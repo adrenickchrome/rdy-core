@@ -834,11 +834,11 @@ round, I7):
 
 | op | what it times | runs | target |
 |---|---|---|---|
-| `tension_carry_1k` | one update of a fresh canon claim into `inf0` after the state's tension set was built, then `tensions()` of the new state. The write is outside the timer. Asserts that the set was carried | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (M2 spec 15.1: `on_change` and tension detection, included in the write response) |
-| `tension_on_change_1k` | one citing claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for view `inf1` (what the write response computes, the second state's set carried included). The write is outside the timer. Asserts the write opened a tension | `runs.incremental` | same |
-| `tension_on_change_delete_1k` | one delete of a fresh canon claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for `inf1`. A delete never carries, so the timer holds the in-flight build of the second state's set and the diff. The write is outside the timer. Asserts the set was rebuilt | `runs.incremental` | same as `tension_carry_1k` |
-| `tension_on_change_view_op_1k` | one of `inf2`'s changes included into a fresh view between two captured states, then `tension_delta` and `delta::on_change` for that view. A view op never carries, so the timer holds the in-flight build and the diff | `runs.incremental` | same as `tension_carry_1k` |
-| `tension_settle_1k` | one update into `inf0` (outside the timer), then `settle_tensions()`: the diff of the last settled set and the published one, and the events | `runs.incremental` | recorded, no spec target: the writer's post-reply settle; compare with `tension_carry_1k` |
+| `tension_carry_1k` | one update of a fresh canon claim into `inf0` after the state's tension set was built. The timer holds the whole write: the carry of the set, the moves between the logged state and the new one, and the seal of the batch with its record (plan M2e2, founder decision C). The read after it finds the set built. Asserts that the set was carried | `runs.incremental` | recorded, no spec target: one write that carries the tension set and logs its moves in its batch (plan M2e2, founder decision C) |
+| `tension_log_close_50_1k` | outside the timer, as agent `tlog{i}` in view `tlog{i}`, 50 one-op updates of claims that an in-flight view also updates (each opens one `edit_collision`); timed: `view_close` of `tlog{i}`. Asserts that the close's batch ends with one record of at least 50 resolved moves | `runs.incremental` | recorded, no spec target: a view close that resolves 50 tensions, logged as one record (plan M2e2) |
+| `tension_on_change_1k` | one citing claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for view `inf1` (what the write response computes; the second state's set was carried inside the write, which logs its moves). The write is outside the timer. Asserts the write opened a tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (M2 spec 15.1: `on_change` and tension detection, included in the write response) |
+| `tension_on_change_delete_1k` | one delete of a fresh canon claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for `inf1`. A delete never carries, so the in-flight build of the second state's set and the diff ran inside the write (it logs its moves), outside the timer; the timer holds the delta and the report. Asserts the set was rebuilt | `runs.incremental` | same as `tension_on_change_1k` |
+| `tension_on_change_view_op_1k` | one of `inf2`'s changes included into a fresh view between two captured states, then `tension_delta` and `delta::on_change` for that view. The view op's write carries the set across the change that moved views and logs its moves, outside the timer; the timer holds the delta (a diff that skips the structure the two sets share) and the report | `runs.incremental` | same as `tension_on_change_1k` |
 | `tensions_full_1k` | cold: `invalidate`, then `tensions_rebuilt()` (every detector over canon and every in-flight change) | `runs.materialize_cold` | no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2) |
 | `tensions_canon` | cold: `invalidate`, then `canon_tensions_rebuilt()` (the canon scope only; FW-CH6). It runs once per landing: the canon part is memoised on canon's build, so a commit never pays it | `runs.materialize_cold` | no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence |
 | `gate_tensions_1k` | `proposal_tensions` for `inf2` with its changes, on a built set | `runs.read` | recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1) |
@@ -854,9 +854,10 @@ What each cost grows with:
   next request). A commit whose state before was not read yet carries that state's set first, when
   it is published, so a run of commits that nobody reads in between never leaves the next read a
   full build (the first `brief_doc` run did).
-- `tension_on_change_delete_1k` and `tension_on_change_view_op_1k` grow with the in-flight changes
-  and their writes: a delete, a view op, a structural update, a move or a lifecycle write builds the
-  in-flight part of the set again (`Writes::build` and every detector over the live writes). A
+- `tension_on_change_delete_1k` grows with the in-flight changes and their writes: a delete, a
+  structural update, a move or a lifecycle write builds the in-flight part of the set again
+  (`Writes::build` and every detector over the live writes). `tension_on_change_view_op_1k` grows
+  with the diff of the two sets (the view op carries, see below). A
   delete does not carry by design (a deviation from the plan's carry rule, fix 118991c,
   confirmed in the final review's fix round): it takes a block out of reads that the seeds do not
   cover, for example an `affects` target's path, which gives its deciders their areas. The
@@ -864,12 +865,26 @@ What each cost grows with:
   built on it shares (fix round I7), so a build does not copy it and a diff skips it. Before
   that fix a delete's `on_change` on the 10k tree took 53 to 56 ms on macOS, most of it copying
   and diffing 43,650 all-canon text duplicates.
-- `tension_settle_1k` runs on the writer after the reply. It grows with the diff of the two sets,
-  by id. If it nears the write budget, the follow-up is to move the settle to a read-pool task
-  (ledger question).
+- `tension_carry_1k` and `tension_log_close_50_1k` (plan M2e2, founder decision C) hold the
+  moves of a write: the diff of the logged set and the new one, by id (the structure a carry
+  shares is skipped), the suspect diff of canon's graph (only when the write moves canon or
+  the pack: a commit into a view moves no suspect), and one record in the batch, before its
+  one sync. `tension_settle_1k` is gone: the settle after the reply no longer
+  exists, and its diff runs inside every write.
+- Since every write logs its moves, every publish needs its state's set, so each kind of write
+  carries it (M2e2 perf fix): a commit (as above); a view op (`include_200`, `exclude_cold`, a
+  close, `tension_log_close_50_1k`), re-detecting around the changes whose membership or views
+  moved, with their writes updated on their blocks only; and a landing (`land_rebase_50`,
+  `propose_land_500_flat`), re-detecting in flight around the landed blocks and the changes that
+  left flight, with the new canon's part carried for duplicate definition (the other canon kinds
+  run in full) and the in-flight state built on the new canon. A step that takes a delete, a
+  structural or lifecycle update, or a non-fresh create into or out of flight (or onto canon)
+  builds the set in full, as a commit does; so does a step whose seeds are more than 1,000 and
+  outnumber the blocks in flight before it (an import: `export_import` builds the imported set
+  once). `Rdy::init` reconciles the empty project, and `invalidate` computes no moves when the
+  published state is the logged one, so a cold read stays cold.
 - `tensions_full_1k` grows with the in-flight changes and the tree; a landing or a structural update
-  pays it once per published state, on its first tension read (on the daemon, the writer's settle
-  after the reply). A briefing after a carried commit and a proposal never pay it: a proposal lists
+  pays it once per published state, inside the write that logs its moves. A briefing after a carried commit and a proposal never pay it: a proposal lists
   its changes' tensions from the set when it is built or carried, else from the detectors seeded
   with what its changes write (no canon part); a briefing reads the sides of a tension row only for
   the rows a page shows with them, and measures each row once. It includes the cold build of the
@@ -1186,9 +1201,9 @@ Seven ops:
 | `review_requests_all_1k` | `review_requests()` on a state whose tension set is built (outside the timer): every request of every in-flight change, cold. Asserts at least one request | `runs.read` | recorded, no spec target: the worst case of a queue scan |
 | `review_next_1k` | `next_request` for the reviewer, then `case_of` and `case_hash` of that request: the first `rdy_review_next` | `runs.read` | recorded, no spec target |
 | `review_submit_lookup_1k` | `find_request` for a request no lease and no settled pair holds: the read-side lookup of a lease-less `rdy_review_submit`, which walks the queue. The daemon runs it on a read, outside the writer | `runs.read` | recorded, no spec target |
-| `review_submit_1k` | `submit_verdict` with a `tension` verdict, one finding and `severity: blocking` with a reason, then the read of the new state's tension set, then `settle_tensions()`. The request is leased to the reviewer outside the timer, as `rdy_review_next` leaves it, so the submit finds it from the lease; its case hash and the built tension set are also read outside the timer. Asserts that `full_builds()` did not move (the verdict carried the set) and that the state holds one more semantic tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included) |
-| `review_submit_nolease_1k` | The writer part of a lease-less `rdy_review_submit`, as the daemon runs it (`run_review_submit`): `submit_found` (it re-proves the pair on the writer), then the read of the tension set, then `settle_tensions()`. The request is found with `find_request` outside the timer (`review_submit_lookup_1k` times that). Same asserts as `review_submit_1k` | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the `review_submit_1k` target; task-7 ruling) |
-| `review_accept_1k` | `accept_advice` as `human:qa` with no relay, for the one tension a `review_submit_1k` run opened, then the read of the tension set, then `settle_tensions()`. The view of the advised change is proposed outside the timer. Asserts that `full_builds()` did not move and that the accepted tension blocks | `runs.incremental` | recorded, no spec target: a person's acceptance of one advised tension of a proposal |
+| `review_submit_1k` | `submit_verdict` with a `tension` verdict, one finding and `severity: blocking` with a reason, then the read of the new state's tension set (the write logged its moves). The request is leased to the reviewer outside the timer, as `rdy_review_next` leaves it, so the submit finds it from the lease; its case hash and the built tension set are also read outside the timer. Asserts that `full_builds()` did not move (the verdict carried the set) and that the state holds one more semantic tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and logged moves included) |
+| `review_submit_nolease_1k` | The writer part of a lease-less `rdy_review_submit`, as the daemon runs it (`run_review_submit`): `submit_found` (it re-proves the pair on the writer; its write logs the moves), then the read of the tension set. The request is found with `find_request` outside the timer (`review_submit_lookup_1k` times that). Same asserts as `review_submit_1k` | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the `review_submit_1k` target; task-7 ruling) |
+| `review_accept_1k` | `accept_advice` as `human:qa` with no relay, for the one tension a `review_submit_1k` run opened, then the read of the tension set (the write logged its moves). The view of the advised change is proposed outside the timer. Asserts that `full_builds()` did not move and that the accepted tension blocks | `runs.incremental` | recorded, no spec target: a person's acceptance of one advised tension of a proposal |
 | `review_requests_sparse_area` | `review_requests()` on a project of its own, with the `rdy-qa` pack's areas: three docs under `payments` hold one claim each, 100 docs of 20 claims (400 in the large tier) are in no area, and 50 changes (100) in views of their own edit the three claims. The area holds fewer than 20 blocks, so the area rule walks every doc for each edited claim | `runs.read` | recorded, no spec target: the area rule's walk over every doc (final review M5) |
 
 What each cost grows with:
@@ -1214,6 +1229,50 @@ What each cost grows with:
   also reads the landing form of the proposal's semantic tensions (the stored kinds only).
 
 No laptop figures are judged here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+## M2e2: inbox (2026-10-12)
+
+The `qa-perf` tier gained `tier_inbox`, run right after `tier_reviews` in both tiers, on the same
+project: the 1,000 in-flight changes in 20 views, the citing claims and the tension set
+`tier_tensions` leaves behind. The pack is `rdy-standard`, which declares no areas, so no landing
+matches by area. Each large-tier twin carries a `_50k` suffix. The op names keep `1k` whatever
+the fixture's size.
+
+Outside every timer, the tier writes the subscription that `subscribe` writes for a new session
+(`agent:perf-inbox`, run `perf-inbox`, cursor at the head, no areas, role `writer`). That agent
+then commits 20 one-op changes in view `perf-inbox`: updates of 20 canon claims that the in-flight
+views also update, so the log holds `tension_opened` moves on the session's changes. Agent
+`agent:perf-other` then posts 200 intents on one block those changes write, so the log holds 200
+`intent_posted` events. The 20 changes and the intents stay in the project; `tier_mcp` reopens the
+same project after the tier.
+
+Three ops:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `inbox_fetch_200_1k` | `inbox_page(&sub, None, usize::MAX)` on a fresh state: the run's in-flight changes, then the log walked from the cursor. Asserts a page of 200 entries and `more`, with the logged `tension_opened` entries among them | `runs.read` | < 5 ms p99 (M2 spec 15.1: inbox fetch, 200 entries), at 1k in-flight changes |
+| `inbox_in_flight_1k` | `run_in_flight` for the session: its in-flight changes, their blocks, citations, views and areas. Every page read pays this before it matches. Asserts the 20 changes | `runs.read` | recorded, no spec target |
+| `inbox_ack_1k` | `ack_inbox` with a cursor one batch further each run (the batch ends are read from the log outside the timer). Asserts that the cursor moved | `runs.incremental` | recorded, no spec target: one inbox ack, a ref write with its fsync |
+
+What each cost grows with:
+
+- `inbox_fetch_200_1k` grows with the entries on the page and the batches walked to fill it, plus
+  one `run_in_flight`. A page reads each batch's events and logged moves from the log; it keeps no
+  cache. If the bench shows it over target, the remedy is an in-memory replay cache keyed by batch
+  `seq`, held by the engine and dropped on reindex. It is a follow-up the orchestrator places
+  (ledger O10); it is not built here.
+- `inbox_in_flight_1k` grows with the changes in flight, since it walks the set's writes and
+  keeps those of the run, and with the views of the project, since it checks each view's owner.
+- `inbox_ack_1k` is one ref write: an append, a sync and a publish. It does not grow with the
+  project. It moves with the drive's sync cost, as the write ops do.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
+are PASS-NEW until the baseline holds them. Because the tier leaves 20 changes and 200 intents in
+the 1k project, compare the `tier_mcp` ops that reopen it with the baseline.
 
 Baseline: `qa-baseline.json` is not changed here.
 

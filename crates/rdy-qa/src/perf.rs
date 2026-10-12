@@ -212,17 +212,23 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: the in-flight state's (coordination graph's) cold build, once per published state (recorded for M2d1)"
         }
         "inflight_carry" => "< 1 ms incremental (spec 15.1, view materialization)",
-        "tension_carry_1k" | "tension_on_change_1k" => {
+        "tension_carry_1k" => {
+            "recorded, no spec target: one write that carries the tension set and logs its moves in its batch (plan M2e2, founder decision C)"
+        }
+        "tension_log_close_50_1k" => {
+            "recorded, no spec target: a view close that resolves 50 tensions, logged as one record (plan M2e2)"
+        }
+        "tension_on_change_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
         "tension_value_1k" | "tension_drift_1k" => {
             "< 10 ms p95: the tension delta and on_change report of one write, the part tension detection adds to the write reply, with 1k in-flight changes (reference/performance tb-XBXR4)"
         }
-        "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
+        "tension_on_change_delete_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete never carries, so this is the in-flight build plus a diff that skips the shared canon part"
         }
-        "tension_settle_1k" => {
-            "recorded, no spec target: the writer's post-reply settle (diff and events), compare with tension_carry_1k"
+        "tension_on_change_view_op_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); the view op's write carries the set (plan M2e2), so this is a diff that skips the structure the two sets share"
         }
         "tensions_full_1k" => {
             "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
@@ -256,6 +262,15 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "review_accept_1k" => {
             "recorded, no spec target: a person's acceptance of one advised tension of a proposal at 1k in-flight changes, carry and settle included (plan M2e1)"
+        }
+        "inbox_fetch_200_1k" => {
+            "< 5 ms p99 (M2 spec 15.1: inbox fetch, 200 entries), at 1k in-flight changes"
+        }
+        "inbox_in_flight_1k" => {
+            "recorded, no spec target: one run's in-flight changes, their blocks, citations, views and areas at 1k in-flight changes (plan M2e2)"
+        }
+        "inbox_ack_1k" => {
+            "recorded, no spec target: one inbox ack, a ref write with its fsync (plan M2e2)"
         }
         "gate_tensions_1k" => {
             "recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1)"
@@ -1524,28 +1539,65 @@ fn tier_tensions(
     let held = r.read().tensions().expect("tensions").len();
     assert!(held >= citing, "{held} tensions, wanted {citing}");
     let mut fresh = fresh.iter();
-    // the carry: the state's set is built (outside the timer), one update of a fresh canon claim
-    // into `inf0` seeds the next state, and the timed part is the read of its set
+    // the carry: the state's set is built (outside the timer); the timed part is one update of a
+    // fresh canon claim into `inf0`, whose write carries the set, logs its moves and seals its
+    // batch (plan M2e2, founder decision C); the read after it finds the set built
     out.push(measure_timed(
         &format!("tension_carry_1k{sfx}"),
         runs.incremental,
         |i| {
             r.read().tensions().expect("warm tensions");
             let id = fresh.next().expect("a fresh claim");
+            let s = Instant::now();
             write(
                 r,
                 "inf0",
                 json!([{"op": "update", "id": id.to_string(), "body": format!("Carried {i}.")}]),
             )
             .expect("carried write");
-            let st = r.read();
-            let s = Instant::now();
-            st.tensions().expect("tensions");
             let took = s.elapsed();
+            let st = r.read();
+            st.tensions().expect("tensions");
             assert_eq!(
                 st.tensions_carried(),
                 Some(true),
                 "the commit did not carry the tension set"
+            );
+            took
+        },
+    ));
+    // a close that resolves 50 tensions: outside the timer, agent `tlog{i}` writes 50 one-op
+    // updates into its view `tlog{i}` of claims an in-flight view also updates (each opens one
+    // edit collision); the timed part is the close, which logs one record of every move
+    out.push(measure_timed(
+        &format!("tension_log_close_50_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let name = format!("tlog{i}");
+            let agent = crate::tensions::ag(&name);
+            // 50 at 1k in-flight changes; a small tree has fewer claims in flight
+            let colliding = edited.len().min(50);
+            for (k, id) in edited.iter().take(colliding).enumerate() {
+                crate::fixtures::write_as(
+                    r,
+                    &agent,
+                    &name,
+                    json!([{"op": "update", "id": id.to_string(), "body": format!("Logged {i} {k}.")}]),
+                )
+                .expect("a colliding write");
+            }
+            r.read().tensions().expect("warm tensions");
+            let s = Instant::now();
+            r.view_close(&agent, std::slice::from_ref(&name), "perf close")
+                .expect("close");
+            let took = s.elapsed();
+            let (kind, h) = *r.store().last_batch().last().expect("the close's batch");
+            assert_eq!(kind, rdy_store::kinds::TRANSITION, "the close logged its moves");
+            let rec = r.read().reader().transitions(&h).expect("the record");
+            assert!(
+                rec.resolved.len() >= colliding,
+                "{} resolved",
+                rec.resolved.len()
             );
             took
         },
@@ -1602,8 +1654,8 @@ fn tier_tensions(
             took
         },
     ));
-    // `on_change` of a view op: one of inf2's changes included into a fresh view (its in-flight
-    // set changes, so the state after builds its in-flight part again)
+    // `on_change` of a view op: one of inf2's changes included into a fresh view (its views
+    // change; the write carries the set across it to log its moves, plan M2e2)
     let human = writer();
     let inf2: Vec<String> = r
         .read()
@@ -1634,24 +1686,6 @@ fn tier_tensions(
                 .expect("delta");
             rdy_engine::tensions::delta::on_change(&before, &after, &name, None, &delta)
                 .expect("on_change");
-            s.elapsed()
-        },
-    ));
-    // the settle: the writer diffs the last settled set and the published one after the reply
-    r.settle_tensions().expect("first settle");
-    out.push(measure_timed(
-        &format!("tension_settle_1k{sfx}"),
-        runs.incremental,
-        |_| {
-            let id = fresh.next().expect("a fresh claim");
-            write(
-                r,
-                "inf0",
-                json!([{"op": "update", "id": id.to_string(), "body": "Settled."}]),
-            )
-            .expect("settled write");
-            let s = Instant::now();
-            r.settle_tensions().expect("settle");
             s.elapsed()
         },
     ));
@@ -1897,7 +1931,6 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
     };
     // the read side of a lease-less submit, as the daemon runs it outside the writer: the request
     // found by its label (no lease and no settled pair hold it, so the queue is walked)
-    r.settle_tensions().expect("settle before the verdicts");
     {
         let (_, _, req, _) = next_req(r);
         let checked = CheckedSubmit::new(&reviewer, req).expect("a checked submit");
@@ -1916,7 +1949,7 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
     }
     // the verdict, as a reviewer that took the request with rdy_review_next submits it: the lease
     // is claimed outside the timer, so the submit finds the request from it; the timed part is the
-    // submit, the read of the set it carried and the settle
+    // submit (its write logs the moves) and the read of the set it carried
     let mut opened: Vec<(String, String)> = vec![];
     out.push(measure_timed(
         &format!("review_submit_1k{sfx}"),
@@ -1938,7 +1971,6 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
             let info = r.submit_verdict(&reviewer, req).expect("a verdict");
             let after = r.read();
             after.tensions().expect("tensions");
-            r.settle_tensions().expect("settle");
             let took = s.elapsed();
             assert_eq!(
                 rdy_engine::tensions::set::full_builds(),
@@ -1956,7 +1988,8 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
     ));
     // the verdict with no lease, as the daemon's writer runs it (`run_review_submit`): the request
     // is found on a read outside the timer (review_submit_lookup_1k times that); the timed part is
-    // `submit_found` (it re-proves the pair on the writer), the read of the set and the settle
+    // `submit_found` (it re-proves the pair on the writer; its write logs the moves) and the read
+    // of the set
     out.push(measure_timed(
         &format!("review_submit_nolease_1k{sfx}"),
         runs.incremental,
@@ -1972,7 +2005,6 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
             r.submit_found(checked, found).expect("a verdict");
             let after = r.read();
             after.tensions().expect("tensions");
-            r.settle_tensions().expect("settle");
             let took = s.elapsed();
             assert_eq!(
                 rdy_engine::tensions::set::full_builds(),
@@ -1988,7 +2020,8 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
         },
     ));
     // the acceptance: the view of the change the tension was advised on is proposed (untimed);
-    // the timed part is the person's answer for that tension, the read of the set and the settle
+    // the timed part is the person's answer for that tension (its write logs the moves) and the
+    // read of the set
     let mut next = opened.iter();
     out.push(measure_timed(
         &format!("review_accept_1k{sfx}"),
@@ -2010,7 +2043,6 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
             let info: AcceptInfo = r.accept_advice(&human, req).expect("an acceptance");
             let after = r.read();
             after.tensions().expect("tensions");
-            r.settle_tensions().expect("settle");
             let took = s.elapsed();
             assert_eq!(
                 rdy_engine::tensions::set::full_builds(),
@@ -2032,6 +2064,153 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
         runs,
         area.0,
         area.1,
+    ));
+}
+
+/// The inbox ops (M2e2): one page of 200 entries, one run's in-flight changes, and one ack, with
+/// `1k` in-flight changes in 20 views (the names say `1k` as in [`tier_inflight`]). Run right after
+/// `tier_reviews`, on the same project. Outside every timer: `agent:perf-inbox` (run `perf-inbox`)
+/// gets the subscription `subscribe` writes for a new session, then commits 20 one-op updates of
+/// claims the in-flight views also update (each opens a tension, so the log holds the moves as
+/// entries), and `agent:perf-other` posts `entries` intents on one block those changes write. The
+/// changes and the intents stay in the project. The page holds the tension entries and the
+/// intents, so it is at least `min(200, entries)` entries long, and cut at 200 with `more` when
+/// `entries` is 200. The ack op moves the cursor one batch further each run.
+fn tier_inbox(
+    out: &mut Vec<Measure>,
+    r: &mut Rdy,
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+    entries: usize,
+) {
+    use rdy_engine::inbox::read::MAX_ENTRIES;
+    use rdy_store::inbox::{InboxCursor, InboxSub};
+    let (actor, run) = ("agent:perf-inbox", "perf-inbox");
+    let sub = InboxSub {
+        actor: actor.into(),
+        run: Some(run.into()),
+        cursor: InboxCursor {
+            at: r.read().seq(),
+            skip: 0,
+        },
+        areas: vec![],
+        role: "writer".into(),
+    };
+    r.put_subscription(&sub).expect("subscription");
+    // the claims `inflight_views` updated are the first by id (besides the fixture's)
+    let ids: Vec<BlockId> = {
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        let mut v: Vec<BlockId> = canon
+            .iter()
+            .filter(|b| b.block_type == "claim" && b.id != fx.claim)
+            .map(|b| b.id.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    let changes = ids.len().min(INFLIGHT_VIEWS);
+    assert!(changes > 0, "canon has claims the in-flight views update");
+    let me = crate::tensions::ag(run);
+    for id in ids.iter().take(changes) {
+        crate::fixtures::write_as(
+            r,
+            &me,
+            run,
+            json!([{"op": "update", "id": id.to_string(), "body": format!("Inbox {id}.")}]),
+        )
+        .expect("an inbox write");
+    }
+    let other = crate::tensions::ag("perf-other");
+    let block = ids[0].to_string();
+    for i in 0..entries {
+        r.intent_post(
+            &other,
+            None,
+            None,
+            std::slice::from_ref(&block),
+            &format!("perf {i}"),
+            None,
+        )
+        .expect("an intent");
+    }
+    // the batch ends past the subscription's cursor: the ack op moves the cursor to one more each run
+    let ends: Vec<InboxCursor> = {
+        let st = r.read();
+        let mut ends = vec![];
+        st.reader()
+            .for_each_frame_from(sub.cursor.at, st.seq(), |_, kind, _, _, next| {
+                if kind == rdy_store::kinds::BATCH_COMMIT {
+                    ends.push(InboxCursor { at: next, skip: 0 });
+                }
+                Ok(())
+            })
+            .expect("walk the log");
+        ends
+    };
+    assert!(
+        ends.len() >= runs.incremental,
+        "{} batches, wanted {}",
+        ends.len(),
+        runs.incremental
+    );
+    out.push(measure_timed(
+        &format!("inbox_fetch_200_1k{sfx}"),
+        runs.read,
+        |_| {
+            let st = r.read();
+            // the lazy builds the page reads (the tension set, the in-flight scope) are warm
+            // before the timer, so the first sample times the fetch alone
+            st.tensions().expect("warm tensions");
+            st.run_in_flight(actor, Some(run)).expect("warm in flight");
+            let s = Instant::now();
+            let page = st.inbox_page(&sub, None, usize::MAX).expect("inbox page");
+            let took = s.elapsed();
+            let held = page.entries.len();
+            assert!(held <= MAX_ENTRIES, "{held} entries");
+            assert!(
+                held >= entries.min(MAX_ENTRIES),
+                "{held} entries, wanted {}",
+                entries.min(MAX_ENTRIES)
+            );
+            assert!(
+                page.entries.iter().any(|e| e.event == "tension_opened"),
+                "the page holds no tension_opened entry"
+            );
+            if entries >= MAX_ENTRIES {
+                assert_eq!(held, MAX_ENTRIES);
+                assert!(page.more, "the page is cut at 200 entries");
+            }
+            took
+        },
+    ));
+    out.push(measure_timed(
+        &format!("inbox_in_flight_1k{sfx}"),
+        runs.read,
+        |_| {
+            let st = r.read();
+            // warm the lazy builds it reads, so the first sample times the op alone
+            st.tensions().expect("warm tensions");
+            st.run_in_flight(actor, Some(run)).expect("warm in flight");
+            let s = Instant::now();
+            let held = st.run_in_flight(actor, Some(run)).expect("in flight");
+            let took = s.elapsed();
+            assert_eq!(held.changes.len(), changes, "the run's in-flight changes");
+            took
+        },
+    ));
+    let mut ends = ends.into_iter();
+    out.push(measure_timed(
+        &format!("inbox_ack_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let next = ends.next().expect("a batch end");
+            let s = Instant::now();
+            let wrote = r.ack_inbox(actor, Some(run), next).expect("ack");
+            let took = s.elapsed();
+            assert!(wrote, "the ack moved the cursor");
+            took
+        },
     ));
 }
 
@@ -2532,6 +2711,9 @@ fn tier_coord_chosen(
         },
     ));
     let mut r = Rdy::open(&proj).expect("open");
+    // as the daemon does after `ready`: what moved while no rdy ran is logged here, outside the
+    // timer, not by the first timed write (plan M2e2)
+    r.reconcile_transitions().expect("reconcile");
     out.push(measure_timed(
         &format!("propose_chosen_alts_100{sfx}"),
         runs.write,
@@ -2840,6 +3022,9 @@ pub fn run_workload() -> Vec<Measure> {
     let snapshot = dir.path().join("index.snapshot");
     std::fs::copy(&index_path, &snapshot).expect("snapshot the index");
     let mut r = Rdy::open(&proj).expect("reopen");
+    // as the daemon does after `ready`: what moved while no rdy ran is logged here, outside the
+    // timer, not by the first timed write (plan M2e2)
+    r.reconcile_transitions().expect("reconcile");
 
     let mut out = vec![];
     // built once, outside every timer, and before the heavy ops so it stays small on disk
@@ -2956,6 +3141,9 @@ pub fn run_workload() -> Vec<Measure> {
     // were added (before them, its 30 docs in `vd` gave the lagging open 271 more frames to
     // catch up: 4,822 instead of 4,551)
     let mut r = Rdy::open(&proj).expect("open");
+    // as the daemon does after `ready`: what moved while no rdy ran is logged here, outside the
+    // timer, not by the first timed write (plan M2e2)
+    r.reconcile_transitions().expect("reconcile");
     out.push(measure("new_doc_single", 30, |i| {
         r.new_doc(&writer(), "vd", &format!("nd-{i}"), None, None)
             .expect("new_doc");
@@ -2967,6 +3155,9 @@ pub fn run_workload() -> Vec<Measure> {
     out.extend(stdio_mcp_ops(dir.path()));
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
+    // as the daemon does after `ready`: what moved while no rdy ran is logged here, outside the
+    // timer, not by the first timed write (plan M2e2)
+    r.reconcile_transitions().expect("reconcile");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     // after the view ops (the view it leaves behind would move the ops before it), before the
     // in-flight ops (which close it and add 1k in-flight changes)
@@ -2982,6 +3173,7 @@ pub fn run_workload() -> Vec<Measure> {
         TENSION_CITING,
     );
     tier_reviews(&mut out, &mut r, "", &TYPICAL_RUNS, SPARSE_AREA);
+    tier_inbox(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, 200);
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
@@ -3495,6 +3687,8 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     out.extend(daemon_ops(&proj, sfx));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
+    // as the daemon does after `ready`, outside every timer (plan M2e2)
+    r.reconcile_transitions().expect("reconcile");
     prepare_rebased_view(&mut r, &fx, &LARGE_RUNS);
     tier_views(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_inflight(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, INFLIGHT_N);
@@ -3508,6 +3702,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
         TENSION_CITING,
     );
     tier_reviews(&mut out, &mut r, sfx, &LARGE_RUNS, SPARSE_AREA_LARGE);
+    tier_inbox(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, 200);
     out
 }
 
@@ -3961,10 +4156,10 @@ mod tests {
             names,
             [
                 "tension_carry_1k",
+                "tension_log_close_50_1k",
                 "tension_on_change_1k",
                 "tension_on_change_delete_1k",
                 "tension_on_change_view_op_1k",
-                "tension_settle_1k",
                 "tensions_full_1k",
                 "tensions_canon",
                 "gate_tensions_1k",
@@ -4021,6 +4216,57 @@ mod tests {
     }
 
     #[test]
+    fn ibperf1_the_inbox_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6962_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut scratch = vec![];
+        tier_inflight(&mut scratch, &mut r, &fx, "", &runs, 40);
+        tier_tensions(&mut scratch, &mut r, &fx, "", &runs, 40, 10);
+        let mut out = vec![];
+        tier_inbox(&mut out, &mut r, &fx, "", &runs, 12);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            ["inbox_fetch_200_1k", "inbox_in_flight_1k", "inbox_ack_1k"]
+        );
+    }
+
+    #[test]
+    fn ibperf1_the_inbox_ops_state_their_targets() {
+        for op in ["inbox_fetch_200_1k", "inbox_in_flight_1k", "inbox_ack_1k"] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        assert!(
+            spec_target("inbox_fetch_200_1k")
+                .unwrap()
+                .contains("< 5 ms p99")
+        );
+        assert!(
+            spec_target("inbox_ack_1k_50k")
+                .unwrap()
+                .contains("no spec target")
+        );
+    }
+
+    #[test]
     fn seperf1_the_review_ops_state_their_targets() {
         for op in [
             "review_requests_all_1k",
@@ -4047,10 +4293,10 @@ mod tests {
     fn d2perf1_the_m2d2_ops_state_their_targets() {
         for op in [
             "tension_carry_1k",
+            "tension_log_close_50_1k",
             "tension_on_change_1k",
             "tension_on_change_delete_1k",
             "tension_on_change_view_op_1k",
-            "tension_settle_1k",
             "tensions_full_1k",
             "tensions_canon",
             "gate_tensions_1k",
@@ -4070,11 +4316,15 @@ mod tests {
                 "{op}: {t}"
             );
         }
-        assert!(
-            spec_target("tension_carry_1k")
-                .unwrap()
-                .contains("< 10 ms p99")
-        );
+        // plan M2e2: the carry now times the whole write, which logs its moves
+        for op in ["tension_carry_1k", "tension_log_close_50_1k"] {
+            assert!(
+                spec_target(op)
+                    .unwrap()
+                    .contains("recorded, no spec target"),
+                "{op}"
+            );
+        }
         assert!(
             spec_target("tension_on_change_1k")
                 .unwrap()

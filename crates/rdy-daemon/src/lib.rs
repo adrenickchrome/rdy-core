@@ -33,6 +33,7 @@ pub use client::{
     SpawnFn, StartOptions, connect, connect_backoff, connect_or_start, log_tail, log_tail_since,
 };
 pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve};
+mod notify;
 pub mod shared;
 pub mod writer;
 

@@ -3,19 +3,22 @@
 //! a landing, recorded conflicts, undo chains, the dependency DAG and closed included sets, and
 //! the version chains of intents and alternative sets and the links that name them (cfmt1), and
 //! the dismissal refs and the reviews they name (rvw1), and the mention review refs and the
-//! reviews they name (cc1).
+//! reviews they name (cc1), and the values of the inbox refs (ib1), and the fold of the
+//! TRANSITION records against the open-move tables (ib14).
 use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
 use crate::kinds;
 use crate::review::{DISMISS_REF, MENTION_REF, PAIR_REF, SEMANTIC_REF, mention_key};
+use crate::segment::Location;
+use crate::transition::Transitions;
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Assurance, Change, EvidenceKind, Hash, Intent, LandingRecord,
     Review, ReviewSubject, SemanticTension, Verdict, pair_key,
 };
 use serde::de::DeserializeOwned;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// What `Store::check_objects` counted in a store that checked clean.
@@ -38,6 +41,10 @@ pub struct StoreCheck {
     pub reviews: usize,
     /// The `semantic/` refs, each with its version chain checked.
     pub tensions: usize,
+    /// The `inbox/` refs, each holding a subscription that keeps the inbox rules.
+    pub inboxes: usize,
+    /// The TRANSITION records, folded in log order into the open tensions and suspects.
+    pub transitions: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -75,8 +82,8 @@ impl StoreReader {
     /// Checks the view chains, their heads and index entries, canon's landings (relay and evidence
     /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
     /// view's included set, the version chains of intents and alternative sets, the links that
-    /// name them, the dismissal, mention review and verdict refs, and the semantic tension chains;
-    /// the first failure found is a `StoreError::Decode`.
+    /// name them, the dismissal, mention review and verdict refs, the semantic tension chains, and
+    /// the inbox refs; the first failure found is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -130,6 +137,8 @@ impl StoreReader {
         let reviews =
             self.check_dismissals()? + self.check_mention_reviews()? + self.check_verdicts()?;
         let tensions = self.check_semantic()?;
+        let inboxes = self.check_inboxes()?;
+        let transitions = self.check_transitions()?;
         Ok(StoreCheck {
             views,
             view_ops,
@@ -140,7 +149,72 @@ impl StoreReader {
             alt_sets: alt_sets.len(),
             reviews,
             tensions,
+            inboxes,
+            transitions,
         })
+    }
+
+    /// Folds every TRANSITION record, in log order from the origin to the end of what the index
+    /// holds, into the open tensions and the open suspects (plan M2e2, D-Z0EMP): each record
+    /// decodes, keeps the record rules (`Transitions::invalid`) and moves only what it may (a
+    /// tension opens only while it is shut, and so on). The fold must equal the index's
+    /// open-tension and open-suspect tables. Returns how many records there are.
+    fn check_transitions(&self) -> Result<usize, StoreError> {
+        let upto = self.index().indexed_upto()?;
+        let origin = Location {
+            segment: 0,
+            offset: 0,
+        };
+        let mut tensions: BTreeMap<Hash, Hash> = BTreeMap::new();
+        let mut suspects: BTreeMap<Hash, Hash> = BTreeMap::new();
+        let mut n = 0;
+        self.for_each_frame_from(origin, upto, |_, kind, hash, payload, _| {
+            if kind != kinds::TRANSITION {
+                return Ok(());
+            }
+            let damage = |what: String| bad(format!("transition record {hash}: {what}"));
+            let rec: Transitions = postcard::from_bytes(payload)
+                .map_err(|_| damage("its value does not decode".into()))?;
+            if let Some(what) = rec.invalid() {
+                return Err(damage(what));
+            }
+            for t in &rec.resolved {
+                if tensions.remove(&t.tension).is_none() {
+                    let id = t.tension;
+                    return Err(damage(format!(
+                        "tension {id} resolves while it is not open"
+                    )));
+                }
+            }
+            for t in &rec.opened {
+                if tensions.insert(t.tension, hash).is_some() {
+                    let id = t.tension;
+                    return Err(damage(format!("tension {id} opens while it is open")));
+                }
+            }
+            for m in &rec.gone {
+                let key = m.key();
+                if suspects.remove(&key).is_none() {
+                    return Err(damage(format!("suspect {key} goes while it is not open")));
+                }
+            }
+            for m in &rec.new {
+                let key = m.key();
+                if suspects.insert(key, hash).is_some() {
+                    return Err(damage(format!("suspect {key} is new while it is open")));
+                }
+            }
+            n += 1;
+            Ok(())
+        })?;
+        let tables = |what: &str| bad(format!("transition tables: {what}"));
+        if tensions.into_iter().collect::<Vec<_>>() != self.open_tensions()? {
+            return Err(tables("the open tension table differs from the log"));
+        }
+        if suspects.into_iter().collect::<Vec<_>>() != self.open_suspects()? {
+            return Err(tables("the open suspect table differs from the log"));
+        }
+        Ok(n)
     }
 
     /// Every `dismiss/` ref is keyed by a tension vkey and names a stored review with verdict

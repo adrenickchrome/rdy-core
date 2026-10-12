@@ -10,7 +10,7 @@ pub const BLOB_CHUNK: u8 = 6;
 pub const BLOB_MANIFEST: u8 = 7;
 pub const REF_UPDATE: u8 = 8;
 pub const TAG: u8 = 9;
-// Codes 10-12 and 19 are unassigned.
+// Codes 10-12 are unassigned.
 /// One op of a view's chain (`crate::view::ViewOp`).
 pub const VIEW_OP: u8 = 13;
 /// Ends every write batch: names the batch's first frame, its frame count and a digest of the
@@ -25,6 +25,9 @@ pub const ALT_SET: u8 = 16;
 pub const REVIEW: u8 = 17;
 /// A semantic tension version (rdy_model::SemanticTension); ref semantic/<key> names the latest.
 pub const TENSION: u8 = 18;
+/// One batch's tension and suspect moves (`crate::transition::Transitions`; plan M2e2, D-Z0EMP):
+/// at most one per batch, its last data frame. Never deduped: two batches may log the same bytes.
+pub const TRANSITION: u8 = 19;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {
@@ -47,6 +50,13 @@ pub struct BatchCommit {
     pub start: crate::segment::Location,
     pub frames: u32,
     pub digest: Hash,
+}
+
+impl BatchCommit {
+    /// The marker a `BATCH_COMMIT` frame's `payload` holds; None if it does not decode.
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        postcard::from_bytes(payload).ok()
+    }
 }
 
 /// `Hash::of` over the concatenated 32-byte frame hashes, in batch order.

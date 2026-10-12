@@ -280,7 +280,7 @@ impl Counted {
 impl ReadState {
     /// True when `scope` is a landing other than canon's head: a past state, which coverage is
     /// not computed for (FW-H7).
-    pub(crate) fn is_past_landing(&self, scope: &Scope) -> bool {
+    pub fn is_past_landing(&self, scope: &Scope) -> bool {
         matches!(scope, Scope::At(h) if Some(*h) != self.canon_head())
     }
 

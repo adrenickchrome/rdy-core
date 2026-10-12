@@ -15,6 +15,7 @@ rdy-engine.workspace = true
 rdy-mcp.workspace = true
 rdy-render.workspace = true
 rdy-model.workspace = true
+rdy-store.workspace = true
 rmcp.workspace = true
 arc-swap.workspace = true
 

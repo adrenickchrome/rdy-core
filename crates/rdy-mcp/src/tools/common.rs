@@ -67,6 +67,9 @@ pub struct McpState {
     /// Who holds this session's review leases: the daemon's session id (`RdyServer::new` sets it
     /// from `sid`), else a process-unique owner.
     pub lease_owner: u64,
+    /// The sessions connected to this server (ib10): `rdy_session` tells it who this one is.
+    /// `RdyServer::new` sets the shared hub; `McpState::new` starts with a hub of its own.
+    pub hub: Arc<crate::notify::NotifyHub>,
 }
 
 impl McpState {
@@ -81,7 +84,13 @@ impl McpState {
             reported: Default::default(),
             reads: Default::default(),
             lease_owner: rdy_engine::semantic::lease::LeaseRegistry::local_owner(),
+            hub: crate::notify::NotifyHub::new(),
         }
+    }
+
+    /// This session's id in the hub: the daemon's session id, else the process-unique owner.
+    pub fn hub_sid(&self) -> u64 {
+        self.sid.unwrap_or(self.lease_owner)
     }
 }
 

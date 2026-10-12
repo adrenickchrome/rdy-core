@@ -3,6 +3,7 @@ pub mod coord;
 pub mod error;
 pub mod format;
 pub mod fsutil;
+pub mod inbox;
 pub mod index;
 pub mod kinds;
 mod land;
@@ -11,6 +12,7 @@ pub mod merge;
 pub mod review;
 pub mod segment;
 mod store;
+pub mod transition;
 pub mod view;
 
 pub use check::StoreCheck;

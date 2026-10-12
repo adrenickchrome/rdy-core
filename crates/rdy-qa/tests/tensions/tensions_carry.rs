@@ -93,7 +93,12 @@ fn tcar1_a_commit_carries_the_set_and_a_structural_write_rebuilds_it() {
     put(&mut r, "a", upd(&s.a, "A one."));
     r.read().tensions().unwrap();
     put(&mut r, "b", upd(&s.a, "A two."));
-    assert_eq!(r.read().tensions_carried(), None, "unbuilt until read");
+    // plan M2e2: the write logs its moves, so it carries the set before it returns
+    assert_eq!(
+        r.read().tensions_carried(),
+        Some(true),
+        "the write carried the set"
+    );
     assert_eq!(
         of_kind(&r, rdy_engine::tensions::TensionKind::EditCollision).len(),
         1

@@ -4,13 +4,11 @@ use crate::config::site_identity;
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::semantic::state::SemanticState;
 use crate::tensions::set::TensionCell;
-use crate::tensions::{SideRef, TensionSeverity, tension_id};
-use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
+use crate::{Delta, Event, Rdy, RdyError, ReadState, events, transitions};
 use rdy_model::{Hash, Op, Verdict};
-use rdy_store::kinds;
 use rdy_store::segment::Location;
-use rdy_store::view::ViewOpKind;
-use std::collections::BTreeMap;
+use rdy_store::transition::Cause;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 
 impl Rdy {
@@ -19,27 +17,24 @@ impl Rdy {
     /// fails, the published state holds the error, every read of it returns that error, and the
     /// next publish re-reads everything; the error is returned too.
     ///
-    /// Then, after the state swap, it emits the events of the store's last batch if that batch
-    /// has not been emitted yet (evt1): a `Full` publish from `invalidate` or `open` emits
-    /// nothing new, and a batch that was fully deduplicated has no frames and emits nothing.
+    /// Then, while the write's batch is still open, it logs how the write moved the open tensions and the suspects (plan M2e2, founder decision C) as the batch's last frame, and seals the batch: one sync. Only then is the state stored and the batch's events emitted, so a replay sends the same events. A raw write through store_mut() joins the open batch; the next publish or seal_open seals it.
+    ///
     /// A batch whose events cannot be read is not the write's failure (the write is durable): its
     /// error is recorded in `last_emit_error` and the batch counts as emitted, so a later batch
-    /// never masks it; a replay over it returns the same error.
-    /// Known gap: a write made through `store_mut()` is emitted live only if it is the last batch
-    /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
-    /// write through the engine.
+    /// never masks it; a replay over it returns the same error. A failed seal is the write's
+    /// failure (the store is poisoned until reopen).
     pub(crate) fn publish(&mut self, delta: Delta) -> Result<(), RdyError> {
+        self.publish_logging(delta).map(drop)
+    }
+
+    /// `publish`, returning how many moves the sealed batch logged.
+    fn publish_logging(&mut self, delta: Delta) -> Result<usize, RdyError> {
         if matches!(delta, Delta::Full) && self.full_publish_panics > 0 {
             self.full_publish_panics -= 1;
             panic!("test hook: a full publish panics");
         }
-        self.publish_gen += 1;
+        let recheck = self.recheck.take();
         let prev = self.state.load_full();
-        // nothing settled since open: the first settle diffs against the state before the
-        // first write
-        if self.tension_seen.is_none() && self.tension_base.is_none() {
-            self.tension_base = Some(Arc::clone(&prev));
-        }
         // a state that holds an error has nothing to carry over
         let delta = if prev.error.is_some() {
             Delta::Full
@@ -47,12 +42,25 @@ impl Rdy {
             delta
         };
         match self.next_state(&prev, delta) {
-            Ok(next) => {
-                self.state.store(Arc::new(next));
+            Ok(mut next) => {
+                let logged = self.seal_with_moves(&prev, &next, recheck)?;
+                next.seq = self.store.log_end();
+                let next = Arc::new(next);
+                let n = match logged {
+                    Some(n) => {
+                        self.logged = Some(Arc::clone(&next));
+                        n
+                    }
+                    None => 0,
+                };
+                self.state.store(next);
                 self.emit_last_batch();
-                Ok(())
+                Ok(n)
             }
             Err(e) => {
+                // with no state the moves cannot be computed: the batch is sealed without them,
+                // and the next batch that computes logs every move since `logged`
+                let sealed = self.store.seal(vec![]);
                 self.state.store(Arc::new(ReadState {
                     seq: self.store.log_end(),
                     canon_head: prev.canon_head,
@@ -85,9 +93,110 @@ impl Rdy {
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
+                sealed?;
                 Err(e)
             }
         }
+    }
+
+    /// Seals the open batch (or writes a batch of its own) with the moves between the logged
+    /// state and `next`, by the closed rule: a batch with a frame that can move something logs
+    /// under its own cause; else `recheck` names the cause (a `recheck` before anything was
+    /// logged computes nothing); else nothing is computed. With nothing logged since open, the
+    /// baseline is the store's open-move tables (`reconcile_moves`). A failure or a panic of
+    /// the computation never fails the write: the batch is sealed with no record, `logged`
+    /// stays, and `transition_error` holds the error. Returns the number of moves logged, or
+    /// `None` when none were computed. A failed seal is returned.
+    fn seal_with_moves(
+        &mut self,
+        prev: &ReadState,
+        next: &ReadState,
+        recheck: Option<Cause>,
+    ) -> Result<Option<usize>, RdyError> {
+        let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
+        let reader = self.store.reader();
+        // `None`: nothing to compute; `Some(None)`: the batch's own cause; `Some(Some(c))`: c
+        let cause = if !frames.is_empty() && transitions::can_move(&reader, &frames) {
+            Some(None)
+        } else {
+            match recheck {
+                Some(Cause::Recheck) if self.logged.is_none() => None,
+                Some(c) => Some(Some(c)),
+                None => None,
+            }
+        };
+        let Some(cause) = cause else {
+            self.store.seal(vec![])?;
+            return Ok(None);
+        };
+        let logged = self.logged.as_deref();
+        let computed = catch_unwind(AssertUnwindSafe(|| match logged {
+            Some(base) => transitions::moves(base, next, &frames, cause),
+            // the batch's own moves take `cause`; the moves since open, `reopened`
+            None => transitions::reconcile_moves(next, Some(prev), &frames, cause),
+        }));
+        let rec = match computed {
+            Ok(Ok(rec)) => rec,
+            Ok(Err(e)) => return self.seal_without_moves(e),
+            Err(p) => {
+                let text = match p.downcast_ref::<&str>() {
+                    Some(s) => (*s).to_string(),
+                    None => p
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .unwrap_or_else(|| "a panic with no message".to_string()),
+                };
+                return self.seal_without_moves(RdyError::new(
+                    crate::E_INTERNAL,
+                    format!("internal error: {text}"),
+                    "report this as a bug in rdy",
+                ));
+            }
+        };
+        if rec.is_empty() {
+            self.store.seal(vec![])?;
+        } else {
+            debug_assert_eq!(rec.invalid(), None, "{rec:?}");
+            self.store.seal(vec![rec.frame()])?;
+        }
+        self.transition_error = None;
+        Ok(Some(transitions::count(&rec)))
+    }
+
+    /// Seals the open batch with no record after the moves could not be computed (`e`).
+    fn seal_without_moves(&mut self, e: RdyError) -> Result<Option<usize>, RdyError> {
+        self.store.seal(vec![])?;
+        self.transition_error = Some(e);
+        Ok(None)
+    }
+
+    /// Seals the open batch, if one is open, with its moves (`publish(Delta::Seq)`); else does
+    /// nothing. A raw write through `store_mut()` stays in the open batch until this or the next
+    /// publish.
+    pub fn seal_open(&mut self) -> Result<(), RdyError> {
+        if self.store.open_batch().is_some() {
+            self.publish(Delta::Seq)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Logs the moves between the store's open-move tables and the current state, as one batch
+    /// of cause `reopened`: what changed while no rdy ran (the pack, or the rdy build). Returns
+    /// the number of moves logged: 0 when the log already folds to the current sets, or when a
+    /// write since open already reconciled. The daemon calls it once after `ready`.
+    pub fn reconcile_transitions(&mut self) -> Result<usize, RdyError> {
+        if self.logged.is_some() {
+            return Ok(0);
+        }
+        self.recheck = Some(Cause::Reopened);
+        self.publish_logging(Delta::Seq)
+    }
+
+    /// The error of the last batch whose moves could not be computed; cleared by the next
+    /// batch that computes them.
+    pub fn last_transition_error(&self) -> Option<&RdyError> {
+        self.transition_error.as_ref()
     }
 
     fn emit_last_batch(&mut self) {
@@ -115,32 +224,7 @@ impl Rdy {
     /// a subscriber would have received had it been listening since `from`. The first batch
     /// whose events cannot be read ends the walk with its error.
     pub fn replay_events(&self, from: Location) -> Result<Vec<Event>, RdyError> {
-        let reader = self.store.reader();
-        let mut out = Vec::new();
-        let mut group: Vec<(u8, rdy_model::Hash)> = Vec::new();
-        let mut failure: Option<RdyError> = None;
-        let walk =
-            reader.for_each_frame_from(from, self.store.log_end(), |_, kind, hash, _, next| {
-                if kind == kinds::BATCH_COMMIT {
-                    match events::events_for_batch(&reader, next, &group) {
-                        Ok(events) => out.extend(events),
-                        Err(e) => {
-                            failure = Some(e);
-                            // stops the walk; the batch's own error is returned below
-                            return Err(rdy_store::StoreError::Db("replay stopped".into()));
-                        }
-                    }
-                    group.clear();
-                } else {
-                    group.push((kind, hash));
-                }
-                Ok(())
-            });
-        if let Some(e) = failure {
-            return Err(e);
-        }
-        walk?;
-        Ok(out)
+        events::replay(&self.store.reader(), from, self.store.log_end())
     }
 
     /// The error of the latest batch since open whose events could not be read and so were never
@@ -227,6 +311,18 @@ impl Rdy {
             {
                 Arc::clone(&prev.tensions)
             }
+            // plan M2e2: a view op (or a close of alternative members that keeps the sets'
+            // members) moves only which changes are in flight and in which views; a built set
+            // (or one the state before can carry to) is carried, re-detected around the changes
+            // that moved, so the batch's moves follow its delta
+            Delta::View { .. } | Delta::Coord { .. }
+                if coord_heads.alt_members == prev.coord_heads.alt_members =>
+            {
+                match prev.tensions_without_build() {
+                    Some(set) => Arc::new(TensionCell::after_views(set)),
+                    None => Arc::default(),
+                }
+            }
             // tcar1: a commit carries a built set, re-detecting around the blocks it writes. A
             // set the state before has not read yet but can carry is carried now (its cost
             // follows that commit), so a run of commits that nobody reads in between keeps
@@ -237,6 +333,17 @@ impl Rdy {
                         Arc::new(TensionCell::carrying(set, *change, view.clone()))
                     }
                     _ => Arc::default(),
+                }
+            }
+            // plan M2e2: a landing moves canon by its ops and takes its changes out of flight;
+            // a built set (or one the state before can carry to) is carried, re-detected around
+            // the blocks the ops write and the changes that moved, with the new canon's part
+            Delta::Landed { ops, .. }
+                if coord_heads.alt_members == prev.coord_heads.alt_members =>
+            {
+                match prev.tensions_without_build() {
+                    Some(set) => Arc::new(TensionCell::after_landing(set, ops.clone())),
+                    None => Arc::default(),
                 }
             }
             // a verdict or an acceptance: a built set (or one the state before can carry to)
@@ -476,30 +583,7 @@ impl Rdy {
     /// its id is new (`writes_fresh`, checked once the set before is in hand). An unreadable
     /// base never carries.
     fn carries_tensions(&self, ops: &[rdy_model::Op]) -> bool {
-        use rdy_model::Op;
-        let structural = |ty: Option<&str>| {
-            ty.and_then(|t| self.pack.block_types.get(t))
-                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Structural))
-        };
-        let lifecycle = |b: &rdy_model::Block| {
-            b.fields
-                .get("lifecycle")
-                .filter(|v| **v != rdy_model::FieldValue::Null)
-                .cloned()
-        };
-        let reader = self.store.reader();
-        ops.iter().all(|op| match op {
-            Op::Create { .. } => true,
-            Op::Update { base, block } => {
-                !structural(Some(&block.block_type))
-                    && reader.get_block(base).is_ok_and(|old| {
-                        old.parent == block.parent && lifecycle(&old) == lifecycle(block)
-                    })
-            }
-            // a delete takes a block out of other blocks' reads that the seeds do not cover (an
-            // `affects` target's path gives its deciders their areas), so it never carries
-            Op::Delete { .. } => false,
-        })
+        crate::tensions::set::ops_carry(&self.pack, &self.store.reader(), ops)
     }
 
     /// Whether `ops` leave every other block's reads as the seeds' re-detection sees them, by
@@ -543,142 +627,6 @@ impl Rdy {
                 .store
                 .ever_deleted(created.iter().copied())
                 .unwrap_or(true)
-    }
-
-    /// Settles the tension set (tevt1): emits the difference between the last settled set and
-    /// the published state's, and records the published one. A resolved tension and an opened
-    /// one of the same vkey are a re-key (paired in id order), and so are a resolved tension
-    /// and an opened one with the same items under the other severity (an acceptance):
-    /// `tension_resolved` names the new id in `rekeyed_to`, `tension_opened` the old one in
-    /// `rekeyed_from`. Every resolved
-    /// tension is emitted first, then every opened one; `by` and `at_ms` come from the store's
-    /// last batch when a batch was written since the last settle (a pack reload writes none:
-    /// its events have no `by`). Before the first settle since open, the set of the state
-    /// before the first write is the last settled one; with no write either, the published set
-    /// is recorded and nothing is emitted. Returns the number of events. Reads never settle:
-    /// the writer calls this after each write and each pack reload.
-    pub fn settle_tensions(&mut self) -> Result<usize, RdyError> {
-        let st = self.read();
-        let generation = self.publish_gen;
-        if self
-            .tension_seen
-            .as_ref()
-            .is_some_and(|(_, g)| *g == generation)
-        {
-            return Ok(0);
-        }
-        let current = st.tensions()?;
-        let prev = match (&self.tension_seen, self.tension_base.take()) {
-            (Some((set, _)), _) => Some(Arc::clone(set)),
-            // a base whose set cannot be built (a state that held an error) is no baseline
-            (None, Some(base)) => base.tensions().ok(),
-            (None, None) => None,
-        };
-        self.tension_seen = Some((Arc::clone(&current), generation));
-        let batch = self.store.last_batch_end();
-        let batch_since = batch != self.settled_batch;
-        self.settled_batch = batch;
-        let Some(prev) = prev else {
-            return Ok(0);
-        };
-        if Arc::ptr_eq(&prev, &current) {
-            return Ok(0);
-        }
-        let (opened, resolved) = prev.diff(&current);
-        if opened.is_empty() && resolved.is_empty() {
-            return Ok(0);
-        }
-        // re-keys: per vkey, the resolved and the opened tensions paired in id order
-        let mut by_vkey: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
-        for t in &opened {
-            by_vkey.entry(t.vkey).or_default().push(t.id);
-        }
-        let mut rekeyed_to: BTreeMap<Hash, Hash> = BTreeMap::new();
-        let mut rekeyed_from: BTreeMap<Hash, Hash> = BTreeMap::new();
-        let mut taken: BTreeMap<Hash, usize> = BTreeMap::new();
-        for t in &resolved {
-            let n = taken.entry(t.vkey).or_default();
-            if let Some(to) = by_vkey.get(&t.vkey).and_then(|ids| ids.get(*n)) {
-                rekeyed_to.insert(t.id, *to);
-                rekeyed_from.insert(*to, t.id);
-                *n += 1;
-            }
-        }
-        // final review M7: the same items under the other severity (a person's acceptance made
-        // a semantic tension blocking; a lifecycle change can soften a kind) are a re-key too:
-        // the id hashes the severity, and a consumer must not read the old one as resolved
-        let opened_ids: std::collections::BTreeSet<Hash> = opened.iter().map(|t| t.id).collect();
-        for t in &resolved {
-            if rekeyed_to.contains_key(&t.id) {
-                continue;
-            }
-            let other = match t.severity {
-                TensionSeverity::Blocking => TensionSeverity::Advisory,
-                TensionSeverity::Advisory => TensionSeverity::Blocking,
-            };
-            let to = tension_id(t.kind, other, &t.involved);
-            if opened_ids.contains(&to) && !rekeyed_from.contains_key(&to) {
-                rekeyed_to.insert(t.id, to);
-                rekeyed_from.insert(to, t.id);
-            }
-        }
-        let (by, at_ms) = if batch_since {
-            self.settled_by()
-        } else {
-            (None, crate::now_ms())
-        };
-        let seq = st.seq();
-        let mut events = Vec::with_capacity(opened.len() + resolved.len());
-        for t in &resolved {
-            events.push(EventKind::TensionResolved {
-                tension: t.id,
-                kind: t.kind.name().to_string(),
-                by: by.clone(),
-                rekeyed_to: rekeyed_to.get(&t.id).copied(),
-            });
-        }
-        for t in &opened {
-            events.push(EventKind::TensionOpened {
-                tension: t.id,
-                kind: t.kind.name().to_string(),
-                severity: t.severity.to_string(),
-                sides: t.sides.iter().map(SideRef::label).collect(),
-                rekeyed_from: rekeyed_from.get(&t.id).copied(),
-            });
-        }
-        let n = events.len();
-        for kind in events {
-            self.events.publish(Arc::new(Event { seq, at_ms, kind }));
-        }
-        Ok(n)
-    }
-
-    /// What the store's last batch did, as a resolution's `by` (`landing:<hex>` for a landing,
-    /// else `change:<hex>` for a commit, else `op:<hex>` for the last view op, else none), and
-    /// the `at_ms` of its last event (now when it has none).
-    fn settled_by(&self) -> (Option<String>, i64) {
-        let reader = self.store.reader();
-        let frames = self.store.last_batch();
-        let at_ms = events::events_for_batch(&reader, self.store.last_batch_end(), frames)
-            .ok()
-            .and_then(|e| e.last().map(|e| e.at_ms))
-            .unwrap_or_else(crate::now_ms);
-        if let Some((_, h)) = frames.iter().find(|(k, _)| *k == kinds::LANDING) {
-            return (Some(format!("landing:{h}")), at_ms);
-        }
-        let ops: Vec<&Hash> = frames
-            .iter()
-            .filter(|(k, _)| *k == kinds::VIEW_OP)
-            .map(|(_, h)| h)
-            .collect();
-        for h in &ops {
-            if let Ok(op) = reader.view_op(h)
-                && let ViewOpKind::Commit { change } = op.op
-            {
-                return (Some(format!("change:{change}")), at_ms);
-            }
-        }
-        (ops.last().map(|h| format!("op:{h}")), at_ms)
     }
 
     /// Re-reads view `view`'s entry into `views` (`Delta::View`, and each view `Delta::Coord`
@@ -857,14 +805,44 @@ impl Rdy {
     /// Republishes a state with every cell empty (`Delta::Full`). Never fails: an error in
     /// reading the heads is kept in the state and returned by its reads. As-of builds are shared
     /// across states and kept. Call it after writing to the store outside the engine.
+    /// The publish logs what moved since the last logged state (cause `recheck`). When the
+    /// published state is the logged one, no batch is open, and the pack and the detectors are
+    /// the ones it was published with, the full publish reads what that state read, so it
+    /// computes nothing: the log already folds to its open sets, and the new state takes the
+    /// logged state's tension set (the same set, as a write leaves it built), so the next write
+    /// carries it (plan M2e2), and becomes the logged state, so a run of invalidates computes
+    /// nothing. Every other cell starts empty.
     pub fn invalidate(&mut self) {
-        let _ = self.publish(Delta::Full);
+        let st = self.state.load_full();
+        let folded = self.logged.as_ref().is_some_and(|l| Arc::ptr_eq(l, &st))
+            && self.store.open_batch().is_none()
+            && Arc::ptr_eq(&st.pack, &self.pack)
+            && std::ptr::eq(st.detectors, self.detectors);
+        let set = folded.then(|| st.tensions_without_build()).flatten();
+        drop(st);
+        if !folded {
+            self.recheck = Some(Cause::Recheck);
+        }
+        if self.publish(Delta::Full).is_err() || !folded {
+            return;
+        }
+        // the new state reads what the logged one read, so it is the logged state now: the next
+        // invalidate folds too, instead of logging a recheck that builds the whole set
+        let next = self.state.load_full();
+        if let Some(set) = set {
+            next.tensions.keep(set);
+        }
+        self.logged = Some(next);
     }
 
-    /// Rebuilds the store's index from its log and republishes the state on the new index.
+    /// Rebuilds the store's index from its log (an open batch is sealed first) and republishes
+    /// the state on the new index; the publish logs what moved since the last logged state
+    /// (cause `recheck`).
     pub fn reindex(&mut self) -> Result<(), RdyError> {
+        self.seal_open()?;
         self.store.reindex()?;
         self.canon_step_cache.clear();
+        self.recheck = Some(Cause::Recheck);
         self.publish(Delta::Full)
     }
 }

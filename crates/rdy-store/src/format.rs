@@ -14,7 +14,8 @@ use std::path::Path;
 /// 7 (plan M2d2): kind REVIEW and refs dismiss/.
 /// 8 (plan Coverage and confidence): REVIEW subject Mention, verdict Restore, refs mention/; ChangeLinks.imported_by.
 /// 9 (plan M2e1): REVIEW subject Pair, verdicts Tension and NoTension, kind TENSION (with advice and a relayed acceptance), refs pair/ and semantic/.
-pub const STORE_FORMAT: u32 = 9;
+/// 10 (plan M2e2): kind TRANSITION (a batch's tension and suspect moves, founder decision C, D-Z0EMP), and the index's open-tension and open-suspect tables.
+pub const STORE_FORMAT: u32 = 10;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The log ref holding `store_format`, in ASCII decimal.

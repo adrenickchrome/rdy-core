@@ -15,6 +15,7 @@ mod conn;
 mod coverage_cmd;
 mod edit_cmd;
 mod history_text;
+mod inbox_cmd;
 mod intent_cmd;
 mod land_cmd;
 mod output;
@@ -87,6 +88,8 @@ enum Cmd {
     /// to block on a proposal version's semantic tensions (--accept P-x@n). A tension is
     /// otherwise resolved by a change.
     Resolve(tension_cmd::ResolveArgs),
+    /// Print your inbox: the events and tension moves since your cursor. The first call starts it; --ack moves your cursor past the entries shown. The chat path is rdy_inbox.
+    Inbox(inbox_cmd::InboxArgs),
     /// Print the coverage report: the score per dimension, the lowest pages, and each coverage issue with its fix
     Coverage(coverage_cmd::CoverageArgs),
     /// Undo the newest op of this session on a view, or the named op. The commits of one
@@ -111,11 +114,11 @@ enum Cmd {
     Fsck(project_cmd::FsckArgs),
     /// Run the MCP server over stdio.
     Mcp,
-    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the
-    /// store. Inside a checkout, with no path or a path in the working tree, it lints the
-    /// working copy against the bound view: a new entry needs no id, and a file rdy does not
-    /// read is a warning. Commit rewrites the committed files in canonical form and drops their
-    /// YAML comments.
+    /// Lint exported files (a doc file, a _folder.yaml or a directory; the export manifest is
+    /// format 3) without touching the store. Inside a checkout, with no path or a path in the
+    /// working tree, it lints the working copy against the bound view; the working copy carries
+    /// no format number. A new entry needs no id, and a file rdy does not read is a warning.
+    /// Commit rewrites the committed files in canonical form and drops their YAML comments.
     Check(project_cmd::CheckArgs),
     Pack {
         #[command(subcommand)]
@@ -158,6 +161,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Intent { cmd } => intent_cmd::intent(env, cmd),
         Cmd::Tensions(a) => tension_cmd::tensions(env, a),
         Cmd::Resolve(a) => tension_cmd::resolve(env, a),
+        Cmd::Inbox(a) => inbox_cmd::inbox(env, a),
         Cmd::Coverage(a) => coverage_cmd::coverage(env, a),
         Cmd::Undo(a) => view_cmd::undo(env, a),
         Cmd::Tag(a) => land_cmd::tag(env, a),

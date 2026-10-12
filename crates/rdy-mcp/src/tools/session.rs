@@ -19,6 +19,8 @@ pub struct SessionParams {
     pub role: String,
     /// Override the default view for writes. A reader may pass "canon" to read canon by default.
     pub view: Option<String>,
+    /// Areas this session watches for landings, persisted with its inbox cursor; [] clears them (the areas of the blocks you change apply).
+    pub areas: Option<Vec<String>>,
 }
 
 fn depth_of(nodes: &[TreeNode]) -> usize {
@@ -102,10 +104,15 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             "pick another view name; only a reader session may use canon",
         ));
     }
+    // ib3: the subscription is written before the session is set, so a refused area leaves the
+    // earlier session as it was
+    let sub = rdy_engine::inbox::sub::subscribe(&*st.engine, &session, p.areas)?;
+    st.hub
+        .identify(st.hub_sid(), &session.actor, session.run.as_deref());
     st.view = view;
     st.session = Some(session);
     st.reported.clear();
-    let mut out = json!({ "view": st.view, "role": p.role });
+    let mut out = json!({ "view": st.view, "role": p.role, "areas": sub.areas });
     // R-P6: a config key rdy does not know is a warning, never silence
     let warnings = rdy_engine::config_levels::config_warnings_for_env(&st.engine.root());
     if !warnings.is_empty() {
@@ -121,18 +128,22 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
-    // cc6 (FW-H7): coverage is for the current state only; a past landing is refused, and the
-    // refusal of `coverage_scope` is never caught
-    let cov_scope = st_.coverage_scope(&scope)?;
+    // cc6 (FW-H7): coverage is for the current state only; at a past landing the overview leaves it out, as briefings, search hits and fact sheets do
+    let past = st_.is_past_landing(&scope);
     // cc15 (FW-CH3a): the score, its dimensions, the issue count and the kinds, from the
     // memoised summary; the pages, areas and issues are `rdy_coverage`'s. A coverage read error
     // never fails the overview: `coverage_error` says why the coverage is left out.
-    let (coverage, coverage_error) = match st_.coverage_summary(&cov_scope) {
-        Ok(s) => (Some(json!(&*s)), None),
-        Err(e) => (
-            None,
-            Some(json!(rdy_engine::coverage::coverage_error_text(&e))),
-        ),
+    let (coverage, coverage_error) = if past {
+        (None, None)
+    } else {
+        let cov_scope = st_.coverage_scope(&scope)?;
+        match st_.coverage_summary(&cov_scope) {
+            Ok(s) => (Some(json!(&*s)), None),
+            Err(e) => (
+                None,
+                Some(json!(rdy_engine::coverage::coverage_error_text(&e))),
+            ),
+        }
     };
     // the tree gets what the fixed parts (coverage included) leave
     let reserve =

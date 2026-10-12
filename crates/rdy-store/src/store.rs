@@ -7,6 +7,7 @@ use crate::merge::Conflict;
 use crate::segment::{
     CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
+use crate::transition::Transitions;
 use crate::view::ViewOp;
 use rdy_model::{
     Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot, Tracking,
@@ -57,6 +58,12 @@ pub struct OpenReport {
 /// the frame counter, all shared. A clone is cheap, `Send` and `Sync`, and reads only what the
 /// index holds, which the writer applies after the log's sync, so it never sees a torn frame.
 /// A reader cloned before a `reindex` keeps the index it was cloned with.
+///
+/// With held batches (plan M2e2, D-Z0EMP), a write indexes its frames before the batch's marker
+/// and sync, so a clone on another thread can see an open batch that a failed seal or a kill
+/// then removes. Index reads off the writer thread must not drive decisions on data an open
+/// batch wrote: no refusal, no logged record, no notification. The writer decides; other threads
+/// read the state it published after the seal.
 #[derive(Clone)]
 pub struct StoreReader {
     index: Arc<Index>,
@@ -120,6 +127,35 @@ pub struct Store {
     last_batch: Vec<(u8, Hash)>,
     /// The end of the log right after the last successful `write`.
     last_batch_end: Location,
+    /// Held batches are on (plan M2e2, D-Z0EMP): a `write` appends and indexes its frames but
+    /// writes no marker and makes no sync, and `seal` ends the batch. Off after open.
+    held: bool,
+    /// The held batch not yet sealed, if any.
+    open: Option<OpenBatch>,
+    /// Set by a failed seal: the index holds entries of frames the log no longer holds, so no
+    /// checkpoint may make it durable, and the close removes it. The next open rebuilds it from
+    /// the log, and a reindex rebuilds it at once.
+    stale_index: bool,
+}
+
+/// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
+/// its frames, in order.
+struct OpenBatch {
+    start: Location,
+    frames: Vec<(u8, Hash)>,
+}
+
+/// The refusal of a step that would make the index durable, or read the log as a whole, while a
+/// held batch is open.
+fn batch_open(what: &str) -> StoreError {
+    StoreError::Refused(format!("a held batch is open: seal it {what}"))
+}
+
+/// The error of every write after a failed write that could not be rolled back.
+fn poisoned_error() -> StoreError {
+    StoreError::Io(std::io::Error::other(
+        "an earlier failed write could not be rolled back; reopen the store",
+    ))
 }
 
 impl Deref for Store {
@@ -331,6 +367,27 @@ fn entries_for_frame(
             out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
                 change,
                 landing: hash,
+            }));
+        }
+        kinds::TRANSITION => {
+            let rec: Transitions = decode(payload)?;
+            out.extend(
+                rec.resolved
+                    .iter()
+                    .map(|t| IndexEntry::TensionShut { id: t.tension }),
+            );
+            out.extend(rec.opened.iter().map(|t| IndexEntry::TensionOpen {
+                id: t.tension,
+                record: hash,
+            }));
+            out.extend(
+                rec.gone
+                    .iter()
+                    .map(|m| IndexEntry::SuspectShut { key: m.key() }),
+            );
+            out.extend(rec.new.iter().map(|m| IndexEntry::SuspectOpen {
+                key: m.key(),
+                record: hash,
             }));
         }
         _ => {}
@@ -549,6 +606,9 @@ impl Store {
             writes: 0,
             last_batch: vec![],
             last_batch_end: ORIGIN,
+            held: false,
+            open: None,
+            stale_index: false,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -668,14 +728,151 @@ impl Store {
 
     /// The kind and hash of every data frame the last successful `write` appended, after dedupe
     /// and in write order (batch markers excluded); empty right after open and after a write
-    /// that appended nothing. A failed write leaves it as it was.
+    /// that appended nothing. A failed write leaves it as it was. With held batches, the last
+    /// sealed batch: a held write sets it only when it appended nothing and no batch is open.
     pub fn last_batch(&self) -> &[(u8, Hash)] {
         &self.last_batch
     }
 
-    /// The end of the log right after the last successful `write`; the origin right after open.
+    /// The end of the log right after the last successful `write` (with held batches, the last
+    /// seal); the origin right after open.
     pub fn last_batch_end(&self) -> Location {
         self.last_batch_end
+    }
+
+    /// Turns held batches on or off (plan M2e2, D-Z0EMP). Turning them off seals an open batch
+    /// first.
+    pub fn set_held(&mut self, on: bool) -> Result<(), StoreError> {
+        if !on && self.open.is_some() {
+            self.seal(vec![])?;
+        }
+        self.held = on;
+        Ok(())
+    }
+
+    /// The kind and hash of each frame of the open held batch, in order; `None` when no batch is
+    /// open.
+    pub fn open_batch(&self) -> Option<&[(u8, Hash)]> {
+        self.open.as_ref().map(|o| &o.frames[..])
+    }
+
+    /// Ends the held batch: appends `last` (the batch's TRANSITION frame, or nothing) to it,
+    /// writes the marker over every frame of the batch and syncs once, then indexes `last`. One
+    /// sync per batch, held or not. With no batch open and `last` empty it does nothing; with no
+    /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
+    ///
+    /// A failure truncates the log to the batch's start. If a batch was open, it also poisons the
+    /// store: the index already holds entries of frames that are gone, so every later write and
+    /// every checkpoint fails until reopen. If no batch was open, the index holds nothing of the
+    /// batch, so the store keeps working, as after a failed write. The error is returned.
+    pub fn seal(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<(), StoreError> {
+        let was_open = self.open.is_some();
+        if !was_open && last.is_empty() {
+            return Ok(());
+        }
+        if self.poisoned {
+            return Err(poisoned_error());
+        }
+        // `last` is decoded before anything is appended: a value that does not decode is
+        // refused with the batch still open, and nothing poisoned
+        let mut entries = vec![];
+        for (kind, payload) in &last {
+            entries.push(entries_for_frame(
+                *kind,
+                Hash::of(payload),
+                ORIGIN,
+                payload,
+            )?);
+        }
+        let start = self.open.as_ref().map_or(self.log.end(), |o| o.start);
+        match self.seal_batch(last, entries) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.open = None;
+                if was_open {
+                    self.poisoned = true;
+                    self.stale_index = true;
+                }
+                // as in `write`: a log that cannot be rolled back poisons the store
+                let rolled_back = !std::mem::take(&mut self.faults.rollback)
+                    && self.log.truncate_to(start).is_ok();
+                if !rolled_back {
+                    self.poisoned = true;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// `seal` once `last` decoded: `entries` holds each frame's index entries, with its
+    /// location still to fill in.
+    fn seal_batch(
+        &mut self,
+        last: Vec<(u8, Vec<u8>)>,
+        entries: Vec<Vec<IndexEntry>>,
+    ) -> Result<(), StoreError> {
+        let placed = self.log.append_frames(&last, self.open.is_none())?;
+        if let Some((loc, _)) = placed.first() {
+            self.open.get_or_insert(OpenBatch {
+                start: *loc,
+                frames: vec![],
+            });
+        }
+        let open = self.open.as_mut().expect("a batch is open");
+        open.frames
+            .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+        let mut placed_entries = vec![];
+        for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
+            if let Some(IndexEntry::Object { loc, .. }) = frame.first_mut() {
+                *loc = *at;
+            }
+            placed_entries.extend(frame);
+        }
+        self.log.crash_point(CrashPoint::BeforeMarker);
+        let open = self.open.as_ref().expect("a batch is open");
+        self.log
+            .append_marker(open.start, open.frames.iter().map(|(_, h)| h))?;
+        self.log.crash_point(CrashPoint::BeforeSync);
+        self.log.sync()?;
+        self.log.crash_point(CrashPoint::AfterSync);
+        if self.take_index_fault() {
+            return Err(StoreError::Db("injected index failure".into()));
+        }
+        self.index().apply(&placed_entries, self.log.end())?;
+        self.log.crash_point(CrashPoint::AfterIndex);
+        let open = self.open.take().expect("a batch is open");
+        self.acknowledge(open.frames);
+        Ok(())
+    }
+
+    /// What a batch does once it is durable in the log: it becomes `last_batch`, and the index
+    /// may checkpoint.
+    fn acknowledge(&mut self, frames: Vec<(u8, Hash)>) {
+        // The write is acknowledged: it is durable in the log. A checkpoint is only the index
+        // catching up, so a failure of one is recorded and retried, never returned.
+        self.pending += frames.len() as u64 + 1;
+        self.last_batch = frames;
+        self.last_batch_end = self.log.end();
+        self.last_write = Instant::now();
+        if self.pending >= self.checkpoint_frames
+            && let Err(e) = self.checkpoint()
+        {
+            self.checkpoint_error = Some(e.to_string());
+        }
+    }
+
+    /// Whether the injected index fault fires for this batch (`fail_next_index_apply`,
+    /// `fail_index_apply_after`).
+    fn take_index_fault(&mut self) -> bool {
+        let after = match self.faults.index_apply_after {
+            Some(0) => self.faults.index_apply_after.take().is_some(),
+            Some(n) => {
+                self.faults.index_apply_after = Some(n - 1);
+                false
+            }
+            None => false,
+        };
+        std::mem::take(&mut self.faults.index_apply) || after
     }
 
     /// Drops the store's own reader, and with it the store's `Arc` of the index, keeping what
@@ -774,6 +971,9 @@ impl Store {
     /// Reads and hash-checks every frame in every segment and checks every batch marker;
     /// returns the number of data frames (markers are not counted).
     pub fn verify(&self) -> Result<usize, StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
         Ok(self.log.verify_frames()?)
     }
 
@@ -796,6 +996,9 @@ impl Store {
     /// file until that reader drops (Unix). A temp that a kill leaves behind is removed by the
     /// next open, which holds the lock.
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join(INDEX_TMP);
         // a leftover temp is an older failed rebuild; `Index::open` would reuse it
@@ -829,25 +1032,31 @@ impl Store {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.pending = 0;
+        self.stale_index = false;
         fsutil::sync_dir(&self.dir)?;
         Ok(())
     }
 
+    /// Writes `items` as one batch: one marker and one sync. With held batches on, the frames
+    /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once.
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
-            return Err(StoreError::Io(std::io::Error::other(
-                "an earlier failed write could not be rolled back; reopen the store",
-            )));
+            return Err(poisoned_error());
         }
         let start = self.log.end();
-        let result = self.append_and_index(items);
+        let result = if self.held {
+            self.append_held(items)
+        } else {
+            self.append_and_index(items)
+        };
         if result.is_ok() {
             self.writes += 1;
         }
         if result.is_err() {
             // nothing past `start` was acknowledged: discard it — including bytes a partial
             // append left past the end and a segment a failed roll left behind — so neither a
-            // later write, a verify nor a reindex can see it
+            // later write, a verify nor a reindex can see it. The frames of earlier writes of an
+            // open held batch are before `start`, and stay open.
             let rollback = if std::mem::take(&mut self.faults.rollback) {
                 Err(std::io::Error::other("injected rollback failure"))
             } else {
@@ -860,15 +1069,19 @@ impl Store {
         result
     }
 
-    fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+    /// `items` with what the store already holds left out, and the hash of every item.
+    fn dedupe(&self, items: Vec<(u8, Vec<u8>)>) -> Result<(Vec<Hash>, Frames), StoreError> {
         let mut hashes = Vec::with_capacity(items.len());
         let mut batch = Vec::with_capacity(items.len());
         let mut seen = BTreeSet::new();
         for (kind, payload) in items {
             let hash = Hash::of(&payload);
             hashes.push(hash);
-            // kind1: dedupe by (kind, hash); the same bytes under another kind are another object
+            // kind1: dedupe by (kind, hash); the same bytes under another kind are another
+            // object. A ref update or a transition record is never deduped: two batches may log
+            // the same bytes.
             if kind != kinds::REF_UPDATE
+                && kind != kinds::TRANSITION
                 && (seen.contains(&(kind, hash)) || self.index().typed(kind, &hash)?.is_some())
             {
                 continue;
@@ -876,6 +1089,41 @@ impl Store {
             seen.insert((kind, hash));
             batch.push((kind, payload));
         }
+        Ok((hashes, batch))
+    }
+
+    /// A write of a held batch: its frames join the open batch (the first write of a batch
+    /// opens it, and may roll the segment), with no marker and no sync, and are indexed at once
+    /// with a commit that is not durable.
+    fn append_held(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        let (hashes, batch) = self.dedupe(items)?;
+        if batch.is_empty() {
+            if self.open.is_none() {
+                self.last_batch.clear();
+                self.last_batch_end = self.log.end();
+            }
+            return Ok(hashes);
+        }
+        let placed = self.log.append_frames(&batch, self.open.is_none())?;
+        let mut entries = vec![];
+        for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
+            entries.extend(entries_for_frame(*kind, *hash, *loc, payload)?);
+        }
+        if self.take_index_fault() {
+            return Err(StoreError::Db("injected index failure".into()));
+        }
+        self.index().apply(&entries, self.log.end())?;
+        let open = self.open.get_or_insert(OpenBatch {
+            start: placed[0].0,
+            frames: vec![],
+        });
+        open.frames
+            .extend(batch.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+        Ok(hashes)
+    }
+
+    fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        let (hashes, batch) = self.dedupe(items)?;
         if batch.is_empty() {
             self.last_batch.clear();
             self.last_batch_end = self.log.end();
@@ -889,34 +1137,18 @@ impl Store {
         self.log.crash_point(CrashPoint::BeforeSync);
         self.log.sync()?;
         self.log.crash_point(CrashPoint::AfterSync);
-        let after = match self.faults.index_apply_after {
-            Some(0) => self.faults.index_apply_after.take().is_some(),
-            Some(n) => {
-                self.faults.index_apply_after = Some(n - 1);
-                false
-            }
-            None => false,
-        };
-        if std::mem::take(&mut self.faults.index_apply) || after {
+        if self.take_index_fault() {
             return Err(StoreError::Db("injected index failure".into()));
         }
         self.index().apply(&entries, self.log.end())?;
         self.log.crash_point(CrashPoint::AfterIndex);
-        self.last_batch = batch
-            .iter()
-            .zip(&placed)
-            .map(|((kind, _), (_, hash))| (*kind, *hash))
-            .collect();
-        self.last_batch_end = self.log.end();
-        // The write is acknowledged: it is durable in the log. A checkpoint is only the index
-        // catching up, so a failure of one is recorded and retried, never returned.
-        self.pending += batch.len() as u64 + 1;
-        self.last_write = Instant::now();
-        if self.pending >= self.checkpoint_frames
-            && let Err(e) = self.checkpoint()
-        {
-            self.checkpoint_error = Some(e.to_string());
-        }
+        self.acknowledge(
+            batch
+                .iter()
+                .zip(&placed)
+                .map(|((kind, _), (_, hash))| (*kind, *hash))
+                .collect(),
+        );
         Ok(hashes)
     }
 
@@ -924,6 +1156,12 @@ impl Store {
     /// then a kill or power loss leaves the durable index behind the log, which the next open
     /// catches up from the log.
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("before a checkpoint"));
+        }
+        if self.stale_index {
+            return Err(poisoned_error());
+        }
         self.log.crash_point(CrashPoint::BeforeCheckpoint);
         if std::mem::take(&mut self.faults.checkpoint) {
             return Err(StoreError::Db("injected checkpoint failure".into()));
@@ -941,7 +1179,10 @@ impl Store {
     /// A failure is returned and also recorded (see `last_checkpoint_error`) until a checkpoint
     /// succeeds.
     pub fn checkpoint_if_idle(&mut self, now: Instant) -> Result<bool, StoreError> {
-        if self.pending == 0 || now.saturating_duration_since(self.last_write) < CHECKPOINT_IDLE {
+        if self.open.is_some()
+            || self.pending == 0
+            || now.saturating_duration_since(self.last_write) < CHECKPOINT_IDLE
+        {
             return Ok(false);
         }
         if let Err(e) = self.checkpoint() {
@@ -965,6 +1206,27 @@ impl Store {
         if !std::mem::take(&mut self.opened) {
             return Ok(());
         }
+        // an open held batch is sealed first, so a write left open is kept
+        let sealed = self.seal(vec![]);
+        if self.open.is_some() || self.stale_index {
+            // The index holds entries of frames the log does not keep (a failed seal, or a batch
+            // left open on a poisoned store), and a clean close of the database makes them
+            // durable. So the file is removed first, and the removal is made durable; only then
+            // does the database close, onto a file no name reaches. The next open rebuilds the
+            // index from the log; the sentinel stays. If the removal fails, the database is never
+            // closed cleanly: the next open then sees a kill, which drops those entries.
+            let removed = remove_if_present(&self.dir.join("index.redb"))
+                .and_then(|()| fsutil::sync_dir(&self.dir).map_err(Into::into));
+            if let Err(e) = removed {
+                std::mem::forget(self.reader.take());
+                return Err(e);
+            }
+            drop(self.drop_index());
+            self.log.crash_point(CrashPoint::StaleIndexClosed);
+            sealed?;
+            return Err(poisoned_error());
+        }
+        sealed?;
         self.checkpoint()?;
         // The database is closed before the sentinel goes, so a kill during the close still
         // leaves the sentinel behind.
@@ -1090,7 +1352,8 @@ impl Store {
     /// Writes refs in one batch. A `dismiss/` ref is refused: only `put_dismissal` writes one,
     /// and nothing rewrites it (FW-CH7). A `mention/` ref is refused: only `put_mention_review`
     /// writes one, with its review (FW-CV4). A `pair/` or `semantic/` ref is refused: only
-    /// `put_verdict` and `put_tension_versions` write them, with their objects (plan M2e1).
+    /// `put_verdict` and `put_tension_versions` write them, with their objects (plan M2e1). An
+    /// `inbox/` ref is refused: only `put_inbox` writes one, after its checks (plan M2e2).
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
         if let Some((name, _)) = refs
             .iter()
@@ -1122,6 +1385,14 @@ impl Store {
         {
             return Err(StoreError::Decode(format!(
                 "ref {name:?} is a semantic tension: only put_verdict and put_tension_versions write one"
+            )));
+        }
+        if let Some((name, _)) = refs
+            .iter()
+            .find(|(name, _)| name.starts_with(crate::inbox::INBOX_REF))
+        {
+            return Err(StoreError::Decode(format!(
+                "ref {name:?} is an inbox: only put_inbox writes one"
             )));
         }
         let items = self.ref_items(refs);
@@ -1602,6 +1873,23 @@ impl StoreReader {
     /// The changes with an op that deletes `block`, ascending.
     pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
         self.index().deleters(block)
+    }
+
+    /// The TRANSITION record with hash `h` (plan M2e2, D-Z0EMP).
+    pub fn transitions(&self, h: &Hash) -> Result<Transitions, StoreError> {
+        self.get_typed(kinds::TRANSITION, h)
+    }
+
+    /// The open tensions the logged moves fold to: (id, the hash of the record that opened it),
+    /// in id order.
+    pub fn open_tensions(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
+        self.index().open_tensions()
+    }
+
+    /// The open suspects the logged moves fold to: (suspect key, the hash of the record that
+    /// made it new), in key order.
+    pub fn open_suspects(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
+        self.index().open_suspects()
     }
 }
 

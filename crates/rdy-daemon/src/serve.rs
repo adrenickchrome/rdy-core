@@ -348,6 +348,9 @@ fn serve_thread(
                 }
             }
         });
+        // plan M2e2 (D-Z0EMP): what moved while no daemon ran (the pack, the rdy build) is
+        // logged once, after ready, in a batch of cause `reopened`
+        warm.writer.reconcile_soon();
     });
     let ran = rt.block_on(daemon.run());
     // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still
@@ -463,9 +466,10 @@ impl Handler for ServeHandler {
         stream: tokio::net::UnixStream,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let engine = self.shared.engine();
+        let hub = Arc::clone(&self.shared.hub);
         Box::pin(async move {
             let (r, w) = stream.into_split();
-            if let Err(e) = rdy_mcp::server::serve_on(engine, session.id.0, r, w).await {
+            if let Err(e) = rdy_mcp::server::serve_on(engine, session.id.0, hub, r, w).await {
                 log(&format!(
                     "mcp session {} ended with an error: {e}",
                     session.id

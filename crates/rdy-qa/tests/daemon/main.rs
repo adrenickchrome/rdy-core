@@ -4,6 +4,7 @@
 mod daemon_concurrent;
 mod daemon_crash;
 mod daemon_followups;
+mod daemon_notify;
 mod daemon_pack_reads;
 mod daemon_reload;
 mod daemon_serve;

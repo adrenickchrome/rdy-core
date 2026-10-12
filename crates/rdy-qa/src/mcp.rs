@@ -51,6 +51,10 @@ pub struct McpClient {
     stderr: Arc<Mutex<String>>,
     stderr_drain: Option<std::thread::JoinHandle<()>>,
     pending: Vec<Value>,
+    /// The notifications (lines with a `method` and no `id`) received, in arrival order (ib10).
+    notifications: Vec<Value>,
+    /// The server's reply to `initialize`.
+    init: Value,
     next: u64,
     calls: usize,
     latencies: Vec<(String, Duration)>,
@@ -157,6 +161,8 @@ impl McpClient {
             stderr,
             stderr_drain,
             pending: vec![],
+            notifications: vec![],
+            init: Value::Null,
             next: 0,
             calls: 0,
             latencies: vec![],
@@ -164,7 +170,7 @@ impl McpClient {
         let id = c.next_id();
         c.send(&json!({"jsonrpc": "2.0", "id": id, "method": "initialize",
             "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "rdy-qa", "version": "0"}}}));
-        c.recv(id, DEADLINE);
+        c.init = c.recv(id, DEADLINE);
         c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         c
     }
@@ -256,6 +262,8 @@ impl McpClient {
             }
             if v.get("id").is_some() {
                 self.pending.push(v);
+            } else {
+                self.keep_notification(v);
             }
         }
     }
@@ -279,7 +287,98 @@ impl McpClient {
             if v.get("id").is_some() {
                 return v;
             }
+            self.keep_notification(v);
         }
+    }
+
+    /// Keeps a line with a `method` and no `id`: a notification.
+    fn keep_notification(&mut self, v: Value) {
+        if v.get("method").is_some() {
+            self.notifications.push(v);
+        }
+    }
+
+    /// The notifications received so far, in arrival order (ib10).
+    pub fn notifications(&self) -> &[Value] {
+        &self.notifications
+    }
+
+    /// The server's reply to `initialize` (its `result` and `id`).
+    pub fn initialize_result(&self) -> &Value {
+        &self.init
+    }
+
+    /// Waits at most `budget` for a line, then takes every line already waiting: notifications go
+    /// to [`McpClient::notifications`], replies are set aside for `recv`. Returns the lines taken.
+    pub fn drain(&mut self, budget: Duration) -> usize {
+        let mut taken = 0;
+        let mut wait = budget;
+        while let Ok(line) = self.lines.recv_timeout(wait) {
+            wait = Duration::ZERO;
+            taken += 1;
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v.get("id").is_some() {
+                self.pending.push(v);
+            } else {
+                self.keep_notification(v);
+            }
+        }
+        taken
+    }
+
+    /// The `resources` of `resources/list`.
+    pub fn list_resources(&mut self) -> Vec<Value> {
+        let v = self.request("resources/list", json!({}));
+        v["result"]["resources"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The `resourceTemplates` of `resources/templates/list`.
+    pub fn list_resource_templates(&mut self) -> Vec<Value> {
+        let v = self.request("resources/templates/list", json!({}));
+        v["result"]["resourceTemplates"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The raw JSON-RPC reply to `resources/read`: `result.contents` or `error`.
+    pub fn read_resource(&mut self, uri: &str) -> Value {
+        self.request("resources/read", json!({"uri": uri}))
+    }
+
+    /// The raw JSON-RPC reply to (legacy) `resources/subscribe`.
+    pub fn subscribe(&mut self, uri: &str) -> Value {
+        self.request("resources/subscribe", json!({"uri": uri}))
+    }
+
+    /// True once a `notifications/resources/updated` for `uri` has arrived, polling for at most
+    /// `budget`. It also finds one that arrived earlier.
+    pub fn wait_notification(&mut self, uri: &str, budget: Duration) -> bool {
+        let end = Instant::now() + budget;
+        loop {
+            if self.notifications.iter().any(|n| {
+                n["method"] == "notifications/resources/updated" && n["params"]["uri"] == uri
+            }) {
+                return true;
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            self.drain(left.min(Duration::from_millis(50)));
+        }
+    }
+
+    /// Sends one request and returns its raw JSON-RPC reply.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id();
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        self.recv(id, DEADLINE)
     }
 
     pub fn call(&mut self, tool: &str, args: Value) -> Reply {
@@ -330,5 +429,51 @@ impl McpClient {
 
     pub fn latencies(&self) -> &[(String, Duration)] {
         &self.latencies
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fake server: answers `initialize`, then sends one notification and one reply with an id
+    /// the client is not waiting for.
+    fn fake() -> McpClient {
+        let script = r#"read line
+echo '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"resources":{"subscribe":true}}}}'
+echo '{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"rdy://inbox"}}'
+echo '{"jsonrpc":"2.0","id":99,"result":{}}'
+sleep 20"#;
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]).stderr(Stdio::null());
+        McpClient::launch(cmd)
+    }
+
+    #[test]
+    fn ib10_the_client_keeps_the_initialize_reply_and_the_notifications() {
+        let mut c = fake();
+        assert_eq!(
+            c.initialize_result()["result"]["capabilities"]["resources"]["subscribe"],
+            true
+        );
+        assert!(c.wait_notification("rdy://inbox", Duration::from_secs(10)));
+        // the one notification the fake sent, and nothing taken for one
+        let uris: Vec<&str> = c
+            .notifications()
+            .iter()
+            .map(|n| n["params"]["uri"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(uris, ["rdy://inbox"]);
+        // the reply that was not asked for is set aside, never taken for a notification
+        assert_eq!(c.recv(99, Duration::from_secs(5))["id"], 99);
+    }
+
+    #[test]
+    fn ib10_drain_returns_at_once_when_nothing_is_waiting() {
+        let mut c = fake();
+        assert!(c.wait_notification("rdy://inbox", Duration::from_secs(10)));
+        // the fake's one stray reply may still be on its way; once it is taken, nothing is left
+        c.drain(Duration::from_millis(200));
+        assert_eq!(c.drain(Duration::from_millis(50)), 0);
     }
 }

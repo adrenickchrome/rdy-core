@@ -38,10 +38,19 @@ fn cc18_the_instructions_carry_confidence_and_linking() {
     let n = s.len();
     assert_eq!(
         s[n - 2],
-        "Answers carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act."
+        "Fact sheets, search hits and briefings carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act."
     );
     assert_eq!(
         s[n - 1],
         "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss)."
+    );
+}
+
+#[test]
+fn ib7_the_instructions_tell_an_agent_to_read_its_inbox() {
+    let i = rdy_mcp::server::INSTRUCTIONS;
+    assert!(
+        i.contains("Read rdy_inbox at session start and when rdy://inbox changes, and ack what you have handled; notifications are best effort, the inbox is reliable."),
+        "{i}"
     );
 }

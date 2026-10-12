@@ -484,7 +484,8 @@ fn mfb3_an_import_is_not_idle_after_old_author_times() {
 }
 
 /// Fix round 1 (finding 4): the import is one store write. A store failure at any write of
-/// the import leaves no view and no change, and a retry imports everything.
+/// the import leaves no view and no change, and a retry (after a reopen: a failed seal poisons
+/// the store, plan M2e2) imports everything.
 #[test]
 fn mfb3_a_failed_import_leaves_no_change() {
     let a_dir = tempfile::tempdir().unwrap();
@@ -503,6 +504,13 @@ fn mfb3_a_failed_import_leaves_no_change() {
             assert!(
                 b.read().view_head("import").is_none(),
                 "write {k} failed: the import left a view behind"
+            );
+            // plan M2e2: a failed seal of a held batch poisons the store until reopen
+            drop(b);
+            b = Rdy::open(b_dir.path()).unwrap();
+            assert!(
+                b.read().view_head("import").is_none(),
+                "write {k} failed: the reopened store holds a view"
             );
             let res = b.import(&imp, "import", &out).unwrap();
             assert_eq!(res.changes.len(), 2, "{res:?}");

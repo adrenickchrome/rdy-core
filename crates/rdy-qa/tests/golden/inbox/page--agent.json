@@ -1,0 +1,53 @@
+{
+  "cursor": "0.17036.0",
+  "entries": [
+    {
+      "event": "tension_opened",
+      "ids": [
+        "0260e4682e712ae9d553d929c056a9687b91f6129c6b2261d3e25032e468d85e",
+        "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
+      ],
+      "line": "tension 0260e4682e71 opened on your change 6e3e2e0e10c8 (edit_collision, blocking): a side changed (change 62c4254aa068)"
+    },
+    {
+      "event": "intent_posted",
+      "ids": [
+        "e6d149772c917dea7bd9f75cd491b0e54d8b13d753a0c52b1767abd1b3e5897a"
+      ],
+      "line": "agent:b posted intent e6d149772c91 on 1 blocks you are changing"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "af61f1dd8ba48d2b5a988be0e873995933808754a63cfa68df980b4e53f88271",
+        "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
+      ],
+      "line": "tension af61f1dd8ba4 opened on your change 6e3e2e0e10c8 (edit_collision, blocking): a side changed (change 0c3f84a38d23)"
+    },
+    {
+      "event": "landed",
+      "ids": [
+        "88af43235a5523b8cf9bd98ae91ce782ca693f7d807935a9a79eb10b863cd903",
+        "9d36720c2c2400047acd29d14fad66f0c01c9af0524ddc1681535c88cbcd165d"
+      ],
+      "line": "landing 88af43235a55 of view work changed 1 blocks in your areas (payments)"
+    },
+    {
+      "event": "view_rebased",
+      "ids": [
+        "88af43235a5523b8cf9bd98ae91ce782ca693f7d807935a9a79eb10b863cd903",
+        "a10aca6f09cb13bbd9fbb3fbe73518e2f04894b6d69a1f2130f18079a4565f25"
+      ],
+      "line": "your view a rebased onto landing 88af43235a55 with 1 conflicts"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "a686cc7dba9ad75a69cf0263213760f7d2cc89ffde6eb0c7f7c8c02b165b8d79",
+        "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
+      ],
+      "line": "tension a686cc7dba9a replaces af61f1dd8ba4 on your change 6e3e2e0e10c8 (edit_collision, blocking): landing 88af43235a55"
+    }
+  ],
+  "more": false
+}

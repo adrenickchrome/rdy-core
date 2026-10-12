@@ -64,6 +64,12 @@ pub(crate) fn justification_text(j: &Value) -> Option<String> {
         .then(|| format!("editorial {}: {}", s(e, "class"), s(e, "reason")))
 }
 
+/// `imported by <who>` for a change `rdy import` wrote; `None` for any other change.
+fn imported_by(entry: &Value) -> Option<String> {
+    let i = &entry["imported_by"];
+    i.is_object().then(|| format!("imported by {}", who(i)))
+}
+
 /// `, landed <id>` or `, not landed`.
 fn landed_suffix(entry: &Value) -> String {
     match entry["landing"]["id"].as_str() {
@@ -84,6 +90,9 @@ pub(crate) fn last_change_line(entry: &Value) -> Option<String> {
         who(a),
         time(&a["at_ms"])
     );
+    if let Some(i) = imported_by(entry) {
+        line.push_str(&format!(", {i}"));
+    }
     if let Some(j) = justification_text(&entry["justification"]) {
         line.push_str(&format!(", {j}"));
     }
@@ -106,6 +115,9 @@ pub(crate) fn blame_text(reply: &Value) -> String {
         ));
         if let Some(j) = justification_text(&e["justification"]) {
             out.push_str(&format!("  {j}"));
+        }
+        if let Some(i) = imported_by(e) {
+            out.push_str(&format!("  {i}"));
         }
         match e["landing"]["id"].as_str() {
             Some(id) => out.push_str(&format!(
@@ -140,5 +152,62 @@ mod tests {
             log_head_line(&row),
             "abcdef012345  ?  T  proposed by agent:a/ra  approved by human:qa"
         );
+    }
+
+    fn entry(imported_by: Option<Value>) -> Value {
+        let mut e = json!({
+            "version": "aaaaaaaaaaaa1111", "op": "update", "change": "0123456789abcdef",
+            "author": {"actor": "agent:a", "run": "r1", "at_ms": 1_791_540_000_000_i64},
+            "justification": {"implements": ["d-1"]},
+            "landing": {"id": "fedcba9876543210", "approved_by": "human:qa", "at_ms": 1_791_540_000_000_i64}
+        });
+        if let Some(i) = imported_by {
+            e["imported_by"] = i;
+        }
+        e
+    }
+
+    #[test]
+    fn ib13_the_last_change_line_names_the_importer() {
+        let plain = last_change_line(&entry(None)).unwrap();
+        assert!(!plain.contains("imported by"), "{plain}");
+        let run =
+            last_change_line(&entry(Some(json!({"actor": "human:imp", "run": "r9"})))).unwrap();
+        assert!(
+            run.contains("at 2026-10-09T10:00:00Z")
+                && run.contains(", imported by human:imp/r9, implements d-1, landed fedcba987654"),
+            "{run}"
+        );
+        let human =
+            last_change_line(&entry(Some(json!({"actor": "human:imp", "run": null})))).unwrap();
+        assert!(
+            human.contains(", imported by human:imp, implements"),
+            "{human}"
+        );
+        let cli =
+            last_change_line(&entry(Some(json!({"actor": "human:imp", "run": "cli"})))).unwrap();
+        assert!(cli.contains(", imported by human:imp, implements"), "{cli}");
+        let mut bare = entry(Some(json!({"actor": "human:imp", "run": null})));
+        bare["justification"] = Value::Null;
+        assert!(
+            last_change_line(&bare)
+                .unwrap()
+                .ends_with("Z, imported by human:imp, landed fedcba987654")
+        );
+    }
+
+    #[test]
+    fn ib13_blame_names_the_importer() {
+        let reply = json!({"history": [entry(None)]});
+        assert!(!blame_text(&reply).contains("imported by"));
+        let reply = json!({"history": [entry(Some(json!({"actor": "human:imp", "run": "r9"})))]});
+        let text = blame_text(&reply);
+        let first = text.lines().nth(2).unwrap();
+        assert!(
+            first.ends_with("implements d-1  imported by human:imp/r9"),
+            "{first}"
+        );
+        let reply = json!({"history": [entry(Some(json!({"actor": "human:imp", "run": null})))]});
+        assert!(blame_text(&reply).contains("  imported by human:imp\n"));
     }
 }

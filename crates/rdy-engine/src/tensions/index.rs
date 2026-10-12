@@ -208,11 +208,14 @@ impl Writes {
         let mut touched = IndexKeys::default();
         for (b, (base, new)) in mine {
             let before = w.by_block.get(&b).cloned().unwrap_or_default();
-            // the old live writes on b leave the indexes
+            // the old live writes on b leave the indexes: only the keys they were filed under,
+            // so a change that writes many blocks costs per block, not per block walked before
+            let mut old = IndexKeys::default();
             for x in before.iter().filter(|x| x.live) {
-                touched.add(pack, min_words, x);
+                old.add(pack, min_words, x);
             }
-            w.unindex_block(&touched, &b);
+            w.unindex_block(&old, &b);
+            touched.extend(old);
             let at = before.partition_point(|x| x.change < change);
             let mut writes: Vec<Arc<Write>> = before;
             writes.insert(
@@ -271,6 +274,183 @@ impl Writes {
         w.by_change.insert(change, own);
         w.sort_index(&touched);
         Ok(w)
+    }
+
+    /// These writes after the in-flight set became `set`, where `changed` are the changes whose
+    /// membership or views differ (each one left flight, entered it, or moved between views):
+    /// their facts and writes, the liveness of every write on the blocks they write (before and
+    /// after), and those blocks' index entries, as [`Writes::build`] over `set` computes them.
+    /// Every other change keeps its facts and writes. Its cost follows the changed changes'
+    /// writes, not the size of the set (plan M2e2: a view op's moves come from its delta).
+    pub(crate) fn with_changes(
+        &self,
+        st: &ReadState,
+        set: &InflightSet,
+        changed: &BTreeSet<Hash>,
+    ) -> Result<Writes, RdyError> {
+        let pack = st.pack();
+        let min_words = pack.duplicate_text_min_words();
+        let mut w = self.clone();
+        // the blocks whose writes move: every block a changed change writes, before and after
+        let mut blocks: BTreeSet<BlockId> = BTreeSet::new();
+        // a changed change still in flight: its writes, by block (base, version, block). One
+        // that was in flight keeps its writes and facts but its views (no store read); a new
+        // one is read
+        type NewWrite = (Hash, Option<Hash>, Option<Hash>, Option<Arc<Block>>);
+        let mut mine: BTreeMap<BlockId, Vec<NewWrite>> = BTreeMap::new();
+        let mut still: Vec<Hash> = vec![];
+        for c in changed {
+            let old = w.changes.remove(c);
+            let old_writes = w.by_change.remove(c);
+            if let Some(f) = &old {
+                blocks.extend(f.blocks.iter().cloned());
+            }
+            let Some(views) = set.views_of.get(c) else {
+                continue;
+            };
+            still.push(*c);
+            match (old, old_writes) {
+                (Some(f), Some(ws)) => {
+                    for x in ws {
+                        mine.entry(x.block.clone()).or_default().push((
+                            *c,
+                            x.base,
+                            x.version,
+                            x.new.clone(),
+                        ));
+                    }
+                    w.changes.insert(
+                        *c,
+                        ChangeFacts {
+                            views: views.clone(),
+                            ..f
+                        },
+                    );
+                }
+                _ => {
+                    STEP_READS.with(|n| n.set(n.get() + 1));
+                    let read = st.reader().change(c)?;
+                    let own = writes_of(&read);
+                    for (b, (base, new)) in &own {
+                        blocks.insert(b.clone());
+                        mine.entry(b.clone()).or_default().push((
+                            *c,
+                            *base,
+                            new.as_ref().map(Block::version_hash),
+                            new.clone().map(Arc::new),
+                        ));
+                    }
+                    w.changes.insert(
+                        *c,
+                        ChangeFacts {
+                            id: *c,
+                            deps: read.deps.clone(),
+                            actor: read.provenance.actor.clone(),
+                            run: read.provenance.run.clone(),
+                            justified: read.justification.is_some(),
+                            views: views.clone(),
+                            blocks: own.keys().cloned().collect(),
+                            at_ms: read.provenance.at_ms,
+                        },
+                    );
+                }
+            }
+        }
+        let mut touched = IndexKeys::default();
+        let mut own: BTreeMap<Hash, Vec<Arc<Write>>> = BTreeMap::new();
+        for b in &blocks {
+            let before = w.by_block.get(b).cloned().unwrap_or_default();
+            // the old live writes on b leave the indexes: only the keys they were filed under,
+            // so the cost follows b's writes, not every block walked before it
+            let mut old = IndexKeys::default();
+            for x in before.iter().filter(|x| x.live) {
+                old.add(pack, min_words, x);
+            }
+            w.unindex_block(&old, b);
+            touched.extend(old);
+            // the writes on b: the unchanged changes' (kept) and the changed changes' still in
+            // flight (live is recomputed below)
+            let mut writes: Vec<Arc<Write>> = before
+                .into_iter()
+                .filter(|x| !changed.contains(&x.change))
+                .collect();
+            for (c, base, version, new) in mine.remove(b).unwrap_or_default() {
+                writes.push(Arc::new(Write {
+                    change: c,
+                    block: b.clone(),
+                    base,
+                    version,
+                    new,
+                    live: true,
+                }));
+            }
+            writes.sort_by_key(|x| x.change);
+            // the liveness of every write on b, from the changes that write b
+            let writers: Vec<Hash> = writes.iter().map(|x| x.change).collect();
+            let mut next = Vec::with_capacity(writes.len());
+            for x in &writes {
+                let views = w
+                    .changes
+                    .get(&x.change)
+                    .map(|f| f.views.as_slice())
+                    .unwrap_or(&[]);
+                let gone: BTreeSet<&str> = writers
+                    .iter()
+                    .filter(|r| **r != x.change)
+                    .filter_map(|r| w.changes.get(r))
+                    .filter(|f| f.deps.contains(&x.change))
+                    .flat_map(|f| f.views.iter().map(String::as_str))
+                    .collect();
+                let live = views.iter().any(|v| !gone.contains(v.as_str()));
+                let y = if live == x.live {
+                    Arc::clone(x)
+                } else {
+                    Arc::new(Write {
+                        live,
+                        ..(**x).clone()
+                    })
+                };
+                next.push(y);
+            }
+            for y in &next {
+                if y.live {
+                    touched.add(pack, min_words, y);
+                    w.index_live(pack, min_words, y);
+                }
+                if changed.contains(&y.change) {
+                    own.entry(y.change).or_default().push(Arc::clone(y));
+                } else if let Some(list) = w.by_change.get_mut(&y.change)
+                    && let Some(slot) = list.iter_mut().find(|z| z.block == *b)
+                {
+                    *slot = Arc::clone(y);
+                }
+            }
+            if next.is_empty() {
+                w.by_block.remove(b);
+            } else {
+                w.by_block.insert(b.clone(), next);
+            }
+        }
+        // a changed change's writes, by block (the blocks were walked in order)
+        for c in still {
+            w.by_change.insert(c, own.remove(&c).unwrap_or_default());
+        }
+        w.sort_index(&touched);
+        Ok(w)
+    }
+
+    /// Test hook: whether these writes and `other` hold the same writes, facts and indexes (a
+    /// carry's writes against a build's).
+    #[doc(hidden)]
+    pub fn same_as(&self, other: &Writes) -> bool {
+        self.by_block == other.by_block
+            && self.by_change == other.by_change
+            && self.changes == other.changes
+            && self.named == other.named
+            && self.texted == other.texted
+            && self.superseding == other.superseding
+            && self.retiring == other.retiring
+            && self.pointing == other.pointing
     }
 
     /// Removes every entry of a write on `b` from the index entries `keys` names.
@@ -364,6 +544,11 @@ impl Writes {
                     .push((Arc::clone(w), e));
             }
         }
+    }
+
+    /// Every write, live or not, by block, then change.
+    pub fn all(&self) -> impl Iterator<Item = &Arc<Write>> {
+        self.by_block.values().flatten()
     }
 
     /// Every live write, by block, then change.
@@ -504,12 +689,34 @@ pub fn retired_by(b: &Block) -> BTreeSet<BlockId> {
         .collect()
 }
 
+thread_local! {
+    /// This thread's count of index keys walked to unfile old writes (`retain_key`).
+    static UNFILED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// This thread's count of changes `Writes::with_changes` read from the store.
+    static STEP_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's count of changes a view op's carry read from the store to update its writes:
+/// only a change that entered flight is read. A test reads the difference over a call.
+#[doc(hidden)]
+pub fn step_change_reads() -> u64 {
+    STEP_READS.with(std::cell::Cell::get)
+}
+
+/// This thread's count of index keys the writes of a carry walked to unfile an old write. A
+/// test reads the difference over a write to check that the cost follows the blocks written.
+#[doc(hidden)]
+pub fn unfiled_keys() -> u64 {
+    UNFILED.with(std::cell::Cell::get)
+}
+
 /// Keeps the entries of `map[k]` that `keep` accepts; a key left with none is removed.
 fn retain_key<K: Ord + Clone, T: Clone>(
     map: &mut OrdMap<K, Vec<T>>,
     k: &K,
     keep: impl Fn(&T) -> bool,
 ) {
+    UNFILED.with(|c| c.set(c.get() + 1));
     let empty = match map.get_mut(k) {
         Some(v) => {
             v.retain(|x| keep(x));
@@ -533,6 +740,15 @@ struct IndexKeys {
 }
 
 impl IndexKeys {
+    /// Adds every key of `other`.
+    fn extend(&mut self, other: IndexKeys) {
+        self.names.extend(other.names);
+        self.texts.extend(other.texts);
+        self.targets.extend(other.targets);
+        self.retired.extend(other.retired);
+        self.pointed.extend(other.pointed);
+    }
+
     /// Adds the keys `index_live` files live write `w` under (keep the two in step).
     fn add(&mut self, pack: &Pack, min_words: usize, w: &Write) {
         let Some(b) = w.new.as_deref() else {
@@ -907,12 +1123,14 @@ impl<'a> DetectCx<'a> {
 
     /// The content of `block`'s version `v` (see [`DetectCx::involved`]).
     fn content_at(&self, side: &SideRef, block: &BlockId, v: &Hash) -> Result<Hash, RdyError> {
+        // the writes on the block, not the change's: a change that writes many blocks (an
+        // import) must not be copied once per block it writes
         if let SideRef::Change(c) = side
             && let Some(b) = self
                 .writes
-                .of_change(c)
+                .on(block)
                 .iter()
-                .find(|w| &w.block == block && w.version.as_ref() == Some(v))
+                .find(|w| &w.change == c && w.version.as_ref() == Some(v))
                 .and_then(|w| w.new.clone())
         {
             return Ok(self.content_of(&b));

@@ -5,10 +5,12 @@ mod coverage;
 mod decide;
 mod entity;
 mod graph;
+mod inbox;
 mod instructions;
 mod intent;
 mod propose;
 mod read;
+mod resources;
 mod review;
 mod schema;
 mod search;
@@ -17,7 +19,9 @@ mod tension;
 mod views;
 mod write;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
+pub use resources::{RESOURCES, TEMPLATES};
 
+use crate::notify::{NotifyHub, Sink};
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
@@ -27,9 +31,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ServerCapabilities, ServerConfig,
+        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
+        SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
     },
-    service::RequestContext,
+    service::{RequestContext, SubscriptionContext},
     tool_handler,
 };
 use std::io::Write as _;
@@ -45,6 +51,13 @@ pub const REQUEST_TOO_LARGE: &str = "rdy_request_too_large";
 pub struct RdyServer {
     state: Arc<Mutex<McpState>>,
     tool_router: ToolRouter<Self>,
+    /// The sessions connected to this server (ib10); shared with `state` for `rdy_session`.
+    hub: Arc<NotifyHub>,
+    /// This session's id in `hub`: the daemon's session id, else the process-unique owner.
+    hub_sid: u64,
+    /// The engine `state` holds, for the `subscriptions/listen` filter, which resolves doc URIs
+    /// without the state lock.
+    engine: Arc<dyn Engine>,
 }
 
 fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
@@ -55,13 +68,18 @@ fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
 }
 
 impl RdyServer {
-    pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>) -> Self {
-        let mut st = McpState::new(engine);
+    pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>, hub: Arc<NotifyHub>) -> Self {
+        let mut st = McpState::new(Arc::clone(&engine));
         st.sid = sid;
         if let Some(sid) = sid {
             st.lease_owner = sid;
         }
+        st.hub = Arc::clone(&hub);
+        let hub_sid = st.hub_sid();
         RdyServer {
+            hub,
+            hub_sid,
+            engine,
             state: Arc::new(Mutex::new(st)),
             tool_router: Self::family_routers()
                 .into_iter()
@@ -71,7 +89,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 17] {
+    fn family_routers() -> [ToolRouter<Self>; 18] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -90,6 +108,7 @@ impl RdyServer {
             Self::tension_router(),
             Self::coverage_router(),
             Self::review_router(),
+            Self::inbox_router(),
         ]
     }
 
@@ -110,14 +129,30 @@ impl RdyServer {
             Ok(p) => p,
             Err(e) => return result(Err(e)),
         };
+        result(self.blocking(tool, true, move |st| f(st, p)).await)
+    }
+
+    /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
+    /// under the state lock. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean
+    /// state (the invalidate runs on the writer, where `Rdy` is); if that fails, the error says
+    /// so. With `notice` set, a pack notice rides on an object result; a resource read leaves
+    /// the notice for the next tool reply.
+    pub(crate) async fn blocking<F>(
+        &self,
+        tool: &'static str,
+        notice: bool,
+        f: F,
+    ) -> Result<serde_json::Value, RdyError>
+    where
+        F: FnOnce(&mut McpState) -> Result<serde_json::Value, RdyError> + Send + 'static,
+    {
         let state = Arc::clone(&self.state);
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st, p)));
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st)));
             match out {
                 Ok(mut r) => {
-                    // the pack notice rides on an object result; otherwise it waits for one
-                    if let Ok(serde_json::Value::Object(m)) = &mut r {
+                    if notice && let Ok(serde_json::Value::Object(m)) = &mut r {
                         let generation = st.engine.pack_generation();
                         let error = st.engine.pack_error();
                         if let Some(n) =
@@ -126,10 +161,9 @@ impl RdyServer {
                             m.insert("notice".into(), serde_json::Value::String(n));
                         }
                     }
-                    result(r)
+                    r
                 }
                 Err(panic) => {
-                    // the invalidate runs on the writer, where `Rdy` is
                     let republished = st.engine.write(Box::new(|r| {
                         r.invalidate();
                         Ok(serde_json::Value::Null)
@@ -152,21 +186,21 @@ impl RdyServer {
                             e.code, e.message
                         ));
                     }
-                    result(Err(RdyError::new(
+                    Err(RdyError::new(
                         E_INTERNAL,
                         message,
                         "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-                    )))
+                    ))
                 }
             }
         })
         .await;
         joined.unwrap_or_else(|_| {
-            result(Err(RdyError::new(
+            Err(RdyError::new(
                 E_INTERNAL,
                 format!("internal error in {tool}: the call was cancelled"),
                 "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-            )))
+            ))
         })
     }
 }
@@ -191,10 +225,74 @@ impl ServerHandler for RdyServer {
         self.tool_router.call(tcc).await
     }
 
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        Ok(Self::resources_list())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
+        Ok(Self::resource_templates_list())
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
+        Ok(self.resources_read(request.uri).await?.into())
+    }
+
+    #[allow(deprecated)]
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        self.resources_subscribe(&request.uri, context.peer).await
+    }
+
+    #[allow(deprecated)]
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        self.resources_unsubscribe(&request.uri)
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        // read once, and only when a doc URI asks
+        let read = std::cell::OnceCell::new();
+        Some(Self::resources_filter(requested, |text| {
+            resources::followed_block(read.get_or_init(|| self.engine.read()), text).is_some()
+        }))
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), rmcp::ErrorData> {
+        self.resources_listen(context).await;
+        Ok(())
+    }
+
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .build(),
+        )
+        .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
+        .with_instructions(INSTRUCTIONS)
     }
 }
 
@@ -524,7 +622,11 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         )
         .await;
     });
-    let server = RdyServer::new(Arc::clone(&local) as Arc<dyn Engine>, None);
+    let server = RdyServer::new(
+        Arc::clone(&local) as Arc<dyn Engine>,
+        None,
+        NotifyHub::new(),
+    );
     let ticker = {
         let local = Arc::clone(&local);
         tokio::spawn(async move {
@@ -574,28 +676,41 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
 
 /// Serves `server` over `(r, w)` until the peer closes, with the session's tool calls stamped
 /// at the transport, run one at a time in arrival order and answered in that order (see
-/// [`crate::order`]), on whatever runtime polls it.
+/// [`crate::order`]), on whatever runtime polls it. Once the session is up, its peer is the
+/// session's sink in the server's hub (ib11), so resource notifications can reach it.
 pub async fn serve<R, W>(server: RdyServer, r: R, w: W) -> anyhow::Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
+    let (hub, sid) = (Arc::clone(&server.hub), server.hub_sid);
     let order = Arc::new(Order::default());
     let transport = Stamped::new(
         rmcp::transport::async_rw::AsyncRwTransport::new_server(r, w),
         Arc::clone(&order),
     );
+    // the session is known to the hub before its first request (`NotifyHub::connect`)
+    hub.connect(sid, Sink::None);
     let service = Ordered::new(server, order).serve(transport).await?;
+    hub.set_sink(sid, Sink::Legacy(service.peer().clone()));
     service.waiting().await?;
     Ok(())
 }
 
 /// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
-/// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id.
+/// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id,
+/// and `hub` the daemon's hub of connected sessions (ib11): the session joins it under `sid`,
+/// and the daemon removes it when the session ends.
 /// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
 /// runtime. Dropping the returned future ends the session: the service is cancelled and the
 /// stream closed; a tool call already on the blocking pool finishes first.
-pub async fn serve_on<R, W>(engine: Arc<dyn Engine>, sid: u64, r: R, w: W) -> anyhow::Result<()>
+pub async fn serve_on<R, W>(
+    engine: Arc<dyn Engine>,
+    sid: u64,
+    hub: Arc<NotifyHub>,
+    r: R,
+    w: W,
+) -> anyhow::Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
@@ -615,7 +730,7 @@ where
         );
     };
     let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
-    let served = serve(RdyServer::new(engine, Some(sid)), from_pump, w);
+    let served = serve(RdyServer::new(engine, Some(sid), hub), from_pump, w);
     tokio::pin!(served);
     // the session ends when `serve` does (the peer closed, or the session failed to start);
     // when the pump ends first (the peer closed its side), `serve` reads EOF and ends after it
@@ -659,12 +774,17 @@ mod tests {
     async fn msw9_a_failed_republish_after_a_tool_panic_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(Arc::new(FailingWrite(Local::new(rdy))), None);
+        let server = RdyServer::new(
+            Arc::new(FailingWrite(Local::new(rdy))),
+            None,
+            NotifyHub::new(),
+        );
         let p = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: None,
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap()
@@ -675,6 +795,34 @@ mod tests {
                 && out.contains("E_DAEMON_GONE"),
             "{out}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ib10_a_panic_in_a_blocking_body_republishes_or_says_it_did_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(
+            Arc::new(FailingWrite(Local::new(rdy))),
+            None,
+            NotifyHub::new(),
+        );
+        let e = server
+            .blocking("a_read", false, |_| panic!("boom"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, E_INTERNAL, "{e:?}");
+        assert!(
+            e.message.contains("boom")
+                && e.message.contains("not republished")
+                && e.message.contains("E_DAEMON_GONE"),
+            "{e:?}"
+        );
+        // a body that does not panic passes its value through, with no notice added
+        let ok = server
+            .blocking("a_read", false, |_| Ok(serde_json::json!({"a": 1})))
+            .await
+            .unwrap();
+        assert_eq!(ok, serde_json::json!({"a": 1}));
     }
 
     #[test]
@@ -697,7 +845,7 @@ mod tests {
         // leave its tools silently unregistered.
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new());
         let registered: Vec<String> = server
             .tool_router
             .list_all()
@@ -951,12 +1099,13 @@ mod mcp1_id_tests {
     async fn hook1_the_panic_hook_exists_only_under_cfg_test() {
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new());
         let p = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: None,
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap()
@@ -971,6 +1120,7 @@ mod mcp1_id_tests {
             run: Some("r".into()),
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap();
@@ -985,12 +1135,14 @@ mod mcp1_id_tests {
                 rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap(),
             )),
             None,
+            NotifyHub::new(),
         );
         let bad = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: Some("x".into()),
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out =
             serde_json::to_value(server.run("rdy_session", Ok(bad), tools::rdy_session).await)
@@ -1005,6 +1157,7 @@ mod mcp1_id_tests {
             run: Some("x".into()),
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(ok), tools::rdy_session).await)
             .unwrap();

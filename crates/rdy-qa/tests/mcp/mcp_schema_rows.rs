@@ -142,3 +142,13 @@ fn msw14_the_write_tool_says_a_bare_key_is_stored_with_the_key_mark() {
     assert!(d.contains("{{id|@key}}"), "{d}");
     c.alive();
 }
+
+#[test]
+fn ib7_the_unapplied_decision_warning_has_a_row() {
+    let (when, fix) = row("W_UNAPPLIED_DECISION");
+    assert!(when.contains("needs_content: false"), "{when}");
+    assert_eq!(
+        fix,
+        "link the content that carries it with decided_by, or set needs_content: false for a process ruling"
+    );
+}

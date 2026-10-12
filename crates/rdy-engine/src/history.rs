@@ -3,7 +3,8 @@
 use crate::error::*;
 use crate::{Materialized, ReadState, Scope};
 use rdy_model::{
-    BlockId, Change, EditorialClass, Hash, Justification, LandingRecord, Op, Provenance, Role,
+    ActorRun, BlockId, Change, EditorialClass, Hash, Justification, LandingRecord, Op, Provenance,
+    Role,
 };
 use rdy_store::StoreReader;
 use serde::Serialize;
@@ -72,6 +73,9 @@ pub struct HistoryEntry {
     /// The change that wrote it (full hash).
     pub change: String,
     pub author: Author,
+    /// The importer, when `rdy import` wrote the change (FW-F7b).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_by: Option<ActorRun>,
     pub message: String,
     pub justification: Option<JustificationInfo>,
     pub landing: Option<LandingRef>,
@@ -278,6 +282,7 @@ impl<'a> Memo<'a> {
             op: op.into(),
             change: c.to_string(),
             author: author(&change.provenance),
+            imported_by: change.links.imported_by.clone(),
             message: change.message.clone(),
             justification: change.justification.as_ref().map(justification),
             landing,

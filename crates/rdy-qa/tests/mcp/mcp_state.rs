@@ -18,6 +18,7 @@ fn session(st: &mut McpState, actor: &str, run: Option<&str>) -> serde_json::Val
             run: run.map(String::from),
             role: "writer".into(),
             view: None,
+            areas: None,
         },
     )
     .unwrap()

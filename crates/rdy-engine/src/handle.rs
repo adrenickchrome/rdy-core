@@ -61,7 +61,11 @@ impl Rdy {
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
-        Rdy::open(project)
+        let mut r = Rdy::open(project)?;
+        // plan M2e2: an empty store folds to no move and its state holds none, so the log is
+        // reconciled here at no cost, and the first write logs only its own moves
+        r.reconcile_transitions()?;
+        Ok(r)
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
@@ -85,6 +89,9 @@ impl Rdy {
         let mut store = layout::open_project_store(&project.join(".rdy"))?;
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());
+        // plan M2e2 (D-Z0EMP): every write joins the open batch, and `publish` seals it with
+        // the batch's tension and suspect moves last: one marker, one sync
+        store.set_held(true)?;
         let areas = Arc::new(pack.area_matcher());
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());
@@ -130,10 +137,10 @@ impl Rdy {
             detectors: &tensions::DETECTORS,
             error: None,
         });
-        let settled_batch = store.last_batch_end();
         let mut r = Rdy {
             root: project.to_path_buf(),
             state,
+            logged: None,
             as_of,
             vpos,
             proposal_touched,
@@ -151,15 +158,11 @@ impl Rdy {
             briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
             leases: Arc::new(crate::semantic::lease::LeaseRegistry::new()),
             detectors: &tensions::DETECTORS,
-            tension_seen: None,
-            publish_gen: 0,
-            settled_batch,
-            tension_base: None,
+            recheck: None,
+            transition_error: None,
             full_publish_panics: 0,
         };
         r.invalidate();
-        // that publish replaced the placeholder state: the first write records the base
-        r.tension_base = None;
         Ok(r)
     }
 
@@ -199,21 +202,35 @@ impl Rdy {
     pub fn store(&self) -> &Store {
         &self.store
     }
+    /// The store, to write to it directly. A raw write through store_mut() joins the open
+    /// batch; the next publish or seal_open seals it.
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
     }
 
     /// Makes the store's index durable up to everything written so far (see `Store::checkpoint`).
+    /// An open batch is sealed first.
     pub fn checkpoint(&mut self) -> Result<(), RdyError> {
+        self.seal_open()?;
         Ok(self.store.checkpoint()?)
     }
 
     /// Closes the project's store cleanly (see `Store::close`) and returns a failed checkpoint's
-    /// error. Dropping an `Rdy` closes it too, but can only report a failure on stderr.
-    pub fn close(self) -> Result<(), RdyError> {
-        let Rdy { state, store, .. } = self;
+    /// error. An open batch is sealed first, with its moves. Dropping an `Rdy` closes it too,
+    /// but can only report a failure on stderr.
+    pub fn close(mut self) -> Result<(), RdyError> {
+        let sealed = self.seal_open();
+        let Rdy {
+            state,
+            logged,
+            store,
+            ..
+        } = self;
+        drop(logged);
         drop(state);
-        Ok(store.close()?)
+        let closed = store.close();
+        sealed?;
+        Ok(closed?)
     }
 
     /// Checkpoints if writes are waiting and the store has been idle long enough; true if it did.
