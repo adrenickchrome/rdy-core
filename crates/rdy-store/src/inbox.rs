@@ -1,17 +1,14 @@
 //! Inbox subscriptions (plan M2e2): the ref `inbox/<actor>/<run>` holds one session's cursor,
-//! declared areas, role and the tensions and suspects it has seen. Nothing per event is stored.
+//! declared areas and role. The tension and suspect moves it reads are logged in their own
+//! batches (founder decision C).
 use crate::error::StoreError;
 use crate::segment::Location;
 use crate::store::encode;
 use crate::{Store, StoreReader};
-use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 
 /// The ref prefix of inbox subscriptions: `inbox/<actor>/<run>` holds one session's `InboxSub`.
 pub const INBOX_REF: &str = "inbox/";
-
-/// The most ids each `seen_*` set of an `InboxSub` holds.
-pub const MAX_SEEN: usize = 1000;
 
 /// The roles an `InboxSub` may hold.
 const ROLES: [&str; 3] = ["reader", "writer", "reviewer"];
@@ -24,10 +21,8 @@ pub struct InboxCursor {
     pub skip: u32,
 }
 
-/// One session's subscription: its cursor, declared areas and role, and the ids of the open
-/// tensions on its in-flight changes and of the suspects on its blocks at its last ack.
-/// `areas`, `seen_tensions` and `seen_suspects` are sorted and distinct; each `seen_*` holds at
-/// most `MAX_SEEN` ids.
+/// One session's subscription: its cursor, declared areas and role (spec §10.2). `areas` is
+/// sorted and distinct.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxSub {
     pub actor: String,
@@ -35,8 +30,6 @@ pub struct InboxSub {
     pub cursor: InboxCursor,
     pub areas: Vec<String>,
     pub role: String,
-    pub seen_tensions: Vec<Hash>,
-    pub seen_suspects: Vec<Hash>,
 }
 
 /// The ref of the session (`actor`, `run`): `inbox/<actor>/<run>`, with an empty last segment for
@@ -57,13 +50,8 @@ fn invalid(name: &str, s: &InboxSub) -> Option<String> {
         "its value names another session".to_string()
     } else if !ROLES.contains(&s.role.as_str()) {
         format!("role {:?} is not reader, writer or reviewer", s.role)
-    } else if !(sorted_distinct(&s.areas)
-        && sorted_distinct(&s.seen_tensions)
-        && sorted_distinct(&s.seen_suspects))
-    {
+    } else if !sorted_distinct(&s.areas) {
         "its lists are not sorted and distinct".to_string()
-    } else if s.seen_tensions.len() > MAX_SEEN || s.seen_suspects.len() > MAX_SEEN {
-        format!("more than {MAX_SEEN} seen entries")
     } else if s.actor.is_empty() {
         "its actor is empty".to_string()
     } else if s
@@ -96,10 +84,10 @@ impl Store {
     /// Writes the session's subscription: the ref `inbox/<actor>/<run>`, in one batch. Refuses a
     /// value that breaks the rule list with a `StoreError::Refused`; nothing is written then.
     ///
-    /// Each write appends the whole value, seen sets included, to the append-only log. Old values
-    /// stay in the log, as old block versions do. That is not history (D-TPZ0W, ruling task-1
-    /// §1): no read surface, journal or replay reads a past ack. Reclaiming log space is later
-    /// store work. An ack that changes nothing writes nothing (ledger O5).
+    /// Each write appends the value (cursor, areas and role) to the append-only log, as any ref
+    /// write does. The inbox reads tension and suspect moves from their own batches (founder
+    /// decision C, 2026-10-12), so an ack writes only the cursor. An ack that changes nothing
+    /// writes nothing (ledger O5).
     pub fn put_inbox(&mut self, sub: &InboxSub) -> Result<(), StoreError> {
         let name = inbox_ref(&sub.actor, sub.run.as_deref());
         if let Some(m) = invalid(&name, sub) {

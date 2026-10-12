@@ -1,5 +1,4 @@
-//! ib1: the inbox/ ref: one session's cursor, areas, role and seen sets.
-use rdy_model::Hash;
+//! ib1: the inbox/ ref: one session's cursor, areas and role.
 use rdy_store::inbox::*;
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
@@ -27,8 +26,6 @@ fn sub(actor: &str, run: Option<&str>) -> InboxSub {
         },
         areas: vec!["payments".into()],
         role: "writer".into(),
-        seen_tensions: vec![],
-        seen_suspects: vec![],
     }
 }
 
@@ -46,8 +43,7 @@ fn ib1_the_ref_name_splits_at_the_last_slash() {
 fn ib1_put_and_read_back_survive_a_reopen_and_a_reindex() {
     let (dir, mut st) = fresh();
     let mut s = sub("agent:a", Some("r1"));
-    s.seen_tensions = vec![Hash::of(b"t1"), Hash::of(b"t2")];
-    s.seen_tensions.sort();
+    s.areas = vec!["identity".into(), "payments".into()];
     st.put_inbox(&s).unwrap();
     assert_eq!(
         st.reader().inbox("agent:a", Some("r1")).unwrap(),
@@ -82,15 +78,6 @@ fn ib1_an_invalid_value_is_refused() {
             .unwrap_err()
             .to_string()
             .contains("its lists are not sorted and distinct")
-    );
-    let mut bad = sub("agent:a", Some("r1"));
-    bad.seen_suspects = (0..1001u32).map(|i| Hash::of(&i.to_le_bytes())).collect();
-    bad.seen_suspects.sort();
-    assert!(
-        st.put_inbox(&bad)
-            .unwrap_err()
-            .to_string()
-            .contains("more than 1000 seen entries")
     );
 }
 
@@ -186,4 +173,31 @@ fn ib1_fsck_reports_an_empty_actor_or_a_run_that_is_empty_or_holds_a_slash() {
         let e = st.check_objects().unwrap_err().to_string();
         assert!(e.contains(&format!("inbox ref {name:?}: {what}")), "{e}");
     }
+}
+
+/// The value holds the session, its cursor, areas and role only: the inbox reads tension and
+/// suspect moves from their own batches (founder decision C, 2026-10-12), so an ack stays small.
+#[test]
+fn ib1_the_value_holds_cursor_areas_and_role_only() {
+    let (_dir, mut st) = fresh();
+    let s = InboxSub {
+        actor: "agent:a".into(),
+        run: Some("r1".into()),
+        cursor: InboxCursor {
+            at: Location {
+                segment: 0,
+                offset: 0,
+            },
+            skip: 0,
+        },
+        areas: vec!["payments".into()],
+        role: "writer".into(),
+    };
+    st.put_inbox(&s).unwrap();
+    assert_eq!(
+        st.reader().inbox("agent:a", Some("r1")).unwrap(),
+        Some(s.clone())
+    );
+    let len = postcard::to_allocvec(&s).unwrap().len();
+    assert!(len < 64, "{len} bytes");
 }
