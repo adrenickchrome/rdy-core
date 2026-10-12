@@ -1,0 +1,34 @@
+{
+  "added": [],
+  "added_deps": [],
+  "cascaded": [],
+  "changes": 1,
+  "conflicts": [],
+  "consequences": [
+    {
+      "because": {
+        "changed": "c-CFPE0",
+        "edge": "references"
+      },
+      "block": "c-WKHEZ",
+      "follow_up": "update",
+      "id": "cq-483017a0789f589f",
+      "kind": "suspect"
+    }
+  ],
+  "head": "60e7eba7af1274d9a49b76845a93641a1790886dc7ab697f789344fff2655b42",
+  "on_change": {
+    "resolved": [
+      {
+        "id": "tn-abd52083b644",
+        "kind": "unjustified_change",
+        "tension": "abd52083b644d49eaa734e3b259d2d9b1988cdfcb99237fcfbd66637a863b68b"
+      }
+    ],
+    "tensions": []
+  },
+  "removed": [
+    "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731"
+  ],
+  "view": "a"
+}

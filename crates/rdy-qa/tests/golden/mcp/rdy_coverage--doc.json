@@ -1,0 +1,141 @@
+{
+  "areas": [],
+  "dimensions": {
+    "complete": 50,
+    "connected": 83,
+    "consistent": 100,
+    "current": 100,
+    "governed": 50,
+    "grounded": 0
+  },
+  "issues": [
+    {
+      "block": "c-CFPE0",
+      "code": "untied_content",
+      "dimension": "grounded",
+      "fix": "link c-CFPE0 to the entity it describes, with describes or a ref",
+      "subject": null
+    },
+    {
+      "block": "c-WKHEZ",
+      "code": "untied_content",
+      "dimension": "grounded",
+      "fix": "link c-WKHEZ to the entity it describes, with describes or a ref",
+      "subject": null
+    },
+    {
+      "block": "c-WKHEZ",
+      "code": "ungrounded",
+      "dimension": "governed",
+      "fix": "link c-WKHEZ to the decision that governs it, with decided_by or implements",
+      "subject": null
+    },
+    {
+      "block": "c-ZCQ17",
+      "code": "untied_content",
+      "dimension": "grounded",
+      "fix": "link c-ZCQ17 to the entity it describes, with describes or a ref",
+      "subject": null
+    },
+    {
+      "block": "c-ZCQ17",
+      "code": "ungrounded",
+      "dimension": "governed",
+      "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+      "subject": null
+    },
+    {
+      "block": "d-TNT6J",
+      "code": "unlinked_doc",
+      "dimension": "connected",
+      "fix": "link to spec from another doc",
+      "subject": "spec"
+    },
+    {
+      "block": "d-TNT6J",
+      "code": "missing_section",
+      "dimension": "complete",
+      "fix": "add the required section Goals",
+      "subject": "Goals"
+    },
+    {
+      "block": "d-TNT6J",
+      "code": "missing_section",
+      "dimension": "complete",
+      "fix": "add the required section Summary",
+      "subject": "Summary"
+    }
+  ],
+  "issues_total": 8,
+  "kinds": [],
+  "onboarding": {
+    "done": false,
+    "next": "structure",
+    "phases": [
+      {
+        "dimension_issues": {
+          "complete": 6,
+          "connected": 2
+        },
+        "dimensions": [
+          "connected",
+          "complete"
+        ],
+        "done": false,
+        "issues": 8,
+        "phase": "structure",
+        "score": 57
+      },
+      {
+        "dimension_issues": {
+          "grounded": 4
+        },
+        "dimensions": [
+          "grounded"
+        ],
+        "done": false,
+        "issues": 4,
+        "phase": "entities",
+        "score": 0
+      },
+      {
+        "dimension_issues": {
+          "governed": 2
+        },
+        "dimensions": [
+          "governed"
+        ],
+        "done": false,
+        "issues": 2,
+        "phase": "decisions",
+        "score": 50
+      },
+      {
+        "dimension_issues": {
+          "consistent": 2
+        },
+        "dimensions": [
+          "consistent",
+          "current"
+        ],
+        "done": true,
+        "issues": 2,
+        "phase": "consistency",
+        "score": 93
+      }
+    ],
+    "score": 58,
+    "target": 80
+  },
+  "pages": [
+    {
+      "doc": "d-TNT6J",
+      "path": "spec",
+      "score": 63
+    }
+  ],
+  "pages_omitted": 0,
+  "scope": "canon",
+  "score": 63,
+  "similar_kinds": []
+}

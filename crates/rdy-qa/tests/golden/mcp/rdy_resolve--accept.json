@@ -1,0 +1,22 @@
+{
+  "accepted": [
+    {
+      "id": "tn-6d74a91fbfcc",
+      "version": "80568cbde25bf0a2b4d02263f2bfce95336b16e58fcf19e4336cb86beb7c7572",
+      "was": "tn-7501e83e7cd1"
+    }
+  ],
+  "now_blocking": [
+    {
+      "tension": "tn-6d74a91fbfcc",
+      "view": "a"
+    },
+    {
+      "proposal": "P-ce5522ad33c8@2",
+      "tension": "tn-6d74a91fbfcc",
+      "view": "b"
+    }
+  ],
+  "proposal": "P-ce5522ad33c8@2",
+  "severity": "blocking"
+}

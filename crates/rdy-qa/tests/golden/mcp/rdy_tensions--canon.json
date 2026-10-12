@@ -1,0 +1,43 @@
+{
+  "counts": {
+    "blocking_open": 0,
+    "dismissed": 0,
+    "open": 1
+  },
+  "tensions": [
+    {
+      "blocks": [
+        "t-0P4Q5",
+        "t-M9806"
+      ],
+      "id": "tn-71797a91a621",
+      "kind": "duplicate_definition",
+      "severity": "advisory",
+      "sides": [
+        {
+          "actor": "human:qa",
+          "authors": [
+            "human:qa"
+          ],
+          "blocks": [
+            {
+              "block": "t-0P4Q5",
+              "version": "208194fd8506536e9ac99dcef3bf913d2894b31a48468bd37731d10384675619"
+            },
+            {
+              "block": "t-M9806",
+              "version": "b6180055f05952f740612f23edec18a860bccb7339abe54bc3cb6a226221b418"
+            }
+          ],
+          "landing": "4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+          "run": "cli",
+          "side": "canon@4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+          "views": []
+        }
+      ],
+      "status": "open",
+      "summary": "t-0P4Q5 and t-M9806 both define \"fee\"",
+      "tension": "71797a91a621093ef7fc7dd4e1d5cb8cc18ec8c54f6a8a31713118e38a344550"
+    }
+  ]
+}

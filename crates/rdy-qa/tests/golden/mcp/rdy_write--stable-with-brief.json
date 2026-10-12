@@ -1,0 +1,91 @@
+{
+  "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+  "consequences": [
+    {
+      "because": {
+        "changed": "c-CFPE0",
+        "edge": "unjustified_change"
+      },
+      "block": "c-CFPE0",
+      "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
+      "follow_up": "resolve",
+      "id": "cq-a7fc2d999bc9e167",
+      "kind": "tension",
+      "tension": "tn-db1594a2c146"
+    },
+    {
+      "because": {
+        "changed": "c-CFPE0",
+        "edge": "references"
+      },
+      "block": "c-WKHEZ",
+      "follow_up": "update",
+      "id": "cq-ba47c295e50ebc70",
+      "kind": "suspect"
+    }
+  ],
+  "coverage": {
+    "after": 56,
+    "before": 58,
+    "pages": [
+      {
+        "after": 58,
+        "before": 63,
+        "doc": "d-TNT6J",
+        "path": "spec"
+      }
+    ]
+  },
+  "created": {},
+  "on_change": {
+    "resolved": [],
+    "tensions": [
+      {
+        "blocks": [
+          "c-CFPE0"
+        ],
+        "id": "tn-db1594a2c146",
+        "kind": "unjustified_change",
+        "overridden": true,
+        "severity": "blocking",
+        "sides": [
+          {
+            "actor": "agent:a",
+            "blocks": [
+              {
+                "block": "c-CFPE0",
+                "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
+              }
+            ],
+            "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+            "run": "a",
+            "side": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+            "views": [
+              "a"
+            ]
+          }
+        ],
+        "status": "open",
+        "summary": "change 592ccd6c6f77 edits stable normative block c-CFPE0 without a justification",
+        "tension": "db1594a2c14655892fb3dbebe9e73d8321454e1c9b96cca9184d6ce1c1528fbf"
+      }
+    ]
+  },
+  "suggestions": [],
+  "warnings": [
+    {
+      "block": "d-TNT6J",
+      "code": "W_SKELETON_MISSING",
+      "fix": "add a section titled \"Summary\" under this doc",
+      "message": "required section \"Summary\" is missing",
+      "severity": "warning"
+    },
+    {
+      "block": "d-TNT6J",
+      "code": "W_SKELETON_MISSING",
+      "fix": "add a section titled \"Goals\" under this doc",
+      "message": "required section \"Goals\" is missing",
+      "severity": "warning"
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "briefing": {
+    "base": {
+      "blocks": [
+        {
+          "id": "c-ZCQ17",
+          "version": "3e4880a825e7ac810529cc9e7bb1c09f63668b0396816dfd25d8b0d0ca8b2119"
+        }
+      ],
+      "depends": 0,
+      "token": "9d4cd5e58b8ecef5a8bde63d0e8141d0ed7c272e4c9c5703e98f1cf2d99245a0"
+    },
+    "coverage": {
+      "confidence": "medium",
+      "dimensions": {
+        "connected": 100,
+        "consistent": 100,
+        "current": 100,
+        "governed": 0,
+        "grounded": 0
+      },
+      "issues": [
+        {
+          "block": "c-ZCQ17",
+          "code": "untied_content",
+          "dimension": "grounded",
+          "fix": "link c-ZCQ17 to the entity it describes, with describes or a ref",
+          "subject": null
+        },
+        {
+          "block": "c-ZCQ17",
+          "code": "ungrounded",
+          "dimension": "governed",
+          "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+          "subject": null
+        }
+      ],
+      "pages": [
+        {
+          "doc": "d-TNT6J",
+          "path": "spec",
+          "score": 58
+        }
+      ],
+      "reasons": [
+        {
+          "block": "c-ZCQ17",
+          "code": "untied_content",
+          "dimension": "grounded",
+          "fix": "link c-ZCQ17 to the entity it describes, with describes or a ref",
+          "subject": null
+        },
+        {
+          "block": "c-ZCQ17",
+          "code": "ungrounded",
+          "dimension": "governed",
+          "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+          "subject": null
+        }
+      ],
+      "score": 60
+    },
+    "covers": 1,
+    "dependents": [],
+    "governs": [],
+    "inflight": {
+      "intents": [],
+      "proposals": [],
+      "tensions": [],
+      "views": []
+    },
+    "lineage": [],
+    "suspects": [],
+    "will_go_stale": []
+  },
+  "code": "E_BRIEF_REQUIRED",
+  "fix": "retry with brief: \"9d4cd5e58b8ecef5a8bde63d0e8141d0ed7c272e4c9c5703e98f1cf2d99245a0\"; this error's briefing covers exactly the blocks the write touches",
+  "issues": [],
+  "message": "this write touches stable content (c-ZCQ17) and cites no briefing"
+}

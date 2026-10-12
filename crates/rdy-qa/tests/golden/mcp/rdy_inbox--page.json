@@ -1,0 +1,95 @@
+{
+  "cursor": "0.28484.0",
+  "entries": [
+    {
+      "event": "tension_opened",
+      "ids": [
+        "db1594a2c14655892fb3dbebe9e73d8321454e1c9b96cca9184d6ce1c1528fbf",
+        "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240"
+      ],
+      "line": "tension db1594a2c146 opened on your change 592ccd6c6f77 (unjustified_change, blocking): a side changed (change 592ccd6c6f77)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "f9395258bf626827f99cccd9e59449eede11965d73e7105eba8c8ea35c2994bc",
+        "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240"
+      ],
+      "line": "tension f9395258bf62 opened on your change 592ccd6c6f77 (edit_collision, blocking): a side changed (change 8868cbe8fbf3)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "abd52083b644d49eaa734e3b259d2d9b1988cdfcb99237fcfbd66637a863b68b",
+        "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240"
+      ],
+      "line": "tension abd52083b644 opened on your change 592ccd6c6f77 (unjustified_change, blocking): a view changed (op 01e961cd6884)"
+    },
+    {
+      "event": "tension_resolved",
+      "ids": [
+        "abd52083b644d49eaa734e3b259d2d9b1988cdfcb99237fcfbd66637a863b68b",
+        "60e7eba7af1274d9a49b76845a93641a1790886dc7ab697f789344fff2655b42"
+      ],
+      "line": "tension abd52083b644 no longer involves your in-flight changes: a view changed (op 60e7eba7af12)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "abd52083b644d49eaa734e3b259d2d9b1988cdfcb99237fcfbd66637a863b68b",
+        "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240"
+      ],
+      "line": "tension abd52083b644 opened on your change 592ccd6c6f77 (unjustified_change, blocking): a view changed (op a516f8d49720)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "8cc5740f88a2ad0f8e2d8737b5c6ffe70e7270dbe187f35ab852f38689d7e679",
+        "cd27496480bdc54930a5291fca3d17ece8a6a6775ad24cd145c1d72c1538b6c2"
+      ],
+      "line": "tension 8cc5740f88a2 opened on your change cd27496480bd (edit_collision, blocking): a side changed (change cd27496480bd)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "085104e59c78bd30c01c2144fe0c80fd1efa6e54eb0ecb99da117d5ae9e8368e",
+        "5b2c3a7ea72c66519b7a501d4fc51b61aefc5da8f60b8e4e549d665c661c4f77"
+      ],
+      "line": "tension 085104e59c78 opened on your change 5b2c3a7ea72c (edit_collision, blocking): a side changed (change 5b2c3a7ea72c)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "6745a8f050cabf3dc02b5ce73d384b42b959e688b86efa68464ee94e6cc97953",
+        "5b2c3a7ea72c66519b7a501d4fc51b61aefc5da8f60b8e4e549d665c661c4f77",
+        "cd27496480bdc54930a5291fca3d17ece8a6a6775ad24cd145c1d72c1538b6c2"
+      ],
+      "line": "tension 6745a8f050ca opened on your change 5b2c3a7ea72c (edit_collision, blocking): a side changed (change 5b2c3a7ea72c)"
+    },
+    {
+      "event": "alt_set_changed",
+      "ids": [
+        "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede",
+        "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede"
+      ],
+      "line": "alternative set 3aa9c7204c77 created (your view alt-x is a member)"
+    },
+    {
+      "event": "tension_resolved",
+      "ids": [
+        "6745a8f050cabf3dc02b5ce73d384b42b959e688b86efa68464ee94e6cc97953",
+        "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede"
+      ],
+      "line": "tension 6745a8f050ca no longer involves your in-flight changes: an alternative set changed (version 3aa9c7204c77)"
+    },
+    {
+      "event": "tension_dismissed",
+      "ids": [
+        "f9395258bf626827f99cccd9e59449eede11965d73e7105eba8c8ea35c2994bc",
+        "4b4d047a98b0fd9af1b9d02d3c1a478932431d91f1b021b98c2e3b534a4c4719"
+      ],
+      "line": "tension f9395258bf62 dismissed by agent:r"
+    }
+  ],
+  "more": false
+}

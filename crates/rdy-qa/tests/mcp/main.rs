@@ -7,6 +7,7 @@ mod mcp_alts;
 mod mcp_compact;
 mod mcp_coverage;
 mod mcp_decision_home;
+mod mcp_golden;
 mod mcp_history;
 mod mcp_inbox;
 mod mcp_inbox_session;

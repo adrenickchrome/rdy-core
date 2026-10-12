@@ -1,0 +1,21 @@
+{
+  "a": "a",
+  "added": [],
+  "b": "canon",
+  "changed": [
+    {
+      "block_type": "claim",
+      "conflict": null,
+      "fields": [
+        "body"
+      ],
+      "from_parent": null,
+      "id": "c-CFPE0",
+      "path": null,
+      "to_parent": null
+    }
+  ],
+  "conflicted": [],
+  "deleted": [],
+  "moved": []
+}
