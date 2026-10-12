@@ -106,7 +106,7 @@ fn wrt1_a_panic_in_a_write_answers_e_internal_and_the_writer_keeps_serving() {
     shared.shutdown().unwrap();
 }
 
-/// Panics while `BOOM` is set: a tension detector that fails the settle after a write.
+/// Panics while `BOOM` is set: a tension detector that fails the move computation of a write.
 struct Boom;
 static BOOM: AtomicBool = AtomicBool::new(false);
 static BOOM_DETECTORS: [&dyn Detector; 1] = [&Boom];
@@ -120,19 +120,20 @@ impl Detector for Boom {
         _seeds: Option<&BTreeSet<BlockId>>,
         _out: &mut Vec<Found>,
     ) -> Result<(), rdy_engine::RdyError> {
-        assert!(!BOOM.load(Ordering::SeqCst), "settle boom");
+        assert!(!BOOM.load(Ordering::SeqCst), "moves boom");
         Ok(())
     }
 }
 
 #[test]
-fn wrt1_a_panic_while_settling_tensions_leaves_the_writer_serving() {
+fn wrt1_a_panic_while_logging_tension_moves_leaves_the_writer_serving() {
     let (_d, mut r) = project();
     r.set_detectors_for_tests(&BOOM_DETECTORS);
     let shared = Shared::new(r);
     let e = shared.engine();
     BOOM.store(true, Ordering::SeqCst);
-    // the write itself builds no tensions: it succeeds, and the settle after its reply panics
+    // the write's move computation panics: it is caught, the batch is sealed without moves,
+    // and the write succeeds
     write_typed(&*e, |r| doc(r, "work", "one")).unwrap();
     write_typed(&*e, |r| doc(r, "work", "two")).unwrap();
     assert!(shared.writer.is_alive());

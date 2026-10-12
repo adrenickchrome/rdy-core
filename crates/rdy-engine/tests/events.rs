@@ -109,8 +109,10 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
             EventKind::IntentPosted { .. } => "intent_posted",
             EventKind::AltSetChanged { .. } => "alt_set_changed",
             EventKind::TensionDismissed { .. } => "tension_dismissed",
-            EventKind::TensionOpened { .. } => "tension_opened",
-            EventKind::TensionResolved { .. } => "tension_resolved",
+            EventKind::TensionOpened(_) => "tension_opened",
+            EventKind::TensionResolved(_) => "tension_resolved",
+            EventKind::SuspectNew(_) => "suspect_new",
+            EventKind::SuspectGone(_) => "suspect_gone",
             EventKind::ReviewSubmitted { .. } => "review_submitted",
         })
         .collect();

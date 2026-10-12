@@ -29,6 +29,8 @@ type Reply<T> = SyncSender<Result<T, RdyError>>;
 enum Msg {
     Run(WriteFn, Reply<Value>),
     Reload(Reply<ReloadOutcome>),
+    /// Logs what moved while no daemon ran (`Rdy::reconcile_transitions`); no reply.
+    Reconcile,
     Shutdown(Reply<()>),
 }
 
@@ -39,8 +41,9 @@ pub struct Writer {
     queued: Arc<AtomicUsize>,
     /// The idle checkpoint has failed and the failure was logged; cleared by a success.
     checkpoint_failing: bool,
-    /// Settling the tension set has failed and the failure was logged; cleared by a success.
-    settle_failing: bool,
+    /// Logging a batch's tension moves has failed and the failure was logged; cleared once a
+    /// batch logs them again.
+    transitions_failing: bool,
     /// A clean republish after a panic panicked too, and the failure was logged: the published
     /// state may be stale, so the next message retries it first. Cleared by a success.
     republish_pending: bool,
@@ -83,7 +86,7 @@ impl Writer {
             rx,
             queued: Arc::clone(&queued),
             checkpoint_failing: false,
-            settle_failing: false,
+            transitions_failing: false,
             republish_pending: false,
         };
         let thread = std::thread::Builder::new()
@@ -116,7 +119,7 @@ impl Writer {
         match catch_unwind(AssertUnwindSafe(|| rdy.invalidate())) {
             Ok(()) => self.republish_pending = false,
             Err(p) => {
-                // logged once while it keeps failing, as settle_failing and checkpoint_failing
+                // logged once while it keeps failing, as transitions_failing and checkpoint_failing
                 if !self.republish_pending {
                     #[cfg(test)]
                     if let Some(sh) = self.shared.upgrade() {
@@ -255,28 +258,38 @@ impl Writer {
         }
     }
 
-    /// Settles the tension set after a write (tevt1). A failure never fails the write, and a
-    /// panic never ends the writer: the caches may be half-updated, so a clean state is
-    /// republished. Either is logged once, until a settle succeeds again.
-    fn settle(&mut self, rdy: &mut Rdy) {
-        let failed = match catch_unwind(AssertUnwindSafe(|| rdy.settle_tensions())) {
-            Ok(Ok(_)) => None,
-            Ok(Err(e)) => Some(e.to_string()),
-            Err(p) => {
-                self.invalidate_after_panic(rdy, "the tension settle");
-                self.publish(rdy);
-                Some(format!("internal error: {}", panic_text(&*p)))
-            }
-        };
-        match failed {
-            Some(e) if !self.settle_failing => {
-                self.settle_failing = true;
+    /// Logs, once while it stands, that a batch's tension moves could not be computed (the
+    /// write succeeded; the next batch that computes logs them), and logs when it clears.
+    fn log_transition_error(&mut self, rdy: &Rdy) {
+        match rdy.last_transition_error() {
+            Some(e) if !self.transitions_failing => {
+                self.transitions_failing = true;
                 log(&format!(
-                    "settling the tension set failed ({e}); no tension events are sent until it succeeds, and it is retried after every write"
+                    "logging tension moves failed ({e}); the next write logs them"
                 ));
             }
             Some(_) => {}
-            None => self.settle_failing = false,
+            None if self.transitions_failing => {
+                self.transitions_failing = false;
+                log("logging tension moves works again");
+            }
+            None => {}
+        }
+    }
+
+    /// Seals the batch a write left open, with its moves (`Rdy::seal_open`). A panic never ends
+    /// the writer: the caches may be half-updated, so a clean state is republished.
+    fn seal_open(&mut self, rdy: &mut Rdy) -> Result<(), RdyError> {
+        match catch_unwind(AssertUnwindSafe(|| rdy.seal_open())) {
+            Ok(out) => out,
+            Err(p) => {
+                self.invalidate_after_panic(rdy, "the seal of a write");
+                Err(RdyError::new(
+                    E_INTERNAL,
+                    format!("internal error on the writer: {}", panic_text(&*p)),
+                    "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
+                ))
+            }
         }
     }
 
@@ -297,11 +310,9 @@ impl Writer {
             let published = match msg {
                 Msg::Run(f, reply) => {
                     self.retry_republish(&mut rdy);
-                    // its outcome is logged and reported in the replies' notices; a reload's
-                    // tension events are settled before the write's, with no `by`
-                    if let Ok(ReloadOutcome::Reloaded) = self.maybe_reload(&mut rdy) {
-                        self.settle(&mut rdy);
-                    }
+                    // its outcome is logged and reported in the replies' notices; a reload logs
+                    // its moves in a batch of its own, before the write's
+                    let _ = self.maybe_reload(&mut rdy);
                     let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
                         Ok(out) => out,
                         Err(p) => {
@@ -314,25 +325,43 @@ impl Writer {
                             ))
                         }
                     };
+                    // a raw write that `f` left open is sealed, with its moves, before the reply
+                    let sealed = self.seal_open(&mut rdy);
+                    let out = match (out, sealed) {
+                        (Ok(_), Err(e)) => Err(e),
+                        (out, _) => out,
+                    };
                     // the first read after a big write must not build the tension set: it is
                     // built here, before the state is published (the reply waits for it)
                     build_tensions(&rdy);
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
-                    // the tension events follow the reply, before the next message
-                    self.settle(&mut rdy);
+                    self.log_transition_error(&rdy);
                     published
                 }
                 Msg::Reload(reply) => {
                     self.retry_republish(&mut rdy);
                     let out = self.maybe_reload(&mut rdy);
                     let published = self.publish(&rdy);
-                    let reloaded = matches!(out, Ok(ReloadOutcome::Reloaded));
                     let _ = reply.send(out);
-                    // a reload changes the tension set without a store write (M8)
-                    if reloaded {
-                        self.settle(&mut rdy);
+                    self.log_transition_error(&rdy);
+                    published
+                }
+                Msg::Reconcile => {
+                    self.retry_republish(&mut rdy);
+                    match catch_unwind(AssertUnwindSafe(|| rdy.reconcile_transitions())) {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => log(&format!(
+                            "logging tension moves failed ({e}); the next write logs them"
+                        )),
+                        Err(p) => self.invalidate_after_panic(
+                            &mut rdy,
+                            &format!("the reconcile of tension moves ({})", panic_text(&*p)),
+                        ),
                     }
+                    build_tensions(&rdy);
+                    let published = self.publish(&rdy);
+                    self.log_transition_error(&rdy);
                     published
                 }
                 Msg::Shutdown(reply) => {
@@ -353,9 +382,9 @@ impl Writer {
 }
 
 /// Builds the tension set of `rdy`'s current state, so a read of the state, once published,
-/// never builds it (a big write's set takes seconds). An error is memoised in the state and
-/// read as the state's tension error. A panic is caught and left to the settle after the reply,
-/// which builds the set again and logs and republishes as it does for any panic there.
+/// never builds it (a big write's set takes seconds; a write that logged its moves built it
+/// already). An error is memoised in the state and read as the state's tension error. A panic
+/// is caught: the next read builds the set again.
 fn build_tensions(rdy: &Rdy) {
     let st = rdy.read();
     let _ = catch_unwind(AssertUnwindSafe(|| st.tensions()));
@@ -376,6 +405,16 @@ impl WriterHandle {
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Msg::Run(f, tx))?;
         rx.recv().map_err(|_| gone())?
+    }
+
+    /// Asks the writer to log what moved while no daemon ran (`Rdy::reconcile_transitions`),
+    /// without waiting: the daemon calls it once after `ready`. A full queue drops it; the next
+    /// write then reconciles in its own batch.
+    pub fn reconcile_soon(&self) {
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        if self.tx.try_send(Msg::Reconcile).is_err() {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Reloads the config and packs on the writer if the watch saw them change (`Unchanged`

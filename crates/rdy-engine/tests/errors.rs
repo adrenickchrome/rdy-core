@@ -125,7 +125,9 @@ fn raw_tag(name: &str, landing: Hash) -> Tag {
     }
 }
 
-fn fsck_message(r: &rdy_engine::Rdy) -> String {
+/// The raw writes above join the open batch (plan M2e2): it is sealed before fsck reads the log.
+fn fsck_message(r: &mut rdy_engine::Rdy) -> String {
+    r.seal_open().unwrap();
     let e = r.fsck().unwrap_err();
     assert_eq!(e.code, "E_IO", "{e}");
     e.message
@@ -150,15 +152,15 @@ fn fsck_reports_damaged_and_dangling_tag_refs() {
     r.store_mut()
         .set_refs(vec![("tag/v1.0.0".into(), b"short".to_vec())])
         .unwrap();
-    assert!(fsck_message(&r).contains("tag/v1.0.0"));
+    assert!(fsck_message(&mut r).contains("tag/v1.0.0"));
     r.store_mut()
         .set_refs(vec![("tag/v1.0.0".into(), [9u8; 32].to_vec())])
         .unwrap();
-    assert!(fsck_message(&r).contains("not in the store"));
+    assert!(fsck_message(&mut r).contains("not in the store"));
     r.store_mut()
         .set_refs(vec![("tag/v1.0.0".into(), l[0].0.to_vec())])
         .unwrap();
-    assert!(fsck_message(&r).contains("not a tag"));
+    assert!(fsck_message(&mut r).contains("not a tag"));
 }
 
 type TagCase = Box<dyn Fn(&[Hash]) -> Vec<Tag>>;
@@ -188,7 +190,7 @@ fn fsck_reports_tags_written_around_the_rules() {
         for t in tags(&l) {
             r.store_mut().put_tag(&t).unwrap();
         }
-        let m = fsck_message(&r);
+        let m = fsck_message(&mut r);
         assert!(m.contains(needle), "{needle}: {m}");
     }
     // a ref whose name doesn't match its tag
@@ -197,7 +199,7 @@ fn fsck_reports_tags_written_around_the_rules() {
     r.store_mut()
         .set_refs(vec![("tag/v9.9.9".into(), h.0.to_vec())])
         .unwrap();
-    let m = fsck_message(&r);
+    let m = fsck_message(&mut r);
     assert!(m.contains("tag/v9.9.9"));
     assert!(
         m.starts_with("1 version problem(s)"),

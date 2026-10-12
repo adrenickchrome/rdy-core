@@ -3,6 +3,7 @@
 use crate::RdyError;
 use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject, Verdict};
 use rdy_store::segment::Location;
+use rdy_store::transition::{SuspectMove, TensionMove};
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -110,31 +111,15 @@ pub enum EventKind {
         actor: String,
         run: Option<String>,
     },
-    /// A tension the settled set did not have (`Rdy::settle_tensions`). `kind` and `severity`
-    /// are their wire names, `sides` the full side labels; `rekeyed_from` is the tension it
-    /// replaces: one of the same vkey (a side landed or moved, its content did not), or one with
-    /// the same items under the other severity (a person accepted a reviewer's advice).
-    TensionOpened {
-        #[serde(serialize_with = "hex::one")]
-        tension: Hash,
-        kind: String,
-        severity: String,
-        sides: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
-        rekeyed_from: Option<Hash>,
-    },
-    /// A tension of the settled set that is gone. `by` is what the last batch did
-    /// (`landing:<hex>`, `change:<hex>` or `op:<hex>`); `rekeyed_to` is the tension that
-    /// replaces it (see `rekeyed_from` on `TensionOpened`).
-    TensionResolved {
-        #[serde(serialize_with = "hex::one")]
-        tension: Hash,
-        kind: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        by: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
-        rekeyed_to: Option<Hash>,
-    },
+    /// A tension that opened in this batch, read from the batch's `TRANSITION` record (plan
+    /// M2e2, founder decision C, D-Z0EMP): the move's fields beside `event`.
+    TensionOpened(TensionMove),
+    /// A tension that this batch resolved (or dismissed), from the batch's record.
+    TensionResolved(TensionMove),
+    /// A suspect that this batch made new, from the batch's record.
+    SuspectNew(SuspectMove),
+    /// A suspect that this batch made gone, from the batch's record.
+    SuspectGone(SuspectMove),
 }
 
 /// Hashes in an event's JSON as lowercase hex strings.
@@ -324,6 +309,18 @@ pub fn events_for_batch(
                     at_ms: r.provenance.at_ms,
                     kind,
                 });
+            }
+            kinds::TRANSITION => {
+                let rec = reader.transitions(&hash)?;
+                let at_ms = rec.at_ms;
+                let moves = rec
+                    .resolved
+                    .into_iter()
+                    .map(EventKind::TensionResolved)
+                    .chain(rec.opened.into_iter().map(EventKind::TensionOpened))
+                    .chain(rec.gone.into_iter().map(EventKind::SuspectGone))
+                    .chain(rec.new.into_iter().map(EventKind::SuspectNew));
+                out.extend(moves.map(|kind| Event { seq, at_ms, kind }));
             }
             _ => {}
         }

@@ -232,16 +232,18 @@ fn perf3_a_commit_beside_an_inflight_conflict_carries() {
         st.materialized(&Scope::Inflight).unwrap().snapshot_id()
     );
     assert_eq!(&carried.1, st.conflicts(&Scope::Inflight).unwrap().as_ref());
-    // onto the conflicted block: rebuilt
+    // onto the conflicted block: rebuilt (plan M2e2: inside the write, which logs its suspect
+    // moves from the in-flight graph)
     st.graph(&Scope::Inflight).unwrap();
     let va = version_of(&r, &Scope::View("a".into()), &claim);
+    let merges = inflight_builds();
     write(
         &mut r,
         "a",
         json!([{"op": "update", "id": claim, "base": va, "body": "a again"}]),
     )
     .unwrap();
-    assert_eq!(r.read().is_built(&Scope::Inflight), (false, false));
+    assert!(inflight_builds() > merges, "an in-flight merge");
 }
 
 #[derive(Clone, Debug)]

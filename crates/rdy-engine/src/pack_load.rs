@@ -262,6 +262,8 @@ impl Rdy {
             fingerprint: fp,
             config: Arc::new(cfg),
         });
+        // the reload's moves are logged in a batch of its own (plan M2e2, D-Z0EMP)
+        self.recheck = Some(rdy_store::transition::Cause::PackReload);
         let failed = match catch_unwind(AssertUnwindSafe(|| self.publish(Delta::Full))) {
             Ok(Ok(())) => return Ok(ReloadOutcome::Reloaded),
             Ok(Err(e)) => Ok(e),

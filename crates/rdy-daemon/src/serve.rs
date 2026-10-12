@@ -348,6 +348,9 @@ fn serve_thread(
                 }
             }
         });
+        // plan M2e2 (D-Z0EMP): what moved while no daemon ran (the pack, the rdy build) is
+        // logged once, after ready, in a batch of cause `reopened`
+        warm.writer.reconcile_soon();
     });
     let ran = rt.block_on(daemon.run());
     // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still

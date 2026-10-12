@@ -58,6 +58,12 @@ pub struct OpenReport {
 /// the frame counter, all shared. A clone is cheap, `Send` and `Sync`, and reads only what the
 /// index holds, which the writer applies after the log's sync, so it never sees a torn frame.
 /// A reader cloned before a `reindex` keeps the index it was cloned with.
+///
+/// With held batches (plan M2e2, D-Z0EMP), a write indexes its frames before the batch's marker
+/// and sync, so a clone on another thread can see an open batch that a failed seal or a kill
+/// then removes. Index reads off the writer thread must not drive decisions on data an open
+/// batch wrote: no refusal, no logged record, no notification. The writer decides; other threads
+/// read the state it published after the seal.
 #[derive(Clone)]
 pub struct StoreReader {
     index: Arc<Index>,

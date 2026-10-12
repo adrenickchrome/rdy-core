@@ -631,7 +631,6 @@ fn tdis1_a_read_time_overlap_cannot_be_dismissed() {
     put(&mut r, "b", upd(&s.a, "A by b."));
     let it = r.read().intent_tensions(rdy_engine::now_ms()).unwrap();
     assert_eq!(it.len(), 1, "{it:#?}");
-    r.settle_tensions().unwrap();
     let rx = r.subscribe();
     let e = r
         .dismiss_tension(&ag("b"), &tension_label(&it[0].id), "fine")
@@ -641,7 +640,6 @@ fn tdis1_a_read_time_overlap_cannot_be_dismissed() {
         e.message,
         "intent overlaps are read-time; resolve the intent instead"
     );
-    r.settle_tensions().unwrap();
     let ev: Vec<EventKind> = rx.try_iter().map(|e| e.kind.clone()).collect();
     assert!(
         !ev.iter()

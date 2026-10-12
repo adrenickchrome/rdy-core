@@ -617,36 +617,28 @@ fn se8_advice_stays_on_the_card_while_another_view_edits_the_canon_side() {
 }
 
 /// final review M7 (P4): an acceptance re-keys the tension under its new severity: the
-/// resolved advisory tension names the blocking one in rekeyed_to, and the opened blocking one
-/// names the advisory one in rekeyed_from.
+/// resolved advisory tension names the blocking one in its re-key, and the opened blocking one
+/// names the advisory one.
 #[test]
 fn se8_an_acceptance_links_the_advisory_and_the_blocking_tension_in_its_events() {
     use rdy_engine::EventKind;
     let (_d, mut r, _s, tn, p) = judged(true);
-    r.settle_tensions().unwrap();
     let rx = r.subscribe();
     let a = r.accept_advice(&writer(), direct(&p)).unwrap();
-    r.settle_tensions().unwrap();
     let kinds: Vec<_> = rx.try_iter().map(|e| e.kind.clone()).collect();
     let was = kinds
         .iter()
         .find_map(|k| match k {
-            EventKind::TensionResolved {
-                tension,
-                rekeyed_to,
-                ..
-            } if tension_label(tension) == tn => Some(*rekeyed_to),
+            EventKind::TensionResolved(m) if tension_label(&m.tension) == tn => Some(m.rekey),
             _ => None,
         })
         .unwrap_or_else(|| panic!("{kinds:?}"));
     let now = kinds
         .iter()
         .find_map(|k| match k {
-            EventKind::TensionOpened {
-                tension,
-                rekeyed_from,
-                ..
-            } if tension_label(tension) == a.accepted[0].id => Some((*tension, *rekeyed_from)),
+            EventKind::TensionOpened(m) if tension_label(&m.tension) == a.accepted[0].id => {
+                Some((m.tension, m.rekey))
+            }
             _ => None,
         })
         .unwrap_or_else(|| panic!("{kinds:?}"));

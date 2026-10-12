@@ -41,6 +41,7 @@ mod session;
 pub mod suggest;
 pub mod tensions;
 pub mod testkit;
+pub mod transitions;
 mod tree_io;
 mod version;
 pub mod view_api;
@@ -124,6 +125,10 @@ pub struct Rdy {
     /// The published read state (snap1). Declared before `store`, with the shared caches, so a
     /// dropped `Rdy` releases its state's reader before the store closes.
     state: ArcSwap<ReadState>,
+    /// The state the log's tension and suspect moves fold to (plan M2e2, founder decision C,
+    /// D-Z0EMP): the next batch logs its moves against it. `None` until a batch reconciles the
+    /// store's open-move tables after open. Declared before `store`, as `state` is.
+    logged: Option<Arc<ReadState>>,
     /// The as-of entries, shared with every published state.
     as_of: Arc<AsOfCache>,
     /// version_position results, keyed by scope and valid for one (canon head, tag count);
@@ -159,18 +164,13 @@ pub struct Rdy {
     leases: Arc<semantic::lease::LeaseRegistry>,
     /// The tension detectors every published state runs: the registry, unless a test set others.
     detectors: &'static [&'static dyn tensions::Detector],
-    /// The tension set the last `settle_tensions` recorded, and the publish (`publish_gen`) of
-    /// its state.
-    tension_seen: Option<(Arc<tensions::TensionSet>, u64)>,
-    /// How many states `publish` has published since open: a settle keys on it, so a publish
-    /// with no store write (a pack reload) is settled too.
-    publish_gen: u64,
-    /// The store's last batch end at the last settle (at open: the origin): a settle with no
-    /// batch since names no `by`.
-    settled_batch: Location,
-    /// The state `publish` held before the first write since open, while nothing is settled:
-    /// the first settle diffs against its set.
-    tension_base: Option<Arc<ReadState>>,
+    /// What a publish logs when no write batch moved anything: `pack_reload` (a pack reload),
+    /// `reopened` (`reconcile_transitions`) or `recheck` (`invalidate`, `reindex`). Cleared by
+    /// every publish.
+    recheck: Option<rdy_store::transition::Cause>,
+    /// The error of the last batch whose moves could not be computed; cleared by the next
+    /// success.
+    transition_error: Option<RdyError>,
     /// Test hook: how many of the next `Delta::Full` publishes panic (0 in every real run).
     full_publish_panics: u32,
 }

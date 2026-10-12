@@ -11,6 +11,7 @@ mod tensions_drift;
 mod tensions_duplicate;
 mod tensions_events;
 mod tensions_fork;
+mod tensions_log;
 mod tensions_overlap;
 mod tensions_premise;
 mod tensions_semantic;
