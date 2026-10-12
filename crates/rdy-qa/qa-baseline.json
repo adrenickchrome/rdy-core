@@ -418,9 +418,9 @@
           "runs": 5
         },
         "propose_chosen_alts_100": {
-          "median_ms": 2.932139,
+          "median_ms": 4.941,
           "op": "propose_chosen_alts_100",
-          "p95_ms": 3.069972,
+          "p95_ms": 5.076,
           "runs": 30
         },
         "propose_land_500_flat": {
