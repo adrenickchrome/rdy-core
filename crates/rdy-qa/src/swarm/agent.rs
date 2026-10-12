@@ -524,10 +524,31 @@ pub fn spawn(
             journal,
             gate,
         );
-        let mut a = Agent {
+        let mut a = Agent::new(link, i, seed);
+        a.start_inbox();
+        for (step, act) in acts.iter().enumerate() {
+            a.link.step = step;
+            a.act(act);
+            if a.link.take_recovered() {
+                a.resume = true;
+                a.resync();
+            }
+        }
+        a.report.last_cursor = a.last_cursor.clone();
+        a.report
+    })
+}
+
+impl Agent {
+    /// An agent in its starting state: view `a<i>`, nothing written, the inbox not yet read.
+    fn new(link: Link, i: usize, seed: SeedBlocks) -> Agent {
+        let name = format!("a{i}");
+        let mut report = AgentReport::default();
+        report.views.insert(name.clone());
+        Agent {
             link,
             i,
-            view: name.clone(),
+            view: name,
             seed,
             last_cursor: String::new(),
             persisted: None,
@@ -545,21 +566,9 @@ pub fn spawn(
             alt_set: None,
             forks: 0,
             counter: 0,
-            report: AgentReport::default(),
-        };
-        a.report.views.insert(name);
-        a.start_inbox();
-        for (step, act) in acts.iter().enumerate() {
-            a.link.step = step;
-            a.act(act);
-            if a.link.take_recovered() {
-                a.resume = true;
-                a.resync();
-            }
+            report,
         }
-        a.report.last_cursor = a.last_cursor.clone();
-        a.report
-    })
+    }
 }
 
 impl Agent {
@@ -731,6 +740,7 @@ impl Agent {
         let res = self.link.raw("view_show", "rdy_view", args);
         // a view nobody has written to does not exist: that is the answer, not a fault
         if matches!(&res, Res::Refused(code, _) if code == "E_NOT_FOUND") {
+            e.outcome = Outcome::Refused("E_NOT_FOUND".to_string());
             self.link.journal.record(e);
             return Shown::Missing;
         }
@@ -1679,6 +1689,40 @@ mod tests {
         assert_eq!(
             (last.act, last.outcome),
             ("propose", Outcome::Refused("E_BAD_INPUT".into()))
+        );
+    }
+
+    /// A read of a view nobody has written to is a refusal the daemon answered: the journal
+    /// records `E_NOT_FOUND` for it, never an `Ok` the oracles would count as a read.
+    #[test]
+    fn sg4_a_show_of_a_missing_view_is_journaled_as_a_refusal() {
+        let cfg = Config {
+            seed: 12,
+            agents: 2,
+            steps: 12,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let journal = Journal::new();
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:a0",
+            "a0",
+            "writer",
+            Some(vec!["payments".to_string()]),
+            journal.clone(),
+            Arc::new(KillGate::new()),
+        );
+        let mut agent = Agent::new(link, 0, p.seed.clone());
+        assert!(matches!(agent.show("nobody-wrote-here"), Shown::Missing));
+        let last = journal.entries().pop().expect("an entry");
+        assert_eq!(
+            (last.act, last.outcome, last.view.as_deref()),
+            (
+                "view_show",
+                Outcome::Refused("E_NOT_FOUND".into()),
+                Some("nobody-wrote-here")
+            )
         );
     }
 }

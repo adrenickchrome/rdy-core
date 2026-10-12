@@ -549,16 +549,24 @@ fn assert_no_refusal(j: &Journal) {
 fn sg4_a_propose_with_nothing_in_the_view_is_skipped_from_the_state() {
     let (p, cfg, j, g) = rig(2);
     run(&p, &cfg, 0, vec![Act::Propose], &j, &g);
+    // the agent has written nothing, so its view does not exist: the daemon's E_NOT_FOUND is
+    // the answer, and the journal shows it as the refusal it is
     let shown = only(&j, 0, "view_show");
     assert_eq!(
         (shown.outcome, shown.view.as_deref()),
-        (Outcome::Ok, Some("a0"))
+        (Outcome::Refused("E_NOT_FOUND".into()), Some("a0"))
     );
     let e = only(&j, 0, "propose");
     assert_eq!(e.outcome, Outcome::Skipped, "{e:?}");
     assert_eq!(e.skip, Some(Skip::NothingToPropose));
     assert!(e.block.is_none(), "no proposal was made");
-    assert_no_refusal(&j);
+    let refused: Vec<&str> = j
+        .entries()
+        .iter()
+        .filter(|e| matches!(e.outcome, Outcome::Refused(_)))
+        .map(|e| e.act)
+        .collect();
+    assert_eq!(refused, ["view_show"], "no other call was refused");
 }
 
 #[test]
