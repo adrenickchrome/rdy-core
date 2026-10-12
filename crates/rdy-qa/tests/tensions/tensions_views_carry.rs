@@ -237,3 +237,33 @@ fn ibperf2_a_landing_carries_the_set() {
     same_as_rebuilt(&r).unwrap();
     assert_eq!(full_builds() - builds, 0, "no landing built the whole set");
 }
+
+#[test]
+fn ibperf2_a_carry_unfiles_only_the_keys_of_the_blocks_it_writes() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    // a flight big enough that a 200-claim commit carries
+    let many: Vec<_> = (0..300)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": s.section.to_string(), "body": format!("Standing claim number {i} holds here.")}))
+        .collect();
+    put(&mut r, "a", json!(many));
+    r.read().tensions().unwrap();
+    let n = 200;
+    let ops: Vec<_> = (0..n)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": s.section.to_string(), "body": format!("Batch claim number {i} holds here.")}))
+        .collect();
+    let before = rdy_engine::tensions::index::unfiled_keys();
+    put(&mut r, "b", json!(ops));
+    assert_eq!(
+        r.read().tensions_carried(),
+        Some(true),
+        "the commit carried"
+    );
+    let walked = rdy_engine::tensions::index::unfiled_keys() - before;
+    // each block has at most a few keys (name, text, targets, edges): never every key before it
+    assert!(
+        walked <= 8 * n as u64,
+        "{walked} keys walked for {n} blocks"
+    );
+    same_as_rebuilt(&r).unwrap();
+}

@@ -208,11 +208,14 @@ impl Writes {
         let mut touched = IndexKeys::default();
         for (b, (base, new)) in mine {
             let before = w.by_block.get(&b).cloned().unwrap_or_default();
-            // the old live writes on b leave the indexes
+            // the old live writes on b leave the indexes: only the keys they were filed under,
+            // so a change that writes many blocks costs per block, not per block walked before
+            let mut old = IndexKeys::default();
             for x in before.iter().filter(|x| x.live) {
-                touched.add(pack, min_words, x);
+                old.add(pack, min_words, x);
             }
-            w.unindex_block(&touched, &b);
+            w.unindex_block(&old, &b);
+            touched.extend(old);
             let at = before.partition_point(|x| x.change < change);
             let mut writes: Vec<Arc<Write>> = before;
             writes.insert(
@@ -323,11 +326,14 @@ impl Writes {
         let mut own: BTreeMap<Hash, Vec<Arc<Write>>> = BTreeMap::new();
         for b in &blocks {
             let before = w.by_block.get(b).cloned().unwrap_or_default();
-            // the old live writes on b leave the indexes
+            // the old live writes on b leave the indexes: only the keys they were filed under,
+            // so the cost follows b's writes, not every block walked before it
+            let mut old = IndexKeys::default();
             for x in before.iter().filter(|x| x.live) {
-                touched.add(pack, min_words, x);
+                old.add(pack, min_words, x);
             }
-            w.unindex_block(&touched, b);
+            w.unindex_block(&old, b);
+            touched.extend(old);
             // the writes on b: the unchanged changes' (kept) and the changed changes' new ones
             let mut writes: Vec<Arc<Write>> = before
                 .into_iter()
@@ -650,12 +656,25 @@ pub fn retired_by(b: &Block) -> BTreeSet<BlockId> {
         .collect()
 }
 
+thread_local! {
+    /// This thread's count of index keys walked to unfile old writes (`retain_key`).
+    static UNFILED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's count of index keys the writes of a carry walked to unfile an old write. A
+/// test reads the difference over a write to check that the cost follows the blocks written.
+#[doc(hidden)]
+pub fn unfiled_keys() -> u64 {
+    UNFILED.with(std::cell::Cell::get)
+}
+
 /// Keeps the entries of `map[k]` that `keep` accepts; a key left with none is removed.
 fn retain_key<K: Ord + Clone, T: Clone>(
     map: &mut OrdMap<K, Vec<T>>,
     k: &K,
     keep: impl Fn(&T) -> bool,
 ) {
+    UNFILED.with(|c| c.set(c.get() + 1));
     let empty = match map.get_mut(k) {
         Some(v) => {
             v.retain(|x| keep(x));
@@ -679,6 +698,15 @@ struct IndexKeys {
 }
 
 impl IndexKeys {
+    /// Adds every key of `other`.
+    fn extend(&mut self, other: IndexKeys) {
+        self.names.extend(other.names);
+        self.texts.extend(other.texts);
+        self.targets.extend(other.targets);
+        self.retired.extend(other.retired);
+        self.pointed.extend(other.pointed);
+    }
+
     /// Adds the keys `index_live` files live write `w` under (keep the two in step).
     fn add(&mut self, pack: &Pack, min_words: usize, w: &Write) {
         let Some(b) = w.new.as_deref() else {
