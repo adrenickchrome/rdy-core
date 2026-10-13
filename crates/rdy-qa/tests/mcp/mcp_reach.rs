@@ -69,7 +69,7 @@ fn mfb2_a_reach_entry_needs_no_repin() {
 fn df4_the_edit_loop_doc_sends_a_kept_entry_to_its_follow_up() {
     assert!(
         EDIT_LOOP_DOC.contains(
-            "An entry with already_written: true is a block your view already rewrote. Do what its follow_up and fix say: confirm means check it, then repin it unless its meaning changed; update means its target is deleted, superseded or revoked, which a repin cannot clear, so point it at another block or remove the link; reaffirm means it is a live decision, so supersede it or leave it suspect; a reach entry (FW-LP6) needs no repin: check it and update it only if it no longer holds."
+            "An entry with already_written: true is a block your view already rewrote. Do what its follow_up and fix say: confirm means check it, then repin it unless its meaning changed; update means rewrite it to fit the change; when its fix says the target is gone, superseded or revoked, a repin cannot clear it: point it at another block or remove the link; reaffirm means it is a live decision, so supersede it or leave it suspect; a reach entry (FW-LP6) needs no repin: check it and update it only if it no longer holds."
         ),
         "{EDIT_LOOP_DOC}"
     );
@@ -80,4 +80,6 @@ fn df4_the_edit_loop_doc_sends_a_kept_entry_to_its_follow_up() {
         "{EDIT_LOOP_DOC}"
     );
     assert!(!EDIT_LOOP_DOC.contains("confirm it (repin) unless its meaning changed"));
+    // an outside entry also carries already_written; its update means rewrite, not unlink
+    assert!(!EDIT_LOOP_DOC.contains("update means its target is deleted"));
 }
