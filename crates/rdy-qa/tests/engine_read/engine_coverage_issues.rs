@@ -282,7 +282,7 @@ fn cc6_fix_texts_are_exact() {
     assert_eq!(
         fix(&c["$d2"], IssueCode::UnappliedDecision),
         format!(
-            "apply {}: link the content that carries it with decided_by, or set needs_content: false",
+            "apply {0}: write the content that carries it with implements: {0}, or link that content to it with decided_by; for a process ruling, set needs_content: false",
             c["$d2"]
         )
     );

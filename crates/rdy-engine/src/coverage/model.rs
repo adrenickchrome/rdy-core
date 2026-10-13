@@ -244,6 +244,6 @@ pub(crate) fn fix_ungrounded(block: &BlockId) -> String {
 /// The fix of `unapplied_decision`.
 pub(crate) fn fix_unapplied_decision(block: &BlockId) -> String {
     format!(
-        "apply {block}: link the content that carries it with decided_by, or set needs_content: false"
+        "apply {block}: write the content that carries it with implements: {block}, or link that content to it with decided_by; for a process ruling, set needs_content: false"
     )
 }

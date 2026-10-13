@@ -869,6 +869,7 @@ fn apply_rekeys(
     ov: &mut Overlay,
     rekeys: Rekeys,
     touched: &mut BTreeSet<BlockId>,
+    content_touched: &mut BTreeSet<BlockId>,
     rekey_only: &mut RekeyOnly,
     conflicts: &ViewConflicts<'_>,
     store: &rdy_store::Store,
@@ -876,6 +877,8 @@ fn apply_rekeys(
     prior: &mut Vec<Prior>,
 ) -> Result<(), RdyError> {
     for (id, k) in rekeys {
+        // `order` is in the content hash, so a re-key changes the sibling's content (sus3)
+        content_touched.insert(id.clone());
         if touched.contains(&id) {
             let Some(mut block) = ov.get(&id).cloned() else {
                 continue;
@@ -1565,6 +1568,10 @@ fn build_ops(
     let mut created = BTreeMap::new();
     let mut names = BTreeMap::new();
     let mut touched = BTreeSet::new();
+    // sus3 (F5): the blocks whose content this write changes; `touched` less the repin-only ones
+    let mut content_touched: BTreeSet<BlockId> = BTreeSet::new();
+    // D-YQCY9: the blocks this write creates or edits, which a write-level `implements` links
+    let mut rewritten: BTreeSet<BlockId> = BTreeSet::new();
     let mut rekey_only = RekeyOnly::new();
     let mut prior: Vec<Prior> = vec![];
     let mut noop_rebalances: Vec<String> = vec![];
@@ -1678,6 +1685,7 @@ fn build_ops(
                     &mut ov,
                     rekeys,
                     &mut touched,
+                    &mut content_touched,
                     &mut rekey_only,
                     conflicts,
                     store,
@@ -1716,6 +1724,8 @@ fn build_ops(
                     res.note_key(&new_id, Some(&block));
                 }
                 touched.insert(new_id.clone());
+                content_touched.insert(new_id.clone());
+                rewritten.insert(new_id.clone());
                 ov.set(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
                 prior.push((false, BTreeMap::new()));
@@ -1749,6 +1759,10 @@ fn build_ops(
                     || !unset.is_empty()
                     || body.is_some()
                     || links.is_some();
+                // an update that names `implements` sets that list exactly (link1)
+                let names_implements = links
+                    .as_ref()
+                    .is_some_and(|l| l.contains_key(decision::IMPLEMENTS));
                 if let Some(t) = retyped {
                     retype(pack, &ov, &mut block, t)?;
                 }
@@ -1804,6 +1818,7 @@ fn build_ops(
                     &mut ov,
                     rekeys,
                     &mut touched,
+                    &mut content_touched,
                     &mut rekey_only,
                     conflicts,
                     store,
@@ -1814,6 +1829,10 @@ fn build_ops(
                 drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push(own_prior);
                 touched.insert(id.clone());
+                content_touched.insert(id.clone());
+                if edits && !names_implements {
+                    rewritten.insert(id.clone());
+                }
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
                     base: base_hash,
@@ -1843,6 +1862,7 @@ fn build_ops(
                     &mut ov,
                     rekeys,
                     &mut touched,
+                    &mut content_touched,
                     &mut rekey_only,
                     conflicts,
                     store,
@@ -1852,6 +1872,7 @@ fn build_ops(
                 drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
+                content_touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
                     base: base_hash,
@@ -1884,6 +1905,7 @@ fn build_ops(
                 }
                 drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 touched.insert(id.clone());
+                content_touched.insert(id.clone());
                 ov.set(id.clone(), None);
                 prior.push((false, BTreeMap::new()));
                 ops.push(Op::Delete {
@@ -1980,6 +2002,7 @@ fn build_ops(
                     block.order = k;
                     prior.push((true, block.pins.clone())); // like a move: pins unchanged
                     touched.insert(block.id.clone());
+                    content_touched.insert(block.id.clone());
                     ov.set(block.id.clone(), Some(block.clone()));
                     ops.push(Op::Update {
                         base: base_hash,
@@ -2069,6 +2092,8 @@ fn build_ops(
                 repinned.extend(wanted);
                 drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
+                // a repin changes only pins, which the content hash leaves out: not in
+                // `content_touched` (p-WYFR3)
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -2096,6 +2121,9 @@ fn build_ops(
         &mut assigned,
     );
     touched.extend(followed.iter().cloned());
+    // a re-key changes the block's key, so its content: every block this pass re-keyed, a
+    // repinned one included (`assigned` holds only this pass's keys so far)
+    content_touched.extend(assigned.keys().filter_map(|id| BlockId::parse(id).ok()));
     for op in &mut ops {
         let Op::Create { block } = op else { continue };
         if !tree::is_tree_type(&block.block_type) || block.fields.contains_key("key") {
@@ -2131,13 +2159,17 @@ fn build_ops(
         ));
     }
 
-    // sus3: a repin to a block this write also changes would pin a version that never lands
-    if let Some(t) = repinned.iter().find(|t| touched.contains(*t)) {
+    // sus3: a repin to a block whose content this write also changes would pin a version that
+    // never lands; a block the write only repins keeps its content (F5)
+    if let Some(t) = repinned.iter().find(|t| content_touched.contains(*t)) {
         return Err(bad(
             format!("{t} changes in this write, so a repin to it would pin an old version"),
             "repin in a separate write, after the write that changes the target",
         ));
     }
+
+    // D-YQCY9: a write-level `implements` links the content blocks it creates or edits
+    implements_links(pack, &mut ov, &mut ops, &rewritten, justification);
 
     // second pass: references, decision permissions, schema validation, pins. `ov` holds every
     // block of this write at its final content (content does not depend on pins), so a target
@@ -2254,6 +2286,65 @@ fn build_ops(
     // edited
     let touched: BTreeSet<BlockId> = touched.difference(&followed).cloned().collect();
     Ok((ops, created, touched, names, assigned))
+}
+
+/// D-YQCY9 (FW-DF1): a write's `implements: [D…]` adds `{target: D}` to the `implements` links
+/// of each block in `rewritten` (created, or updated with an edit and not naming `implements`),
+/// when the block is not a decision, its type is neither supporting nor structural (doc, folder,
+/// section), the pack has the `implements` link kind, and the block does not link to D already.
+/// Existing links come first, then the new ones in the justification's order. The pending op's
+/// block and the overlay both change; the second pass pins each new target.
+fn implements_links(
+    pack: &Pack,
+    ov: &mut Overlay,
+    ops: &mut [Op],
+    rewritten: &BTreeSet<BlockId>,
+    j: Option<&Justification>,
+) {
+    let Some(Justification::Implements(decisions)) = j else {
+        return;
+    };
+    if decisions.is_empty() || !pack.link_types.contains(decision::IMPLEMENTS) {
+        return;
+    }
+    for op in ops.iter_mut() {
+        let block = match op {
+            Op::Create { block } | Op::Update { block, .. } => block,
+            Op::Delete { .. } => continue,
+        };
+        if !rewritten.contains(&block.id)
+            || block.block_type == decision::DECISION
+            || pack.class_of(&block.block_type) == TypeClass::Supporting
+            || pack
+                .block_types
+                .get(&block.block_type)
+                .is_some_and(|t| t.traits.contains(&rdy_schema::Trait::Structural))
+        {
+            continue;
+        }
+        let mut added = false;
+        for d in decisions {
+            let linked = block
+                .links
+                .get(decision::IMPLEMENTS)
+                .is_some_and(|l| l.iter().any(|l| l.target == *d));
+            if linked {
+                continue;
+            }
+            block
+                .links
+                .entry(decision::IMPLEMENTS.to_string())
+                .or_default()
+                .push(Link {
+                    target: d.clone(),
+                    part: None,
+                });
+            added = true;
+        }
+        if added {
+            ov.set(block.id.clone(), Some(block.clone()));
+        }
+    }
 }
 
 /// kfol1 (FW-PR3a, FW-PR3b): on a move or rename, a key rdy assigned (`key_auto`) follows the

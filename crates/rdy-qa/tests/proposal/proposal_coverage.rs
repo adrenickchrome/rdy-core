@@ -82,9 +82,12 @@ fn cc16_a_proposal_that_lands_an_unapplied_decision_warns_and_still_proposes() {
             .unwrap()
             .ends_with("lands with no content that applies it")
     );
+    let d = w[0]["block"].as_str().unwrap();
     assert_eq!(
         w[0]["fix"],
-        "link the content that carries it with decided_by, or set needs_content: false for a process ruling"
+        format!(
+            "write the content that carries it with implements: {d}, or link that content to it with decided_by; for a process ruling, set needs_content: false"
+        )
     );
     assert_eq!(w[0]["severity"], "warning");
     assert!(
