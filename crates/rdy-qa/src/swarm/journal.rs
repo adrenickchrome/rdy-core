@@ -80,6 +80,9 @@ pub struct Entry {
     /// The message of a refusal (`Outcome::Refused`), as the daemon gave it: a check reads which
     /// change a refusal names.
     pub message: Option<String>,
+    /// Set on the drain's `repair_dangling_ref`: the block the rewritten reference named, which a
+    /// change the drain excluded created (ruling task-5-round2.1). `block` is the citing block.
+    pub target: Option<String>,
 }
 
 impl Entry {
@@ -102,6 +105,7 @@ impl Entry {
             reply: None,
             skip: None,
             message: None,
+            target: None,
         }
     }
 }

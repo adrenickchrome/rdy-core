@@ -9,8 +9,8 @@
 //! `RDY_QA_SWARM_SEEDS=<seed>,...` runs only those seeds.
 use rdy_engine::inbox::read::parse_cursor;
 use rdy_engine::tensions::tension_label;
-use rdy_engine::{EventKind, Rdy, ReadState};
-use rdy_model::{Change, Hash, Op};
+use rdy_engine::{EventKind, Rdy, ReadState, Scope};
+use rdy_model::{BlockId, Hash};
 use rdy_qa::fixtures::deep;
 use rdy_qa::invariants::check_all;
 use rdy_qa::landing_audit::{alt_unchosen, chosen_members, conflicts_at, landed_of};
@@ -665,52 +665,10 @@ fn loser_bound(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> bo
         .any(|(set, member)| settled.get(set).is_some_and(|won| won != member))
 }
 
-/// The blocks change `ch` references: the `{{<id>}}` tokens of each body it writes, and each
-/// link's target (read from the stored change, not through the gate's reference code).
-fn refs_of(ch: &Change) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for op in &ch.ops {
-        let (Op::Create { block } | Op::Update { block, .. }) = op else {
-            continue;
-        };
-        let mut rest = block.body.as_str();
-        while let Some(at) = rest.find("{{") {
-            rest = &rest[at + 2..];
-            let Some(end) = rest.find("}}") else { break };
-            out.insert(rest[..end].trim().to_string());
-            rest = &rest[end + 2..];
-        }
-        out.extend(block.links.values().flatten().map(|l| l.target.to_string()));
-    }
-    out
-}
-
-/// The change that created each block, among `changes`.
-fn creators(st: &ReadState, changes: impl IntoIterator<Item = Hash>) -> BTreeMap<String, Hash> {
-    let mut out = BTreeMap::new();
-    for h in changes {
-        let ch = st
-            .reader()
-            .change(&h)
-            .unwrap_or_else(|err| panic!("change {h}: {err}"));
-        for op in &ch.ops {
-            if let Op::Create { block } = op {
-                out.insert(block.id.to_string(), h);
-            }
-        }
-    }
-    out
-}
-
-/// Whether change `c` depends on a change bound to a losing member (or is one): through its deps,
-/// or through a block it references that such a change created (`created`: the creating change
-/// of each block). Both are dependents the drain excludes with the loser (ruling task-5.4).
-fn loser_related(
-    st: &ReadState,
-    settled: &BTreeMap<Hash, String>,
-    created: &BTreeMap<String, Hash>,
-    c: &Hash,
-) -> bool {
+/// Whether change `c`, or a change it depends on (transitively), is bound to a losing member.
+/// A reference is not a dep (`exclude --cascade` follows deps only): a change that cites a block
+/// a loser-bound change created is not loser-related (ruling task-5-round2.1).
+fn loser_related(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> bool {
     let mut todo = vec![*c];
     let mut seen = BTreeSet::new();
     while let Some(h) = todo.pop() {
@@ -725,7 +683,6 @@ fn loser_related(
             .change(&h)
             .unwrap_or_else(|err| panic!("change {h}: {err}"));
         todo.extend(ch.deps.iter().copied());
-        todo.extend(refs_of(&ch).iter().filter_map(|b| created.get(b).copied()));
     }
     false
 }
@@ -948,13 +905,94 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
     });
 }
 
+/// Ruling task-5-round2.1: the drain meets `propose`/`E_VALIDATION` for a dangling reference only
+/// when a change it excluded from that view created the target. The owning agent then rewrites
+/// the citing block without the reference (`repair_dangling_ref`, naming the block and the
+/// target) and proposes again. Each repair is `Ok`, names a target that a change the drain
+/// excluded from that view created (by the journal), and the citing block no longer references
+/// the target in canon. Every drain `E_VALIDATION` is followed by a repair in its view.
+#[test]
+fn sg5_each_dangling_reference_repair_cites_a_discarded_block() {
+    each(|seed, o| {
+        let drained = o.after_freeze();
+        let mut bad = vec![];
+        let mut repairs = vec![];
+        for (k, e) in drained.iter().enumerate() {
+            let v = e.view.as_deref().unwrap_or("");
+            if e.act == "propose" && e.outcome == Met::Refused("E_VALIDATION".to_string()) {
+                let repaired = drained[k + 1..]
+                    .iter()
+                    .any(|x| x.act == "repair_dangling_ref" && x.view.as_deref() == Some(v));
+                if !repaired {
+                    bad.push(format!(
+                        "{v}: E_VALIDATION with no repair after it: {}",
+                        e.message.as_deref().unwrap_or("")
+                    ));
+                }
+            }
+            if e.act != "repair_dangling_ref" {
+                continue;
+            }
+            let (Some(block), Some(target)) = (e.block.clone(), e.target.clone()) else {
+                bad.push(format!("{v}: a repair names no block or no target: {e:?}"));
+                continue;
+            };
+            if e.outcome != Met::Ok {
+                bad.push(format!("{v}: the repair of {block} met {:?}", e.outcome));
+            }
+            // the changes the drain excluded from this view before the repair
+            let excluded: BTreeSet<String> = drained[..k]
+                .iter()
+                .filter(|x| x.act == "exclude" && x.outcome == Met::Ok)
+                .filter(|x| x.view.as_deref() == Some(v))
+                .filter_map(|x| x.reply.as_ref())
+                .flat_map(|r| {
+                    ["removed", "cascaded"].into_iter().flat_map(move |key| {
+                        r[key]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|c| c.as_str().map(str::to_string))
+                    })
+                })
+                .collect();
+            let discarded = o.journal.iter().any(|x| {
+                x.outcome == Met::Ok
+                    && x.block.as_deref() == Some(target.as_str())
+                    && x.change.as_ref().is_some_and(|c| excluded.contains(c))
+            });
+            if !discarded {
+                bad.push(format!(
+                    "{v}: the repair of {block} names {target}, which no change the drain excluded from {v} created"
+                ));
+            }
+            repairs.push((block, target));
+        }
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        for (block, target) in &repairs {
+            let id = BlockId::parse(block).expect("a block id");
+            if let Ok(b) = st.block(&Scope::Canon, &id)
+                && b.ref_tokens().contains(target)
+            {
+                bad.push(format!("{block} still references {target} in canon"));
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        eprintln!("swarm seed {seed}: dangling reference repairs: {repairs:?}");
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+    });
+}
+
 /// Ruling task-5.4: after the drain no agent view holds a change. A view that landed (a landing
 /// record whose proposal's view is it) is told apart from a view the drain emptied: the drain's
 /// exclusions are listed by change, and each excluded change is bound to a losing member or
-/// depends on one, by its deps or by a block it references that such a change created (fix round
-/// 2: a cite of a discarded alternative's block). Every change a view held at the freeze, or that
-/// the drain wrote in it, landed
-/// or is such an exclusion; an open, empty view never counts as landed by itself.
+/// depends on one by its deps (a citation is no dep: the drain repairs a citing block instead,
+/// ruling task-5-round2.1, so the citing change must land). Every change a view held at the
+/// freeze, or that the drain wrote in it, landed or is such an exclusion; an open, empty view
+/// never counts as landed by itself.
 #[test]
 fn sg5_every_live_view_drains_without_a_dismissal() {
     each(|seed, o| {
@@ -990,21 +1028,6 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
             .map(|p| p.view)
             .collect();
         let drained = o.after_freeze();
-        // the creating change of each block that a view held at the freeze or the drain wrote
-        let created = creators(
-            &st,
-            held_at_freeze
-                .values()
-                .flatten()
-                .copied()
-                .chain(
-                    drained
-                        .iter()
-                        .filter(|e| e.outcome == Met::Ok)
-                        .filter_map(|e| e.change.as_deref()?.parse::<Hash>().ok()),
-                )
-                .collect::<BTreeSet<Hash>>(),
-        );
         let mut live = vec![];
         let mut emptied = vec![];
         let mut bad = vec![];
@@ -1067,9 +1090,9 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
                         "{name}: change {} left the view without landing or a drain exclusion",
                         c.short()
                     ));
-                } else if !loser_related(&st, &settled, &created, c) {
+                } else if !loser_related(&st, &settled, c) {
                     bad.push(format!(
-                        "{name}: the drain excluded change {}, which is not bound to a losing member and depends on none, by its deps or its references",
+                        "{name}: the drain excluded change {}, which is not bound to a losing member and depends on none",
                         c.short()
                     ));
                 }

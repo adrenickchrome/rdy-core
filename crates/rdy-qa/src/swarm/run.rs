@@ -795,6 +795,56 @@ fn dangling_in(text: &str) -> Option<(String, String)> {
         .then(|| (block.to_string(), target.to_string()))
 }
 
+/// `text` with each reference to `target` written as plain words: its link words, or `name` (the
+/// target's last name) when it has none (ruling task-5-round2.1). Other references and escapes
+/// stay as written.
+fn unref(text: &str, target: &str, name: &str) -> String {
+    let mut out = String::new();
+    let mut last = 0;
+    for span in rdy_model::ref_spans(text, rdy_model::RefMode::Strict) {
+        if span.token != target {
+            continue;
+        }
+        out.push_str(&text[last..span.range.start]);
+        out.push_str(span.display.as_deref().unwrap_or(name));
+        last = span.range.end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// What a reader calls a block (`yaml`, as `rdy_read` gives it): the target's last name of ruling
+/// task-5-round2.1. Its title, else its `name` field, else its text's first sentence, with each
+/// reference as its link words (dropped when it has none: an id is never a name), no CONTRA
+/// marker, and no final full stop.
+fn name_in(yaml: &serde_yaml_ng::Value) -> String {
+    let field = |k: &str| {
+        yaml["fields"][k]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(said) = field("title").or_else(|| field("name")) {
+        return said;
+    }
+    let body = yaml["body"].as_str().unwrap_or_default();
+    let mut text = String::new();
+    let mut last = 0;
+    for span in rdy_model::ref_spans(body, rdy_model::RefMode::Strict) {
+        text.push_str(&body[last..span.range.start]);
+        text.push_str(span.display.as_deref().unwrap_or(""));
+        last = span.range.end;
+    }
+    text.push_str(&body[last..]);
+    let text = strip_marker(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let first = text.split(". ").next().unwrap_or_default();
+    first.trim_end_matches('.').trim().to_string()
+}
+
 /// `text` without its `CONTRA-<k>` marker (and the space before it).
 fn strip_marker(text: &str) -> String {
     let Some(at) = text.find("CONTRA-") else {
@@ -996,6 +1046,8 @@ impl Drain {
             .flatten()
             .filter_map(|c| c["id"].as_str().map(str::to_string))
             .collect();
+        // each dangling reference is repaired once: a second refusal for it fails the run
+        let mut repaired: BTreeSet<(String, String)> = BTreeSet::new();
         loop {
             let mut args = json!({"view": v, "title": format!("{v} drain round {round}")});
             if let Some((set, member)) = self.alternative(v) {
@@ -1039,25 +1091,20 @@ impl Drain {
                     }
                     held = left;
                 }
-                // a change of the view cites a block that a change the drain excluded above
-                // created: it depends on the discarded alternative through its reference, and
-                // the agent excludes it with what depends on it (fix round 2: the cite of a block
-                // that a loser-bound change created; ruling task-5.4's "with their dependents")
+                // a block of the view cites a block that a change the drain excluded above
+                // created. A citation is no dep (`exclude --cascade` follows deps), so the citing
+                // change stays: the agent rewrites the citing block without the reference and
+                // proposes again (ruling task-5-round2.1). Any other E_VALIDATION fails the run.
                 (Res::Refused(code, message), _) if code == "E_VALIDATION" => {
-                    let citing = dangling_in(&message).and_then(|(block, target)| {
-                        self.excluded_creates(v)
-                            .contains(&target)
-                            .then(|| self.writer_of(v, &block, &held))?
-                    });
-                    let Some(citing) = citing else {
+                    let found = dangling_in(&message)
+                        .filter(|(_, target)| self.excluded_creates(v).contains(target))
+                        .filter(|pair| repaired.insert(pair.clone()));
+                    let Some((block, target)) = found else {
                         self.said = message;
                         self.no_rule(v, &code, "propose")
                     };
-                    let left = self.exclude(i, v, &citing, &code);
-                    if left.is_empty() {
-                        return None;
-                    }
-                    held = left;
+                    self.said = message;
+                    self.repair(i, v, &block, &target);
                 }
                 (Res::Refused(code, message), _) => {
                     self.said = message;
@@ -1066,6 +1113,117 @@ impl Drain {
                 _ => link_fail(&self.cfg, v, "propose"),
             }
         }
+    }
+
+    /// Agent `i` rewrites `block` in view `v` without its reference to `target`, a block that a
+    /// change the drain excluded from `v` created: one `rdy_write` update with `base`, the
+    /// reference written as its link words or as the target's last name (`last_name`). Journaled
+    /// as the drain act `repair_dangling_ref` naming `block` and `target` (ruling
+    /// task-5-round2.1). A reference outside the body is outside the row.
+    fn repair(&mut self, i: usize, v: &str, block: &str, target: &str) {
+        let body = self.body(i, block, v);
+        // the target's last name is needed only for a reference with no link words
+        let wordless = rdy_model::ref_spans(&body, rdy_model::RefMode::Strict)
+            .iter()
+            .any(|s| s.token == target && s.display.is_none());
+        let name = if wordless {
+            self.last_name(i, v, target).unwrap_or_else(|| {
+                self.no_rule(
+                    v,
+                    "E_VALIDATION",
+                    &format!("propose: no view holds {target} to name it by"),
+                )
+            })
+        } else {
+            String::new()
+        };
+        let fixed = unref(&body, target, &name);
+        if fixed == body {
+            self.no_rule(
+                v,
+                "E_VALIDATION",
+                &format!("propose: {block}'s body holds no reference to {target}"),
+            );
+        }
+        let ops = json!([{"op": "update", "id": block, "body": fixed}]);
+        self.write_noted(
+            i,
+            v,
+            block,
+            ops,
+            "repair_dangling_ref",
+            "E_VALIDATION",
+            "a dangling reference",
+            Some(target),
+        );
+    }
+
+    /// The target's last name: agent `i` reads `target` in a view other than `v` that still holds
+    /// it (a view that included or created the change that created it, by the journal: the
+    /// losing member's view keeps a loser-bound change) and names it as a reader would
+    /// (`name_in`). `None` when no such view holds it.
+    fn last_name(&mut self, i: usize, v: &str, target: &str) -> Option<String> {
+        let journal = self.journal.entries();
+        let made: BTreeSet<String> = journal
+            .iter()
+            .filter(|e| e.outcome == Met::Ok && e.block.as_deref() == Some(target))
+            .filter_map(|e| e.change.clone())
+            .collect();
+        let mut views: Vec<String> = vec![];
+        let included = journal.iter().filter(|e| {
+            e.act == "include"
+                && e.outcome == Met::Ok
+                && e.reply.as_ref().is_some_and(|r| {
+                    r["included"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|c| c.as_str().is_some_and(|c| made.contains(c)))
+                })
+        });
+        let creating = journal.iter().filter(|e| {
+            e.outcome == Met::Ok && e.change.as_ref().is_some_and(|c| made.contains(c))
+        });
+        for w in included.chain(creating).filter_map(|e| e.view.clone()) {
+            if w != v && !views.contains(&w) {
+                views.push(w);
+            }
+        }
+        for w in views {
+            let link = self.agent(i);
+            let mut e = link.entry("read");
+            e.view = Some(w.clone());
+            e.block = Some(target.to_string());
+            let res = link.raw(
+                "read",
+                "rdy_read",
+                json!({"id": target, "scope": w, "format": "yaml"}),
+            );
+            match res {
+                Res::Ok(r) => {
+                    link.journal.record(e);
+                    let text = r["text"].as_str().unwrap_or_default();
+                    let yaml: serde_yaml_ng::Value =
+                        serde_yaml_ng::from_str(text).unwrap_or_else(|err| {
+                            panic!(
+                                "swarm seed {}: {target} in {w}: yaml that does not parse: {err}",
+                                self.cfg.seed
+                            )
+                        });
+                    let name = name_in(&yaml);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+                Res::Refused(code, message) => {
+                    e.outcome = Met::Refused(code);
+                    e.message = Some(message);
+                    link.journal.record(e);
+                }
+                Res::Lost => link_fail(&self.cfg, v, "read"),
+            }
+        }
+        None
     }
 
     /// The blocks that the changes the drain excluded from view `v` created or wrote, as the
@@ -1096,18 +1254,6 @@ impl Drain {
             .filter(|e| e.change.as_ref().is_some_and(|c| excluded.contains(c)))
             .filter_map(|e| e.block.clone())
             .collect()
-    }
-
-    /// The first change of view `v`, among those it still holds (`held`), that wrote `block`, as
-    /// the journal names it.
-    fn writer_of(&self, v: &str, block: &str, held: &[String]) -> Option<String> {
-        self.journal
-            .entries()
-            .into_iter()
-            .filter(|e| e.outcome == Met::Ok && e.view.as_deref() == Some(v))
-            .filter(|e| e.block.as_deref() == Some(block))
-            .filter_map(|e| e.change)
-            .find(|c| held.contains(c))
     }
 
     /// Agent `i` excludes change `c` from view `v`, with what depends on it. Returns the changes
@@ -1467,9 +1613,27 @@ impl Drain {
         code: &str,
         kind: &str,
     ) {
+        self.write_noted(i, v, b, ops, act, code, kind, None);
+    }
+
+    /// `write`, with the entry naming `target` (a repair's dangling reference). An update op with
+    /// no `base` key takes the version the briefing gives for `b` in `v`.
+    #[allow(clippy::too_many_arguments)]
+    fn write_noted(
+        &mut self,
+        i: usize,
+        v: &str,
+        b: &str,
+        mut ops: Value,
+        act: &'static str,
+        code: &str,
+        kind: &str,
+        target: Option<&str>,
+    ) {
         let decision = self.seed.decisions[self.area(b)].clone();
         let link = self.agent(i);
         let mut token = String::new();
+        let mut version = Value::Null;
         let e = link.entry("brief");
         link.exec(
             e,
@@ -1478,12 +1642,17 @@ impl Drain {
             json!({"ids": [b], "scope": v}),
             |en, r| {
                 token = r["base"]["token"].as_str().unwrap_or_default().to_string();
+                version = r["base"]["blocks"][0]["version"].clone();
                 en.brief = Some(token.clone());
             },
         );
+        if ops[0]["op"] == "update" && ops[0].get("base").is_none() {
+            ops[0]["base"] = version;
+        }
         let mut e = link.entry(act);
         e.view = Some(v.to_string());
         e.block = Some(b.to_string());
+        e.target = target.map(str::to_string);
         e.base = ops[0]["base"].as_str().map(str::to_string);
         e.brief = Some(token.clone());
         e.stable = true;
@@ -1565,6 +1734,64 @@ mod tests {
             Some(("c-NGH43".to_string(), "c-18JGF".to_string()))
         );
         assert_eq!(dangling_in("c-NGH43 is too deep"), None);
+    }
+
+    /// Ruling task-5-round2.1: the repair replaces each reference to the target with its link
+    /// words, or with the target's last name when it has none, and keeps every other reference
+    /// and escape as written.
+    #[test]
+    fn sg5_a_repair_writes_the_reference_as_plain_words() {
+        let name = "Agent a four adds a rule";
+        assert_eq!(
+            unref("Agent b builds on {{c-0MKAA}} in pass c.", "c-0MKAA", name),
+            "Agent b builds on Agent a four adds a rule in pass c."
+        );
+        assert_eq!(
+            unref(
+                "See {{ c-0MKAA | the rule }} and {{c-1AAAA}}.",
+                "c-0MKAA",
+                name
+            ),
+            "See the rule and {{c-1AAAA}}."
+        );
+        assert_eq!(
+            unref("\\{{c-0MKAA}} {{c-0MKAA|x}} {{c-0MKAA}}", "c-0MKAA", name),
+            "\\{{c-0MKAA}} x Agent a four adds a rule"
+        );
+        assert_eq!(unref("no reference", "c-0MKAA", name), "no reference");
+    }
+
+    /// The target's last name: its title, else its name field, else its text's first sentence,
+    /// with references as their link words (dropped when they have none) and no CONTRA marker.
+    #[test]
+    fn sg5_a_targets_last_name_is_what_a_reader_calls_it() {
+        let yaml = |s: &str| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(s).unwrap();
+        assert_eq!(
+            name_in(&yaml(
+                "type: doc\nfields:\n  title: Setup guide\nbody: ''\n"
+            )),
+            "Setup guide"
+        );
+        assert_eq!(
+            name_in(&yaml("type: claim\nfields:\n  name: settle-rule\n")),
+            "settle-rule"
+        );
+        assert_eq!(
+            name_in(&yaml(
+                "type: claim\nbody: Agent d forbids that settlement is at once. CONTRA-3\n"
+            )),
+            "Agent d forbids that settlement is at once"
+        );
+        assert_eq!(
+            name_in(&yaml(
+                "type: claim\nbody: 'Agent e builds on {{c-1AAAA}} in pass b. More.'\n"
+            )),
+            "Agent e builds on in pass b"
+        );
+        assert_eq!(
+            name_in(&yaml("type: claim\nbody: 'See {{c-1AAAA|the rule}}'\n")),
+            "See the rule"
+        );
     }
 
     #[test]
