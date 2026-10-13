@@ -402,6 +402,7 @@ impl<'a> Site<'a> {
             (at, id.clone())
         };
         let mut entries: Vec<crate::disagree::Disagreement> = vec![];
+        let mut seen: BTreeSet<crate::disagree::Disagreement> = BTreeSet::new();
         for d in list {
             let lead = d.lead;
             // the page the sentence calls "this page" must be linkable, else the entry would
@@ -422,7 +423,7 @@ impl<'a> Site<'a> {
                 blocks,
                 lead,
             };
-            if !entry.blocks.is_empty() && !entries.contains(&entry) {
+            if !entry.blocks.is_empty() && seen.insert(entry.clone()) {
                 entries.push(entry);
             }
         }
@@ -852,6 +853,55 @@ fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Final review M12 (minors item 32): an entry whose "this page" block has no page is
+    /// dropped, since its sentence would point the reader at the wrong page; an entry with no lead
+    /// keeps the blocks that have a page.
+    #[test]
+    fn an_entry_whose_lead_has_no_page_is_dropped() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 1, 1, 2);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        let claim = m
+            .iter()
+            .find(|b| b.block_type == "claim")
+            .expect("a claim")
+            .id
+            .clone();
+        let ghost = BlockId::parse("c-ZZZZZ").expect("an id");
+        assert!(m.get(&ghost).is_none());
+        let mut site = Site::new(&m, st.pack());
+        site.set_disagreements(vec![
+            Disagreement {
+                sentence: "This page still points to something that was retired.",
+                blocks: vec![claim.clone(), ghost.clone()],
+                lead: Some(ghost.clone()),
+            },
+            Disagreement {
+                sentence: "These pages define the same thing twice.",
+                blocks: vec![ghost.clone(), claim.clone()],
+                lead: None,
+            },
+            Disagreement {
+                sentence: "These pages define the same thing twice.",
+                blocks: vec![claim.clone()],
+                lead: None,
+            },
+        ]);
+        assert_eq!(
+            site.disagreements,
+            vec![Disagreement {
+                sentence: "These pages define the same thing twice.",
+                blocks: vec![claim],
+                lead: None,
+            }]
+        );
+    }
 
     #[test]
     fn an_anchor_is_a_slug_cut_to_48_that_is_never_empty_or_id_shaped() {

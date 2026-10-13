@@ -1,6 +1,6 @@
 //! sg3: a swarm script is a pure function of its seed; it covers every act; outcomes are a closed table.
 use rdy_qa::swarm::journal::{Outcome, allowed};
-use rdy_qa::swarm::script::{Act, Config, PersonAct, script};
+use rdy_qa::swarm::script::{Act, Config, PersonAct, direct_land_at, script};
 use std::collections::BTreeSet;
 
 fn names(acts: &[Act]) -> BTreeSet<&'static str> {
@@ -308,15 +308,25 @@ fn sg3_a_fast_seed_includes_before_a_set_and_lands_after_it() {
             .map(|(j, _)| (j + 1) * cfg.steps / len)
             .max()
             .unwrap_or(0);
+        // an include from an agent outside the includer's set: a change of the set partner is
+        // a member's own work, not a change the set binds (msw20)
         s.agents.iter().enumerate().any(|(m, acts)| {
-            let Some(included) = acts.iter().position(|a| matches!(a, Act::Include { .. })) else {
-                return false;
-            };
-            s.agents.iter().enumerate().any(|(maker, theirs)| {
-                theirs.iter().enumerate().any(|(j, a)| {
-                    matches!(a, Act::AltCreate { with } if maker == m || *with == m)
-                        && included < j
-                        && j < last_land
+            acts.iter().enumerate().any(|(included, a)| {
+                let Act::Include { from } = a else {
+                    return false;
+                };
+                s.agents.iter().enumerate().any(|(maker, theirs)| {
+                    theirs.iter().enumerate().any(|(j, a)| {
+                        let Act::AltCreate { with } = a else {
+                            return false;
+                        };
+                        let partner = match (maker == m, *with == m) {
+                            (true, _) => *with,
+                            (_, true) => maker,
+                            _ => return false,
+                        };
+                        *from != partner && included < j && j < last_land
+                    })
                 })
             })
         })
@@ -326,6 +336,79 @@ fn sg3_a_fast_seed_includes_before_a_set_and_lands_after_it() {
         !seeds.is_empty(),
         "no fast seed includes before a set and lands after it"
     );
+}
+
+/// Final review M8 (minors item 3): each reviewer holds at least three `ReviewNext` acts.
+#[test]
+fn sg3_each_reviewer_holds_at_least_three_review_next() {
+    for seed in 1..=20 {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            for (i, acts) in script(&cfg).agents.iter().enumerate() {
+                if !cfg.is_reviewer(i) {
+                    continue;
+                }
+                let n = acts.iter().filter(|a| matches!(a, Act::ReviewNext)).count();
+                assert!(n >= 3, "seed {seed} reviewer {i}: {n} review_next");
+            }
+        }
+    }
+}
+
+/// Final review M8 (minors item 2): a reviewer never writes, so `Collide`, `Include` and
+/// `AltCreate` name a writer other than the agent itself.
+#[test]
+fn sg3_a_partner_is_always_another_writer() {
+    for seed in 1..=20 {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            for (me, acts) in script(&cfg).agents.iter().enumerate() {
+                for act in acts {
+                    let other = match act {
+                        Act::Collide { with, .. } | Act::AltCreate { with } => *with,
+                        Act::Include { from } => *from,
+                        _ => continue,
+                    };
+                    assert!(
+                        other != me && !cfg.is_reviewer(other),
+                        "seed {seed} a{me}: {act:?} names a reviewer or itself"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Final review M4 (minors item 1): every person script lands direct (`rdy approve` with no
+/// relay, the CLI parity path) at a fixed even act, and still lands through the relay.
+#[test]
+fn sg3_every_person_script_lands_direct_at_a_fixed_act() {
+    for cfg in (1..=20).flat_map(|seed| {
+        [
+            Config::fast(seed),
+            Config::deep(seed),
+            Config {
+                seed,
+                agents: 4,
+                steps: 24,
+                kill_at: None,
+            },
+        ]
+    }) {
+        let p = script(&cfg).person;
+        let at = direct_land_at(p.len());
+        assert_eq!(at % 2, 0, "seed {}: a landing act", cfg.seed);
+        assert!(at < p.len() - 2, "seed {}: before the tail", cfg.seed);
+        assert_eq!(
+            p[at],
+            PersonAct::Land { relayed: false },
+            "seed {}",
+            cfg.seed
+        );
+        assert!(
+            p.contains(&PersonAct::Land { relayed: true }),
+            "seed {}",
+            cfg.seed
+        );
+    }
 }
 
 #[test]

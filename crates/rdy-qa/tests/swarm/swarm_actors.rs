@@ -878,6 +878,27 @@ fn sg4_a_lost_daemon_in_a_run_that_kills_nothing_fails_with_the_seed() {
     assert!(j.entries().iter().all(|e| e.outcome != Outcome::Lost));
 }
 
+/// Final review M5 (minors item 20): in a run that expects a kill, a daemon lost before the run
+/// starts its kill is a product crash: the agent fails with the seed and journals no `Lost`.
+#[test]
+fn sg5_a_lost_daemon_before_the_run_starts_its_kill_fails_with_the_seed() {
+    let (p, cfg, j, _) = rig(2);
+    let g = Arc::new(KillGate::with_kill());
+    let h = agent::spawn(&p, &cfg, 0, reads(5000), j.clone(), g);
+    wait_for(&j, "three reads", |e| e.len() >= 3);
+    p.served.kill9();
+    let text = panic_text(h.join().expect_err("the agent must fail"));
+    assert!(
+        text.starts_with(&format!("swarm seed {SEED}: agent:a0 step ")),
+        "{text}"
+    );
+    assert!(
+        text.contains("lost the daemon before the run started its kill"),
+        "{text}"
+    );
+    assert!(j.entries().iter().all(|e| e.outcome != Outcome::Lost));
+}
+
 #[test]
 fn sg4_a_lost_daemon_after_the_restart_fails_with_the_seed() {
     let (p, cfg, j, _) = rig(2);
@@ -885,6 +906,7 @@ fn sg4_a_lost_daemon_after_the_restart_fails_with_the_seed() {
     let h = agent::spawn(&p, &cfg, 0, reads(5000), j.clone(), g.clone());
     wait_for(&j, "three reads", |e| e.len() >= 3);
     // the kill window: the call is lost, the agent waits, then goes on in epoch 1
+    g.killing();
     p.served.kill9();
     g.restarted();
     wait_for(&j, "a read after the restart", |e| {

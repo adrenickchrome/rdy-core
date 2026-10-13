@@ -347,19 +347,25 @@ fn pick(rng: &mut Rng, me: usize, agents: usize) -> Pick {
     }
 }
 
-fn other_agent(rng: &mut Rng, me: usize, agents: usize) -> usize {
-    if agents < 2 {
+/// Another writer than `me`, drawn: the partner of a `Collide`, an `Include` or an `AltCreate`.
+/// A reviewer never writes, so it is never drawn (final review M8). `me` when no other writer
+/// exists.
+fn other_agent(rng: &mut Rng, me: usize, cfg: &Config) -> usize {
+    let others: Vec<usize> = (0..cfg.agents)
+        .filter(|&i| i != me && !cfg.is_reviewer(i))
+        .collect();
+    if others.is_empty() {
         return me;
     }
-    let a = rng.below(agents - 1);
-    if a >= me { a + 1 } else { a }
+    others[rng.below(others.len())]
 }
 
 fn area(rng: &mut Rng) -> &'static str {
     AREAS[rng.below(AREAS.len())]
 }
 
-fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
+fn make(rng: &mut Rng, kind: Kind, me: usize, cfg: &Config) -> Act {
+    let agents = cfg.agents;
     match kind {
         Kind::Brief => Act::Brief {
             target: pick(rng, me, agents),
@@ -379,7 +385,7 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
             contra: None,
         },
         Kind::Collide => Act::Collide {
-            with: other_agent(rng, me, agents),
+            with: other_agent(rng, me, cfg),
             target: Pick::Seed(rng.below(SEED_BLOCKS)),
         },
         Kind::Cite => Act::Cite {
@@ -388,13 +394,13 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
         Kind::Repin => Act::Repin,
         Kind::Fork => Act::Fork,
         Kind::Include => Act::Include {
-            from: other_agent(rng, me, agents),
+            from: other_agent(rng, me, cfg),
         },
         Kind::Exclude => Act::Exclude,
         Kind::Undo => Act::Undo,
         Kind::Intent => Act::Intent { area: area(rng) },
         Kind::AltCreate => Act::AltCreate {
-            with: other_agent(rng, me, agents),
+            with: other_agent(rng, me, cfg),
         },
         Kind::Propose => Act::Propose,
         Kind::ReviewNext => Act::ReviewNext,
@@ -430,7 +436,7 @@ fn actor_script(
     }];
     for _ in 1..cfg.steps {
         let kind = weighted(rng, weights);
-        acts.push(make(rng, kind, me, cfg.agents));
+        acts.push(make(rng, kind, me, cfg));
     }
     let mut free: Vec<usize> = (1..cfg.steps).collect();
     for (act, lo, hi) in placed {
@@ -465,9 +471,11 @@ fn actor_script(
 ///
 /// Every actor's first act is `Brief`. Only the reviewers hold `ReviewNext`, at least three
 /// each. Every writer holds at least one `Collide`, `Cite`, `Propose` and `Inbox`; every
-/// reviewer at least one `Inbox`; agents 0 and 1 hold an `AltCreate` with each other. The
-/// person's script holds `steps / 2` acts: every other act lands, the run ends with an
-/// `AcceptAdvice` and a `Land`, and every `PersonAct` comes at least once (ruling task-5.2). The
+/// reviewer at least one `Inbox`; agents 0 and 1 hold an `AltCreate` with each other. A
+/// `Collide`, `Include` or `AltCreate` names another writer. The person's script holds
+/// `steps / 2` acts: every other act lands, one landing at a fixed act is direct, the run ends
+/// with an `AcceptAdvice` and a `Land`, and every `PersonAct` comes at least once (ruling
+/// task-5.2). The
 /// members of a contradiction pair hold their marked `Create` acts in the order `Script::contra`
 /// states.
 ///
@@ -517,8 +525,8 @@ pub fn script(cfg: &Config) -> Script {
             }
             required.push(Act::Inbox { ack: true });
         } else {
-            required.push(make(&mut rng, Kind::Collide, me, cfg.agents));
-            required.push(make(&mut rng, Kind::Cite, me, cfg.agents));
+            required.push(make(&mut rng, Kind::Collide, me, cfg));
+            required.push(make(&mut rng, Kind::Cite, me, cfg));
             required.push(Act::Propose);
             required.push(Act::Inbox { ack: true });
             if cfg.agents >= 2 && me < 2 {
@@ -557,10 +565,17 @@ pub fn script(cfg: &Config) -> Script {
     }
 }
 
+/// The person's act that lands direct (`rdy approve` with no relay, the CLI parity path; final
+/// review M4): the even act at the middle of the script, before the tail.
+pub fn direct_land_at(len: usize) -> usize {
+    (len / 2) & !1
+}
+
 /// The person's acts (`len` of them, at least 12): a landing cadence, so the run lands as it goes
 /// (ruling task-5.2). Each even act lands; each odd act is drawn from the other kinds; the last
 /// two accept the advice the person is shown on a queued proposal and land; and each other kind
-/// comes at least once, on an odd act before those two.
+/// comes at least once, on an odd act before those two. The landing at `direct_land_at` is a
+/// direct `rdy approve` (the CLI parity path); the last one is relayed.
 fn person_script(rng: &mut Rng, len: usize) -> Vec<PersonAct> {
     let make = |rng: &mut Rng, id: u8| match id {
         0 => PersonAct::Land {
@@ -584,6 +599,7 @@ fn person_script(rng: &mut Rng, len: usize) -> Vec<PersonAct> {
         .collect();
     acts[len - 2] = PersonAct::AcceptAdvice;
     acts[len - 1] = PersonAct::Land { relayed: true };
+    acts[direct_land_at(len)] = PersonAct::Land { relayed: false };
     let mut free: Vec<usize> = (1..len - 2).step_by(2).collect();
     for id in 1..6u8 {
         let at = free.swap_remove(rng.below(free.len()));

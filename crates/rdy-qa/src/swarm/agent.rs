@@ -20,9 +20,9 @@
 //!   state they need first (`view_show`, `suspects` entries) and decide from it. A refusal of
 //!   an actual call is only ever checked against the closed table (`allowed`); a message text
 //!   never turns a refusal into a skip.
-//! - `Lost` is journaled only between the kill and the restart: while the run expects a kill
-//!   (`KillGate::with_kill`) and the actor still runs on the first daemon (epoch 0). Any other
-//!   lost daemon fails the run with the seed.
+//! - `Lost` is journaled only between the kill and the restart: the run expects a kill
+//!   (`KillGate::with_kill`), has started it (`KillGate::killing`), and the actor still runs on
+//!   the first daemon (epoch 0). Any other lost daemon fails the run with the seed.
 //! - A contradiction pair is written through the real flow (ruling task-4.2): the first
 //!   member's claim is created, proposed and landed by the person, then the second member
 //!   creates its claim against canon. The executor adds no act of its own for this. Each
@@ -39,6 +39,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
     Arc, Condvar, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -80,6 +81,8 @@ pub struct KillGate {
     epoch: Mutex<u32>,
     changed: Condvar,
     expects_kill: bool,
+    /// Set by the run just before it kills the daemon (`killing`).
+    killing: AtomicBool,
     turn: RwLock<()>,
 }
 
@@ -101,6 +104,17 @@ impl KillGate {
     /// Whether the run kills the daemon once.
     pub fn expects_kill(&self) -> bool {
         self.expects_kill
+    }
+
+    /// The run is about to kill the daemon: from now until `restarted`, a lost call is the
+    /// scripted kill's (final review M5).
+    pub fn killing(&self) {
+        self.killing.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the run has started its kill (`killing`).
+    pub fn is_killing(&self) -> bool {
+        self.killing.load(Ordering::SeqCst)
     }
 
     /// The person's turn to land: no act that decides from a read runs while it is held.
@@ -158,8 +172,9 @@ pub struct AgentReport {
     pub proposals: Vec<String>,
     /// The cursor its last inbox read returned.
     pub last_cursor: String,
-    /// The cursor of its last read that acked, if one did: where a read starts again when
-    /// `last_cursor` is past the end of the log after a kill.
+    /// The cursor of its last read that acked: where a read starts again when `last_cursor` is
+    /// past the end of the log after a kill. `None` when the agent does not know it: no ack yet,
+    /// or an ack whose reply the kill cut (`persisted_after`).
     pub persisted: Option<String>,
     /// The range of its last inbox read (`InboxRead::range`).
     pub range: u32,
@@ -337,13 +352,15 @@ impl Link {
     /// A call the daemon's death cut off. Accepted only in the kill window (`may_lose`); any
     /// other lost daemon is a product crash or an unplanned exit, and fails the run.
     pub fn lost(&self, act: &str, why: &str) -> Res {
-        if may_lose(self.gate.expects_kill(), self.epoch) {
+        if may_lose(self.gate.expects_kill(), self.gate.is_killing(), self.epoch) {
             Res::Lost
         } else {
-            let when = if self.gate.expects_kill() {
-                format!("after the restart (epoch {})", self.epoch)
-            } else {
+            let when = if !self.gate.expects_kill() {
                 "in a run that kills nothing".to_string()
+            } else if !self.gate.is_killing() {
+                "before the run started its kill".to_string()
+            } else {
+                format!("after the restart (epoch {})", self.epoch)
             };
             self.fail(act, &format!("lost the daemon {when}: {why}"))
         }
@@ -414,10 +431,38 @@ impl Link {
     }
 }
 
-/// Whether a call may be lost: the run kills the daemon once, and the actor still runs on the
-/// daemon that dies (epoch 0).
-fn may_lose(expects_kill: bool, epoch: u32) -> bool {
-    expects_kill && epoch == 0
+/// Whether a call may be lost: the run kills the daemon once, it has started the kill
+/// (`KillGate::killing`), and the actor still runs on the daemon that dies (epoch 0). A lost
+/// daemon before the kill starts is a product crash (final review M5).
+fn may_lose(expects_kill: bool, killing: bool, epoch: u32) -> bool {
+    expects_kill && killing && epoch == 0
+}
+
+/// The cursor the daemon persisted for the agent after an inbox read, as far as the agent knows:
+/// `cursor` after an acknowledged `ack: true` read, else `old`. `None` is unknown (no ack yet,
+/// or an ack whose reply the kill cut: the daemon may or may not have persisted it).
+fn persisted_after(
+    old: Option<String>,
+    ack: bool,
+    res: &Res,
+    cursor: Option<String>,
+) -> Option<String> {
+    match res {
+        Res::Ok(_) if ack => cursor,
+        Res::Lost if ack => None,
+        _ => old,
+    }
+}
+
+/// The tension labels of a proposal's advised entries (`rdy_read P-x@n`'s `proposal.advised`):
+/// open semantic tensions of the event-derived set.
+pub(crate) fn advised_labels(proposal: &Value) -> Vec<String> {
+    proposal["advised"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a["tension"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// What a call met, as the journal records it, and the failure text when it is a refusal the
@@ -700,19 +745,18 @@ impl Agent {
 
     /// After a kill the agent does not know whether the view op in flight (an undo, an exclude,
     /// an include) took effect. It reads its view and drops what the view no longer holds.
+    /// The read is a journaled `view_show` (final review M7): a view the kill left unmade reads
+    /// as empty, and any other refusal fails the run through the closed table.
     fn resync(&mut self) {
         if !self.wrote && self.included.is_empty() {
             return;
         }
-        let args = json!({"op": "show", "view": self.view});
-        let res = self.link.raw("read", "rdy_view", args);
-        let Res::Ok(v) = res else { return };
-        let held: BTreeSet<String> = v["changes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|c| c["id"].as_str().map(str::to_string))
-            .collect();
+        let view = self.view.clone();
+        let held: BTreeSet<String> = match self.show(&view) {
+            Shown::Lost => return,
+            Shown::Missing => BTreeSet::new(),
+            Shown::View { changes, .. } => changes.into_iter().collect(),
+        };
         self.included.retain(|c| held.contains(c));
         self.gone = self
             .own
@@ -726,7 +770,6 @@ impl Agent {
         {
             self.scratch = None;
         }
-        self.link.journal.record(self.link.entry("read"));
     }
 
     fn act(&mut self, act: &Act) {
@@ -919,6 +962,7 @@ impl Agent {
             token = v["base"]["token"].as_str().unwrap_or_default().to_string();
             blocks = v["base"]["blocks"].as_array().cloned().unwrap_or_default();
             en.brief = Some(token.clone());
+            en.seen = labels_of(&v["inflight"]["tensions"]);
         });
         matches!(res, Res::Ok(_)).then_some((token, blocks))
     }
@@ -1003,7 +1047,10 @@ impl Agent {
             "brief",
             "rdy_brief",
             json!({"ids": [section]}),
-            |en, v| en.brief = v["base"]["token"].as_str().map(str::to_string),
+            |en, v| {
+                en.brief = v["base"]["token"].as_str().map(str::to_string);
+                en.seen = labels_of(&v["inflight"]["tensions"]);
+            },
         );
     }
 
@@ -1737,16 +1784,13 @@ impl Agent {
             });
             cursor = Some(c);
         });
+        self.persisted = persisted_after(self.persisted.take(), ack, &res, cursor.clone());
         match res {
-            Res::Ok(_) => {
-                let c = cursor.unwrap_or_default();
-                if ack {
-                    self.persisted = Some(c.clone());
-                }
-                self.last_cursor = c;
-            }
+            Res::Ok(_) => self.last_cursor = cursor.unwrap_or_default(),
             // the kill dropped a batch this agent had read: the cursor is past the end of the
             // log. It reads from the cursor the daemon persisted, and that starts a new range.
+            // An unknown persisted cursor is journaled as an empty `since`: the range's start
+            // cannot be checked (final review M7)
             Res::Refused(code, _) if resume && code == "E_BAD_INPUT" => {
                 self.range += 1;
                 let since = self.persisted.clone().unwrap_or_default();
@@ -1872,14 +1916,56 @@ mod tests {
     #[test]
     fn sg4_a_lost_call_is_accepted_only_in_the_kill_window() {
         assert!(
-            may_lose(true, 0),
-            "a kill is expected and has not been survived"
+            may_lose(true, true, 0),
+            "the kill has started and has not been survived"
         );
-        assert!(!may_lose(true, 1), "after the restart");
-        assert!(!may_lose(false, 0), "no kill is expected");
-        assert!(!may_lose(false, 1));
+        assert!(!may_lose(true, true, 1), "after the restart");
+        assert!(!may_lose(false, false, 0), "no kill is expected");
+        assert!(!may_lose(false, false, 1));
         assert!(KillGate::with_kill().expects_kill());
         assert!(!KillGate::new().expects_kill());
+    }
+
+    /// Final review M5 (minors item 20): before the run starts its kill, a lost daemon is a
+    /// product crash, not the scripted kill.
+    #[test]
+    fn sg5_a_lost_call_before_the_kill_starts_fails_the_run() {
+        assert!(!may_lose(true, false, 0), "the kill has not started");
+        let gate = KillGate::with_kill();
+        assert!(!gate.is_killing());
+        gate.killing();
+        assert!(gate.is_killing());
+        gate.restarted();
+        assert_eq!(gate.epoch(), 1);
+    }
+
+    /// Final review M7 (minors item 17): after an ack whose reply the kill cut, the agent does
+    /// not know the cursor the daemon persisted.
+    #[test]
+    fn sg5_a_lost_ack_leaves_the_persisted_cursor_unknown() {
+        let old = Some("1.2.0".to_string());
+        let new = Some("1.9.0".to_string());
+        let ok = Res::Ok(json!({}));
+        assert_eq!(persisted_after(old.clone(), true, &ok, new.clone()), new);
+        assert_eq!(persisted_after(old.clone(), false, &ok, new.clone()), old);
+        assert_eq!(persisted_after(old.clone(), true, &Res::Lost, None), None);
+        assert_eq!(persisted_after(old.clone(), false, &Res::Lost, None), old);
+        let refused = Res::Refused("E_BAD_INPUT".into(), "past the end".into());
+        assert_eq!(persisted_after(old.clone(), true, &refused, None), old);
+    }
+
+    /// Final review M7 (minors item 15): a proposal read names the advised tensions it saw.
+    #[test]
+    fn sg5_a_proposal_read_names_its_advised_tensions() {
+        let p = json!({"advised": [
+            {"tension": "tn-aaa", "accepted": false},
+            {"tension": "tn-bbb", "accepted": true},
+        ]});
+        assert_eq!(
+            advised_labels(&p),
+            vec!["tn-aaa".to_string(), "tn-bbb".to_string()]
+        );
+        assert!(advised_labels(&json!({})).is_empty());
     }
 
     #[test]
@@ -2015,5 +2101,91 @@ mod tests {
                 Some("nobody-wrote-here")
             )
         );
+    }
+
+    /// Final review M7 (minors item 16): the read a resync makes after a kill is journaled and
+    /// held to the closed table, like every other call.
+    #[test]
+    fn sg5_a_resync_journals_its_read_of_the_view() {
+        let cfg = Config {
+            seed: 13,
+            agents: 2,
+            steps: 12,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let journal = Journal::new();
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:a0",
+            "a0",
+            "writer",
+            Some(vec!["payments".to_string()]),
+            journal.clone(),
+            Arc::new(KillGate::new()),
+        );
+        let mut agent = Agent::new(link, 0, p.seed.clone());
+        // a write the kill may have cut: the view may not exist
+        agent.wrote = true;
+        agent.resync();
+        let last = journal
+            .entries()
+            .pop()
+            .expect("the resync's read is journaled");
+        assert_eq!(
+            (last.act, last.outcome, last.view.as_deref()),
+            (
+                "view_show",
+                Outcome::Refused("E_NOT_FOUND".into()),
+                Some("a0")
+            )
+        );
+    }
+
+    /// Final review M7 (minors item 15): a briefing names the open tensions it lists, so the
+    /// log check holds them to the log too.
+    #[test]
+    fn sg5_a_briefing_names_the_tensions_it_lists() {
+        let cfg = Config {
+            seed: 14,
+            agents: 2,
+            steps: 12,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let journal = Journal::new();
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:a0",
+            "a0",
+            "writer",
+            Some(vec!["payments".to_string()]),
+            journal.clone(),
+            Arc::new(KillGate::new()),
+        );
+        let mut agent = Agent::new(link, 0, p.seed.clone());
+        let claim = p.seed.claims[0].clone();
+        let (token, _) = agent
+            .brief_call(std::slice::from_ref(&claim))
+            .expect("a briefing");
+        // an update of a stable claim with no justification opens `unjustified_change`
+        let ops = json!([{"op": "update", "id": claim, "body": "The ledger rule first changes."}]);
+        let e = agent.link.entry("write");
+        let res = agent.write_call(e, "write", json!({"ops": ops, "brief": token}));
+        assert!(matches!(res, Res::Ok(_)));
+        let opened = journal.entries().pop().expect("the write").seen;
+        assert!(!opened.is_empty(), "the write opened a tension");
+        agent
+            .brief_call(std::slice::from_ref(&claim))
+            .expect("a briefing");
+        let briefed = journal.entries().pop().expect("the briefing");
+        assert_eq!(briefed.act, "brief");
+        for label in &opened {
+            assert!(
+                briefed.seen.contains(label),
+                "{label} in {:?}",
+                briefed.seen
+            );
+        }
     }
 }

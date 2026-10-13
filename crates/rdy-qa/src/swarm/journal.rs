@@ -132,6 +132,14 @@ impl Journal {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// The entries from index `from` on, and the index after them: a reader that polls keeps the
+    /// index and copies only what is new (final review M10).
+    pub fn since(&self, from: usize) -> (Vec<Entry>, usize) {
+        let all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let from = from.min(all.len());
+        (all[from..].to_vec(), all.len())
+    }
 }
 
 const WRITE_CODES: &[&str] = &[

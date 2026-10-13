@@ -18,7 +18,7 @@
 //! wrongly marks store-only fails there instead of vanishing on both sides of the comparison.
 use crate::daemon::Served;
 use crate::invariants::Violation;
-use rdy_schema::{Pack, PackSet};
+use rdy_schema::Pack;
 use rdy_store::Store;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +35,8 @@ pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
 
 /// The supporting block types of the standard pack: never written into the tree, with their
 /// subtrees. The spec also lists reviews, tensions and intents as supporting; those are store
-/// records and not block types, so no export entry has them.
+/// records and not block types, so no export entry has them. The list is the oracle's own and
+/// names `rdy-standard`'s types: a pack that adds a supporting type needs it added here.
 pub const SUPPORTING_TYPES: &[&str] = &["decision", "question", "rationale"];
 
 fn violation(rule: &'static str, detail: impl Into<String>) -> Violation {
@@ -209,9 +210,9 @@ pub fn matches_export(s: &Served, view: &str, checkout: &Path) -> Result<(), Vec
         )]);
     }
     let mut found = vec![];
-    let pack = PackSet::with_builtin()
-        .resolve("rdy-standard")
-        .expect("the standard pack resolves");
+    // the project's own pack names the type of each id prefix (final review M9, minors item 7);
+    // the supporting types are the oracle's closed list (SUPPORTING_TYPES)
+    let pack = rdy_engine::project_pack(s.dir.path()).expect("the project's pack resolves");
     let raw = files(&out.join("docs"), false);
     let mut types = BTreeMap::new();
     for bytes in raw.values() {

@@ -12,7 +12,9 @@
 //! `land` (`Skip::ProposedBeforeSet`) that names the proposal. Journal entries of the
 //! relay carry the actor `agent:relay`; those of a direct command carry `human:qa`, the human
 //! the project's user config names.
-use super::agent::{KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of, spell};
+use super::agent::{
+    KINDS, KillGate, Link, Pace, Res, Where, advised_labels, inbox_labels, labels_of, spell,
+};
 use super::journal::{Entry, Journal, Outcome, Skip};
 use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
@@ -431,8 +433,9 @@ impl Person {
             let mut digest = None;
             let res = self
                 .link
-                .exec(e, "read", "rdy_read", json!({"id": pref}), |_, v| {
+                .exec(e, "read", "rdy_read", json!({"id": pref}), |en, v| {
                     let p = &v["proposal"];
+                    en.seen = advised_labels(p);
                     let open = p["advised"]
                         .as_array()
                         .is_some_and(|a| a.iter().any(|t| t["accepted"] == false));
@@ -857,6 +860,7 @@ mod tests {
         let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
         assert!(ok, "{landed}");
         // the kill, and the run's restart: the relay's next call is lost, then it reconnects
+        gate.killing();
         p.served.kill9();
         gate.restarted();
         assert!(

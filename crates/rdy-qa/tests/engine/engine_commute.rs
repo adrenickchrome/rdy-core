@@ -83,7 +83,9 @@ fn run(key: u64, edits: &[(usize, String)], order: &[usize]) -> Outcome {
     (bodies, snapshot)
 }
 
-/// A subset of the claims in random order (the edits), and two orders to land them in.
+/// A subset of the claims in random order (the edits), and two different orders to land them
+/// in: two shuffles, the second turned by one when it equals the first (final review M9, minors
+/// item 5: equal shuffles made the check compare a run with itself).
 fn cases_strategy() -> impl Strategy<Value = (Vec<usize>, Vec<usize>, Vec<usize>)> {
     proptest::sample::subsequence((0..CLAIMS).collect::<Vec<_>>(), 2..=CLAIMS)
         .prop_shuffle()
@@ -92,6 +94,29 @@ fn cases_strategy() -> impl Strategy<Value = (Vec<usize>, Vec<usize>, Vec<usize>
             let order = Just((0..n).collect::<Vec<_>>()).prop_shuffle();
             (Just(claims), order.clone(), order)
         })
+        .prop_map(|(claims, first, mut second)| {
+            if second == first {
+                second.rotate_left(1);
+            }
+            (claims, first, second)
+        })
+}
+
+/// The two orders of every case differ.
+#[test]
+fn sg2_the_two_landing_orders_always_differ() {
+    let mut runner = TestRunner::new(Config {
+        cases: 256,
+        rng_seed: RngSeed::Fixed(0x5921_c034),
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(&cases_strategy(), |(_, first, second)| {
+            prop_assert_ne!(first, second);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

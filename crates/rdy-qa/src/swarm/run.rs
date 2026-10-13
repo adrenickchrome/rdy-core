@@ -4,8 +4,8 @@
 //! - The run builds the project and starts every agent and the person. It paces the person: act
 //!   `k` of `n` waits until every agent has reached step `(k + 1) * steps / n`, and then the
 //!   person's queue takes the proposals the agents made so far. A proposal of a contradiction
-//!   pair's first claim, a proposal that chooses a set member, and a set winner's later proposal
-//!   go to the front of the queue.
+//!   pair's first claim goes to the front of the queue; a proposal that chooses a set member,
+//!   and a set winner's later proposal, go right after the queued first claims.
 //! - When the furthest agent reaches `kill_at`, the run kills the daemon (`kill -9`) and opens the
 //!   gate: the next client starts a new daemon.
 //! - The freeze (no actor runs): each agent reads its inbox with `ack: true` until `more` is
@@ -34,7 +34,7 @@ use super::oracle::{self, copy_tree};
 use super::people::{self, Hooks, Queue};
 use super::project::{self, CLAIMS_PER_AREA, SeedBlocks, SwarmProject};
 use super::script::{AREAS, Config, Script, script};
-use crate::daemon::{Served, human_command, short_tempdir};
+use crate::daemon::{Served, human_command, short_tempdir_in};
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -156,8 +156,9 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     let (mut view, mut advised) = (None, None);
     let mut e = link.entry("read");
     e.block = Some(pref.to_string());
-    let res = link.exec(e, "read", "rdy_read", json!({"id": pref}), |_, v| {
+    let res = link.exec(e, "read", "rdy_read", json!({"id": pref}), |en, v| {
         let p = &v["proposal"];
+        en.seen = agent::advised_labels(p);
         view = p["view"].as_str().map(str::to_string);
         let open = p["advised"]
             .as_array()
@@ -272,11 +273,54 @@ fn version_of(pref: &str) -> (&str, u32) {
     }
 }
 
+/// Where the pacer puts a proposal it has not queued before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// A proposal of a contradiction pair's first marked claim: at the front.
+    FirstClaim,
+    /// A proposal that chooses a set member, or a set winner's later work: after every queued
+    /// first-claim proposal, before the rest.
+    Ahead,
+    /// Any other proposal: at the back.
+    Behind,
+}
+
+/// Queues proposal `r` at `place`; a newer version of a queued proposal takes its place, and an
+/// older one is dropped. `ranks` holds the place of each proposal the pacer queued, by stable id.
+/// A first claim goes after the first claims at the front; a proposal `Ahead` goes after every
+/// queued first claim and every earlier one `Ahead`, so it never passes a first claim (final
+/// review M8); the rest go to the back. Each place keeps its proposals oldest first.
+fn enqueue(q: &mut Vec<String>, r: String, place: Place, ranks: &mut BTreeMap<String, Place>) {
+    let (stable, n) = version_of(&r);
+    if let Some(at) = q.iter().position(|x| version_of(x).0 == stable) {
+        if version_of(&q[at]).1 < n {
+            q[at] = r;
+        }
+        return;
+    }
+    ranks.insert(stable.to_string(), place);
+    let rank = |x: &String| ranks.get(version_of(x).0).copied();
+    let at = match place {
+        Place::FirstClaim => q
+            .iter()
+            .take_while(|x| rank(x) == Some(Place::FirstClaim))
+            .count(),
+        Place::Ahead => q
+            .iter()
+            .rposition(|x| matches!(rank(x), Some(Place::FirstClaim | Place::Ahead)))
+            .map_or(0, |p| p + 1),
+        Place::Behind => q.len(),
+    };
+    q.insert(at, r);
+}
+
 /// The person's pace: before act `k` of `len`, it waits until every agent has reached step
-/// `(k + 1) * steps / len`, then queues the agents' proposals made so far. The queue holds the
-/// latest version of each proposal, oldest proposal first, except that a proposal of the view of
-/// a contradiction pair's first marked claim goes first: the pair is reviewable only once that
-/// claim has landed (ruling task-4.2).
+/// `(k + 1) * steps / len`, then queues the agents' proposals made since its last act (it reads
+/// the journal from a cursor). The queue holds the latest version of each proposal, oldest
+/// proposal first, except that a proposal of the view of a contradiction pair's first marked
+/// claim goes first (the pair is reviewable only once that claim has landed, ruling task-4.2),
+/// and a proposal that chooses a member or a set winner's later work goes right after the queued
+/// first claims (`enqueue`).
 fn pacer(
     cfg: &Config,
     s: &Script,
@@ -294,18 +338,26 @@ fn pacer(
         .collect();
     let (progress, journal, queue) = (progress.clone(), journal.clone(), queue.clone());
     let queued: Mutex<BTreeSet<String>> = Mutex::default();
+    // how far the pacer has read the journal, and the views that won a set by a landing so far
+    let read: Mutex<(usize, BTreeSet<String>)> = Mutex::default();
+    // the place of each proposal queued so far, by stable id
+    let placed: Mutex<BTreeMap<String, Place>> = Mutex::default();
     Arc::new(move |k| {
         wait_for(&progress, due(k, steps, len), seed, "the person");
         let mut seen = queued.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut ranks = placed.lock().unwrap_or_else(PoisonError::into_inner);
         let mut q = queue.lock().unwrap_or_else(PoisonError::into_inner);
-        let entries = journal.entries();
-        // the views that won a set by a landing so far
-        let won: BTreeSet<String> = entries
-            .iter()
-            .filter(|e| e.act == "land" && e.outcome == Met::Ok)
-            .filter_map(|e| e.reply.as_ref()?["chosen"]["member"].as_str())
-            .map(str::to_string)
-            .collect();
+        let mut read = read.lock().unwrap_or_else(PoisonError::into_inner);
+        let (entries, next) = journal.since(read.0);
+        read.0 = next;
+        let won = &mut read.1;
+        won.extend(
+            entries
+                .iter()
+                .filter(|e| e.act == "land" && e.outcome == Met::Ok)
+                .filter_map(|e| e.reply.as_ref()?["chosen"]["member"].as_str())
+                .map(str::to_string),
+        );
         for e in entries {
             if e.act != "propose" || e.outcome != Met::Ok || !e.actor.starts_with("agent:a") {
                 continue;
@@ -326,13 +378,14 @@ fn pacer(
                 .as_ref()
                 .is_some_and(|v| first.contains(v) || won.contains(v))
                 || chooses;
-            let (stable, n) = version_of(&r);
-            match q.iter().position(|x| version_of(x).0 == stable) {
-                Some(at) if version_of(&q[at]).1 < n => q[at] = r,
-                Some(_) => {}
-                None if first_up => q.insert(0, r),
-                None => q.push(r),
-            }
+            let place = if e.view.as_ref().is_some_and(|v| first.contains(v)) {
+                Place::FirstClaim
+            } else if first_up {
+                Place::Ahead
+            } else {
+                Place::Behind
+            };
+            enqueue(&mut q, r, place, &mut ranks);
         }
     })
 }
@@ -438,9 +491,13 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     );
     let names: Vec<String> = (0..agents.len()).map(|i| format!("agent:a{i}")).collect();
     let mut kill_at = cfg.kill_at;
+    // each agent's furthest step, read from the journal's new entries only
+    let mut step: HashMap<&str, usize> = HashMap::new();
+    let mut cursor = 0;
     loop {
-        let mut step: HashMap<&str, usize> = HashMap::new();
-        for e in journal.entries() {
+        let (fresh, next) = journal.since(cursor);
+        cursor = next;
+        for e in fresh {
             if let Some(n) = names.iter().find(|n| **n == e.actor) {
                 let s = step.entry(n.as_str()).or_default();
                 *s = (*s).max(e.step);
@@ -463,6 +520,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         if let Some(k) = kill_at
             && furthest >= k
         {
+            gate.killing();
             p.served.kill9();
             gate.restarted();
             kill_at = None;
@@ -504,7 +562,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     );
     drop(relay);
     stop(&p.served, cfg.seed);
-    let frozen_dir = short_tempdir();
+    let frozen_dir = short_tempdir_in(project::run_parent());
     let frozen = frozen_dir.path().join("frozen");
     copy_tree(&at.dir, &frozen).unwrap_or_else(|e| {
         panic!(
@@ -790,7 +848,7 @@ fn change_in(text: &str) -> Option<String> {
 
 /// The block and the target of a dangling reference that a refusal names first:
 /// `<block> references <target>, which does not exist in canon` (the gate's `E_DANGLING_REF`).
-fn dangling_in(text: &str) -> Option<(String, String)> {
+pub fn dangling_in(text: &str) -> Option<(String, String)> {
     let (block, rest) = text.split_once(" references ")?;
     let (target, _) = rest.split_once(", which does not exist in canon")?;
     let block = block.rsplit(' ').next()?;
@@ -1049,7 +1107,7 @@ impl Drain {
     /// The failure of a refusal outside the drain's table.
     fn no_rule(&self, v: &str, code: &str, kind: &str) -> ! {
         panic!(
-            "swarm seed {}: view {v} met {code} ({kind}), which the drain has no rule for: {}",
+            "swarm seed {}: view {v} met {code} ({kind}), which the drain has no rule for\n  the daemon said: {}",
             self.cfg.seed, self.said
         )
     }
@@ -1848,7 +1906,7 @@ impl Drain {
         match res {
             Res::Ok(_) => {}
             Res::Refused(c, message) => panic!(
-                "swarm seed {}: view {v} met {c} ({kind}, resolving {code}), which the drain has no rule for: {message}",
+                "swarm seed {}: view {v} met {c} ({kind}), which the drain has no rule for\n  while resolving {code}; the daemon said: {message}",
                 self.cfg.seed
             ),
             Res::Lost => link_fail(&self.cfg, v, act),
@@ -1867,6 +1925,32 @@ fn link_fail(cfg: &Config, v: &str, act: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Final review M8 (minors items 23 and 39): a proposal that chooses a set member, or a
+    /// winner's later work, never passes a queued contra first claim; each place keeps its
+    /// proposals oldest first.
+    #[test]
+    fn sg5_a_choosing_proposal_never_passes_a_queued_first_claim() {
+        let mut q: Vec<String> = vec![];
+        let mut ranks = BTreeMap::new();
+        enqueue(&mut q, "P-o1@1".into(), Place::Behind, &mut ranks);
+        enqueue(&mut q, "P-f1@1".into(), Place::FirstClaim, &mut ranks);
+        enqueue(&mut q, "P-c1@1".into(), Place::Ahead, &mut ranks);
+        assert_eq!(q, ["P-f1@1", "P-c1@1", "P-o1@1"]);
+        enqueue(&mut q, "P-f2@1".into(), Place::FirstClaim, &mut ranks);
+        enqueue(&mut q, "P-c2@1".into(), Place::Ahead, &mut ranks);
+        assert_eq!(q, ["P-f1@1", "P-f2@1", "P-c1@1", "P-c2@1", "P-o1@1"]);
+        // a refused first claim waits at the back: a choosing proposal still comes after it
+        q.retain(|x| x != "P-f1@1");
+        q.push("P-f1@1".into());
+        enqueue(&mut q, "P-c3@1".into(), Place::Ahead, &mut ranks);
+        assert_eq!(q.last().map(String::as_str), Some("P-c3@1"));
+        // a newer version takes the old one's place; an older one is dropped
+        enqueue(&mut q, "P-o1@2".into(), Place::Behind, &mut ranks);
+        enqueue(&mut q, "P-c1@0".into(), Place::Ahead, &mut ranks);
+        assert!(q.contains(&"P-o1@2".to_string()) && !q.contains(&"P-o1@1".to_string()));
+        assert!(q.contains(&"P-c1@1".to_string()) && !q.contains(&"P-c1@0".to_string()));
+    }
 
     #[test]
     fn sg5_a_marker_and_the_space_before_it_are_stripped() {

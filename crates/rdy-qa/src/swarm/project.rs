@@ -7,6 +7,54 @@ use crate::fixtures::{land, write, writer};
 use crate::packs::{QA_PACK_YAML, use_pack};
 use rdy_engine::{DecisionInput, Rdy, Scope};
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The name of a swarm process's parent directory under `/tmp`, before its pid.
+const PARENT_PREFIX: &str = "rdysw-";
+
+/// This process's directory for every swarm project and frozen copy: `/tmp/rdysw-<pid>`. The
+/// sg5 checks share one run per seed in a static, which is never dropped, so those directories
+/// outlive the test binary. The first call removes the directories of swarm processes that have
+/// exited (`sweep`), so `/tmp` holds at most the last run of each process (final review I1).
+pub fn run_parent() -> &'static Path {
+    static PARENT: OnceLock<PathBuf> = OnceLock::new();
+    PARENT.get_or_init(|| {
+        let root = Path::new("/tmp");
+        let me = std::process::id();
+        sweep(root, me);
+        let p = root.join(format!("{PARENT_PREFIX}{me}"));
+        std::fs::create_dir_all(&p).unwrap_or_else(|e| panic!("cannot make {}: {e}", p.display()));
+        p
+    })
+}
+
+/// Removes each `<root>/rdysw-<pid>` whose process has exited (`daemon::exited`, which also
+/// sees another user's process), except `me`'s. Returns the paths it removed. A directory it
+/// cannot remove is left.
+pub fn sweep(root: &Path, me: u32) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut removed = vec![];
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(PARENT_PREFIX))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == me || !crate::daemon::exited(pid) {
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed.push(entry.path());
+        }
+    }
+    removed
+}
 
 /// How many claims each seed doc holds.
 pub const CLAIMS_PER_AREA: usize = 4;
@@ -58,7 +106,7 @@ const CLAIM_WORDS: [&str; CLAIMS_PER_AREA] = ["first", "second", "third", "fourt
 /// Builds the project: pack `rdy-qa`, then for each area a folder and a stable doc holding one
 /// section with four claims, one accepted decision and one term, landed in one landing.
 pub fn build(cfg: &Config) -> SwarmProject {
-    let served = Served::new();
+    let served = Served::new_in(run_parent());
     use_pack(
         served.dir.path(),
         "rdy-qa",
@@ -156,5 +204,40 @@ pub fn build(cfg: &Config) -> SwarmProject {
         seed,
         run_seed: cfg.seed,
         seed_landings,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review I1: the sweep removes the directory of a swarm process that has exited, and
+    /// keeps this process's, a live process's and any other name.
+    #[test]
+    fn sg5_the_sweep_removes_the_parents_of_exited_processes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let dead = child.id();
+        child.wait().expect("wait for true");
+        let live = std::process::id();
+        let names = [
+            format!("{PARENT_PREFIX}{dead}"),
+            format!("{PARENT_PREFIX}{live}"),
+            format!("{PARENT_PREFIX}1"),
+            format!("{PARENT_PREFIX}x"),
+            "rdyd-other".to_string(),
+        ];
+        for n in &names {
+            std::fs::create_dir_all(root.path().join(n).join("p")).expect("mkdir");
+        }
+        let removed = sweep(root.path(), live);
+        assert_eq!(removed, vec![root.path().join(&names[0])]);
+        for n in &names[1..] {
+            assert!(root.path().join(n).exists(), "{n} was kept");
+        }
+        assert!(run_parent().ends_with(format!("{PARENT_PREFIX}{live}")));
+        assert!(run_parent().is_dir());
     }
 }

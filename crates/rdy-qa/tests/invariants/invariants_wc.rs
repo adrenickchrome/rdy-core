@@ -74,22 +74,24 @@ fn sg2_a_missing_blob_is_a_wc_blobs_violation() {
 fn sg2_checkout_then_commit_with_no_edits_is_a_no_op() {
     let (s, _seed) = seeded();
     ok(&s, &["checkout", "work"]);
-    let log_len = |s: &rdy_qa::daemon::Served| {
+    // the whole log, compared as a value (final review M9, minors item 8: a length could hide
+    // a changed entry of the same size)
+    let log = |s: &rdy_qa::daemon::Served| {
         let (okk, v) = json(s, &["log"]);
         assert!(okk, "{v}");
-        serde_json::to_string(&v).unwrap().len()
+        v
     };
     let shown = |s: &rdy_qa::daemon::Served| {
         let (okk, v) = json(s, &["view", "show", "work"]);
         assert!(okk, "{v}");
         v["changes"].as_array().map(|c| c.len())
     };
-    let (log_before, shown_before) = (log_len(&s), shown(&s));
+    let (log_before, shown_before) = (log(&s), shown(&s));
     assert!(shown_before.is_some(), "view show lists the changes");
     ok(&s, &["add", "."]);
     let (okk, v) = json(&s, &["commit", "-m", "x"]);
     assert!(!okk && v["message"] == "nothing staged", "{v}");
-    assert_eq!(log_len(&s), log_before, "the log did not move");
+    assert_eq!(log(&s), log_before, "the log did not move");
     assert_eq!(shown(&s), shown_before, "the view holds the same changes");
     if let Err(v) = matches_export(&s, "work", s.dir.path()) {
         panic!("the checkout differs from the export: {v:?}");

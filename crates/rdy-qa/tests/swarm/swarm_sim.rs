@@ -131,6 +131,9 @@ fn logged_kinds(o: &Outcome) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The person's actor: a landing it made is a direct `rdy approve`.
+const HUMAN: &str = "human:qa";
+
 /// The acts every seed's run reaches before the freeze (ruling task-5.2).
 const CORE: [&str; 6] = [
     "write",
@@ -160,6 +163,8 @@ struct Coverage {
     /// `sg5_an_included_change_bound_to_the_winner_lands_after_the_choice` asserts it, and
     /// `sg3_a_fast_seed_includes_before_a_set_and_lands_after_it` asserts the scripts allow it.
     bound_include: bool,
+    /// A landing by a direct `rdy approve` (the person, with no relay: the CLI parity path).
+    direct: bool,
 }
 
 /// Whether the run (before the freeze) included a change that a set binds, chose that set by a
@@ -218,10 +223,10 @@ fn coverage(o: &Outcome) -> Coverage {
     let mut acts: BTreeSet<&'static str> = run
         .iter()
         .filter(|e| e.outcome == Met::Ok)
+        // an approve whose reply the kill cut, found landed (`land_found`), was not acknowledged:
+        // it is no `land` act (final review M14)
         .map(|e| match e.act {
             "inbox_resume" => "inbox",
-            // an approve whose reply the kill cut, found landed
-            run::LAND_FOUND if e.reply.is_some() => "land",
             act => act,
         })
         .collect();
@@ -274,6 +279,9 @@ fn coverage(o: &Outcome) -> Coverage {
     Coverage {
         winner_again,
         bound_include: bound_include(o),
+        direct: run
+            .iter()
+            .any(|e| e.act == "land" && e.outcome == Met::Ok && e.actor == HUMAN),
         acts,
         lost: run.iter().any(|e| e.outcome == Met::Lost),
         landings: landed.len(),
@@ -295,7 +303,10 @@ fn coverage(o: &Outcome) -> Coverage {
 /// and lands at least once before the freeze; the union of the seeds reaches every act of the
 /// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
 /// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry. Ruling
-/// task-5-round1.2: the union also reaches a set's winner landing again with no choice.
+/// task-5-round1.2: the union also reaches a set's winner landing again with no choice. Final
+/// review M4: the union also lands by a direct `rdy approve`. Only acknowledged `land` calls count
+/// as `land` (final review M14). With `RDY_QA_SWARM_SEEDS` set, only each seed's core acts are
+/// checked: the union is a property of the tier's seeds.
 #[test]
 fn sg5_the_run_exercised_every_act() {
     let mut all = Coverage {
@@ -307,6 +318,7 @@ fn sg5_the_run_exercised_every_act() {
         opened: false,
         winner_again: false,
         bound_include: false,
+        direct: false,
     };
     let mut failed = vec![];
     for (seed, r) in runs() {
@@ -320,7 +332,7 @@ fn sg5_the_run_exercised_every_act() {
         let c = coverage(o);
         // the evidence a person reads with --nocapture: what each seed's run reached
         eprintln!(
-            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, winner lands again {}, bound include then choice {}",
+            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, winner lands again {}, bound include then choice {}, direct landing {}",
             c.acts.len(),
             c.lost,
             c.landings,
@@ -329,7 +341,8 @@ fn sg5_the_run_exercised_every_act() {
             c.opened,
             c.acts.contains("accept_advice"),
             c.winner_again,
-            c.bound_include
+            c.bound_include,
+            c.direct
         );
         let missing: Vec<&str> = CORE
             .iter()
@@ -348,6 +361,14 @@ fn sg5_the_run_exercised_every_act() {
         all.kinds.extend(c.kinds);
         all.opened |= c.opened;
         all.winner_again |= c.winner_again;
+        all.direct |= c.direct;
+    }
+    // the union is a property of the tier's seeds: a run of listed seeds (to run a failing
+    // seed again) checks each seed's core acts only (final review M8, minors item 46)
+    if std::env::var("RDY_QA_SWARM_SEEDS").is_ok() {
+        eprintln!("RDY_QA_SWARM_SEEDS is set: the union of the seeds is not checked");
+        assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+        return;
     }
     let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
     let missing: Vec<&str> = Act::ALL_NAMES
@@ -389,12 +410,32 @@ fn sg5_the_run_exercised_every_act() {
     if !all.winner_again {
         lacks.push("a set's winner that landed again, choosing nothing".to_string());
     }
+    if !all.direct {
+        lacks.push("a landing by a direct rdy approve (no relay)".to_string());
+    }
     if !lacks.is_empty() {
         failed.push(format!(
             "swarm seeds {seeds:?}: before the freeze, no run had {lacks:?}"
         ));
     }
     assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
+/// Final review I1: each run's project and frozen copy live under this process's directory,
+/// which a later swarm process removes once this one has exited (`project::sweep`).
+#[test]
+fn sg5_a_run_keeps_its_dirs_under_the_process_directory() {
+    let parent = rdy_qa::swarm::project::run_parent();
+    each(|seed, o| {
+        for (what, dir) in [("project", &o.dir), ("frozen copy", &o.frozen)] {
+            assert!(
+                dir.starts_with(parent),
+                "swarm seed {seed}: the {what} is at {}, outside {}",
+                dir.display(),
+                parent.display()
+            );
+        }
+    });
 }
 
 #[test]
@@ -1023,14 +1064,29 @@ fn sg5_each_dangling_reference_repair_cites_a_discarded_block() {
         for (k, e) in drained.iter().enumerate() {
             let v = e.view.as_deref().unwrap_or("");
             if e.act == "propose" && e.outcome == Met::Refused("E_VALIDATION".to_string()) {
-                let repaired = drained[k + 1..]
+                // the next repair in the view rewrites the block and target the refusal names
+                let said = e.message.as_deref().unwrap_or("");
+                let named = run::dangling_in(said);
+                let next = drained[k + 1..]
                     .iter()
-                    .any(|x| x.act == "repair_dangling_ref" && x.view.as_deref() == Some(v));
-                if !repaired {
-                    bad.push(format!(
-                        "{v}: E_VALIDATION with no repair after it: {}",
-                        e.message.as_deref().unwrap_or("")
-                    ));
+                    .find(|x| x.act == "repair_dangling_ref" && x.view.as_deref() == Some(v));
+                match (&named, next) {
+                    (None, _) => bad.push(format!(
+                        "{v}: E_VALIDATION that names no dangling reference: {said}"
+                    )),
+                    (Some(_), None) => {
+                        bad.push(format!("{v}: E_VALIDATION with no repair after it: {said}"))
+                    }
+                    (Some((block, target)), Some(x)) => {
+                        if x.block.as_deref() != Some(block.as_str())
+                            || x.target.as_deref() != Some(target.as_str())
+                        {
+                            bad.push(format!(
+                                "{v}: the refusal names {block} -> {target}, the next repair {:?} -> {:?}",
+                                x.block, x.target
+                            ));
+                        }
+                    }
                 }
             }
             if e.act != "repair_dangling_ref" {
@@ -1076,10 +1132,13 @@ fn sg5_each_dangling_reference_repair_cites_a_discarded_block() {
         let st = r.read();
         for (block, target) in &repairs {
             let id = BlockId::parse(block).expect("a block id");
-            if let Ok(b) = st.block(&Scope::Canon, &id)
-                && b.ref_tokens().contains(target)
-            {
-                bad.push(format!("{block} still references {target} in canon"));
+            // the repaired block lands: a citing change is no dependent of the excluded one
+            match st.block(&Scope::Canon, &id) {
+                Ok(b) if b.ref_tokens().contains(target) => {
+                    bad.push(format!("{block} still references {target} in canon"));
+                }
+                Ok(_) => {}
+                Err(e) => bad.push(format!("the repaired block {block} is not in canon: {e}")),
             }
         }
         drop(st);
@@ -1775,6 +1834,12 @@ fn sg5_each_inbox_is_a_function_of_the_log() {
             let run_name = actor.trim_start_matches("agent:").to_string();
             let first = reads[0].inbox.as_ref().expect("a read");
             let lastr = reads[reads.len() - 1].inbox.as_ref().expect("a read");
+            // a range that starts where the daemon persisted the agent's cursor, which the agent
+            // does not know (an ack the kill cut, or none yet): its start cannot be checked
+            if first.since.is_empty() {
+                eprintln!("swarm seed {seed}: {actor} range {range} starts at an unknown cursor");
+                continue;
+            }
             let (Some(since), Some(upto)) =
                 (parse_cursor(&first.since), parse_cursor(&lastr.cursor))
             else {

@@ -361,6 +361,90 @@ mod tests {
         assert!(collision_pairs(&held, |_, _| true).is_empty());
     }
 
+    /// Final review M9 (minors item 38), on a real store: a1 and a3 write the seed claim from
+    /// its base; a3 includes a1's change, so its view holds the claim conflicted; a3 then writes
+    /// it from the conflict's base, which resolves the conflict and depends on both sides
+    /// (cres1). a5 and a6 write it from the seed base alone. a3's two changes are built on a
+    /// side, so neither collides; a5 and a6 do.
+    #[test]
+    fn sg5_resolved_in_reads_a_conflict_resolution_from_the_store() {
+        use crate::fixtures::{as_agent, land, project, seed_doc, version_of, write_as};
+        use rdy_engine::Scope;
+        use rdy_store::view::ViewOpKind;
+        let (_d, mut r) = project();
+        let (_doc, _section, c) = seed_doc(&mut r, "seed");
+        land(&mut r, "seed").expect("land the seed");
+        let base = version_of(&r, &Scope::Canon, &c);
+        let upd = |b: &str, body: &str| json!([{"op": "update", "id": c, "base": b, "body": body}]);
+        let put = |r: &mut Rdy, who: &str, b: &str| {
+            write_as(r, &as_agent(&format!("agent:{who}"), who), who, upd(b, who))
+                .unwrap_or_else(|e| panic!("{who}: {e}"))
+                .change
+        };
+        let c1 = put(&mut r, "a1", &base);
+        let c3a = put(&mut r, "a3", &base);
+        let a3 = as_agent("agent:a3", "a3");
+        r.store_mut()
+            .view_append(
+                "a3",
+                vec![ViewOpKind::Include {
+                    changes: vec![c1.parse().expect("a change id")],
+                }],
+                &a3.provenance(),
+            )
+            .expect("a3 includes a1's change");
+        r.invalidate();
+        assert!(
+            !r.read()
+                .conflicts(&Scope::View("a3".into()))
+                .unwrap()
+                .is_empty(),
+            "a3 holds the claim conflicted"
+        );
+        let c3 = put(&mut r, "a3", &base);
+        assert!(
+            r.read()
+                .conflicts(&Scope::View("a3".into()))
+                .unwrap()
+                .is_empty(),
+            "the write from the base resolved it"
+        );
+        let c5 = put(&mut r, "a5", &base);
+        let c6 = put(&mut r, "a6", &base);
+        let st = r.read();
+        assert!(
+            resolved_in(&st, &c3, &c, &base, "a3"),
+            "the resolving write"
+        );
+        assert!(
+            resolved_in(&st, &c3a, &c, &base, "a3"),
+            "a write its view resolved later"
+        );
+        for (ch, v) in [(&c5, "a5"), (&c6, "a6"), (&c1, "a1")] {
+            assert!(
+                !resolved_in(&st, ch, &c, &base, v),
+                "{v} wrote from the base alone"
+            );
+        }
+        let held: Vec<Collide<'_>> = [(&c3, "a3"), (&c5, "a5"), (&c6, "a6")]
+            .into_iter()
+            .map(|(ch, v)| Collide {
+                actor: v,
+                change: ch,
+                block: &c,
+                base: &base,
+                view: v,
+                resolves: resolved_in(&st, ch, &c, &base, v),
+            })
+            .collect();
+        let pair = if c5 < c6 {
+            (c5.clone(), c6.clone())
+        } else {
+            (c6.clone(), c5.clone())
+        };
+        assert_eq!(collision_pairs(&held, |_, _| false), BTreeSet::from([pair]));
+    }
+
     #[test]
     fn sg5_new_blocking_canon_keys_by_kind_and_sorted_blocks() {
         let before = json!({"tensions": [row("fork", "blocking", &["c-2", "c-1"], false)]});

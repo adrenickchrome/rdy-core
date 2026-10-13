@@ -282,6 +282,9 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: one rdy_write of 2,002 ops (~9 MiB) through the MCP parameter path, consequences included (recorded; intake: the &Value parse and the deep clone of ops cost about +30 ms per 9 MiB)"
         }
         "render" => "< 2 s full render at 100k (spec 11)",
+        "render_cold" => {
+            "no spec target: the full render of canon on a fresh handle (canon read outside the timer), the tension build of the disagreements page included (FW-SW2); compare with render, whose state keeps its set across runs"
+        }
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
         "new_doc_single" => "in-process comparator for daemon_write_single (no spec target)",
@@ -2983,6 +2986,28 @@ fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str
     }));
 }
 
+/// `render_cold`: the full render of canon on a fresh handle each run, canon read outside the
+/// timer, so the median holds what the first render after a start pays: the tension set the
+/// disagreements page reads is built inside it (final review M2). `render` reuses one state, whose
+/// set is built once in its first run. Run with the project closed.
+fn tier_render_cold(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    dir: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) {
+    out.push(measure_timed(&format!("render_cold{sfx}"), runs, |i| {
+        let r = Rdy::open(proj).expect("open");
+        let st = r.read();
+        st.materialized(&Scope::Canon).expect("canon");
+        let site = dir.join(format!("site_cold{sfx}{i}"));
+        let s = Instant::now();
+        rdy_render::render_site(&st, &Scope::Canon, &site).expect("render");
+        s.elapsed()
+    }));
+}
+
 /// Cold open: a fresh handle on the project, then the first read of canon.
 fn tier_cold_open(out: &mut Vec<Measure>, proj: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("cold_open{sfx}"), runs, |_| {
@@ -3126,6 +3151,7 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     drop(r);
     tier_cold_open(&mut out, &proj, "", 5);
+    tier_render_cold(&mut out, &proj, dir.path(), "", 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -3157,7 +3183,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
-    out.extend(daemon_clients_ops(&proj, dir.path()));
+    out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
     out.extend(bound_ops(dir.path()));
     out.extend(stdio_mcp_ops(dir.path()));
     // the view ops last: the views and landings they leave behind would move the ops above
@@ -3404,7 +3430,11 @@ fn wait_ready(
 /// real one, started by the first `rdy mcp` proxy. Seven proxies write one claim after another
 /// until the timed proxy has made its runs; each timed run is one `rdy_write` of one claim, its
 /// durable flush included. The load is checked: every background writer must have written.
-fn daemon_clients_ops(proj: &std::path::Path, parent: &std::path::Path) -> Vec<Measure> {
+fn daemon_clients_ops(
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    runs: usize,
+) -> Vec<Measure> {
     use crate::mcp::Reply;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, mpsc};
@@ -3444,7 +3474,7 @@ fn daemon_clients_ops(proj: &std::path::Path, parent: &std::path::Path) -> Vec<M
         stop.store(true, Ordering::Relaxed);
         panic!("{e}");
     }
-    let m = measure_timed("daemon_write_8_clients", 30, |i| {
+    let m = measure_timed("daemon_write_8_clients", runs, |i| {
         let args = json!({"ops": [{"op": "create", "type": "claim", "parent": section, "body": format!("Timed claim {i}.")}]});
         let s = Instant::now();
         let r = timed.call_within("rdy_write", args, budget);
@@ -3848,6 +3878,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_render(&mut out, &r, parent, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
+    tier_render_cold(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
@@ -4414,12 +4445,74 @@ mod tests {
         tier_invariants(&mut ops, &r, 2);
         crate::invariants::check_all(&r).unwrap_or_else(|v| panic!("violations: {v:?}"));
         drop(r);
-        ops.extend(daemon_clients_ops(&proj, dir.path()));
+        ops.extend(daemon_clients_ops(&proj, dir.path(), runs.write));
         let names: Vec<&str> = ops.iter().map(|m| m.op.as_str()).collect();
         assert_eq!(names, ["invariants_check_all", "daemon_write_8_clients"]);
         for m in &ops {
             assert!(m.median_ms > 0.0, "{m:?}");
         }
+        // final review M11 (minors item 26): the timed writes are `runs.write`, as PERF.md says
+        assert_eq!(ops[1].runs, runs.write);
+    }
+
+    /// Final review M11 (minors item 27): `run_workload` runs the M2g ops, so taking the wiring
+    /// out fails a test. Both tiers render cold after their warm render.
+    #[test]
+    fn sgperf1_run_workload_runs_the_m2g_ops() {
+        let src = include_str!("perf.rs");
+        let from = src.find("pub fn run_workload(").expect("run_workload");
+        let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
+        let at = |call: &str| {
+            body.find(call)
+                .unwrap_or_else(|| panic!("run_workload does not call {call}"))
+        };
+        assert!(
+            at("tier_views(&mut out, &mut r, &fx, \"\", &TYPICAL_RUNS);")
+                < at("tier_invariants(&mut out, &r, TYPICAL_RUNS.read);"),
+            "the checker runs after the view ops"
+        );
+        at("out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));");
+        at("tier_render_cold(&mut out, &proj, dir.path(), \"\", 5);");
+        let large = src.find("fn run_large_tier(").expect("run_large_tier");
+        let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
+        assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
+    }
+
+    /// Final review M2 (minors item 34): `render_cold` renders on a fresh handle, so each run
+    /// builds the tension set the disagreements page reads; `render` builds it once.
+    #[test]
+    fn sgperf1_render_cold_builds_the_tensions_in_each_run() {
+        rdy_model::seed_ids_for_tests(0x7367_7067);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let mut out = vec![];
+        let builds = rdy_engine::tensions::set::full_builds;
+        let before = builds();
+        tier_render(&mut out, &r, dir.path(), "", 3);
+        let warm = builds() - before;
+        let end = r.store().log_end();
+        drop(r);
+        let before = builds();
+        tier_render_cold(&mut out, &proj, dir.path(), "", 3);
+        let cold = builds() - before;
+        // the cold renders log nothing, so the ops after them read the project as before
+        let r = Rdy::open(&proj).expect("reopen");
+        assert_eq!(r.store().log_end(), end, "a cold render wrote to the log");
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["render", "render_cold"]);
+        assert!(
+            warm <= 1,
+            "the warm render builds the set at most once: {warm}"
+        );
+        assert_eq!(cold, 3, "each cold render builds the set");
+        assert!(spec_target("render_cold").is_some_and(|t| t.contains("fresh handle")));
+        assert!(!fsync_bound("render_cold"));
     }
 
     /// The tension ops run end to end on a small tree (n and the citing claims scaled down), after

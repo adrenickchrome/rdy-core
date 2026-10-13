@@ -447,6 +447,35 @@ fn golden_names() -> BTreeSet<String> {
         .collect()
 }
 
+/// The first line where `got` differs from `want`, with its number (final review M10, minors
+/// item 11).
+fn first_difference(want: &str, got: &str) -> String {
+    let (mut w, mut g) = (want.lines(), got.lines());
+    for n in 1.. {
+        match (w.next(), g.next()) {
+            (Some(a), Some(b)) if a == b => continue,
+            (None, None) => return "  the texts differ only in their line ends".to_string(),
+            (a, b) => {
+                return format!(
+                    "  line {n}: golden {:?}\n  line {n}: reply  {:?}",
+                    a.unwrap_or("<end>"),
+                    b.unwrap_or("<end>")
+                );
+            }
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+#[test]
+fn sg7_a_golden_mismatch_names_the_first_differing_line() {
+    assert_eq!(
+        first_difference("{\n  \"a\": 1\n}", "{\n  \"a\": 2\n}"),
+        "  line 2: golden \"  \\\"a\\\": 1\"\n  line 2: reply  \"  \\\"a\\\": 2\""
+    );
+    assert!(first_difference("a\nb", "a").contains("line 2: reply  \"<end>\""));
+}
+
 #[test]
 fn sg7_every_m2_tool_reply_matches_its_golden() {
     let mut all = run_session();
@@ -465,7 +494,10 @@ fn sg7_every_m2_tool_reply_matches_its_golden() {
     for (name, text) in &all {
         match std::fs::read_to_string(golden_dir().join(format!("{name}.json"))) {
             Ok(want) if &want == text => {}
-            Ok(_) => bad.push(format!("{name}: the reply changed from the golden")),
+            Ok(want) => bad.push(format!(
+                "{name}: the reply changed from the golden\n{}",
+                first_difference(&want, text)
+            )),
             Err(_) => bad.push(format!("{name}: no golden file")),
         }
     }

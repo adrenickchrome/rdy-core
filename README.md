@@ -54,7 +54,7 @@ rdy computes. Agents write. People decide. The loop is: brief, write, consequenc
 
 1. **Brief.** The agent calls `rdy_brief` for the blocks it will change. The briefing lists what governs them, what depends on them and what will go stale. It also lists open tensions and other changes in progress, and it gives a token.
 2. **Write.** The agent writes to its own view and passes the token as `brief`. A write to stable content with no current token fails with `E_BRIEF_REQUIRED`. A token that is out of date fails with `E_BRIEF_STALE`.
-3. **Consequences.** Every write, view op and proposal reply lists `consequences`: the blocks the change touches, why, and what to do (`update`, `confirm`, `reaffirm` or `resolve`). The agent answers each one before it proposes. The gate does not check the answers yet.
+3. **Consequences.** Every write, `rdy_view` include/exclude/undo and propose reply lists `consequences`: the blocks the change touches, why, and what to do (`update`, `confirm`, `reaffirm` or `resolve`). The agent answers each one before it proposes. The gate does not check the answers yet.
 4. **Propose, approved, land.** The agent proposes the view. A person approves it, and the proposal lands in canon.
 
 A **view** is a private place for one run's changes. Many views can be open at one time, and each lands on its own.

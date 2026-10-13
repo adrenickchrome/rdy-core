@@ -449,3 +449,26 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
         attempt += 1;
     }
 }
+
+/// Final review M6 (minors items 13 and 14): the wait after a `kill -9` ends when the killed
+/// process is gone, even when a client has already started its successor and the socket answers
+/// again. A wait for "no daemon answers" would run out its budget and panic here.
+#[test]
+fn sg6_the_kill_wait_ends_when_a_successor_already_answers() {
+    let s = Served::new();
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(ok, "{v}");
+    let first = s.daemon_pid().expect("a daemon");
+    let status = std::process::Command::new("kill")
+        .args(["-9", &first.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(status.success());
+    // the next client starts a successor before the wait begins
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(ok, "{v}");
+    let second = s.daemon_pid().expect("a successor");
+    assert_ne!(first, second);
+    s.wait_killed(first);
+    assert_eq!(s.daemon_pid(), Some(second), "the successor still runs");
+}

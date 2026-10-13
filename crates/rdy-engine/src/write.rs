@@ -4,8 +4,10 @@
 //! (D-8EH6E; parallel appends under one parent leave such a tie, and M2 does not re-key at
 //! landing, ruling task-2-round2). The fallback in `between` re-keys the smaller side of the run.
 //! Known cost: it writes siblings the agent did not touch, so another view's edit of one of them
-//! conflicts when both land, and a pin on one goes stale (`order` is in the content hash). The
-//! M3 intake item "Order-key ties and the content hash" removes the cost.
+//! conflicts when both land, and a pin on one goes stale (`order` is in the content hash). In a
+//! stable doc, an insert with no `implements` or `editorial` also gets `unjustified_change` on a
+//! re-keyed sibling the agent never named. The M3 intake item "Order-key ties and the content
+//! hash" removes the cost.
 use crate::error::*;
 use crate::keys::{self, Keys};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
@@ -673,10 +675,15 @@ type Slot = (String, BlockId);
 /// concurrent edit of one of them in another view then conflicts when both land (pinned by
 /// `sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling`), and,
 /// since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale and a
-/// tension on it gets a new vkey. A tie is a state that parallel appends under one parent leave,
-/// or that an import leaves; M2 does not re-key at landing (ruling task-2-round2). The M3 intake
-/// item "Order-key ties and the content hash" (leave `order` out of the content hash at the next
-/// store format change) removes the cost.
+/// tension on it gets a new vkey. In a stable doc, the write also edits that stable sibling, so
+/// with no `implements` or `editorial` it opens `unjustified_change` on a block the agent never
+/// named, and `unjustified_change: blocking` refuses the landing; the write's justification
+/// covers the sibling too (pinned by
+/// `sg2_an_insert_into_a_tie_in_a_stable_doc_flags_the_re_keyed_sibling_unless_justified`). A tie
+/// is a state that parallel appends under one parent leave, or that an import leaves; M2 does not
+/// re-key at landing (ruling task-2-round2). The M3 intake item "Order-key ties and the content
+/// hash" (leave `order` out of the content hash at the next store format change) removes the
+/// cost.
 fn between(
     ov: &Overlay,
     s: &Sibs,

@@ -475,15 +475,36 @@ impl Model {
         Err(E_NOTHING_TO_UNDO)
     }
 
-    /// Reopens `view` (the undo of its close at `op`); unpinned with work behind canon, it rebases
-    /// onto canon's head. Returns whether it rebased.
+    /// Reopens `view` (the undo of its close at `op`): it is open again, and then it follows the
+    /// open-view rule (`catch_up_open`). Returns whether it rebased.
     fn reopen(&mut self, view: &str, op: usize) -> bool {
-        let canon = self.canon_at();
-        let landed: Vec<bool> = self.changes.iter().map(|c| c.landed.is_some()).collect();
         let v = self.views.get_mut(view).expect("view");
         v.ops[op].1 = true;
         v.closed = false;
-        if !v.pinned && !v.included.is_empty() && v.base_landing != canon {
+        self.catch_up_open(view)
+    }
+
+    /// Adds `to`, a fork of `from`: a new open view with the source's set, base and pin and no
+    /// ops of its own, which then follows the open-view rule (`catch_up_open`). The model states
+    /// the fork as "a copy that is an open view", not as the store's conditions: an open view
+    /// behind canon is one a landing would have rebased, and a fork of a closed view is the one
+    /// case that can be. Returns whether it rebased.
+    fn fork(&mut self, from: &str, to: &str) -> bool {
+        let mut fork = self.views[from].clone();
+        fork.closed = false;
+        fork.ops = vec![];
+        self.views.insert(to.to_string(), fork);
+        self.catch_up_open(to)
+    }
+
+    /// The open-view rule, which `land` applies to every open view: an open, unpinned view with
+    /// work behind canon starts on canon's head and drops the changes that landed. Returns
+    /// whether it moved.
+    fn catch_up_open(&mut self, view: &str) -> bool {
+        let canon = self.canon_at();
+        let landed: Vec<bool> = self.changes.iter().map(|c| c.landed.is_some()).collect();
+        let v = self.views.get_mut(view).expect("view");
+        if !v.closed && !v.pinned && !v.included.is_empty() && v.base_landing != canon {
             v.included.retain(|&c| !landed[c]);
             v.base_landing = canon;
             return true;
@@ -765,19 +786,7 @@ impl<'a> Driver<'a> {
                 self.r
                     .view_fork(&session(&to), &src, &to)
                     .map_err(|e| fail(format!("{what}: {e:?}")))?;
-                let canon = self.model.canon_at();
-                let mut fork = self.model.views[&src].clone();
-                fork.closed = false;
-                fork.ops = vec![];
-                // an unpinned, non-empty fork behind canon is rebased onto it in the same write
-                let rebases =
-                    !fork.pinned && !fork.included.is_empty() && fork.base_landing != canon;
-                if rebases {
-                    let model = &self.model;
-                    fork.included.retain(|&c| model.changes[c].landed.is_none());
-                    fork.base_landing = canon;
-                }
-                self.model.views.insert(to, fork);
+                let rebases = self.model.fork(&src, &to);
                 let mut s = self.stats.borrow_mut();
                 s.forks += 1;
                 if rebases {

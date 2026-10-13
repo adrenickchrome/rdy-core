@@ -11,6 +11,7 @@
 //! re-keyed sibling conflicts when both land
 //! (`sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling` pins it);
 //! and since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale.
+//! In a stable doc, an unjustified insert also opens `unjustified_change` on the re-keyed sibling.
 //! The M3 intake item "Order-key ties and the content hash" (leave `order` out of the content
 //! hash at the next store format change, then re-key at landing) removes the cost.
 use proptest::prelude::*;
@@ -824,4 +825,54 @@ fn sg2_an_insert_into_a_tie_makes_a_pin_on_the_re_keyed_sibling_suspect() {
         "the insert after {x} re-keyed {y}"
     );
     assert_eq!(suspects(&r, "c"), vec![(citer, y)]);
+}
+
+#[test]
+fn sg2_an_insert_into_a_tie_in_a_stable_doc_flags_the_re_keyed_sibling_unless_justified() {
+    // The third known cost of the fallback (final review M3, probe P1b): in a stable section, an
+    // insert into a tie with no justification also opens `unjustified_change` on the re-keyed
+    // sibling, a block the agent never named (`unjustified_change: blocking` would refuse the
+    // landing). A justified insert opens neither tension.
+    use rdy_engine::tensions::TensionKind;
+    use rdy_qa::edit_loop::{brief_of, write_cited};
+    use rdy_qa::tensions::{change_of, change_sides, j_typo, of_kind, put_j};
+    let (_d, mut r, section, ids) = tied_run(2);
+    let (x, y) = (ids[1].clone(), ids[2].clone());
+    let sec = BlockId::parse(&section).unwrap();
+    let t = brief_of(&r, &canon(), &[&sec]).base.token;
+    write_cited(
+        &mut r,
+        "st",
+        json!([{"op": "update", "id": section, "fields": {"lifecycle": "stable"}}]),
+        Some(&t),
+    )
+    .expect("make the section stable");
+    land(&mut r, "st").expect("land the stable section");
+    let insert = json!([{"op": "create", "type": "claim", "id": "$n", "parent": section, "after": x, "body": "between"}]);
+    let flagged = |r: &Rdy, w: &WriteResult| -> Vec<String> {
+        let mut out: Vec<String> = of_kind(r, TensionKind::UnjustifiedChange)
+            .into_iter()
+            .filter(|t| change_sides(t).contains(&change_of(w)))
+            .flat_map(|t| t.blocks())
+            .map(|b| b.to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    let bare = put_j(&mut r, "c", insert.clone(), None);
+    let new = bare.created["$n"].clone();
+    assert_ne!(
+        version_of(&r, &Scope::View("c".into()), &y),
+        version_of(&r, &canon(), &y),
+        "the insert after {x} re-keyed {y}"
+    );
+    let mut want = vec![new, y.clone()];
+    want.sort();
+    assert_eq!(
+        flagged(&r, &bare),
+        want,
+        "the new claim and the re-keyed sibling"
+    );
+    let justified = put_j(&mut r, "d", insert, j_typo());
+    assert!(flagged(&r, &justified).is_empty(), "a justified insert");
 }

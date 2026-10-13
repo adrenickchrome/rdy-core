@@ -135,6 +135,16 @@ fn sg10_schema_has_brief_and_consequences_topics() {
         EDIT_LOOP_DOC.contains("brief and consequences"),
         "{EDIT_LOOP_DOC}"
     );
+    // final review M1: only rdy_view include, exclude and undo return consequences among the
+    // view ops (the create, fork and compare goldens hold none), as edit_loop says
+    assert!(
+        CONSEQUENCES_DOC.starts_with(
+            "Every write, rdy_view include/exclude/undo and propose reply carries consequences."
+        ),
+        "{CONSEQUENCES_DOC}"
+    );
+    assert!(!CONSEQUENCES_DOC.contains("view op"), "{CONSEQUENCES_DOC}");
+    assert!(EDIT_LOOP_DOC.contains("rdy_view include, exclude and undo return consequences"));
 }
 
 #[test]
@@ -174,6 +184,11 @@ fn sg10_the_readme_states_the_rules_the_code_holds() {
     assert!(!readme.contains("Each answer rdy gives"));
     // `work` is the human's view; the agent's scope is not "work".
     assert!(!readme.contains("around its work"));
+    // Final review M1: only include, exclude and undo among the view ops list consequences.
+    assert!(readme.contains(
+        "Every write, `rdy_view` include/exclude/undo and propose reply lists `consequences`"
+    ));
+    assert!(!readme.contains("view op and proposal reply"));
     // The swarm line says what the run checks.
     assert!(readme.contains("eight scripted agents and one person against one daemon"));
     assert!(readme.contains("every stable write cites a briefing"));

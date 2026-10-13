@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 /// One entry of the page: what the reader is told, and the blocks it is about. For the two kinds
 /// whose sentence says "this page" (a retired reference, a restated point that changed), `lead`
 /// is the block of that page and its link comes first; for the others it is `None`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Disagreement {
     pub sentence: &'static str,
     pub blocks: Vec<BlockId>,
@@ -44,6 +44,7 @@ pub fn list(rdy: &ReadState, scope: &Scope) -> Result<Vec<Disagreement>, RdyErro
         return Ok(vec![]);
     }
     let mut out: Vec<Disagreement> = vec![];
+    let mut seen: BTreeSet<Disagreement> = BTreeSet::new();
     for t in rdy.tensions()?.iter() {
         let Some(said) = sentence(t.kind.name()) else {
             continue;
@@ -63,7 +64,7 @@ pub fn list(rdy: &ReadState, scope: &Scope) -> Result<Vec<Disagreement>, RdyErro
             blocks,
             lead,
         };
-        if !out.contains(&entry) {
+        if seen.insert(entry.clone()) {
             out.push(entry);
         }
     }
@@ -74,7 +75,9 @@ pub fn list(rdy: &ReadState, scope: &Scope) -> Result<Vec<Disagreement>, RdyErro
 /// sides sorted, so the roles are read from the summary the detector wrote: a deprecated
 /// reference opens with the pointing block ("{y} (who) references deprecated {x}"), and a
 /// restatement drift names the restating block last ("{x} (who) changed text that {y} restates").
-/// The other kinds have no such page.
+/// The other kinds have no such page. This reads the detectors' wording: if it changes, the lead
+/// is lost and the entry falls back to reading order. An explicit side role on a tension would
+/// remove the dependence.
 fn lead_of(kind: &str, summary: &str, blocks: &[BlockId]) -> Option<BlockId> {
     match kind {
         "deprecated_reference" => blocks
