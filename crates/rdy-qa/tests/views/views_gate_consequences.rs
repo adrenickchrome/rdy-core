@@ -70,7 +70,10 @@ fn pcq1_a_version_that_does_not_merge_onto_canon_says_why_it_has_no_consequences
     assert!(!v["blocking"].as_array().unwrap().is_empty(), "{v}");
     assert_eq!(v["consequences"], json!([]));
     assert!(
-        v["consequences_error"].as_str().unwrap().starts_with("E_"),
+        v["consequences_error"]
+            .as_str()
+            .unwrap()
+            .starts_with("E_CONFLICT_UNRESOLVED: no consequences while "),
         "{v}"
     );
 }
