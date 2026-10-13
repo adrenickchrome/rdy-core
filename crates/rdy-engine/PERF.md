@@ -1290,7 +1290,7 @@ Three ops. The first two run on the typical tier only; `render_cold` runs on bot
 |---|---|---|---|
 | `daemon_write_8_clients` | one `rdy_write` of one claim, its durable flush included, through an `rdy mcp` proxy while seven other proxies write one claim after another. The daemon is the real one, started by the first proxy, over a copy of the typical project. The op asserts that each of the seven wrote | `runs.write` | recorded, no spec target: the write target of M2 spec 15.1 is for one writer. Compare with `daemon_write_single` |
 | `invariants_check_all` | `rdy_qa::invariants::check_all` on the typical workload after the view ops, so canon and every open view are checked from one snapshot, then `fsck` and the `logged` rule (D-XH24M). A violation is printed, not asserted | `runs.read` | recorded, no spec target |
-| `render_cold` | `render_site` of canon on a fresh handle each run, with the project closed: canon is read outside the timer, so the median holds the tension build that the disagreements page needs (FW-SW2). `render` renders from one state, which builds its set in the first run only, so its median cannot show that cost (final review M2) | 5 (3 at 50k) | recorded, no spec target. Compare with `render` |
+| `render_cold` | `render_site` of canon on a fresh handle each run, with the project closed: canon is read outside the timer, so the median holds the canon tension read that the disagreements page needs (FW-SW2). `render` renders from one state, which memoises that read in the first run only, so its median cannot show that cost (final review M2) | 5 (3 at 50k) | recorded, no spec target. Compare with `render` |
 
 What each cost grows with:
 
@@ -1300,10 +1300,12 @@ What each cost grows with:
   #18): record the higher median of the two runs.
 - `invariants_check_all` grows with the blocks of canon and of each open view, since each scope is
   materialized and walked once.
-- `render_cold` less `render` is about the tension build of canon and every in-flight change
-  (compare with `tensions_full_1k` and `tensions_canon`). The final review measured +0.03 s on
-  rdy-design and noise on a 10k project with no disagreement; at 50k the build could add about
-  40% to a cold render. A canon-only, memoised tension read in the engine would remove it.
+- `render_cold` less `render` is about the canon tension read of the page (compare with
+  `tensions_canon`). Until the render_50k fix the page built the whole set, in-flight part
+  included: `render_50k` went from 577 ms (b863ffd) to 888-915 ms. The page now reads
+  `ReadState::canon_tensions`, which shares canon's memo and never detects the in-flight part.
+  The test `sg9_a_canon_render_builds_no_inflight_tension_set` pins this with the engine's
+  full-build counter.
 
 No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.

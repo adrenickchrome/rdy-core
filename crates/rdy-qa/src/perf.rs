@@ -283,7 +283,7 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "render" => "< 2 s full render at 100k (spec 11)",
         "render_cold" => {
-            "no spec target: the full render of canon on a fresh handle (canon read outside the timer), the tension build of the disagreements page included (FW-SW2); compare with render, whose state keeps its set across runs"
+            "no spec target: the full render of canon on a fresh handle (canon read outside the timer), the canon tension read of the disagreements page included (FW-SW2); compare with render, whose state keeps that read across runs"
         }
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
@@ -2987,9 +2987,10 @@ fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str
 }
 
 /// `render_cold`: the full render of canon on a fresh handle each run, canon read outside the
-/// timer, so the median holds what the first render after a start pays: the tension set the
-/// disagreements page reads is built inside it (final review M2). `render` reuses one state, whose
-/// set is built once in its first run. Run with the project closed.
+/// timer, so the median holds what the first render after a start pays: the canon tensions the
+/// disagreements page reads are found inside it (final review M2), and a whole tension build in
+/// the render could not hide. `render` reuses one state, whose canon read is memoised after its
+/// first run. Run with the project closed.
 fn tier_render_cold(
     out: &mut Vec<Measure>,
     proj: &std::path::Path,
@@ -4479,9 +4480,10 @@ mod tests {
     }
 
     /// Final review M2 (minors item 34): `render_cold` renders on a fresh handle, so each run
-    /// builds the tension set the disagreements page reads; `render` builds it once.
+    /// finds canon's tensions for the disagreements page; `render` finds them once. Neither
+    /// builds a whole tension set: the page reads canon only (render_50k fix).
     #[test]
-    fn sgperf1_render_cold_builds_the_tensions_in_each_run() {
+    fn sgperf1_render_cold_reads_canon_tensions_in_each_run() {
         rdy_model::seed_ids_for_tests(0x7367_7067);
         let dir = tempfile::tempdir().expect("tempdir");
         let proj = dir.path().join("p");
@@ -4491,14 +4493,20 @@ mod tests {
         land(&mut r, "work").expect("land work");
         let mut out = vec![];
         let builds = rdy_engine::tensions::set::full_builds;
-        let before = builds();
+        let runs = rdy_engine::tensions::set::canon_part_runs;
+        // a fresh state: the land above built its set in this one
+        let r = {
+            drop(r);
+            Rdy::open(&proj).expect("reopen")
+        };
+        let (before, before_runs) = (builds(), runs());
         tier_render(&mut out, &r, dir.path(), "", 3);
-        let warm = builds() - before;
+        let (warm, warm_runs) = (builds() - before, runs() - before_runs);
         let end = r.store().log_end();
         drop(r);
-        let before = builds();
+        let (before, before_runs) = (builds(), runs());
         tier_render_cold(&mut out, &proj, dir.path(), "", 3);
-        let cold = builds() - before;
+        let (cold, cold_runs) = (builds() - before, runs() - before_runs);
         // the cold renders log nothing, so the ops after them read the project as before
         let r = Rdy::open(&proj).expect("reopen");
         assert_eq!(r.store().log_end(), end, "a cold render wrote to the log");
@@ -4506,11 +4514,13 @@ mod tests {
         rdy_model::unseed_ids_for_tests();
         let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
         assert_eq!(names, ["render", "render_cold"]);
+        assert_eq!(warm, 0, "the warm render builds no whole set");
+        assert_eq!(cold, 0, "a cold render builds no whole set");
         assert!(
-            warm <= 1,
-            "the warm render builds the set at most once: {warm}"
+            warm_runs <= 1,
+            "the warm render finds canon's part at most once: {warm_runs}"
         );
-        assert_eq!(cold, 3, "each cold render builds the set");
+        assert_eq!(cold_runs, 3, "each cold render finds canon's part");
         assert!(spec_target("render_cold").is_some_and(|t| t.contains("fresh handle")));
         assert!(!fsync_bound("render_cold"));
     }

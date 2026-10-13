@@ -45,7 +45,8 @@ pub fn list(rdy: &ReadState, scope: &Scope) -> Result<Vec<Disagreement>, RdyErro
     }
     let mut out: Vec<Disagreement> = vec![];
     let mut seen: BTreeSet<Disagreement> = BTreeSet::new();
-    for t in rdy.tensions()?.iter() {
+    // canon's tensions only: a canon render never detects the in-flight part (render_50k)
+    for t in rdy.canon_tensions()?.iter() {
         let Some(said) = sentence(t.kind.name()) else {
             continue;
         };

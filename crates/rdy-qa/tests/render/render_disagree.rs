@@ -295,3 +295,45 @@ fn sg9_the_closed_table_has_six_sentences_and_no_other() {
     }
     assert_eq!(rdy_render::disagree::sentence("nonsense"), None);
 }
+
+/// The canon render reads canon's tensions only: on a fresh handle, with a change in flight, a
+/// render of canon (and of a tag at canon's head) builds no whole tension set, so the in-flight
+/// part is never detected for the page (perf fix of the M2g final review: render_50k).
+#[test]
+fn sg9_a_canon_render_builds_no_inflight_tension_set() {
+    let (d, mut r, s) = retired_reference();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    let tag: Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();
+    // an in-flight change that also points to the retired section
+    write(
+        &mut r,
+        "later",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "later", "title": "Later", "doc_type": "overview"}},
+            {"op": "create", "type": "claim", "parent": "$d", "body": format!("Later work relies on {{{{{}}}}}.", s.c)}
+        ]),
+    )
+    .unwrap();
+    drop(r);
+    let builds = rdy_engine::tensions::set::full_builds;
+    for scope in [Scope::Canon, Scope::At(tag)] {
+        let r = Rdy::open(d.path()).unwrap();
+        let st = r.read();
+        st.materialized(&Scope::Canon).unwrap();
+        let before = builds();
+        let out = tempfile::tempdir().unwrap();
+        rdy_render::render_site(&st, &scope, out.path()).unwrap();
+        assert_eq!(
+            builds() - before,
+            0,
+            "{scope:?}: the render built a whole set"
+        );
+        assert!(
+            !st.tensions_built(),
+            "{scope:?}: the state's set is unbuilt"
+        );
+        let page = read(out.path(), "disagreements.html");
+        assert_eq!(entries(&page).len(), 1, "{scope:?}: {page}");
+        assert!(page.contains(RETIRED), "{scope:?}: {page}");
+    }
+}
