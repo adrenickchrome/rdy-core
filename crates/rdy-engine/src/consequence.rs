@@ -240,10 +240,13 @@ fn creates_cite_outside(ops: &[Op]) -> bool {
 }
 
 /// D-W7KAK: the follow-up and the fix of a kept `suspect` entry, by the suspect's reason and
-/// whether the block is a live or partly superseded decision; `None` for any other reason.
+/// whether the block is a live or partly superseded decision; `None` for any other reason. A
+/// live decision is frozen, so it gets `reaffirm` for every reason, as `follow_up` gives it.
 fn kept_follow_up(reason: &str, live_decision: bool) -> Option<(FollowUp, String)> {
     let (follow, fix) = match reason {
-        "changed" if live_decision => (FollowUp::Reaffirm, REAFFIRM_FIX),
+        "changed" | "deleted" | "superseded" | "revoked" if live_decision => {
+            (FollowUp::Reaffirm, REAFFIRM_FIX)
+        }
         "changed" => (FollowUp::Confirm, KEPT_CHANGED_FIX),
         "deleted" => (FollowUp::Update, KEPT_DELETED_FIX),
         "superseded" | "revoked" => (FollowUp::Update, KEPT_REPLACED_FIX),
@@ -734,10 +737,10 @@ impl ReadState {
 
     /// D-W7KAK: a `suspect` entry for each block of `rewritten` that is suspect in `g`, once per
     /// target, marked `already_written`: the write kept its pin, so the agent answers it before it
-    /// proposes. `because.edge` is the block's premise edge to the target (the least by name);
-    /// follow-up and fix by [`kept_follow_up`]. None for a block that is gone, a decision that
-    /// asserts nothing live, a presentational source, or a target the block reaches by no premise
-    /// edge. By block, then target.
+    /// proposes. `because.edge` is the edge to the target that makes the block suspect (a premise
+    /// edge first, the least by name; else the least link by name); the id covers the target too.
+    /// Follow-up and fix by [`kept_follow_up`]. None for a block that is gone, a decision that
+    /// asserts nothing live, or a presentational source. By block, then target.
     fn kept_suspects(
         &self,
         g: &Graph,
@@ -766,17 +769,21 @@ impl ReadState {
                 let Some((follow, fix)) = kept_follow_up(&s.reason, live_decision) else {
                     continue;
                 };
-                // the closed set: a suspect reached only by a link that is not a premise (a
-                // `refines` or an `affects` to a superseded decision) is left as it is
+                // the edge that makes it suspect, by the graph's own rule (`edge_suspect`), so
+                // this reply and rdy_context never disagree: a premise edge first, then a link
+                // that is not one (a `refines` or an `affects` to a superseded decision)
                 let edge = g
                     .outgoing(block)
                     .iter()
-                    .filter(|e| e.to == s.target && premise(e))
-                    .map(|e| e.kind.name())
+                    .filter(|e| {
+                        e.to == s.target && g.edge_suspect(e).is_some_and(|x| x.reason == s.reason)
+                    })
+                    .map(|e| (!premise(e), e.kind.name()))
                     .min();
-                let Some(edge) = edge else { continue };
+                let Some((_, edge)) = edge else { continue };
                 out.push(Consequence {
-                    id: consequence_id(batch, ConsequenceKind::Suspect.as_str(), block),
+                    // one id per (block, target), as a tension entry names its tension
+                    id: consequence_id(batch, &format!("suspect {}", s.target), block),
                     block: block.to_string(),
                     kind: ConsequenceKind::Suspect,
                     because: Because {
@@ -1369,27 +1376,32 @@ mod tests {
     #[test]
     fn df4_kept_rows_follow_the_table() {
         let row = |f: FollowUp, fix: &str| Some((f, fix.to_string()));
-        assert_eq!(
-            kept_follow_up("changed", true),
-            row(FollowUp::Reaffirm, REAFFIRM_FIX)
-        );
+        // fix round 1 (ruling 1): a live decision is frozen, so it always gets reaffirm, whatever
+        // the reason; an update would send the agent to an edit rdy refuses (E_FROZEN)
+        for reason in ["changed", "deleted", "superseded", "revoked"] {
+            assert_eq!(
+                kept_follow_up(reason, true),
+                row(FollowUp::Reaffirm, REAFFIRM_FIX),
+                "{reason}"
+            );
+        }
         assert_eq!(
             kept_follow_up("changed", false),
             row(FollowUp::Confirm, KEPT_CHANGED_FIX)
         );
+        assert_eq!(
+            kept_follow_up("deleted", false),
+            row(FollowUp::Update, KEPT_DELETED_FIX)
+        );
+        assert_eq!(
+            kept_follow_up("superseded", false),
+            row(FollowUp::Update, KEPT_REPLACED_FIX)
+        );
+        assert_eq!(
+            kept_follow_up("revoked", false),
+            row(FollowUp::Update, KEPT_REPLACED_FIX)
+        );
         for live in [true, false] {
-            assert_eq!(
-                kept_follow_up("deleted", live),
-                row(FollowUp::Update, KEPT_DELETED_FIX)
-            );
-            assert_eq!(
-                kept_follow_up("superseded", live),
-                row(FollowUp::Update, KEPT_REPLACED_FIX)
-            );
-            assert_eq!(
-                kept_follow_up("revoked", live),
-                row(FollowUp::Update, KEPT_REPLACED_FIX)
-            );
             assert_eq!(kept_follow_up("moved", live), None);
             assert_eq!(kept_follow_up("", live), None);
         }

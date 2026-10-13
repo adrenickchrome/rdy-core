@@ -533,8 +533,9 @@ impl Graph {
 
     /// lpin1: a pinned premise edge is `deleted` when its target is gone and `changed` when the
     /// pin differs from the target's content hash. A block is never a suspect of itself: a
-    /// write never pins a block to its own id, and a stray self-pin is ignored here.
-    fn edge_suspect(&self, e: &Edge) -> Option<Suspect> {
+    /// write never pins a block to its own id, and a stray self-pin is ignored here. Public so a
+    /// consequence names the edge that made a suspect from this one rule (df4).
+    pub fn edge_suspect(&self, e: &Edge) -> Option<Suspect> {
         if e.kind == EdgeKind::Contains || e.from == e.to {
             return None;
         }

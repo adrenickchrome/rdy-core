@@ -495,10 +495,12 @@ fn mfb2_a_target_that_asserts_nothing_live_reaches_nothing() {
         };
         let res = refine(&mut r, &s, &target);
         let c = after(&r, &res.change);
+        // FW-LP6 reach entries only: the new decision's own kept suspect (df4 ruling 2: a
+        // `refines` to a superseded or revoked decision makes it suspect) is not a reach
         assert!(
-            c.items
-                .iter()
-                .all(|e| e.because.changed != target.to_string() || e.because.edge != "refines"),
+            c.items.iter().all(|e| e.kind != ConsequenceKind::Dependent
+                || e.because.changed != target.to_string()
+                || e.because.edge != "refines"),
             "{status}: {c:?}"
         );
         assert!(entries(&c, &s.c).is_empty(), "{status}: {c:?}");
