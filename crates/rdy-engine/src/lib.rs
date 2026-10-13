@@ -36,6 +36,7 @@ mod query;
 mod read_state;
 pub mod related;
 pub mod search;
+pub mod section;
 pub mod semantic;
 mod session;
 pub mod suggest;

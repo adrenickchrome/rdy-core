@@ -1008,6 +1008,16 @@ impl ReadState {
             }
             Ok(id)
         };
+        // df8: an address is a block, or `<doc>#<heading-slug>` (the section, walked like a path)
+        let address = |text: &str| -> Result<(BlockId, bool), RdyError> {
+            let (target, slug) = crate::section::split_address(text)?;
+            let id = known(target)?;
+            let Some(slug) = slug else {
+                return Ok((id, false));
+            };
+            let doc = m.get(&id).expect("known returns a block of m");
+            Ok((crate::section::section_by_slug(&m, doc, slug)?, true))
+        };
         // refused as soon as the coverage passes the limit: the walk stops there
         let too_many = || {
             RdyError::new(
@@ -1018,17 +1028,10 @@ impl ReadState {
                 "brief a smaller part: a doc, or the blocks you will change",
             )
         };
-        let mut ids = BTreeSet::new();
-        for text in &cov.ids {
-            ids.insert(known(text)?);
-            if ids.len() > MAX_BRIEF_BLOCKS {
-                return Err(too_many());
-            }
-        }
-        if let Some(path) = &cov.path {
-            let root = known(path)?;
-            // the walk keeps its own visited set: a block also named in `ids` is still walked,
-            // and counts once (`extra` counts the walked blocks not in `ids`)
+        // the block at `root` with every descendant joins `ids`. The walk keeps its own visited
+        // set: a block already in `ids` is still walked, and counts once (`extra` counts the
+        // walked blocks not in `ids`)
+        let walk = |ids: &mut BTreeSet<BlockId>, root: BlockId| -> Result<(), RdyError> {
             let mut extra = usize::from(!ids.contains(&root));
             let mut seen = BTreeSet::from([root.clone()]);
             let mut todo = vec![root];
@@ -1048,6 +1051,22 @@ impl ReadState {
                 return Err(too_many());
             }
             ids.extend(seen);
+            Ok(())
+        };
+        let mut ids = BTreeSet::new();
+        for text in &cov.ids {
+            match address(text)? {
+                (id, false) => {
+                    ids.insert(id);
+                }
+                (section, true) => walk(&mut ids, section)?,
+            }
+            if ids.len() > MAX_BRIEF_BLOCKS {
+                return Err(too_many());
+            }
+        }
+        if let Some(path) = &cov.path {
+            walk(&mut ids, address(path)?.0)?;
         }
         if ids.is_empty() {
             return Err(RdyError::new(
