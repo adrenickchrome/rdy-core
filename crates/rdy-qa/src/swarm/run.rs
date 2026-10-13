@@ -67,8 +67,11 @@ const PACE_WAIT: Duration = Duration::from_secs(1800);
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 /// How long the run waits for a stopped daemon to exit (a hang guard).
 const STOP_WAIT: Duration = Duration::from_secs(60);
-/// The relay as `rdy approve --relayed-by` names it.
+/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor and run.
 const RELAY: &str = "agent:relay/chat";
+/// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
+const RELAY_ACTOR: &str = "agent:relay";
+const RELAY_RUN: &str = "chat";
 /// The budget of every listing the run reads whole.
 const ALL: usize = 100_000;
 
@@ -1611,7 +1614,9 @@ impl Drain {
             "--session",
             "chat",
         ];
+        // the relaying agent runs the approve as itself (D-HA7YZ)
         let mut cmd = human_command(&self.at.dir, &self.at.env, &args);
+        cmd.env("RDY_ACTOR", RELAY_ACTOR).env("RDY_RUN", RELAY_RUN);
         let out = output_within(&mut cmd, CLI_BUDGET)
             .unwrap_or_else(|err| panic!("swarm seed {}: rdy approve hung: {err}", self.cfg.seed));
         let ok = out.status.success();

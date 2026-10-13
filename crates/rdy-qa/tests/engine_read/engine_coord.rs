@@ -281,6 +281,7 @@ fn cgr1_show_in_the_inflight_scope_lists_the_in_flight_changes() {
     let cx = OpContext {
         engine: &e,
         session: &s,
+        human: "human:qa",
         cwd: d.path(),
     };
     let v = dispatch(&cx, "show", json!({"id": claim, "scope": "inflight"})).unwrap();

@@ -366,6 +366,8 @@ fn serve_thread(
 pub struct CtlSession {
     pub info: SessionInfo,
     pub session: Session,
+    /// The human actor the session was classified against (a relayed approval names it).
+    pub human: String,
 }
 
 /// The host's [`Handler`]: the `session` op, the ctl ops over the shared engine, and MCP.
@@ -433,6 +435,7 @@ impl ServeHandler {
             CtlSession {
                 info: info.clone(),
                 session: s,
+                human,
             },
         );
         Ok(reply)
@@ -455,6 +458,7 @@ impl Handler for ServeHandler {
         let cx = OpContext {
             engine: &*engine,
             session: &cs.session,
+            human: &cs.human,
             cwd: &cs.info.cwd,
         };
         dispatch(&cx, &request.op, request.args).map_err(ErrorReply::from)

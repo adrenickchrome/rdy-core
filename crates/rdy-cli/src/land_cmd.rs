@@ -26,7 +26,7 @@ pub(crate) struct ProposeArgs {
 #[derive(clap::Args)]
 pub(crate) struct ApproveArgs {
     proposal: String,
-    /// The agent that relays the human's approval, as actor[/run]. Records a relayed approval.
+    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Records a relayed approval.
     #[arg(long, requires = "evidence")]
     relayed_by: Option<String>,
     /// The human's words, quoted. Requires --relayed-by and the exact version.

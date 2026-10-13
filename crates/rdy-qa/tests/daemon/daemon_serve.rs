@@ -143,7 +143,7 @@ fn serve1_an_agent_session_cannot_approve_and_cannot_take_the_humans_view() {
             .await
             .unwrap_err();
         assert_eq!(e.code, E_PERMISSION);
-        assert!(e.fix.contains("RDY_ACTOR"), "{e}");
+        assert!(e.fix.contains("--relayed-by <your actor>"), "{e}");
     });
 }
 

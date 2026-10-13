@@ -790,6 +790,7 @@ fn mfb3_the_daemon_import_reply_is_read_as_the_importer() {
     let cx = OpContext {
         engine: &engine,
         session: &imp,
+        human: "human:imp",
         cwd: b_dir.path(),
     };
     let v = dispatch(

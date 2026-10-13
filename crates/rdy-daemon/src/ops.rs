@@ -10,7 +10,7 @@ use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Scope, Session, alt, intent, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
-use rdy_model::Role;
+use rdy_model::{ActorRun, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -35,10 +35,13 @@ use site::{export, import, render};
 pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
 
-/// What an op runs against: the engine, the calling session and its working directory.
+/// What an op runs against: the engine, the calling session, the project's human actor (the
+/// one the session was classified against) and the session's working directory.
 pub struct OpContext<'a> {
     pub engine: &'a dyn Engine,
     pub session: &'a Session,
+    /// The human actor: a relayed approval is recorded as this person's (D-HA7YZ).
+    pub human: &'a str,
     pub cwd: &'a Path,
 }
 
@@ -86,14 +89,28 @@ pub const OPS: &[&str] = &[
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
 
-/// Why an agent session is refused an approver op.
-pub(crate) const AGENT_NOT_APPROVER: &str = "agent sessions cannot approve, tag or import";
+/// Why an agent session is refused a tag or an import.
+pub(crate) const AGENT_NOT_APPROVER: &str = "agent sessions cannot tag or import";
 
 /// How the refusal is fixed.
-pub(crate) const AGENT_NOT_APPROVER_FIX: &str = "approvals are made by the human actor: unset RDY_ACTOR, or set actor: in the user's rdy config";
+pub(crate) const AGENT_NOT_APPROVER_FIX: &str =
+    "tags and imports are the person's acts: ask the person to run the command";
 
-/// The session an approver op runs as: a human session as an approver; an agent session is
-/// refused with `E_PERMISSION`.
+/// Why an agent session is refused an approval it does not relay.
+const AGENT_NOT_RELAYING: &str = "an agent approves only by relaying a person's approval";
+
+/// How that refusal is fixed.
+const AGENT_NOT_RELAYING_FIX: &str = "ask the person, then pass --relayed-by <your actor> --evidence \"<their words>\" --question \"<what you asked>\"";
+
+/// Why a human session is refused a relay (D-HA7YZ, Q2).
+const HUMAN_RELAY: &str =
+    "a person approves as themselves; only the relaying agent records a relay";
+
+/// How that refusal is fixed.
+const HUMAN_RELAY_FIX: &str = "drop --relayed-by to approve yourself, or let the agent run rdy approve with RDY_ACTOR set to its actor";
+
+/// The session a tag or an import runs as: a human session as an approver; an agent session
+/// is refused with `E_PERMISSION`.
 pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
     if s.is_human() {
         Ok(Session {
@@ -108,6 +125,74 @@ pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
         ))
     }
 }
+
+/// The session an approval runs as, and the agent that relays it (D-HA7YZ). The cases:
+/// - a human session with no `relayed_by`: the human, as an approver; no relay;
+/// - a human session with `relayed_by`: refused (`E_PERMISSION`);
+/// - an agent session with no `relayed_by`: refused (`E_PERMISSION`);
+/// - an agent session with `relayed_by` but no evidence: refused (`E_BAD_INPUT`, the pairing);
+/// - an agent session whose `relayed_by` names its own actor, and its own run when it names a
+///   run: the human actor (`cx.human`, run `cli`) as the approver, relayed by the session's
+///   actor and run (the session's run when the flag names none);
+/// - an agent session whose `relayed_by` names another actor or another run, or a run the
+///   session does not have: refused (`E_PERMISSION`).
+pub(crate) fn relay_approver(
+    cx: &OpContext,
+    relayed_by: Option<&str>,
+    has_evidence: bool,
+) -> Result<(Session, Option<ActorRun>), RdyError> {
+    let s = cx.session;
+    let by = match (s.is_human(), relayed_by) {
+        (true, None) => return Ok((approver(s)?, None)),
+        (true, Some(_)) => return Err(RdyError::new(E_PERMISSION, HUMAN_RELAY, HUMAN_RELAY_FIX)),
+        (false, None) => {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                AGENT_NOT_RELAYING,
+                AGENT_NOT_RELAYING_FIX,
+            ));
+        }
+        (false, Some(by)) => by,
+    };
+    if !has_evidence {
+        return Err(RdyError::new(E_BAD_INPUT, RELAY_PAIR, RELAY_PAIR_FIX));
+    }
+    let (actor, run) = match by.split_once('/') {
+        Some((actor, run)) => (actor, Some(run)),
+        None => (by, None),
+    };
+    let own_run = match run {
+        None => true,
+        Some(r) => s.run.as_deref() == Some(r),
+    };
+    if actor != s.actor || !own_run {
+        let me = match &s.run {
+            Some(r) => format!("{}/{r}", s.actor),
+            None => s.actor.clone(),
+        };
+        return Err(RdyError::new(
+            E_PERMISSION,
+            format!("{me} relays only as itself, not as {by}"),
+            format!(
+                "pass --relayed-by {} with the person's words in --evidence",
+                s.actor
+            ),
+        ));
+    }
+    Ok((
+        Session::human(cx.human.to_string(), Role::Approver),
+        Some(ActorRun {
+            actor: s.actor.clone(),
+            run: s.run.clone(),
+        }),
+    ))
+}
+
+/// Why half a relay is refused.
+pub(crate) const RELAY_PAIR: &str = "relayed_by and evidence go together";
+
+/// How that refusal is fixed.
+pub(crate) const RELAY_PAIR_FIX: &str = "pass both (--relayed-by and --evidence) or neither";
 
 /// The view a write op targets: `view` without a leading `view:`, else the session's default.
 pub(crate) fn view_of(s: &Session, view: Option<String>) -> String {
