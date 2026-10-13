@@ -73,8 +73,23 @@ pub async fn daemon(version: &str, ready: bool, cfg: impl FnOnce(&mut DaemonConf
     }
 }
 
+/// A hello line from a client in the project at `cwd`, which names that project's `.rdy`.
 pub fn hello(version: &str, proto: &str, cwd: &Path) -> String {
-    json!({"rdy": 1, "version": version, "proto": proto, "cwd": cwd}).to_string() + "\n"
+    let project = RunDir::of_project(cwd)
+        .project_id()
+        .expect("the project's .rdy");
+    json!({"rdy": 1, "version": version, "proto": proto, "cwd": cwd, "project": project})
+        .to_string()
+        + "\n"
+}
+
+/// Writes `run`'s socket record as a daemon does: the socket, then the `.rdy` identity.
+pub fn write_record(run: &RunDir, socket: &Path, project: &ProjectId) {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = socket.as_os_str().as_bytes().to_vec();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(format!("{project}\n").as_bytes());
+    std::fs::write(run.socket_record(), bytes).unwrap();
 }
 
 /// Connects, sends `line` as the hello, and returns the reader and the first reply line.

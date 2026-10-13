@@ -1,10 +1,8 @@
-//! rpag1, rfoc1, rpat1: the parts of `rdy_read` that page whole blocks with a cursor, find one
-//! section of a doc by its heading slug, and keep only the blocks a pattern matches.
-use rdy_engine::{E_BAD_INPUT, E_UNKNOWN_BLOCK, Materialized, RdyError};
-use rdy_model::tree::{DOC, slug as slug_of};
-use rdy_model::{Block, BlockId};
+//! rpag1, rpat1: the parts of `rdy_read` that page whole blocks with a cursor and keep only the
+//! blocks a pattern matches.
+use rdy_engine::{E_BAD_INPUT, RdyError};
 use serde::Serialize;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 /// The most cut reads one MCP session keeps a cursor for; the oldest is dropped first.
 pub const READ_REGISTRY_CAP: usize = 32;
@@ -116,52 +114,6 @@ pub fn parse_cursor(text: &str) -> Option<(String, usize)> {
         return None;
     }
     Some((token.to_string(), offset.parse().ok()?))
-}
-
-/// rfoc1: the section of `doc` that `slug` names. Sections are named by the slug of their title,
-/// depth-first in child order; the 2nd, 3rd, … section with the same slug in this doc is named
-/// `{slug}-2`, `{slug}-3`, …, skipping a name an earlier section already has. The first exact
-/// match wins.
-pub fn section_by_slug(m: &Materialized, doc: &Block, slug: &str) -> Result<BlockId, RdyError> {
-    if doc.block_type != DOC {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!(
-                "{} is a {}, not a doc: #<heading> reads a section of a doc",
-                doc.id, doc.block_type
-            ),
-            "pass a doc's id, key or path before #",
-        ));
-    }
-    let mut taken: BTreeSet<String> = BTreeSet::new();
-    let mut walk: Vec<&Block> = m.children(Some(&doc.id)).into_iter().rev().collect();
-    while let Some(b) = walk.pop() {
-        // a doc inside this doc has its own sections
-        if b.block_type == DOC {
-            continue;
-        }
-        if b.block_type == "section" {
-            let base = slug_of(b.field_str("title").unwrap_or(""));
-            let name = if taken.contains(&base) {
-                (2..)
-                    .map(|n| format!("{base}-{n}"))
-                    .find(|c| !taken.contains(c))
-                    .expect("an unbounded range has a free name")
-            } else {
-                base
-            };
-            taken.insert(name.clone());
-            if name == slug {
-                return Ok(b.id.clone());
-            }
-        }
-        walk.extend(m.children(Some(&b.id)).into_iter().rev());
-    }
-    Err(RdyError::new(
-        E_UNKNOWN_BLOCK,
-        format!("no section #{slug} in {}", doc.id),
-        "rdy_read the doc to see its section titles",
-    ))
 }
 
 /// The length of `s` written as a JSON string, without its quotes.

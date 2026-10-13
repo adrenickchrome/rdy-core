@@ -158,6 +158,8 @@ pub(crate) enum Conn {
     Direct {
         local: Box<Local>,
         session: Session,
+        /// The human actor the session was classified against.
+        human: String,
         cwd: PathBuf,
     },
     /// `client` before `rt`: the connection drops while its runtime still runs. `pending` is
@@ -178,15 +180,12 @@ impl Conn {
         require_project(&env.project)?;
         if env.no_daemon {
             let local = Local::open(&env.project)?;
-            match classify(
-                &human_actor_for_env(&env.project),
-                actor.as_deref(),
-                run.as_deref(),
-                Role::Writer,
-            ) {
+            let human = human_actor_for_env(&env.project);
+            match classify(&human, actor.as_deref(), run.as_deref(), Role::Writer) {
                 Ok(session) => Ok(Conn::Direct {
                     local: Box::new(local),
                     session,
+                    human,
                     cwd: env.cwd.clone(),
                 }),
                 Err(e) => {
@@ -219,11 +218,13 @@ impl Conn {
             Conn::Direct {
                 local,
                 session,
+                human,
                 cwd,
             } => {
                 let cx = OpContext {
                     engine: &**local,
                     session,
+                    human,
                     cwd,
                 };
                 dispatch(&cx, op, args).map_err(ErrorReply::from)

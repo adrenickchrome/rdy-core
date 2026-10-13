@@ -149,6 +149,6 @@ fn ib7_the_unapplied_decision_warning_has_a_row() {
     assert!(when.contains("needs_content: false"), "{when}");
     assert_eq!(
         fix,
-        "link the content that carries it with decided_by, or set needs_content: false for a process ruling"
+        "write the content that carries it with implements: <decision>, or link that content to it with decided_by; for a process ruling, set needs_content: false"
     );
 }

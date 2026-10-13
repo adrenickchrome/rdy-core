@@ -31,8 +31,11 @@ use std::time::Duration;
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 /// The actor a direct command journals as (the user config `Served` writes names it).
 const HUMAN: &str = "human:qa";
-/// The relay as `rdy approve --relayed-by` names it.
+/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor and run.
 const RELAY: &str = "agent:relay/chat";
+/// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
+const RELAY_ACTOR: &str = "agent:relay";
+const RELAY_RUN: &str = "chat";
 /// How many queued proposals the person looks at when it hunts for advice to accept: the queue
 /// a fast run holds, so a late contradiction pair's proposal is seen (ruling task-5.2).
 const ADVICE_LOOKS: usize = 24;
@@ -158,9 +161,17 @@ impl Person {
     /// `rdy --project <dir> --json <args>` as the person. A command the daemon died under, or
     /// could not start for, is `Lost`.
     fn cli(&mut self, act: &str, args: &[&str]) -> Res {
+        self.cli_as(act, args, false)
+    }
+
+    /// `cli`, run as the relaying agent (`RDY_ACTOR=agent:relay`, `RDY_RUN=chat`) when `relay`.
+    fn cli_as(&mut self, act: &str, args: &[&str], relay: bool) -> Res {
         let mut all = vec!["--json"];
         all.extend_from_slice(args);
         let mut cmd = human_command(&self.link.at.dir, &self.link.at.env, &all);
+        if relay {
+            cmd.env("RDY_ACTOR", RELAY_ACTOR).env("RDY_RUN", RELAY_RUN);
+        }
         let out = match output_within(&mut cmd, CLI_BUDGET) {
             Ok(o) => o,
             Err(e) => self.link.fail(act, &format!("hung: {e}")),
@@ -248,7 +259,8 @@ impl Person {
         } else {
             vec!["approve", &pref]
         };
-        let res = self.cli("land", &args);
+        // the relay runs as the agent itself; the direct approve is the person's
+        let res = self.cli_as("land", &args, relayed);
         let res = self.link.finish(e, "land", res, |en, v| {
             en.reply = Some(v.clone());
         });

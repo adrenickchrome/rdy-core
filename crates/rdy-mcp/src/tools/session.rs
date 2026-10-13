@@ -150,12 +150,9 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         300 + coverage.as_ref().map_or(0, tokens_of) + coverage_error.as_ref().map_or(0, tokens_of);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(reserve));
     let views: Vec<Value> = st_
-        .view_names()
+        .views_with_changes()
         .into_iter()
-        .map(|name| {
-            let n = st_.included(&name).len();
-            json!({"name": name, "changes": n})
-        })
+        .map(|(name, n)| json!({"name": name, "changes": n}))
         .collect();
     let landings = st_.landings()?.len();
     let mut out = json!({

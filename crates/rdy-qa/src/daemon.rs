@@ -291,6 +291,9 @@ impl Hosted {
             version: "t".into(),
             proto,
             cwd: self.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&self.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let run = RunDir::of_project(self.dir.path());
         match connect(&run, &hello).await {

@@ -4,7 +4,7 @@
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
 use crate::coverage::{coverage_change, coverage_error_text};
 use crate::engine::{Engine, write_typed};
-use crate::error::{E_INTERNAL, RdyError};
+use crate::error::{E_CONFLICT_UNRESOLVED, E_INTERNAL, RdyError};
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
 use crate::tensions::delta::on_change;
@@ -12,9 +12,12 @@ use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
 use crate::views::{UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
-use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
+use rdy_graph::{
+    DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect, edges_of,
+};
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
 use rdy_model::{BlockId, Hash, Op};
+use rdy_store::StoreError;
 use serde::Serialize;
 use std::cell::OnceCell;
 use std::collections::btree_map::Entry;
@@ -92,6 +95,19 @@ pub struct Consequences {
 /// The hint on a `reaffirm` entry.
 pub const REAFFIRM_FIX: &str =
     "supersede it, or leave it suspect; re-affirmation arrives with FW-R6";
+
+/// The hint on a kept `suspect` entry (D-W7KAK) whose target changed, for a block that is not a
+/// live decision: the write kept the old pin.
+pub const KEPT_CHANGED_FIX: &str = "this write kept its pin on the old version of the target. Check that it still holds, then repin it with a repin op.";
+
+/// The hint on a kept `suspect` entry whose target was deleted: there is no version to pin.
+pub const KEPT_DELETED_FIX: &str =
+    "its target is gone. Remove the reference or the link, or point it at another block.";
+
+/// The hint on a kept `suspect` entry whose target is superseded or revoked: a repin does not
+/// clear it, only a new citation does.
+pub const KEPT_REPLACED_FIX: &str =
+    "its target is superseded or revoked. Point it at the decision in force, or remove the link.";
 
 /// The hint on a `conflict` entry.
 pub const CONFLICT_FIX: &str = "write the block from the version you want (rdy_context lists the sides), or exclude one side's change";
@@ -203,6 +219,65 @@ pub(crate) fn changed_by_ops(ops: &[Op]) -> (BTreeSet<BlockId>, BTreeSet<BlockId
     (touched, changed)
 }
 
+/// The blocks `ops` create or update (`Op::Create`, `Op::Update`): those a kept `suspect` entry
+/// may name (D-W7KAK).
+fn rewritten_by(ops: &[Op]) -> BTreeSet<BlockId> {
+    ops.iter()
+        .filter(|o| matches!(o, Op::Create { .. } | Op::Update { .. }))
+        .map(|o| o.block_id().clone())
+        .collect()
+}
+
+/// Whether a block `ops` create cites (by a reference or a link) a block that `ops` do not write:
+/// only then can a block a change set only creates be suspect after it (on a superseded or
+/// revoked target, or, merged onto canon, on a target canon changed since).
+fn creates_cite_outside(ops: &[Op]) -> bool {
+    let written: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
+    ops.iter().any(|o| match o {
+        Op::Create { block } => edges_of(block).iter().any(|e| !written.contains(&e.to)),
+        _ => false,
+    })
+}
+
+/// D-W7KAK: the follow-up and the fix of a kept `suspect` entry, by the suspect's reason and
+/// whether the block is a live or partly superseded decision; `None` for any other reason. A
+/// live decision is frozen, so it gets `reaffirm` for every reason, as `follow_up` gives it.
+fn kept_follow_up(reason: &str, live_decision: bool) -> Option<(FollowUp, String)> {
+    let (follow, fix) = match reason {
+        "changed" | "deleted" | "superseded" | "revoked" if live_decision => {
+            (FollowUp::Reaffirm, REAFFIRM_FIX)
+        }
+        "changed" => (FollowUp::Confirm, KEPT_CHANGED_FIX),
+        "deleted" => (FollowUp::Update, KEPT_DELETED_FIX),
+        "superseded" | "revoked" => (FollowUp::Update, KEPT_REPLACED_FIX),
+        _ => return None,
+    };
+    Some((follow, fix.to_string()))
+}
+
+/// The words after the code of a version's `consequences_error` while `ids` are in conflict
+/// (sorted, each once).
+fn conflict_message(ids: &[String]) -> String {
+    let mut ids = ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    match ids.as_slice() {
+        [one] => format!(
+            "no consequences while {one} is in conflict. Write it from the version you want (rdy_context lists the sides), then propose again."
+        ),
+        _ => format!(
+            "no consequences while {} are in conflict. Write each from the version you want (rdy_context lists the sides), then propose again.",
+            ids.join(", ")
+        ),
+    }
+}
+
+/// A version's `consequences_error` while `ids` are in conflict: it has no consequences until
+/// the conflicts are resolved and it is proposed again (ledger O4).
+fn conflict_error(ids: &[String]) -> String {
+    format!("{E_CONFLICT_UNRESOLVED}: {}", conflict_message(ids))
+}
+
 impl ReadState {
     /// The consequences of `change` in this state (the one the write published): for each block
     /// the change touched, each block outside the change that points at it. See
@@ -234,10 +309,12 @@ impl ReadState {
             .map(|h| self.reader().change(h))
             .collect::<Result<Vec<_>, _>>()?;
         let (mut touched, mut changed) = (BTreeSet::new(), BTreeSet::new());
+        let mut rewritten = BTreeSet::new();
         for ch in &chs {
             let (t, c) = changed_by_ops(&ch.ops);
             touched.extend(t);
             changed.extend(c);
+            rewritten.extend(rewritten_by(&ch.ops));
         }
         // FW-LP6: the reaching links, by new decision, then target
         let mut reach: Vec<_> = chs.iter().flat_map(|ch| reached_targets(&ch.ops)).collect();
@@ -257,12 +334,17 @@ impl ReadState {
             }
             Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
         };
-        // nothing can point at a block that did not exist: no graph to read
+        // nothing can point at a block that did not exist, and a new block that cites nothing
+        // outside the write cannot be suspect: no graph to read
         let only_creates = chs
             .iter()
             .flat_map(|ch| &ch.ops)
             .all(|o| matches!(o, Op::Create { .. }));
-        if only_creates && changed == touched && reach.is_empty() {
+        if only_creates
+            && changed == touched
+            && reach.is_empty()
+            && !chs.iter().any(|ch| creates_cite_outside(&ch.ops))
+        {
             return Ok(Consequences {
                 tensions_error,
                 ..cut(tensions, max_tokens)
@@ -284,6 +366,7 @@ impl ReadState {
                 &m,
                 change,
                 &touched,
+                &rewritten,
                 &changed,
                 &written,
                 vec![],
@@ -400,6 +483,7 @@ impl ReadState {
             &m,
             batch,
             &touched,
+            &BTreeSet::new(),
             &changed,
             &written,
             conflicts,
@@ -414,7 +498,8 @@ impl ReadState {
     /// (the landing is in it); otherwise the version's changes merged onto canon, applied to
     /// canon's materialization, with canon's graph carried across the applied ops. The batch is
     /// the version hash, so the propose and the approval give each entry the same id. A version
-    /// that does not merge onto canon is an error (the caller reports it).
+    /// that does not merge onto canon is an error (the caller reports it): on a conflict,
+    /// `E_CONFLICT_UNRESOLVED` with the propose's text (ledger O4).
     pub fn landing_consequences(
         &self,
         version: &Hash,
@@ -425,7 +510,7 @@ impl ReadState {
         let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
         let (touched, changed) = changed_by_ops(&ops);
         let only_creates = ops.iter().all(|o| matches!(o, Op::Create { .. }));
-        if only_creates && changed == touched {
+        if only_creates && changed == touched && !creates_cite_outside(&ops) {
             return Ok(Consequences::default());
         }
         // build canon's graph first, so that `after` carries it instead of building another
@@ -437,8 +522,19 @@ impl ReadState {
             )
         } else {
             let reader = self.reader();
+            // a conflict the version carries: it has no consequences until it is resolved
             let (_, applied) =
-                reader.merge_checked(&reader.state_of(self.canon_head())?, &changes)?;
+                match reader.merge_checked(&reader.state_of(self.canon_head())?, &changes) {
+                    Ok(merged) => merged,
+                    Err(StoreError::StaleBase { id, .. }) => {
+                        return Err(RdyError::new(
+                            E_CONFLICT_UNRESOLVED,
+                            conflict_message(&[id.to_string()]),
+                            CONFLICT_FIX,
+                        ));
+                    }
+                    Err(e) => return Err(e.into()),
+                };
             let next = self
                 .built(&Scope::Canon)?
                 .after(&applied_ops(&changes, &applied), self.pack());
@@ -455,6 +551,7 @@ impl ReadState {
             &m,
             version,
             &touched,
+            &rewritten_by(&ops),
             &changed,
             &|_| false,
             vec![],
@@ -465,7 +562,8 @@ impl ReadState {
     }
 
     /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
-    /// outside `touched` that points at it. `conflicts` (by block id) come first, then
+    /// outside `touched` that points at it, and the kept suspects of `rewritten` (see
+    /// `kept_suspects`). `conflicts` (by block id) come first, then
     /// `tensions` (as given), then suspect entries, then dependent ones, each by block id, then
     /// the FW-LP6 entries of `reach` (a `dependent` entry for each block a reached target
     /// governs, in the order of `reach`, never a block `touched` holds, the new decision itself,
@@ -481,6 +579,7 @@ impl ReadState {
         m: &Materialized,
         batch: &Hash,
         touched: &BTreeSet<BlockId>,
+        rewritten: &BTreeSet<BlockId>,
         changed: &BTreeSet<BlockId>,
         written: &dyn Fn(&BlockId) -> bool,
         mut conflicts: Vec<Consequence>,
@@ -570,6 +669,10 @@ impl ReadState {
                 _ => dependent_items.push(item),
             }
         }
+        // D-W7KAK: with the other suspect entries, by block id (a kept entry never names a block
+        // an outside entry names: those are outside `touched`)
+        suspect_items.extend(self.kept_suspects(g, m, batch, rewritten));
+        suspect_items.sort_by(|a, b| a.block.cmp(&b.block));
         conflicts.sort_by(|a, b| a.block.cmp(&b.block));
         conflicts.extend(tensions);
         conflicts.extend(suspect_items);
@@ -630,6 +733,72 @@ impl ReadState {
             }
         }
         cut(conflicts, max_tokens)
+    }
+
+    /// D-W7KAK: a `suspect` entry for each block of `rewritten` that is suspect in `g`, once per
+    /// target, marked `already_written`: the write kept its pin, so the agent answers it before it
+    /// proposes. `because.edge` is the edge to the target that makes the block suspect (a premise
+    /// edge first, the least by name; else the least link by name); the id covers the target too.
+    /// Follow-up and fix by [`kept_follow_up`]. None for a block that is gone, a decision that
+    /// asserts nothing live, or a presentational source. By block, then target.
+    fn kept_suspects(
+        &self,
+        g: &Graph,
+        m: &Materialized,
+        batch: &Hash,
+        rewritten: &BTreeSet<BlockId>,
+    ) -> Vec<Consequence> {
+        let mut out = vec![];
+        for block in rewritten {
+            if m.get(block).is_none() {
+                continue;
+            }
+            let live_decision = match g.status(block) {
+                Some(
+                    DerivedStatus::Rejected
+                    | DerivedStatus::Superseded { .. }
+                    | DerivedStatus::Revoked { .. },
+                ) => continue,
+                Some(DerivedStatus::Live | DerivedStatus::PartiallySuperseded { .. }) => true,
+                Some(DerivedStatus::Proposed) | None => false,
+            };
+            for s in g.suspects_of(block) {
+                if self.is_presentational_source(m, &s) {
+                    continue;
+                }
+                let Some((follow, fix)) = kept_follow_up(&s.reason, live_decision) else {
+                    continue;
+                };
+                // the edge that makes it suspect, by the graph's own rule (`edge_suspect`), so
+                // this reply and rdy_context never disagree: a premise edge first, then a link
+                // that is not one (a `refines` or an `affects` to a superseded decision)
+                let edge = g
+                    .outgoing(block)
+                    .iter()
+                    .filter(|e| {
+                        e.to == s.target && g.edge_suspect(e).is_some_and(|x| x.reason == s.reason)
+                    })
+                    .map(|e| (!premise(e), e.kind.name()))
+                    .min();
+                let Some((_, edge)) = edge else { continue };
+                out.push(Consequence {
+                    // one id per (block, target), as a tension entry names its tension
+                    id: consequence_id(batch, &format!("suspect {}", s.target), block),
+                    block: block.to_string(),
+                    kind: ConsequenceKind::Suspect,
+                    because: Because {
+                        edge,
+                        changed: s.target.to_string(),
+                    },
+                    follow_up: follow,
+                    conflict: None,
+                    tension: None,
+                    fix: Some(fix),
+                    already_written: true,
+                });
+            }
+        }
+        out
     }
 }
 
@@ -1046,15 +1215,30 @@ pub fn view_op_and_report<T: Serialize + 'static>(
 
 /// `write_typed` for a proposal (`f` returns its `ProposalInfo`), then the consequences of
 /// landing it on canon (see `ReadState::landing_consequences`): `consequences` is always present
-/// in the reply, with `consequences_omitted` when a cut dropped some, or `consequences_error`
-/// when the version does not merge onto canon (the proposal stands).
+/// in the reply, with `consequences_omitted` when a cut dropped some, or `consequences: []` and
+/// `consequences_error` when the version has a blocking conflict (`E_CONFLICT_UNRESOLVED`, no
+/// merge tried) or does not merge onto canon (the proposal stands).
 pub fn propose_and_report(
     engine: &dyn Engine,
     max_tokens: Option<usize>,
     f: impl FnOnce(&mut Rdy) -> Result<ProposalInfo, RdyError> + Send + 'static,
 ) -> Result<serde_json::Value, RdyError> {
     let mut v = write_typed(engine, f)?;
-    report_landing(engine, &mut v, "id", max_tokens);
+    // ledger O4: a version with a blocking conflict has no consequences (FW-LP3 reads them from
+    // its final state, which it does not have yet); no merge is tried
+    let blocking: Vec<String> = v
+        .get("blocking")
+        .and_then(|b| b.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("block")?.as_str().map(str::to_string))
+        .collect();
+    if blocking.is_empty() {
+        report_landing(engine, &mut v, "id", max_tokens);
+    } else {
+        v["consequences"] = serde_json::json!([]);
+        v["consequences_error"] = conflict_error(&blocking).into();
+    }
     attach_proposal_coverage(engine, &mut v);
     Ok(v)
 }
@@ -1185,6 +1369,55 @@ mod tests {
         attach_proposal_coverage(&e, &mut v);
         assert!(v["coverage"]["before"].is_u64(), "{v:#}");
         assert_eq!(v["coverage_error"], "E_INTERNAL: warning pass", "{v:#}");
+    }
+
+    /// df4 (D-W7KAK): a kept suspect's follow-up and fix, by the suspect's reason and whether the
+    /// block is a live (or partly superseded) decision.
+    #[test]
+    fn df4_kept_rows_follow_the_table() {
+        let row = |f: FollowUp, fix: &str| Some((f, fix.to_string()));
+        // fix round 1 (ruling 1): a live decision is frozen, so it always gets reaffirm, whatever
+        // the reason; an update would send the agent to an edit rdy refuses (E_FROZEN)
+        for reason in ["changed", "deleted", "superseded", "revoked"] {
+            assert_eq!(
+                kept_follow_up(reason, true),
+                row(FollowUp::Reaffirm, REAFFIRM_FIX),
+                "{reason}"
+            );
+        }
+        assert_eq!(
+            kept_follow_up("changed", false),
+            row(FollowUp::Confirm, KEPT_CHANGED_FIX)
+        );
+        assert_eq!(
+            kept_follow_up("deleted", false),
+            row(FollowUp::Update, KEPT_DELETED_FIX)
+        );
+        assert_eq!(
+            kept_follow_up("superseded", false),
+            row(FollowUp::Update, KEPT_REPLACED_FIX)
+        );
+        assert_eq!(
+            kept_follow_up("revoked", false),
+            row(FollowUp::Update, KEPT_REPLACED_FIX)
+        );
+        for live in [true, false] {
+            assert_eq!(kept_follow_up("moved", live), None);
+            assert_eq!(kept_follow_up("", live), None);
+        }
+    }
+
+    /// df4 (ledger O4): the conflict text names each id once, sorted, and says "each" for more.
+    #[test]
+    fn df4_conflict_error_names_each_id_once_sorted() {
+        assert_eq!(
+            conflict_error(&["c-0PEN1".into()]),
+            "E_CONFLICT_UNRESOLVED: no consequences while c-0PEN1 is in conflict. Write it from the version you want (rdy_context lists the sides), then propose again."
+        );
+        assert_eq!(
+            conflict_error(&["c-2".into(), "c-1".into(), "c-2".into()]),
+            "E_CONFLICT_UNRESOLVED: no consequences while c-1, c-2 are in conflict. Write each from the version you want (rdy_context lists the sides), then propose again."
+        );
     }
 
     /// A tension read error means the coverage cannot be worked out: the reply is left as it is.

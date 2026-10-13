@@ -29,6 +29,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
     OpContext {
         engine: e,
         session: s,
+        human: "human:t",
         cwd,
     }
 }
@@ -232,7 +233,7 @@ fn ctl2_new_propose_approve_tag_land_through_the_writer_and_the_next_read_sees_t
 }
 
 #[test]
-fn ctl2_an_agent_may_write_but_not_approve_tag_or_import() {
+fn ctl2_an_agent_may_write_but_not_approve_alone_tag_or_import() {
     let (d, e) = project();
     let a = Session::agent("agent:w".into(), Some("r1".into()), Role::Writer).unwrap();
     let c = cx(&e, &a, d.path());
@@ -244,14 +245,23 @@ fn ctl2_an_agent_may_write_but_not_approve_tag_or_import() {
         "the agent's default view is its run"
     );
     let p = dispatch(&c, "propose", json!({"title": "t"})).unwrap();
+    let err = dispatch(&c, "approve", json!({"proposal": p["id"]})).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PERMISSION);
+    assert_eq!(
+        err.message,
+        "an agent approves only by relaying a person's approval"
+    );
     for (op, args) in [
-        ("approve", json!({"proposal": p["id"]})),
         ("tag", json!({"version": "v0.1.0"})),
         ("import", json!({"dir": "x", "view": "r1"})),
     ] {
         let err = dispatch(&c, op, args).unwrap_err();
         assert_eq!(err.code, rdy_engine::E_PERMISSION, "{op}");
-        assert_eq!(err.message, "agent sessions cannot approve, tag or import");
+        assert_eq!(err.message, "agent sessions cannot tag or import");
+        assert_eq!(
+            err.fix,
+            "tags and imports are the person's acts: ask the person to run the command"
+        );
     }
 }
 
@@ -458,6 +468,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
             let c = OpContext {
                 engine: &*e,
                 session: &s,
+                human: "human:t",
                 cwd: &root,
             };
             dispatch(
@@ -489,6 +500,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
             let c = OpContext {
                 engine: &*e,
                 session: &s,
+                human: "human:t",
                 cwd: &root,
             };
             dispatch(

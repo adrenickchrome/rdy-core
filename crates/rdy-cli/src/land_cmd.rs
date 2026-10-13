@@ -26,7 +26,7 @@ pub(crate) struct ProposeArgs {
 #[derive(clap::Args)]
 pub(crate) struct ApproveArgs {
     proposal: String,
-    /// The agent that relays the human's approval, as actor[/run]. Records a relayed approval.
+    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Records a relayed approval.
     #[arg(long, requires = "evidence")]
     relayed_by: Option<String>,
     /// The human's words, quoted. Requires --relayed-by and the exact version.
@@ -199,8 +199,12 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
         "\nlanded {} ({approved})",
         hash_short(text(&v["landing"]))
     ));
-    if let Some(by) = relayed_by {
-        t.push_str(&format!(", relayed by {by}"));
+    // the relayer as recorded (the session's actor and run), which may differ from the flag
+    if let Some(by) = v["relayed_by"]["actor"].as_str() {
+        match v["relayed_by"]["run"].as_str() {
+            Some(run) => t.push_str(&format!(", relayed by {by}/{run}")),
+            None => t.push_str(&format!(", relayed by {by}")),
+        }
     }
     if let Some(member) = v["chosen"]["member"].as_str() {
         t.push_str(&format!(

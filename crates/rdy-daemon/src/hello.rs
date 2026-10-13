@@ -1,6 +1,7 @@
 //! The hello: the first line of every connection, and the daemon's replies to it.
 
 use crate::error::{E_BAD_INPUT, ErrorReply};
+use crate::layout::ProjectId;
 use crate::session::{Proto, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,14 +16,17 @@ pub const MAX_HELLO_BYTES: usize = 4096;
 /// How long a new connection has to send its hello.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// `{"rdy":1,"version":"…","proto":"ctl"|"mcp","cwd":"…"}`. Unknown fields are ignored:
-/// later versions may add some.
+/// `{"rdy":1,"version":"…","proto":"ctl"|"mcp","cwd":"…","project":"dev:ino"}`. Unknown fields
+/// are ignored: later versions may add some.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub rdy: u32,
     pub version: String,
     pub proto: Proto,
     pub cwd: PathBuf,
+    /// The client's project: its `.rdy` identity (`RunDir::project_id`). A daemon refuses a
+    /// hello from another project.
+    pub project: ProjectId,
 }
 
 /// The daemon's answer to a hello, one JSON line each. Zero or more `starting`, then exactly one
@@ -41,7 +45,7 @@ const SEND_HELLO_FIRST: &str = "send the hello line first";
 fn not_a_hello() -> ErrorReply {
     ErrorReply::new(
         E_BAD_INPUT,
-        r#"the first line must be a hello: {"rdy":1,"version":"…","proto":"ctl"|"mcp","cwd":"…"}"#,
+        r#"the first line must be a hello: {"rdy":1,"version":"…","proto":"ctl"|"mcp","cwd":"…","project":"dev:ino"}"#,
         SEND_HELLO_FIRST,
     )
 }

@@ -137,7 +137,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "W_UNAPPLIED_DECISION",
         "a proposal creates a decision that no content applies in its view, and the decision does not set needs_content: false; rdy_propose and rdy propose report it, and it never refuses the proposal",
-        "link the content that carries it with decided_by, or set needs_content: false for a process ruling",
+        "write the content that carries it with implements: <decision>, or link that content to it with decided_by; for a process ruling, set needs_content: false",
     ),
     (
         "W_SKELETON_MISSING",

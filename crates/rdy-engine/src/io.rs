@@ -860,6 +860,13 @@ impl ReadState {
     }
 }
 
+/// The label an import's messages carry: the final component of the directory's canonical
+/// path. A directory with no final component, or a name that is not UTF-8, has no label.
+fn import_label(dir: &Path) -> Option<String> {
+    let canon = std::fs::canonicalize(dir).ok()?;
+    canon.file_name()?.to_str().map(str::to_string)
+}
+
 impl Rdy {
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
         if !s.role.can_land() {
@@ -1188,12 +1195,16 @@ impl Rdy {
             .map(|g| (g.provenance, g.ops))
             .collect();
         order.sort_by(|a, b| (a.0.at_ms, &a.0.actor).cmp(&(b.0.at_ms, &b.0.actor)));
+        // df6: the messages name the directory, never its path (a path can hold a user name)
+        let from = import_label(dir)
+            .map(|l| format!(" from {l}"))
+            .unwrap_or_default();
         let mut planned: Vec<(Provenance, Vec<Op>, String)> = order
             .into_iter()
             .map(|(p, ops)| {
                 let message = format!(
-                    "import from {}: {} block(s) by {}, imported by {}",
-                    dir.display(),
+                    "import{}: {} block(s) by {}, imported by {}",
+                    from,
                     ops.len(),
                     p.actor,
                     s.actor
@@ -1203,11 +1214,7 @@ impl Rdy {
             .collect();
         // an export with no blocks still writes the importer's (empty) change, as before
         if !mine.is_empty() || planned.is_empty() {
-            planned.push((
-                s.provenance(),
-                mine,
-                format!("import from {}", dir.display()),
-            ));
+            planned.push((s.provenance(), mine, format!("import{from}")));
         }
         // one write for every change (all or nothing). Each change keeps its author's
         // provenance; the view ops (the implicit create, a claim, the commits) and the view's

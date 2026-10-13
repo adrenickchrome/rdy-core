@@ -9,4 +9,5 @@ mod daemon_notify;
 mod daemon_pack_reads;
 mod daemon_reload;
 mod daemon_serve;
+mod daemon_short_socket;
 mod daemon_transport;

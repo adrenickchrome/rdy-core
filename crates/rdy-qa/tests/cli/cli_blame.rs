@@ -232,3 +232,67 @@ fn blame1_a_landed_revert_is_the_last_change_and_blame_lists_it() {
     assert_eq!(h[2]["op"], "create");
     assert_eq!(v["history_more"], false);
 }
+
+/// The repro case `blame-omits-relay`: an agent writes c and proposes it; the agent relays the
+/// person's approval as itself. The landing line of `rdy show --blame` says so, as `rdy log` does.
+#[test]
+fn df7_blame_omits_relay() {
+    let s = Served::new();
+    let (claim, pref) = {
+        s.stop();
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let (_doc, section, _c) = seed_doc(&mut r, "seed");
+        land(&mut r, "seed").unwrap();
+        let a = agent("agent:writer-a", Some("r1"));
+        let w = r
+            .write(
+                &a,
+                WriteRequest {
+                    view: "r1".into(),
+                    ops: from_value(
+                        json!([{"op": "create", "type": "claim", "parent": section, "body": "Relayed."}]),
+                    )
+                    .unwrap(),
+                    justification: None,
+                    message: "add c".into(),
+                },
+            )
+            .unwrap();
+        let claim = w.created.values().next().unwrap().clone();
+        let pref = r.propose(&a, "r1", "c").unwrap().r#ref;
+        r.close().unwrap();
+        (claim, pref)
+    };
+    let (ok, v) = s.json_as(
+        "agent:writer-a",
+        Some("r1"),
+        &[
+            "--json",
+            "approve",
+            &pref,
+            "--relayed-by",
+            "agent:writer-a/r1",
+            "--evidence",
+            "yes, land it",
+        ],
+    );
+    assert!(ok, "{v}");
+    let out = text(&s, &["show", &claim, "--blame"]);
+    let landed = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("landed "))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        landed.ends_with(", relayed by agent:writer-a/r1"),
+        "{landed}"
+    );
+    let log = text(&s, &["log"]);
+    let first = log.lines().next().unwrap();
+    assert!(first.contains("relayed by agent:writer-a/r1"), "{log}");
+    let (ok, v) = s.json(&["--json", "show", &claim, "--blame"]);
+    assert!(ok, "{v}");
+    assert_eq!(
+        v["history"][0]["landing"]["relayed_by"],
+        json!({"actor": "agent:writer-a", "run": "r1"})
+    );
+}

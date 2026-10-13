@@ -61,6 +61,10 @@ pub struct LandingRef {
     pub approved_by: String,
     pub at_ms: i64,
     pub assurance: String,
+    /// The agent that relayed the approval, `{actor, run}` as `author` and `rdy log` give it;
+    /// absent for an approval the person gave themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<ActorRun>,
 }
 
 /// One version of a block.
@@ -236,6 +240,7 @@ impl<'a> Memo<'a> {
             approved_by: rec.approved_by.actor.clone(),
             at_ms: rec.approved_by.at_ms,
             assurance: rec.assurance.as_str().into(),
+            relayed_by: rec.relayed_by.clone(),
         };
         self.landings.insert(h, l.clone());
         Ok(Some(l))

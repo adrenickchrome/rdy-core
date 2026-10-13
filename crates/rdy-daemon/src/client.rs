@@ -3,14 +3,15 @@
 
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
-use crate::layout::RunDir;
+use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
 use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
+use crate::socket::MAX_SOCKET_PATH;
 use crate::spawn::Spawned;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -148,13 +149,18 @@ fn log_len(run: &RunDir) -> u64 {
         .map_or(0, |m| m.len())
 }
 
-/// Whether `daemon.pid` names a live process: a daemon (starting, or draining its store) that a
-/// held store lock may belong to.
-fn daemon_pid_alive(run: &RunDir) -> bool {
+/// The pid `daemon.pid` names when that process is alive: a daemon (starting, or draining its
+/// store) that a held store lock may belong to.
+fn live_daemon_pid(run: &RunDir) -> Option<u32> {
     fs::read_to_string(run.pid_file())
         .ok()
         .and_then(|t| t.trim().parse::<u32>().ok())
-        .is_some_and(crate::spawn::process_alive)
+        .filter(|&pid| crate::spawn::process_alive(pid))
+}
+
+/// The project's store lock file, `.rdy/store/lock`, next to the run dir.
+fn store_lock(run: &RunDir) -> Option<PathBuf> {
+    run.path().parent().map(|p| p.join("store").join("lock"))
 }
 
 /// Whether the store's lock file is held by a process right now. A missing lock file or any other
@@ -412,8 +418,8 @@ pub enum Attempt {
     Refused(ErrorReply),
 }
 
-/// Connects to the run dir's socket, sends `hello` and reads the first reply (within
-/// `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
+/// Connects to the project's daemon (the socket recorded in `daemon.sock`, else the run dir's
+/// socket), sends `hello` and reads the first reply (within `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
 /// path that is a symlink, and a peer that is not of our own uid (neither hears the hello).
 pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
     connect_expecting_uid(run, hello, crate::socket::own_uid()).await
@@ -428,21 +434,43 @@ pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Att
     }
 }
 
-/// The connect, the peer check, the hello and its first reply; any error is "no daemon".
+/// The connect, the peer check, the hello and its first reply; any error is "no daemon". The
+/// socket the daemon recorded (`daemon.sock`) comes first, so a client of any spelling of the
+/// project reaches the one daemon. A record is followed only when it names this project's
+/// `.rdy` (`RunDir::recorded_socket`): a copied project's record names the original. A record
+/// that does not answer is stale; then the client's own socket (`RunDir::socket`) is tried. A
+/// daemon that answers but serves another project refuses the hello, and that refusal is the
+/// reply: it is never retried elsewhere (`connect_or_start` tries once more only when that
+/// daemon says it is stopping).
 async fn exchange_hello(
     run: &RunDir,
     hello: &Hello,
     uid: u32,
 ) -> io::Result<(UnixStream, HelloReply)> {
-    let path = run.socket();
+    let own = run.socket();
+    if let Some(recorded) = run.recorded_socket()
+        && recorded != own
+        && let Ok(found) = exchange_hello_at(&recorded, hello, uid).await
+    {
+        return Ok(found);
+    }
+    exchange_hello_at(&own, hello, uid).await
+}
+
+/// `exchange_hello` on the socket `path`.
+async fn exchange_hello_at(
+    path: &Path,
+    hello: &Hello,
+    uid: u32,
+) -> io::Result<(UnixStream, HelloReply)> {
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::other(format!(
             "{} is a symbolic link, which rdy does not follow",
             path.display()
         )));
     }
-    let mut stream = UnixStream::connect(&path).await?;
+    let mut stream = UnixStream::connect(path).await?;
     // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
     let peer = crate::socket::peer_uid(&stream)?;
     if peer != uid {
@@ -526,8 +554,67 @@ async fn finish(
     })
 }
 
+/// The `E_DAEMON_START` for a failed `RunDir::ensure`: a short socket directory that is not
+/// private to this user, or that cannot be created or checked (D-YMWEM), has its own fix; any
+/// other failure names the run dir.
+fn ensure_error(run: &RunDir, e: io::Error) -> ErrorReply {
+    let inner = e.get_ref();
+    if let Some(dir) = inner.and_then(|i| i.downcast_ref::<NotPrivateDir>()) {
+        return ErrorReply::new(
+            E_DAEMON_START,
+            format!("could not start the daemon: {dir}"),
+            format!(
+                "remove {}, or move the project to a shorter path",
+                dir.0.display()
+            ),
+        );
+    }
+    if let Some(failed) = inner.and_then(|i| i.downcast_ref::<ShortDirError>()) {
+        return ErrorReply::new(
+            E_DAEMON_START,
+            failed.to_string(),
+            format!(
+                "make {} a directory this user owns with mode 0700, or move the project to a path short enough that .rdy/run/rdy.sock fits (at most {MAX_SOCKET_PATH} bytes)",
+                failed.dir.display()
+            ),
+        );
+    }
+    start_error(format!(
+        "could not create the run directory {}: {e}",
+        run.path().display()
+    ))
+}
+
+/// The `E_DAEMON_START` for a spawned daemon that exited while the store is locked by daemon
+/// `pid`, which answers on no socket this client tried: the recorded one, else its own.
+fn locked_by_silent_daemon(run: &RunDir, pid: u32, since: u64) -> ErrorReply {
+    let socket = run.recorded_socket().unwrap_or_else(|| run.socket());
+    let mut e = ErrorReply::new(
+        E_DAEMON_START,
+        format!(
+            "the store is locked by daemon {pid}, which does not answer on {}",
+            socket.display()
+        ),
+        format!("stop it with rdy serve --stop from the project, or end process {pid}"),
+    );
+    e.extra.insert(
+        "log_tail".into(),
+        json!(log_tail_since(run, since, LOG_TAIL_LINES)),
+    );
+    e
+}
+
+/// Whether a refusal comes from a daemon that is stopping because its own project is gone or
+/// replaced (`stopping: true`, final ruling): the client then tries once more.
+fn stopping(e: &ErrorReply) -> bool {
+    e.extra.get("stopping") == Some(&Value::Bool(true))
+}
+
 /// Connects to the project's daemon, starting one if none answers. At most one client spawns:
-/// the spawn happens under `start.lock`, after a second connect made while holding it.
+/// the spawn happens under `start.lock`, after a second connect made while holding it. A refusal
+/// from a daemon that is stopping (its own project is gone or replaced: a project restored in
+/// place) is retried once, within the same start timeout; that daemon removed its socket before
+/// it answered, so the retry starts this project's own daemon.
 pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client, ErrorReply> {
     let StartOptions {
         version,
@@ -538,158 +625,255 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         mut progress,
     } = opts;
     let deadline = Instant::now() + start_timeout;
-    let hello = Hello {
-        rdy: PROTO_VERSION,
-        version,
-        proto,
-        cwd,
-    };
     let progress: &mut (dyn FnMut(&str) + Send) = &mut *progress;
-    // whether a daemon told us it is exiting: it then still holds the store while it drains
-    let mut saw_exiting = false;
-    // 1. a daemon may be running
-    match connect(run, &hello).await {
-        Attempt::Ready(c) => return Ok(c),
-        Attempt::Starting(p) => {
-            return finish(p, run, deadline, start_timeout, progress, None).await;
-        }
-        Attempt::Refused(e) => return Err(e),
-        Attempt::Exiting => saw_exiting = true,
-        Attempt::NoDaemon(_) => {}
-    }
-
-    // a daemon spawned for a socket path over `sun_path` would only die at its bind; refuse it
-    // here rather than wait out the start timeout. The daemon binds the absolute path, so check
-    // that one, not a run dir relative to the caller's working directory.
-    run.absolute()
-        .and_then(|r| crate::socket::check_socket_path(&r))
-        .map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
-
-    // 2. take start.lock; the guard unlocks on every return below
-    run.ensure().map_err(|e| {
-        start_error(format!(
-            "could not create the run directory {}: {e}",
-            run.path().display()
-        ))
-    })?;
-    let lock_path = run.start_lock();
-    let _lock = loop {
-        match FileLock::try_take(&lock_path) {
-            Ok(Some(lock)) => break lock,
-            Ok(None) => {}
-            Err(e) => {
-                return Err(start_error(format!(
-                    "could not lock {}: {e}",
-                    lock_path.display()
-                )));
-            }
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(start_error(format!(
-                "another client has been starting the daemon for {} s",
-                start_timeout.as_secs()
-            )));
-        }
-        tokio::time::sleep(LOCK_RETRY.min(deadline - now)).await;
+    let mut start = Start {
+        version: &version,
+        proto,
+        cwd: &cwd,
+        start_timeout,
+        deadline,
+        spawn: &mut spawn,
+        progress,
     };
-
-    // 3. another client may have started one while we waited for the lock
-    match connect(run, &hello).await {
-        Attempt::Ready(c) => return Ok(c),
-        Attempt::Starting(p) => {
-            return finish(p, run, deadline, start_timeout, progress, None).await;
-        }
-        Attempt::Refused(e) => return Err(e),
-        Attempt::Exiting => saw_exiting = true,
-        Attempt::NoDaemon(_) => {}
+    match start.once(run).await {
+        Err(e) if stopping(&e) => start.once(run).await,
+        out => out,
     }
+}
 
-    // a store held by a process that is not a daemon (a --no-daemon rdy) would only make the
-    // daemon we spawn die at its open: refuse that here, without a spawn, once it has had a
-    // moment to let go. A daemon that is draining holds the store too (it removes its socket and
-    // pid file first), and the successor's own open retries for LOCKED_RETRY to outlast it: so
-    // wait that long when a daemon just told us it is exiting, and do not refuse at all while
-    // the pid file names a live process.
-    if let Some(store) = run.path().parent().map(|p| p.join("store")) {
-        let lock = store.join("lock");
-        let grace = if saw_exiting {
-            crate::serve::LOCKED_RETRY
-        } else {
-            HELD_GRACE
+/// One `connect_or_start` try.
+struct Start<'a> {
+    version: &'a str,
+    proto: Proto,
+    cwd: &'a Path,
+    start_timeout: Duration,
+    deadline: Instant,
+    spawn: &'a mut SpawnFn,
+    progress: &'a mut (dyn FnMut(&str) + Send),
+}
+
+impl Start<'_> {
+    async fn once(&mut self, run: &RunDir) -> Result<Client, ErrorReply> {
+        let (version, proto, cwd, start_timeout, deadline) = (
+            self.version,
+            self.proto,
+            self.cwd,
+            self.start_timeout,
+            self.deadline,
+        );
+        let spawn = &mut *self.spawn;
+        let progress: &mut (dyn FnMut(&str) + Send) = &mut *self.progress;
+        // the hello names this project's `.rdy` (`RunDir::project_id`)
+        let hello_of = |project| Hello {
+            rdy: PROTO_VERSION,
+            version: version.to_string(),
+            proto,
+            cwd: cwd.to_path_buf(),
+            project,
         };
-        let give_up = (Instant::now() + grace).min(deadline);
-        while store_lock_held(&lock) && !daemon_pid_alive(run) {
-            match connect(run, &hello).await {
+        // whether a daemon told us it is exiting: it then still holds the store while it drains
+        let mut saw_exiting = false;
+        // 1. a daemon may be running; a project whose `.rdy` does not exist yet has none
+        if let Ok(project) = run.project_id() {
+            match connect(run, &hello_of(project)).await {
                 Attempt::Ready(c) => return Ok(c),
                 Attempt::Starting(p) => {
                     return finish(p, run, deadline, start_timeout, progress, None).await;
                 }
                 Attempt::Refused(e) => return Err(e),
-                Attempt::Exiting | Attempt::NoDaemon(_) => {}
+                Attempt::Exiting => saw_exiting = true,
+                Attempt::NoDaemon(_) => {}
+            }
+        }
+
+        // the last guard: a daemon spawned for a socket path over `sun_path` would only die at its
+        // bind. `run.socket()` is the short socket whenever `.rdy/run/rdy.sock` is too long
+        // (D-YMWEM), so this passes for every project.
+        crate::socket::check_socket_path(run)
+            .map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
+
+        // 2. take start.lock; the guard unlocks on every return below. `ensure` also checks the
+        // short socket's directory, before any spawn.
+        run.ensure().map_err(|e| ensure_error(run, e))?;
+        let hello = hello_of(run.project_id().map_err(|e| ensure_error(run, e))?);
+        let lock_path = run.start_lock();
+        let _lock = loop {
+            match FileLock::try_take(&lock_path) {
+                Ok(Some(lock)) => break lock,
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(start_error(format!(
+                        "could not lock {}: {e}",
+                        lock_path.display()
+                    )));
+                }
             }
             let now = Instant::now();
-            if now >= give_up {
-                return Err(ErrorReply::new(
-                    E_DAEMON_START,
-                    format!(
-                        "the store at {} is held by another rdy process that is not a daemon (a command run with --no-daemon, or rdy mcp --no-daemon)",
-                        store.display()
-                    ),
-                    "a --no-daemon rdy holds the store: close it, or drop --no-daemon",
-                ));
+            if now >= deadline {
+                return Err(start_error(format!(
+                    "another client has been starting the daemon for {} s",
+                    start_timeout.as_secs()
+                )));
             }
-            tokio::time::sleep(HELD_POLL).await;
-        }
-    }
-
-    // 4. spawn
-    let log_from = log_len(run);
-    let mut spawned = match spawn(run) {
-        Ok(s) => s,
-        Err(e) => return Err(start_error(format!("could not start the daemon: {e}"))),
-    };
-
-    // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
-    // so an `exiting` now comes from the daemon we spawned: it is not of our version, and
-    // waiting cannot help. Neither can waiting on a daemon that has exited.
-    let mut attempt_no = 0u32;
-    loop {
-        let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
-            Ok((_, HelloReply::Exiting { version: theirs })) => {
-                return Err(ErrorReply::new(
-                    E_DAEMON_START,
-                    format!(
-                        "the daemon we started is rdy {theirs}, this client is rdy {}",
-                        hello.version
-                    ),
-                    VERSION_FIX,
-                ));
-            }
-            Ok((stream, reply)) => attempt(run, stream, reply),
-            Err(e) => Attempt::NoDaemon(e),
+            tokio::time::sleep(LOCK_RETRY.min(deadline - now)).await;
         };
-        match reached {
+
+        // 3. another client may have started one while we waited for the lock
+        match connect(run, &hello).await {
             Attempt::Ready(c) => return Ok(c),
             Attempt::Starting(p) => {
-                return finish(p, run, deadline, start_timeout, progress, Some(log_from)).await;
+                return finish(p, run, deadline, start_timeout, progress, None).await;
             }
             Attempt::Refused(e) => return Err(e),
-            Attempt::Exiting | Attempt::NoDaemon(_) => {}
+            Attempt::Exiting => saw_exiting = true,
+            Attempt::NoDaemon(_) => {}
         }
-        // a daemon that died (say, finding the store locked) will never answer: say so now
-        if let Some(code) = (spawned.exited)() {
-            return Err(start_error_citing(
-                run,
-                format!("the daemon exited with code {code} before it was ready"),
-                Some(log_from),
-            ));
+
+        // a store held by a process that is not a daemon (a --no-daemon rdy) would only make the
+        // daemon we spawn die at its open: refuse that here, without a spawn, once it has had a
+        // moment to let go. A daemon that is draining holds the store too (it removes its socket and
+        // pid file first), and the successor's own open retries for LOCKED_RETRY to outlast it: so
+        // wait that long when a daemon just told us it is exiting, and do not refuse at all while
+        // the pid file names a live process.
+        if let Some(lock) = store_lock(run) {
+            let store = lock.parent().unwrap_or(&lock).to_path_buf();
+            let grace = if saw_exiting {
+                crate::serve::LOCKED_RETRY
+            } else {
+                HELD_GRACE
+            };
+            let give_up = (Instant::now() + grace).min(deadline);
+            while store_lock_held(&lock) && live_daemon_pid(run).is_none() {
+                match connect(run, &hello).await {
+                    Attempt::Ready(c) => return Ok(c),
+                    Attempt::Starting(p) => {
+                        return finish(p, run, deadline, start_timeout, progress, None).await;
+                    }
+                    Attempt::Refused(e) => return Err(e),
+                    Attempt::Exiting | Attempt::NoDaemon(_) => {}
+                }
+                let now = Instant::now();
+                if now >= give_up {
+                    return Err(ErrorReply::new(
+                        E_DAEMON_START,
+                        format!(
+                            "the store at {} is held by another rdy process that is not a daemon (a command run with --no-daemon, or rdy mcp --no-daemon)",
+                            store.display()
+                        ),
+                        "a --no-daemon rdy holds the store: close it, or drop --no-daemon",
+                    ));
+                }
+                tokio::time::sleep(HELD_POLL).await;
+            }
         }
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(not_ready(run, start_timeout, Some(log_from)));
+
+        // 4. spawn
+        let log_from = log_len(run);
+        let mut spawned = match spawn(run) {
+            Ok(s) => s,
+            Err(e) => return Err(start_error(format!("could not start the daemon: {e}"))),
+        };
+
+        // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
+        // so an `exiting` now comes from the daemon we spawned: it is not of our version, and
+        // waiting cannot help. Neither can waiting on a daemon that has exited.
+        let mut attempt_no = 0u32;
+        loop {
+            let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
+                Ok((_, HelloReply::Exiting { version: theirs })) => {
+                    return Err(ErrorReply::new(
+                        E_DAEMON_START,
+                        format!(
+                            "the daemon we started is rdy {theirs}, this client is rdy {}",
+                            hello.version
+                        ),
+                        VERSION_FIX,
+                    ));
+                }
+                Ok((stream, reply)) => attempt(run, stream, reply),
+                Err(e) => Attempt::NoDaemon(e),
+            };
+            match reached {
+                Attempt::Ready(c) => return Ok(c),
+                Attempt::Starting(p) => {
+                    return finish(p, run, deadline, start_timeout, progress, Some(log_from)).await;
+                }
+                Attempt::Refused(e) => return Err(e),
+                Attempt::Exiting | Attempt::NoDaemon(_) => {}
+            }
+            // a daemon that died (say, finding the store locked) will never answer: say so now. A
+            // store held by a live daemon that answers on no socket we know is named as such.
+            if let Some(code) = (spawned.exited)() {
+                if let Some(pid) = live_daemon_pid(run)
+                    && store_lock(run).is_some_and(|l| store_lock_held(&l))
+                {
+                    return Err(locked_by_silent_daemon(run, pid, log_from));
+                }
+                return Err(start_error_citing(
+                    run,
+                    format!("the daemon exited with code {code} before it was ready"),
+                    Some(log_from),
+                ));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(not_ready(run, start_timeout, Some(log_from)));
+            }
+            tokio::time::sleep(connect_backoff(attempt_no).min(deadline - now)).await;
+            attempt_no += 1;
         }
-        tokio::time::sleep(connect_backoff(attempt_no).min(deadline - now)).await;
-        attempt_no += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn df3_a_refused_short_socket_dir_is_e_daemon_start_with_its_own_fix() {
+        let run = RunDir::of_project(Path::new("/p"));
+        let dir = PathBuf::from("/tmp/rdy-501");
+        let e = ensure_error(&run, io::Error::other(NotPrivateDir(dir)));
+        assert_eq!(e.code, E_DAEMON_START);
+        assert_eq!(
+            e.message,
+            "could not start the daemon: /tmp/rdy-501 is not a private directory of this user, so rdy cannot put the socket there"
+        );
+        assert_eq!(
+            e.fix,
+            "remove /tmp/rdy-501, or move the project to a shorter path"
+        );
+        let other = ensure_error(&run, io::Error::other("no space"));
+        assert_eq!(
+            other.message,
+            "could not create the run directory /p/.rdy/run: no space"
+        );
+        assert_eq!(other.fix, START_FIX);
+
+        // fix round 1 (ruling 1): a short directory that cannot be prepared (a sandboxed /tmp,
+        // simulated by a parent this user cannot write) names the directory and has its own fix
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let d = tempfile::tempdir().unwrap();
+        let ro = d.path().join("read-only");
+        fs::DirBuilder::new().mode(0o500).create(&ro).unwrap();
+        let dir = ro.join("rdy-501");
+        let e = ensure_error(&run, crate::layout::ensure_short_dir(&dir).unwrap_err());
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(e.code, E_DAEMON_START);
+        assert_eq!(
+            e.message,
+            format!(
+                "could not prepare the run directory {} for the daemon socket: Permission denied (os error 13)",
+                dir.display()
+            )
+        );
+        assert_eq!(
+            e.fix,
+            format!(
+                "make {} a directory this user owns with mode 0700, or move the project to a path short enough that .rdy/run/rdy.sock fits (at most 103 bytes)",
+                dir.display()
+            )
+        );
     }
 }

@@ -6,7 +6,7 @@
 //! such runs (`ledger-service`, `v1.2`). A phrase is a text's words, lower-cased and joined by
 //! one space, so case and spacing never matter.
 
-use crate::{Block, FieldValue, RefMode, ref_spans};
+use crate::{Block, FieldValue, RefMode, RefSpan, ref_spans};
 use std::ops::Range;
 
 pub const VALUE: &str = "value";
@@ -265,14 +265,14 @@ pub fn text_sources(b: &Block) -> Vec<(String, String)> {
 /// this: it would read a reference's id as a mention.
 pub fn shown_sources(b: &Block) -> Vec<(String, String)> {
     sources_with(b, &|text, mode| {
-        render_refs(text, mode, &|tok| tok.to_string())
+        render_refs(text, mode, &|span| span.token.clone())
     })
 }
 
-/// `text` with each reference under `mode` replaced by what `resolve` gives for its token, and
+/// `text` with each reference under `mode` replaced by what `resolve` gives for its span, and
 /// `\{{` shown as `{{`. A `RefMode::Off` text is returned as it is. `rdy_read` and the review
 /// case files both render text this way.
-pub fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&str) -> String) -> String {
+pub fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&RefSpan) -> String) -> String {
     if mode == RefMode::Off {
         return text.to_string();
     }
@@ -281,7 +281,7 @@ pub fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&str) -> String) 
     let mut last = 0;
     for span in ref_spans(text, mode) {
         out.push_str(&plain(&text[last..span.range.start]));
-        out.push_str(&resolve(&span.token));
+        out.push_str(&resolve(&span));
         last = span.range.end;
     }
     out.push_str(&plain(&text[last..]));

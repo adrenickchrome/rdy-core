@@ -338,6 +338,7 @@ fn hello_for(cwd: &std::path::Path) -> Hello {
         version: "1".into(),
         proto: Proto::Ctl,
         cwd: cwd.to_path_buf(),
+        project: RunDir::of_project(cwd).project_id().unwrap(),
     }
 }
 
@@ -493,37 +494,37 @@ async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
     assert_untouched(&v);
 }
 
-/// Review Focus 2 on the real spawn path: a `rdy serve --detach` spawns fine and only dies at its
-/// bind, so the client must refuse the path itself, before it spawns, not wait out the timeout.
+/// df3 (F12, D-YMWEM): a project whose `.rdy/run/rdy.sock` is over `sun_path` gets a short
+/// socket, `/tmp/rdy-<uid>/<hash>.sock`, and its daemon starts there; every other run file stays
+/// in `.rdy/run/`.
 #[tokio::test]
-async fn start1_a_socket_path_over_the_limit_is_e_daemon_start_at_once_and_nothing_is_spawned() {
+async fn start1_a_long_project_path_gets_a_short_socket() {
     let dir = short_tempdir();
     let deep = dir.path().join("a".repeat(120));
     std::fs::create_dir_all(&deep).unwrap();
     let run = RunDir::of_project(&deep);
+    let sock = run.socket();
+    let short = run.short_socket().expect("the socket leaves .rdy/run");
+    assert_eq!(sock, short);
+    assert!(
+        sock.starts_with(format!("/tmp/rdy-{}", socket::own_uid()))
+            && sock.as_os_str().len() <= MAX_SOCKET_PATH,
+        "{}",
+        sock.display()
+    );
     let n = Arc::new(AtomicUsize::new(0));
-    let spawned = n.clone();
-    let t0 = std::time::Instant::now();
-    // a spawn that succeeds, as a real one does before the daemon dies at bind
-    let e = connect_or_start(
+    let mut c = connect_or_start(
         &run,
-        opts("1", &deep, move |_| {
-            spawned.fetch_add(1, Ordering::SeqCst);
-            Ok(running())
-        }),
+        opts("1", &deep, in_process_spawn("1", n.clone(), Duration::ZERO)),
     )
     .await
-    .unwrap_err();
-    assert_eq!(e.code, E_DAEMON_START);
-    assert!(
-        e.message
-            .contains(&format!("socket path {} is ", run.socket().display()))
-            && e.message.contains("the limit is 103")
-            && e.message.contains("shorter path"),
-        "{e}"
-    );
-    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
-    assert_eq!(n.load(Ordering::SeqCst), 0);
+    .unwrap();
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+    assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 1);
+    assert!(sock.exists(), "the daemon listens on the short socket");
+    assert!(!run.path().join(SOCKET_FILE).exists());
+    assert!(run.pid_file().exists() && run.start_lock().exists());
+    c.ctl("stop", json!({})).await.unwrap();
 }
 
 /// The daemon we spawned is of another version than this client (the rdy on PATH is not this
@@ -623,4 +624,117 @@ async fn cli2_a_spawned_daemon_that_exits_before_ready_is_e_daemon_start_at_once
         json!(["already running: the store at x"])
     );
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+}
+
+/// Holds the project's store lock (`.rdy/store/lock`) as a daemon does, until dropped.
+fn hold_store_lock(project: &std::path::Path) -> std::fs::File {
+    let store = project.join(".rdy").join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let f = std::fs::File::create(store.join("lock")).unwrap();
+    f.try_lock().unwrap();
+    f
+}
+
+/// df3 fix round 1 (ruling 2): a spawned daemon that exits because a live daemon, which answers
+/// on no socket we know, holds the store says so, with the socket the client tried: the recorded
+/// one when there is a record, else its own.
+#[tokio::test]
+async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
+    for recorded in [false, true] {
+        let dir = short_tempdir();
+        let run = RunDir::of_project(dir.path());
+        run.ensure().unwrap();
+        let _held = hold_store_lock(dir.path());
+        let pid = std::process::id();
+        std::fs::write(run.pid_file(), format!("{pid}\n")).unwrap();
+        let tried = if recorded {
+            let dead = dir.path().join("dead.sock");
+            drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
+            write_record(&run, &dead, &run.project_id().unwrap());
+            dead
+        } else {
+            run.socket()
+        };
+        let mut o = opts("1", dir.path(), |_: &RunDir| {
+            Ok(Spawned {
+                exited: Box::new(|| Some(2)),
+            })
+        });
+        o.start_timeout = Duration::from_secs(10);
+        let e = connect_or_start(&run, o).await.unwrap_err();
+        assert_eq!(e.code, E_DAEMON_START, "{e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "the store is locked by daemon {pid}, which does not answer on {}",
+                tried.display()
+            ),
+            "recorded: {recorded}"
+        );
+        assert_eq!(
+            e.fix,
+            format!("stop it with rdy serve --stop from the project, or end process {pid}")
+        );
+    }
+}
+
+/// df3 fix round 2 (ruling task-3-round1): a client follows `daemon.sock` only when the record
+/// names this project's `.rdy` (`dev:ino`). A copy of a project carries the original's record,
+/// which names the original's `.rdy`: the copy never follows it. A record that names this
+/// project but leads to another project's daemon is refused by that daemon at the hello, and
+/// the client takes the refusal as it is: no retry, no spawn.
+#[tokio::test]
+async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
+    let d = daemon("1", true, |_| {}).await;
+    let copy = short_tempdir();
+    let run = RunDir::of_project(copy.path());
+    run.ensure().unwrap();
+    let hello = hello_for(copy.path());
+    // what cp -R carries: the original's socket and the original's identity
+    write_record(&run, &d.run.socket(), &d.run.project_id().unwrap());
+    assert_eq!(run.recorded_socket(), None, "a copied record is stale");
+    assert!(
+        matches!(connect(&run, &hello).await, Attempt::NoDaemon(_)),
+        "the copy reached the original's daemon"
+    );
+    // a record that names this project is followed; the daemon there serves another project
+    // and refuses the hello
+    write_record(&run, &d.run.socket(), &run.project_id().unwrap());
+    assert_eq!(run.recorded_socket(), Some(d.run.socket()));
+    let root = std::fs::canonicalize(d.dir.path()).unwrap();
+    let refused = |e: &ErrorReply| {
+        assert_eq!(e.code, E_DAEMON_START, "{e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "the daemon on {} serves another project ({}, process {})",
+                d.run.socket().display(),
+                root.display(),
+                std::process::id()
+            )
+        );
+        assert_eq!(
+            e.fix,
+            "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project"
+        );
+    };
+    match connect(&run, &hello).await {
+        Attempt::Refused(e) => refused(&e),
+        other => panic!("not refused: {other:?}"),
+    }
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&spawns);
+    let e = connect_or_start(
+        &run,
+        opts("1", copy.path(), move |_: &RunDir| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(running())
+        }),
+    )
+    .await
+    .unwrap_err();
+    refused(&e);
+    assert_eq!(spawns.load(Ordering::SeqCst), 0, "a refusal is not retried");
+    assert_eq!(d.handle.sessions().len(), 0);
+    d.handle.stop();
 }

@@ -285,3 +285,49 @@ async fn reload1_a_slow_session_start_answers_one_starting_then_ready() {
     assert_eq!(ctl(&mut r, 1, "echo", json!({})).await["ok"]["session"], 1);
     handle.stop();
 }
+
+/// df3 fix round 2 (ruling task-3-round1): a hello names the client's `.rdy` (`dev:ino`). A
+/// daemon refuses a hello from another project with `E_DAEMON_START`, opens no session, and
+/// keeps serving its own project. A hello with no project is not a hello.
+#[tokio::test]
+async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
+    let d = daemon("1", true, |_| {}).await;
+    let other = short_tempdir();
+    RunDir::of_project(other.path()).ensure().unwrap();
+    let root = std::fs::canonicalize(d.dir.path()).unwrap();
+    let (mut r, first) = connect_with(&d.run, &hello("1", "ctl", other.path())).await;
+    let v = parsed(&first);
+    assert_eq!(v["status"], "refused", "{v}");
+    assert_eq!(v["error"]["code"], "E_DAEMON_START");
+    assert_eq!(
+        v["error"]["message"],
+        format!(
+            "the daemon on {} serves another project ({}, process {})",
+            d.run.socket().display(),
+            root.display(),
+            std::process::id()
+        )
+    );
+    assert_eq!(
+        v["error"]["fix"],
+        "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project"
+    );
+    let mut rest = String::new();
+    assert_eq!(
+        r.read_line(&mut rest).await.unwrap(),
+        0,
+        "closed after the refusal"
+    );
+    // another version from another project does not make the daemon exit to be replaced
+    let (_, first) = connect_with(&d.run, &hello("2", "ctl", other.path())).await;
+    assert_eq!(parsed(&first)["error"]["code"], "E_DAEMON_START");
+    // no project at all is not a hello
+    let line = json!({"rdy": 1, "version": "1", "proto": "ctl", "cwd": d.dir.path()}).to_string();
+    let (_, first) = connect_with(&d.run, &(line + "\n")).await;
+    assert_eq!(parsed(&first)["error"]["code"], "E_BAD_INPUT");
+    assert_eq!(d.handle.sessions().len(), 0);
+    // its own project is still served
+    let (_, first) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
+    assert_eq!(parsed(&first)["status"], "ready");
+    d.handle.stop();
+}

@@ -208,18 +208,7 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         .as_deref()
         .map(read_page::Pattern::parse)
         .transpose()?;
-    // a ref line's trailing words may hold a #; ids, keys, paths, versions and slugs never do
-    let (target, slug) = match q.id.split_once('#') {
-        Some((t, s)) if !q.id.trim_start().starts_with('[') => (t, Some(s)),
-        _ => (q.id.as_str(), None),
-    };
-    if slug == Some("") {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "a # needs a heading slug after it",
-            "write <doc>#<heading-slug>, e.g. guide#set-up",
-        ));
-    }
+    let (target, slug) = rdy_engine::section::split_address(&q.id)?;
     let st_ = st.engine.read();
     let (scope, id) = read_target(&q.view, &st_, target, &q.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
@@ -240,7 +229,7 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         )
     })?;
     if let Some(slug) = slug {
-        let section = read_page::section_by_slug(&m, root, slug)?;
+        let section = rdy_engine::section::section_by_slug(&m, root, slug)?;
         root = m
             .get(&section)
             .expect("section_by_slug returns a block of m");

@@ -319,7 +319,7 @@ fn relay_evidence_kind(
         return Err(RdyError::new(
             E_PERMISSION,
             "only a human session records a relayed approval",
-            "run rdy approve as the human; the relaying agent is named by --relayed-by",
+            "run rdy approve under the relaying agent's RDY_ACTOR, with --relayed-by naming that agent",
         ));
     }
     let exact = (text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -535,7 +535,10 @@ fn unapplied_warnings(
             code: W_UNAPPLIED_DECISION,
             block: Some(b.id.clone()),
             message: format!("decision {} lands with no content that applies it", b.id),
-            fix: "link the content that carries it with decided_by, or set needs_content: false for a process ruling".into(),
+            fix: format!(
+                "write the content that carries it with implements: {}, or link that content to it with decided_by; for a process ruling, set needs_content: false",
+                b.id
+            ),
         })
         .collect())
 }

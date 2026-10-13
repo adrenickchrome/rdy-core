@@ -356,8 +356,14 @@ fn serve_thread(
     // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still
     // serves them; then the store closes last, so the process exits right after releasing it
     drop(rt);
-    close(&shared);
-    log("store closed");
+    if matches!(ran, Ok(ExitReason::ProjectGone)) {
+        // final ruling: no store write; the store's path may hold another project now
+        shared.writer.abandon();
+        log("store left as it is (the project is gone)");
+    } else {
+        close(&shared);
+        log("store closed");
+    }
     ran.map_err(ServeError::Runtime)
 }
 
@@ -366,6 +372,8 @@ fn serve_thread(
 pub struct CtlSession {
     pub info: SessionInfo,
     pub session: Session,
+    /// The human actor the session was classified against (a relayed approval names it).
+    pub human: String,
 }
 
 /// The host's [`Handler`]: the `session` op, the ctl ops over the shared engine, and MCP.
@@ -433,6 +441,7 @@ impl ServeHandler {
             CtlSession {
                 info: info.clone(),
                 session: s,
+                human,
             },
         );
         Ok(reply)
@@ -455,6 +464,7 @@ impl Handler for ServeHandler {
         let cx = OpContext {
             engine: &*engine,
             session: &cs.session,
+            human: &cs.human,
             cwd: &cs.info.cwd,
         };
         dispatch(&cx, &request.op, request.args).map_err(ErrorReply::from)

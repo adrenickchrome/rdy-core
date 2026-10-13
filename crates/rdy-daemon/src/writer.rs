@@ -40,6 +40,8 @@ enum Msg {
     /// Logs what moved while no daemon ran (`Rdy::reconcile_transitions`); no reply.
     Reconcile,
     Shutdown(Reply<()>),
+    /// Ends the thread without closing the store (`WriterHandle::abandon`).
+    Abandon(SyncSender<()>),
 }
 
 /// The writer thread's state: the project, the state it publishes into, and its queue.
@@ -450,6 +452,13 @@ impl Writer {
                     let _ = reply.send(rdy.close());
                     return;
                 }
+                Msg::Abandon(reply) => {
+                    // no close and no drop: either would write to the store's files, whose path
+                    // may now hold another project; the lock goes with the process
+                    std::mem::forget(rdy);
+                    let _ = reply.send(());
+                    return;
+                }
             };
             if !published {
                 // every `Shared` is gone: nothing can read what this thread publishes
@@ -525,6 +534,21 @@ impl WriterHandle {
             None if joined.is_ok() => Ok(()),
             None => Err(gone()),
         }
+    }
+
+    /// Ends the writer thread without closing the store or writing to it, and joins it: for a
+    /// daemon whose project is gone or replaced (final ruling), which exits right after. The
+    /// store stays locked until the process exits. A later `shutdown` is `Ok(())`.
+    pub fn abandon(&self) {
+        let mut thread = self.thread.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(handle) = thread.take() else {
+            return;
+        };
+        let (tx, rx) = mpsc::sync_channel(1);
+        if self.send(Msg::Abandon(tx)).is_ok() {
+            let _ = rx.recv();
+        }
+        let _ = handle.join();
     }
 
     /// Messages sent and not yet taken by the writer.

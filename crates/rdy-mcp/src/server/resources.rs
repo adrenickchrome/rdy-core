@@ -136,17 +136,14 @@ fn params<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, RdyError> {
 /// `<doc>#<heading-slug>` follows its section. `None` when neither scope holds it. A doc's
 /// subscription hears of any block in the doc; any other block's hears of that block only.
 pub(crate) fn followed_block(read: &ReadState, text: &str) -> Option<BlockId> {
-    let (target, slug) = match text.split_once('#') {
-        Some((t, s)) => (t, Some(s)),
-        None => (text, None),
-    };
+    let (target, slug) = rdy_engine::section::split_address(text).ok()?;
     [Scope::Inflight, Scope::Canon].iter().find_map(|scope| {
         let id = read.resolve_id(scope, target).ok()?;
         let m = read.materialized(scope).ok()?;
         let root = m.get(&id)?;
         match slug {
             None => Some(id),
-            Some(s) => crate::read_page::section_by_slug(&m, root, s).ok(),
+            Some(s) => rdy_engine::section::section_by_slug(&m, root, s).ok(),
         }
     })
 }

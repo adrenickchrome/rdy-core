@@ -11,9 +11,9 @@ use serde_json::Value;
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BriefParams {
-    /// Blocks to brief on (ids, keys or paths).
+    /// Block ids, keys or paths; <doc>#<heading-slug> covers that section and every block under it.
     pub ids: Option<Vec<String>>,
-    /// A doc or folder path: brief on every block under it.
+    /// A doc or folder path, or <doc>#<heading-slug>: brief on every block under it.
     pub path: Option<String>,
     /// A file in a linked code repo (relative to its top folder): brief on the design blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it. Not with ids or path.
     pub code_path: Option<String>,

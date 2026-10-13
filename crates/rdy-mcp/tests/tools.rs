@@ -599,8 +599,8 @@ fn name_errors_carry_a_corrected_payload_and_schema_explains_names() {
     );
 }
 
-/// Guard (final review fix round 1): `rdy_overview` counts each view's changes from its head
-/// (`ViewHead.len`), which must equal the view's included set, before and after a landing.
+/// `rdy_overview` counts each view's changes from its included set, and (df9) lists only a view
+/// that holds at least one: after the landing `run-7` is open and empty, so it is not listed.
 #[test]
 fn chain1_overview_counts_each_views_changes() {
     let (_d, mut st) = state();
@@ -614,12 +614,11 @@ fn chain1_overview_counts_each_views_changes() {
         .unwrap(),
     )
     .unwrap();
-    let count = |st: &mut McpState| {
+    let views = |st: &mut McpState| {
         let ov = rdy_overview(st, serde_json::from_value(json!({})).unwrap()).unwrap();
-        assert_eq!(ov["views"][0]["name"], "run-7");
-        ov["views"][0]["changes"].clone()
+        ov["views"].clone()
     };
-    assert_eq!(count(&mut st), 2);
+    assert_eq!(views(&mut st), json!([{"name": "run-7", "changes": 2}]));
     let p = rdy_propose(
         &mut st,
         serde_json::from_value(json!({"title": "two"})).unwrap(),
@@ -627,7 +626,7 @@ fn chain1_overview_counts_each_views_changes() {
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
     write_typed(&*st.engine, move |r| r.land(&approver(), &pid)).unwrap();
-    assert_eq!(count(&mut st), 0);
+    assert_eq!(views(&mut st), json!([]));
 }
 
 /// Final review fix round 1 (minor 9): the schema says in words that the daemon's socket carries

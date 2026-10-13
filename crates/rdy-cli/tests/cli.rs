@@ -489,9 +489,7 @@ fn chain1_status_counts_each_views_changes() {
     );
     let p = json(dir.path(), &["propose", "--view", "work", "--title", "two"]);
     json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
+    // F11 (Demo findings): a view whose changes all landed holds none and leaves the list.
     let st = json(dir.path(), &["status"]);
-    assert_eq!(
-        counts(&st),
-        vec![("side".to_string(), 1), ("work".to_string(), 0)]
-    );
+    assert_eq!(counts(&st), vec![("side".to_string(), 1)]);
 }

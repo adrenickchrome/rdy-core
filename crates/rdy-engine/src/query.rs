@@ -2,7 +2,7 @@ use crate::error::*;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Edge, Suspect};
 use rdy_model::entity::render_refs;
-use rdy_model::{Block, BlockId, FieldValue, RefMode};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, RefSpan};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,43 +59,87 @@ pub struct ImpactVia {
     pub kind: String,
 }
 
-/// A one-line label for `b` (at most 80 chars): its statement, prompt, name or title field, else
-/// its body, with whitespace collapsed and each `{{id}}` reference shown as the bare id.
+/// A one-line label for `b` (at most 80 chars, cut at a word with `…`; see [`cut_line`]): its
+/// statement, prompt, name or title field, else its body, with whitespace collapsed. A reference
+/// with link words shows them; any other shows its bare id.
 pub fn summary(b: &Block) -> String {
-    summarize(b, &|tok| tok.to_string())
+    summarize(b, &|span| {
+        link_words(span).unwrap_or_else(|| span.token.clone())
+    })
 }
 
-/// Like [`summary`], but each `{{id}}` reference to a block in `m` is shown as that block's own
-/// [`summary`] (never expanded further), except that a referenced value shows as its
-/// [`rdy_model::entity::value_text`]; unknown targets show the bare id.
+/// Like [`summary`], but a reference without link words shows what [`label_in`] gives for its
+/// target in `m`: a value's text, else the target's name or title, else the id. The target's
+/// body is never shown and a reference inside a target is never expanded.
 pub fn summary_in(b: &Block, m: &Materialized) -> String {
-    summarize(b, &|tok| label_in(tok, m))
+    summarize(b, &|span| label_in(span, m))
 }
 
 /// `b`'s body with each reference rendered as [`summary_in`] renders it, whitespace and line
 /// breaks kept (a fact sheet's definition).
 pub(crate) fn body_in(b: &Block, m: &Materialized) -> String {
-    render_refs(&b.body, RefMode::for_body(&b.block_type), &|tok| {
-        label_in(tok, m)
+    render_refs(&b.body, RefMode::for_body(&b.block_type), &|span| {
+        label_in(span, m)
     })
 }
 
-/// How a reference reads in [`summary_in`]: the target's value text or summary, else the id.
-fn label_in(tok: &str, m: &Materialized) -> String {
-    BlockId::parse(tok)
-        .ok()
-        .and_then(|id| m.get(&id))
-        .map(|t| rdy_model::entity::value_text(t).unwrap_or_else(|| summary(t)))
-        .unwrap_or_else(|| tok.to_string())
+/// A reference's link words: its display text (`None` for a bare or `@key` reference).
+fn link_words(span: &RefSpan) -> Option<String> {
+    span.display.clone().filter(|d| !d.is_empty())
 }
 
-fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
-    primary_text(b, resolve).0.chars().take(80).collect()
+/// How a reference reads in [`summary_in`]. Closed rule: (1) link words show; (2) a reference
+/// to a value shows the value's text; (3) any other reference to a known block shows the
+/// target's `name` field, else its `title` field, else its id; (4) an unknown target shows its
+/// id.
+fn label_in(span: &RefSpan, m: &Materialized) -> String {
+    if let Some(words) = link_words(span) {
+        return words;
+    }
+    let Some(target) = BlockId::parse(&span.token).ok().and_then(|id| m.get(&id)) else {
+        return span.token.clone();
+    };
+    if let Some(v) = rdy_model::entity::value_text(target) {
+        return v;
+    }
+    ["name", "title"]
+        .iter()
+        .find_map(|f| target.field_str(f).filter(|s| !s.is_empty()))
+        .map(|text| {
+            // A reference inside a target is never expanded: it shows as link words or its id.
+            render_refs(text, RefMode::Strict, &|inner| {
+                link_words(inner).unwrap_or_else(|| inner.token.clone())
+            })
+        })
+        .unwrap_or_else(|| span.token.clone())
+}
+
+/// `text` as one line of at most `max` characters: whitespace collapsed; a text that fits is
+/// returned whole; a longer text is cut before character `max` at the last space (at `max - 1`
+/// characters when the first word is longer), trailing whitespace dropped, and `…` added.
+pub fn cut_line(text: &str, max: usize) -> String {
+    let line = collapse(text);
+    if line.chars().count() <= max {
+        return line;
+    }
+    let head: Vec<char> = line.chars().take(max).collect();
+    let keep = match head.iter().rposition(|c| *c == ' ') {
+        Some(i) if i > 0 => i,
+        _ => max.saturating_sub(1),
+    };
+    let mut out: String = head[..keep].iter().collect();
+    out.truncate(out.trim_end().len());
+    out.push('…');
+    out
+}
+
+fn summarize(b: &Block, resolve: &dyn Fn(&RefSpan) -> String) -> String {
+    cut_line(&primary_text(b, resolve).0, 80)
 }
 
 /// `b`'s primary text (its statement, prompt, name or title field, else its body), with
 /// whitespace collapsed and each reference rendered by `resolve`; and whether it is the body.
-fn primary_text(b: &Block, resolve: &dyn Fn(&str) -> String) -> (String, bool) {
+fn primary_text(b: &Block, resolve: &dyn Fn(&RefSpan) -> String) -> (String, bool) {
     let (text, from_body) = resolved_text(b, resolve);
     (collapse(&text), from_body)
 }
@@ -105,7 +149,7 @@ fn collapse(text: &str) -> String {
 }
 
 /// Like [`primary_text`], but with the text's own whitespace and line breaks kept.
-fn resolved_text(b: &Block, resolve: &dyn Fn(&str) -> String) -> (String, bool) {
+fn resolved_text(b: &Block, resolve: &dyn Fn(&RefSpan) -> String) -> (String, bool) {
     let keys: &[&str] = if rdy_model::tree::is_tree_type(&b.block_type) {
         &["title", "name"]
     } else {
@@ -132,7 +176,7 @@ const COMPACT_LINE_MAX: usize = 200;
 /// capped at 200 characters with an ellipsis. References stay as bare ids; a field or sentence
 /// is not cut at a length (the read's max_tokens does the cutting).
 pub fn compact_summary(b: &Block) -> String {
-    let (text, from_body) = resolved_text(b, &|tok| tok.to_string());
+    let (text, from_body) = resolved_text(b, &|span| span.token.clone());
     if !from_body {
         return collapse(&text);
     }
@@ -142,7 +186,7 @@ pub fn compact_summary(b: &Block) -> String {
     }
     for f in ["alt", "caption"] {
         if let Some(v) = b.field_str(f).filter(|s| !s.trim().is_empty()) {
-            return collapse(&render_refs(v, RefMode::Strict, &|tok| tok.to_string()));
+            return collapse(&render_refs(v, RefMode::Strict, &|span| span.token.clone()));
         }
     }
     let line = text.lines().map(str::trim).find(|l| !l.is_empty());
@@ -163,8 +207,8 @@ pub fn code_lines(b: &Block) -> Vec<String> {
     if b.block_type != "code" {
         return Vec::new();
     }
-    render_refs(&b.body, RefMode::for_body(&b.block_type), &|tok| {
-        tok.to_string()
+    render_refs(&b.body, RefMode::for_body(&b.block_type), &|span| {
+        span.token.clone()
     })
     .lines()
     .map(|l| l.trim_end().to_string())

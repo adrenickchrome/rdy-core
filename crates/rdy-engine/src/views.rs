@@ -4,6 +4,7 @@
 //! in `undo`, ownership and the bulk close (own1) in `own`.
 use crate::Materialized;
 use crate::error::*;
+use crate::query::{body_in, cut_line};
 use crate::read_state::ReadState;
 use crate::write::{not_humans_view, writable_view};
 use crate::{Delta, Rdy, Scope, Session};
@@ -212,6 +213,11 @@ pub(crate) fn conflict_infos(
     conflicts: &[Conflict],
 ) -> Result<Vec<ConflictInfo>, RdyError> {
     let reader = st.reader();
+    let canon = if conflicts.is_empty() {
+        None
+    } else {
+        Some(st.materialized(&Scope::Canon)?)
+    };
     conflicts
         .iter()
         .map(|c| {
@@ -227,20 +233,18 @@ pub(crate) fn conflict_infos(
                         Some(ch) => {
                             let change = reader.change(ch)?;
                             let what = if change.message.trim().is_empty() {
-                                let body = change
-                                    .ops
-                                    .iter()
-                                    .rev()
-                                    .find_map(|op| match op {
-                                        Op::Create { block } | Op::Update { block, .. }
-                                            if block.id == c.block =>
-                                        {
-                                            Some(block.body.as_str())
-                                        }
-                                        _ => None,
-                                    })
-                                    .unwrap_or("");
-                                first_chars(body, 60).to_string()
+                                let block = change.ops.iter().rev().find_map(|op| match op {
+                                    Op::Create { block } | Op::Update { block, .. }
+                                        if block.id == c.block =>
+                                    {
+                                        Some(block)
+                                    }
+                                    _ => None,
+                                });
+                                match (block, &canon) {
+                                    (Some(b), Some(m)) => cut_line(&body_in(b, m), 60),
+                                    _ => String::new(),
+                                }
                             } else {
                                 change.message.clone()
                             };

@@ -266,37 +266,43 @@ fn dfu1_fixing_a_broken_pack_sends_pack_changed() {
     });
 }
 
+/// df3 (F12, D-YMWEM): a relative `--project` under a path too long for `.rdy/run/rdy.sock`
+/// starts its daemon on the short socket; the run dir keeps every other run file.
 #[test]
-fn msw15_a_relative_project_whose_absolute_socket_path_is_too_long_is_refused_before_a_spawn() {
+fn msw15_a_relative_project_under_a_long_path_starts_its_daemon() {
     let base = rdy_qa::daemon::short_tempdir();
     let deep = base.path().join("d".repeat(100));
     let project = deep.join("p");
     std::fs::create_dir_all(&project).unwrap();
     drop(Rdy::init(&project, "rdy-standard").unwrap());
-    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
-        .current_dir(&deep)
-        .args(["--json", "--project", "p", "status"])
-        .env_remove("RDY_ACTOR")
-        .env_remove("RDY_RUN")
-        .env_remove("RDY_NO_DAEMON")
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let e: Value = serde_json::from_str(
+    let (_cfg, env) = rdy_qa::fixtures::human_env("human:qa");
+    let rdy = |args: &[&str]| {
+        std::process::Command::new(rdy_qa::fixtures::rdy_bin())
+            .current_dir(&deep)
+            .args(["--project", "p"])
+            .args(args)
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .output()
+            .unwrap()
+    };
+    let out = rdy(&["--json", "status"]);
+    let stop = rdy(&["serve", "--stop"]);
+    assert!(
+        out.status.success(),
+        "{}",
         String::from_utf8_lossy(&out.stderr)
-            .trim()
-            .lines()
-            .last()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(e["code"], E_DAEMON_START, "{e}");
-    assert!(
-        e["message"].as_str().unwrap().contains("the limit is"),
-        "{e}"
     );
     assert!(
-        !project.join(".rdy/run/daemon.log").exists(),
-        "a daemon was spawned: {e}"
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
     );
+    let run = RunDir::of_project(&project);
+    assert!(run.short_socket().is_some(), "{}", run.socket().display());
+    assert!(project.join(".rdy/run/daemon.log").exists());
+    assert!(!project.join(".rdy/run/rdy.sock").exists());
+    assert!(!run.socket().exists(), "the stopped daemon left its socket");
 }

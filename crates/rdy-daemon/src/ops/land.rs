@@ -3,9 +3,9 @@ use super::*;
 use rdy_engine::consequence::{land_and_report, propose_and_report};
 use rdy_engine::engine::write_typed;
 use rdy_engine::{E_BAD_INPUT, LandOptions, RdyError, Relay, alt};
-use rdy_model::{ActorRun, RelayEvidence};
+use rdy_model::RelayEvidence;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,23 +53,20 @@ pub(super) fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError>
 }
 
 pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
-    let s = approver(cx.session)?;
+    // the session kind, then the flags' pairing, then the relaying actor and run (D-HA7YZ)
+    let (s, by) = relay_approver(cx, a.relayed_by.as_deref(), a.evidence.is_some())?;
+    // the reply names the relayer as recorded (the session's actor and run), not the flag
+    let recorded = by.clone();
     let bad = |message: &str, fix: &str| RdyError::new(E_BAD_INPUT, message, fix);
-    let relay = match (a.relayed_by, a.evidence) {
-        (Some(by), Some(quoted)) => {
-            let (actor, run) = match by.split_once('/') {
-                Some((actor, run)) => (actor.to_string(), Some(run.to_string())),
-                None => (by, None),
-            };
-            Some(Relay {
-                by: ActorRun { actor, run },
-                evidence: RelayEvidence {
-                    quoted,
-                    session_ref: a.session_ref.unwrap_or_else(|| "cli".into()),
-                    question: a.question.filter(|q| !q.trim().is_empty()),
-                },
-            })
-        }
+    let relay = match (by, a.evidence) {
+        (Some(by), Some(quoted)) => Some(Relay {
+            by,
+            evidence: RelayEvidence {
+                quoted,
+                session_ref: a.session_ref.unwrap_or_else(|| "cli".into()),
+                question: a.question.filter(|q| !q.trim().is_empty()),
+            },
+        }),
         (None, None) => {
             if a.session_ref.is_some() {
                 return Err(bad(
@@ -85,19 +82,18 @@ pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError>
             }
             None
         }
-        _ => {
-            return Err(bad(
-                "relayed_by and evidence go together",
-                "pass both (--relayed-by and --evidence) or neither",
-            ));
-        }
+        _ => return Err(bad(RELAY_PAIR, RELAY_PAIR_FIX)),
     };
     let opts = LandOptions {
         strict: a.strict.unwrap_or(false),
         relay,
         evidence: None,
     };
-    land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
+    let mut v = land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))?;
+    if let Some(by) = recorded {
+        v["relayed_by"] = json!(by);
+    }
+    Ok(v)
 }
 
 pub(super) fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {

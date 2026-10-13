@@ -246,6 +246,7 @@ fn msw13_block_and_brief_strip_a_view_prefix_as_edit_block_does() {
     let cx = OpContext {
         engine: &e,
         session: &h,
+        human: "human:qa",
         cwd: d.path(),
     };
     let b = dispatch(&cx, "block", json!({"id": c, "view": "view:foo"})).unwrap();
@@ -263,6 +264,7 @@ fn msw13_a_write_or_proposal_to_the_empty_view_name_is_refused() {
     let cx = OpContext {
         engine: &e,
         session: &h,
+        human: "human:qa",
         cwd: d.path(),
     };
     for view in ["view:", ""] {
@@ -284,6 +286,7 @@ fn msw13_a_proposal_to_an_over_long_view_name_is_e_limit() {
     let cx = OpContext {
         engine: &e,
         session: &h,
+        human: "human:qa",
         cwd: d.path(),
     };
     let err = dispatch(
