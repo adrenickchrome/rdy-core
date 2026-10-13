@@ -123,3 +123,34 @@ fn ses1_a_reader_session_may_read_canon_by_default() {
         assert_eq!(e.code, "E_RESERVED_VIEW", "{role}: {e}");
     }
 }
+
+#[test]
+fn sg10_schema_has_brief_and_consequences_topics() {
+    let (_d, r) = project();
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
+    let s = rdy_schema(&mut st, p(json!({}))).unwrap();
+    assert_eq!(s["brief"], BRIEF_DOC, "{s}");
+    assert_eq!(s["consequences"], CONSEQUENCES_DOC, "{s}");
+    assert!(
+        EDIT_LOOP_DOC.contains("brief and consequences"),
+        "{EDIT_LOOP_DOC}"
+    );
+}
+
+#[test]
+fn sg10_the_readme_names_the_m2_concepts() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+    let readme = std::fs::read_to_string(&path).unwrap();
+    for word in [
+        "rdy_brief",
+        "consequences",
+        "intent",
+        "alternative set",
+        "tension",
+        "inbox",
+        "swarm",
+    ] {
+        assert!(readme.contains(word), "README.md lacks {word}");
+    }
+    assert!(!readme.contains("in-flight work"));
+}
