@@ -3369,6 +3369,37 @@ fn write_client(
     (c, section)
 }
 
+/// Waits for `count` ready signals. It takes the main side's sender, so a writer that dies before
+/// it signals disconnects the channel and the wait returns an error at once; a writer that hangs
+/// ends the wait at `within`.
+fn wait_ready(
+    tx: std::sync::mpsc::Sender<()>,
+    rx: &std::sync::mpsc::Receiver<()>,
+    count: usize,
+    within: Duration,
+) -> Result<(), String> {
+    use std::sync::mpsc::RecvTimeoutError;
+    drop(tx);
+    let end = Instant::now() + within;
+    for got in 0..count {
+        let left = end.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "a background writer ended before it was ready ({got} of {count} ready)"
+                ));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "the background writers were not ready within {within:?} ({got} of {count} ready)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `daemon_write_8_clients` on a copy of the typical project under `parent`: the daemon is the
 /// real one, started by the first `rdy mcp` proxy. Seven proxies write one claim after another
 /// until the timed proxy has made its runs; each timed run is one `rdy_write` of one claim, its
@@ -3409,8 +3440,9 @@ fn daemon_clients_ops(proj: &std::path::Path, parent: &std::path::Path) -> Vec<M
             })
         })
         .collect();
-    for _ in 1..WRITE_CLIENTS {
-        ready_rx.recv().expect("a writer is ready");
+    if let Err(e) = wait_ready(ready_tx, &ready_rx, WRITE_CLIENTS - 1, budget) {
+        stop.store(true, Ordering::Relaxed);
+        panic!("{e}");
     }
     let m = measure_timed("daemon_write_8_clients", 30, |i| {
         let args = json!({"ops": [{"op": "create", "type": "claim", "parent": section, "body": format!("Timed claim {i}.")}]});
@@ -4273,6 +4305,44 @@ mod tests {
         assert!(spec_ceiling_ms("invariants_check_all").is_none());
         assert!(fsync_bound("daemon_write_8_clients"));
         assert!(!fsync_bound("invariants_check_all"));
+    }
+
+    /// A writer thread that dies before it signals ready must end the wait with an error, not
+    /// hang it (the main side's own sender must not keep the channel open).
+    #[test]
+    fn sgperf1_a_writer_that_dies_before_ready_ends_the_wait() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let theirs = tx.clone();
+        let dead = std::thread::spawn(move || {
+            let _held = theirs;
+            panic!("the writer died before it was ready");
+        });
+        let started = Instant::now();
+        let r = wait_ready(tx, &rx, 1, Duration::from_secs(30));
+        assert!(dead.join().is_err());
+        let e = r.expect_err("a dead writer fails the wait");
+        assert!(e.contains("ended before it was ready"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    /// A writer that stays alive but never signals ends the wait at the time limit.
+    #[test]
+    fn sgperf1_a_writer_that_never_signals_times_out() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let _alive = tx.clone();
+        let e = wait_ready(tx, &rx, 1, Duration::from_millis(200)).expect_err("times out");
+        assert!(e.contains("not ready within"), "{e}");
+    }
+
+    /// Ready writers pass the wait.
+    #[test]
+    fn sgperf1_ready_writers_pass_the_wait() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        for _ in 0..3 {
+            let t = tx.clone();
+            std::thread::spawn(move || t.send(()).unwrap());
+        }
+        wait_ready(tx, &rx, 3, Duration::from_secs(30)).expect("all ready");
     }
 
     /// Every op the gate can run: those the baseline holds, those `spec_target` names, and the
