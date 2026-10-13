@@ -3,7 +3,7 @@
 
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
-use crate::layout::RunDir;
+use crate::layout::{NotPrivateDir, RunDir};
 use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
 use crate::spawn::Spawned;
@@ -526,6 +526,28 @@ async fn finish(
     })
 }
 
+/// The `E_DAEMON_START` for a failed `RunDir::ensure`: a short socket directory that is not
+/// private to this user (D-YMWEM) has its own fix; any other failure names the run dir.
+fn ensure_error(run: &RunDir, e: io::Error) -> ErrorReply {
+    match e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<NotPrivateDir>())
+    {
+        Some(dir) => ErrorReply::new(
+            E_DAEMON_START,
+            format!("could not start the daemon: {dir}"),
+            format!(
+                "remove {}, or move the project to a shorter path",
+                dir.0.display()
+            ),
+        ),
+        None => start_error(format!(
+            "could not create the run directory {}: {e}",
+            run.path().display()
+        )),
+    }
+}
+
 /// Connects to the project's daemon, starting one if none answers. At most one client spawns:
 /// the spawn happens under `start.lock`, after a second connect made while holding it.
 pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client, ErrorReply> {
@@ -558,20 +580,15 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         Attempt::NoDaemon(_) => {}
     }
 
-    // a daemon spawned for a socket path over `sun_path` would only die at its bind; refuse it
-    // here rather than wait out the start timeout. The daemon binds the absolute path, so check
-    // that one, not a run dir relative to the caller's working directory.
-    run.absolute()
-        .and_then(|r| crate::socket::check_socket_path(&r))
+    // the last guard: a daemon spawned for a socket path over `sun_path` would only die at its
+    // bind. `run.socket()` is the short socket whenever `.rdy/run/rdy.sock` is too long
+    // (D-YMWEM), so this passes for every project.
+    crate::socket::check_socket_path(run)
         .map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
 
-    // 2. take start.lock; the guard unlocks on every return below
-    run.ensure().map_err(|e| {
-        start_error(format!(
-            "could not create the run directory {}: {e}",
-            run.path().display()
-        ))
-    })?;
+    // 2. take start.lock; the guard unlocks on every return below. `ensure` also checks the
+    // short socket's directory, before any spawn.
+    run.ensure().map_err(|e| ensure_error(run, e))?;
     let lock_path = run.start_lock();
     let _lock = loop {
         match FileLock::try_take(&lock_path) {
@@ -691,5 +708,33 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         }
         tokio::time::sleep(connect_backoff(attempt_no).min(deadline - now)).await;
         attempt_no += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn df3_a_refused_short_socket_dir_is_e_daemon_start_with_its_own_fix() {
+        let run = RunDir::of_project(Path::new("/p"));
+        let dir = PathBuf::from("/tmp/rdy-501");
+        let e = ensure_error(&run, io::Error::other(NotPrivateDir(dir)));
+        assert_eq!(e.code, E_DAEMON_START);
+        assert_eq!(
+            e.message,
+            "could not start the daemon: /tmp/rdy-501 is not a private directory of this user, so rdy cannot put the socket there"
+        );
+        assert_eq!(
+            e.fix,
+            "remove /tmp/rdy-501, or move the project to a shorter path"
+        );
+        let other = ensure_error(&run, io::Error::other("no space"));
+        assert_eq!(
+            other.message,
+            "could not create the run directory /p/.rdy/run: no space"
+        );
+        assert_eq!(other.fix, START_FIX);
     }
 }

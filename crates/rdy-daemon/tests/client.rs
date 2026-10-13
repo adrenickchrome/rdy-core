@@ -493,37 +493,37 @@ async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
     assert_untouched(&v);
 }
 
-/// Review Focus 2 on the real spawn path: a `rdy serve --detach` spawns fine and only dies at its
-/// bind, so the client must refuse the path itself, before it spawns, not wait out the timeout.
+/// df3 (F12, D-YMWEM): a project whose `.rdy/run/rdy.sock` is over `sun_path` gets a short
+/// socket, `/tmp/rdy-<uid>/<hash>.sock`, and its daemon starts there; every other run file stays
+/// in `.rdy/run/`.
 #[tokio::test]
-async fn start1_a_socket_path_over_the_limit_is_e_daemon_start_at_once_and_nothing_is_spawned() {
+async fn start1_a_long_project_path_gets_a_short_socket() {
     let dir = short_tempdir();
     let deep = dir.path().join("a".repeat(120));
     std::fs::create_dir_all(&deep).unwrap();
     let run = RunDir::of_project(&deep);
+    let sock = run.socket();
+    let short = run.short_socket().expect("the socket leaves .rdy/run");
+    assert_eq!(sock, short);
+    assert!(
+        sock.starts_with(format!("/tmp/rdy-{}", socket::own_uid()))
+            && sock.as_os_str().len() <= MAX_SOCKET_PATH,
+        "{}",
+        sock.display()
+    );
     let n = Arc::new(AtomicUsize::new(0));
-    let spawned = n.clone();
-    let t0 = std::time::Instant::now();
-    // a spawn that succeeds, as a real one does before the daemon dies at bind
-    let e = connect_or_start(
+    let mut c = connect_or_start(
         &run,
-        opts("1", &deep, move |_| {
-            spawned.fetch_add(1, Ordering::SeqCst);
-            Ok(running())
-        }),
+        opts("1", &deep, in_process_spawn("1", n.clone(), Duration::ZERO)),
     )
     .await
-    .unwrap_err();
-    assert_eq!(e.code, E_DAEMON_START);
-    assert!(
-        e.message
-            .contains(&format!("socket path {} is ", run.socket().display()))
-            && e.message.contains("the limit is 103")
-            && e.message.contains("shorter path"),
-        "{e}"
-    );
-    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
-    assert_eq!(n.load(Ordering::SeqCst), 0);
+    .unwrap();
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+    assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 1);
+    assert!(sock.exists(), "the daemon listens on the short socket");
+    assert!(!run.path().join(SOCKET_FILE).exists());
+    assert!(run.pid_file().exists() && run.start_lock().exists());
+    c.ctl("stop", json!({})).await.unwrap();
 }
 
 /// The daemon we spawned is of another version than this client (the rdy on PATH is not this

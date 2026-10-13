@@ -83,19 +83,28 @@ async fn daemon_at(dir: tempfile::TempDir) -> TestDaemon {
     }
 }
 
+/// df3 (D-YMWEM): a project path whose `.rdy/run/rdy.sock` is over `sun_path` binds the short
+/// socket in the user's private `/tmp/rdy-<uid>` instead of failing; the pid file stays in
+/// `.rdy/run/`.
 #[tokio::test]
-async fn sock1_a_socket_path_over_the_limit_is_refused_with_a_clear_error() {
+async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
     let dir = short_tempdir();
     let deep = dir.path().join("a".repeat(120));
     std::fs::create_dir_all(&deep).unwrap();
     let run = RunDir::of_project(&deep);
-    let e = socket::bind(&run).await.unwrap_err();
-    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
-    let msg = e.to_string();
+    let listener = socket::bind(&run).await.unwrap();
+    let sock = run.socket();
+    assert_eq!(run.short_socket().as_ref(), Some(&sock));
     assert!(
-        msg.contains("the limit is 103") && msg.contains("shorter path"),
-        "{msg}"
+        sock.as_os_str().len() <= MAX_SOCKET_PATH,
+        "{}",
+        sock.display()
     );
+    assert_eq!(mode(&sock), 0o600);
+    assert_eq!(mode(sock.parent().unwrap()), 0o700);
+    assert!(run.pid_file().exists());
+    drop(listener);
+    std::fs::remove_file(&sock).unwrap();
 }
 
 #[tokio::test]

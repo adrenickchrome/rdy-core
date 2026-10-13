@@ -231,23 +231,25 @@ fn spawn1_a_symlinked_daemon_log_is_refused_and_its_target_is_untouched() {
     );
 }
 
+/// df3 (D-YMWEM): a project whose `.rdy/run/rdy.sock` is over `sun_path` is no longer refused.
+/// The serve command for it prepares the run dir, its log and the short socket's private
+/// directory.
 #[test]
-fn spawn1_the_serve_command_refuses_a_socket_path_over_the_limit() {
+fn spawn1_the_serve_command_for_a_long_project_path_prepares_the_short_socket_dir() {
+    use std::os::unix::fs::PermissionsExt;
     let _env = env_lock();
     let dir = short_tempdir();
     let deep = dir.path().join("a".repeat(120));
     std::fs::create_dir_all(&deep).unwrap();
     let run = RunDir::of_project(&deep);
-    let e = serve_command(std::path::Path::new("/bin/sh"), &deep, &run).unwrap_err();
-    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        e.to_string().contains("the limit is 103") && e.to_string().contains("shorter path"),
-        "{e}"
-    );
-    assert!(
-        !run.path().exists(),
-        "no run dir or log for a daemon that could not bind"
-    );
+    serve_command(std::path::Path::new("/bin/sh"), &deep, &run).unwrap();
+    assert!(run.log_file().exists());
+    let short = run.short_socket().expect("the socket leaves .rdy/run");
+    let mode = std::fs::symlink_metadata(short.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
 }
 
 /// A relative project reaches the child as an absolute path: the child runs in the project, so

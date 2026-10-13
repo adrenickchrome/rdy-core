@@ -9,12 +9,14 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use tokio::net::{UnixListener, UnixStream};
 
 /// The longest socket path `bind` accepts, in bytes: `sun_path` is 104 bytes on macOS,
-/// one of which is the terminating NUL.
+/// one of which is the terminating NUL. A project whose `.rdy/run/rdy.sock` is longer gets the
+/// short socket, `/tmp/rdy-<uid>/<hash>.sock` (`RunDir::socket`, D-YMWEM).
 pub const MAX_SOCKET_PATH: usize = 103;
 
 /// Refuses a socket path `bind` could not take: over `MAX_SOCKET_PATH` bytes, `bind` fails with
-/// `ENAMETOOLONG`. The error names the path, its length and the limit. A client checks this
-/// before it spawns a daemon that would only die at its bind.
+/// `ENAMETOOLONG`. The error names the path, its length and the limit. `run.socket()` is short
+/// whenever `.rdy/run/rdy.sock` would be too long, so this is the last guard only: a client
+/// checks it before it spawns a daemon that would only die at its bind.
 pub fn check_socket_path(run: &RunDir) -> io::Result<()> {
     let path = run.socket();
     let len = path.as_os_str().len();
