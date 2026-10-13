@@ -10,7 +10,7 @@
 //! The person lands the oldest unlanded proposal of a shared queue. Journal entries of the
 //! relay carry the actor `agent:relay`; those of a direct command carry `human:qa`, the human
 //! the project's user config names.
-use super::agent::{KillGate, Link, Pace, Res, Where, inbox_labels, labels_of, spell};
+use super::agent::{KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of, spell};
 use super::journal::{Entry, Journal, Outcome};
 use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
@@ -18,6 +18,7 @@ use super::script::PersonAct;
 use crate::daemon::human_command;
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -28,8 +29,9 @@ const CLI_BUDGET: Duration = Duration::from_secs(120);
 const HUMAN: &str = "human:qa";
 /// The relay as `rdy approve --relayed-by` names it.
 const RELAY: &str = "agent:relay/chat";
-/// How many queued proposals the person looks at when it hunts for advice to accept.
-const ADVICE_LOOKS: usize = 3;
+/// How many queued proposals the person looks at when it hunts for advice to accept: the queue
+/// a fast run holds, so a late contradiction pair's proposal is seen (ruling task-5.2).
+const ADVICE_LOOKS: usize = 24;
 
 /// The proposals waiting for the person to land, oldest first.
 pub type Queue = Arc<Mutex<Vec<String>>>;
@@ -44,6 +46,8 @@ pub(crate) struct Hooks {
     /// before and after each landing, and each land entry names the proposal's view and the
     /// view's effective base before the landing (`Entry::view`, `Entry::base`).
     pub watch: Option<Watch>,
+    /// How many acts the person has finished: the run paces the agents by it too.
+    pub done: Option<Arc<AtomicUsize>>,
 }
 
 /// Starts the person: one thread, one relay session. It runs `acts` and returns.
@@ -83,6 +87,9 @@ pub(crate) fn spawn_with(
             }
             person.link.step = step;
             person.act(act);
+            if let Some(done) = &person.hooks.done {
+                done.fetch_add(1, Ordering::SeqCst);
+            }
         }
     })
 }
@@ -153,9 +160,19 @@ impl Person {
     fn land(&mut self, relayed: bool) {
         let who = if relayed { "agent:relay" } else { HUMAN };
         let mut e = self.entry(who, "land");
-        let next = {
-            let mut q = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-            (!q.is_empty()).then(|| q.remove(0))
+        // the person's turn, from the pick to the approve: no agent act that decides from a read,
+        // and no alternative set being made, runs while canon moves (fix round 1)
+        let gate = self.link.gate.clone();
+        let _turn = gate.landing_turn();
+        let next = loop {
+            let r = {
+                let mut q = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+                (!q.is_empty()).then(|| q.remove(0))
+            };
+            match r {
+                Some(r) if self.chose_nothing_in_a_set(&r) => {}
+                r => break r,
+            }
         };
         let Some(pref) = next else {
             e.outcome = Outcome::Skipped;
@@ -203,9 +220,19 @@ impl Person {
         let res = self.link.finish(e, "land", res, |en, v| {
             en.reply = Some(v.clone());
         });
-        if let (Some(w), Some(b), Res::Ok(v)) = (&self.hooks.watch, before, &res) {
-            run::after_land(&mut self.link, w, b, v);
-        }
+        let found = match (before, &res) {
+            (Some(b), Res::Ok(v)) => {
+                if let Some(w) = &self.hooks.watch {
+                    run::after_land(&mut self.link, w, b, v);
+                }
+                true
+            }
+            // the kill cut the reply, or an earlier cut reply landed it: whether it landed is
+            // read now, and a landing found is audited like any other (fix round 1, finding 4)
+            (Some(b), Res::Lost) => self.found(&pref, b),
+            (Some(b), Res::Refused(code, _)) if code == "E_ALREADY_LANDED" => self.found(&pref, b),
+            _ => false,
+        };
         let mut q = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         match &res {
             Res::Ok(_) => {}
@@ -213,21 +240,89 @@ impl Person {
             Res::Refused(code, _) if code == "E_PROPOSAL_MOVED" || code == "E_ALREADY_LANDED" => {}
             // the gate refused it for now: it waits behind the others
             Res::Refused(..) => q.push(pref),
+            // the kill landed it: the ref is dead
+            Res::Lost if found => {}
             // the kill may or may not have landed it: it goes first, and `E_ALREADY_LANDED`
             // answers if it did
             Res::Lost => q.insert(0, pref),
         }
     }
 
+    /// Whether queued proposal `pref` is a dead ref: an agent proposed it from a view that the
+    /// journal shows in an alternative set, and it chose no member. It was made before the set,
+    /// and the gate refuses it now (a member's change lands only in a version that chose it); the
+    /// agent's later proposals choose (fix round 1, ruling task-5.4: the table holds
+    /// `land`/`E_ALT_MEMBER` only for a change bound to a losing member).
+    fn chose_nothing_in_a_set(&self, pref: &str) -> bool {
+        let entries = self.link.journal.entries();
+        let Some(made) = entries.iter().find(|x| {
+            x.act == "propose" && x.outcome == Outcome::Ok && x.block.as_deref() == Some(pref)
+        }) else {
+            return false;
+        };
+        let chose = made
+            .reply
+            .as_ref()
+            .is_some_and(|r| !r["alternatives"].is_null());
+        let in_a_set = entries.iter().any(|x| {
+            x.act == "alt_create"
+                && x.outcome == Outcome::Ok
+                && (x.view == made.view || x.block == made.view)
+        });
+        in_a_set && !chose
+    }
+
+    /// Whether proposal `pref` landed, as the relay reads it (`rdy_read`), journaled as a
+    /// `land_found` entry that names the proposal, the view and the base `before` read. When it
+    /// landed with a landing no entry names yet, the entry's reply names the landing, and with the
+    /// run's hooks the reads after a landing run on `before`: a landing whose reply the kill cut
+    /// is audited too. A landing an entry names already (a version that landed with a later
+    /// version's landing, `E_ALREADY_LANDED`) is not named again: its base is the one read
+    /// before it.
+    fn found(&mut self, pref: &str, before: run::Before) -> bool {
+        let mut e = self.entry("agent:relay", run::LAND_FOUND);
+        e.block = Some(pref.to_string());
+        e.view = Some(before.view.clone());
+        e.base.clone_from(&before.base);
+        let res = self
+            .link
+            .raw(run::LAND_FOUND, "rdy_read", json!({"id": pref}));
+        let landing = match &res {
+            Res::Ok(v) if v["proposal"]["state"] == "landed" => {
+                v["proposal"]["landing"].as_str().map(str::to_string)
+            }
+            _ => None,
+        };
+        let named = landing.as_deref().is_some_and(|l| {
+            self.link.journal.entries().iter().any(|x| {
+                ((x.act == "land" && x.outcome == Outcome::Ok) || x.act == run::LAND_FOUND)
+                    && x.reply.as_ref().is_some_and(|r| r["landing"] == l)
+            })
+        });
+        self.link.finish(e, run::LAND_FOUND, res, |en, _| {
+            if let (Some(l), false) = (&landing, named) {
+                en.reply = Some(json!({"landing": l}));
+            }
+        });
+        let Some(l) = landing else { return false };
+        if !named && let Some(w) = self.hooks.watch.clone() {
+            run::after_land(&mut self.link, &w, before, &json!({"landing": l}));
+        }
+        true
+    }
+
     // ---- through the relay ----
 
+    /// The relay reads canon's tensions of one kind, the kind going round with the step, which
+    /// keeps the read inside its budget in the deep tier (ruling task-5.5).
     fn tensions(&mut self) -> Option<Value> {
         let e = self.entry("agent:relay", "tensions");
+        let kind = KINDS[self.link.step % KINDS.len()];
         let res = self.link.exec(
             e,
             "tensions",
             "rdy_tensions",
-            json!({"max_tokens": 100_000}),
+            json!({"scope": "canon", "kind": kind, "max_tokens": 100_000}),
             |en, v| en.seen = labels_of(&v["tensions"]),
         );
         let Res::Ok(v) = res else { return None };
@@ -238,16 +333,33 @@ impl Person {
     }
 
     fn dismiss(&mut self) {
-        // the relay lists the blocking tensions and dismisses the first with a change side of a
-        // writer agent: it is a reviewer of another actor (D-DAFWP)
+        // the relay lists the blocking edit collisions or premise shifts (in turn) of one agent
+        // view (the view going round with the step; the narrow read keeps inside its budget in the
+        // deep tier, ruling task-5.5) and dismisses the first with a change side of a writer
+        // agent: it is a reviewer of another actor (D-DAFWP)
+        let mut views: Vec<String> = self
+            .link
+            .journal
+            .entries()
+            .into_iter()
+            .filter(|x| x.actor.starts_with("agent:a") && x.outcome == Outcome::Ok)
+            .filter(|x| x.change.is_some())
+            .filter_map(|x| x.view)
+            .collect();
+        views.sort();
+        views.dedup();
+        let step = self.link.step;
+        let kind = ["edit_collision", "premise_shift"][step % 2];
+        let mut args = json!({"severity": "blocking", "kind": kind, "max_tokens": 100_000});
+        if !views.is_empty() {
+            args["view"] = json!(views[step / 2 % views.len()]);
+        }
         let e = self.entry("agent:relay", "tensions");
-        let res = self.link.exec(
-            e,
-            "tensions",
-            "rdy_tensions",
-            json!({"severity": "blocking", "max_tokens": 100_000}),
-            |en, v| en.seen = labels_of(&v["tensions"]),
-        );
+        let res = self
+            .link
+            .exec(e, "tensions", "rdy_tensions", args, |en, v| {
+                en.seen = labels_of(&v["tensions"]);
+            });
         let Res::Ok(v) = res else { return };
         if v.get("omitted").is_some() {
             self.link.fail("dismiss", "got a reply cut for its budget");
@@ -481,5 +593,100 @@ impl Person {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swarm::agent;
+    use crate::swarm::project;
+    use crate::swarm::script::{Act, Config, Pick};
+
+    /// Fix round 1, finding 4: a landing whose reply the kill cut is still audited. The relay
+    /// reads whether the proposal landed; when it did, the reads after a landing run on what was
+    /// read before it, and a `land_found` entry names the landing, the view and its base.
+    #[test]
+    fn sg5_a_landing_whose_reply_was_lost_is_found_and_audited() {
+        let cfg = Config {
+            seed: 31,
+            agents: 1,
+            steps: 2,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let (journal, gate) = (Journal::new(), Arc::new(KillGate::new()));
+        let write = Act::Write {
+            target: Pick::Seed(0),
+            stable: true,
+        };
+        let report = agent::spawn(
+            &p,
+            &cfg,
+            0,
+            vec![write, Act::Propose],
+            journal.clone(),
+            gate.clone(),
+        )
+        .join()
+        .expect("the agent runs");
+        let pref = report.proposals[0].clone();
+        let watch: Watch = Arc::default();
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:relay",
+            "chat",
+            "reviewer",
+            None,
+            journal.clone(),
+            gate.clone(),
+        );
+        let hooks = Hooks {
+            pace: None,
+            watch: Some(watch.clone()),
+            done: None,
+        };
+        let mut person = Person {
+            link,
+            seed: p.seed.clone(),
+            queue: Queue::default(),
+            checked_out: false,
+            hooks,
+        };
+        // not landed yet: nothing is found
+        let before = run::before_land(&mut person.link, &pref).expect("the reads before");
+        assert!(!person.found(&pref, before));
+        // landed by an approve whose reply nobody read
+        let before = run::before_land(&mut person.link, &pref).expect("the reads before");
+        let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
+        assert!(ok, "{landed}");
+        assert!(person.found(&pref, before));
+        let found: Vec<Entry> = journal
+            .entries()
+            .into_iter()
+            .filter(|e| e.act == "land_found")
+            .collect();
+        assert_eq!(found.len(), 2, "{found:#?}");
+        let last = &found[1];
+        assert_eq!(last.block.as_deref(), Some(pref.as_str()));
+        assert_eq!(last.view.as_deref(), Some("a0"));
+        assert!(last.base.is_some(), "{last:?}");
+        assert_eq!(
+            last.reply.as_ref().map(|r| &r["landing"]),
+            Some(&landed["landing"]),
+            "{last:?}"
+        );
+        assert!(found[0].reply.is_none(), "{:?}", found[0]);
+        // seed 11: a later approve of a version that landed with that landing (E_ALREADY_LANDED)
+        // finds it again; the landing is named once, by the entry whose base was read before it
+        let again = run::before_land(&mut person.link, &pref).expect("the reads before");
+        assert!(person.found(&pref, again));
+        let found: Vec<Entry> = journal
+            .entries()
+            .into_iter()
+            .filter(|e| e.act == "land_found")
+            .collect();
+        assert_eq!(found.len(), 3, "{found:#?}");
+        assert!(found[2].reply.is_none(), "{:?}", found[2]);
     }
 }

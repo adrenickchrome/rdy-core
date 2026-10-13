@@ -314,6 +314,69 @@ fn sg1_an_unchosen_alternative_is_flagged() {
     assert!(!rules(&audit(&before, &ok)).contains(&"alt_unchosen"));
 }
 
+/// Members x (view x) and y (view y) of one set; each member writes a claim after the set exists
+/// (so both changes link to it). x proposes choosing x, writes `later` (still linked: the set is
+/// open), and the proposal lands. Returns the changes of `later` and of y's second claim.
+fn chosen_x_then_more(r: &mut Rdy) -> (rdy_model::Hash, rdy_model::Hash) {
+    let (_doc, section, _c) = seed_doc(r, "seed");
+    land(r, "seed").unwrap();
+    let claim =
+        |body: &str| json!([{"op": "create", "type": "claim", "parent": section, "body": body}]);
+    put(r, "x", claim("X."));
+    put(r, "y", claim("Y."));
+    let set = r
+        .alt_create(&ag("x"), "Which", None, &[m("x", "x"), m("y", "y")])
+        .unwrap();
+    put(r, "x", claim("X two."));
+    let lost = put(r, "y", claim("Y two."));
+    let pick = rdy_engine::alt::AltPick {
+        set: set.id.clone(),
+        chosen: "x".into(),
+    };
+    let p = r
+        .propose_with(&writer(), "x", "x", None, None, Some(&pick))
+        .unwrap();
+    let later = put(r, "x", claim("X three."));
+    r.land(&approver(), &p.id).unwrap();
+    (change_of(&later), change_of(&lost))
+}
+
+/// Ruling task-5.1 (seed 3's pattern; gate.rs linked_alts rule 2): once a set is chosen, the
+/// chosen member's later changes land without choosing again, and the audit agrees.
+#[test]
+fn sg1_the_chosen_members_later_change_lands_without_a_choice() {
+    let (_d, mut r) = project();
+    let (later, _lost) = chosen_x_then_more(&mut r);
+    let before = r.read();
+    let landed = Landed {
+        view: "x".into(),
+        changes: vec![later],
+        alternative: None,
+    };
+    let v = audit(&before, &landed);
+    assert!(!rules(&v).contains(&"alt_unchosen"), "{v:?}");
+    drop(before);
+    // precondition: the gate lands it, choosing nothing
+    let l = land(&mut r, "x").unwrap();
+    let rec = landed_of(&r, &l.parse().unwrap()).unwrap();
+    assert_eq!((rec.changes, rec.alternative), (vec![later], None));
+}
+
+/// Ruling task-5.1 (guard): a change bound to a member the set did not choose, landed with no
+/// choice, is still flagged.
+#[test]
+fn sg1_a_losing_members_change_landed_without_a_choice_is_flagged() {
+    let (_d, mut r) = project();
+    let (_later, lost) = chosen_x_then_more(&mut r);
+    let before = r.read();
+    let landed = Landed {
+        view: "z".into(),
+        changes: vec![lost],
+        alternative: None,
+    };
+    assert!(rules(&audit(&before, &landed)).contains(&"alt_unchosen"));
+}
+
 #[test]
 fn sg1_check_all_covers_canon_and_every_open_view() {
     // guard: check_all is check on canon plus check on each open view plus the logged rule

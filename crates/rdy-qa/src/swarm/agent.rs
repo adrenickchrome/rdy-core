@@ -8,7 +8,8 @@
 //!   entry of act `brief`, and a second write after `E_BRIEF_STALE` is a second entry.
 //! - A write names the change it made in `change`, the block it wrote or created in `block`,
 //!   and, for an update, the version it was made from in `base`.
-//! - `propose`, `land` and `accept_advice` name the proposal ref `P-x@n` in `block`. `alt_create`
+//! - `propose`, `land` and `accept_advice` name the proposal ref `P-x@n` in `block`; an `Ok`
+//!   `propose` entry's `reply` is `{alternatives}`, the choice it made (null: none). `alt_create`
 //!   names the agent's view in `view` and the other member's view in `block`. `dismiss` names
 //!   the tension label in `block`. No other act puts anything but a block there.
 //! - A pick that resolves to nothing is journaled `Skipped` after a read of a seed block. An act
@@ -22,16 +23,23 @@
 //!   lost daemon fails the run with the seed.
 //! - A contradiction pair is written through the real flow (ruling task-4.2): the first
 //!   member's claim is created, proposed and landed by the person, then the second member
-//!   creates its claim against canon. The executor adds no act of its own for this.
+//!   creates its claim against canon. The executor adds no act of its own for this. Each
+//!   member writes its marked claim in a view of its own, `a<i>-k<k>` (k spelled), and its next
+//!   `Propose` proposes that view (fix round 1, ruling task-5.2): the claim lands, or is shown
+//!   with its advice, apart from the agent's other work, and no alternative set closes it.
+//! - A `ReviewNext` act judges up to `REVIEW_BATCH` free requests, one `review_next` and one
+//!   `review_submit` entry each, so the reviewers keep up with the queue in a run.
 use super::journal::{Entry, InboxRead, Journal, Outcome, Skip, allowed};
 use super::project::{SeedBlocks, SwarmProject};
-use super::script::{AREAS, Act, Config, Pick};
+use super::script::{AREAS, Act, Config, Pick, SEED_BLOCKS};
 use crate::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::{
+    Arc, Condvar, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -41,14 +49,36 @@ pub const CALL_BUDGET: Duration = Duration::from_secs(30);
 const RESTART_WAIT: Duration = Duration::from_secs(180);
 /// How often an actor tries to open a session on a proxy before the run fails.
 const OPEN_TRIES: usize = 8;
+/// The tension kinds, as `rdy_tensions {kind}` names them: a read of canon takes one, in turn.
+pub(crate) const KINDS: [&str; 10] = [
+    "edit_collision",
+    "fork",
+    "premise_shift",
+    "area_overlap",
+    "duplicate_definition",
+    "unjustified_change",
+    "deprecated_reference",
+    "value_disagreement",
+    "restatement_drift",
+    "semantic",
+];
+/// The most review requests one `ReviewNext` act judges (ruling task-5.2: the reviewers keep up
+/// with the queue in a run, so a contradiction pair is judged before the run ends).
+pub const REVIEW_BATCH: usize = 16;
 
 /// The daemon generation, shared by the run and every actor. The run calls `restarted` once the
 /// killed daemon is gone and the next client may start a new one.
+///
+/// It also holds the landing turn: an act that decides from a read of the agent's view (a
+/// precondition, ruling task-4.1) holds a read turn from that read to its call, and the person's
+/// `rdy approve` holds the write turn, so canon never moves between an agent's read and the call
+/// that relies on it. Every other call races freely.
 #[derive(Default)]
 pub struct KillGate {
     epoch: Mutex<u32>,
     changed: Condvar,
     expects_kill: bool,
+    turn: RwLock<()>,
 }
 
 impl KillGate {
@@ -69,6 +99,16 @@ impl KillGate {
     /// Whether the run kills the daemon once.
     pub fn expects_kill(&self) -> bool {
         self.expects_kill
+    }
+
+    /// The person's turn to land: no act that decides from a read runs while it is held.
+    pub fn landing_turn(&self) -> RwLockWriteGuard<'_, ()> {
+        self.turn.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An agent's turn for an act that decides from a read: no landing runs while it is held.
+    pub fn read_turn(&self) -> RwLockReadGuard<'_, ()> {
+        self.turn.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The daemon was killed and may start again: the generation moves to its next number and
@@ -348,8 +388,10 @@ impl Link {
         e.epoch = self.epoch;
         let (outcome, bad) = judge(rules, &res);
         e.outcome = outcome;
-        if let Res::Ok(v) = &res {
-            fill(&mut e, v);
+        match &res {
+            Res::Ok(v) => fill(&mut e, v),
+            Res::Refused(_, message) => e.message = Some(message.clone()),
+            Res::Lost => {}
         }
         let act = e.act;
         self.journal.record(e);
@@ -460,8 +502,20 @@ enum Shown {
     Lost,
     /// No view of that name exists.
     Missing,
-    /// The view: whether it is closed, and the changes it includes that have not landed.
-    View { closed: bool, changes: Vec<String> },
+    /// The view: whether it is closed, the changes it includes that have not landed, and the
+    /// blocks it holds conflicted.
+    View {
+        closed: bool,
+        changes: Vec<String>,
+        conflicts: BTreeSet<String>,
+    },
+}
+
+/// The index of the first of `ids` that is not in `conflicted`, the blocks a view holds
+/// conflicted: the target of a write that names no base (ruling task-5.3). `None` when every one
+/// is conflicted.
+pub fn first_unconflicted(ids: &[&str], conflicted: &BTreeSet<String>) -> Option<usize> {
+    ids.iter().position(|id| !conflicted.contains(*id))
 }
 
 /// A block an act aims at, resolved.
@@ -508,6 +562,8 @@ struct Agent {
     /// The prose of the scratch doc and the change that made it.
     scratch: Option<(String, String)>,
     alt_set: Option<String>,
+    /// The views of this agent's marked claims that it has not yet proposed, oldest first.
+    contra_views: Vec<String>,
     forks: usize,
     counter: usize,
     report: AgentReport,
@@ -605,6 +661,7 @@ impl Agent {
             wrote: false,
             scratch: None,
             alt_set: None,
+            contra_views: Vec::new(),
             forks: 0,
             counter: 0,
             report,
@@ -671,6 +728,23 @@ impl Agent {
     }
 
     fn act(&mut self, act: &Act) {
+        // an act that decides from a read of the agent's view holds the read turn from the read
+        // to its call: a landing between them would make the read stale (fix round 1)
+        // an alternative set is made in that turn too: the person never lands while a set is
+        // made and not yet journaled
+        let reads_first = matches!(
+            act,
+            Act::Propose
+                | Act::Include { .. }
+                | Act::Exclude
+                | Act::WriteNoBrief { .. }
+                | Act::WriteStale { .. }
+                | Act::Write { stable: false, .. }
+                | Act::AltCreate { .. }
+                | Act::Tensions
+        );
+        let gate = self.link.gate.clone();
+        let _turn = reads_first.then(|| gate.read_turn());
         match act {
             Act::Brief { target } => self.brief_act(target),
             Act::Write { target, stable } => self.write_act(target, *stable),
@@ -796,14 +870,18 @@ impl Agent {
             self.link
                 .fail("view_show", "got a reply cut for its budget");
         }
-        Shown::View {
-            closed: v["head"]["closed"].as_bool().unwrap_or(false),
-            changes: v["changes"]
+        let ids = |key: &str, field: &str| -> Vec<String> {
+            v[key]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|c| c["id"].as_str().map(str::to_string))
-                .collect(),
+                .filter_map(|c| c[field].as_str().map(str::to_string))
+                .collect()
+        };
+        Shown::View {
+            closed: v["head"]["closed"].as_bool().unwrap_or(false),
+            changes: ids("changes", "id"),
+            conflicts: ids("conflicts", "block").into_iter().collect(),
         }
     }
 
@@ -822,23 +900,31 @@ impl Agent {
     /// `rdy_brief` on `ids`: the token and the version of each covered block. `None` after a
     /// kill (the act ends).
     fn brief_call(&mut self, ids: &[String]) -> Option<(String, Vec<Value>)> {
+        self.brief_in(ids, None)
+    }
+
+    /// `brief_call` in view `scope` (the session's view when `None`).
+    fn brief_in(&mut self, ids: &[String], scope: Option<&str>) -> Option<(String, Vec<Value>)> {
         let mut e = self.link.entry("brief");
         e.block = ids.first().cloned();
         let mut token = String::new();
         let mut blocks = Vec::new();
-        let res = self
-            .link
-            .exec(e, "brief", "rdy_brief", json!({"ids": ids}), |en, v| {
-                token = v["base"]["token"].as_str().unwrap_or_default().to_string();
-                blocks = v["base"]["blocks"].as_array().cloned().unwrap_or_default();
-                en.brief = Some(token.clone());
-            });
+        let mut args = json!({"ids": ids});
+        if let Some(v) = scope {
+            args["scope"] = json!(v);
+        }
+        let res = self.link.exec(e, "brief", "rdy_brief", args, |en, v| {
+            token = v["base"]["token"].as_str().unwrap_or_default().to_string();
+            blocks = v["base"]["blocks"].as_array().cloned().unwrap_or_default();
+            en.brief = Some(token.clone());
+        });
         matches!(res, Res::Ok(_)).then_some((token, blocks))
     }
 
     /// Briefs `ids`, then writes `ops` citing the token, as `entry.act` (the table row `rules`
     /// applies). On `E_BRIEF_STALE` it briefs again and writes once more. Returns the last
-    /// reply.
+    /// reply. An entry whose view is not the session's (a marked claim's own view, which the
+    /// write makes) briefs canon and writes in that view.
     fn briefed_write(
         &mut self,
         mut entry: Entry,
@@ -850,8 +936,12 @@ impl Agent {
     ) -> Res {
         entry.stable = true;
         let mut tries = 0;
+        // a marked claim's own view does not exist before its write, which makes it from canon:
+        // the briefing reads canon
+        let other = entry.view.clone().filter(|v| *v != self.view);
+        let scope = other.as_ref().map(|_| "canon");
         loop {
-            let Some((token, blocks)) = self.brief_call(ids) else {
+            let Some((token, blocks)) = self.brief_in(ids, scope) else {
                 return Res::Lost;
             };
             let mut ops = ops.clone();
@@ -865,7 +955,10 @@ impl Agent {
                 }
             }
             entry.brief = Some(token.clone());
-            let args = json!({"ops": ops, "brief": token, "implements": [self.decision(area)]});
+            let mut args = json!({"ops": ops, "brief": token, "implements": [self.decision(area)]});
+            if let Some(v) = &other {
+                args["view"] = json!(v);
+            }
             let res = self.write_call(entry.clone(), rules, args);
             if retry
                 && tries == 0
@@ -966,6 +1059,17 @@ impl Agent {
                 }
             }
             Some((id, _)) => {
+                // the update names no base: a scratch block conflicted in the view is refused,
+                // so the agent reads its view first (ruling task-5.3)
+                let view = self.view.clone();
+                let conflicted = match self.show(&view) {
+                    Shown::Lost => return,
+                    Shown::Missing => BTreeSet::new(),
+                    Shown::View { conflicts, .. } => conflicts,
+                };
+                if first_unconflicted(&[id.as_str()], &conflicted).is_none() {
+                    return self.skip("write", Skip::NoUnconflictedTarget);
+                }
                 e.block = Some(id.clone());
                 let ops = json!([{"op": "update", "id": id, "body": body}]);
                 self.write_call(e, "write", json!({"ops": ops}));
@@ -1004,6 +1108,29 @@ impl Agent {
         let Some(t) = self.resolve(target) else {
             return self.skipped("write_stale");
         };
+        // the second write names no base, which a block conflicted in the view refuses: the
+        // agent reads its view and aims at the pick, or else the first seed block, that its view
+        // does not hold conflicted (ruling task-5.3)
+        let view = self.view.clone();
+        let conflicted = match self.show(&view) {
+            Shown::Lost => return,
+            Shown::Missing => BTreeSet::new(),
+            Shown::View { conflicts, .. } => conflicts,
+        };
+        let mut candidates = vec![t];
+        for n in 0..SEED_BLOCKS {
+            let (id, area) = self.seed.pick(n);
+            candidates.push(Target {
+                id: id.to_string(),
+                area,
+                included: None,
+            });
+        }
+        let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+        let Some(k) = first_unconflicted(&ids, &conflicted) else {
+            return self.skip("write_stale", Skip::NoUnconflictedTarget);
+        };
+        let t = candidates.swap_remove(k);
         let Some((token, blocks)) = self.brief_call(std::slice::from_ref(&t.id)) else {
             return;
         };
@@ -1054,10 +1181,31 @@ impl Agent {
         };
         let ops = json!([{"op": "create", "type": "claim", "id": "$n",
             "parent": self.seed.sections[k], "body": text}]);
-        let e = self.view_entry("create");
+        let mut e = self.view_entry("create");
+        // a marked claim goes in a view of its own, which the agent's next `Propose` proposes
+        let own_view = contra.map(|c| format!("{}-k{}", self.view, spell(c)));
+        if let Some(v) = &own_view {
+            e.view = Some(v.clone());
+        }
         let section = self.seed.sections[k].clone();
         let res = self.briefed_write(e, "create", &[section], ops, k, true);
-        self.take_created(&res, k, None);
+        match (own_view, &res) {
+            (None, _) => self.take_created(&res, k, None),
+            (Some(_), Res::Refused(..)) => {}
+            // a write the kill cut may have made the view: the drain and the next `Propose` look
+            (Some(v), _) => {
+                if let Res::Ok(r) = &res
+                    && let Some(id) = r["created"]["$n"].as_str()
+                {
+                    area_registry()
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(id.to_string(), k);
+                }
+                self.report.views.insert(v.clone());
+                self.contra_views.push(v);
+            }
+        }
     }
 
     /// Notes the claim a create or cite made (`$n` or `$y` in the reply's `created`).
@@ -1399,30 +1547,49 @@ impl Agent {
         }
     }
 
+    /// Proposes the oldest view of a marked claim not yet proposed, else the agent's view.
     fn propose(&mut self) {
-        let view = self.view.clone();
-        match self.show(&view) {
-            Shown::Lost => return,
-            Shown::Missing => return self.skip("propose", Skip::NothingToPropose),
-            Shown::View {
-                closed: false,
-                changes,
-            } if changes.is_empty() => return self.skip("propose", Skip::NothingToPropose),
-            // a closed view is refused by the call, and the table allows that refusal
-            Shown::View { .. } => {}
-        }
-        let mut args = json!({"title": format!("{} step {}", self.view, self.link.step)});
-        if let Some(set) = &self.alt_set {
+        let (contra, view) = loop {
+            let contra = self.contra_views.first().cloned();
+            let view = contra.clone().unwrap_or_else(|| self.view.clone());
+            let nothing = match self.show(&view) {
+                Shown::Lost => return,
+                Shown::Missing => true,
+                Shown::View {
+                    closed: false,
+                    changes,
+                    ..
+                } => changes.is_empty(),
+                // a closed view is refused by the call, and the table allows that refusal
+                Shown::View { .. } => false,
+            };
+            match (nothing, &contra) {
+                (false, _) => break (contra, view),
+                // a marked claim the kill cut never made its view: the agent's own view is next
+                (true, Some(_)) => {
+                    self.contra_views.remove(0);
+                }
+                (true, None) => return self.skip("propose", Skip::NothingToPropose),
+            }
+        };
+        let mut args = json!({"title": format!("{view} step {}", self.link.step), "view": view});
+        if contra.is_none()
+            && let Some(set) = &self.alt_set
+        {
             args["alternatives"] = json!({"set": set, "chosen": self.view});
         }
         for attempt in 0..2 {
-            let e = self.view_entry("propose");
+            let mut e = self.view_entry("propose");
+            e.view = Some(view.clone());
             let mut made = None;
+            // the entry names the choice it made (null: none), which the person reads
+            let chose = args["alternatives"].clone();
             let res = self
                 .link
                 .exec(e, "propose", "rdy_propose", args.clone(), |en, v| {
                     en.block = v["ref"].as_str().map(str::to_string);
                     en.seen = labels_of(&v["tensions"]);
+                    en.reply = Some(json!({"alternatives": chose}));
                     made = en.block.clone();
                 });
             match res {
@@ -1432,9 +1599,14 @@ impl Agent {
                     {
                         self.report.proposals.push(r);
                     }
+                    if contra.is_some() {
+                        self.contra_views.remove(0);
+                    }
                 }
                 // the view is a member of a set: the refusal names it, and the agent chooses
-                Res::Refused(code, message) if code == "E_ALT_UNCHOSEN" && attempt == 0 => {
+                Res::Refused(code, message)
+                    if code == "E_ALT_UNCHOSEN" && attempt == 0 && contra.is_none() =>
+                {
                     if let Some(set) = set_in(&message) {
                         args["alternatives"] = json!({"set": set, "chosen": self.view});
                         self.alt_set = Some(set);
@@ -1442,14 +1614,27 @@ impl Agent {
                     }
                 }
                 // the set is not open any more
-                Res::Refused(code, _) if code == "E_ALT_MEMBER" => self.alt_set = None,
+                Res::Refused(code, _) if code == "E_ALT_MEMBER" && contra.is_none() => {
+                    self.alt_set = None;
+                }
                 _ => {}
             }
             return;
         }
     }
 
+    /// Judges up to `REVIEW_BATCH` free review requests: each a `rdy_review_next` and a
+    /// `rdy_review_submit` on the case it leased. It stops when none is free.
     fn review_next(&mut self) {
+        for _ in 0..REVIEW_BATCH {
+            if !self.review_one() {
+                return;
+            }
+        }
+    }
+
+    /// One review: whether a case was leased and judged.
+    fn review_one(&mut self) -> bool {
         let e = self.link.entry("review_next");
         let mut case: Option<Value> = None;
         let res = self.link.exec(
@@ -1464,7 +1649,7 @@ impl Agent {
             },
         );
         let (Res::Ok(_), Some(leased)) = (res, case) else {
-            return;
+            return false;
         };
         let blocks = leased["case"]["blocks"]
             .as_array()
@@ -1472,7 +1657,8 @@ impl Agent {
             .unwrap_or_default();
         let args = verdict_args(&leased["request"], &leased["case_hash"], &blocks);
         let e = self.link.entry("review_submit");
-        self.link
+        let res = self
+            .link
             .exec(e, "review_submit", "rdy_review_submit", args, |en, v| {
                 en.seen = v["tension"]
                     .as_str()
@@ -1481,17 +1667,35 @@ impl Agent {
                     .collect();
                 en.reply = Some(v.clone());
             });
+        !matches!(res, Res::Lost)
     }
 
+    /// `rdy_tensions` on the agent's own in-flight work: the tensions involving the last change
+    /// its view holds (`involving`, read from the view first), which keeps the read inside its
+    /// budget in the deep tier (ruling task-5.5). With no change in flight (no view, an empty one,
+    /// or a closed one) the agent reads canon's tensions of one kind, the kind going round with
+    /// the step.
     fn tensions(&mut self) {
+        let view = self.view.clone();
+        // a closed view's changes are not in flight (a member that lost its set)
+        let last = match self.show(&view) {
+            Shown::Lost => return,
+            Shown::Missing | Shown::View { closed: true, .. } => None,
+            Shown::View { changes, .. } => changes.last().cloned(),
+        };
+        let args = match last {
+            Some(c) => json!({"involving": c, "max_tokens": 100_000}),
+            None => {
+                let kind = KINDS[self.link.step % KINDS.len()];
+                json!({"scope": "canon", "kind": kind, "max_tokens": 100_000})
+            }
+        };
         let e = self.link.entry("tensions");
-        let res = self.link.exec(
-            e,
-            "tensions",
-            "rdy_tensions",
-            json!({"max_tokens": 100_000}),
-            |en, v| en.seen = labels_of(&v["tensions"]),
-        );
+        let res = self
+            .link
+            .exec(e, "tensions", "rdy_tensions", args, |en, v| {
+                en.seen = labels_of(&v["tensions"]);
+            });
         if let Res::Ok(v) = res
             && v.get("omitted").is_some()
         {

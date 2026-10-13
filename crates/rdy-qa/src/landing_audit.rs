@@ -7,9 +7,9 @@
 use crate::invariants::Violation;
 use rdy_engine::tensions::{SideRef, TensionSeverity, TensionStatus, tension_label};
 use rdy_engine::{Rdy, ReadState};
-use rdy_model::{BlockId, Change, Hash};
+use rdy_model::{BlockId, Change, Hash, LandingRecord};
 use rdy_store::merge::{Conflict, MergeChange, merge_on_blocks};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// One landing as the audit reads it: the view it was proposed from, the changes it landed and
 /// the stable hash of the alternative set it chose (`LandingRecord.chosen`'s `set`).
@@ -89,21 +89,86 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
         before.effective_base(view),
         &read,
     ));
-    // alt_unchosen: a change bound to a set whose member the landing did not choose
-    for (c, ch) in &read {
-        if let Some(choice) = &ch.links.alternative
-            && landed.alternative != Some(choice.set)
-        {
-            out.push(viol(
+    // alt_unchosen: a change bound to a set whose member the landing did not choose, unless an
+    // earlier landing of canon's chain chose that member
+    match before.reader().landings() {
+        Ok(chain) => out.extend(unchosen_rule(view, landed, &read, &chosen_members(&chain))),
+        Err(e) => out.push(viol(
+            "alt_unchosen",
+            None,
+            format!("landing of {view}: cannot read canon's landings: {e}"),
+        )),
+    }
+    out
+}
+
+/// The member each alternative set was chosen for, by the set's stable hash, as the landing
+/// records of `chain` (canon's chain, in any order) state it. Read from the records alone, never
+/// from the gate.
+pub fn chosen_members(chain: &[(Hash, LandingRecord)]) -> BTreeMap<Hash, String> {
+    chain
+        .iter()
+        .filter_map(|(_, rec)| rec.chosen.as_ref())
+        .map(|c| (c.set, c.member.clone()))
+        .collect()
+}
+
+/// Rule `alt_unchosen` alone: each change of `landed` linked to a set (`links.alternative`) needs
+/// the landing to choose that set, or the set to be chosen already for the member the change is
+/// linked to. `settled` is `chosen_members` of the landings before this one. Once a set is chosen,
+/// only its losers stay bound (FW-AL1; gate rule 2 of `linked_alts`, ruling task-5.1).
+pub fn alt_unchosen(
+    st: &ReadState,
+    landed: &Landed,
+    settled: &BTreeMap<Hash, String>,
+) -> Vec<Violation> {
+    let view = &landed.view;
+    let reader = st.reader();
+    let mut out = vec![];
+    let mut read = vec![];
+    for c in &landed.changes {
+        match reader.change(c) {
+            Ok(ch) => read.push((*c, ch)),
+            Err(e) => out.push(viol(
                 "alt_unchosen",
                 None,
-                format!(
-                    "landing of {view}: change {} is bound to set {}, and the landing chose no member of it",
-                    c.short(),
-                    choice.set.short()
-                ),
-            ));
+                format!("landing of {view}: cannot read change {}: {e}", c.short()),
+            )),
         }
+    }
+    out.extend(unchosen_rule(view, landed, &read, settled));
+    out
+}
+
+fn unchosen_rule(
+    view: &str,
+    landed: &Landed,
+    changes: &[(Hash, Change)],
+    settled: &BTreeMap<Hash, String>,
+) -> Vec<Violation> {
+    let mut out = vec![];
+    for (c, ch) in changes {
+        let Some(choice) = &ch.links.alternative else {
+            continue;
+        };
+        if landed.alternative == Some(choice.set) {
+            continue;
+        }
+        let detail = match settled.get(&choice.set) {
+            Some(member) if *member == choice.member => continue,
+            Some(member) => format!(
+                "landing of {view}: change {} is bound to member {} of set {}, which chose {member}, and the landing chose no member of it",
+                c.short(),
+                choice.member,
+                choice.set.short()
+            ),
+            None => format!(
+                "landing of {view}: change {} is bound to set {}, and the landing chose no member of it",
+                c.short(),
+                choice.set.short()
+            ),
+        };
+        out.push(viol("alt_unchosen", None, detail));
     }
     out
 }

@@ -18,7 +18,7 @@ pub enum Outcome {
 }
 
 /// Why an act found nothing to do and was `Skipped` before any call (the closed list of the
-/// ruling on task 4). The executor decides each from the state it read, never from a refusal.
+/// ruling on task 4, and `NoUnconflictedTarget` of the ruling on task 5). The executor decides each from the state it read, never from a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     /// The agent's view holds no change to propose.
@@ -31,6 +31,9 @@ pub enum Skip {
     NothingToExclude,
     /// The agent's view is closed, so a probe of the briefing gate has nowhere to write.
     NoLiveView,
+    /// Every block a write that names no base could aim at is conflicted in the agent's view
+    /// (ruling task-5.3): a write without a base is refused on a conflicted block.
+    NoUnconflictedTarget,
 }
 
 /// One inbox read: the cursor passed, the cursor returned and the entries as the reply gave them.
@@ -68,6 +71,9 @@ pub struct Entry {
     pub reply: Option<serde_json::Value>,
     /// Set on a `Skipped` entry that found nothing to do (see [`Skip`]).
     pub skip: Option<Skip>,
+    /// The message of a refusal (`Outcome::Refused`), as the daemon gave it: a check reads which
+    /// change a refusal names.
+    pub message: Option<String>,
 }
 
 impl Entry {
@@ -89,6 +95,7 @@ impl Entry {
             inbox: None,
             reply: None,
             skip: None,
+            message: None,
         }
     }
 }

@@ -3,15 +3,17 @@
 //! actor runs (the freeze), the project is copied, and the drain lands every live view.
 //!
 //! Every assertion reads the final state or the journal, never an order of events. One run per
-//! seed is shared by every test of this file: seed 1 in the fast gate, seeds 1, 2 and 3 in the
-//! deep gate (`RDY_QA_DEEP=1`). Every failure names its seed, so a person can run it again.
+//! seed is shared by every test of this file: seeds 1 to 6 in the fast gate (each runs every
+//! check; together they must exercise every act, ruling task-5.2), seeds 1, 2 and 3 in the deep
+//! gate (`RDY_QA_DEEP=1`). Every failure names its seed, so a person can run it again:
+//! `RDY_QA_SWARM_SEEDS=<seed>,...` runs only those seeds.
 use rdy_engine::inbox::read::parse_cursor;
 use rdy_engine::tensions::tension_label;
-use rdy_engine::{EventKind, Rdy};
+use rdy_engine::{EventKind, Rdy, ReadState};
 use rdy_model::Hash;
 use rdy_qa::fixtures::deep;
 use rdy_qa::invariants::check_all;
-use rdy_qa::landing_audit::{conflicts_at, landed_of};
+use rdy_qa::landing_audit::{alt_unchosen, chosen_members, conflicts_at, landed_of};
 use rdy_qa::reindex_check::reindex_reproduces;
 use rdy_qa::swarm::journal::{Entry, Outcome as Met, allowed};
 use rdy_qa::swarm::oracle::{self, copy_of};
@@ -45,28 +47,59 @@ fn seeded<T>(seed: u64, f: impl FnOnce() -> T) -> Result<T, String> {
     })
 }
 
+/// The fast gate's seeds. Each one runs every check, and their union must exercise every act
+/// (ruling task-5.2).
+const FAST_SEEDS: [u64; 6] = [1, 2, 3, 4, 5, 6];
+/// The deep gate's seeds.
+const DEEP_SEEDS: [u64; 3] = [1, 2, 3];
+
+/// The seeds of this run: `RDY_QA_SWARM_SEEDS` (a comma list, to run a failing seed again),
+/// else the tier's.
+fn seeds() -> Vec<u64> {
+    if let Ok(list) = std::env::var("RDY_QA_SWARM_SEEDS") {
+        return list
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("RDY_QA_SWARM_SEEDS: {s:?} is not a seed"))
+            })
+            .collect();
+    }
+    if deep() {
+        DEEP_SEEDS.to_vec()
+    } else {
+        FAST_SEEDS.to_vec()
+    }
+}
+
 /// The runs of this file: one per seed, made once.
 fn runs() -> &'static [Run] {
     static RUNS: OnceLock<Vec<Run>> = OnceLock::new();
     RUNS.get_or_init(|| {
-        let seeds: Vec<u64> = if deep() { vec![1, 2, 3] } else { vec![1] };
-        seeds
+        seeds()
             .into_iter()
             .map(|seed| (seed, seeded(seed, || run::run(&Config::for_run(seed)))))
             .collect()
     })
 }
 
-/// Runs `check` on every seed's outcome. A run that failed fails here with its own text.
+/// Runs `check` on every seed's outcome. A run that failed fails here with its own text. Every
+/// seed is checked; the failure names each seed that failed.
 fn each(check: impl Fn(u64, &Outcome)) {
+    let mut failed = vec![];
     for (seed, r) in runs() {
-        let o = match r {
-            Ok(o) => o,
-            Err(text) => panic!("{text}"),
-        };
-        if let Err(text) = seeded(*seed, || check(*seed, o)) {
-            resume_unwind(Box::new(text));
+        match r {
+            Ok(o) => {
+                if let Err(text) = seeded(*seed, || check(*seed, o)) {
+                    failed.push(text);
+                }
+            }
+            Err(text) => failed.push(text.clone()),
         }
+    }
+    if !failed.is_empty() {
+        resume_unwind(Box::new(failed.join("\n\n")));
     }
 }
 
@@ -98,90 +131,179 @@ fn logged_kinds(o: &Outcome) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn ok_lands(o: &Outcome) -> impl Iterator<Item = &Entry> {
-    o.journal
-        .iter()
-        .filter(|e| e.act == "land" && e.outcome == Met::Ok)
+/// The acts every seed's run reaches before the freeze (ruling task-5.2).
+const CORE: [&str; 6] = [
+    "write",
+    "brief",
+    "propose",
+    "land",
+    "review_submit",
+    "inbox",
+];
+
+/// What one seed's run did before the freeze (ruling task-5.2: the drain's acts do not count).
+struct Coverage {
+    /// The acts acknowledged (`write_no_brief`: refused with `E_BRIEF_REQUIRED`; `inbox`: an
+    /// agent's read, resumed or not).
+    acts: BTreeSet<&'static str>,
+    lost: bool,
+    landings: usize,
+    chose: bool,
+    kinds: BTreeSet<String>,
+    opened: bool,
 }
 
-#[test]
-fn sg5_the_run_exercised_every_act() {
-    each(|seed, o| {
-        let ok = |act: &str| {
-            o.journal
-                .iter()
-                .any(|e| e.act == act && e.outcome == Met::Ok)
-        };
-        let mut missing: Vec<&str> = Act::ALL_NAMES
-            .iter()
-            .copied()
-            .chain([
-                "review_submit",
-                "land",
-                "dismiss",
-                "accept_advice",
-                "wc_commit",
-                "inbox_ack",
-            ])
-            // the daemon never acknowledges an unbriefed stable write: its refusal is the act
-            .filter(|a| *a != "write_no_brief" && !ok(a))
-            .collect();
-        let refused_unbriefed = o.journal.iter().any(|e| {
-            e.act == "write_no_brief" && e.outcome == Met::Refused("E_BRIEF_REQUIRED".into())
-        });
-        if !refused_unbriefed {
-            missing.push("write_no_brief");
-        }
-        assert!(
-            missing.is_empty(),
-            "swarm seed {seed}: no acknowledged act of {missing:?}"
-        );
-        assert!(
-            o.journal.iter().any(|e| e.outcome == Met::Lost),
-            "swarm seed {seed}: the kill cut no call"
-        );
-        assert!(
-            o.landings.len() >= 4,
-            "swarm seed {seed}: {} landings, fewer than 4",
-            o.landings.len()
-        );
-        let chose = ok_lands(o).any(|e| {
+fn coverage(o: &Outcome) -> Coverage {
+    let run = o.before_freeze();
+    let mut acts: BTreeSet<&'static str> = run
+        .iter()
+        .filter(|e| e.outcome == Met::Ok)
+        .map(|e| match e.act {
+            "inbox_resume" => "inbox",
+            // an approve whose reply the kill cut, found landed
+            run::LAND_FOUND if e.reply.is_some() => "land",
+            act => act,
+        })
+        .collect();
+    // the daemon never acknowledges an unbriefed stable write: its refusal is the act
+    acts.remove("write_no_brief");
+    if run
+        .iter()
+        .any(|e| e.act == "write_no_brief" && e.outcome == Met::Refused("E_BRIEF_REQUIRED".into()))
+    {
+        acts.insert("write_no_brief");
+    }
+    let landed: Vec<&Entry> = run
+        .iter()
+        .filter(|e| {
+            (e.act == "land" && e.outcome == Met::Ok)
+                || (e.act == run::LAND_FOUND && e.reply.is_some())
+        })
+        .collect();
+    let logged = logged_kinds(o);
+    let mut kinds: BTreeSet<String> = o
+        .reported
+        .values()
+        .filter_map(|t| t["kind"].as_str().map(str::to_string))
+        .collect();
+    kinds.extend(
+        run.iter()
+            .flat_map(|e| e.seen.iter())
+            .filter_map(|l| logged.get(l).cloned()),
+    );
+    Coverage {
+        acts,
+        lost: run.iter().any(|e| e.outcome == Met::Lost),
+        landings: landed.len(),
+        chose: landed.iter().any(|e| {
             e.reply
                 .as_ref()
                 .is_some_and(|r| r.get("chosen").is_some_and(|c| !c.is_null()))
-        });
-        assert!(
-            chose,
-            "swarm seed {seed}: no landing chose a member of an alternative set"
-        );
-        let logged = logged_kinds(o);
-        let mut kinds: BTreeSet<String> = o
-            .reported
-            .values()
-            .filter_map(|t| t["kind"].as_str().map(str::to_string))
-            .collect();
-        kinds.extend(
-            o.journal
-                .iter()
-                .flat_map(|e| e.seen.iter())
-                .filter_map(|l| logged.get(l).cloned()),
-        );
-        for kind in ["edit_collision", "premise_shift"] {
-            assert!(
-                kinds.contains(kind),
-                "swarm seed {seed}: no {kind} was reported or seen: {kinds:?}"
-            );
-        }
-        let opened = o.journal.iter().any(|e| {
+        }),
+        kinds,
+        opened: run.iter().any(|e| {
             e.inbox
                 .as_ref()
                 .is_some_and(|r| r.entries.iter().any(|x| x["event"] == "tension_opened"))
-        });
-        assert!(
-            opened,
-            "swarm seed {seed}: no inbox read held a tension_opened entry"
+        }),
+    }
+}
+
+/// Ruling task-5.2: the run, not the drain, exercises the acts. Every seed reaches the core acts
+/// and lands at least once before the freeze; the union of the seeds reaches every act of the
+/// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
+/// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry.
+#[test]
+fn sg5_the_run_exercised_every_act() {
+    let mut all = Coverage {
+        acts: BTreeSet::new(),
+        lost: false,
+        landings: 0,
+        chose: false,
+        kinds: BTreeSet::new(),
+        opened: false,
+    };
+    let mut failed = vec![];
+    for (seed, r) in runs() {
+        let o = match r {
+            Ok(o) => o,
+            Err(text) => {
+                failed.push(text.clone());
+                continue;
+            }
+        };
+        let c = coverage(o);
+        // the evidence a person reads with --nocapture: what each seed's run reached
+        eprintln!(
+            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}",
+            c.acts.len(),
+            c.lost,
+            c.landings,
+            c.chose,
+            c.kinds,
+            c.opened,
+            c.acts.contains("accept_advice")
         );
-    });
+        let missing: Vec<&str> = CORE
+            .iter()
+            .copied()
+            .filter(|a| !c.acts.contains(a))
+            .collect();
+        if !missing.is_empty() {
+            failed.push(format!(
+                "swarm seed {seed}: before the freeze, no acknowledged act of {missing:?}"
+            ));
+        }
+        all.acts.extend(c.acts);
+        all.lost |= c.lost;
+        all.landings = all.landings.max(c.landings);
+        all.chose |= c.chose;
+        all.kinds.extend(c.kinds);
+        all.opened |= c.opened;
+    }
+    let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
+    let missing: Vec<&str> = Act::ALL_NAMES
+        .iter()
+        .copied()
+        .chain([
+            "review_submit",
+            "land",
+            "dismiss",
+            "accept_advice",
+            "wc_commit",
+            "inbox_ack",
+        ])
+        .filter(|a| !all.acts.contains(a))
+        .collect();
+    if !missing.is_empty() {
+        failed.push(format!(
+            "swarm seeds {seeds:?}: no run reached an acknowledged act of {missing:?} before the freeze"
+        ));
+    }
+    let mut lacks = vec![];
+    if !all.lost {
+        lacks.push("a call the kill cut".to_string());
+    }
+    if all.landings < 4 {
+        lacks.push(format!("4 landings in one run (at most {})", all.landings));
+    }
+    if !all.chose {
+        lacks.push("a landing that chose a member of an alternative set".to_string());
+    }
+    for kind in ["edit_collision", "premise_shift"] {
+        if !all.kinds.contains(kind) {
+            lacks.push(format!("a reported or seen {kind}"));
+        }
+    }
+    if !all.opened {
+        lacks.push("an inbox read with a tension_opened entry".to_string());
+    }
+    if !lacks.is_empty() {
+        failed.push(format!(
+            "swarm seeds {seeds:?}: before the freeze, no run had {lacks:?}"
+        ));
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
 }
 
 #[test]
@@ -292,7 +414,34 @@ fn sg5_every_journal_collision_is_a_reported_tension() {
                     })
             });
             if !found {
-                unreported.push(format!("{a} and {b} on {block}"));
+                // what a person needs to look at it: each side's entry and views, and the edit
+                // collisions reported on the block
+                let entry = |c: &str| {
+                    o.before_freeze()
+                        .iter()
+                        .find(|e| e.change.as_deref() == Some(c))
+                        .map(|e| {
+                            format!(
+                                "{} step {} view {:?} base {:?}",
+                                e.actor, e.step, e.view, e.base
+                            )
+                        })
+                };
+                let on_block: Vec<String> = rows
+                    .iter()
+                    .filter(|t| {
+                        t["kind"] == "edit_collision"
+                            && t["blocks"]
+                                .as_array()
+                                .is_some_and(|bs| bs.iter().any(|x| x == block))
+                    })
+                    .map(|t| t["sides"].to_string())
+                    .collect();
+                unreported.push(format!(
+                    "{a} ({:?}, in {va:?}) and {b} ({:?}, in {vb:?}) on {block}; reported on the block: {on_block:?}",
+                    entry(a),
+                    entry(b)
+                ));
             }
         }
         assert!(
@@ -313,61 +462,293 @@ fn sg5_no_landing_put_a_blocking_tension_into_canon() {
     });
 }
 
+/// Every landing of canon's chain after the project's seed landings is audited (fix round 1,
+/// finding 4): each needs a journaled `land` or `land_found` entry that names it with the base its
+/// view read on, so a landing whose reply the kill cut is audited too. The alternative rule mirrors
+/// the gate (ruling task-5.1): a change linked to a set needs the landing to choose the set, or an
+/// earlier landing of the chain to have chosen the member it is linked to.
 #[test]
 fn sg5_no_landing_chose_no_alternative_or_crossed_a_conflict() {
     each(|seed, o| {
         let (_keep, copy) = copy_of(&o.dir);
         let r = Rdy::open(&copy).expect("open the drained copy");
         let st = r.read();
+        let mut chain = st.reader().landings().expect("read canon's chain");
+        chain.reverse();
+        // the first entry that names each landing: the one whose base was read before it
+        let mut named: BTreeMap<Hash, &Entry> = BTreeMap::new();
+        for e in o
+            .journal
+            .iter()
+            .filter(|e| (e.act == "land" && e.outcome == Met::Ok) || e.act == run::LAND_FOUND)
+        {
+            if let Some(l) = e.reply.as_ref().and_then(|r| r["landing"].as_str())
+                && let Ok(h) = l.parse::<Hash>()
+            {
+                named.entry(h).or_insert(e);
+            }
+        }
+        let mut settled: BTreeMap<Hash, String> = BTreeMap::new();
         let mut bad = vec![];
-        for e in ok_lands(o) {
-            let reply = e.reply.as_ref().expect("a land reply");
-            let landing: Hash = reply["landing"]
-                .as_str()
-                .and_then(|l| l.parse().ok())
-                .unwrap_or_else(|| panic!("a landing id in {reply}"));
-            let landed =
-                landed_of(&r, &landing).unwrap_or_else(|err| panic!("landing {landing}: {err}"));
-            for c in &landed.changes {
-                let ch = st
-                    .reader()
-                    .change(c)
-                    .unwrap_or_else(|err| panic!("change {c}: {err}"));
-                if let Some(choice) = &ch.links.alternative
-                    && landed.alternative != Some(choice.set)
-                {
-                    bad.push(format!(
-                        "landing {landing}: change {} is bound to set {}, and the landing chose {:?}",
-                        c.short(),
-                        choice.set.short(),
-                        landed.alternative.map(|s| s.short())
-                    ));
+        let mut audited = 0;
+        for (landing, rec) in &chain {
+            let seeded = o.seed_landings.contains(&landing.to_string());
+            let entry = named.get(landing);
+            match (seeded, entry.and_then(|e| e.base.as_deref())) {
+                (true, _) => {}
+                (false, None) => bad.push(format!(
+                    "landing {}: no journaled land entry names it with a base ({:?})",
+                    landing.short(),
+                    entry.map(|e| (&e.actor, e.step, e.act))
+                )),
+                (false, Some(base)) => {
+                    let e = entry.expect("an entry with a base");
+                    let ctx = format!(
+                        " (landing {}, {} step {} {}, base {})",
+                        landing.short(),
+                        e.actor,
+                        e.step,
+                        e.act,
+                        &base[..12.min(base.len())]
+                    );
+                    let landed = landed_of(&r, landing)
+                        .unwrap_or_else(|err| panic!("landing {landing}: {err}"));
+                    bad.extend(
+                        alt_unchosen(&st, &landed, &settled)
+                            .into_iter()
+                            .map(|v| v.detail),
+                    );
+                    // the conflict rule on the base the view read on when it landed (ruling task-1.1)
+                    let base: Hash = base
+                        .parse()
+                        .unwrap_or_else(|err| panic!("base {base}: {err}"));
+                    bad.extend(
+                        conflicts_at(&st, &landed, Some(base))
+                            .into_iter()
+                            .map(|v| format!("{}{ctx}", v.detail)),
+                    );
+                    audited += 1;
                 }
             }
-            // the conflict rule on the base the view read on when it landed (ruling task-1.1)
-            let base = e.base.as_deref().map(|b| {
-                b.parse::<Hash>()
-                    .unwrap_or_else(|err| panic!("base {b}: {err}"))
-            });
-            bad.extend(
-                conflicts_at(&st, &landed, base)
-                    .into_iter()
-                    .map(|v| v.detail),
-            );
+            if let Some(c) = &rec.chosen {
+                settled.insert(c.set, c.member.clone());
+            }
         }
         drop(st);
         r.close().expect("close the drained copy");
+        assert!(audited > 0, "swarm seed {seed}: no landing was audited");
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
 }
 
+/// The member each alternative set was chosen for, by the landing records of `st`'s canon chain.
+fn settled_of(st: &ReadState) -> BTreeMap<Hash, String> {
+    chosen_members(&st.reader().landings().expect("read canon's chain"))
+}
+
+/// The bindings of change `c` (set, member): by its link (`links.alternative`), and by the
+/// binding each set fixed when the change entered it (msw20).
+fn bindings_of(st: &ReadState, c: &Hash) -> Vec<(Hash, String)> {
+    let ch = st
+        .reader()
+        .change(c)
+        .unwrap_or_else(|err| panic!("change {c}: {err}"));
+    let mut bindings: Vec<(Hash, String)> = ch
+        .links
+        .alternative
+        .iter()
+        .map(|a| (a.set, a.member.clone()))
+        .collect();
+    for (set, binds) in &st.coord_heads().alt_binds {
+        if let Some(member) = binds.bound.get(c) {
+            bindings.push((*set, member.clone()));
+        }
+    }
+    bindings
+}
+
+/// Whether change `c` is bound to a member that lost its chosen set.
+fn loser_bound(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> bool {
+    bindings_of(st, c)
+        .iter()
+        .any(|(set, member)| settled.get(set).is_some_and(|won| won != member))
+}
+
+/// Whether change `c`, or a change it depends on (transitively), is bound to a losing member.
+fn loser_related(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> bool {
+    let mut todo = vec![*c];
+    let mut seen = BTreeSet::new();
+    while let Some(h) = todo.pop() {
+        if !seen.insert(h) {
+            continue;
+        }
+        if loser_bound(st, settled, &h) {
+            return true;
+        }
+        let ch = st
+            .reader()
+            .change(&h)
+            .unwrap_or_else(|err| panic!("change {h}: {err}"));
+        todo.extend(ch.deps.iter().copied());
+    }
+    false
+}
+
+/// The hex digits after `change ` in a refusal's message.
+fn change_named(text: &str) -> Option<String> {
+    let at = text.find("change ")? + "change ".len();
+    let hex: String = text[at..]
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    (hex.len() >= 6).then_some(hex)
+}
+
+/// Ruling task-5.4: `propose`/`E_ALT_CHOSEN` and `land`/`E_ALT_MEMBER` are in the table only for a
+/// change bound to a losing member of a chosen set (FW-AL1). Each refusal of those two rows names
+/// such a change, or (a land refused because its view itself lost its set) comes from a view
+/// that is a losing member. The binding is read from the stored change and the set's fixed
+/// bindings; the choice from the landing records.
 #[test]
-fn sg5_every_live_view_drains_without_a_dismissal() {
+fn sg5_the_alternative_refusals_name_a_change_bound_to_a_loser() {
     each(|seed, o| {
         let (_keep, copy) = copy_of(&o.dir);
         let r = Rdy::open(&copy).expect("open the drained copy");
         let st = r.read();
+        let settled = settled_of(&st);
+        // every change id a refusal may name: the journal's, the drain's exclusions', and every
+        // change a view held at the freeze (a write the kill cut names none in the journal)
+        let mut known: BTreeSet<String> =
+            o.journal.iter().filter_map(|e| e.change.clone()).collect();
+        for e in o.after_freeze().iter().filter(|e| e.act == "exclude") {
+            for k in ["removed", "cascaded"] {
+                if let Some(r) = &e.reply {
+                    known.extend(
+                        r[k].as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|c| c.as_str().map(str::to_string)),
+                    );
+                }
+            }
+        }
+        {
+            let (_keep, frozen) = copy_of(&o.frozen);
+            let f = Rdy::open(&frozen).expect("open the frozen copy");
+            let fst = f.read();
+            for v in fst.view_names() {
+                known.extend(fst.included(&v).iter().map(ToString::to_string));
+            }
+            drop(fst);
+            f.close().expect("close the frozen copy");
+        }
+        let mut bad = vec![];
+        for e in &o.journal {
+            let row = match (&e.outcome, e.act) {
+                (Met::Refused(c), "propose") if c == "E_ALT_CHOSEN" => c,
+                (Met::Refused(c), "land") if c == "E_ALT_MEMBER" => c,
+                _ => continue,
+            };
+            // the proposal's view and how it was made, for a person to look at
+            let made = o.journal.iter().find(|x| {
+                x.act == "propose"
+                    && x.outcome == Met::Ok
+                    && x.block.is_some()
+                    && x.block == e.block
+            });
+            let at = format!(
+                "{} step {} {} {row} ({:?} of view {:?}, proposed by {:?} step {:?} with {:?})",
+                e.actor,
+                e.step,
+                e.act,
+                e.block,
+                e.view,
+                made.map(|x| &x.actor),
+                made.map(|x| x.step),
+                made.and_then(|x| x.reply.as_ref())
+            );
+            let message = e.message.as_deref().unwrap_or_default();
+            let mut why = String::new();
+            let fine = match change_named(message) {
+                Some(prefix) => {
+                    let full = known.iter().find(|k| k.starts_with(&prefix));
+                    match full.and_then(|f| f.parse::<Hash>().ok()) {
+                        Some(c) => {
+                            let b = bindings_of(&st, &c);
+                            let won: Vec<_> = b
+                                .iter()
+                                .map(|(set, _)| (set.short(), settled.get(set)))
+                                .collect();
+                            why = format!(" (bindings {b:?}; chosen {won:?})");
+                            loser_bound(&st, &settled, &c)
+                        }
+                        None => false,
+                    }
+                }
+                // the land's view itself lost its set (altg1)
+                None => e.view.as_ref().is_some_and(|v| {
+                    st.coord_heads().settled_alts.iter().any(|(set, (_, alt))| {
+                        alt.members.iter().any(|m| m.view == *v)
+                            && settled.get(set).is_some_and(|won| won != v)
+                    })
+                }),
+            };
+            if !fine {
+                bad.push(format!("{at}: {message}{why}"));
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        assert!(
+            bad.is_empty(),
+            "swarm seed {seed}: alternative refusals that name no change bound to a losing member: {bad:#?}"
+        );
+    });
+}
+
+/// Ruling task-5.4: after the drain no agent view holds a change. A view that landed (a landing
+/// record whose proposal's view is it) is told apart from a view the drain emptied: the drain's
+/// exclusions are listed by change, and each excluded change is bound to a losing member or
+/// depends on one. Every change a view held at the freeze, or that the drain wrote in it, landed
+/// or is such an exclusion; an open, empty view never counts as landed by itself.
+#[test]
+fn sg5_every_live_view_drains_without_a_dismissal() {
+    each(|seed, o| {
+        // what each agent view held at the freeze
+        let held_at_freeze: BTreeMap<String, Vec<Hash>> = {
+            let (_keep, copy) = copy_of(&o.frozen);
+            let r = Rdy::open(&copy).expect("open the frozen copy");
+            let st = r.read();
+            let out = st
+                .view_names()
+                .into_iter()
+                .map(|v| {
+                    let held = st.included(&v).to_vec();
+                    (v, held)
+                })
+                .collect();
+            drop(st);
+            r.close().expect("close the frozen copy");
+            out
+        };
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let settled = settled_of(&st);
+        let chain = st.reader().landings().expect("read canon's chain");
+        let canon: BTreeSet<Hash> = chain
+            .iter()
+            .flat_map(|(_, rec)| rec.changes.clone())
+            .collect();
+        let landed_from: BTreeSet<String> = chain
+            .iter()
+            .filter_map(|(_, rec)| st.reader().proposal(&rec.proposal).ok())
+            .map(|p| p.view)
+            .collect();
+        let drained = o.after_freeze();
         let mut live = vec![];
+        let mut emptied = vec![];
+        let mut bad = vec![];
         let mut agent_views = 0;
         for name in st.view_names() {
             let Some(head) = st.view_head(&name) else {
@@ -381,9 +762,63 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
                 continue;
             }
             agent_views += 1;
-            // landed: the landing rebased it and dropped every change it landed
-            if !head.closed && !st.included(&name).is_empty() {
-                live.push(format!("{name} ({} changes)", st.included(&name).len()));
+            // a member of a chosen or abandoned set is closed: its work is discarded by design
+            if head.closed {
+                continue;
+            }
+            let now = st.included(&name);
+            if !now.is_empty() {
+                live.push(format!("{name} ({} changes)", now.len()));
+                continue;
+            }
+            let mine =
+                |e: &&Entry| e.outcome == Met::Ok && e.view.as_deref() == Some(name.as_str());
+            let excluded: BTreeSet<Hash> = drained
+                .iter()
+                .filter(|e| e.act == "exclude")
+                .filter(mine)
+                .filter_map(|e| e.reply.as_ref())
+                .flat_map(|r| {
+                    ["removed", "cascaded"].into_iter().flat_map(move |k| {
+                        r[k].as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|c| c.as_str()?.parse().ok())
+                    })
+                })
+                .collect();
+            let mut held: BTreeSet<Hash> = held_at_freeze
+                .get(&name)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            held.extend(
+                drained
+                    .iter()
+                    .filter(mine)
+                    .filter_map(|e| e.change.as_deref()?.parse::<Hash>().ok()),
+            );
+            for c in held.iter().chain(&excluded) {
+                if canon.contains(c) {
+                    continue;
+                }
+                if !excluded.contains(c) {
+                    bad.push(format!(
+                        "{name}: change {} left the view without landing or a drain exclusion",
+                        c.short()
+                    ));
+                } else if !loser_related(&st, &settled, c) {
+                    bad.push(format!(
+                        "{name}: the drain excluded change {}, which is not bound to a losing member and depends on none",
+                        c.short()
+                    ));
+                }
+            }
+            if !excluded.is_empty() {
+                let ids: Vec<String> = excluded.iter().map(|c| c.short()).collect();
+                let landed = landed_from.contains(&name);
+                emptied.push(format!("{name} (landed: {landed}) excluded {ids:?}"));
             }
         }
         drop(st);
@@ -392,6 +827,10 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
         assert!(
             live.is_empty(),
             "swarm seed {seed}: views neither landed nor closed after the drain: {live:?}"
+        );
+        assert!(
+            bad.is_empty(),
+            "swarm seed {seed}: {bad:#?}\nviews the drain emptied: {emptied:#?}"
         );
         let dismissed: Vec<String> = o
             .after_freeze()
@@ -500,10 +939,10 @@ fn sg5_two_colliding_views_land_one_after_the_other() {
     );
 }
 
-/// Deep seed 1: an agent's view that includes a change whose member later lost its set is refused
-/// at propose (`E_ALT_CHOSEN`), and a queued proposal whose change joined a set after it was
-/// proposed is refused at land (`E_ALT_MEMBER`). Both are the product's answers to the run, not
-/// faults, so the closed table holds them.
+/// Ruling task-5.4: the closed table holds `propose`/`E_ALT_CHOSEN` and `land`/`E_ALT_MEMBER`,
+/// which the gate answers for a change bound to a member that lost its set (FW-AL1).
+/// `sg5_the_alternative_refusals_name_a_change_bound_to_a_loser` holds every such refusal of a
+/// run to that.
 #[test]
 fn sg5_the_table_holds_the_alternative_refusals_a_run_meets() {
     assert!(allowed("propose", "E_ALT_CHOSEN"));

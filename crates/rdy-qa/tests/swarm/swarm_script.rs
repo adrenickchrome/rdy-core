@@ -152,9 +152,11 @@ fn sg3_a_contra_pair_shares_one_area_and_one_marker() {
 }
 
 /// Ruling task-4.2: a contradiction pair goes through the real flow. The first member (`.0`)
-/// creates its claim early and proposes after it; the second member (`.1`) creates its claim in
-/// the last quarter, so the first member's landing can come before it. Agents 0 and 1 (one
-/// alternative set) are not paired while other writers exist.
+/// creates its claim early and proposes after it; the second member (`.1`) creates its claim
+/// after five eighths of the steps, so the first member's landing can come before it, and before
+/// the last quarter, then proposes it before the last two steps, so the person is shown the
+/// reviewers' advice in the run (ruling task-5.2). Agents 0 and 1 (one alternative set) are not
+/// paired while other writers exist.
 #[test]
 fn sg3_a_contra_pair_is_written_through_the_real_flow() {
     let configs = (1..=20)
@@ -201,13 +203,18 @@ fn sg3_a_contra_pair_is_written_through_the_real_flow() {
                 "{ctx}: the first claim comes early ({c1})"
             );
             assert!(
-                c2 >= cfg.steps - cfg.steps / 4,
-                "{ctx}: the second claim comes late ({c2})"
+                (cfg.steps / 2 + cfg.steps / 8..cfg.steps - cfg.steps / 4).contains(&c2),
+                "{ctx}: the second claim comes after five eighths and before the last quarter ({c2})"
             );
             let proposes = at(*first, &|a| matches!(a, Act::Propose));
             assert!(
                 proposes.iter().any(|&p| c1 < p && p < c2),
                 "{ctx}: the first member proposes between the two claims: {proposes:?}"
+            );
+            let second_proposes = at(*second, &|a| matches!(a, Act::Propose));
+            assert!(
+                second_proposes.iter().any(|&p| c2 < p && p < cfg.steps - 2),
+                "{ctx}: the second member proposes its claim before the last two steps: {second_proposes:?}"
             );
             if writers > 2 {
                 assert_ne!(
@@ -215,6 +222,63 @@ fn sg3_a_contra_pair_is_written_through_the_real_flow() {
                     (0, 1),
                     "{ctx}: agents 0 and 1 share an alternative set"
                 );
+            }
+        }
+    }
+}
+
+/// Ruling task-5.2: the person lands on a cadence (every other act, `steps / 2` acts), ends by
+/// accepting the advice it is shown and landing, and does each kind of act at least once.
+#[test]
+fn sg3_the_person_lands_on_a_cadence_and_ends_by_accepting_advice() {
+    for cfg in (1..=20).flat_map(|seed| {
+        [
+            Config::fast(seed),
+            Config::deep(seed),
+            Config {
+                seed,
+                agents: 4,
+                steps: 24,
+                kill_at: None,
+            },
+        ]
+    }) {
+        let p = script(&cfg).person;
+        assert_eq!(p.len(), cfg.steps / 2, "seed {}", cfg.seed);
+        for (i, act) in p.iter().enumerate().take(p.len() - 2) {
+            if i % 2 == 0 {
+                assert_eq!(act.name(), "land", "seed {} act {i}", cfg.seed);
+            }
+        }
+        assert_eq!(p[p.len() - 2], PersonAct::AcceptAdvice, "seed {}", cfg.seed);
+        assert_eq!(p[p.len() - 1].name(), "land", "seed {}", cfg.seed);
+        let names: BTreeSet<_> = p[..p.len() - 2].iter().map(PersonAct::name).collect();
+        assert_eq!(names.len(), 6, "seed {}: {names:?}", cfg.seed);
+    }
+}
+
+/// Fix round 1 (ruling task-5.4): with writers beyond agents 0 and 1, only agents 0 and 1 make an
+/// alternative set (with each other), and they neither include nor are included from, so no view
+/// holds a change a set binds to another view's member.
+#[test]
+fn sg3_only_agents_0_and_1_make_a_set_and_they_share_no_change() {
+    for seed in 1..=20 {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            for (me, acts) in script(&cfg).agents.iter().enumerate() {
+                for act in acts {
+                    match act {
+                        Act::AltCreate { with } => {
+                            assert!(me < 2 && *with == 1 - me, "seed {seed}: a{me} {act:?}");
+                        }
+                        Act::Include { from } => {
+                            assert!(
+                                me >= 2 && *from >= 2 && *from != me,
+                                "seed {seed}: a{me} {act:?}"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }

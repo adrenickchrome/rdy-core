@@ -211,7 +211,7 @@ fn sg4_two_agents_collide_and_both_writes_are_acknowledged() {
         .collect();
     sides.sort();
     assert_eq!(sides, changes, "{t}");
-    // the later writer's reply listed it; the person's tensions read lists it too
+    // the later writer's reply listed it
     let queue = Arc::new(Mutex::new(Vec::new()));
     run_person(&p, vec![PersonAct::Tensions], &j, &queue, &g);
     let label = rows[0]["id"].as_str().expect("a label").to_string();
@@ -220,7 +220,74 @@ fn sg4_two_agents_collide_and_both_writes_are_acknowledged() {
         seen.iter().any(|s| s.contains(&label)),
         "{seen:?} lacks {label}"
     );
-    assert!(of(&j, "agent:relay", "tensions")[0].seen.contains(&label));
+    // the person's tensions read is canon's, one kind at a time (ruling task-5.5, so the read
+    // keeps inside its budget in the deep tier): the in-flight collision is not in it
+    let read = &of(&j, "agent:relay", "tensions")[0];
+    assert_eq!(read.outcome, Outcome::Ok, "{read:?}");
+    assert!(!read.seen.contains(&label), "{read:?}");
+}
+
+/// Agents 0 and 1 update seed claim 0 from one base, and the person lands agent 0's proposal:
+/// the claim is conflicted in agent 1's view.
+fn conflicted_in_a1() -> (SwarmProject, Config, Journal, Arc<KillGate>) {
+    let (p, cfg, j, g) = rig(2);
+    let collide = |with| Act::Collide {
+        with,
+        target: Pick::Seed(0),
+    };
+    let report = run(&p, &cfg, 0, vec![collide(1), Act::Propose], &j, &g);
+    run(&p, &cfg, 1, vec![collide(0)], &j, &g);
+    let queue = Arc::new(Mutex::new(report.proposals.clone()));
+    run_person(&p, vec![PersonAct::Land { relayed: true }], &j, &queue, &g);
+    let mut r = relay(&p);
+    let shown = r
+        .call(
+            "rdy_view",
+            json!({"op": "show", "view": "a1", "max_tokens": 100_000}),
+        )
+        .ok();
+    let claim = &p.seed.claims[0];
+    assert!(
+        shown["conflicts"]
+            .as_array()
+            .is_some_and(|cs| cs.iter().any(|c| c["block"] == claim.as_str())),
+        "precondition: {claim} is conflicted in a1: {shown}"
+    );
+    (p, cfg, j, g)
+}
+
+/// Ruling task-5.3 (fast seed 2): the stale-briefing probe aims at a block its view does not hold
+/// conflicted, read before the act: its second write names no base, which a conflicted block
+/// refuses with `E_BAD_INPUT` before the briefing is looked at.
+#[test]
+fn sg4_a_stale_briefing_probe_aims_at_a_block_its_view_does_not_hold_conflicted() {
+    let (p, cfg, j, g) = conflicted_in_a1();
+    run(
+        &p,
+        &cfg,
+        1,
+        vec![Act::WriteStale {
+            target: Pick::Seed(0),
+        }],
+        &j,
+        &g,
+    );
+    let e = of(&j, "agent:a1", "write_stale");
+    assert_eq!(e.len(), 2, "{:#?}", j.entries());
+    assert_ne!(e[0].block.as_deref(), Some(p.seed.claims[0].as_str()));
+    assert_eq!(e[0].outcome, Outcome::Ok);
+    assert_eq!(e[1].outcome, Outcome::Refused("E_BRIEF_STALE".into()));
+}
+
+/// Ruling task-5.3: a write that names no base aims at the first candidate its view does not
+/// hold conflicted; when there is none, the act is skipped (`NoUnconflictedTarget`).
+#[test]
+fn sg4_the_first_unconflicted_target_is_the_pick_or_else_a_seed_block() {
+    let ids = ["c-1", "c-2", "c-3"];
+    let conflicted: BTreeSet<String> = ["c-1".to_string(), "c-2".to_string()].into();
+    assert_eq!(agent::first_unconflicted(&ids, &conflicted), Some(2));
+    assert_eq!(agent::first_unconflicted(&ids[..2], &conflicted), None);
+    assert_eq!(agent::first_unconflicted(&ids, &BTreeSet::new()), Some(0));
 }
 
 #[test]
@@ -497,6 +564,7 @@ fn sg4_an_unexpected_refusal_panics_with_the_seed() {
             ..p.seed.clone()
         },
         run_seed: p.run_seed,
+        seed_landings: p.seed_landings.clone(),
         served: p.served,
     };
     let err = agent::spawn(

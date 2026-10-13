@@ -117,11 +117,109 @@ pub fn holders(frozen: &Path) -> BTreeMap<String, BTreeSet<String>> {
     })
 }
 
+/// One acknowledged `collide` write, as the collision oracle weighs it.
+#[derive(Debug, Clone)]
+pub struct Collide<'a> {
+    pub actor: &'a str,
+    pub change: &'a str,
+    pub block: &'a str,
+    /// The version the write named as its base.
+    pub base: &'a str,
+    pub view: &'a str,
+    /// In every view that holds it, the change's chain on the block depends on a writer of the
+    /// block other than the producer of `base`: the write (or a later one of its view) named the
+    /// base of a conflict its view held and depends on every side, so it resolves the conflict
+    /// (cres1) and is built on the other side, not on `base` alone.
+    pub resolves: bool,
+}
+
+/// The pairs of `held` (sorted change ids) that are edit collisions: one block from one base, by
+/// two different agents whose views were never members of one alternative set (`one_set`,
+/// D-84QSN), neither of them a write that resolves a conflict.
+pub fn collision_pairs(
+    held: &[Collide<'_>],
+    one_set: impl Fn(&str, &str) -> bool,
+) -> BTreeSet<(String, String)> {
+    let plain: Vec<&Collide<'_>> = held.iter().filter(|c| !c.resolves).collect();
+    let mut out = BTreeSet::new();
+    for (i, x) in plain.iter().enumerate() {
+        for y in &plain[i + 1..] {
+            if x.actor != y.actor
+                && x.block == y.block
+                && x.base == y.base
+                && !one_set(x.view, y.view)
+            {
+                let (a, b) = if x.change < y.change {
+                    (x.change, y.change)
+                } else {
+                    (y.change, x.change)
+                };
+                out.insert((a.to_string(), b.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Whether change `c`'s chain on `block` in view `view` was built on another side: the chain is
+/// `c` and the changes of the view that write the block and depend on it, directly or through
+/// one another; it was built on another side when one of them depends on a change that writes the
+/// block, is not in the chain and is not the producer of version `base` (a write that named a
+/// conflict's base, or that the view made after it, resolves the conflict: cres1). The deps and
+/// the ops are read from the stored changes, never from a tension.
+fn resolved_in(st: &rdy_engine::ReadState, c: &str, block: &str, base: &str, view: &str) -> bool {
+    let reader = st.reader();
+    let parse = |h: &str| {
+        h.parse::<rdy_model::Hash>()
+            .unwrap_or_else(|e| panic!("{h} is not a hash: {e}"))
+    };
+    let read = |h: &rdy_model::Hash| {
+        reader
+            .change(h)
+            .unwrap_or_else(|e| panic!("cannot read change {h}: {e}"))
+    };
+    let writes =
+        |ch: &rdy_model::Change| ch.ops.iter().any(|op| op.block_id().to_string() == block);
+    let root = reader
+        .producer(&parse(base))
+        .unwrap_or_else(|e| panic!("cannot read the producer of {base}: {e}"));
+    // the view's changes that write the block, with their deps
+    let writers: Vec<(rdy_model::Hash, Vec<rdy_model::Hash>)> = st
+        .included(view)
+        .iter()
+        .map(|h| (*h, read(h)))
+        .filter(|(_, ch)| writes(ch))
+        .map(|(h, ch)| (h, ch.deps))
+        .collect();
+    let mut chain: BTreeSet<rdy_model::Hash> = BTreeSet::from([parse(c)]);
+    loop {
+        let before = chain.len();
+        for (h, deps) in &writers {
+            if deps.iter().any(|d| chain.contains(d)) {
+                chain.insert(*h);
+            }
+        }
+        if chain.len() == before {
+            break;
+        }
+    }
+    chain.iter().any(|m| {
+        read(m)
+            .deps
+            .iter()
+            .filter(|d| !chain.contains(*d) && Some(**d) != root)
+            .any(|d| writes(&read(d)))
+    })
+}
+
 /// The edit collisions the journal shows (D-84QSN): pairs of acknowledged `collide` changes on
 /// one block from one base, by two different agents, whose two views were never members of one
 /// alternative set (journal `alt_create` entries), and whose changes are both still in an open
-/// view's included set in the project at `frozen`. Each pair is sorted. It reads only the journal
-/// and those included sets, never a tension.
+/// view's included set in the project at `frozen`. A write whose chain on the block resolves a
+/// conflict in every view that holds it (the write, or a later write of its view on the block,
+/// depends on another writer of the block than the base's producer, cres1) collides with nobody.
+/// Each pair is sorted. It reads only the journal, those included sets and the stored changes' deps and ops,
+/// never a tension.
 pub fn collisions(journal: &[Entry], frozen: &Path) -> BTreeSet<(String, String)> {
     let sets: Vec<BTreeSet<&str>> = journal
         .iter()
@@ -136,30 +234,31 @@ pub fn collisions(journal: &[Entry], frozen: &Path) -> BTreeSet<(String, String)
         .collect();
     let one_set = |a: &str, b: &str| sets.iter().any(|s| s.contains(a) && s.contains(b));
     let held = holders(frozen);
-    let collides: Vec<(&Entry, &str, &str, &str, &str)> = journal
+    let mut collides: Vec<Collide<'_>> = journal
         .iter()
         .filter(|e| e.act == "collide" && e.outcome == Outcome::Ok)
         .filter_map(|e| {
-            Some((
-                e,
-                e.change.as_deref()?,
-                e.block.as_deref()?,
-                e.base.as_deref()?,
-                e.view.as_deref()?,
-            ))
+            Some(Collide {
+                actor: &e.actor,
+                change: e.change.as_deref()?,
+                block: e.block.as_deref()?,
+                base: e.base.as_deref()?,
+                view: e.view.as_deref()?,
+                resolves: false,
+            })
         })
-        .filter(|(_, c, ..)| held.contains_key(*c))
+        .filter(|c| held.contains_key(c.change))
         .collect();
-    let mut out = BTreeSet::new();
-    for (i, (x, cx, bx, basex, vx)) in collides.iter().enumerate() {
-        for (y, cy, by, basey, vy) in &collides[i + 1..] {
-            if x.actor != y.actor && bx == by && basex == basey && !one_set(vx, vy) {
-                let (a, b) = if cx < cy { (cx, cy) } else { (cy, cx) };
-                out.insert((a.to_string(), b.to_string()));
-            }
+    // a change resolves when no view that holds it holds it on a chain built on the base alone
+    on_copy(frozen, |r| {
+        let st = r.read();
+        for c in &mut collides {
+            c.resolves = held[c.change]
+                .iter()
+                .all(|v| resolved_in(&st, c.change, c.block, c.base, v));
         }
-    }
-    out
+    });
+    collision_pairs(&collides, one_set)
 }
 
 /// The keys (kind, sorted blocks) of the open, blocking, all-canon tensions of an `rdy_tensions`
@@ -230,6 +329,36 @@ mod tests {
         };
         json!({"kind": kind, "severity": severity, "status": "open", "blocks": blocks,
             "sides": [side, {"landing": "ef56"}]})
+    }
+
+    fn collide<'a>(actor: &'a str, change: &'a str, resolves: bool) -> Collide<'a> {
+        Collide {
+            actor,
+            change,
+            block: "c-N0743",
+            base: "c3813e",
+            view: actor,
+            resolves,
+        }
+    }
+
+    /// Seed 3 (fix round 1, finding 2): a3 wrote the block from the conflict's base while its view
+    /// held it conflicted, so its change depends on the producer of canon's side and resolves the
+    /// conflict (cres1). It collides with nobody; a5 and a6, which wrote from the base alone, do.
+    #[test]
+    fn sg5_a_write_that_resolves_a_conflict_is_no_collision() {
+        let held = [
+            collide("agent:a5", "c5", false),
+            collide("agent:a3", "c3", true),
+            collide("agent:a6", "c6", false),
+        ];
+        let pairs = collision_pairs(&held, |_, _| false);
+        assert_eq!(
+            pairs,
+            BTreeSet::from([("c5".to_string(), "c6".to_string())])
+        );
+        // members of one alternative set never collide (D-84QSN)
+        assert!(collision_pairs(&held, |_, _| true).is_empty());
     }
 
     #[test]

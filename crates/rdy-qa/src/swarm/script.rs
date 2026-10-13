@@ -37,13 +37,15 @@ impl Config {
         }
     }
 
-    /// The deep tier: 8 agents, 400 steps, a kill at a seeded step in 50..350.
+    /// The deep tier: 8 agents, 200 steps, a kill at a seeded step in 50..150. (400 steps until
+    /// fix round 1: the drain's reviewers then met more than 2 000 open review requests, the hang
+    /// guard of ruling task-5.5, which reduces the tier instead.)
     pub fn deep(seed: u64) -> Config {
         Config {
             seed,
             agents: 8,
-            steps: 400,
-            kill_at: Some(kill_step(seed, 50, 300)),
+            steps: 200,
+            kill_at: Some(kill_step(seed, 50, 100)),
         }
     }
 
@@ -209,7 +211,7 @@ impl PersonAct {
 pub struct Script {
     /// One list of acts per agent; `steps` long.
     pub agents: Vec<Vec<Act>>,
-    /// The person's acts: `steps / 4`.
+    /// The person's acts: `steps / 2`, with a landing cadence (see `script`).
     pub person: Vec<PersonAct>,
     /// Pairs of agents whose `Create` texts carry one shared `CONTRA-<k>` marker, where `k`
     /// is the index in this list (the scripted reviewer rule, ledger O4). Each member holds
@@ -223,9 +225,11 @@ pub struct Script {
     /// order: the first member (`.0`) writes its marked `Create` in the first quarter of its
     /// steps and holds a `Propose` between the first quarter and the first half; the person
     /// lands that proposal (the person's `Land`, through the relay); the second member (`.1`)
-    /// writes its marked `Create` in the last quarter of its steps. The positions order the
-    /// acts of one script; the landing between them is up to the run, which paces the person
-    /// (Task 5). The journal shows whether the landing came first.
+    /// writes its marked `Create` between five eighths and three quarters of its steps, and
+    /// holds a `Propose` in the last quarter, before the last two steps, so the reviewers judge
+    /// the pair and the person is shown their advice before the run ends (ruling task-5.2). The positions order the acts of one
+    /// script; the landing between them is up to the run, which paces the person (Task 5). The
+    /// journal shows whether the landing came first.
     pub contra: Vec<(usize, usize)>,
 }
 
@@ -310,8 +314,9 @@ const REVIEWER_WEIGHTS: &[(Kind, u64)] = &[
     (Kind::Read, 10),
 ];
 
-/// The weights of the person's random draw (after the required acts).
-const PERSON_WEIGHTS: &[(u8, u64)] = &[(0, 25), (1, 20), (2, 15), (3, 15), (4, 15), (5, 10)];
+/// The weights of the person's random draw on an act that does not land (after the required
+/// acts): `Dismiss`, `AcceptAdvice`, `WcEdit`, `InboxAck`, `Tensions`.
+const OTHER_WEIGHTS: &[(u8, u64)] = &[(1, 20), (2, 20), (3, 15), (4, 15), (5, 10)];
 
 fn weighted<T: Copy>(rng: &mut Rng, table: &[(T, u64)]) -> T {
     let total: u64 = table.iter().map(|(_, w)| w).sum();
@@ -350,11 +355,30 @@ fn other_agent(rng: &mut Rng, me: usize, agents: usize) -> usize {
     if a >= me { a + 1 } else { a }
 }
 
+/// The agent whose view agent `me` includes from. When writers outside agents 0 and 1 exist,
+/// it is one of them, and agents 0 and 1 include nothing (`make`): agents 0 and 1 are the members
+/// of the run's alternative set, and a change that exactly one member holds when the set is made
+/// is bound to that member (msw20), which the gate refuses in any other view (fix round 1: the
+/// table holds the alternative refusals only for a change bound to a losing member, ruling
+/// task-5.4).
+fn include_from(rng: &mut Rng, me: usize, cfg_agents: usize, writers: &[usize]) -> usize {
+    let outside: Vec<usize> = writers
+        .iter()
+        .copied()
+        .filter(|w| *w >= 2 && *w != me)
+        .collect();
+    if outside.is_empty() {
+        other_agent(rng, me, cfg_agents)
+    } else {
+        outside[rng.below(outside.len())]
+    }
+}
+
 fn area(rng: &mut Rng) -> &'static str {
     AREAS[rng.below(AREAS.len())]
 }
 
-fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
+fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize, writers: &[usize]) -> Act {
     match kind {
         Kind::Brief => Act::Brief {
             target: pick(rng, me, agents),
@@ -382,12 +406,22 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
         },
         Kind::Repin => Act::Repin,
         Kind::Fork => Act::Fork,
+        // agents 0 and 1 include nothing when other writers exist: a change another agent wrote
+        // that one member holds when the set is made is bound to that member (msw20)
+        Kind::Include if me < 2 && writers.iter().any(|w| *w >= 2) => Act::Read {
+            target: pick(rng, me, agents),
+        },
         Kind::Include => Act::Include {
-            from: other_agent(rng, me, agents),
+            from: include_from(rng, me, agents, writers),
         },
         Kind::Exclude => Act::Exclude,
         Kind::Undo => Act::Undo,
         Kind::Intent => Act::Intent { area: area(rng) },
+        // agents 0 and 1 are the only members of an alternative set when other writers exist
+        Kind::AltCreate if me < 2 && agents >= 2 => Act::AltCreate { with: 1 - me },
+        Kind::AltCreate if writers.iter().any(|w| *w >= 2) => Act::Read {
+            target: pick(rng, me, agents),
+        },
         Kind::AltCreate => Act::AltCreate {
             with: other_agent(rng, me, agents),
         },
@@ -423,9 +457,10 @@ fn actor_script(
     let mut acts = vec![Act::Brief {
         target: Pick::Seed(rng.below(SEED_BLOCKS)),
     }];
+    let writers: Vec<usize> = (0..cfg.agents).filter(|i| !cfg.is_reviewer(*i)).collect();
     for _ in 1..cfg.steps {
         let kind = weighted(rng, weights);
-        acts.push(make(rng, kind, me, cfg.agents));
+        acts.push(make(rng, kind, me, cfg.agents, &writers));
     }
     let mut free: Vec<usize> = (1..cfg.steps).collect();
     for (act, lo, hi) in placed {
@@ -461,8 +496,10 @@ fn actor_script(
 /// Every actor's first act is `Brief`. Only the reviewers hold `ReviewNext`, at least three
 /// each. Every writer holds at least one `Collide`, `Cite`, `Propose` and `Inbox`; every
 /// reviewer at least one `Inbox`; agents 0 and 1 hold an `AltCreate` with each other. The
-/// person's script holds `steps / 4` acts with at least one of each `PersonAct`. The members of
-/// a contradiction pair hold their marked `Create` acts in the order `Script::contra` states.
+/// person's script holds `steps / 2` acts: every other act lands, the run ends with an
+/// `AcceptAdvice` and a `Land`, and every `PersonAct` comes at least once (ruling task-5.2). The
+/// members of a contradiction pair hold their marked `Create` acts in the order `Script::contra`
+/// states.
 ///
 /// Panics when `cfg.steps` is below `MIN_STEPS`.
 pub fn script(cfg: &Config) -> Script {
@@ -510,14 +547,18 @@ pub fn script(cfg: &Config) -> Script {
             }
             required.push(Act::Inbox { ack: true });
         } else {
-            required.push(make(&mut rng, Kind::Collide, me, cfg.agents));
-            required.push(make(&mut rng, Kind::Cite, me, cfg.agents));
+            required.push(make(&mut rng, Kind::Collide, me, cfg.agents, &writers));
+            required.push(make(&mut rng, Kind::Cite, me, cfg.agents, &writers));
             required.push(Act::Propose);
             required.push(Act::Inbox { ack: true });
             if cfg.agents >= 2 && me < 2 {
                 required.push(Act::AltCreate { with: 1 - me });
             }
             let quarter = cfg.steps / 4;
+            // the second claim comes after the first member's landing (its proposal is due by
+            // the half, the person lands on a cadence) and early enough to be judged in the run
+            let late = cfg.steps / 2 + cfg.steps / 8;
+            let mut second_of_a_pair = false;
             for (k, (first, second)) in contra.iter().enumerate() {
                 let create = Act::Create {
                     area: contra_areas[k],
@@ -528,19 +569,28 @@ pub fn script(cfg: &Config) -> Script {
                     placed.push((Act::Propose, quarter, cfg.steps / 2));
                 }
                 if *second == me {
-                    placed.push((create, cfg.steps - quarter, cfg.steps));
+                    placed.push((create, late, cfg.steps - quarter));
+                    second_of_a_pair = true;
                 }
+            }
+            // the second member proposes its marked claim before the person's tail
+            if second_of_a_pair {
+                placed.push((Act::Propose, cfg.steps - quarter, cfg.steps - 2));
             }
         }
         agents.push(actor_script(&mut rng, cfg, me, placed, required));
     }
     Script {
         agents,
-        person: person_script(&mut Rng::new(master.next()), cfg.steps / 4),
+        person: person_script(&mut Rng::new(master.next()), cfg.steps / 2),
         contra,
     }
 }
 
+/// The person's acts (`len` of them, at least 12): a landing cadence, so the run lands as it goes
+/// (ruling task-5.2). Each even act lands; each odd act is drawn from the other kinds; the last
+/// two accept the advice the person is shown on a queued proposal and land; and each other kind
+/// comes at least once, on an odd act before those two.
 fn person_script(rng: &mut Rng, len: usize) -> Vec<PersonAct> {
     let make = |rng: &mut Rng, id: u8| match id {
         0 => PersonAct::Land {
@@ -553,13 +603,19 @@ fn person_script(rng: &mut Rng, len: usize) -> Vec<PersonAct> {
         _ => PersonAct::Tensions,
     };
     let mut acts: Vec<PersonAct> = (0..len)
-        .map(|_| {
-            let id = weighted(rng, PERSON_WEIGHTS);
+        .map(|i| {
+            let id = if i % 2 == 0 {
+                0
+            } else {
+                weighted(rng, OTHER_WEIGHTS)
+            };
             make(rng, id)
         })
         .collect();
-    let mut free: Vec<usize> = (0..len).collect();
-    for id in 0..6u8 {
+    acts[len - 2] = PersonAct::AcceptAdvice;
+    acts[len - 1] = PersonAct::Land { relayed: true };
+    let mut free: Vec<usize> = (1..len - 2).step_by(2).collect();
+    for id in 1..6u8 {
         let at = free.swap_remove(rng.below(free.len()));
         acts[at] = make(rng, id);
     }

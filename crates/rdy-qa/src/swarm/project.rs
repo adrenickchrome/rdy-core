@@ -17,6 +17,8 @@ pub struct SwarmProject {
     pub seed: SeedBlocks,
     /// The run's seed, for the text of a failure.
     pub run_seed: u64,
+    /// The landings that seeded the project, oldest first: canon's chain before any actor runs.
+    pub seed_landings: Vec<String>,
 }
 
 /// The ids of the seeded blocks. `docs`, `sections` and `decisions` hold one id per area, in the
@@ -139,10 +141,20 @@ pub fn build(cfg: &Config) -> SwarmProject {
         .collect();
     write_cited(&mut r, "work", Value::Array(ops), Some(&brief)).expect("make the docs stable");
     land(&mut r, "work").expect("land the stable docs");
+    let mut seed_landings: Vec<String> = r
+        .read()
+        .reader()
+        .landings()
+        .expect("read the seed landings")
+        .into_iter()
+        .map(|(h, _)| h.to_string())
+        .collect();
+    seed_landings.reverse();
     r.close().expect("close the swarm project");
     SwarmProject {
         served,
         seed,
         run_seed: cfg.seed,
+        seed_landings,
     }
 }

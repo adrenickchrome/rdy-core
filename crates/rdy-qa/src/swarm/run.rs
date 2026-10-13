@@ -11,11 +11,20 @@
 //!   copied to `frozen`.
 //! - The drain (collision liveness, ledger O5): every live agent view with changes, oldest first,
 //!   is proposed by its agent and landed by the person, through a closed table of resolutions,
-//!   never a dismissal.
+//!   never a dismissal. Before the views, the reviewers judge the open review requests (at most
+//!   `REVIEWS`). A change bound to a member that lost its set is excluded with what depends on
+//!   it (FW-AL1: losers are discarded by design); the person accepts advice it is shown through
+//!   the relay (ruling task-5.4).
 //!
-//! Around every landing the relay reads canon's blocking tensions before and after (ledger O2).
+//! Around every landing the relay reads canon's blocking tensions before and after (ledger O2);
+//! a landing whose reply the kill cut is found by a read and audited the same way. The person
+//! lands on a cadence and the agents wait for the person's acts due before each step (ruling
+//! task-5.2), and the person's approve and the agents' acts that decide from a read take turns
+//! (`KillGate::landing_turn`).
 //! The journal holds two markers of the actor `run`: `freeze` and `drain`.
-use super::agent::{self, AgentReport, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of};
+use super::agent::{
+    self, AgentReport, KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of,
+};
 use super::journal::{Entry, InboxRead, Journal, Outcome as Met};
 use super::oracle::{self, copy_tree};
 use super::people::{self, Hooks, Queue};
@@ -38,10 +47,14 @@ pub const FREEZE: &str = "freeze";
 pub const DRAIN: &str = "drain";
 /// The actor of the journal markers.
 pub const MARKER: &str = "run";
+/// The act of the relay's read, after a landing whose reply the kill cut, of whether the
+/// proposal landed. When it did, the entry's reply names the landing.
+pub const LAND_FOUND: &str = "land_found";
 /// The most rounds the drain gives one view.
 const ROUNDS: usize = 4;
-/// The most review requests one reviewer judges in the drain (a hang guard).
-const REVIEWS: usize = 1000;
+/// The most review requests the drain's reviewer pass judges, all reviewers together (a hang
+/// guard, ruling task-5.5).
+const REVIEWS: usize = 2000;
 /// How often the run looks at the journal.
 const POLL: Duration = Duration::from_millis(10);
 /// How long the person waits for the agents before the run fails (a hang guard).
@@ -61,8 +74,11 @@ pub(crate) type Watch = Arc<Mutex<Vec<String>>>;
 /// What a run leaves for the checks.
 pub struct Outcome {
     pub journal: Vec<Entry>,
-    /// The landing ids, in the order the journal's `land` entries made them.
+    /// The landing ids, in the order the journal's `land` entries (and `land_found` entries, for
+    /// a landing whose reply the kill cut) name them.
     pub landings: Vec<String>,
+    /// The landings that seeded the project, oldest first: canon's chain before any actor ran.
+    pub seed_landings: Vec<String>,
     /// Every open tension the relay's `rdy_tensions {max_tokens: 100000}` listed at the freeze,
     /// by label.
     pub reported: BTreeMap<String, Value>,
@@ -203,12 +219,41 @@ fn wait_for(progress: &AtomicUsize, target: usize, seed: u64, who: &str) {
     }
 }
 
+/// The step the person's act `j` of `len` waits for: every agent has reached it.
+fn due(j: usize, steps: usize, len: usize) -> usize {
+    ((j + 1) * steps / len.max(1)).min(steps)
+}
+
+/// How many of the person's `len` acts are due before an agent's step `k`: those whose step
+/// (`due`) is `k - 1` or less.
+fn person_acts_before(k: usize, steps: usize, len: usize) -> usize {
+    (0..len)
+        .take_while(|j| k > 0 && due(*j, steps, len) < k)
+        .count()
+}
+
 /// An agent's pace: step `k` waits until every agent has reached step `k - 1`, so the agents
 /// stay within a step of each other and a reviewer still runs when a writer creates the claim it
-/// judges. Within a step they race.
-fn agent_pacer(cfg: &Config, progress: &Arc<AtomicUsize>) -> Pace {
-    let (seed, progress) = (cfg.seed, progress.clone());
-    Arc::new(move |k| wait_for(&progress, k.saturating_sub(1), seed, "an agent"))
+/// judges; and until the person has finished the acts due before step `k`, so the person keeps
+/// its cadence (ruling task-5.2: the run lands as it goes, and the first member of a
+/// contradiction pair lands before the second member writes). Within a step they race.
+fn agent_pacer(
+    cfg: &Config,
+    progress: &Arc<AtomicUsize>,
+    person: &Arc<AtomicUsize>,
+    len: usize,
+) -> Pace {
+    let (seed, steps) = (cfg.seed, cfg.steps);
+    let (progress, person) = (progress.clone(), person.clone());
+    Arc::new(move |k| {
+        wait_for(&progress, k.saturating_sub(1), seed, "an agent");
+        wait_for(
+            &person,
+            person_acts_before(k, steps, len),
+            seed,
+            "an agent (for the person)",
+        );
+    })
 }
 
 /// The stable part of a proposal ref `P-<stable>@<n>`, and its version.
@@ -221,9 +266,9 @@ fn version_of(pref: &str) -> (&str, u32) {
 
 /// The person's pace: before act `k` of `len`, it waits until every agent has reached step
 /// `(k + 1) * steps / len`, then queues the agents' proposals made so far. The queue holds the
-/// latest version of each proposal, oldest proposal first, except that a proposal from the view
-/// of a contradiction pair's first member goes first: the pair is reviewable only once that
-/// member has landed (ruling task-4.2).
+/// latest version of each proposal, oldest proposal first, except that a proposal of the view of
+/// a contradiction pair's first marked claim goes first: the pair is reviewable only once that
+/// claim has landed (ruling task-4.2).
 fn pacer(
     cfg: &Config,
     s: &Script,
@@ -232,12 +277,17 @@ fn pacer(
     queue: &Queue,
 ) -> Pace {
     let (steps, seed, len) = (cfg.steps, cfg.seed, s.person.len());
-    let first: BTreeSet<String> = s.contra.iter().map(|(a, _)| format!("a{a}")).collect();
+    // the view of the first member's marked claim (agent.rs: `a<i>-k<k>`)
+    let first: BTreeSet<String> = s
+        .contra
+        .iter()
+        .enumerate()
+        .map(|(k, (a, _))| format!("a{a}-k{}", agent::spell(k)))
+        .collect();
     let (progress, journal, queue) = (progress.clone(), journal.clone(), queue.clone());
     let queued: Mutex<BTreeSet<String>> = Mutex::default();
     Arc::new(move |k| {
-        let target = ((k + 1) * steps / len.max(1)).min(steps);
-        wait_for(&progress, target, seed, "the person");
+        wait_for(&progress, due(k, steps, len), seed, "the person");
         let mut seen = queued.lock().unwrap_or_else(PoisonError::into_inner);
         let mut q = queue.lock().unwrap_or_else(PoisonError::into_inner);
         for e in journal.entries() {
@@ -327,12 +377,13 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     let queue: Queue = Arc::default();
     let watch: Watch = Arc::default();
     let progress = Arc::new(AtomicUsize::new(0));
+    let person_done = Arc::new(AtomicUsize::new(0));
     let agents: Vec<JoinHandle<AgentReport>> = s
         .agents
         .iter()
         .enumerate()
         .map(|(i, acts)| {
-            let pace = Some(agent_pacer(cfg, &progress));
+            let pace = Some(agent_pacer(cfg, &progress, &person_done, s.person.len()));
             agent::spawn_paced(
                 &p,
                 cfg,
@@ -347,6 +398,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     let hooks = Hooks {
         pace: Some(pacer(cfg, &s, &progress, &journal, &queue)),
         watch: Some(watch.clone()),
+        done: Some(person_done.clone()),
     };
     let person = people::spawn_with(
         &p,
@@ -386,6 +438,10 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
             p.served.kill9();
             gate.restarted();
             kill_at = None;
+        }
+        // a person that stopped (a failure) holds no agent back: the run then fails with its text
+        if person.is_finished() {
+            person_done.store(usize::MAX, Ordering::SeqCst);
         }
         if agents.iter().all(JoinHandle::is_finished) && person.is_finished() {
             break;
@@ -433,8 +489,9 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     journal.record(Entry::new(MARKER, cfg.steps, DRAIN, Met::Ok));
     let order = drain_order(&reports, &journal.entries());
     let mut d = Drain::new(&at, cfg, &p.seed, &journal, &gate, &watch);
+    let mut judged = 0;
     for i in (0..reports.len()).filter(|i| cfg.is_reviewer(*i)) {
-        d.reviews(i);
+        judged += d.reviews(i, REVIEWS - judged);
     }
     for v in &order {
         d.view(v);
@@ -445,14 +502,19 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     let journal = journal.entries();
     let landings = journal
         .iter()
-        .filter(|e| e.act == "land" && e.outcome == Met::Ok)
+        .filter(|e| (e.act == "land" && e.outcome == Met::Ok) || e.act == LAND_FOUND)
         .filter_map(|e| e.reply.as_ref()?["landing"].as_str().map(str::to_string))
         .collect();
     let violations = watch.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    let SwarmProject { served, .. } = p;
+    let SwarmProject {
+        served,
+        seed_landings,
+        ..
+    } = p;
     Outcome {
         journal,
         landings,
+        seed_landings,
         reported,
         dismissed,
         frozen,
@@ -463,24 +525,112 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     }
 }
 
-/// The relay's `rdy_tensions` with `args`, whole, by label.
-fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
+/// The relay's `rdy_tensions` with `args`: the rows by label, or `None` when the reply was cut
+/// for its budget (`omitted`).
+fn listing_once(relay: &mut Link, args: Value) -> Option<BTreeMap<String, Value>> {
     let e = relay.entry("tensions");
+    let mut cut = false;
+    let mut rows = BTreeMap::new();
     let res = relay.exec(e, "tensions", "rdy_tensions", args, |en, v| {
         en.seen = labels_of(&v["tensions"]);
+        cut = v.get("omitted").is_some();
+        rows = v["tensions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| Some((t["id"].as_str()?.to_string(), t.clone())))
+            .collect();
     });
-    let Res::Ok(v) = res else {
-        relay.fail("tensions", "lost the daemon at the freeze")
-    };
-    if v.get("omitted").is_some() {
-        relay.fail("tensions", "got a reply cut for its budget");
+    if !matches!(res, Res::Ok(_)) {
+        relay.fail("tensions", "lost the daemon at the freeze");
     }
-    v["tensions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|t| Some((t["id"].as_str()?.to_string(), t.clone())))
-        .collect()
+    (!cut).then_some(rows)
+}
+
+/// The relay's `rdy_tensions` with `args`, whole, by label. When one read is cut for its budget
+/// (the deep tier), the listing is read in parts that together hold every tension that is not a
+/// read-time overlap: canon's (`scope: canon`) and each open view's (`view`), each kind apart,
+/// and a view's kind still cut change by change (`involving`) (ruling task-5.5). A part still cut
+/// fails the run with the seed.
+fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
+    if let Some(rows) = listing_once(relay, args.clone()) {
+        return rows;
+    }
+    let mut scopes: Vec<Value> = vec![json!({"scope": "canon"})];
+    let e = relay.entry("view_list");
+    let mut views: Vec<String> = vec![];
+    relay.exec(
+        e,
+        "view_list",
+        "rdy_view",
+        json!({"op": "list", "all": true}),
+        |_, v| {
+            views = v["views"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["closed"] != true)
+                .filter_map(|r| r["name"].as_str().map(str::to_string))
+                .collect();
+        },
+    );
+    scopes.extend(views.iter().map(|v| json!({"view": v})));
+    let mut out = BTreeMap::new();
+    for scope in scopes {
+        for kind in KINDS {
+            let mut part = args.clone();
+            for (k, v) in scope.as_object().into_iter().flatten() {
+                part[k] = v.clone();
+            }
+            part["kind"] = json!(kind);
+            if let Some(rows) = listing_once(relay, part.clone()) {
+                out.extend(rows);
+                continue;
+            }
+            // still cut: a view's part is read change by change (`involving`)
+            let Some(view) = scope["view"].as_str() else {
+                relay.fail(
+                    "tensions",
+                    &format!("got a reply cut for its budget, read in parts: {part}"),
+                )
+            };
+            for c in view_changes(relay, view) {
+                let mut one = part.clone();
+                one.as_object_mut().map(|m| m.remove("view"));
+                one["involving"] = json!(c);
+                match listing_once(relay, one.clone()) {
+                    Some(rows) => out.extend(rows),
+                    None => relay.fail(
+                        "tensions",
+                        &format!("got a reply cut for its budget, read in parts: {one}"),
+                    ),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The changes view `view` holds, as the relay reads them (`rdy_view show`).
+fn view_changes(relay: &mut Link, view: &str) -> Vec<String> {
+    let mut e = relay.entry("view_show");
+    e.view = Some(view.to_string());
+    let mut out = vec![];
+    relay.exec(
+        e,
+        "view_show",
+        "rdy_view",
+        json!({"op": "show", "view": view, "max_tokens": ALL}),
+        |_, v| {
+            out = v["changes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["id"].as_str().map(str::to_string))
+                .collect();
+        },
+    );
+    out
 }
 
 /// Agent `i`'s session, as `agent::spawn` opens it.
@@ -796,15 +946,20 @@ impl Drain {
                     e.block = r["ref"].as_str().map(str::to_string);
                     e.seen = labels_of(&r["tensions"]);
                 }
-                Res::Refused(code, _) => e.outcome = Met::Refused(code.clone()),
+                Res::Refused(code, message) => {
+                    e.outcome = Met::Refused(code.clone());
+                    e.message = Some(message.clone());
+                }
                 Res::Lost => e.outcome = Met::Lost,
             }
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
                 (Res::Ok(_), Some(p)) => return Some(p),
-                // a change bound to another member of a set, or to a member that lost its set: the
-                // agent excludes it (and what depends on it), and proposes the rest
+                // a change bound to a member that lost its set (FW-AL1: losers are discarded by
+                // design): the agent excludes it with what depends on it, and proposes the rest.
+                // `sg5_the_alternative_refusals_name_a_change_bound_to_a_loser` holds each such
+                // refusal to a loser-bound change (ruling task-5.4)
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
                 {
@@ -839,12 +994,15 @@ impl Drain {
         let res = link.raw("exclude", "rdy_view", args);
         if let Res::Refused(got, message) = &res {
             e.outcome = Met::Refused(got.clone());
+            e.message = Some(message.clone());
             link.journal.record(e);
             self.said.clone_from(message);
             self.no_rule(v, got, &format!("exclude, resolving {code}"));
         }
+        // the reply names what left the view (`removed`, `cascaded`): the liveness check lists it
         link.finish(e, "exclude", res, |en, r| {
             en.seen = labels_of(&r["on_change"]["tensions"]);
+            en.reply = Some(r.clone());
         });
         self.show(i, v)
             .and_then(|s| s["changes"].as_array().cloned())
@@ -856,9 +1014,11 @@ impl Drain {
 
     /// Reviewer `i` judges every free review request, as its scripted `ReviewNext` does, until
     /// none is left: a contradiction pair whose second claim came late in the run is judged
-    /// before its view is drained.
-    fn reviews(&mut self, i: usize) {
-        for _ in 0..REVIEWS {
+    /// before its view is drained. The requests are those open at the drain's start and those
+    /// its own judgements make; at most `left` of them, else the run fails (a hang guard).
+    /// Returns how many it judged.
+    fn reviews(&mut self, i: usize, left: usize) -> usize {
+        for judged in 0..=left {
             let link = self.agent(i);
             let e = link.entry("review_next");
             let mut case: Option<Value> = None;
@@ -873,7 +1033,13 @@ impl Drain {
                     }
                 },
             );
-            let Some(leased) = case else { return };
+            let Some(leased) = case else { return judged };
+            if judged == left {
+                panic!(
+                    "swarm seed {}: the drain's reviewers judged {REVIEWS} review requests and more are open (a hang guard)",
+                    self.cfg.seed
+                );
+            }
             let blocks = leased["case"]["blocks"]
                 .as_array()
                 .cloned()
@@ -889,14 +1055,12 @@ impl Drain {
                 en.reply = Some(r.clone());
             });
         }
-        panic!(
-            "swarm seed {}: agent:a{i} still had review requests after {REVIEWS} reviews",
-            self.cfg.seed
-        );
+        unreachable!("the loop returns or fails by its last round")
     }
 
     /// The person, shown a reviewer's advice on `pref`, accepts it through the relay, as the
-    /// scripted `AcceptAdvice` does.
+    /// scripted `AcceptAdvice` does: a relayed person act of the drain, journaled as
+    /// `accept_advice` (ruling task-5.4; the coverage check counts only the run's acts).
     fn accept(&mut self, pref: &str, digest: &str) {
         let mut e = self.relay.entry("accept_advice");
         e.block = Some(pref.to_string());
@@ -918,7 +1082,7 @@ impl Drain {
     }
 
     /// The person lands `pref` through the relay. `None` when it landed; else the refusal. Advice
-    /// the person is shown and has not accepted is accepted first.
+    /// the person is shown and has not accepted, the person accepts first (`accept`).
     fn land(&mut self, v: &str, pref: &str) -> Option<Refusal> {
         let mut before =
             before_land(&mut self.relay, pref).unwrap_or_else(|| link_fail(&self.cfg, v, "land"));
@@ -968,6 +1132,7 @@ impl Drain {
             })
             .to_string();
         e.outcome = Met::Refused(code.clone());
+        e.message = body["message"].as_str().map(str::to_string);
         e.reply = Some(body.clone());
         self.journal.record(e);
         self.said = body.to_string();
@@ -1247,6 +1412,24 @@ mod tests {
             Some("a9c63f7428a6")
         );
         assert_eq!(change_in("no change here"), None);
+    }
+
+    /// Ruling task-5.2: an agent's step `k` waits for the person's acts due before it, and the
+    /// person's act `j` waits for the step it is due at, so neither waits for the other.
+    #[test]
+    fn sg5_the_agents_wait_for_the_person_acts_due_before_their_step() {
+        let (steps, len) = (40, 20);
+        assert_eq!(due(0, steps, len), 2);
+        assert_eq!(due(len - 1, steps, len), steps);
+        assert_eq!(person_acts_before(0, steps, len), 0);
+        assert_eq!(person_acts_before(2, steps, len), 0);
+        assert_eq!(person_acts_before(3, steps, len), 1);
+        assert_eq!(person_acts_before(steps, steps, len), len - 1);
+        for k in 0..=steps {
+            for j in 0..person_acts_before(k, steps, len) {
+                assert!(due(j, steps, len) < k, "act {j} is due by step {k}");
+            }
+        }
     }
 
     #[test]
