@@ -355,30 +355,11 @@ fn other_agent(rng: &mut Rng, me: usize, agents: usize) -> usize {
     if a >= me { a + 1 } else { a }
 }
 
-/// The agent whose view agent `me` includes from. When writers outside agents 0 and 1 exist,
-/// it is one of them, and agents 0 and 1 include nothing (`make`): agents 0 and 1 are the members
-/// of the run's alternative set, and a change that exactly one member holds when the set is made
-/// is bound to that member (msw20), which the gate refuses in any other view (fix round 1: the
-/// table holds the alternative refusals only for a change bound to a losing member, ruling
-/// task-5.4).
-fn include_from(rng: &mut Rng, me: usize, cfg_agents: usize, writers: &[usize]) -> usize {
-    let outside: Vec<usize> = writers
-        .iter()
-        .copied()
-        .filter(|w| *w >= 2 && *w != me)
-        .collect();
-    if outside.is_empty() {
-        other_agent(rng, me, cfg_agents)
-    } else {
-        outside[rng.below(outside.len())]
-    }
-}
-
 fn area(rng: &mut Rng) -> &'static str {
     AREAS[rng.below(AREAS.len())]
 }
 
-fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize, writers: &[usize]) -> Act {
+fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
     match kind {
         Kind::Brief => Act::Brief {
             target: pick(rng, me, agents),
@@ -406,22 +387,12 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize, writers: &[usize]) 
         },
         Kind::Repin => Act::Repin,
         Kind::Fork => Act::Fork,
-        // agents 0 and 1 include nothing when other writers exist: a change another agent wrote
-        // that one member holds when the set is made is bound to that member (msw20)
-        Kind::Include if me < 2 && writers.iter().any(|w| *w >= 2) => Act::Read {
-            target: pick(rng, me, agents),
-        },
         Kind::Include => Act::Include {
-            from: include_from(rng, me, agents, writers),
+            from: other_agent(rng, me, agents),
         },
         Kind::Exclude => Act::Exclude,
         Kind::Undo => Act::Undo,
         Kind::Intent => Act::Intent { area: area(rng) },
-        // agents 0 and 1 are the only members of an alternative set when other writers exist
-        Kind::AltCreate if me < 2 && agents >= 2 => Act::AltCreate { with: 1 - me },
-        Kind::AltCreate if writers.iter().any(|w| *w >= 2) => Act::Read {
-            target: pick(rng, me, agents),
-        },
         Kind::AltCreate => Act::AltCreate {
             with: other_agent(rng, me, agents),
         },
@@ -457,10 +428,9 @@ fn actor_script(
     let mut acts = vec![Act::Brief {
         target: Pick::Seed(rng.below(SEED_BLOCKS)),
     }];
-    let writers: Vec<usize> = (0..cfg.agents).filter(|i| !cfg.is_reviewer(*i)).collect();
     for _ in 1..cfg.steps {
         let kind = weighted(rng, weights);
-        acts.push(make(rng, kind, me, cfg.agents, &writers));
+        acts.push(make(rng, kind, me, cfg.agents));
     }
     let mut free: Vec<usize> = (1..cfg.steps).collect();
     for (act, lo, hi) in placed {
@@ -547,8 +517,8 @@ pub fn script(cfg: &Config) -> Script {
             }
             required.push(Act::Inbox { ack: true });
         } else {
-            required.push(make(&mut rng, Kind::Collide, me, cfg.agents, &writers));
-            required.push(make(&mut rng, Kind::Cite, me, cfg.agents, &writers));
+            required.push(make(&mut rng, Kind::Collide, me, cfg.agents));
+            required.push(make(&mut rng, Kind::Cite, me, cfg.agents));
             required.push(Act::Propose);
             required.push(Act::Inbox { ack: true });
             if cfg.agents >= 2 && me < 2 {

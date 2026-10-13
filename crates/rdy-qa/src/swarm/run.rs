@@ -3,18 +3,22 @@
 //!
 //! - The run builds the project and starts every agent and the person. It paces the person: act
 //!   `k` of `n` waits until every agent has reached step `(k + 1) * steps / n`, and then the
-//!   person's queue takes the proposals the agents made so far.
+//!   person's queue takes the proposals the agents made so far. A proposal of a contradiction
+//!   pair's first claim, a proposal that chooses a set member, and a set winner's later proposal
+//!   go to the front of the queue.
 //! - When the furthest agent reaches `kill_at`, the run kills the daemon (`kill -9`) and opens the
 //!   gate: the next client starts a new daemon.
 //! - The freeze (no actor runs): each agent reads its inbox with `ack: true` until `more` is
 //!   false; the relay reads the open and the dismissed tensions; the daemon stops; the project is
 //!   copied to `frozen`.
-//! - The drain (collision liveness, ledger O5): every live agent view with changes, oldest first,
-//!   is proposed by its agent and landed by the person, through a closed table of resolutions,
-//!   never a dismissal. Before the views, the reviewers judge the open review requests (at most
-//!   `REVIEWS`). A change bound to a member that lost its set is excluded with what depends on
-//!   it (FW-AL1: losers are discarded by design); the person accepts advice it is shown through
-//!   the relay (ruling task-5.4).
+//! - The drain (collision liveness, ledger O5): every live agent view with changes, oldest first
+//!   (the member views of a set still open come first, so the set is chosen before a view holding
+//!   a change bound to a member proposes), is proposed by its agent and landed by the person,
+//!   through a closed table of resolutions, never a dismissal. Before the views, the reviewers
+//!   judge the open review requests (at most `REVIEWS`). A change bound to a member that lost its
+//!   set is excluded with what depends on it: its dependents by deps, and a change that cites a
+//!   block such an excluded change created (FW-AL1: losers are discarded by design); the person
+//!   accepts advice it is shown through the relay (ruling task-5.4).
 //!
 //! Around every landing the relay reads canon's blocking tensions before and after (ledger O2);
 //! a landing whose reply the kill cut is found by a read and audited the same way. The person
@@ -290,7 +294,15 @@ fn pacer(
         wait_for(&progress, due(k, steps, len), seed, "the person");
         let mut seen = queued.lock().unwrap_or_else(PoisonError::into_inner);
         let mut q = queue.lock().unwrap_or_else(PoisonError::into_inner);
-        for e in journal.entries() {
+        let entries = journal.entries();
+        // the views that won a set by a landing so far
+        let won: BTreeSet<String> = entries
+            .iter()
+            .filter(|e| e.act == "land" && e.outcome == Met::Ok)
+            .filter_map(|e| e.reply.as_ref()?["chosen"]["member"].as_str())
+            .map(str::to_string)
+            .collect();
+        for e in entries {
             if e.act != "propose" || e.outcome != Met::Ok || !e.actor.starts_with("agent:a") {
                 continue;
             }
@@ -298,11 +310,23 @@ fn pacer(
             if !seen.insert(r.clone()) {
                 continue;
             }
+            // a proposal that chooses a member, or a set's winner's later work, goes first, so
+            // the run chooses sets and lands a winner's later work (fix round 2, ruling
+            // task-5-round1)
+            let chooses = e
+                .reply
+                .as_ref()
+                .is_some_and(|x| !x["alternatives"].is_null());
+            let first_up = e
+                .view
+                .as_ref()
+                .is_some_and(|v| first.contains(v) || won.contains(v))
+                || chooses;
             let (stable, n) = version_of(&r);
             match q.iter().position(|x| version_of(x).0 == stable) {
                 Some(at) if version_of(&q[at]).1 < n => q[at] = r,
                 Some(_) => {}
-                None if e.view.as_ref().is_some_and(|v| first.contains(v)) => q.insert(0, r),
+                None if first_up => q.insert(0, r),
                 None => q.push(r),
             }
         }
@@ -493,6 +517,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     for i in (0..reports.len()).filter(|i| cfg.is_reviewer(*i)) {
         judged += d.reviews(i, REVIEWS - judged);
     }
+    let order = d.members_first(order);
     for v in &order {
         d.view(v);
     }
@@ -760,6 +785,16 @@ fn change_in(text: &str) -> Option<String> {
     (hex.len() >= 6).then_some(hex)
 }
 
+/// The block and the target of a dangling reference that a refusal names first:
+/// `<block> references <target>, which does not exist in canon` (the gate's `E_DANGLING_REF`).
+fn dangling_in(text: &str) -> Option<(String, String)> {
+    let (block, rest) = text.split_once(" references ")?;
+    let (target, _) = rest.split_once(", which does not exist in canon")?;
+    let block = block.rsplit(' ').next()?;
+    (!block.is_empty() && !target.is_empty() && !target.contains(' '))
+        .then(|| (block.to_string(), target.to_string()))
+}
+
 /// `text` without its `CONTRA-<k>` marker (and the space before it).
 fn strip_marker(text: &str) -> String {
     let Some(at) = text.find("CONTRA-") else {
@@ -900,6 +935,35 @@ impl Drain {
         Some(shown)
     }
 
+    /// `order` with the member views of each set still open first (in `order`'s order), as the
+    /// relay lists the sets. A set open at the drain is chosen by its first member that lands,
+    /// before a view holding a change bound to one of its members proposes: while the set is
+    /// open, such a proposal is refused (the landing must choose, ruling task-5-round1.1), and
+    /// the drain excludes only loser-bound changes (ruling task-5.4).
+    fn members_first(&mut self, order: Vec<String>) -> Vec<String> {
+        let e = self.relay.entry("alternatives");
+        let mut sets = Value::Null;
+        self.relay.exec(
+            e,
+            "alternatives",
+            "rdy_alternatives",
+            json!({"op": "list", "max_tokens": ALL}),
+            |_, r| sets = r["sets"].clone(),
+        );
+        let members: BTreeSet<String> = sets
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|s| s["status"] == "open")
+            .flat_map(|s| s["members"].as_array().cloned().unwrap_or_default())
+            .filter_map(|m| m["view"].as_str().map(str::to_string))
+            .collect();
+        let (mut first, rest): (Vec<String>, Vec<String>) =
+            order.into_iter().partition(|v| members.contains(v));
+        first.extend(rest);
+        first
+    }
+
     /// The open alternative set `v` is a member of, and its member label, as the relay lists it.
     fn alternative(&mut self, v: &str) -> Option<(String, String)> {
         let e = self.relay.entry("alternatives");
@@ -958,7 +1022,7 @@ impl Drain {
                 (Res::Ok(_), Some(p)) => return Some(p),
                 // a change bound to a member that lost its set (FW-AL1: losers are discarded by
                 // design): the agent excludes it with what depends on it, and proposes the rest.
-                // `sg5_the_alternative_refusals_name_a_change_bound_to_a_loser` holds each such
+                // `sg5_each_alternative_refusal_is_a_ruled_row` holds each such
                 // refusal to a loser-bound change (ruling task-5.4)
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
@@ -975,6 +1039,26 @@ impl Drain {
                     }
                     held = left;
                 }
+                // a change of the view cites a block that a change the drain excluded above
+                // created: it depends on the discarded alternative through its reference, and
+                // the agent excludes it with what depends on it (fix round 2: the cite of a block
+                // that a loser-bound change created; ruling task-5.4's "with their dependents")
+                (Res::Refused(code, message), _) if code == "E_VALIDATION" => {
+                    let citing = dangling_in(&message).and_then(|(block, target)| {
+                        self.excluded_creates(v)
+                            .contains(&target)
+                            .then(|| self.writer_of(v, &block, &held))?
+                    });
+                    let Some(citing) = citing else {
+                        self.said = message;
+                        self.no_rule(v, &code, "propose")
+                    };
+                    let left = self.exclude(i, v, &citing, &code);
+                    if left.is_empty() {
+                        return None;
+                    }
+                    held = left;
+                }
                 (Res::Refused(code, message), _) => {
                     self.said = message;
                     self.no_rule(v, &code, "propose")
@@ -982,6 +1066,48 @@ impl Drain {
                 _ => link_fail(&self.cfg, v, "propose"),
             }
         }
+    }
+
+    /// The blocks that the changes the drain excluded from view `v` created or wrote, as the
+    /// journal's entries of those changes name them.
+    fn excluded_creates(&self, v: &str) -> BTreeSet<String> {
+        let journal = self.journal.entries();
+        let drained = journal
+            .iter()
+            .position(|e| e.actor == MARKER && e.act == DRAIN)
+            .unwrap_or(journal.len());
+        let excluded: BTreeSet<String> = journal[drained..]
+            .iter()
+            .filter(|e| e.act == "exclude" && e.outcome == Met::Ok)
+            .filter(|e| e.view.as_deref() == Some(v))
+            .filter_map(|e| e.reply.as_ref())
+            .flat_map(|r| {
+                ["removed", "cascaded"].into_iter().flat_map(move |k| {
+                    r[k].as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.as_str().map(str::to_string))
+                })
+            })
+            .collect();
+        journal
+            .iter()
+            .filter(|e| e.outcome == Met::Ok)
+            .filter(|e| e.change.as_ref().is_some_and(|c| excluded.contains(c)))
+            .filter_map(|e| e.block.clone())
+            .collect()
+    }
+
+    /// The first change of view `v`, among those it still holds (`held`), that wrote `block`, as
+    /// the journal names it.
+    fn writer_of(&self, v: &str, block: &str, held: &[String]) -> Option<String> {
+        self.journal
+            .entries()
+            .into_iter()
+            .filter(|e| e.outcome == Met::Ok && e.view.as_deref() == Some(v))
+            .filter(|e| e.block.as_deref() == Some(block))
+            .filter_map(|e| e.change)
+            .find(|c| held.contains(c))
     }
 
     /// Agent `i` excludes change `c` from view `v`, with what depends on it. Returns the changes
@@ -1430,6 +1556,15 @@ mod tests {
                 assert!(due(j, steps, len) < k, "act {j} is due by step {k}");
             }
         }
+    }
+
+    #[test]
+    fn sg5_a_refusal_names_its_dangling_reference() {
+        assert_eq!(
+            dangling_in("c-NGH43 references c-18JGF, which does not exist in canon"),
+            Some(("c-NGH43".to_string(), "c-18JGF".to_string()))
+        );
+        assert_eq!(dangling_in("c-NGH43 is too deep"), None);
     }
 
     #[test]

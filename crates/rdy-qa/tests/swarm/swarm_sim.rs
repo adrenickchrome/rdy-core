@@ -10,7 +10,7 @@
 use rdy_engine::inbox::read::parse_cursor;
 use rdy_engine::tensions::tension_label;
 use rdy_engine::{EventKind, Rdy, ReadState};
-use rdy_model::Hash;
+use rdy_model::{Change, Hash, Op};
 use rdy_qa::fixtures::deep;
 use rdy_qa::invariants::check_all;
 use rdy_qa::landing_audit::{alt_unchosen, chosen_members, conflicts_at, landed_of};
@@ -151,6 +151,66 @@ struct Coverage {
     chose: bool,
     kinds: BTreeSet<String>,
     opened: bool,
+    /// A member that won its set by a landing lands again, choosing nothing (seed 3's pattern;
+    /// ruling task-5-round1.2).
+    winner_again: bool,
+    /// An include of a change that a set binds (msw20), that set chosen by a landing of the run,
+    /// and a landing after the choice (ruling task-5-round1.1). Printed as evidence only: the
+    /// random seeds reach it rarely (fix round 2 measured 1 seed in 16), so the directed run
+    /// `sg5_an_included_change_bound_to_the_winner_lands_after_the_choice` asserts it, and
+    /// `sg3_a_fast_seed_includes_before_a_set_and_lands_after_it` asserts the scripts allow it.
+    bound_include: bool,
+}
+
+/// Whether the run (before the freeze) included a change that a set binds, chose that set by a
+/// landing, and landed again after the choice. The bindings and the choices are read from the
+/// drained store; the order from the journal.
+fn bound_include(o: &Outcome) -> bool {
+    let (_keep, copy) = copy_of(&o.dir);
+    let r = Rdy::open(&copy).expect("open the drained copy");
+    let st = r.read();
+    let chosen_by: BTreeMap<String, Hash> = st
+        .reader()
+        .landings()
+        .expect("read canon's chain")
+        .iter()
+        .filter_map(|(l, rec)| Some((l.to_string(), rec.chosen.as_ref()?.set)))
+        .collect();
+    let run = o.before_freeze();
+    // the sets that bind a change an include of the run brought into another view
+    let mut bound: BTreeSet<Hash> = BTreeSet::new();
+    let mut found = false;
+    // the sets chosen so far, each with whether a landing came after its choice
+    let mut chosen: BTreeSet<Hash> = BTreeSet::new();
+    for e in run.iter().filter(|e| e.outcome == Met::Ok) {
+        if e.act == "include" {
+            for c in e
+                .reply
+                .as_ref()
+                .and_then(|r| r["included"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.as_str()?.parse::<Hash>().ok())
+            {
+                bound.extend(bindings_of(&st, &c).into_iter().map(|(set, _)| set));
+            }
+        }
+        let Some(l) = e
+            .reply
+            .as_ref()
+            .filter(|_| e.act == "land" || e.act == run::LAND_FOUND)
+            .and_then(|r| r["landing"].as_str())
+        else {
+            continue;
+        };
+        found |= chosen.iter().any(|set| bound.contains(set));
+        if let Some(set) = chosen_by.get(l) {
+            chosen.insert(*set);
+        }
+    }
+    drop(st);
+    r.close().expect("close the drained copy");
+    found
 }
 
 fn coverage(o: &Outcome) -> Coverage {
@@ -191,7 +251,29 @@ fn coverage(o: &Outcome) -> Coverage {
             .flat_map(|e| e.seen.iter())
             .filter_map(|l| logged.get(l).cloned()),
     );
+    // the views that won a set by a landing of the run, and whether one landed again choosing
+    // nothing
+    let mut won: BTreeSet<&str> = BTreeSet::new();
+    let mut winner_again = false;
+    for e in run
+        .iter()
+        .filter(|e| e.act == "land" && e.outcome == Met::Ok)
+    {
+        let (Some(view), Some(reply)) = (e.view.as_deref(), e.reply.as_ref()) else {
+            continue;
+        };
+        match reply.get("chosen").filter(|c| !c.is_null()) {
+            Some(c) => {
+                if c["member"] == view {
+                    won.insert(view);
+                }
+            }
+            None => winner_again |= won.contains(view),
+        }
+    }
     Coverage {
+        winner_again,
+        bound_include: bound_include(o),
         acts,
         lost: run.iter().any(|e| e.outcome == Met::Lost),
         landings: landed.len(),
@@ -212,7 +294,8 @@ fn coverage(o: &Outcome) -> Coverage {
 /// Ruling task-5.2: the run, not the drain, exercises the acts. Every seed reaches the core acts
 /// and lands at least once before the freeze; the union of the seeds reaches every act of the
 /// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
-/// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry.
+/// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry. Ruling
+/// task-5-round1.2: the union also reaches a set's winner landing again with no choice.
 #[test]
 fn sg5_the_run_exercised_every_act() {
     let mut all = Coverage {
@@ -222,6 +305,8 @@ fn sg5_the_run_exercised_every_act() {
         chose: false,
         kinds: BTreeSet::new(),
         opened: false,
+        winner_again: false,
+        bound_include: false,
     };
     let mut failed = vec![];
     for (seed, r) in runs() {
@@ -235,14 +320,16 @@ fn sg5_the_run_exercised_every_act() {
         let c = coverage(o);
         // the evidence a person reads with --nocapture: what each seed's run reached
         eprintln!(
-            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}",
+            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, winner lands again {}, bound include then choice {}",
             c.acts.len(),
             c.lost,
             c.landings,
             c.chose,
             c.kinds,
             c.opened,
-            c.acts.contains("accept_advice")
+            c.acts.contains("accept_advice"),
+            c.winner_again,
+            c.bound_include
         );
         let missing: Vec<&str> = CORE
             .iter()
@@ -260,6 +347,7 @@ fn sg5_the_run_exercised_every_act() {
         all.chose |= c.chose;
         all.kinds.extend(c.kinds);
         all.opened |= c.opened;
+        all.winner_again |= c.winner_again;
     }
     let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
     let missing: Vec<&str> = Act::ALL_NAMES
@@ -297,6 +385,9 @@ fn sg5_the_run_exercised_every_act() {
     }
     if !all.opened {
         lacks.push("an inbox read with a tension_opened entry".to_string());
+    }
+    if !all.winner_again {
+        lacks.push("a set's winner that landed again, choosing nothing".to_string());
     }
     if !lacks.is_empty() {
         failed.push(format!(
@@ -574,8 +665,52 @@ fn loser_bound(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> bo
         .any(|(set, member)| settled.get(set).is_some_and(|won| won != member))
 }
 
-/// Whether change `c`, or a change it depends on (transitively), is bound to a losing member.
-fn loser_related(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> bool {
+/// The blocks change `ch` references: the `{{<id>}}` tokens of each body it writes, and each
+/// link's target (read from the stored change, not through the gate's reference code).
+fn refs_of(ch: &Change) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for op in &ch.ops {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        let mut rest = block.body.as_str();
+        while let Some(at) = rest.find("{{") {
+            rest = &rest[at + 2..];
+            let Some(end) = rest.find("}}") else { break };
+            out.insert(rest[..end].trim().to_string());
+            rest = &rest[end + 2..];
+        }
+        out.extend(block.links.values().flatten().map(|l| l.target.to_string()));
+    }
+    out
+}
+
+/// The change that created each block, among `changes`.
+fn creators(st: &ReadState, changes: impl IntoIterator<Item = Hash>) -> BTreeMap<String, Hash> {
+    let mut out = BTreeMap::new();
+    for h in changes {
+        let ch = st
+            .reader()
+            .change(&h)
+            .unwrap_or_else(|err| panic!("change {h}: {err}"));
+        for op in &ch.ops {
+            if let Op::Create { block } = op {
+                out.insert(block.id.to_string(), h);
+            }
+        }
+    }
+    out
+}
+
+/// Whether change `c` depends on a change bound to a losing member (or is one): through its deps,
+/// or through a block it references that such a change created (`created`: the creating change
+/// of each block). Both are dependents the drain excludes with the loser (ruling task-5.4).
+fn loser_related(
+    st: &ReadState,
+    settled: &BTreeMap<Hash, String>,
+    created: &BTreeMap<String, Hash>,
+    c: &Hash,
+) -> bool {
     let mut todo = vec![*c];
     let mut seen = BTreeSet::new();
     while let Some(h) = todo.pop() {
@@ -590,6 +725,7 @@ fn loser_related(st: &ReadState, settled: &BTreeMap<Hash, String>, c: &Hash) -> 
             .change(&h)
             .unwrap_or_else(|err| panic!("change {h}: {err}"));
         todo.extend(ch.deps.iter().copied());
+        todo.extend(refs_of(&ch).iter().filter_map(|b| created.get(b).copied()));
     }
     false
 }
@@ -604,18 +740,90 @@ fn change_named(text: &str) -> Option<String> {
     (hex.len() >= 6).then_some(hex)
 }
 
-/// Ruling task-5.4: `propose`/`E_ALT_CHOSEN` and `land`/`E_ALT_MEMBER` are in the table only for a
-/// change bound to a losing member of a chosen set (FW-AL1). Each refusal of those two rows names
-/// such a change, or (a land refused because its view itself lost its set) comes from a view
-/// that is a losing member. The binding is read from the stored change and the set's fixed
-/// bindings; the choice from the landing records.
+/// What the bindings of the change an alternative refusal names were when the refusal came, by
+/// the sets the landings before it had chosen (`settled`). A losing binding wins over an open
+/// one, and an open one over a winning one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtRefusal {
+    /// Bound to a member that lost a set chosen before the refusal.
+    Loser,
+    /// Bound to a member of a set no landing had chosen yet: the landing must choose.
+    OpenSet,
+    /// Bound only to members that won a set chosen before the refusal: gate rule 2 lands it.
+    Winner,
+    /// Bound to no set.
+    Unbound,
+}
+
+fn at_refusal(bindings: &[(Hash, String)], settled: &BTreeMap<Hash, String>) -> AtRefusal {
+    if bindings
+        .iter()
+        .any(|(set, m)| settled.get(set).is_some_and(|won| won != m))
+    {
+        AtRefusal::Loser
+    } else if bindings.iter().any(|(set, _)| !settled.contains_key(set)) {
+        AtRefusal::OpenSet
+    } else if bindings.is_empty() {
+        AtRefusal::Unbound
+    } else {
+        AtRefusal::Winner
+    }
+}
+
+/// Ruling task-5-round1.1: each binding is judged by the set's state when the refusal came.
 #[test]
-fn sg5_the_alternative_refusals_name_a_change_bound_to_a_loser() {
+fn sg5_an_alternative_refusal_is_judged_by_the_set_at_that_time() {
+    let (s1, s2) = (Hash::of(b"set one"), Hash::of(b"set two"));
+    let bound = |set: Hash, m: &str| (set, m.to_string());
+    let chose = |pairs: &[(Hash, &str)]| -> BTreeMap<Hash, String> {
+        pairs.iter().map(|(s, m)| (*s, (*m).to_string())).collect()
+    };
+    assert_eq!(at_refusal(&[], &chose(&[])), AtRefusal::Unbound);
+    assert_eq!(
+        at_refusal(&[bound(s1, "a0")], &chose(&[])),
+        AtRefusal::OpenSet
+    );
+    assert_eq!(
+        at_refusal(&[bound(s1, "a0")], &chose(&[(s1, "a1")])),
+        AtRefusal::Loser
+    );
+    assert_eq!(
+        at_refusal(&[bound(s1, "a0")], &chose(&[(s1, "a0")])),
+        AtRefusal::Winner
+    );
+    // a set chosen for its winner and a second set still open: the landing must choose there
+    assert_eq!(
+        at_refusal(&[bound(s1, "a0"), bound(s2, "a4")], &chose(&[(s1, "a0")])),
+        AtRefusal::OpenSet
+    );
+    assert_eq!(
+        at_refusal(&[bound(s1, "a0"), bound(s2, "a4")], &chose(&[(s1, "a1")])),
+        AtRefusal::Loser
+    );
+}
+
+/// Ruling task-5.4 and its round-1 ruling: the alternative refusals of the table are ruled rows.
+/// `propose`/`E_ALT_CHOSEN` names a change bound to a member that lost a set chosen before it.
+/// `land`/`E_ALT_MEMBER` names such a change, or a change bound to a member of a set still open at
+/// that landing (the landing must choose), or (naming no change) comes from a view that lost its
+/// set before it. A change bound only to a member that an earlier landing chose lands (gate rule
+/// 2): a refusal of it is a product defect. The binding is read from the stored change and the
+/// sets' fixed bindings; the set's state at each refusal from canon's landing records, in the
+/// order the journal names the landings.
+#[test]
+fn sg5_each_alternative_refusal_is_a_ruled_row() {
     each(|seed, o| {
         let (_keep, copy) = copy_of(&o.dir);
         let r = Rdy::open(&copy).expect("open the drained copy");
         let st = r.read();
-        let settled = settled_of(&st);
+        let chain = st.reader().landings().expect("read canon's chain");
+        let chosen_by: BTreeMap<String, (Hash, String)> = chain
+            .iter()
+            .filter_map(|(l, rec)| {
+                let c = rec.chosen.as_ref()?;
+                Some((l.to_string(), (c.set, c.member.clone())))
+            })
+            .collect();
         // every change id a refusal may name: the journal's, the drain's exclusions', and every
         // change a view held at the freeze (a write the kill cut names none in the journal)
         let mut known: BTreeSet<String> =
@@ -642,8 +850,23 @@ fn sg5_the_alternative_refusals_name_a_change_bound_to_a_loser() {
             drop(fst);
             f.close().expect("close the frozen copy");
         }
+        // the sets chosen so far, walking the journal: the seed landings, then each landing as
+        // the journal names it (the person is the only one who lands)
+        let mut settled: BTreeMap<Hash, String> = o
+            .seed_landings
+            .iter()
+            .filter_map(|l| chosen_by.get(l).cloned())
+            .collect();
         let mut bad = vec![];
+        let mut rows: BTreeMap<String, usize> = BTreeMap::new();
         for e in &o.journal {
+            let landed = (e.act == "land" && e.outcome == Met::Ok) || e.act == run::LAND_FOUND;
+            if landed
+                && let Some(l) = e.reply.as_ref().and_then(|r| r["landing"].as_str())
+                && let Some((set, member)) = chosen_by.get(l)
+            {
+                settled.insert(*set, member.clone());
+            }
             let row = match (&e.outcome, e.act) {
                 (Met::Refused(c), "propose") if c == "E_ALT_CHOSEN" => c,
                 (Met::Refused(c), "land") if c == "E_ALT_MEMBER" => c,
@@ -668,40 +891,59 @@ fn sg5_the_alternative_refusals_name_a_change_bound_to_a_loser() {
                 made.and_then(|x| x.reply.as_ref())
             );
             let message = e.message.as_deref().unwrap_or_default();
-            let mut why = String::new();
-            let fine = match change_named(message) {
+            let (judged, why) = match change_named(message) {
                 Some(prefix) => {
                     let full = known.iter().find(|k| k.starts_with(&prefix));
                     match full.and_then(|f| f.parse::<Hash>().ok()) {
                         Some(c) => {
                             let b = bindings_of(&st, &c);
+                            let then = at_refusal(&b, &settled);
                             let won: Vec<_> = b
                                 .iter()
                                 .map(|(set, _)| (set.short(), settled.get(set)))
                                 .collect();
-                            why = format!(" (bindings {b:?}; chosen {won:?})");
-                            loser_bound(&st, &settled, &c)
+                            (
+                                Some(then),
+                                format!(" ({then:?}: bindings {b:?}; chosen before it {won:?})"),
+                            )
                         }
-                        None => false,
+                        None => (None, " (a change no entry or view names)".to_string()),
                     }
                 }
-                // the land's view itself lost its set (altg1)
-                None => e.view.as_ref().is_some_and(|v| {
-                    st.coord_heads().settled_alts.iter().any(|(set, (_, alt))| {
-                        alt.members.iter().any(|m| m.view == *v)
-                            && settled.get(set).is_some_and(|won| won != v)
-                    })
-                }),
+                // the land's view itself lost its set before it (altg1)
+                None => {
+                    let lost = e.view.as_ref().is_some_and(|v| {
+                        st.coord_heads().settled_alts.iter().any(|(set, (_, alt))| {
+                            alt.members.iter().any(|m| m.view == *v)
+                                && settled.get(set).is_some_and(|won| won != v)
+                        })
+                    });
+                    (lost.then_some(AtRefusal::Loser), String::new())
+                }
             };
-            if !fine {
+            let fine = match (row.as_str(), judged) {
+                (_, Some(AtRefusal::Loser)) => true,
+                ("E_ALT_MEMBER", Some(AtRefusal::OpenSet)) => e.act == "land",
+                _ => false,
+            };
+            if fine {
+                *rows
+                    .entry(format!("{} {row} {:?}", e.act, judged))
+                    .or_default() += 1;
+            } else if judged == Some(AtRefusal::Winner) {
+                bad.push(format!(
+                    "{at}: {message}{why}: the change is bound only to a member an earlier landing chose, which gate rule 2 lands (a product defect)"
+                ));
+            } else {
                 bad.push(format!("{at}: {message}{why}"));
             }
         }
         drop(st);
         r.close().expect("close the drained copy");
+        eprintln!("swarm seed {seed}: alternative refusals by row: {rows:?}");
         assert!(
             bad.is_empty(),
-            "swarm seed {seed}: alternative refusals that name no change bound to a losing member: {bad:#?}"
+            "swarm seed {seed}: alternative refusals outside the ruled rows: {bad:#?}"
         );
     });
 }
@@ -709,7 +951,9 @@ fn sg5_the_alternative_refusals_name_a_change_bound_to_a_loser() {
 /// Ruling task-5.4: after the drain no agent view holds a change. A view that landed (a landing
 /// record whose proposal's view is it) is told apart from a view the drain emptied: the drain's
 /// exclusions are listed by change, and each excluded change is bound to a losing member or
-/// depends on one. Every change a view held at the freeze, or that the drain wrote in it, landed
+/// depends on one, by its deps or by a block it references that such a change created (fix round
+/// 2: a cite of a discarded alternative's block). Every change a view held at the freeze, or that
+/// the drain wrote in it, landed
 /// or is such an exclusion; an open, empty view never counts as landed by itself.
 #[test]
 fn sg5_every_live_view_drains_without_a_dismissal() {
@@ -746,6 +990,21 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
             .map(|p| p.view)
             .collect();
         let drained = o.after_freeze();
+        // the creating change of each block that a view held at the freeze or the drain wrote
+        let created = creators(
+            &st,
+            held_at_freeze
+                .values()
+                .flatten()
+                .copied()
+                .chain(
+                    drained
+                        .iter()
+                        .filter(|e| e.outcome == Met::Ok)
+                        .filter_map(|e| e.change.as_deref()?.parse::<Hash>().ok()),
+                )
+                .collect::<BTreeSet<Hash>>(),
+        );
         let mut live = vec![];
         let mut emptied = vec![];
         let mut bad = vec![];
@@ -808,9 +1067,9 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
                         "{name}: change {} left the view without landing or a drain exclusion",
                         c.short()
                     ));
-                } else if !loser_related(&st, &settled, c) {
+                } else if !loser_related(&st, &settled, &created, c) {
                     bad.push(format!(
-                        "{name}: the drain excluded change {}, which is not bound to a losing member and depends on none",
+                        "{name}: the drain excluded change {}, which is not bound to a losing member and depends on none, by its deps or its references",
                         c.short()
                     ));
                 }
@@ -818,7 +1077,23 @@ fn sg5_every_live_view_drains_without_a_dismissal() {
             if !excluded.is_empty() {
                 let ids: Vec<String> = excluded.iter().map(|c| c.short()).collect();
                 let landed = landed_from.contains(&name);
-                emptied.push(format!("{name} (landed: {landed}) excluded {ids:?}"));
+                // the drain's refusals that led to the exclusions, for a person to look at
+                let met: Vec<String> = drained
+                    .iter()
+                    .filter(|e| e.view.as_deref() == Some(name.as_str()))
+                    .filter(|e| matches!(e.outcome, Met::Refused(_)))
+                    .map(|e| {
+                        format!(
+                            "{} {:?}: {}",
+                            e.act,
+                            e.outcome,
+                            e.message.as_deref().unwrap_or("")
+                        )
+                    })
+                    .collect();
+                emptied.push(format!(
+                    "{name} (landed: {landed}) excluded {ids:?} after {met:?}"
+                ));
             }
         }
         drop(st);
@@ -939,10 +1214,169 @@ fn sg5_two_colliding_views_land_one_after_the_other() {
     );
 }
 
+/// One line per entry: the actor, step, act, outcome, view, block, message and choice.
+fn lines(entries: &[Entry]) -> String {
+    entries
+        .iter()
+        .map(|e| {
+            format!(
+                "  {} step {} {} {:?} view={} block={} {} {}",
+                e.actor,
+                e.step,
+                e.act,
+                e.outcome,
+                e.view.as_deref().unwrap_or("-"),
+                e.block.as_deref().unwrap_or("-"),
+                e.message.as_deref().unwrap_or(""),
+                e.reply
+                    .as_ref()
+                    .and_then(|r| r.get("chosen").or_else(|| r.get("alternatives")))
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Ruling task-5-round1 (the msw20 binding path, directed). Agent a0 includes a2's claim and then
+/// makes a set with a1, so the set binds the claim to a0; a0 excludes it again. While the set is
+/// open, the landing of a2's proposal (which holds the claim) is refused with `E_ALT_MEMBER`: the
+/// landing must choose. a0's proposal lands and chooses a0. Then a2's proposal lands with the
+/// claim, which is bound to the winner (gate rule 2), and a0's later work lands with no choice
+/// (seed 3's pattern).
+#[test]
+fn sg5_an_included_change_bound_to_the_winner_lands_after_the_choice() {
+    const SEED: u64 = 22;
+    let cfg = Config {
+        seed: SEED,
+        agents: 3,
+        steps: 16,
+        kill_at: None,
+    };
+    let read = |n| Act::Read {
+        target: Pick::Seed(n),
+    };
+    let brief = |n| Act::Brief {
+        target: Pick::Seed(n),
+    };
+    let write = |n| Act::Write {
+        target: Pick::Seed(n),
+        stable: false,
+    };
+    let mut a0 = vec![read(0); 16];
+    a0[0] = brief(0);
+    a0[1] = write(0);
+    a0[3] = Act::Include { from: 2 };
+    a0[4] = Act::AltCreate { with: 1 };
+    a0[5] = Act::Exclude;
+    a0[7] = Act::Propose;
+    a0[11] = write(0);
+    a0[13] = Act::Propose;
+    let mut a1 = vec![read(1); 16];
+    a1[0] = brief(1);
+    a1[1] = write(1);
+    let mut a2 = vec![read(2); 16];
+    a2[0] = brief(2);
+    a2[1] = Act::Create {
+        area: "payments",
+        contra: None,
+    };
+    // a2 proposes before the set exists: a propose of a set-bound change is refused while the
+    // set is open, a landing of a version made before it meets the gate
+    a2[2] = Act::Propose;
+    // the person's act j runs after step 2(j + 1): it lands after steps 6, 8, 10, 12 and 14
+    let mut person = vec![PersonAct::Tensions; 8];
+    for act in &mut person[2..7] {
+        *act = PersonAct::Land { relayed: true };
+    }
+    let s = Script {
+        agents: vec![a0, a1, a2],
+        person,
+        contra: vec![],
+    };
+    let o = match seeded(SEED, || run::run_script(&cfg, s)) {
+        Ok(o) => o,
+        Err(text) => panic!("{text}"),
+    };
+    let run = o.before_freeze();
+    let ok = |e: &&Entry| e.act == "land" && e.outcome == Met::Ok;
+    let chose = |e: &Entry| {
+        e.reply
+            .as_ref()
+            .and_then(|r| r.get("chosen"))
+            .filter(|c| !c.is_null())
+            .and_then(|c| c["member"].as_str().map(str::to_string))
+    };
+    let at = |e: &Entry| run.iter().position(|x| std::ptr::eq(x, e)).unwrap();
+    let choice = run
+        .iter()
+        .filter(ok)
+        .find(|e| chose(e).is_some())
+        .unwrap_or_else(|| panic!("swarm seed {SEED}: no landing chose:\n{}", lines(run)));
+    assert_eq!(chose(choice).as_deref(), Some("a0"), "{choice:#?}");
+    let open = run.iter().take(at(choice)).find(|e| {
+        e.act == "land"
+            && e.view.as_deref() == Some("a2")
+            && e.outcome == Met::Refused("E_ALT_MEMBER".into())
+    });
+    assert!(
+        open.is_some(),
+        "swarm seed {SEED}: a2's proposal met no open set:\n{}",
+        lines(run)
+    );
+    let after: Vec<&Entry> = run[at(choice) + 1..].iter().filter(ok).collect();
+    assert!(
+        after.iter().any(|e| e.view.as_deref() == Some("a2")),
+        "swarm seed {SEED}: a2's proposal did not land after the choice:\n{}",
+        lines(run)
+    );
+    assert!(
+        after
+            .iter()
+            .any(|e| e.view.as_deref() == Some("a0") && chose(e).is_none()),
+        "swarm seed {SEED}: the winner did not land again without a choice:\n{}",
+        lines(run)
+    );
+    // the claim a0 included is in canon, by a landing of a2's proposal
+    let claim = run
+        .iter()
+        .find(|e| e.actor == "agent:a2" && e.act == "create" && e.outcome == Met::Ok)
+        .and_then(|e| e.change.as_deref()?.parse::<Hash>().ok())
+        .expect("a2's claim");
+    let (_keep, copy) = copy_of(&o.dir);
+    let r = Rdy::open(&copy).expect("open the drained copy");
+    let st = r.read();
+    let bound = bindings_of(&st, &claim);
+    assert_eq!(bound.len(), 1, "swarm seed {SEED}: {bound:?}");
+    assert_eq!(bound[0].1, "a0", "swarm seed {SEED}: {bound:?}");
+    let by_a2 = st
+        .reader()
+        .landings()
+        .expect("read canon's chain")
+        .into_iter()
+        .any(|(_, rec)| {
+            rec.changes.contains(&claim)
+                && st
+                    .reader()
+                    .proposal(&rec.proposal)
+                    .is_ok_and(|p| p.view == "a2")
+        });
+    drop(st);
+    r.close().expect("close the drained copy");
+    assert!(by_a2, "swarm seed {SEED}: the claim did not land from a2");
+    assert!(
+        o.violations.is_empty(),
+        "swarm seed {SEED}: {:?}",
+        o.violations
+    );
+}
+
 /// Ruling task-5.4: the closed table holds `propose`/`E_ALT_CHOSEN` and `land`/`E_ALT_MEMBER`,
 /// which the gate answers for a change bound to a member that lost its set (FW-AL1).
-/// `sg5_the_alternative_refusals_name_a_change_bound_to_a_loser` holds every such refusal of a
-/// run to that.
+/// `sg5_each_alternative_refusal_is_a_ruled_row` holds every such refusal of a run to its ruled
+/// rows (and `land`/`E_ALT_MEMBER` also to a set still open at that landing, ruling
+/// task-5-round1.1).
 #[test]
 fn sg5_the_table_holds_the_alternative_refusals_a_run_meets() {
     assert!(allowed("propose", "E_ALT_CHOSEN"));

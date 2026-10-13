@@ -18,7 +18,9 @@ pub enum Outcome {
 }
 
 /// Why an act found nothing to do and was `Skipped` before any call (the closed list of the
-/// ruling on task 4, and `NoUnconflictedTarget` of the ruling on task 5). The executor decides each from the state it read, never from a refusal.
+/// ruling on task 4, `NoUnconflictedTarget` of the ruling on task 5 and `ProposedBeforeSet` of
+/// its round-1 ruling). The executor decides each from the state it read or the journal, never
+/// from a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     /// The agent's view holds no change to propose.
@@ -34,6 +36,10 @@ pub enum Skip {
     /// Every block a write that names no base could aim at is conflicted in the agent's view
     /// (ruling task-5.3): a write without a base is refused on a conflicted block.
     NoUnconflictedTarget,
+    /// The person's `land`: the queued proposal (`Entry::block`) was made before its view joined
+    /// an alternative set, so it chose no member (ruling task-5-round1.2). The person drops it
+    /// and lands the next one; the view's later proposals choose or land on their own.
+    ProposedBeforeSet,
 }
 
 /// One inbox read: the cursor passed, the cursor returned and the entries as the reply gave them.

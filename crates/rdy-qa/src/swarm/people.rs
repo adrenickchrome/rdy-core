@@ -7,11 +7,13 @@
 //! - the working copy: `rdy checkout`, `rdy add`, `rdy commit`, `rdy update`, and `rdy propose`
 //!   for the human's view `work`, which no agent may act in.
 //!
-//! The person lands the oldest unlanded proposal of a shared queue. Journal entries of the
+//! The person lands the proposal at the front of a shared queue (the run orders it). A proposal
+//! made before its view joined an alternative set it drops, and journals the drop as a skipped
+//! `land` (`Skip::ProposedBeforeSet`) that names the proposal. Journal entries of the
 //! relay carry the actor `agent:relay`; those of a direct command carry `human:qa`, the human
 //! the project's user config names.
 use super::agent::{KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of, spell};
-use super::journal::{Entry, Journal, Outcome};
+use super::journal::{Entry, Journal, Outcome, Skip};
 use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
 use super::script::PersonAct;
@@ -103,6 +105,27 @@ struct Person {
     hooks: Hooks,
 }
 
+/// Whether queued proposal `pref` was made before its view joined an alternative set (ruling
+/// task-5-round1.2): the journal's `Ok` propose entry that names it comes before an `Ok`
+/// `alt_create` entry that names its view, as the set's maker (`view`) or as the other member
+/// (`block`). Such a proposal chose no member, and the person drops it. A proposal made after
+/// the set (the winner's later work among them) goes to the gate.
+pub(crate) fn proposed_before_set(entries: &[Entry], pref: &str) -> bool {
+    let Some(at) = entries.iter().position(|x| {
+        x.act == "propose" && x.outcome == Outcome::Ok && x.block.as_deref() == Some(pref)
+    }) else {
+        return false;
+    };
+    let Some(view) = entries[at].view.as_deref() else {
+        return false;
+    };
+    entries[at + 1..].iter().any(|x| {
+        x.act == "alt_create"
+            && x.outcome == Outcome::Ok
+            && (x.view.as_deref() == Some(view) || x.block.as_deref() == Some(view))
+    })
+}
+
 /// The JSON a command printed: its stdout on success, its last stderr line on failure.
 fn json_of(text: &str) -> Value {
     serde_json::from_str(text.trim())
@@ -170,7 +193,14 @@ impl Person {
                 (!q.is_empty()).then(|| q.remove(0))
             };
             match r {
-                Some(r) if self.chose_nothing_in_a_set(&r) => {}
+                // made before its view joined a set: dropped, and the drop is journaled
+                Some(r) if proposed_before_set(&self.link.journal.entries(), &r) => {
+                    let mut d = self.entry(who, "land");
+                    d.outcome = Outcome::Skipped;
+                    d.skip = Some(Skip::ProposedBeforeSet);
+                    d.block = Some(r);
+                    self.link.journal.record(d);
+                }
                 r => break r,
             }
         };
@@ -246,30 +276,6 @@ impl Person {
             // answers if it did
             Res::Lost => q.insert(0, pref),
         }
-    }
-
-    /// Whether queued proposal `pref` is a dead ref: an agent proposed it from a view that the
-    /// journal shows in an alternative set, and it chose no member. It was made before the set,
-    /// and the gate refuses it now (a member's change lands only in a version that chose it); the
-    /// agent's later proposals choose (fix round 1, ruling task-5.4: the table holds
-    /// `land`/`E_ALT_MEMBER` only for a change bound to a losing member).
-    fn chose_nothing_in_a_set(&self, pref: &str) -> bool {
-        let entries = self.link.journal.entries();
-        let Some(made) = entries.iter().find(|x| {
-            x.act == "propose" && x.outcome == Outcome::Ok && x.block.as_deref() == Some(pref)
-        }) else {
-            return false;
-        };
-        let chose = made
-            .reply
-            .as_ref()
-            .is_some_and(|r| !r["alternatives"].is_null());
-        let in_a_set = entries.iter().any(|x| {
-            x.act == "alt_create"
-                && x.outcome == Outcome::Ok
-                && (x.view == made.view || x.block == made.view)
-        });
-        in_a_set && !chose
     }
 
     /// Whether proposal `pref` landed, as the relay reads it (`rdy_read`), journaled as a
@@ -602,6 +608,92 @@ mod tests {
     use crate::swarm::agent;
     use crate::swarm::project;
     use crate::swarm::script::{Act, Config, Pick};
+
+    /// A journal entry `act` of `actor`, `Ok`, in `view`, naming `block`.
+    fn noted(actor: &str, act: &'static str, view: &str, block: &str) -> Entry {
+        let mut e = Entry::new(actor, 0, act, Outcome::Ok);
+        e.view = Some(view.to_string());
+        e.block = Some(block.to_string());
+        e
+    }
+
+    /// Fix round 2 (ruling task-5-round1.2): a queued proposal is dropped only when its propose
+    /// entry comes before an `alt_create` entry that names its view, as the set's maker (`view`)
+    /// or as the other member (`block`). A proposal made after the set, a proposal of a view in
+    /// no set, and a set refused are no reason to drop it.
+    #[test]
+    fn sg5_a_proposal_is_dropped_only_when_made_before_its_views_set() {
+        let set =
+            |maker: &str, other: &str| noted(&format!("agent:{maker}"), "alt_create", maker, other);
+        let before = noted("agent:a1", "propose", "a1", "P-before@1");
+        let after = noted("agent:a1", "propose", "a1", "P-after@1");
+        let elsewhere = noted("agent:a5", "propose", "a5", "P-a5@1");
+        let mut refused = set("a5", "a6");
+        refused.outcome = Outcome::Refused("E_ALT_MEMBER".to_string());
+        let j = vec![before.clone(), elsewhere, refused, set("a0", "a1"), after];
+        assert!(proposed_before_set(&j, "P-before@1"));
+        assert!(!proposed_before_set(&j, "P-after@1"));
+        assert!(!proposed_before_set(&j, "P-a5@1"), "a5's set was refused");
+        assert!(!proposed_before_set(&j, "P-unknown@1"), "no propose entry");
+        // the set's maker is the view too
+        let j = vec![before, set("a1", "a3")];
+        assert!(proposed_before_set(&j, "P-before@1"));
+    }
+
+    /// Fix round 2 (ruling task-5-round1.2): the person journals each proposal it drops as a
+    /// skipped `land` (`ProposedBeforeSet`) that names the proposal, and lands the next one.
+    #[test]
+    fn sg5_the_person_journals_each_proposal_it_drops() {
+        let cfg = Config {
+            seed: 32,
+            agents: 1,
+            steps: 2,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let (journal, gate) = (Journal::new(), Arc::new(KillGate::new()));
+        journal.record(noted("agent:a1", "propose", "a1", "P-before@1"));
+        journal.record(noted("agent:a0", "alt_create", "a0", "a1"));
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:relay",
+            "chat",
+            "reviewer",
+            None,
+            journal.clone(),
+            gate.clone(),
+        );
+        let queue = Queue::default();
+        queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push("P-before@1".to_string());
+        let mut person = Person {
+            link,
+            seed: p.seed.clone(),
+            queue: queue.clone(),
+            checked_out: false,
+            hooks: Hooks::default(),
+        };
+        person.land(true);
+        let lands: Vec<Entry> = journal
+            .entries()
+            .into_iter()
+            .filter(|e| e.act == "land")
+            .collect();
+        let dropped = lands
+            .iter()
+            .find(|e| e.skip == Some(Skip::ProposedBeforeSet))
+            .unwrap_or_else(|| panic!("no drop journaled: {lands:#?}"));
+        assert_eq!(dropped.outcome, Outcome::Skipped);
+        assert_eq!(dropped.block.as_deref(), Some("P-before@1"));
+        assert!(
+            queue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
+    }
 
     /// Fix round 1, finding 4: a landing whose reply the kill cut is still audited. The relay
     /// reads whether the proposal landed; when it did, the reads after a landing run on what was

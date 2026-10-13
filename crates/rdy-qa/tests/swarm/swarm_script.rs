@@ -257,24 +257,27 @@ fn sg3_the_person_lands_on_a_cadence_and_ends_by_accepting_advice() {
     }
 }
 
-/// Fix round 1 (ruling task-5.4): with writers beyond agents 0 and 1, only agents 0 and 1 make an
-/// alternative set (with each other), and they neither include nor are included from, so no view
-/// holds a change a set binds to another view's member.
+/// Fix round 2 (ruling task-5-round1.1): the generator draws `AltCreate` and `Include` as Task 3
+/// drew them. Any writer may make a set with any other agent, and any writer may include from
+/// any other agent, agents 0 and 1 included. Over the fast and deep scripts of 20 seeds, each of
+/// these draws comes at least once.
 #[test]
-fn sg3_only_agents_0_and_1_make_a_set_and_they_share_no_change() {
+fn sg3_any_writer_makes_a_set_or_includes_as_task_3_drew() {
+    let (mut set_beyond_0_and_1, mut include_by_0_or_1, mut include_from_0_or_1) =
+        (false, false, false);
     for seed in 1..=20 {
         for cfg in [Config::fast(seed), Config::deep(seed)] {
             for (me, acts) in script(&cfg).agents.iter().enumerate() {
                 for act in acts {
                     match act {
                         Act::AltCreate { with } => {
-                            assert!(me < 2 && *with == 1 - me, "seed {seed}: a{me} {act:?}");
+                            assert_ne!(*with, me, "seed {seed}: a{me} {act:?}");
+                            set_beyond_0_and_1 |= me >= 2 || *with >= 2;
                         }
                         Act::Include { from } => {
-                            assert!(
-                                me >= 2 && *from >= 2 && *from != me,
-                                "seed {seed}: a{me} {act:?}"
-                            );
+                            assert_ne!(*from, me, "seed {seed}: a{me} {act:?}");
+                            include_by_0_or_1 |= me < 2;
+                            include_from_0_or_1 |= *from < 2;
                         }
                         _ => {}
                     }
@@ -282,6 +285,47 @@ fn sg3_only_agents_0_and_1_make_a_set_and_they_share_no_change() {
             }
         }
     }
+    assert!(set_beyond_0_and_1, "no set made beyond agents 0 and 1");
+    assert!(include_by_0_or_1, "no include by agent 0 or 1");
+    assert!(include_from_0_or_1, "no include from agent 0 or 1");
+}
+
+/// Ruling task-5-round1.1: at least one fast seed's script lets a set bind an included change
+/// (msw20) and lands after the set can be chosen. An agent includes, then it makes a set or is
+/// named in one, and the person lands after that set exists. The person's act `j` of `len` runs
+/// after step `(j + 1) * steps / len` (the run's pacing).
+#[test]
+fn sg3_a_fast_seed_includes_before_a_set_and_lands_after_it() {
+    let reaches = |seed: u64| {
+        let cfg = Config::fast(seed);
+        let s = script(&cfg);
+        let len = s.person.len();
+        let last_land = s
+            .person
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.name() == "land")
+            .map(|(j, _)| (j + 1) * cfg.steps / len)
+            .max()
+            .unwrap_or(0);
+        s.agents.iter().enumerate().any(|(m, acts)| {
+            let Some(included) = acts.iter().position(|a| matches!(a, Act::Include { .. })) else {
+                return false;
+            };
+            s.agents.iter().enumerate().any(|(maker, theirs)| {
+                theirs.iter().enumerate().any(|(j, a)| {
+                    matches!(a, Act::AltCreate { with } if maker == m || *with == m)
+                        && included < j
+                        && j < last_land
+                })
+            })
+        })
+    };
+    let seeds: Vec<u64> = (1..=6).filter(|s| reaches(*s)).collect();
+    assert!(
+        !seeds.is_empty(),
+        "no fast seed includes before a set and lands after it"
+    );
 }
 
 #[test]

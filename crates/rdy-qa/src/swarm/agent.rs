@@ -10,7 +10,9 @@
 //!   and, for an update, the version it was made from in `base`.
 //! - `propose`, `land` and `accept_advice` name the proposal ref `P-x@n` in `block`; an `Ok`
 //!   `propose` entry's `reply` is `{alternatives}`, the choice it made (null: none). `alt_create`
-//!   names the agent's view in `view` and the other member's view in `block`. `dismiss` names
+//!   names the agent's view in `view` and the other member's view in `block`. An `Ok` `include`
+//!   entry's `reply` is `{included: [<change>]}`. A `land` the person skips because the
+//!   proposal was made before its view's set names that proposal too. `dismiss` names
 //!   the tension label in `block`. No other act puts anything but a block there.
 //! - A pick that resolves to nothing is journaled `Skipped` after a read of a seed block. An act
 //!   that finds nothing to do is journaled `Skipped` with a `Skip` reason and no call of its own
@@ -1438,8 +1440,11 @@ impl Agent {
     fn include_change(&mut self, change: String) {
         let e = self.view_entry("include");
         let args = json!({"op": "include", "changes": [change]});
+        let named = change.clone();
         if let Res::Ok(_) = self.link.exec(e, "include", "rdy_view", args, |en, v| {
             en.seen = labels_of(&v["on_change"]["tensions"]);
+            // the change it included, which a coverage check reads (fix round 2)
+            en.reply = Some(json!({"included": [named]}));
         }) {
             self.gone.remove(&change);
             if !self.included.contains(&change) {
@@ -1613,9 +1618,18 @@ impl Agent {
                         continue;
                     }
                 }
-                // the set is not open any more
+                // the set is not open any more: the agent forgets it and, as the refusal's fix
+                // says ("only an open set takes a choice: propose without alternatives"),
+                // proposes again at once without a choice, so a winner's later work reaches the
+                // gate in the run (fix round 2, ruling task-5-round1.2)
                 Res::Refused(code, _) if code == "E_ALT_MEMBER" && contra.is_none() => {
                     self.alt_set = None;
+                    if attempt == 0
+                        && let Some(a) = args.as_object_mut()
+                        && a.remove("alternatives").is_some()
+                    {
+                        continue;
+                    }
                 }
                 _ => {}
             }
