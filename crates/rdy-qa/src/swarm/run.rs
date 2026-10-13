@@ -512,12 +512,11 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     // the drain: the daemon starts again with its first client
     journal.record(Entry::new(MARKER, cfg.steps, DRAIN, Met::Ok));
     let order = drain_order(&reports, &journal.entries());
-    let mut d = Drain::new(&at, cfg, &p.seed, &journal, &gate, &watch);
+    let mut d = Drain::new(&at, cfg, &p.seed, &journal, &gate, &watch, order.clone());
     let mut judged = 0;
     for i in (0..reports.len()).filter(|i| cfg.is_reviewer(*i)) {
         judged += d.reviews(i, REVIEWS - judged);
     }
-    let order = d.members_first(order);
     for v in &order {
         d.view(v);
     }
@@ -863,6 +862,104 @@ fn strip_marker(text: &str) -> String {
     format!("{}{}", &text[..start], &text[end..])
 }
 
+/// What an alternative refusal at the drain's propose names, read against the sets the relay
+/// lists (ruling task-5.4).
+#[derive(Debug, PartialEq, Eq)]
+enum Named {
+    /// A member that lost a chosen set (`E_ALT_CHOSEN`): the drain excludes the change.
+    Lost,
+    /// Members of open sets (`E_ALT_MEMBER`), as (set id, member view): the landing must choose,
+    /// so the drain lands the set's member first (the gate's fix: "propose from <member> to
+    /// choose it") and excludes nothing.
+    Open(Vec<(String, String)>),
+    /// Neither, by the listing.
+    Unknown,
+}
+
+/// The members of `set` as (label, view).
+fn members_of(set: &Value) -> Vec<(String, String)> {
+    set["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            Some((
+                m["label"].as_str()?.to_string(),
+                m["view"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// What the refusal `message` names, read against `sets` (`rdy_alternatives list`): a member
+/// that the listing shows lost a chosen set (`belongs to member <label>, which lost set <id>`),
+/// else the open sets' members it names (`<id> member <label>'s alternative`, or one of the
+/// open sets a change is bound in, `<id> member <label>,` or `;`).
+fn alt_named(message: &str, sets: &Value) -> Named {
+    let sets = sets.as_array().map(Vec::as_slice).unwrap_or_default();
+    let lost = sets.iter().filter(|s| s["status"] == "chosen").any(|s| {
+        let (Some(id), Some(won)) = (s["id"].as_str(), s["chosen"]["member"].as_str()) else {
+            return false;
+        };
+        members_of(s).iter().any(|(label, view)| {
+            view != won && message.contains(&format!("member {label}, which lost set {id} ("))
+        })
+    });
+    if lost {
+        return Named::Lost;
+    }
+    let mut open = vec![];
+    for s in sets.iter().filter(|s| s["status"] == "open") {
+        let Some(id) = s["id"].as_str() else { continue };
+        for (label, view) in members_of(s) {
+            let at = format!("{id} member {label}");
+            let named = message.match_indices(&at).any(|(k, _)| {
+                matches!(
+                    message[k + at.len()..].chars().next(),
+                    Some('\'' | ',' | ';')
+                )
+            });
+            if named {
+                open.push((id.to_string(), view));
+            }
+        }
+    }
+    if open.is_empty() {
+        Named::Unknown
+    } else {
+        Named::Open(open)
+    }
+}
+
+/// The member views the drain lands, in turn, to settle the open set `set`: `bound` first, then
+/// the others in the drain's `order` (a member outside it last), leaving out each view in
+/// `busy` (the drain is landing it now, up its call chain).
+fn settle_order(set: &Value, bound: &str, order: &[String], busy: &[String]) -> Vec<String> {
+    let members: Vec<String> = members_of(set).into_iter().map(|(_, v)| v).collect();
+    let mut out: Vec<String> = vec![];
+    let ranked = order.iter().filter(|v| members.contains(v));
+    let rest = members.iter().filter(|v| !order.contains(v));
+    for v in std::iter::once(&bound.to_string())
+        .chain(ranked)
+        .chain(rest)
+    {
+        if members.contains(v) && !busy.contains(v) && !out.contains(v) {
+            out.push(v.clone());
+        }
+    }
+    out
+}
+
+/// What the drain's propose came to.
+enum Proposed {
+    /// The proposal's ref.
+    Ref(String),
+    /// The view holds nothing more.
+    Empty,
+    /// The drain settled an open set first: the view proposes again.
+    Again,
+}
+
 /// A refusal of the gate: its code and the JSON `rdy approve` printed.
 struct Refusal {
     code: String,
@@ -881,6 +978,12 @@ struct Drain {
     agents: HashMap<usize, Link>,
     /// The message of the last refusal, for a failure's text.
     said: String,
+    /// The drain's order: oldest view first.
+    order: Vec<String>,
+    /// The views the drain is landing now, outermost first.
+    busy: Vec<String>,
+    /// The open sets the drain has settled for a view that waited on them.
+    settling: BTreeSet<String>,
 }
 
 impl Drain {
@@ -891,6 +994,7 @@ impl Drain {
         journal: &Journal,
         gate: &Arc<KillGate>,
         watch: &Watch,
+        order: Vec<String>,
     ) -> Drain {
         let mut relay = Link::connect(
             at.clone(),
@@ -912,6 +1016,9 @@ impl Drain {
             relay,
             agents: HashMap::new(),
             said: String::new(),
+            order,
+            busy: vec![],
+            settling: BTreeSet::new(),
         }
     }
 
@@ -931,11 +1038,18 @@ impl Drain {
     }
 
     /// Lands view `v`, or finds it landed or closed. At most `ROUNDS` rounds of propose, land
-    /// and resolve.
+    /// and resolve; a propose that first settles an open set (`Proposed::Again`) is no round.
     fn view(&mut self, v: &str) {
+        self.busy.push(v.to_string());
+        self.rounds(v);
+        self.busy.pop();
+    }
+
+    fn rounds(&mut self, v: &str) {
         let i = owner_of(v);
         let mut last = "no refusal".to_string();
-        for round in 0..ROUNDS {
+        let mut round = 0;
+        while round < ROUNDS {
             let Some(shown) = self.show(i, v) else {
                 return;
             };
@@ -944,8 +1058,10 @@ impl Drain {
             if shown["head"]["closed"] == true || empty {
                 return;
             }
-            let Some(pref) = self.propose(i, v, round, &shown) else {
-                return;
+            let pref = match self.propose(i, v, round, &shown) {
+                Proposed::Ref(pref) => pref,
+                Proposed::Empty => return,
+                Proposed::Again => continue,
             };
             match self.land(v, &pref) {
                 None => return,
@@ -954,6 +1070,7 @@ impl Drain {
                     self.resolve(i, v, &r);
                 }
             }
+            round += 1;
         }
         panic!(
             "swarm seed {}: view {v} did not land after {ROUNDS} rounds: {last}",
@@ -985,46 +1102,63 @@ impl Drain {
         Some(shown)
     }
 
-    /// `order` with the member views of each set still open first (in `order`'s order), as the
-    /// relay lists the sets. A set open at the drain is chosen by its first member that lands,
-    /// before a view holding a change bound to one of its members proposes: while the set is
-    /// open, such a proposal is refused (the landing must choose, ruling task-5-round1.1), and
-    /// the drain excludes only loser-bound changes (ruling task-5.4).
-    fn members_first(&mut self, order: Vec<String>) -> Vec<String> {
+    /// Every alternative set, chosen and abandoned ones too, as the relay lists them.
+    fn sets(&mut self) -> Value {
         let e = self.relay.entry("alternatives");
         let mut sets = Value::Null;
         self.relay.exec(
             e,
             "alternatives",
             "rdy_alternatives",
-            json!({"op": "list", "max_tokens": ALL}),
+            json!({"op": "list", "all": true, "max_tokens": ALL}),
             |_, r| sets = r["sets"].clone(),
         );
-        let members: BTreeSet<String> = sets
+        sets
+    }
+
+    /// Whether the relay lists set `id` as open.
+    fn is_open(&mut self, id: &str) -> bool {
+        self.sets()
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|s| s["status"] == "open")
-            .flat_map(|s| s["members"].as_array().cloned().unwrap_or_default())
-            .filter_map(|m| m["view"].as_str().map(str::to_string))
-            .collect();
-        let (mut first, rest): (Vec<String>, Vec<String>) =
-            order.into_iter().partition(|v| members.contains(v));
-        first.extend(rest);
-        first
+            .any(|s| s["id"] == id && s["status"] == "open")
+    }
+
+    /// Settles each open set in `named` (set id, bound member view) for view `v`, which waits on
+    /// it: the drain lands the set's members (`settle_order`) until one landing chooses it. The
+    /// run fails when the set stays open, or when the drain meets it a second time.
+    fn settle(&mut self, v: &str, code: &str, named: &[(String, String)], sets: &Value) {
+        for (id, bound) in named {
+            if !self.settling.insert(id.clone()) {
+                self.no_rule(v, code, &format!("propose, waiting again on open set {id}"));
+            }
+            let set = sets
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|s| s["id"] == id.as_str())
+                .cloned()
+                .unwrap_or(Value::Null);
+            for m in settle_order(&set, bound, &self.order, &self.busy) {
+                if !self.is_open(id) {
+                    break;
+                }
+                self.view(&m);
+            }
+            if self.is_open(id) {
+                self.no_rule(
+                    v,
+                    code,
+                    &format!("propose, waiting on open set {id}, which no member's landing chose"),
+                );
+            }
+        }
     }
 
     /// The open alternative set `v` is a member of, and its member label, as the relay lists it.
     fn alternative(&mut self, v: &str) -> Option<(String, String)> {
-        let e = self.relay.entry("alternatives");
-        let mut sets = Value::Null;
-        self.relay.exec(
-            e,
-            "alternatives",
-            "rdy_alternatives",
-            json!({"op": "list", "max_tokens": ALL}),
-            |_, r| sets = r["sets"].clone(),
-        );
+        let sets = self.sets();
         sets.as_array().into_iter().flatten().find_map(|s| {
             let member = s["members"]
                 .as_array()?
@@ -1038,8 +1172,8 @@ impl Drain {
     }
 
     /// Agent `i` proposes view `v`, naming its set and member when the view is a member of an
-    /// open set. Any refusal is outside the drain's table.
-    fn propose(&mut self, i: usize, v: &str, round: usize, shown: &Value) -> Option<String> {
+    /// open set. The refusals of the drain's table are answered here; any other fails the run.
+    fn propose(&mut self, i: usize, v: &str, round: usize, shown: &Value) -> Proposed {
         let mut held: Vec<String> = shown["changes"]
             .as_array()
             .into_iter()
@@ -1071,25 +1205,45 @@ impl Drain {
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
-                (Res::Ok(_), Some(p)) => return Some(p),
-                // a change bound to a member that lost its set (FW-AL1: losers are discarded by
-                // design): the agent excludes it with what depends on it, and proposes the rest.
-                // `sg5_each_alternative_refusal_is_a_ruled_row` holds each such
-                // refusal to a loser-bound change (ruling task-5.4)
+                (Res::Ok(_), Some(p)) => return Proposed::Ref(p),
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
                 {
-                    let bound = change_in(&message)
-                        .and_then(|prefix| held.iter().find(|c| c.starts_with(&prefix)).cloned());
-                    let Some(bound) = bound else {
-                        self.said = message;
-                        self.no_rule(v, &code, "propose, naming no change of the view")
-                    };
-                    let left = self.exclude(i, v, &bound, &code);
-                    if left.is_empty() {
-                        return None;
+                    let sets = self.sets();
+                    let named = alt_named(&message, &sets);
+                    self.said.clone_from(&message);
+                    match named {
+                        // a change bound to a member that lost its set (FW-AL1: losers are
+                        // discarded by design), as the listing shows: the agent excludes it with
+                        // what depends on it, and proposes the rest (ruling task-5.4)
+                        Named::Lost if code == "E_ALT_CHOSEN" => {
+                            let bound = change_in(&message).and_then(|prefix| {
+                                held.iter().find(|c| c.starts_with(&prefix)).cloned()
+                            });
+                            let Some(bound) = bound else {
+                                self.no_rule(v, &code, "propose, naming no change of the view")
+                            };
+                            let left = self.exclude(i, v, &bound, &code);
+                            if left.is_empty() {
+                                return Proposed::Empty;
+                            }
+                            held = left;
+                        }
+                        // a change bound to a member of a set still open: the landing must
+                        // choose (ruling task-5-round1.1). The drain excludes nothing: it lands
+                        // the set's member first, as the gate's fix says, and the view proposes
+                        // again. `sg5_each_alternative_refusal_is_a_ruled_row` holds each such
+                        // refusal to an open set that a landing then chose
+                        Named::Open(named) if code == "E_ALT_MEMBER" => {
+                            self.settle(v, &code, &named, &sets);
+                            return Proposed::Again;
+                        }
+                        _ => self.no_rule(
+                            v,
+                            &code,
+                            "propose, naming no member that lost a listed chosen set or belongs to a listed open one",
+                        ),
                     }
-                    held = left;
                 }
                 // a block of the view cites a block that a change the drain excluded above
                 // created. A citation is no dep (`exclude --cascade` follows deps), so the citing
@@ -1792,6 +1946,95 @@ mod tests {
             name_in(&yaml("type: claim\nbody: 'See {{c-1AAAA|the rule}}'\n")),
             "See the rule"
         );
+    }
+
+    /// Ruling task-5.4 (fix round 1 of the promoted review): the drain reads an alternative
+    /// refusal at its propose against the sets the relay lists. It excludes a change only when
+    /// the refusal names a member that the listing shows lost a chosen set. A change bound to a
+    /// member of an open set is never excluded: the drain lands that member first.
+    #[test]
+    fn sg5_an_alternative_refusal_is_read_against_the_listed_sets() {
+        let sets = json!([
+            {"id": "as-111111111111", "status": "open", "members": [
+                {"label": "a0", "view": "a0"}, {"label": "a1", "view": "a1"}]},
+            {"id": "as-222222222222", "status": "chosen",
+             "chosen": {"member": "a3", "landing": "abc"}, "members": [
+                {"label": "a2", "view": "a2"}, {"label": "a3", "view": "a3"}]},
+            {"id": "as-333333333333", "status": "open", "members": [
+                {"label": "a4", "view": "a4"}, {"label": "a5", "view": "a5-fb"}]}
+        ]);
+        let open = |pairs: &[(&str, &str)]| {
+            Named::Open(
+                pairs
+                    .iter()
+                    .map(|(s, m)| ((*s).to_string(), (*m).to_string()))
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            alt_named(
+                "change abcdef123456 is as-111111111111 member a0's alternative",
+                &sets
+            ),
+            open(&[("as-111111111111", "a0")])
+        );
+        // the member is named by its label, and the drain lands its view
+        assert_eq!(
+            alt_named(
+                "change abcdef123456 is bound in 2 open sets: as-111111111111 member a1, as-333333333333 member a5; one proposal chooses in one set only",
+                &sets
+            ),
+            open(&[("as-111111111111", "a1"), ("as-333333333333", "a5-fb")])
+        );
+        // a label that only starts another label names nothing
+        assert_eq!(
+            alt_named(
+                "change abcdef123456 is as-111111111111 member a01's alternative",
+                &sets
+            ),
+            Named::Unknown
+        );
+        assert_eq!(
+            alt_named(
+                "change abcdef123456 belongs to member a2, which lost set as-222222222222 (chosen by landing 1234, which recorded no decision)",
+                &sets
+            ),
+            Named::Lost
+        );
+        // the winner, or a member of a set the listing shows open, did not lose
+        assert_eq!(
+            alt_named(
+                "change abcdef123456 belongs to member a3, which lost set as-222222222222 (chosen by landing 1234, which recorded no decision)",
+                &sets
+            ),
+            Named::Unknown
+        );
+        assert_eq!(
+            alt_named(
+                "change abcdef123456 belongs to member a0, which lost set as-111111111111 (chosen by landing 1234, which recorded no decision)",
+                &sets
+            ),
+            Named::Unknown
+        );
+        assert_eq!(alt_named("no set here", &sets), Named::Unknown);
+    }
+
+    /// The members the drain lands to settle an open set: the bound member first, then the
+    /// others in the drain's order. A view the drain is landing now (up its call chain) is left
+    /// out: it cannot land before the view that waits on it.
+    #[test]
+    fn sg5_an_open_set_is_settled_by_its_bound_member_first() {
+        let set = json!({"id": "as-111111111111", "status": "open", "members": [
+            {"label": "a0", "view": "a0"}, {"label": "a1", "view": "a1"},
+            {"label": "a2", "view": "a2"}]});
+        let order: Vec<String> = ["a2", "a1", "a0"].map(String::from).to_vec();
+        assert_eq!(settle_order(&set, "a0", &order, &[]), ["a0", "a2", "a1"]);
+        assert_eq!(
+            settle_order(&set, "a1", &order, &["a2".into()]),
+            ["a1", "a0"]
+        );
+        let busy: Vec<String> = ["a0", "a1", "a2"].map(String::from).to_vec();
+        assert!(settle_order(&set, "a0", &order, &busy).is_empty());
     }
 
     #[test]

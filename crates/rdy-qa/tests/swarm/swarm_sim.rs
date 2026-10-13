@@ -767,6 +767,11 @@ fn sg5_an_alternative_refusal_is_judged_by_the_set_at_that_time() {
 /// 2): a refusal of it is a product defect. The binding is read from the stored change and the
 /// sets' fixed bindings; the set's state at each refusal from canon's landing records, in the
 /// order the journal names the landings.
+///
+/// The drain's `propose`/`E_ALT_MEMBER` names a change bound to a member of a set still open at
+/// that propose. The drain then lands that set's member (the gate's fix: "propose from <member>
+/// to choose it"): a landing that chose one of those sets comes before the view proposes again.
+/// It never excludes such a change (fix round 1 of the promoted review).
 #[test]
 fn sg5_each_alternative_refusal_is_a_ruled_row() {
     each(|seed, o| {
@@ -816,17 +821,22 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
             .collect();
         let mut bad = vec![];
         let mut rows: BTreeMap<String, usize> = BTreeMap::new();
-        for e in &o.journal {
-            let landed = (e.act == "land" && e.outcome == Met::Ok) || e.act == run::LAND_FOUND;
-            if landed
-                && let Some(l) = e.reply.as_ref().and_then(|r| r["landing"].as_str())
-                && let Some((set, member)) = chosen_by.get(l)
-            {
+        let freeze = o.journal.len() - o.after_freeze().len();
+        // the set a landing entry chose, by canon's landing records
+        let chose = |x: &Entry| -> Option<&(Hash, String)> {
+            let landed = (x.act == "land" && x.outcome == Met::Ok) || x.act == run::LAND_FOUND;
+            let l = x.reply.as_ref()?["landing"].as_str()?;
+            if landed { chosen_by.get(l) } else { None }
+        };
+        for (k, e) in o.journal.iter().enumerate() {
+            if let Some((set, member)) = chose(e) {
                 settled.insert(*set, member.clone());
             }
+            let drain = k >= freeze;
             let row = match (&e.outcome, e.act) {
                 (Met::Refused(c), "propose") if c == "E_ALT_CHOSEN" => c,
                 (Met::Refused(c), "land") if c == "E_ALT_MEMBER" => c,
+                (Met::Refused(c), "propose") if c == "E_ALT_MEMBER" && drain => c,
                 _ => continue,
             };
             // the proposal's view and how it was made, for a person to look at
@@ -878,9 +888,37 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
                     (lost.then_some(AtRefusal::Loser), String::new())
                 }
             };
-            let fine = match (row.as_str(), judged) {
-                (_, Some(AtRefusal::Loser)) => true,
-                ("E_ALT_MEMBER", Some(AtRefusal::OpenSet)) => e.act == "land",
+            let fine = match (row.as_str(), e.act, judged) {
+                // the drain's open-set row: a landing chose one of the change's open sets before
+                // the view proposed again
+                ("E_ALT_MEMBER", "propose", Some(AtRefusal::OpenSet)) => {
+                    let open: BTreeSet<Hash> = change_named(message)
+                        .and_then(|prefix| known.iter().find(|x| x.starts_with(&prefix)))
+                        .and_then(|f| f.parse::<Hash>().ok())
+                        .map(|c| bindings_of(&st, &c))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(set, _)| set)
+                        .filter(|set| !settled.contains_key(set))
+                        .collect();
+                    let next = o.journal[k + 1..]
+                        .iter()
+                        .position(|x| x.act == "propose" && x.view == e.view)
+                        .map_or(o.journal.len(), |p| k + 1 + p);
+                    let settles = o.journal[k + 1..next]
+                        .iter()
+                        .any(|x| chose(x).is_some_and(|(set, _)| open.contains(set)));
+                    if !settles {
+                        bad.push(format!(
+                            "{at}: {message}: no landing chose its open set before the view proposed again"
+                        ));
+                        continue;
+                    }
+                    true
+                }
+                ("E_ALT_MEMBER", "propose", _) => false,
+                (_, _, Some(AtRefusal::Loser)) => true,
+                ("E_ALT_MEMBER", "land", Some(AtRefusal::OpenSet)) => true,
                 _ => false,
             };
             if fine {
@@ -1388,6 +1426,148 @@ fn sg5_an_included_change_bound_to_the_winner_lands_after_the_choice() {
     drop(st);
     r.close().expect("close the drained copy");
     assert!(by_a2, "swarm seed {SEED}: the claim did not land from a2");
+    assert!(
+        o.violations.is_empty(),
+        "swarm seed {SEED}: {:?}",
+        o.violations
+    );
+}
+
+/// The brief's drain order, oldest view first, and ruling task-5.4's exclusion only of a
+/// loser-bound change (fix round 1 of the promoted review). a2 creates a claim first; a0
+/// includes it and makes a set with a1, so the set binds the claim to a0; nothing lands in the
+/// run. The drain takes a2 first: its propose meets `E_ALT_MEMBER` (the claim is the open set's
+/// member a0's alternative). The drain excludes nothing: it lands a0 first, which chooses a0 and
+/// lands the claim, and then lands a2's own work.
+#[test]
+fn sg5_the_drain_lands_an_open_sets_bound_member_before_the_view_that_waits_on_it() {
+    const SEED: u64 = 23;
+    let cfg = Config {
+        seed: SEED,
+        agents: 3,
+        steps: 10,
+        kill_at: None,
+    };
+    let read = |n| Act::Read {
+        target: Pick::Seed(n),
+    };
+    let brief = |n| Act::Brief {
+        target: Pick::Seed(n),
+    };
+    let write = |n| Act::Write {
+        target: Pick::Seed(n),
+        stable: false,
+    };
+    // the pacing keeps the agents within one step: a write two steps later comes later in the
+    // journal, so the drain's order is a2, a0, a1
+    let mut a2 = vec![read(2); 10];
+    a2[0] = brief(2);
+    a2[1] = Act::Create {
+        area: "payments",
+        contra: None,
+    };
+    a2[2] = write(2);
+    let mut a0 = vec![read(0); 10];
+    a0[0] = brief(0);
+    a0[3] = write(0);
+    a0[4] = Act::Include { from: 2 };
+    a0[7] = Act::AltCreate { with: 1 };
+    let mut a1 = vec![read(1); 10];
+    a1[0] = brief(1);
+    a1[5] = write(1);
+    let s = Script {
+        agents: vec![a0, a1, a2],
+        person: vec![PersonAct::Tensions; 5],
+        contra: vec![],
+    };
+    let o = match seeded(SEED, || run::run_script(&cfg, s)) {
+        Ok(o) => o,
+        Err(text) => panic!("{text}"),
+    };
+    let drain = o.after_freeze();
+    let shown = lines(drain);
+    assert!(
+        !o.before_freeze().iter().any(|e| e.act == "land"),
+        "swarm seed {SEED}: the person landed in the run:\n{}",
+        lines(o.before_freeze())
+    );
+    assert!(
+        o.before_freeze()
+            .iter()
+            .any(|e| e.act == "alt_create" && e.outcome == Met::Ok),
+        "swarm seed {SEED}: no set was made:\n{}",
+        lines(o.before_freeze())
+    );
+    // oldest first: a2's propose is the drain's first, and the open set refuses it
+    let first = drain
+        .iter()
+        .position(|e| e.act == "propose")
+        .unwrap_or_else(|| panic!("swarm seed {SEED}: the drain proposed nothing:\n{shown}"));
+    assert_eq!(
+        drain[first].view.as_deref(),
+        Some("a2"),
+        "swarm seed {SEED}: the drain did not take the oldest view first:\n{shown}"
+    );
+    assert_eq!(
+        drain[first].outcome,
+        Met::Refused("E_ALT_MEMBER".into()),
+        "swarm seed {SEED}:\n{shown}"
+    );
+    let ok = |e: &&Entry| e.act == "land" && e.outcome == Met::Ok;
+    let chosen = |e: &Entry| {
+        e.reply
+            .as_ref()
+            .and_then(|r| r.get("chosen"))
+            .and_then(|c| c["member"].as_str().map(str::to_string))
+    };
+    let choice = drain[first..]
+        .iter()
+        .position(|e| ok(&e) && chosen(e).is_some())
+        .map(|p| first + p)
+        .unwrap_or_else(|| panic!("swarm seed {SEED}: no drain landing chose:\n{shown}"));
+    assert_eq!(
+        (
+            drain[choice].view.as_deref(),
+            chosen(&drain[choice]).as_deref()
+        ),
+        (Some("a0"), Some("a0")),
+        "swarm seed {SEED}: the drain did not land the bound member first:\n{shown}"
+    );
+    assert!(
+        drain[choice..]
+            .iter()
+            .any(|e| ok(&e) && e.view.as_deref() == Some("a2")),
+        "swarm seed {SEED}: a2's own work did not land after the choice:\n{shown}"
+    );
+    assert!(
+        !drain.iter().any(|e| e.act == "exclude"),
+        "swarm seed {SEED}: the drain excluded a change bound to an open set's member:\n{shown}"
+    );
+    // the claim is in canon
+    let claim = o
+        .journal
+        .iter()
+        .find(|e| e.actor == "agent:a2" && e.act == "create" && e.outcome == Met::Ok)
+        .and_then(|e| e.change.as_deref()?.parse::<Hash>().ok())
+        .expect("a2's claim");
+    let (_keep, copy) = copy_of(&o.dir);
+    let r = Rdy::open(&copy).expect("open the drained copy");
+    let st = r.read();
+    let bound = bindings_of(&st, &claim);
+    let landed = st
+        .reader()
+        .landings()
+        .expect("read canon's chain")
+        .into_iter()
+        .any(|(_, rec)| rec.changes.contains(&claim));
+    drop(st);
+    r.close().expect("close the drained copy");
+    assert_eq!(bound.len(), 1, "swarm seed {SEED}: {bound:?}");
+    assert_eq!(bound[0].1, "a0", "swarm seed {SEED}: {bound:?}");
+    assert!(
+        landed,
+        "swarm seed {SEED}: the claim is not in canon:\n{shown}"
+    );
     assert!(
         o.violations.is_empty(),
         "swarm seed {SEED}: {:?}",
