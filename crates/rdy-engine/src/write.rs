@@ -2089,11 +2089,19 @@ fn build_ops(
                     check_name(&ov, &block, i, Some("repin"))?;
                 }
                 res.check_rekey(&block, was, false)?;
+                // a repin changes only pins, which the content hash leaves out: not in
+                // `content_touched` (p-WYFR3). But a repin of a conflicted block from a side's
+                // version starts from the side's block, while the view reads the conflict's base:
+                // it writes the side's content, so that block's content changes (sus3)
+                let tracking = store.tracking();
+                if was.is_none_or(|w| {
+                    w.content_hash_with(tracking) != cur.content_hash_with(tracking)
+                }) {
+                    content_touched.insert(id.clone());
+                }
                 repinned.extend(wanted);
                 drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
-                // a repin changes only pins, which the content hash leaves out: not in
-                // `content_touched` (p-WYFR3)
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -2286,6 +2294,40 @@ fn build_ops(
     // edited
     let touched: BTreeSet<BlockId> = touched.difference(&followed).cloned().collect();
     Ok((ops, created, touched, names, assigned))
+}
+
+/// The ruling on D-YQCY9's task: `implements` names the decision a change carries out, which
+/// the write's view holds. Checked once, before any op applies, for every write that carries
+/// the justification (a write that only moves or repins included): a block of another type is
+/// refused, and so is an id the view does not hold (one decided in another view and not
+/// landed, or a typo).
+fn check_implements(m: &Materialized, j: Option<&Justification>) -> Result<(), RdyError> {
+    let Some(Justification::Implements(ids)) = j else {
+        return Ok(());
+    };
+    for id in ids {
+        match m.get(id) {
+            Some(b) if b.block_type == decision::DECISION => {}
+            Some(b) => {
+                return Err(bad(
+                    format!(
+                        "implements names {id}, a {}; implements names the decision this change carries out",
+                        b.block_type
+                    ),
+                    "name the decision (D-…), or give an editorial reason",
+                ));
+            }
+            None => {
+                return Err(bad(
+                    format!("implements names {id}, which this view does not hold"),
+                    format!(
+                        "include the change that records {id} (rdy_view include), or wait until {id} lands"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// D-YQCY9 (FW-DF1): a write's `implements: [D…]` adds `{target: D}` to the `implements` links
@@ -2563,6 +2605,7 @@ impl Rdy {
         let conflicts = st.conflicts(&scope)?;
         let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
+        check_implements(&m, req.justification.as_ref())?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
         let (ops, created, touched, names, keys) = build_ops(
             &self.pack,

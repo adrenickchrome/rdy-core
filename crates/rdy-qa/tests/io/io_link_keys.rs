@@ -206,6 +206,10 @@ fn llst1_an_import_takes_a_string_or_a_list_for_a_link_kind() {
     assert_eq!(targets(&r, "describes"), vec!["r-BBBBB", "r-AAAAA"]);
 }
 
+/// Two accepted decisions with keys, for `implements` (it names decisions only: the ruling on
+/// D-YQCY9's task).
+const DECS: &str = "- id: D-AAAAA\n  type: decision\n  parent: s-AAAAA\n  order: a4\n  fields:\n    key: DEC-1\n    statement: It must.\n    status: accepted\n- id: D-BBBBB\n  type: decision\n  parent: s-AAAAA\n  order: a5\n  fields:\n    key: DEC-2\n    statement: It also must.\n    status: accepted\n";
+
 #[test]
 fn llst1_rdy_write_implements_takes_a_key_or_a_list() {
     use rdy_qa::daemon::Served;
@@ -216,7 +220,7 @@ fn llst1_rdy_write_implements_takes_a_key_or_a_list() {
         r.import(
             &approver(),
             "work",
-            tree(&format!("{REQ2}{}", claim("r-AAAAA"))).path(),
+            tree(&format!("{REQ2}{DECS}{}", claim("r-AAAAA"))).path(),
         )
         .unwrap();
         land(&mut r, "work").unwrap();
@@ -229,11 +233,17 @@ fn llst1_rdy_write_implements_takes_a_key_or_a_list() {
     );
     assert!(ok.code().is_none());
     let one = c
-        .call("rdy_write", json!({"implements": "REQ-1", "ops": [{"op": "update", "id": "c-AAAAA", "body": "One."}]}))
+        .call("rdy_write", json!({"implements": "DEC-1", "ops": [{"op": "update", "id": "c-AAAAA", "body": "One."}]}))
         .ok();
     let many = c
-        .call("rdy_write", json!({"implements": ["REQ-2", "r-AAAAA", "REQ-1"], "ops": [{"op": "update", "id": "c-AAAAA", "body": "Two."}]}))
+        .call("rdy_write", json!({"implements": ["DEC-2", "D-AAAAA", "DEC-1"], "ops": [{"op": "update", "id": "c-AAAAA", "body": "Two."}]}))
         .ok();
+    // a requirement's key resolves, but implements names decisions only
+    let req = c.call(
+        "rdy_write",
+        json!({"implements": "REQ-1", "ops": [{"op": "update", "id": "c-AAAAA", "body": "Req."}]}),
+    );
+    assert_eq!(req.code(), Some("E_BAD_INPUT"));
     let empty = c.call(
         "rdy_write",
         json!({"implements": [], "ops": [{"op": "update", "id": "c-AAAAA", "body": "Three."}]}),
@@ -253,12 +263,12 @@ fn llst1_rdy_write_implements_takes_a_key_or_a_list() {
     };
     assert_eq!(
         just(&one),
-        Some(rdy_model::Justification::Implements(ids(&["r-AAAAA"])))
+        Some(rdy_model::Justification::Implements(ids(&["D-AAAAA"])))
     );
     assert_eq!(
         just(&many),
         Some(rdy_model::Justification::Implements(ids(&[
-            "r-BBBBB", "r-AAAAA"
+            "D-BBBBB", "D-AAAAA"
         ]))),
         "resolved, deduplicated, in order"
     );
