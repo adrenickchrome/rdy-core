@@ -190,24 +190,48 @@ fn summary_without_context_shows_references_as_bare_ids() {
 }
 
 #[test]
-fn summary_in_renders_a_reference_as_the_target_summary() {
+fn summary_in_renders_a_bare_reference_as_the_target_name() {
     let d = blk(
         "D-98YRA",
         "decision",
         Some(("statement", "Wallets\ndon't move")),
         "",
     );
+    let t = blk(
+        "T-AAAAA",
+        "term",
+        Some(("name", "Wallet\nrule")),
+        "Long body.",
+    );
     let c = blk(
         "C-AAAAA",
         "claim",
         None,
-        "Leavers open a new wallet per {{D-98YRA}}.",
+        "Leavers open a new wallet per {{T-AAAAA}} and {{D-98YRA}}, {{T-AAAAA|@key}}.",
     );
-    let m = scope_of(vec![d, c.clone()]);
+    let m = scope_of(vec![d, t, c.clone()]);
+    // a name (collapsed), else the id (a decision has a statement, never read); never the body
     assert_eq!(
         summary_in(&c, &m),
-        "Leavers open a new wallet per Wallets don't move."
+        "Leavers open a new wallet per Wallet rule and D-98YRA, Wallet rule."
     );
+}
+
+#[test]
+fn summary_in_renders_link_words_and_a_title_when_there_is_no_name() {
+    let t = blk("T-AAAAA", "term", Some(("title", "Wallet title")), "");
+    let c = blk(
+        "C-AAAAA",
+        "claim",
+        None,
+        "See {{T-AAAAA}} or {{T-AAAAA|the wallet}} or {{T-ZZZZZ|gone}}.",
+    );
+    let m = scope_of(vec![t, c.clone()]);
+    assert_eq!(
+        summary_in(&c, &m),
+        "See Wallet title or the wallet or gone."
+    );
+    assert_eq!(summary(&c), "See T-AAAAA or the wallet or gone.");
 }
 
 #[test]
@@ -218,22 +242,22 @@ fn summary_in_renders_an_unknown_reference_as_its_bare_id() {
 }
 
 #[test]
-fn summary_in_does_not_expand_references_inside_a_referenced_summary() {
-    let a = blk("D-AAAAA", "decision", Some(("statement", "Base rule")), "");
+fn summary_in_does_not_expand_references_inside_a_referenced_name() {
+    let a = blk("T-AAAAA", "term", Some(("name", "Base rule")), "");
     let b = blk(
-        "D-BBBBB",
-        "decision",
-        Some(("statement", "Refines {{D-AAAAA}}")),
+        "T-BBBBB",
+        "term",
+        Some(("name", "Refines {{T-AAAAA}} and {{T-AAAAA|the base}}")),
         "",
     );
-    let c = blk("C-CCCCC", "claim", None, "Per {{D-BBBBB}}");
+    let c = blk("C-CCCCC", "claim", None, "Per {{T-BBBBB}}");
     let m = scope_of(vec![a, b, c.clone()]);
-    assert_eq!(summary_in(&c, &m), "Per Refines D-AAAAA");
+    assert_eq!(summary_in(&c, &m), "Per Refines T-AAAAA and the base");
 }
 
 #[test]
 fn summary_in_follows_ref_mode_rules() {
-    let d = blk("D-98YRA", "decision", Some(("statement", "Ship it")), "");
+    let d = blk("D-98YRA", "decision", Some(("name", "Ship it")), "");
     let code = blk("K-AAAAA", "code", None, "let x = {{D-98YRA}};");
     let diagram = blk(
         "G-AAAAA",
@@ -252,7 +276,7 @@ fn summary_in_follows_ref_mode_rules() {
 }
 
 #[test]
-fn impact_items_render_references_in_their_summaries() {
+fn impact_items_render_a_decision_reference_as_its_id() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let (s, did) = setup(&mut r);
@@ -267,8 +291,9 @@ fn impact_items_render_references_in_their_summaries() {
             2,
         )
         .unwrap();
+    // a decision has a statement but no name or title: the rule shows its id (df5)
     assert_eq!(
         imp[0].summary,
-        "Leavers open a new wallet per Wallets don't move."
+        format!("Leavers open a new wallet per {did}.")
     );
 }

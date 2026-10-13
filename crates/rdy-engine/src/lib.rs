@@ -76,7 +76,8 @@ pub use proposal_show::{
     ProposalChangeRow, ProposalShow, ProposalVersionRow, is_proposal_ref, proposal_text,
 };
 pub use query::{
-    Context, ImpactItem, ImpactVia, code_lines, compact_summary, field_json, summary, summary_in,
+    Context, ImpactItem, ImpactVia, code_lines, compact_summary, cut_line, field_json, summary,
+    summary_in,
 };
 pub use rdy_store::Relay;
 pub use read_state::{
