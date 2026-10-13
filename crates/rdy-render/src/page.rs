@@ -303,7 +303,7 @@ impl Shared<'_> {
             _ => {}
         }
         let doc = self
-            .m
+            .site
             .doc_of(&b.id)
             .map(|d| self.site.label(d))
             .unwrap_or_default();
@@ -823,7 +823,7 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
                 .iter()
                 .filter_map(|id| {
                     let link = sh.link(page, id)?;
-                    let doc = sh.m.doc_of(id).map(|d| sh.site.label(d));
+                    let doc = sh.site.doc_of(id).map(|d| sh.site.label(d));
                     let text = match doc {
                         Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
                         _ => link.label,

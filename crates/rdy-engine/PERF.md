@@ -1301,11 +1301,18 @@ What each cost grows with:
 - `invariants_check_all` grows with the blocks of canon and of each open view, since each scope is
   materialized and walked once.
 - `render_cold` less `render` is about the canon tension read of the page (compare with
-  `tensions_canon`). Until the render_50k fix the page built the whole set, in-flight part
-  included: `render_50k` went from 577 ms (b863ffd) to 888-915 ms. The page now reads
+  `tensions_canon`). The page read the whole set, in-flight part included; it now reads
   `ReadState::canon_tensions`, which shares canon's memo and never detects the in-flight part.
   The test `sg9_a_canon_render_builds_no_inflight_tension_set` pins this with the engine's
   full-build counter.
+- `render_50k` went from about 550-577 ms (dfffa8f and before) to 877-915 ms (3a4fcf7). `render`
+  keeps its state across runs, so the tension read is in its first run only, not its median. The
+  cost in every run was the page itself: the 50k tree has 970 all-canon duplicate definitions with
+  about 50 blocks each (48,500 links). `Site::set_disagreements` sorted each entry's blocks by a
+  key that walked the block's doc chain at every comparison (laptop: about 245 ms a render), and
+  the links read each block's place and doc again (about 145 ms). The fix reads each block's
+  place once per entry and memoises `Site::url_of` and `Site::doc_of` per render; the permalink
+  pages reuse those places. Pinned by `set_disagreements_reads_each_blocks_doc_once` (a count).
 
 No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
