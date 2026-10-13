@@ -127,10 +127,7 @@ fn mfb3_import_writes_one_change_per_author_with_their_times() {
     );
     assert_eq!(
         first.message,
-        format!(
-            "import from {}: 1 block(s) by agent:a, imported by human:imp",
-            out.display()
-        )
+        "import from x: 1 block(s) by agent:a, imported by human:imp"
     );
     let json = serde_json::to_value(&res).unwrap();
     assert_eq!(json["changes"].as_array().map(Vec::len), Some(2));
@@ -180,7 +177,40 @@ fn mfb3_without_authors_yaml_the_importer_writes_one_change() {
         .change(&res.change.parse::<Hash>().unwrap())
         .unwrap();
     assert_eq!(c.provenance.actor, "human:imp");
-    assert_eq!(c.message, format!("import from {}", out.display()));
+    assert_eq!(c.message, "import from x");
+}
+
+/// df6 (F9): the import messages name the directory, not its path. The path is canonicalised
+/// first, so `a/b/../wiki-export` gives `wiki-export`, and no message holds a `/`.
+#[test]
+fn df6_import_stores_absolute_path() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, _d, _p) = two_authors(a_dir.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("a").join("wiki-export");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
+    let via = tmp
+        .path()
+        .join("a")
+        .join("b")
+        .join("..")
+        .join("wiki-export");
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", None, Role::Approver);
+    let res = b.import(&imp, "import", &via).unwrap();
+    assert_eq!(res.changes.len(), 2, "{res:?}");
+    let st = b.read();
+    for h in &res.changes {
+        let c = st.reader().change(&h.parse::<Hash>().unwrap()).unwrap();
+        assert!(
+            c.message.starts_with("import from wiki-export"),
+            "{}",
+            c.message
+        );
+        assert!(!c.message.contains('/'), "{}", c.message);
+    }
 }
 
 #[test]
