@@ -199,8 +199,12 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
         "\nlanded {} ({approved})",
         hash_short(text(&v["landing"]))
     ));
-    if let Some(by) = relayed_by {
-        t.push_str(&format!(", relayed by {by}"));
+    // the relayer as recorded (the session's actor and run), which may differ from the flag
+    if let Some(by) = v["relayed_by"]["actor"].as_str() {
+        match v["relayed_by"]["run"].as_str() {
+            Some(run) => t.push_str(&format!(", relayed by {by}/{run}")),
+            None => t.push_str(&format!(", relayed by {by}")),
+        }
     }
     if let Some(member) = v["chosen"]["member"].as_str() {
         t.push_str(&format!(

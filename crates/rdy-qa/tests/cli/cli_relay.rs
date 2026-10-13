@@ -627,3 +627,134 @@ fn df2_a_relay_lands_without_a_daemon() {
     );
     assert!(s.daemon_pid().is_none(), "no daemon started");
 }
+
+/// The `--relayed-by` value a refusal's fix names (`pass --relayed-by <X> with …`).
+fn fix_flag(v: &Value) -> String {
+    let fix = v["fix"].as_str().unwrap_or_else(|| panic!("no fix: {v}"));
+    let rest = fix
+        .strip_prefix("pass --relayed-by ")
+        .unwrap_or_else(|| panic!("the fix names a flag: {v}"));
+    rest.split(' ').next().unwrap().to_string()
+}
+
+#[test]
+fn df2_an_actor_with_a_slash_relays_as_itself() {
+    // an agent actor may contain '/' (Session::agent refuses it only in a run)
+    for (by, no_daemon) in [
+        ("agent:a/b", false),
+        ("agent:a/b/r1", false),
+        ("agent:a/b", true),
+    ] {
+        let (s, pref) = proposed();
+        let mut args = if no_daemon {
+            vec!["--no-daemon"]
+        } else {
+            vec![]
+        };
+        args.extend(relay_args(&pref, by));
+        let (ok, v) = s.json_as("agent:a/b", Some("r1"), &args);
+        assert!(ok, "{by} (no daemon: {no_daemon}): {v}");
+        assert_eq!(v["assurance"], "relayed", "{v}");
+        let mut log = if no_daemon {
+            vec!["--no-daemon"]
+        } else {
+            vec![]
+        };
+        log.extend(["--json", "log"]);
+        let (ok, rows) = s.json(&log);
+        assert!(ok, "{rows}");
+        assert_eq!(rows[0]["approved_by"], "human:qa", "{rows}");
+        assert_eq!(
+            rows[0]["relayed_by"],
+            json!({"actor": "agent:a/b", "run": "r1"}),
+            "{by}: the record is the session's actor and run"
+        );
+    }
+    // with no run, only the bare actor is its own spelling
+    let (s, pref) = proposed();
+    let (ok, v) = s.json_as("agent:a/b", None, &relay_args(&pref, "agent:a/b/r1"));
+    assert!(!ok);
+    assert_eq!(v["code"], "E_PERMISSION", "{v}");
+    assert_eq!(
+        v["message"], "agent:a/b relays only as itself, not as agent:a/b/r1",
+        "{v}"
+    );
+    let (ok, v) = s.json_as("agent:a/b", None, &relay_args(&pref, "agent:a/b"));
+    assert!(ok, "{v}");
+    let (_, rows) = s.json(&["--json", "log"]);
+    assert_eq!(
+        rows[0]["relayed_by"],
+        json!({"actor": "agent:a/b", "run": null})
+    );
+    // a prefix of the actor is another actor
+    let (s, pref) = proposed();
+    for by in ["agent:a", "agent:a/b/r2", "agent:a/r1"] {
+        let (ok, v) = s.json_as("agent:a/b", Some("r1"), &relay_args(&pref, by));
+        assert!(!ok, "{by}: {v}");
+        assert_eq!(
+            v["message"],
+            format!("agent:a/b/r1 relays only as itself, not as {by}"),
+            "{v}"
+        );
+    }
+}
+
+#[test]
+fn df2_a_refused_relay_s_fix_when_followed_lands() {
+    for (actor, run, wrong) in [
+        ("agent:writer-a", Some("r1"), "agent:other"),
+        ("agent:writer-a", Some("r1"), "agent:writer-a/r2"),
+        ("agent:writer-b", None, "agent:writer-b/r9"),
+        ("agent:a/b", Some("r1"), "agent:a"),
+        ("agent:a/b", Some("r1"), "agent:a/b/r2"),
+        ("agent:a/b", None, "agent:a/b/r1"),
+    ] {
+        let (s, pref) = proposed();
+        let (ok, v) = s.json_as(actor, run, &relay_args(&pref, wrong));
+        assert!(!ok, "{actor} as {wrong}: {v}");
+        assert_eq!(v["code"], "E_PERMISSION", "{v}");
+        let by = fix_flag(&v);
+        let (ok, v) = s.json_as(actor, run, &relay_args(&pref, &by));
+        assert!(
+            ok,
+            "{actor}/{run:?}: the fix's --relayed-by {by} lands: {v}"
+        );
+        assert_eq!(v["assurance"], "relayed", "{v}");
+    }
+}
+
+#[test]
+fn df2_the_approve_reply_names_the_recorded_relayer() {
+    // the flag names no run; the record takes the session's run, and so does the reply
+    let (s, pref) = proposed();
+    let (ok, text, err) = out(&s.rdy_as(
+        "agent:w",
+        Some("rb"),
+        &[
+            "approve",
+            &pref,
+            "--relayed-by",
+            "agent:w",
+            "--evidence",
+            "Yes",
+        ],
+    ));
+    assert!(ok, "{text}{err}");
+    assert!(text.contains(", relayed by agent:w/rb"), "{text}");
+    let (_, rows) = s.json(&["--json", "log"]);
+    assert_eq!(
+        rows[0]["relayed_by"],
+        json!({"actor": "agent:w", "run": "rb"})
+    );
+    let (s, pref) = proposed();
+    let (ok, v) = s.json_as("agent:w", Some("rb"), &relay_args(&pref, "agent:w"));
+    assert!(ok, "{v}");
+    let (_, rows) = s.json(&["--json", "log"]);
+    assert_eq!(v["relayed_by"], rows[0]["relayed_by"], "{v}");
+    assert_eq!(v["relayed_by"], json!({"actor": "agent:w", "run": "rb"}));
+    // a local approval's reply names no relayer
+    let (s, pref) = proposed();
+    let (ok, v) = s.json(&["--json", "approve", &pref]);
+    assert!(ok, "{v}");
+    assert!(v.get("relayed_by").is_none(), "{v}");
+}

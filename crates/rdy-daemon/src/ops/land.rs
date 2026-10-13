@@ -5,7 +5,7 @@ use rdy_engine::engine::write_typed;
 use rdy_engine::{E_BAD_INPUT, LandOptions, RdyError, Relay, alt};
 use rdy_model::RelayEvidence;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +55,8 @@ pub(super) fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError>
 pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
     // the session kind, then the flags' pairing, then the relaying actor and run (D-HA7YZ)
     let (s, by) = relay_approver(cx, a.relayed_by.as_deref(), a.evidence.is_some())?;
+    // the reply names the relayer as recorded (the session's actor and run), not the flag
+    let recorded = by.clone();
     let bad = |message: &str, fix: &str| RdyError::new(E_BAD_INPUT, message, fix);
     let relay = match (by, a.evidence) {
         (Some(by), Some(quoted)) => Some(Relay {
@@ -87,7 +89,11 @@ pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError>
         relay,
         evidence: None,
     };
-    land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
+    let mut v = land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))?;
+    if let Some(by) = recorded {
+        v["relayed_by"] = json!(by);
+    }
+    Ok(v)
 }
 
 pub(super) fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {

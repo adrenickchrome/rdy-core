@@ -131,11 +131,11 @@ pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
 /// - a human session with `relayed_by`: refused (`E_PERMISSION`);
 /// - an agent session with no `relayed_by`: refused (`E_PERMISSION`);
 /// - an agent session with `relayed_by` but no evidence: refused (`E_BAD_INPUT`, the pairing);
-/// - an agent session whose `relayed_by` names its own actor, and its own run when it names a
+/// - an agent session whose `relayed_by` is exactly its actor, or its `actor/run` when it has a
 ///   run: the human actor (`cx.human`, run `cli`) as the approver, relayed by the session's
-///   actor and run (the session's run when the flag names none);
-/// - an agent session whose `relayed_by` names another actor or another run, or a run the
-///   session does not have: refused (`E_PERMISSION`).
+///   actor and run (taken from the session, never parsed from the flag);
+/// - an agent session whose `relayed_by` is anything else: refused (`E_PERMISSION`), with a fix
+///   that names the session's actor, a spelling this check accepts.
 pub(crate) fn relay_approver(
     cx: &OpContext,
     relayed_by: Option<&str>,
@@ -157,19 +157,13 @@ pub(crate) fn relay_approver(
     if !has_evidence {
         return Err(RdyError::new(E_BAD_INPUT, RELAY_PAIR, RELAY_PAIR_FIX));
     }
-    let (actor, run) = match by.split_once('/') {
-        Some((actor, run)) => (actor, Some(run)),
-        None => (by, None),
+    // the flag is compared whole with the session's own spellings, never split: an agent
+    // actor may contain '/', so splitting would misread `agent:a/b` as actor `agent:a`, run `b`
+    let me = match &s.run {
+        Some(r) => format!("{}/{r}", s.actor),
+        None => s.actor.clone(),
     };
-    let own_run = match run {
-        None => true,
-        Some(r) => s.run.as_deref() == Some(r),
-    };
-    if actor != s.actor || !own_run {
-        let me = match &s.run {
-            Some(r) => format!("{}/{r}", s.actor),
-            None => s.actor.clone(),
-        };
+    if by != s.actor && by != me {
         return Err(RdyError::new(
             E_PERMISSION,
             format!("{me} relays only as itself, not as {by}"),
