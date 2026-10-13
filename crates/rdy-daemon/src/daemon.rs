@@ -161,8 +161,9 @@ impl DaemonHandle {
         self.info.connections.load(Ordering::SeqCst)
     }
 
+    /// The socket this daemon bound.
     pub fn socket(&self) -> PathBuf {
-        self.run.socket()
+        self.files.socket(&self.run)
     }
 }
 
@@ -213,10 +214,12 @@ impl Daemon {
         }
     }
 
-    /// Binds the socket and writes the pid file (`socket::bind`). Call only while holding the
-    /// store lock.
+    /// Binds the socket, writes the pid file and records the socket (`socket::bind`). Call only
+    /// while holding the store lock.
     pub async fn bind(&mut self) -> io::Result<()> {
-        self.listener = Some(socket::bind(&self.config.run).await?);
+        let (listener, path) = socket::bind(&self.config.run).await?;
+        self.files.bound(path);
+        self.listener = Some(listener);
         Ok(())
     }
 
@@ -231,7 +234,7 @@ impl Daemon {
             .ok_or_else(|| io::Error::other("run before bind"))?;
         log(&format!(
             "listening on {}",
-            self.config.run.socket().display()
+            self.files.socket(&self.config.run).display()
         ));
         let ctx = Arc::new(Conn {
             version: self.config.version.clone(),
@@ -335,19 +338,42 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
     }
 }
 
-/// The removal of this daemon's socket and pid file, done exactly once by whichever stop path
-/// gets there first. Once removed, the paths may belong to a successor daemon, so a second
-/// removal would delete its files. The lock is held across the removal, so every caller returns
-/// only once the files are gone.
+/// The removal of this daemon's socket record, socket and pid file, done exactly once by
+/// whichever stop path gets there first. Once removed, the paths may belong to a successor
+/// daemon, so a second removal would delete its files. The lock is held across the removal, so
+/// every caller returns only once the files are gone. The socket is the one `bind` bound
+/// (`RunDir::socket` before a bind), so a project renamed or deleted while the daemon runs still
+/// has its socket removed.
 #[derive(Clone, Default)]
-struct RunFiles(Arc<Mutex<bool>>);
+struct RunFiles(Arc<Mutex<Files>>);
+
+#[derive(Default)]
+struct Files {
+    removed: bool,
+    socket: Option<PathBuf>,
+}
 
 impl RunFiles {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Files> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn bound(&self, socket: PathBuf) {
+        self.lock().socket = Some(socket);
+    }
+
+    fn socket(&self, run: &RunDir) -> PathBuf {
+        self.lock().socket.clone().unwrap_or_else(|| run.socket())
+    }
+
     fn remove(&self, run: &RunDir) {
-        let mut removed = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if !*removed {
-            *removed = true;
-            remove_if_present(&run.socket());
+        let mut files = self.lock();
+        if !files.removed {
+            files.removed = true;
+            // the record first: no client follows it to a socket that is going away
+            remove_if_present(&run.socket_record());
+            let socket = files.socket.clone().unwrap_or_else(|| run.socket());
+            remove_if_present(&socket);
             remove_if_present(&run.pid_file());
         }
     }

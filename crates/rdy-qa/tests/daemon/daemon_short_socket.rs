@@ -172,3 +172,120 @@ fn df3_every_spelling_of_a_long_project_path_reaches_one_socket() {
         .unwrap());
     assert!(!sock.exists());
 }
+
+/// The `/System/Volumes/Data` spelling of `canonical` (a macOS firmlink that `fs::canonicalize`
+/// leaves as it is), when it names the same directory under another string.
+fn firmlink_spelling(canonical: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let data = Path::new("/System/Volumes/Data").join(canonical.strip_prefix("/").ok()?);
+    let (a, b) = (
+        std::fs::metadata(canonical).ok()?,
+        std::fs::metadata(&data).ok()?,
+    );
+    let same = (a.dev(), a.ino()) == (b.dev(), b.ino());
+    let unmerged = std::fs::canonicalize(&data).ok()? != canonical;
+    (same && unmerged).then_some(data)
+}
+
+/// How many daemons started for `project`: the "opening store" lines of its daemon.log.
+fn starts(project: &Path) -> usize {
+    std::fs::read_to_string(project.join(".rdy/run/daemon.log"))
+        .unwrap_or_default()
+        .matches("opening store")
+        .count()
+}
+
+/// Starts the daemon through `first`, then checks that `status` through `second` reaches the same
+/// daemon (same pid) with no second spawn, and stops it.
+fn one_daemon_through(project: &Path, first: &Path, second: &Path) {
+    let before = starts(project);
+    ok(&human_command(first, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    let pid = ping_pid(first);
+    ok(&human_command(second, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    assert_eq!(
+        ping_pid(second),
+        pid,
+        "{} reached another daemon than {}",
+        second.display(),
+        first.display()
+    );
+    assert_eq!(starts(project), before + 1, "a second daemon was spawned");
+    let record = project.join(".rdy/run/daemon.sock");
+    assert!(record.exists(), "the daemon records its socket");
+    ok(&human_command(second, &[], &["serve", "--stop"])
+        .output()
+        .unwrap());
+    assert!(!record.exists(), "a clean exit removes the record");
+}
+
+/// Fix round 1 (ruling 2): every spelling of one project reaches one daemon, also a spelling
+/// that `fs::canonicalize` does not merge (the macOS `/System/Volumes/Data` firmlink), because
+/// the daemon records where it bound and clients connect there.
+#[test]
+fn df3_two_spellings_of_one_project_reach_one_daemon() {
+    // a symlink: canonicalize merges it
+    let base = short_tempdir();
+    let project = long_project(base.path());
+    let _stop = StopOnDrop(&project);
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    one_daemon_through(&project, &link, &project);
+
+    // the firmlink spelling of a long project: both spellings get a short socket, keyed by
+    // different strings
+    let canonical = std::fs::canonicalize(&project).unwrap();
+    if let Some(data) = firmlink_spelling(&canonical) {
+        one_daemon_through(&project, &data, &canonical);
+    }
+
+    // at the length limit: the canonical spelling fits .rdy/run/rdy.sock, the firmlink one does
+    // not
+    let base = short_tempdir();
+    let canonical_base = std::fs::canonicalize(base.path()).unwrap();
+    let pad = MAX_SOCKET_PATH - canonical_base.as_os_str().len() - 1 - "/.rdy/run/rdy.sock".len();
+    let edge = canonical_base.join("p".repeat(pad));
+    std::fs::create_dir(&edge).unwrap();
+    drop(Rdy::init(&edge, "rdy-standard").unwrap());
+    assert_eq!(
+        edge.join(".rdy/run/rdy.sock").as_os_str().len(),
+        MAX_SOCKET_PATH
+    );
+    let _stop_edge = StopOnDrop(&edge);
+    if let Some(data) = firmlink_spelling(&edge) {
+        one_daemon_through(&edge, &data, &edge);
+    }
+}
+
+/// Fix round 1 (ruling 2): a record that names a socket nobody answers on is stale: the client
+/// computes its own socket, starts a daemon, and that daemon rewrites the record.
+#[test]
+fn df3_a_stale_socket_record_is_recomputed_and_rewritten() {
+    let base = short_tempdir();
+    let project = base.path().join("p");
+    std::fs::create_dir(&project).unwrap();
+    drop(Rdy::init(&project, "rdy-standard").unwrap());
+    let _stop = StopOnDrop(&project);
+    let run = RunDir::of_project(&project);
+    run.ensure().unwrap();
+    let dead = base.path().join("dead.sock");
+    drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
+    std::fs::write(run.socket_record(), format!("{}\n", dead.display())).unwrap();
+    ok(&human_command(&project, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    assert_eq!(
+        std::fs::read_to_string(run.socket_record()).unwrap(),
+        format!("{}\n", run.socket().display()),
+        "the new daemon rewrites the record"
+    );
+    assert_eq!(run.recorded_socket(), Some(run.socket()));
+    ping_pid(&project);
+    ok(&human_command(&project, &[], &["serve", "--stop"])
+        .output()
+        .unwrap());
+    assert!(!run.socket_record().exists());
+}

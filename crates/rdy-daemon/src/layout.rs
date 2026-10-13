@@ -1,13 +1,14 @@
 //! Where the daemon's files live: `<project>/.rdy/run/`. The socket is `.rdy/run/rdy.sock` when
 //! that path fits `sun_path`, else `/tmp/rdy-<uid>/<hash>.sock` in a directory private to the
-//! user (D-YMWEM).
+//! user (D-YMWEM). The daemon records the socket it bound in `.rdy/run/daemon.sock`.
 
 use crate::lock::open_no_follow;
 use crate::socket::{MAX_SOCKET_PATH, own_uid};
 use rdy_model::Hash;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ pub const PID_FILE: &str = "daemon.pid";
 pub const LOG_FILE: &str = "daemon.log";
 /// The run dir's own `.gitignore`: its files are the daemon's, never a checkout's.
 const GITIGNORE_FILE: &str = ".gitignore";
+/// The record of the socket the running daemon bound (`RunDir::socket_record`).
+pub const SOCKET_RECORD_FILE: &str = "daemon.sock";
 /// Where the short socket's directory, `rdy-<uid>`, lives (D-YMWEM).
 pub const SHORT_SOCKET_ROOT: &str = "/tmp";
 
@@ -80,6 +83,29 @@ impl RunDir {
             .unwrap_or_else(|_| root.to_path_buf())
     }
 
+    /// `.rdy/run/daemon.sock`: the socket the running daemon bound, one line. Every spelling of
+    /// a project reaches this one run dir, so a client of any spelling finds the daemon there,
+    /// also when its own spelling would compute another socket (a macOS firmlink, a bind mount).
+    pub fn socket_record(&self) -> PathBuf {
+        self.0.join(SOCKET_RECORD_FILE)
+    }
+
+    /// The socket `daemon.sock` names: one absolute path of at most `MAX_SOCKET_PATH` bytes,
+    /// ended by a newline. `None` when the record is missing, a symlink, unreadable, or anything
+    /// else.
+    pub fn recorded_socket(&self) -> Option<PathBuf> {
+        let f = open_no_follow(OpenOptions::new().read(true), &self.socket_record()).ok()?;
+        let mut buf = Vec::with_capacity(MAX_SOCKET_PATH + 1);
+        f.take(MAX_SOCKET_PATH as u64 + 2)
+            .read_to_end(&mut buf)
+            .ok()?;
+        let line = buf.strip_suffix(b"\n")?;
+        let well_formed = line.first() == Some(&b'/')
+            && line.len() <= MAX_SOCKET_PATH
+            && !line.iter().any(|&b| b == b'\n' || b == 0);
+        well_formed.then(|| PathBuf::from(OsStr::from_bytes(line)))
+    }
+
     pub fn start_lock(&self) -> PathBuf {
         self.0.join(START_LOCK_FILE)
     }
@@ -97,7 +123,8 @@ impl RunDir {
     /// writes the run dir's `.gitignore` (`*`) when it is missing, so git ignores the socket, pid,
     /// lock and log; whatever already stands at that name, a link included, is left untouched.
     /// When the socket is the short one, makes sure its directory is private to this user
-    /// (`ensure_short_dir`); a refusal is a [`NotPrivateDir`] error.
+    /// (`ensure_short_dir`); a refusal is a [`NotPrivateDir`] error, and a directory that cannot
+    /// be created or checked is a [`ShortDirError`].
     pub fn ensure(&self) -> io::Result<()> {
         self.ensure_dir()?;
         self.ignore_self()?;
@@ -219,16 +246,54 @@ impl fmt::Display for NotPrivateDir {
 
 impl std::error::Error for NotPrivateDir {}
 
+/// A short socket directory that could not be created or checked (`mkdir`, `lstat` or `chmod`
+/// failed: a read-only or sandboxed `/tmp`, say). It names the directory.
+#[derive(Debug)]
+pub struct ShortDirError {
+    pub dir: PathBuf,
+    pub error: io::Error,
+}
+
+impl fmt::Display for ShortDirError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "could not prepare the run directory {} for the daemon socket: {}",
+            self.dir.display(),
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for ShortDirError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// `e` as a [`ShortDirError`] for `dir`, of `e`'s kind.
+fn short_dir_error(dir: &Path, e: io::Error) -> io::Error {
+    io::Error::new(
+        e.kind(),
+        ShortDirError {
+            dir: dir.to_path_buf(),
+            error: e,
+        },
+    )
+}
+
 /// `ensure_short_dir_as` for this process's user.
-fn ensure_short_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn ensure_short_dir(dir: &Path) -> io::Result<()> {
     ensure_short_dir_as(dir, own_uid())
 }
 
 /// Makes `dir` a directory private to user `uid` (D-YMWEM): creates it with mode 0o700 when it
 /// is missing; tightens a directory of `uid` with another mode to 0o700; refuses anything else
 /// (a symlink, a file, a directory of another user) with [`NotPrivateDir`], and leaves it as it
-/// is. It never follows a symlink.
+/// is. It never follows a symlink. A failed `mkdir`, `lstat` or `chmod` is a [`ShortDirError`]
+/// that names `dir`.
 fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
+    let failed = |e| short_dir_error(dir, e);
     let m = match fs::symlink_metadata(dir) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -236,18 +301,18 @@ fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
                 Ok(()) => {}
                 // another process made it first: check what it made
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
+                Err(e) => return Err(failed(e)),
             }
-            fs::symlink_metadata(dir)?
+            fs::symlink_metadata(dir).map_err(failed)?
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(failed(e)),
     };
     if !m.is_dir() || m.uid() != uid {
         return Err(io::Error::other(NotPrivateDir(dir.to_path_buf())));
     }
     // the umask may have narrowed a new directory's mode, and an old one may be open to others
     if m.mode() & 0o777 != 0o700 {
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(failed)?;
     }
     Ok(())
 }
@@ -427,5 +492,42 @@ mod tests {
         assert_eq!(m.permissions().mode() & 0o777, 0o700);
         // the short directory's name
         assert_eq!(short_dir(501), PathBuf::from("/tmp/rdy-501"));
+    }
+
+    /// Fix round 1 (ruling 1): a short directory that cannot be created or checked (a sandboxed
+    /// or read-only /tmp) is a `ShortDirError` that names the directory, never a bare io error.
+    #[test]
+    fn df3_a_short_socket_directory_that_cannot_be_prepared_names_it() {
+        let d = tempfile::tempdir().unwrap();
+        let named = |dir: &Path, e: io::Error| {
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+            let inner = e
+                .get_ref()
+                .and_then(|i| i.downcast_ref::<ShortDirError>())
+                .unwrap_or_else(|| panic!("not a ShortDirError: {e}"));
+            assert_eq!(inner.dir, dir);
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "could not prepare the run directory {} for the daemon socket: Permission denied (os error 13)",
+                    dir.display()
+                )
+            );
+        };
+        // mkdir fails: the parent cannot be written
+        let ro = d.path().join("read-only");
+        fs::DirBuilder::new().mode(0o500).create(&ro).unwrap();
+        let unwritable = ro.join("rdy-501");
+        let mkdir_failed = ensure_short_dir(&unwritable);
+        // lstat fails: the parent cannot be searched
+        let shut = d.path().join("shut");
+        fs::DirBuilder::new().mode(0o000).create(&shut).unwrap();
+        let unsearchable = shut.join("rdy-501");
+        let lstat_failed = ensure_short_dir(&unsearchable);
+        // restored before the asserts, so the temp dir is removed whatever they find
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        named(&unwritable, mkdir_failed.unwrap_err());
+        named(&unsearchable, lstat_failed.unwrap_err());
     }
 }

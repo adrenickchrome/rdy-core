@@ -92,8 +92,9 @@ async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
     let deep = dir.path().join("a".repeat(120));
     std::fs::create_dir_all(&deep).unwrap();
     let run = RunDir::of_project(&deep);
-    let listener = socket::bind(&run).await.unwrap();
+    let (listener, bound) = socket::bind(&run).await.unwrap();
     let sock = run.socket();
+    assert_eq!(bound, sock);
     assert_eq!(run.short_socket().as_ref(), Some(&sock));
     assert!(
         sock.as_os_str().len() <= MAX_SOCKET_PATH,
@@ -155,4 +156,42 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
         !run.socket().exists(),
         "the socket of a failed bind is removed"
     );
+}
+
+/// df3 fix round 1 (ruling 2): after its bind the daemon records the socket it bound in
+/// `.rdy/run/daemon.sock` (one line), next to `daemon.pid`, and removes the record on a clean
+/// exit.
+#[tokio::test]
+async fn df3_the_daemon_records_its_socket_and_removes_the_record_on_exit() {
+    let d = daemon("1", true, |_| {}).await;
+    let record = d.run.path().join("daemon.sock");
+    assert_eq!(d.run.socket_record(), record);
+    let mut line = d.run.socket().into_os_string().into_encoded_bytes();
+    line.push(b'\n');
+    assert_eq!(std::fs::read(&record).unwrap(), line);
+    assert_eq!(mode(&record), 0o600);
+    assert_eq!(d.run.recorded_socket(), Some(d.run.socket()));
+    d.handle.stop();
+    d.task.await.unwrap().unwrap();
+    assert!(!record.exists(), "a clean exit removes the record");
+    assert_eq!(d.run.recorded_socket(), None);
+}
+
+/// df3 fix round 1 (ruling 1): a socket that cannot be bound names its path, so a foreground
+/// `rdy serve` says where it failed.
+#[tokio::test]
+async fn df3_a_socket_that_cannot_be_bound_names_its_path() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    // a non-empty directory at the socket's name: it can be neither removed nor bound
+    std::fs::create_dir_all(run.socket().join("x")).unwrap();
+    let e = socket::bind(&run).await.unwrap_err();
+    assert!(
+        e.to_string()
+            .starts_with(&format!("{}: ", run.socket().display())),
+        "{e}"
+    );
+    assert!(!run.pid_file().exists());
+    assert_eq!(run.recorded_socket(), None);
 }

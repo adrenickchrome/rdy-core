@@ -87,6 +87,8 @@ Its files live in `.rdy/run/`: `rdy.sock` (the socket), `daemon.pid`, `daemon.lo
 background daemon's output; an `E_DAEMON_START` error quotes its last lines) and `start.lock`
 (held by the one client that starts the daemon). When `.rdy/run/rdy.sock` is too long for the
 system, the socket is `/tmp/rdy-<uid>/<hash>.sock` instead, in a directory only you can read.
+The daemon writes its socket's path to `.rdy/run/daemon.sock`, and clients connect there, so
+every spelling of the project's path reaches one daemon.
 Two settings in `.rdy.yaml`, in seconds:
 
 ```yaml

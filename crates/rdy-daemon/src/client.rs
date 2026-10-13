@@ -3,14 +3,15 @@
 
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
-use crate::layout::{NotPrivateDir, RunDir};
+use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
 use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
+use crate::socket::MAX_SOCKET_PATH;
 use crate::spawn::Spawned;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -148,13 +149,18 @@ fn log_len(run: &RunDir) -> u64 {
         .map_or(0, |m| m.len())
 }
 
-/// Whether `daemon.pid` names a live process: a daemon (starting, or draining its store) that a
-/// held store lock may belong to.
-fn daemon_pid_alive(run: &RunDir) -> bool {
+/// The pid `daemon.pid` names when that process is alive: a daemon (starting, or draining its
+/// store) that a held store lock may belong to.
+fn live_daemon_pid(run: &RunDir) -> Option<u32> {
     fs::read_to_string(run.pid_file())
         .ok()
         .and_then(|t| t.trim().parse::<u32>().ok())
-        .is_some_and(crate::spawn::process_alive)
+        .filter(|&pid| crate::spawn::process_alive(pid))
+}
+
+/// The project's store lock file, `.rdy/store/lock`, next to the run dir.
+fn store_lock(run: &RunDir) -> Option<PathBuf> {
+    run.path().parent().map(|p| p.join("store").join("lock"))
 }
 
 /// Whether the store's lock file is held by a process right now. A missing lock file or any other
@@ -412,8 +418,8 @@ pub enum Attempt {
     Refused(ErrorReply),
 }
 
-/// Connects to the run dir's socket, sends `hello` and reads the first reply (within
-/// `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
+/// Connects to the project's daemon (the socket recorded in `daemon.sock`, else the run dir's
+/// socket), sends `hello` and reads the first reply (within `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
 /// path that is a symlink, and a peer that is not of our own uid (neither hears the hello).
 pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
     connect_expecting_uid(run, hello, crate::socket::own_uid()).await
@@ -428,21 +434,42 @@ pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Att
     }
 }
 
-/// The connect, the peer check, the hello and its first reply; any error is "no daemon".
+/// The connect, the peer check, the hello and its first reply; any error is "no daemon". The
+/// socket the daemon recorded (`daemon.sock`) comes first, so a client of any spelling of the
+/// project reaches the one daemon. It is followed only while the project's store is locked, as
+/// a running daemon keeps it: a copied project's record names the original's daemon, which
+/// serves another store. A record that does not answer is stale; then the client's own socket
+/// (`RunDir::socket`) is tried.
 async fn exchange_hello(
     run: &RunDir,
     hello: &Hello,
     uid: u32,
 ) -> io::Result<(UnixStream, HelloReply)> {
-    let path = run.socket();
+    let own = run.socket();
+    if let Some(recorded) = run.recorded_socket()
+        && recorded != own
+        && store_lock(run).is_some_and(|l| store_lock_held(&l))
+        && let Ok(found) = exchange_hello_at(&recorded, hello, uid).await
+    {
+        return Ok(found);
+    }
+    exchange_hello_at(&own, hello, uid).await
+}
+
+/// `exchange_hello` on the socket `path`.
+async fn exchange_hello_at(
+    path: &Path,
+    hello: &Hello,
+    uid: u32,
+) -> io::Result<(UnixStream, HelloReply)> {
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::other(format!(
             "{} is a symbolic link, which rdy does not follow",
             path.display()
         )));
     }
-    let mut stream = UnixStream::connect(&path).await?;
+    let mut stream = UnixStream::connect(path).await?;
     // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
     let peer = crate::socket::peer_uid(&stream)?;
     if peer != uid {
@@ -527,25 +554,53 @@ async fn finish(
 }
 
 /// The `E_DAEMON_START` for a failed `RunDir::ensure`: a short socket directory that is not
-/// private to this user (D-YMWEM) has its own fix; any other failure names the run dir.
+/// private to this user, or that cannot be created or checked (D-YMWEM), has its own fix; any
+/// other failure names the run dir.
 fn ensure_error(run: &RunDir, e: io::Error) -> ErrorReply {
-    match e
-        .get_ref()
-        .and_then(|inner| inner.downcast_ref::<NotPrivateDir>())
-    {
-        Some(dir) => ErrorReply::new(
+    let inner = e.get_ref();
+    if let Some(dir) = inner.and_then(|i| i.downcast_ref::<NotPrivateDir>()) {
+        return ErrorReply::new(
             E_DAEMON_START,
             format!("could not start the daemon: {dir}"),
             format!(
                 "remove {}, or move the project to a shorter path",
                 dir.0.display()
             ),
-        ),
-        None => start_error(format!(
-            "could not create the run directory {}: {e}",
-            run.path().display()
-        )),
+        );
     }
+    if let Some(failed) = inner.and_then(|i| i.downcast_ref::<ShortDirError>()) {
+        return ErrorReply::new(
+            E_DAEMON_START,
+            failed.to_string(),
+            format!(
+                "make {} a directory this user owns with mode 0700, or move the project to a path short enough that .rdy/run/rdy.sock fits (at most {MAX_SOCKET_PATH} bytes)",
+                failed.dir.display()
+            ),
+        );
+    }
+    start_error(format!(
+        "could not create the run directory {}: {e}",
+        run.path().display()
+    ))
+}
+
+/// The `E_DAEMON_START` for a spawned daemon that exited while the store is locked by daemon
+/// `pid`, which answers on no socket this client tried: the recorded one, else its own.
+fn locked_by_silent_daemon(run: &RunDir, pid: u32, since: u64) -> ErrorReply {
+    let socket = run.recorded_socket().unwrap_or_else(|| run.socket());
+    let mut e = ErrorReply::new(
+        E_DAEMON_START,
+        format!(
+            "the store is locked by daemon {pid}, which does not answer on {}",
+            socket.display()
+        ),
+        format!("stop it with rdy serve --stop from the project, or end process {pid}"),
+    );
+    e.extra.insert(
+        "log_tail".into(),
+        json!(log_tail_since(run, since, LOG_TAIL_LINES)),
+    );
+    e
 }
 
 /// Connects to the project's daemon, starting one if none answers. At most one client spawns:
@@ -628,15 +683,15 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     // pid file first), and the successor's own open retries for LOCKED_RETRY to outlast it: so
     // wait that long when a daemon just told us it is exiting, and do not refuse at all while
     // the pid file names a live process.
-    if let Some(store) = run.path().parent().map(|p| p.join("store")) {
-        let lock = store.join("lock");
+    if let Some(lock) = store_lock(run) {
+        let store = lock.parent().unwrap_or(&lock).to_path_buf();
         let grace = if saw_exiting {
             crate::serve::LOCKED_RETRY
         } else {
             HELD_GRACE
         };
         let give_up = (Instant::now() + grace).min(deadline);
-        while store_lock_held(&lock) && !daemon_pid_alive(run) {
+        while store_lock_held(&lock) && live_daemon_pid(run).is_none() {
             match connect(run, &hello).await {
                 Attempt::Ready(c) => return Ok(c),
                 Attempt::Starting(p) => {
@@ -694,8 +749,14 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
             Attempt::Refused(e) => return Err(e),
             Attempt::Exiting | Attempt::NoDaemon(_) => {}
         }
-        // a daemon that died (say, finding the store locked) will never answer: say so now
+        // a daemon that died (say, finding the store locked) will never answer: say so now. A
+        // store held by a live daemon that answers on no socket we know is named as such.
         if let Some(code) = (spawned.exited)() {
+            if let Some(pid) = live_daemon_pid(run)
+                && store_lock(run).is_some_and(|l| store_lock_held(&l))
+            {
+                return Err(locked_by_silent_daemon(run, pid, log_from));
+            }
             return Err(start_error_citing(
                 run,
                 format!("the daemon exited with code {code} before it was ready"),
@@ -736,5 +797,30 @@ mod tests {
             "could not create the run directory /p/.rdy/run: no space"
         );
         assert_eq!(other.fix, START_FIX);
+
+        // fix round 1 (ruling 1): a short directory that cannot be prepared (a sandboxed /tmp,
+        // simulated by a parent this user cannot write) names the directory and has its own fix
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let d = tempfile::tempdir().unwrap();
+        let ro = d.path().join("read-only");
+        fs::DirBuilder::new().mode(0o500).create(&ro).unwrap();
+        let dir = ro.join("rdy-501");
+        let e = ensure_error(&run, crate::layout::ensure_short_dir(&dir).unwrap_err());
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(e.code, E_DAEMON_START);
+        assert_eq!(
+            e.message,
+            format!(
+                "could not prepare the run directory {} for the daemon socket: Permission denied (os error 13)",
+                dir.display()
+            )
+        );
+        assert_eq!(
+            e.fix,
+            format!(
+                "make {} a directory this user owns with mode 0700, or move the project to a path short enough that .rdy/run/rdy.sock fits (at most 103 bytes)",
+                dir.display()
+            )
+        );
     }
 }

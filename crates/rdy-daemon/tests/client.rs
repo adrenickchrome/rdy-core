@@ -624,3 +624,84 @@ async fn cli2_a_spawned_daemon_that_exits_before_ready_is_e_daemon_start_at_once
     );
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
 }
+
+/// Holds the project's store lock (`.rdy/store/lock`) as a daemon does, until dropped.
+fn hold_store_lock(project: &std::path::Path) -> std::fs::File {
+    let store = project.join(".rdy").join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let f = std::fs::File::create(store.join("lock")).unwrap();
+    f.try_lock().unwrap();
+    f
+}
+
+/// df3 fix round 1 (ruling 2): a spawned daemon that exits because a live daemon, which answers
+/// on no socket we know, holds the store says so, with the socket the client tried: the recorded
+/// one when there is a record, else its own.
+#[tokio::test]
+async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
+    for recorded in [false, true] {
+        let dir = short_tempdir();
+        let run = RunDir::of_project(dir.path());
+        run.ensure().unwrap();
+        let _held = hold_store_lock(dir.path());
+        let pid = std::process::id();
+        std::fs::write(run.pid_file(), format!("{pid}\n")).unwrap();
+        let tried = if recorded {
+            let dead = dir.path().join("dead.sock");
+            drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
+            let mut line = dead.clone().into_os_string().into_encoded_bytes();
+            line.push(b'\n');
+            std::fs::write(run.socket_record(), line).unwrap();
+            dead
+        } else {
+            run.socket()
+        };
+        let mut o = opts("1", dir.path(), |_: &RunDir| {
+            Ok(Spawned {
+                exited: Box::new(|| Some(2)),
+            })
+        });
+        o.start_timeout = Duration::from_secs(10);
+        let e = connect_or_start(&run, o).await.unwrap_err();
+        assert_eq!(e.code, E_DAEMON_START, "{e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "the store is locked by daemon {pid}, which does not answer on {}",
+                tried.display()
+            ),
+            "recorded: {recorded}"
+        );
+        assert_eq!(
+            e.fix,
+            format!("stop it with rdy serve --stop from the project, or end process {pid}")
+        );
+    }
+}
+
+/// df3 fix round 1 (ruling 2): a client follows `daemon.sock` to a socket that is not its own
+/// computed one only while its project's store is locked (by that daemon). A copy of a project,
+/// whose record names the original's daemon, never reaches it: that daemon serves another store.
+#[tokio::test]
+async fn df3_a_recorded_socket_is_followed_only_while_the_store_is_locked() {
+    let d = daemon("1", true, |_| {}).await;
+    let copy = short_tempdir();
+    let run = RunDir::of_project(copy.path());
+    run.ensure().unwrap();
+    let mut line = d.run.socket().into_os_string().into_encoded_bytes();
+    line.push(b'\n');
+    std::fs::write(run.socket_record(), line).unwrap();
+    let hello = hello_for(copy.path());
+    // the copy's store is not locked: the record is not followed
+    assert!(
+        matches!(connect(&run, &hello).await, Attempt::NoDaemon(_)),
+        "the copy reached the original's daemon"
+    );
+    // the same project under another spelling: its store is locked by the recorded daemon
+    let _held = hold_store_lock(copy.path());
+    let Attempt::Ready(c) = connect(&run, &hello).await else {
+        panic!("the recorded socket was not followed")
+    };
+    c.close();
+    d.handle.stop();
+}
