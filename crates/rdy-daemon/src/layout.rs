@@ -26,6 +26,54 @@ pub const SOCKET_RECORD_FILE: &str = "daemon.sock";
 /// Where the short socket's directory, `rdy-<uid>`, lives (D-YMWEM).
 pub const SHORT_SOCKET_ROOT: &str = "/tmp";
 
+/// Which project a daemon serves: the filesystem identity (`st_dev`, `st_ino`) of the project's
+/// `.rdy` directory, from `lstat`. Every spelling of one project gives one identity; a copy or a
+/// restore gives another. Written `{dev}:{ino}`, in the socket record and in the hello.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProjectId {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.dev, self.ino)
+    }
+}
+
+impl std::str::FromStr for ProjectId {
+    type Err = String;
+
+    /// `{dev}:{ino}`, two decimal numbers.
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("{s:?} is not a project identity (dev:ino)");
+        let (dev, ino) = s.split_once(':').ok_or_else(bad)?;
+        let number = |n: &str| {
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
+            n.parse::<u64>().map_err(|_| bad())
+        };
+        Ok(ProjectId {
+            dev: number(dev)?,
+            ino: number(ino)?,
+        })
+    }
+}
+
+impl serde::Serialize for ProjectId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProjectId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunDir(PathBuf);
 
@@ -71,6 +119,22 @@ impl RunDir {
         (short_dir(own_uid()).join(format!("{hash}.sock")), true)
     }
 
+    /// The project's identity: `lstat` of its `.rdy` (the run dir's parent), never followed.
+    pub fn project_id(&self) -> io::Result<ProjectId> {
+        // `<root>/.rdy/run` always has its `.rdy` as parent
+        let m = fs::symlink_metadata(self.0.parent().unwrap_or(Path::new(".rdy")))?;
+        Ok(ProjectId {
+            dev: m.dev(),
+            ino: m.ino(),
+        })
+    }
+
+    /// The project root, canonical (`canonical_root`): what a daemon names as the project it
+    /// serves.
+    pub fn root(&self) -> PathBuf {
+        self.canonical_root()
+    }
+
     /// The project root (the run dir's grandparent), canonical: `fs::canonicalize`, else
     /// `std::path::absolute` (a root that does not exist), else as given.
     fn canonical_root(&self) -> PathBuf {
@@ -83,27 +147,35 @@ impl RunDir {
             .unwrap_or_else(|_| root.to_path_buf())
     }
 
-    /// `.rdy/run/daemon.sock`: the socket the running daemon bound, one line. Every spelling of
-    /// a project reaches this one run dir, so a client of any spelling finds the daemon there,
-    /// also when its own spelling would compute another socket (a macOS firmlink, a bind mount).
+    /// `.rdy/run/daemon.sock`: the socket the running daemon bound, then the identity of the
+    /// project's `.rdy` at its bind (`{dev}:{ino}`), one line each. Every spelling of a project
+    /// reaches this one run dir, so a client of any spelling finds the daemon there, also when
+    /// its own spelling would compute another socket (a macOS firmlink, a bind mount).
     pub fn socket_record(&self) -> PathBuf {
         self.0.join(SOCKET_RECORD_FILE)
     }
 
-    /// The socket `daemon.sock` names: one absolute path of at most `MAX_SOCKET_PATH` bytes,
-    /// ended by a newline. `None` when the record is missing, a symlink, unreadable, or anything
-    /// else.
+    /// The socket `daemon.sock` names, when the record names this project: an absolute socket
+    /// path of at most `MAX_SOCKET_PATH` bytes, then the identity of this project's `.rdy`
+    /// (`project_id`), each ended by a newline. `None` when the record is missing, a symlink,
+    /// unreadable or anything else, and when it names another `.rdy`: a copy or a restore of a
+    /// project carries the original's record, which is stale here.
     pub fn recorded_socket(&self) -> Option<PathBuf> {
         let f = open_no_follow(OpenOptions::new().read(true), &self.socket_record()).ok()?;
-        let mut buf = Vec::with_capacity(MAX_SOCKET_PATH + 1);
-        f.take(MAX_SOCKET_PATH as u64 + 2)
-            .read_to_end(&mut buf)
-            .ok()?;
-        let line = buf.strip_suffix(b"\n")?;
-        let well_formed = line.first() == Some(&b'/')
-            && line.len() <= MAX_SOCKET_PATH
-            && !line.iter().any(|&b| b == b'\n' || b == 0);
-        well_formed.then(|| PathBuf::from(OsStr::from_bytes(line)))
+        // the socket, its newline, and `u64:u64` with its newline
+        let most = MAX_SOCKET_PATH as u64 + 1 + 2 * 20 + 2;
+        let mut buf = Vec::with_capacity(most as usize);
+        f.take(most + 1).read_to_end(&mut buf).ok()?;
+        if buf.len() as u64 > most {
+            return None;
+        }
+        let (socket, rest) = buf.split_at(buf.iter().position(|&b| b == b'\n')?);
+        let project = std::str::from_utf8(rest.strip_prefix(b"\n")?.strip_suffix(b"\n")?).ok()?;
+        let well_formed = socket.first() == Some(&b'/')
+            && socket.len() <= MAX_SOCKET_PATH
+            && !socket.contains(&0);
+        let ours = project.parse::<ProjectId>().ok()? == self.project_id().ok()?;
+        (well_formed && ours).then(|| PathBuf::from(OsStr::from_bytes(socket)))
     }
 
     pub fn start_lock(&self) -> PathBuf {
@@ -529,5 +601,38 @@ mod tests {
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
         named(&unwritable, mkdir_failed.unwrap_err());
         named(&unsearchable, lstat_failed.unwrap_err());
+    }
+
+    /// df3 fix round 2 (ruling task-3-round1): `daemon.sock` is the socket, then the `.rdy`
+    /// identity (`dev:ino`), one line each. It is followed only when the identity is this
+    /// project's; any other shape is no record.
+    #[test]
+    fn df3_a_socket_record_is_read_only_when_it_names_this_project() {
+        let d = tempfile::tempdir().unwrap();
+        let run = RunDir::of_project(d.path());
+        run.ensure_dir().unwrap();
+        let own = run.project_id().unwrap();
+        let rdy = fs::symlink_metadata(d.path().join(".rdy")).unwrap();
+        assert_eq!(own.to_string(), format!("{}:{}", rdy.dev(), rdy.ino()));
+        assert_eq!(own.to_string().parse::<ProjectId>(), Ok(own));
+        let other = ProjectId {
+            dev: own.dev,
+            ino: own.ino + 1,
+        };
+        let cases: Vec<(String, Option<&str>)> = vec![
+            (format!("/s.sock\n{own}\n"), Some("/s.sock")),
+            (format!("/s.sock\n{other}\n"), None),
+            ("/s.sock\n".into(), None),
+            (format!("/s.sock\n{own}"), None),
+            (format!("/s.sock\n{own}\nmore\n"), None),
+            (format!("s.sock\n{own}\n"), None),
+            (format!("/s.sock\n{}:x\n", own.dev), None),
+            (format!("/s.sock\n+{own}\n"), None),
+            (format!("/{}\n{own}\n", "s".repeat(MAX_SOCKET_PATH)), None),
+        ];
+        for (record, want) in cases {
+            fs::write(run.socket_record(), &record).unwrap();
+            assert_eq!(run.recorded_socket(), want.map(PathBuf::from), "{record:?}");
+        }
     }
 }

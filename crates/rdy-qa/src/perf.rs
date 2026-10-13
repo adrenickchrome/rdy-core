@@ -3253,6 +3253,9 @@ async fn daemon_ready(proj: &std::path::Path) -> Client {
         version: "perf".into(),
         proto: Proto::Ctl,
         cwd: proj.to_path_buf(),
+        project: rdy_daemon::RunDir::of_project(std::path::Path::new(&proj))
+            .project_id()
+            .expect("the project's .rdy"),
     };
     let run = RunDir::of_project(proj);
     match rdy_daemon::connect(&run, &hello).await {
@@ -3549,6 +3552,9 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
         version: "perf".into(),
         proto: Proto::Mcp,
         cwd: proj.to_path_buf(),
+        project: rdy_daemon::RunDir::of_project(std::path::Path::new(&proj))
+            .project_id()
+            .expect("the project's .rdy"),
     };
     let stream = match rdy_daemon::connect(&RunDir::of_project(proj), &hello).await {
         Attempt::Ready(c) => c.into_stream(),

@@ -1,10 +1,10 @@
 //! The daemon: the accept loop, the per-connection hello and handshake, and stop.
 
 use crate::ctl::{DaemonInfo, serve_ctl};
-use crate::error::{E_DAEMON_VERSION, ErrorReply};
+use crate::error::{E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::handler::Handler;
 use crate::hello::{HelloReply, read_hello};
-use crate::layout::RunDir;
+use crate::layout::{ProjectId, RunDir};
 use crate::session::{Proto, SessionInfo, Sessions};
 use crate::socket;
 use std::io::{self, Write};
@@ -178,6 +178,8 @@ pub struct Daemon {
     count: Arc<watch::Sender<usize>>,
     files: RunFiles,
     listener: Option<UnixListener>,
+    /// The identity of the project's `.rdy` at the bind: hellos from another project are refused.
+    project: Option<ProjectId>,
 }
 
 impl Daemon {
@@ -199,6 +201,7 @@ impl Daemon {
             count: Arc::new(watch::channel(0).0),
             files: RunFiles::default(),
             listener: None,
+            project: None,
         }
     }
 
@@ -217,8 +220,9 @@ impl Daemon {
     /// Binds the socket, writes the pid file and records the socket (`socket::bind`). Call only
     /// while holding the store lock.
     pub async fn bind(&mut self) -> io::Result<()> {
-        let (listener, path) = socket::bind(&self.config.run).await?;
+        let (listener, path, project) = socket::bind(&self.config.run).await?;
         self.files.bound(path);
+        self.project = Some(project);
         self.listener = Some(listener);
         Ok(())
     }
@@ -228,9 +232,10 @@ impl Daemon {
     /// the pid file (unless `DaemonHandle::stop` already did), tells every connection to finish,
     /// and waits for them up to `STOP_GRACE`.
     pub async fn run(mut self) -> io::Result<ExitReason> {
-        let listener = self
+        let (listener, project) = self
             .listener
             .take()
+            .zip(self.project)
             .ok_or_else(|| io::Error::other("run before bind"))?;
         log(&format!(
             "listening on {}",
@@ -245,6 +250,8 @@ impl Daemon {
             reason: Arc::clone(&self.reason),
             run: self.config.run.clone(),
             files: self.files.clone(),
+            project,
+            root: self.config.run.root(),
         });
         let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
@@ -397,6 +404,23 @@ struct Conn {
     reason: Arc<OnceLock<ExitReason>>,
     run: RunDir,
     files: RunFiles,
+    /// The project this daemon serves (its `.rdy` at the bind) and its canonical root.
+    project: ProjectId,
+    root: PathBuf,
+}
+
+/// The refusal of a hello from another project: the daemon on `socket` serves the project at
+/// `root`, and the client's own daemon is not running (ruling task-3-round1).
+fn another_project(socket: &Path, root: &Path) -> ErrorReply {
+    ErrorReply::new(
+        E_DAEMON_START,
+        format!(
+            "the daemon on {} serves another project ({})",
+            socket.display(),
+            root.display()
+        ),
+        "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project",
+    )
 }
 
 /// The end of a connection, run on every way out of its task (return, panic, abort): removes
@@ -494,7 +518,19 @@ impl Conn {
                 return;
             }
         };
-        // (c) the version handshake
+        // (c) the project: a client of another project (a copy's stale record, a path reused
+        // after a project was moved away) never gets a session, and never makes this daemon
+        // exit to be replaced
+        if hello.project != self.project {
+            log(&format!(
+                "refused a client of another project ({})",
+                hello.project
+            ));
+            let error = another_project(&self.files.socket(&self.run), &self.root);
+            close_after_reply(stream, &HelloReply::Refused { error }).await;
+            return;
+        }
+        // (d) the version handshake
         if hello.version != self.version {
             if self.info.sessions.is_empty() {
                 let reply = HelloReply::Exiting {
@@ -523,7 +559,7 @@ impl Conn {
             }
             return;
         }
-        // (d) starting, then ready
+        // (e) starting, then ready
         if !self.wait_ready(&mut stream).await {
             return;
         }
@@ -546,7 +582,7 @@ impl Conn {
         if write_reply(&mut stream, &ready).await.is_err() {
             return;
         }
-        // (e) the protocol
+        // (f) the protocol
         match hello.proto {
             Proto::Ctl => {
                 let (r, w) = stream.split();
@@ -652,5 +688,25 @@ impl Conn {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// df3 fix round 2 (ruling task-3-round1): the refusal of a hello from another project.
+    #[test]
+    fn df3_the_refusal_of_another_project_names_the_socket_and_the_root() {
+        let e = another_project(Path::new("/tmp/rdy-501/abc.sock"), Path::new("/w/orig"));
+        assert_eq!(e.code, E_DAEMON_START);
+        assert_eq!(
+            e.message,
+            "the daemon on /tmp/rdy-501/abc.sock serves another project (/w/orig)"
+        );
+        assert_eq!(
+            e.fix,
+            "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project"
+        );
     }
 }

@@ -45,6 +45,9 @@ fn serve1_a_ctl_session_must_open_with_the_session_op() {
             version: "t".into(),
             proto: Proto::Ctl,
             cwd: h.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&h.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let rdy_daemon::Attempt::Ready(mut c) =
             connect(&RunDir::of_project(h.dir.path()), &hello).await
@@ -230,6 +233,9 @@ fn serve1_hellos_during_warm_up_see_starting_then_ready() {
             version: "t".into(),
             proto: Proto::Ctl,
             cwd: dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         match connect(&RunDir::of_project(dir.path()), &hello).await {
             rdy_daemon::Attempt::Ready(_) => true,
@@ -288,6 +294,9 @@ fn assert_ready(rt: &tokio::runtime::Runtime, project: &std::path::Path, version
             version: version.into(),
             proto: Proto::Ctl,
             cwd: project.into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&project))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         match connect(&RunDir::of_project(project), &hello).await {
             rdy_daemon::Attempt::Ready(c) => assert_eq!(c.version(), version),
@@ -321,6 +330,9 @@ fn serve1_a_successor_started_as_a_version_replaced_daemon_exits_comes_up_ready(
             version: "u".into(),
             proto: Proto::Ctl,
             cwd: h.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&h.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let a = connect(&RunDir::of_project(h.dir.path()), &hello).await;
         assert!(matches!(a, rdy_daemon::Attempt::Exiting), "{a:?}");
@@ -392,6 +404,9 @@ fn hd3_the_session_op_gets_a_did_you_mean_for_a_misspelt_key() {
             version: "t".into(),
             proto: Proto::Ctl,
             cwd: h.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&h.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let rdy_daemon::Attempt::Ready(mut c) =
             connect(&RunDir::of_project(h.dir.path()), &hello).await

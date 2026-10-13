@@ -338,6 +338,7 @@ fn hello_for(cwd: &std::path::Path) -> Hello {
         version: "1".into(),
         proto: Proto::Ctl,
         cwd: cwd.to_path_buf(),
+        project: RunDir::of_project(cwd).project_id().unwrap(),
     }
 }
 
@@ -649,9 +650,7 @@ async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
         let tried = if recorded {
             let dead = dir.path().join("dead.sock");
             drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
-            let mut line = dead.clone().into_os_string().into_encoded_bytes();
-            line.push(b'\n');
-            std::fs::write(run.socket_record(), line).unwrap();
+            write_record(&run, &dead, &run.project_id().unwrap());
             dead
         } else {
             run.socket()
@@ -679,29 +678,62 @@ async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
     }
 }
 
-/// df3 fix round 1 (ruling 2): a client follows `daemon.sock` to a socket that is not its own
-/// computed one only while its project's store is locked (by that daemon). A copy of a project,
-/// whose record names the original's daemon, never reaches it: that daemon serves another store.
+/// df3 fix round 2 (ruling task-3-round1): a client follows `daemon.sock` only when the record
+/// names this project's `.rdy` (`dev:ino`). A copy of a project carries the original's record,
+/// which names the original's `.rdy`: the copy never follows it. A record that names this
+/// project but leads to another project's daemon is refused by that daemon at the hello, and
+/// the client takes the refusal as it is: no retry, no spawn.
 #[tokio::test]
-async fn df3_a_recorded_socket_is_followed_only_while_the_store_is_locked() {
+async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
     let d = daemon("1", true, |_| {}).await;
     let copy = short_tempdir();
     let run = RunDir::of_project(copy.path());
     run.ensure().unwrap();
-    let mut line = d.run.socket().into_os_string().into_encoded_bytes();
-    line.push(b'\n');
-    std::fs::write(run.socket_record(), line).unwrap();
     let hello = hello_for(copy.path());
-    // the copy's store is not locked: the record is not followed
+    // what cp -R carries: the original's socket and the original's identity
+    write_record(&run, &d.run.socket(), &d.run.project_id().unwrap());
+    assert_eq!(run.recorded_socket(), None, "a copied record is stale");
     assert!(
         matches!(connect(&run, &hello).await, Attempt::NoDaemon(_)),
         "the copy reached the original's daemon"
     );
-    // the same project under another spelling: its store is locked by the recorded daemon
-    let _held = hold_store_lock(copy.path());
-    let Attempt::Ready(c) = connect(&run, &hello).await else {
-        panic!("the recorded socket was not followed")
+    // a record that names this project is followed; the daemon there serves another project
+    // and refuses the hello
+    write_record(&run, &d.run.socket(), &run.project_id().unwrap());
+    assert_eq!(run.recorded_socket(), Some(d.run.socket()));
+    let root = std::fs::canonicalize(d.dir.path()).unwrap();
+    let refused = |e: &ErrorReply| {
+        assert_eq!(e.code, E_DAEMON_START, "{e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "the daemon on {} serves another project ({})",
+                d.run.socket().display(),
+                root.display()
+            )
+        );
+        assert_eq!(
+            e.fix,
+            "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project"
+        );
     };
-    c.close();
+    match connect(&run, &hello).await {
+        Attempt::Refused(e) => refused(&e),
+        other => panic!("not refused: {other:?}"),
+    }
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&spawns);
+    let e = connect_or_start(
+        &run,
+        opts("1", copy.path(), move |_: &RunDir| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(running())
+        }),
+    )
+    .await
+    .unwrap_err();
+    refused(&e);
+    assert_eq!(spawns.load(Ordering::SeqCst), 0, "a refusal is not retried");
+    assert_eq!(d.handle.sessions().len(), 0);
     d.handle.stop();
 }

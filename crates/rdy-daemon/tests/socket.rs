@@ -92,9 +92,10 @@ async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
     let deep = dir.path().join("a".repeat(120));
     std::fs::create_dir_all(&deep).unwrap();
     let run = RunDir::of_project(&deep);
-    let (listener, bound) = socket::bind(&run).await.unwrap();
+    let (listener, bound, project) = socket::bind(&run).await.unwrap();
     let sock = run.socket();
     assert_eq!(bound, sock);
+    assert_eq!(project, run.project_id().unwrap());
     assert_eq!(run.short_socket().as_ref(), Some(&sock));
     assert!(
         sock.as_os_str().len() <= MAX_SOCKET_PATH,
@@ -159,16 +160,23 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
 }
 
 /// df3 fix round 1 (ruling 2): after its bind the daemon records the socket it bound in
-/// `.rdy/run/daemon.sock` (one line), next to `daemon.pid`, and removes the record on a clean
-/// exit.
+/// `.rdy/run/daemon.sock`, next to `daemon.pid`, and removes the record on a clean exit. Fix
+/// round 2 (ruling task-3-round1): the record's second line is the `.rdy` identity.
 #[tokio::test]
 async fn df3_the_daemon_records_its_socket_and_removes_the_record_on_exit() {
     let d = daemon("1", true, |_| {}).await;
     let record = d.run.path().join("daemon.sock");
     assert_eq!(d.run.socket_record(), record);
+    // fix round 2: the second line is the `.rdy` identity, `dev:ino` of its lstat
+    use std::os::unix::fs::MetadataExt;
+    let rdy = std::fs::symlink_metadata(d.dir.path().join(".rdy")).unwrap();
     let mut line = d.run.socket().into_os_string().into_encoded_bytes();
-    line.push(b'\n');
+    line.extend_from_slice(format!("\n{}:{}\n", rdy.dev(), rdy.ino()).as_bytes());
     assert_eq!(std::fs::read(&record).unwrap(), line);
+    assert_eq!(
+        d.run.project_id().unwrap().to_string(),
+        format!("{}:{}", rdy.dev(), rdy.ino())
+    );
     assert_eq!(mode(&record), 0o600);
     assert_eq!(d.run.recorded_socket(), Some(d.run.socket()));
     d.handle.stop();

@@ -132,11 +132,16 @@ fn start_detached(env: &Env) -> Result<String, ErrorReply> {
 fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
     let rt = runtime()?;
     let run = RunDir::of_project(&env.project);
+    // a project with no `.rdy` has no daemon to stop
+    let Ok(project) = run.project_id() else {
+        return Ok("no daemon running");
+    };
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: VERSION.to_string(),
         proto: Proto::Ctl,
         cwd: env.cwd.clone(),
+        project,
     };
     let start_timeout = serve_config(&env.project).start_timeout;
     let pid = rt.block_on(async {

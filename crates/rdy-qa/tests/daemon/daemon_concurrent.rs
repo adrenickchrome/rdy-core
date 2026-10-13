@@ -118,6 +118,9 @@ fn conc1_reads_on_another_connection_answer_during_a_long_write() {
             version: env!("CARGO_PKG_VERSION").into(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let Attempt::Ready(mut c) = connect(&RunDir::of_project(s.dir.path()), &hello).await else {
             panic!("no daemon")

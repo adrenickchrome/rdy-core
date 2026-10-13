@@ -88,7 +88,8 @@ background daemon's output; an `E_DAEMON_START` error quotes its last lines) and
 (held by the one client that starts the daemon). When `.rdy/run/rdy.sock` is too long for the
 system, the socket is `/tmp/rdy-<uid>/<hash>.sock` instead, in a directory only you can read.
 The daemon writes its socket's path to `.rdy/run/daemon.sock`, and clients connect there, so
-every spelling of the project's path reaches one daemon.
+every spelling of the project's path reaches one daemon. The record also names the project's
+`.rdy` directory, so a copy of the project never talks to the original's daemon.
 Two settings in `.rdy.yaml`, in seconds:
 
 ```yaml

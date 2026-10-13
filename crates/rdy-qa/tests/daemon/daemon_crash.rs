@@ -126,6 +126,9 @@ fn kill2_an_in_flight_request_is_daemon_gone_with_the_may_have_committed_fix() {
             version: env!("CARGO_PKG_VERSION").into(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let Attempt::Ready(mut c) = connect(&RunDir::of_project(s.dir.path()), &hello).await else {
             panic!("no daemon")
@@ -305,6 +308,9 @@ fn kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex() {
             version: env!("CARGO_PKG_VERSION").into(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
+            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))
+                .project_id()
+                .expect("the project's .rdy"),
         };
         let Attempt::Ready(mut c) = connect(&RunDir::of_project(s.dir.path()), &hello).await else {
             panic!("no daemon")

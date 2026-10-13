@@ -54,6 +54,7 @@ fn ping_pid(project: &Path) -> u64 {
             version: env!("CARGO_PKG_VERSION").into(),
             proto: Proto::Ctl,
             cwd: project.into(),
+            project: RunDir::of_project(project).project_id().unwrap(),
         };
         let Attempt::Ready(mut c) = connect(&RunDir::of_project(project), &hello).await else {
             panic!(
@@ -273,13 +274,14 @@ fn df3_a_stale_socket_record_is_recomputed_and_rewritten() {
     run.ensure().unwrap();
     let dead = base.path().join("dead.sock");
     drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
-    std::fs::write(run.socket_record(), format!("{}\n", dead.display())).unwrap();
+    let id = run.project_id().unwrap();
+    std::fs::write(run.socket_record(), format!("{}\n{id}\n", dead.display())).unwrap();
     ok(&human_command(&project, &[], &["--json", "status"])
         .output()
         .unwrap());
     assert_eq!(
         std::fs::read_to_string(run.socket_record()).unwrap(),
-        format!("{}\n", run.socket().display()),
+        format!("{}\n{id}\n", run.socket().display()),
         "the new daemon rewrites the record"
     );
     assert_eq!(run.recorded_socket(), Some(run.socket()));
@@ -288,4 +290,77 @@ fn df3_a_stale_socket_record_is_recomputed_and_rewritten() {
         .output()
         .unwrap());
     assert!(!run.socket_record().exists());
+}
+
+/// Whether `rdy ls --scope work` in `project` lists the folder `path` (`--no-daemon` with
+/// `direct`).
+fn work_lists(project: &Path, path: &str, direct: bool) -> bool {
+    let mut args = vec!["--json", "ls", "--scope", "work"];
+    if direct {
+        args.insert(0, "--no-daemon");
+    }
+    let out = human_command(project, &[], &args).output().unwrap();
+    ok(&out);
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let path = path.trim_start_matches('/');
+    entries.iter().any(|e| e["path"] == path)
+}
+
+/// Fix round 2 (ruling task-3-round1), the reviewer's probe: the original's daemon is live, and
+/// a copy made with `cp -R` carries its `.rdy/run/daemon.sock`, which names the original's
+/// socket. The copy's first write lands in the copy, and the original is untouched. The record
+/// names the original's `.rdy` (`dev:ino`), so the copy never follows it, also while its own
+/// daemon has the store and has not bound yet. Ten fresh copies.
+#[test]
+fn df3_a_copied_project_never_talks_to_the_originals_daemon() {
+    let base = short_tempdir();
+    let original = base.path().join("orig");
+    std::fs::create_dir(&original).unwrap();
+    drop(Rdy::init(&original, "rdy-standard").unwrap());
+    let _stop = StopOnDrop(&original);
+    ok(&human_command(&original, &[], &["new", "folder", "/orig"])
+        .output()
+        .unwrap());
+    let pid = ping_pid(&original);
+    assert!(RunDir::of_project(&original).socket_record().exists());
+    assert!(work_lists(&original, "/orig", false));
+    for n in 1..=10 {
+        let copy = base.path().join(format!("c{n}"));
+        // cp may complain about the socket file; the record must reach the copy
+        let _ = std::process::Command::new("cp")
+            .arg("-R")
+            .arg(&original)
+            .arg(&copy)
+            .output()
+            .unwrap();
+        assert!(
+            copy.join(".rdy/run/daemon.sock").exists(),
+            "the copy carries the original's record"
+        );
+        let _stop_copy = StopOnDrop(&copy);
+        let folder = format!("/only-c{n}");
+        ok(&human_command(&copy, &[], &["new", "folder", &folder])
+            .output()
+            .unwrap());
+        assert_ne!(
+            ping_pid(&copy),
+            pid,
+            "copy {n} reached the original's daemon"
+        );
+        ok(&human_command(&copy, &[], &["serve", "--stop"])
+            .output()
+            .unwrap());
+        assert!(
+            work_lists(&copy, &folder, true),
+            "copy {n}'s write is not in the copy"
+        );
+        assert!(
+            !work_lists(&original, &folder, false),
+            "copy {n}'s write landed in the original"
+        );
+        assert_eq!(ping_pid(&original), pid, "the original's daemon changed");
+    }
+    ok(&human_command(&original, &[], &["serve", "--stop"])
+        .output()
+        .unwrap());
 }

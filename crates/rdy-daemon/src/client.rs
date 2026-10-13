@@ -436,10 +436,11 @@ pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Att
 
 /// The connect, the peer check, the hello and its first reply; any error is "no daemon". The
 /// socket the daemon recorded (`daemon.sock`) comes first, so a client of any spelling of the
-/// project reaches the one daemon. It is followed only while the project's store is locked, as
-/// a running daemon keeps it: a copied project's record names the original's daemon, which
-/// serves another store. A record that does not answer is stale; then the client's own socket
-/// (`RunDir::socket`) is tried.
+/// project reaches the one daemon. A record is followed only when it names this project's
+/// `.rdy` (`RunDir::recorded_socket`): a copied project's record names the original. A record
+/// that does not answer is stale; then the client's own socket (`RunDir::socket`) is tried. A
+/// daemon that answers but serves another project refuses the hello, and that refusal is the
+/// reply: it is never retried elsewhere.
 async fn exchange_hello(
     run: &RunDir,
     hello: &Hello,
@@ -448,7 +449,6 @@ async fn exchange_hello(
     let own = run.socket();
     if let Some(recorded) = run.recorded_socket()
         && recorded != own
-        && store_lock(run).is_some_and(|l| store_lock_held(&l))
         && let Ok(found) = exchange_hello_at(&recorded, hello, uid).await
     {
         return Ok(found);
@@ -615,24 +615,28 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         mut progress,
     } = opts;
     let deadline = Instant::now() + start_timeout;
-    let hello = Hello {
+    // the hello names this project's `.rdy` (`RunDir::project_id`)
+    let hello_of = |project| Hello {
         rdy: PROTO_VERSION,
-        version,
+        version: version.clone(),
         proto,
-        cwd,
+        cwd: cwd.clone(),
+        project,
     };
     let progress: &mut (dyn FnMut(&str) + Send) = &mut *progress;
     // whether a daemon told us it is exiting: it then still holds the store while it drains
     let mut saw_exiting = false;
-    // 1. a daemon may be running
-    match connect(run, &hello).await {
-        Attempt::Ready(c) => return Ok(c),
-        Attempt::Starting(p) => {
-            return finish(p, run, deadline, start_timeout, progress, None).await;
+    // 1. a daemon may be running; a project whose `.rdy` does not exist yet has none
+    if let Ok(project) = run.project_id() {
+        match connect(run, &hello_of(project)).await {
+            Attempt::Ready(c) => return Ok(c),
+            Attempt::Starting(p) => {
+                return finish(p, run, deadline, start_timeout, progress, None).await;
+            }
+            Attempt::Refused(e) => return Err(e),
+            Attempt::Exiting => saw_exiting = true,
+            Attempt::NoDaemon(_) => {}
         }
-        Attempt::Refused(e) => return Err(e),
-        Attempt::Exiting => saw_exiting = true,
-        Attempt::NoDaemon(_) => {}
     }
 
     // the last guard: a daemon spawned for a socket path over `sun_path` would only die at its
@@ -644,6 +648,7 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     // 2. take start.lock; the guard unlocks on every return below. `ensure` also checks the
     // short socket's directory, before any spawn.
     run.ensure().map_err(|e| ensure_error(run, e))?;
+    let hello = hello_of(run.project_id().map_err(|e| ensure_error(run, e))?);
     let lock_path = run.start_lock();
     let _lock = loop {
         match FileLock::try_take(&lock_path) {

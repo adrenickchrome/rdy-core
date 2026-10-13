@@ -1,6 +1,6 @@
 //! The daemon's socket: binding it privately, the pid file, and the peer's uid.
 
-use crate::layout::RunDir;
+use crate::layout::{ProjectId, RunDir};
 use crate::lock::open_no_follow;
 use std::fs;
 use std::io::{self, Write};
@@ -37,13 +37,16 @@ pub fn check_socket_path(run: &RunDir) -> io::Result<()> {
 }
 
 /// Binds the project's socket (mode 0o600) in a private run dir, writes the pid file, and
-/// records the socket's path in `daemon.sock` (`RunDir::socket_record`). Returns the listener
-/// and the path it bound. A failure of the bind itself names the socket's path.
+/// records the socket's path and the project's identity in `daemon.sock`
+/// (`RunDir::socket_record`). Returns the listener, the path it bound and the identity of the
+/// project's `.rdy` at bind time (`RunDir::project_id`). A failure of the bind itself names the
+/// socket's path.
 ///
 /// Call only while holding the store lock (§3.1); a client never calls this.
-pub async fn bind(run: &RunDir) -> io::Result<(UnixListener, PathBuf)> {
+pub async fn bind(run: &RunDir) -> io::Result<(UnixListener, PathBuf, ProjectId)> {
     run.ensure()?;
     check_socket_path(run)?;
+    let project = run.project_id()?;
     let path = run.socket();
     let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
     match fs::remove_file(&path) {
@@ -58,9 +61,10 @@ pub async fn bind(run: &RunDir) -> io::Result<(UnixListener, PathBuf)> {
         .and_then(|()| write_pid_file(run))
         .and_then(|()| {
             pid_written = true;
-            let mut line = path.as_os_str().as_bytes().to_vec();
-            line.push(b'\n');
-            write_run_file(&run.socket_record(), &line)
+            let mut record = path.as_os_str().as_bytes().to_vec();
+            record.push(b'\n');
+            record.extend_from_slice(format!("{project}\n").as_bytes());
+            write_run_file(&run.socket_record(), &record)
         });
     if let Err(e) = done {
         // the socket we just bound, and its pid file; no daemon will serve them
@@ -71,7 +75,7 @@ pub async fn bind(run: &RunDir) -> io::Result<(UnixListener, PathBuf)> {
         }
         return Err(e);
     }
-    Ok((listener, path))
+    Ok((listener, path, project))
 }
 
 /// `<pid>\n`, mode 0o600, written atomically (`write_run_file`).
