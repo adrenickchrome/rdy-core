@@ -1277,3 +1277,29 @@ the 1k project, compare the `tier_mcp` ops that reopen it with the baseline.
 Baseline: `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## M2g: eight writers and the checker (2026-10-12)
+
+The M2 targets are p95, not p99 (D-ANNKF). The `spec_target` text of every op now says p95, and
+the pinned tests assert it. rdy does not measure p99.
+
+Two ops, on the typical tier only:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `daemon_write_8_clients` | one `rdy_write` of one claim, its durable flush included, through an `rdy mcp` proxy while seven other proxies write one claim after another. The daemon is the real one, started by the first proxy, over a copy of the typical project. The op asserts that each of the seven wrote | `runs.write` | recorded, no spec target: the write target of M2 spec 15.1 is for one writer. Compare with `daemon_write_single` |
+| `invariants_check_all` | `rdy_qa::invariants::check_all` on the typical workload after the view ops, so canon and every open view are checked from one snapshot, then `fsck` and the `logged` rule (D-XH24M). A violation is printed, not asserted | `runs.read` | recorded, no spec target |
+
+What each cost grows with:
+
+- `daemon_write_8_clients` ends in a durable flush, so it moves with the drive, like
+  `daemon_write_single`. Eight writers queue on one writer, so the median is about the flush cost
+  times the writers in line. The bench's fsync cost is bimodal between runs (POST-LAUNCH-LOG #14,
+  #18): record the higher median of the two runs.
+- `invariants_check_all` grows with the blocks of canon and of each open view, since each scope is
+  materialized and walked once.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. Both ops
+are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
