@@ -246,6 +246,20 @@ impl ReadState {
         Ok(out)
     }
 
+    /// The open views that hold at least one included change, each with its change count, in
+    /// name order. A landed view stays open and empty, and nothing closes it, so it is left out
+    /// here; `view_list` stays the full list.
+    pub fn views_with_changes(&self) -> Vec<(String, usize)> {
+        self.view_names()
+            .into_iter()
+            .filter(|name| self.view_head(name).is_some_and(|h| !h.closed))
+            .filter_map(|name| {
+                let n = self.included(&name).len();
+                (n > 0).then_some((name, n))
+            })
+            .collect()
+    }
+
     /// The reason of the latest close op on the chain from `head` back to its latest checkpoint.
     fn close_reason(&self, head: Hash) -> Result<Option<String>, RdyError> {
         let reader = self.reader();

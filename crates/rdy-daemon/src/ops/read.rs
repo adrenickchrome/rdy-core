@@ -92,7 +92,8 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
                 "view {name:?} has ':' in its name (reserved for scopes since addendum A): read it as view:{name}, propose it with --view view:{name}; it can't receive new writes"
             ));
         }
-        let changes = st.included(&name).len();
+    }
+    for (name, changes) in st.views_with_changes() {
         let pos = st.version_position(&Scope::View(name.clone()))?;
         let owner = st.view_head(&name).and_then(|h| h.owner.as_ref());
         views.push(
