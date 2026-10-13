@@ -154,3 +154,32 @@ fn sg10_the_readme_names_the_m2_concepts() {
     }
     assert!(!readme.contains("in-flight work"));
 }
+
+/// Fix round 1: the README states the rules the code holds.
+#[test]
+fn sg10_the_readme_states_the_rules_the_code_holds() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+    let readme = std::fs::read_to_string(&path).unwrap();
+    // Dismissal: anyone who writes may dismiss an advisory tension.
+    assert!(readme.contains("Anyone who writes may dismiss an advisory tension."));
+    assert!(!readme.contains("A reviewer or a person of another actor than the authors dismisses"));
+    // The gate refuses only a landing that brings all sides into canon.
+    assert!(readme.contains("stops a landing that would bring all its sides into canon"));
+    // No tool approves: the relay goes through the CLI.
+    assert!(readme.contains("No tool approves yet"));
+    assert!(readme.contains("--relayed-by"));
+    assert!(!readme.contains("with the same acts"));
+    // Confidence is carried by fact sheets, search hits and briefings only.
+    assert!(readme.contains("Fact sheets, search hits and briefings carry a confidence level"));
+    assert!(!readme.contains("Each answer rdy gives"));
+    // `work` is the human's view; the agent's scope is not "work".
+    assert!(!readme.contains("around its work"));
+    // The swarm line says what the run checks.
+    assert!(readme.contains("eight scripted agents and one person against one daemon"));
+    assert!(readme.contains("every stable write cites a briefing"));
+    assert!(!readme.contains("every write was briefed"));
+    // The working section stays within 45 lines.
+    let start = readme.find("## Working with agents").unwrap();
+    let end = readme.find("## Daemon").unwrap();
+    assert!(readme[start..end].lines().count() <= 46);
+}
