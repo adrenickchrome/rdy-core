@@ -259,8 +259,10 @@ impl Person {
             }
             // the kill cut the reply, or an earlier cut reply landed it: whether it landed is
             // read now, and a landing found is audited like any other (fix round 1, finding 4)
-            (Some(b), Res::Lost) => self.found(&pref, b),
-            (Some(b), Res::Refused(code, _)) if code == "E_ALREADY_LANDED" => self.found(&pref, b),
+            (Some(b), Res::Lost) => self.found(&pref, b, false),
+            (Some(b), Res::Refused(code, _)) if code == "E_ALREADY_LANDED" => {
+                self.found(&pref, b, true)
+            }
             _ => false,
         };
         let mut q = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
@@ -282,17 +284,27 @@ impl Person {
     /// `land_found` entry that names the proposal, the view and the base `before` read. When it
     /// landed with a landing no entry names yet, the entry's reply names the landing, and with the
     /// run's hooks the reads after a landing run on `before`: a landing whose reply the kill cut
-    /// is audited too. A landing an entry names already (a version that landed with a later
-    /// version's landing, `E_ALREADY_LANDED`) is not named again: its base is the one read
-    /// before it.
-    fn found(&mut self, pref: &str, before: run::Before) -> bool {
-        let mut e = self.entry("agent:relay", run::LAND_FOUND);
-        e.block = Some(pref.to_string());
-        e.view = Some(before.view.clone());
-        e.base.clone_from(&before.base);
-        let res = self
-            .link
-            .raw(run::LAND_FOUND, "rdy_read", json!({"id": pref}));
+    /// is audited too. A read the kill cuts is made again on the restarted daemon (the link has
+    /// reconnected; a second loss fails the run), so `before` stays the read made before the
+    /// landing. A landing an entry names already (a version that landed with a later version's
+    /// landing, `E_ALREADY_LANDED`) is not named again: its base is the one read before it.
+    /// After `E_ALREADY_LANDED` (`refused`), `before` was read after the landing: a landing no
+    /// entry names then would be audited on the wrong base, so the run fails.
+    fn found(&mut self, pref: &str, before: run::Before, refused: bool) -> bool {
+        let (e, res) = loop {
+            let mut e = self.entry("agent:relay", run::LAND_FOUND);
+            e.block = Some(pref.to_string());
+            e.view = Some(before.view.clone());
+            e.base.clone_from(&before.base);
+            let res = self
+                .link
+                .raw(run::LAND_FOUND, "rdy_read", json!({"id": pref}));
+            if !matches!(res, Res::Lost) {
+                break (e, res);
+            }
+            // journaled `Lost`; the link waits for the restart and reconnects
+            self.link.finish(e, run::LAND_FOUND, res, |_, _| {});
+        };
         let landing = match &res {
             Res::Ok(v) if v["proposal"]["state"] == "landed" => {
                 v["proposal"]["landing"].as_str().map(str::to_string)
@@ -305,6 +317,14 @@ impl Person {
                     && x.reply.as_ref().is_some_and(|r| r["landing"] == l)
             })
         });
+        if let (Some(l), false, true) = (&landing, named, refused) {
+            self.link.fail(
+                run::LAND_FOUND,
+                &format!(
+                    "found {pref} landed with landing {l}, which no entry names: the reads before it came after it"
+                ),
+            );
+        }
         self.link.finish(e, run::LAND_FOUND, res, |en, _| {
             if let (Some(l), false) = (&landing, named) {
                 en.reply = Some(json!({"landing": l}));
@@ -747,12 +767,12 @@ mod tests {
         };
         // not landed yet: nothing is found
         let before = run::before_land(&mut person.link, &pref).expect("the reads before");
-        assert!(!person.found(&pref, before));
+        assert!(!person.found(&pref, before, false));
         // landed by an approve whose reply nobody read
         let before = run::before_land(&mut person.link, &pref).expect("the reads before");
         let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
         assert!(ok, "{landed}");
-        assert!(person.found(&pref, before));
+        assert!(person.found(&pref, before, false));
         let found: Vec<Entry> = journal
             .entries()
             .into_iter()
@@ -772,7 +792,7 @@ mod tests {
         // seed 11: a later approve of a version that landed with that landing (E_ALREADY_LANDED)
         // finds it again; the landing is named once, by the entry whose base was read before it
         let again = run::before_land(&mut person.link, &pref).expect("the reads before");
-        assert!(person.found(&pref, again));
+        assert!(person.found(&pref, again, true));
         let found: Vec<Entry> = journal
             .entries()
             .into_iter()
@@ -780,5 +800,148 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 3, "{found:#?}");
         assert!(found[2].reply.is_none(), "{:?}", found[2]);
+    }
+
+    /// Adversarial review: the kill cuts the reads after a landing. The approve landed; the kill
+    /// comes before the relay reads whether it landed. The relay reads again on the restarted
+    /// daemon, so the landing is found with the base read before it, and the reads after it run
+    /// (an O2 check is never left out in silence).
+    #[test]
+    fn sg5_a_landing_found_after_a_kill_cut_its_reads_is_still_audited() {
+        let cfg = Config {
+            seed: 33,
+            agents: 1,
+            steps: 2,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let (journal, gate) = (Journal::new(), Arc::new(KillGate::with_kill()));
+        let write = Act::Write {
+            target: Pick::Seed(0),
+            stable: true,
+        };
+        let report = agent::spawn(
+            &p,
+            &cfg,
+            0,
+            vec![write, Act::Propose],
+            journal.clone(),
+            gate.clone(),
+        )
+        .join()
+        .expect("the agent runs");
+        let pref = report.proposals[0].clone();
+        let watch: Watch = Arc::default();
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:relay",
+            "chat",
+            "reviewer",
+            None,
+            journal.clone(),
+            gate.clone(),
+        );
+        let hooks = Hooks {
+            pace: None,
+            watch: Some(watch.clone()),
+            done: None,
+        };
+        let mut person = Person {
+            link,
+            seed: p.seed.clone(),
+            queue: Queue::default(),
+            checked_out: false,
+            hooks,
+        };
+        let before = run::before_land(&mut person.link, &pref).expect("the reads before");
+        let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
+        assert!(ok, "{landed}");
+        // the kill, and the run's restart: the relay's next call is lost, then it reconnects
+        p.served.kill9();
+        gate.restarted();
+        assert!(
+            person.found(&pref, before, false),
+            "{:#?}",
+            journal.entries()
+        );
+        let entries = journal.entries();
+        let named: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.act == "land_found" && e.reply.is_some())
+            .collect();
+        assert_eq!(named.len(), 1, "{entries:#?}");
+        assert_eq!(
+            named[0].reply.as_ref().map(|r| &r["landing"]),
+            Some(&landed["landing"]),
+            "{entries:#?}"
+        );
+        assert!(named[0].base.is_some(), "{:?}", named[0]);
+        // the reads after the landing ran on the restarted daemon
+        let at = entries
+            .iter()
+            .position(|e| e.act == "land_found" && e.reply.is_some())
+            .expect("the entry");
+        assert!(
+            entries[at..]
+                .iter()
+                .any(|e| e.act == "tensions" && e.outcome == Outcome::Ok),
+            "{entries:#?}"
+        );
+    }
+
+    /// Adversarial review: `land_found` after `E_ALREADY_LANDED` read its `before` after the
+    /// landing. When no entry names that landing yet, its audit would have no base read before it,
+    /// so the run fails instead of auditing it on the wrong base.
+    #[test]
+    #[should_panic(expected = "which no entry names")]
+    fn sg5_a_landing_first_found_after_it_landed_fails_the_run() {
+        let cfg = Config {
+            seed: 34,
+            agents: 1,
+            steps: 2,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let (journal, gate) = (Journal::new(), Arc::new(KillGate::new()));
+        let write = Act::Write {
+            target: Pick::Seed(0),
+            stable: true,
+        };
+        let report = agent::spawn(
+            &p,
+            &cfg,
+            0,
+            vec![write, Act::Propose],
+            journal.clone(),
+            gate.clone(),
+        )
+        .join()
+        .expect("the agent runs");
+        let pref = report.proposals[0].clone();
+        let link = Link::connect(
+            Where::of(&p),
+            "agent:relay",
+            "chat",
+            "reviewer",
+            None,
+            journal.clone(),
+            gate.clone(),
+        );
+        let hooks = Hooks {
+            pace: None,
+            watch: Some(Arc::default()),
+            done: None,
+        };
+        let mut person = Person {
+            link,
+            seed: p.seed.clone(),
+            queue: Queue::default(),
+            checked_out: false,
+            hooks,
+        };
+        let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
+        assert!(ok, "{landed}");
+        let after = run::before_land(&mut person.link, &pref).expect("the reads");
+        person.found(&pref, after, true);
     }
 }

@@ -609,6 +609,19 @@ fn sg5_no_landing_chose_no_alternative_or_crossed_a_conflict() {
                             .into_iter()
                             .map(|v| v.detail),
                     );
+                    // every binding of each landed change, the sets' fixed ones (msw20) too
+                    let chose = rec.chosen.as_ref().map(|c| (&c.set, c.member.as_str()));
+                    for c in &landed.changes {
+                        for (set, member) in broken_bindings(&bindings_of(&st, c), chose, &settled)
+                        {
+                            bad.push(format!(
+                                "change {} is bound to member {member} of set {}, and the landing broke the binding (it chose {chose:?}; chosen before it {:?}){ctx}",
+                                c.short(),
+                                set.short(),
+                                settled.get(&set)
+                            ));
+                        }
+                    }
                     // the conflict rule on the base the view read on when it landed (ruling task-1.1)
                     let base: Hash = base
                         .parse()
@@ -630,6 +643,57 @@ fn sg5_no_landing_chose_no_alternative_or_crossed_a_conflict() {
         assert!(audited > 0, "swarm seed {seed}: no landing was audited");
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
+}
+
+/// The bindings (set, member) of one landed change that its landing broke, mirroring the gate's
+/// `linked_alts` from the landing records alone (ruling task-5.1; msw20 bindings too, which
+/// `alt_unchosen` does not read). A binding holds when the landing chose its set for its member,
+/// or when an earlier landing (`settled`) chose its set for its member (gate rule 2). A binding
+/// to a member that lost, to another member of the set this landing chose, or to a set still open
+/// that this landing did not choose, is broken.
+fn broken_bindings(
+    bindings: &[(Hash, String)],
+    chose: Option<(&Hash, &str)>,
+    settled: &BTreeMap<Hash, String>,
+) -> Vec<(Hash, String)> {
+    bindings
+        .iter()
+        .filter(|(set, member)| match chose {
+            Some((cs, cm)) if cs == set => cm != member,
+            _ => settled.get(set) != Some(member),
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn sg5_a_landing_keeps_every_binding_of_its_changes() {
+    let (s1, s2) = (Hash::of(b"set one"), Hash::of(b"set two"));
+    let b = |set: Hash, m: &str| (set, m.to_string());
+    let none = BTreeMap::new();
+    let won = BTreeMap::from([(s1, "a0".to_string())]);
+    // the landing chooses the bound member
+    assert!(broken_bindings(&[b(s1, "a0")], Some((&s1, "a0")), &none).is_empty());
+    // the landing chooses another member of the set
+    assert_eq!(
+        broken_bindings(&[b(s1, "a1")], Some((&s1, "a0")), &none),
+        vec![b(s1, "a1")]
+    );
+    // a set still open that the landing did not choose
+    assert_eq!(
+        broken_bindings(&[b(s1, "a0")], None, &none),
+        vec![b(s1, "a0")]
+    );
+    assert_eq!(
+        broken_bindings(&[b(s1, "a0")], Some((&s2, "a4")), &none),
+        vec![b(s1, "a0")]
+    );
+    // gate rule 2: the winner's change lands later with no choice; a loser's does not
+    assert!(broken_bindings(&[b(s1, "a0")], None, &won).is_empty());
+    assert_eq!(
+        broken_bindings(&[b(s1, "a1")], None, &won),
+        vec![b(s1, "a1")]
+    );
 }
 
 /// The member each alternative set was chosen for, by the landing records of `st`'s canon chain.
@@ -771,7 +835,8 @@ fn sg5_an_alternative_refusal_is_judged_by_the_set_at_that_time() {
 /// The drain's `propose`/`E_ALT_MEMBER` names a change bound to a member of a set still open at
 /// that propose. The drain then lands that set's member (the gate's fix: "propose from <member>
 /// to choose it"): a landing that chose one of those sets comes before the view proposes again.
-/// It never excludes such a change (fix round 1 of the promoted review).
+/// It never excludes such a change. This is the drain row and settle act of ruling
+/// task-5-round3.1; any other drain `propose`/`E_ALT_MEMBER` fails.
 #[test]
 fn sg5_each_alternative_refusal_is_a_ruled_row() {
     each(|seed, o| {
@@ -889,8 +954,8 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
                 }
             };
             let fine = match (row.as_str(), e.act, judged) {
-                // the drain's open-set row: a landing chose one of the change's open sets before
-                // the view proposed again
+                // the drain's open-set row (ruling task-5-round3.1): a landing chose one of the
+                // change's open sets before the view proposed again
                 ("E_ALT_MEMBER", "propose", Some(AtRefusal::OpenSet)) => {
                     let open: BTreeSet<Hash> = change_named(message)
                         .and_then(|prefix| known.iter().find(|x| x.starts_with(&prefix)))
@@ -1783,6 +1848,136 @@ fn sg5_each_inbox_is_a_function_of_the_log() {
         r.close().expect("close the frozen copy");
         assert!(wrong.is_empty(), "swarm seed {seed}: {wrong:#?}");
     });
+}
+
+/// How much each oracle had to check in one seed's run.
+#[derive(Debug, Default, Clone, Copy)]
+struct Weighed {
+    /// Open tensions of the reference set.
+    reference: usize,
+    /// Tension moves the frozen log holds.
+    logged: usize,
+    /// Seen labels the log check holds to the log.
+    seen: usize,
+    /// Journal collision pairs.
+    collisions: usize,
+    /// Tension entries of the agents' inbox reads.
+    inbox: usize,
+    /// Second writes on a stale briefing, refused with `E_BRIEF_STALE`.
+    stale: usize,
+    /// Unbriefed stable writes, refused with `E_BRIEF_REQUIRED`.
+    no_brief: usize,
+}
+
+/// What the oracles of `runs` lacked: an assertion over an empty set passes whatever the product
+/// does. Each seed's run has reference tensions, logged moves and seen labels to check; the union
+/// of the seeds has journal collisions, inbox tension entries and both briefing refusals.
+fn vacuous(runs: &[(u64, Weighed)]) -> Vec<String> {
+    let mut out = vec![];
+    for (seed, w) in runs {
+        for (what, n) in [
+            ("reference tensions", w.reference),
+            ("logged tension moves", w.logged),
+            ("seen labels held to the log", w.seen),
+        ] {
+            if n == 0 {
+                out.push(format!("swarm seed {seed}: no {what}"));
+            }
+        }
+    }
+    let seeds: Vec<u64> = runs.iter().map(|(s, _)| *s).collect();
+    let sum = |f: fn(&Weighed) -> usize| runs.iter().map(|(_, w)| f(w)).sum::<usize>();
+    for (what, n) in [
+        ("journal collision pair", sum(|w| w.collisions)),
+        ("inbox tension entry", sum(|w| w.inbox)),
+        ("stale briefing refused", sum(|w| w.stale)),
+        ("unbriefed write refused", sum(|w| w.no_brief)),
+    ] {
+        if n == 0 {
+            out.push(format!("swarm seeds {seeds:?}: no {what}"));
+        }
+    }
+    out
+}
+
+#[test]
+fn sg5_an_oracle_with_nothing_to_check_is_reported() {
+    let full = Weighed {
+        reference: 1,
+        logged: 1,
+        seen: 1,
+        collisions: 1,
+        inbox: 1,
+        stale: 1,
+        no_brief: 1,
+    };
+    assert!(vacuous(&[(1, full)]).is_empty());
+    let empty = Weighed::default();
+    assert_eq!(
+        vacuous(&[(1, full), (2, empty)]),
+        vec![
+            "swarm seed 2: no reference tensions".to_string(),
+            "swarm seed 2: no logged tension moves".to_string(),
+            "swarm seed 2: no seen labels held to the log".to_string(),
+        ]
+    );
+    assert_eq!(vacuous(&[(2, empty)]).len(), 7);
+}
+
+/// Adversarial review: every oracle above had something to check (`vacuous`).
+#[test]
+fn sg5_the_oracles_are_not_vacuous() {
+    let mut weighed = vec![];
+    let mut failed = vec![];
+    for (seed, r) in runs() {
+        let o = match r {
+            Ok(o) => o,
+            Err(text) => {
+                failed.push(text.clone());
+                continue;
+            }
+        };
+        let entries = o.before_drain();
+        let last = entries.iter().map(|e| e.epoch).max().unwrap_or(0);
+        let mut by_step: BTreeMap<(&str, usize), Vec<&Entry>> = BTreeMap::new();
+        for e in o.journal.iter().filter(|e| e.act == "write_stale") {
+            by_step.entry((&e.actor, e.step)).or_default().push(e);
+        }
+        let w = Weighed {
+            reference: oracle::reference(&o.frozen).len(),
+            logged: oracle::logged_moves(&o.frozen).len(),
+            seen: entries
+                .iter()
+                .filter(|e| {
+                    e.epoch == last || (e.outcome == Met::Ok && ACKNOWLEDGED.contains(&e.act))
+                })
+                .map(|e| e.seen.len())
+                .sum(),
+            collisions: oracle::collisions(o.before_freeze(), &o.frozen).len(),
+            inbox: entries
+                .iter()
+                .filter(|e| e.actor.starts_with("agent:a"))
+                .filter_map(|e| e.inbox.as_ref())
+                .flat_map(|r| r.entries.iter())
+                .filter(|x| is_tension_entry(x))
+                .count(),
+            stale: by_step
+                .values()
+                .filter(|es| es.len() == 2)
+                .filter(|es| es[1].outcome == Met::Refused("E_BRIEF_STALE".into()))
+                .count(),
+            no_brief: o
+                .journal
+                .iter()
+                .filter(|e| e.act == "write_no_brief")
+                .filter(|e| e.outcome == Met::Refused("E_BRIEF_REQUIRED".into()))
+                .count(),
+        };
+        eprintln!("swarm seed {seed}: the oracles weighed {w:?}");
+        weighed.push((*seed, w));
+    }
+    failed.extend(vacuous(&weighed));
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
 }
 
 #[test]

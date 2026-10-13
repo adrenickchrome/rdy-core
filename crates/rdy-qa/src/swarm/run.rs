@@ -193,10 +193,14 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
 }
 
 /// After a landing (`reply`, the `rdy approve` reply): the relay reads canon's blocking tensions
-/// again, and each one the landing put into canon is a violation.
+/// again, and each one the landing put into canon is a violation. A read the kill cuts is made
+/// again on the restarted daemon: only the person lands, and it holds its landing turn, so canon
+/// has not moved. A second loss fails the run (the check is never left out).
 pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: &Value) {
-    let Some(after) = canon_blocking(link) else {
-        return;
+    let after = match canon_blocking(link) {
+        Some(after) => after,
+        None => canon_blocking(link)
+            .unwrap_or_else(|| link.fail("tensions", "lost the daemon twice after a landing")),
     };
     let landing = reply["landing"].as_str().unwrap_or("?");
     let mut w = watch.lock().unwrap_or_else(PoisonError::into_inner);
@@ -870,7 +874,7 @@ enum Named {
     Lost,
     /// Members of open sets (`E_ALT_MEMBER`), as (set id, member view): the landing must choose,
     /// so the drain lands the set's member first (the gate's fix: "propose from <member> to
-    /// choose it") and excludes nothing.
+    /// choose it") and excludes nothing (the settle act, ruling task-5-round3.1).
     Open(Vec<(String, String)>),
     /// Neither, by the listing.
     Unknown,
@@ -958,6 +962,19 @@ enum Proposed {
     Empty,
     /// The drain settled an open set first: the view proposes again.
     Again,
+}
+
+/// Whether the listed tension `row` fits the drain row for `kind`, the kind the refusal's issue
+/// names: the row is of that kind, and a `semantic` row is one a person accepted (D-WMCFW: only
+/// an accepted semantic tension blocks). Else why not.
+fn row_fits(row: &Value, kind: &str) -> Result<(), String> {
+    if row["kind"] != kind {
+        return Err(format!("listed as {}", row["kind"]));
+    }
+    if kind == "semantic" && row["judged"]["accepted"].is_null() {
+        return Err("listed with no accepted advice".to_string());
+    }
+    Ok(())
 }
 
 /// A refusal of the gate: its code and the JSON `rdy approve` printed.
@@ -1230,10 +1247,12 @@ impl Drain {
                             held = left;
                         }
                         // a change bound to a member of a set still open: the landing must
-                        // choose (ruling task-5-round1.1). The drain excludes nothing: it lands
-                        // the set's member first, as the gate's fix says, and the view proposes
-                        // again. `sg5_each_alternative_refusal_is_a_ruled_row` holds each such
-                        // refusal to an open set that a landing then chose
+                        // choose (ruling task-5-round1.1). The ruled drain row and its settle act
+                        // (ruling task-5-round3.1): the drain excludes nothing; it lands the
+                        // set's bound member first, out of oldest-first order, and the view
+                        // proposes again without using a round. Drain-only, never coverage.
+                        // `sg5_each_alternative_refusal_is_a_ruled_row` holds each such refusal to
+                        // a set open at that propose that a landing chose before the next one
                         Named::Open(named) if code == "E_ALT_MEMBER" => {
                             self.settle(v, &code, &named, &sets);
                             return Proposed::Again;
@@ -1639,9 +1658,14 @@ impl Drain {
                 rows = r["tensions"].as_array().cloned().unwrap_or_default();
             },
         );
-        rows.into_iter()
+        let row = rows
+            .into_iter()
             .find(|t| t["id"] == label)
-            .unwrap_or_else(|| self.no_rule(v, code, &format!("{kind}, not listed")))
+            .unwrap_or_else(|| self.no_rule(v, code, &format!("{kind}, not listed")));
+        if let Err(why) = row_fits(&row, kind) {
+            self.no_rule(v, code, &format!("{kind}, {why}"));
+        }
+        row
     }
 
     /// The blocks of `row`'s sides that view `v` holds, each at its side's version.
@@ -1852,6 +1876,23 @@ mod tests {
         );
         assert_eq!(strip_marker("CONTRA-3 first"), " first");
         assert_eq!(strip_marker("no marker"), "no marker");
+    }
+
+    /// Adversarial review: the drain picks its row by the kind the refusal's issue names, and
+    /// holds the listed row to it: the listed kind must be that kind, and the `semantic` row is
+    /// only for a semantic tension a person accepted (D-WMCFW: only an accepted one blocks).
+    #[test]
+    fn sg5_the_drain_holds_a_blocking_tension_row_to_its_kind() {
+        let accepted = json!({"kind": "semantic", "judged": {"accepted": {"person": "p"}}});
+        let unaccepted = json!({"kind": "semantic", "judged": {"advice": "block"}});
+        assert_eq!(row_fits(&accepted, "semantic"), Ok(()));
+        assert!(row_fits(&unaccepted, "semantic").is_err());
+        assert!(row_fits(&json!({"kind": "semantic"}), "semantic").is_err());
+        assert_eq!(
+            row_fits(&json!({"kind": "premise_shift"}), "premise_shift"),
+            Ok(())
+        );
+        assert!(row_fits(&json!({"kind": "edit_collision"}), "premise_shift").is_err());
     }
 
     #[test]
