@@ -127,7 +127,8 @@ pub(crate) fn blame_text(reply: &Value) -> String {
                     s(&e["landing"], "approved_by"),
                     time(&e["landing"]["at_ms"])
                 ));
-                if let Some(r) = e["landing"]["relayed_by"].as_str() {
+                if e["landing"]["relayed_by"].is_object() {
+                    let r = who(&e["landing"]["relayed_by"]);
                     out.push_str(&format!(", relayed by {r}"));
                 }
             }
@@ -224,12 +225,20 @@ mod tests {
             plain.ends_with("approved by human:qa at 2026-10-09T10:00:00Z"),
             "{plain}"
         );
-        e["landing"]["relayed_by"] = json!("agent:w/r1");
-        let relayed = blame_text(&json!({"history": [e]}));
+        e["landing"]["relayed_by"] = json!({"actor": "agent:w", "run": "r1"});
+        let relayed = blame_text(&json!({"history": [e.clone()]}));
         assert!(
             relayed
                 .ends_with("approved by human:qa at 2026-10-09T10:00:00Z, relayed by agent:w/r1"),
             "{relayed}"
+        );
+        // final review M3: the object keeps a `cli` run; the text names the actor alone, as
+        // `who` does everywhere
+        e["landing"]["relayed_by"] = json!({"actor": "agent:w", "run": "cli"});
+        let cli = blame_text(&json!({"history": [e]}));
+        assert!(
+            cli.ends_with("approved by human:qa at 2026-10-09T10:00:00Z, relayed by agent:w"),
+            "{cli}"
         );
     }
 }

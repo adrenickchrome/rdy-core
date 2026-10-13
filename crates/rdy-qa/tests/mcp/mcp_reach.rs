@@ -61,3 +61,23 @@ fn mfb2_a_reach_entry_needs_no_repin() {
     );
     c.alive();
 }
+
+/// Final review M4: the edit-loop doc sends an already-written entry to its own follow_up and
+/// fix (a kept entry whose target is deleted, superseded or revoked cannot be cleared by a
+/// repin, and a live decision gets reaffirm), and says what a conflicted propose returns.
+#[test]
+fn df4_the_edit_loop_doc_sends_a_kept_entry_to_its_follow_up() {
+    assert!(
+        EDIT_LOOP_DOC.contains(
+            "An entry with already_written: true is a block your view already rewrote. Do what its follow_up and fix say: confirm means check it, then repin it unless its meaning changed; update means its target is deleted, superseded or revoked, which a repin cannot clear, so point it at another block or remove the link; reaffirm means it is a live decision, so supersede it or leave it suspect; a reach entry (FW-LP6) needs no repin: check it and update it only if it no longer holds."
+        ),
+        "{EDIT_LOOP_DOC}"
+    );
+    assert!(
+        EDIT_LOOP_DOC.contains(
+            "When the version has a blocking conflict, rdy_propose returns no consequences and a consequences_error (E_CONFLICT_UNRESOLVED) that names the blocks in conflict: write each from the version you want, then propose again."
+        ),
+        "{EDIT_LOOP_DOC}"
+    );
+    assert!(!EDIT_LOOP_DOC.contains("confirm it (repin) unless its meaning changed"));
+}

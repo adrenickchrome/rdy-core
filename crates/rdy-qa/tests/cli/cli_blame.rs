@@ -293,6 +293,6 @@ fn df7_blame_omits_relay() {
     assert!(ok, "{v}");
     assert_eq!(
         v["history"][0]["landing"]["relayed_by"],
-        "agent:writer-a/r1"
+        json!({"actor": "agent:writer-a", "run": "r1"})
     );
 }

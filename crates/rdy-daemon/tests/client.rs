@@ -707,9 +707,10 @@ async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
         assert_eq!(
             e.message,
             format!(
-                "the daemon on {} serves another project ({})",
+                "the daemon on {} serves another project ({}, process {})",
                 d.run.socket().display(),
-                root.display()
+                root.display(),
+                std::process::id()
             )
         );
         assert_eq!(

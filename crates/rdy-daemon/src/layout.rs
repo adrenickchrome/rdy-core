@@ -161,6 +161,22 @@ impl RunDir {
     /// unreadable or anything else, and when it names another `.rdy`: a copy or a restore of a
     /// project carries the original's record, which is stale here.
     pub fn recorded_socket(&self) -> Option<PathBuf> {
+        let (socket, project) = self.read_record()?;
+        (project == self.project_id().ok()?).then_some(socket)
+    }
+
+    /// Whether `daemon.sock` names `socket` and `project`: the record of the daemon that bound
+    /// them, whatever `.rdy` now stands at this path (final ruling: a daemon whose project is
+    /// gone removes the record only while it still names that daemon).
+    pub fn record_names(&self, socket: &Path, project: ProjectId) -> bool {
+        self.read_record()
+            .is_some_and(|(s, p)| s == socket && p == project)
+    }
+
+    /// `daemon.sock` as written: the socket (absolute, at most `MAX_SOCKET_PATH` bytes) and the
+    /// identity, each ended by a newline; `None` when missing, a symlink, unreadable or anything
+    /// else.
+    fn read_record(&self) -> Option<(PathBuf, ProjectId)> {
         let f = open_no_follow(OpenOptions::new().read(true), &self.socket_record()).ok()?;
         // the socket, its newline, and `u64:u64` with its newline
         let most = MAX_SOCKET_PATH as u64 + 1 + 2 * 20 + 2;
@@ -174,8 +190,8 @@ impl RunDir {
         let well_formed = socket.first() == Some(&b'/')
             && socket.len() <= MAX_SOCKET_PATH
             && !socket.contains(&0);
-        let ours = project.parse::<ProjectId>().ok()? == self.project_id().ok()?;
-        (well_formed && ours).then(|| PathBuf::from(OsStr::from_bytes(socket)))
+        let project = project.parse::<ProjectId>().ok()?;
+        well_formed.then(|| (PathBuf::from(OsStr::from_bytes(socket)), project))
     }
 
     pub fn start_lock(&self) -> PathBuf {

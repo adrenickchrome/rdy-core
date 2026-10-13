@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
 /// How long a detached daemon with no connections waits before exiting.
@@ -23,6 +23,10 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 /// The least time between two `starting` replies on one connection.
 pub const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How often a daemon with no connections checks that its project's `.rdy` is still the one it
+/// bound (final ruling: a daemon whose project is gone or replaced exits). The writer's idle tick.
+pub const PROJECT_TICK: Duration = crate::writer::CHECKPOINT_TICK;
 
 /// Read past a final reply at most this much before closing (see `close_after_reply`).
 pub(crate) const DRAIN_AFTER_REPLY_BYTES: usize = 64 * 1024;
@@ -118,6 +122,9 @@ pub enum ExitReason {
     Idle,
     /// A client of another version arrived while no session was open.
     VersionReplaced,
+    /// The project's `.rdy` is gone or replaced (deleted, moved away, restored from a copy): the
+    /// daemon serves nothing there and exits without writing to its store.
+    ProjectGone,
 }
 
 impl ExitReason {
@@ -126,6 +133,7 @@ impl ExitReason {
             ExitReason::Stopped => "stopped",
             ExitReason::Idle => "idle",
             ExitReason::VersionReplaced => "version replaced",
+            ExitReason::ProjectGone => "project gone",
         }
     }
 }
@@ -136,6 +144,7 @@ pub struct DaemonHandle {
     info: DaemonInfo,
     run: RunDir,
     files: RunFiles,
+    tick: Arc<Notify>,
 }
 
 impl DaemonHandle {
@@ -165,6 +174,13 @@ impl DaemonHandle {
     pub fn socket(&self) -> PathBuf {
         self.files.socket(&self.run)
     }
+
+    /// Test hook: runs the idle tick's project check now (it runs every `PROJECT_TICK` while no
+    /// connection is open), so a test needs no sleep.
+    #[doc(hidden)]
+    pub fn tick(&self) {
+        self.tick.notify_one();
+    }
 }
 
 pub struct Daemon {
@@ -180,6 +196,8 @@ pub struct Daemon {
     listener: Option<UnixListener>,
     /// The identity of the project's `.rdy` at the bind: hellos from another project are refused.
     project: Option<ProjectId>,
+    /// `DaemonHandle::tick`: an idle tick now.
+    tick: Arc<Notify>,
 }
 
 impl Daemon {
@@ -202,6 +220,7 @@ impl Daemon {
             files: RunFiles::default(),
             listener: None,
             project: None,
+            tick: Arc::new(Notify::new()),
         }
     }
 
@@ -214,6 +233,7 @@ impl Daemon {
             info: self.info.clone(),
             run: self.config.run.clone(),
             files: self.files.clone(),
+            tick: Arc::clone(&self.tick),
         }
     }
 
@@ -258,14 +278,27 @@ impl Daemon {
         let mut count = self.count.subscribe();
         // armed at the start (no connections yet) and on each drop of the count to 0
         let mut idle_at = idle.map(|t| tokio::time::Instant::now() + t);
+        // the project check while no connection is open (a connection checks at its hello)
+        let mut project_tick = tokio::time::interval(PROJECT_TICK);
+        project_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let tick = Arc::clone(&self.tick);
         let mut tasks = JoinSet::new();
         loop {
             if *stop.borrow_and_update() {
                 break;
             }
             while tasks.try_join_next().is_some() {}
+            let idle_now = self.info.connections.load(Ordering::SeqCst) == 0;
             tokio::select! {
                 _ = stop.changed() => {}
+                _ = project_tick.tick(), if idle_now => {
+                    ctx.check_project();
+                }
+                _ = tick.notified() => {
+                    if self.info.connections.load(Ordering::SeqCst) == 0 {
+                        ctx.check_project();
+                    }
+                }
                 // the sender lives in `self`, so this never errors
                 _ = count.changed() => {
                     idle_at = if *count.borrow_and_update() == 0 {
@@ -358,6 +391,8 @@ struct RunFiles(Arc<Mutex<Files>>);
 struct Files {
     removed: bool,
     socket: Option<PathBuf>,
+    /// The bound socket's file identity (`dev`, `ino`), from `lstat` right after the bind.
+    socket_id: Option<(u64, u64)>,
 }
 
 impl RunFiles {
@@ -366,7 +401,40 @@ impl RunFiles {
     }
 
     fn bound(&self, socket: PathBuf) {
-        self.lock().socket = Some(socket);
+        use std::os::unix::fs::MetadataExt;
+        let mut files = self.lock();
+        files.socket_id = std::fs::symlink_metadata(&socket)
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
+        files.socket = Some(socket);
+    }
+
+    /// The removal for a daemon whose project is gone (final ruling), once like `remove`: the
+    /// paths may now belong to the project that replaced it. The record goes only while it still
+    /// names this daemon's socket and `project`; the pid file only while it names `pid`; the
+    /// socket only while it is the file this daemon bound.
+    fn remove_if_ours(&self, run: &RunDir, project: ProjectId, pid: u32) {
+        use std::os::unix::fs::MetadataExt;
+        let mut files = self.lock();
+        if files.removed {
+            return;
+        }
+        files.removed = true;
+        let socket = files.socket.clone().unwrap_or_else(|| run.socket());
+        if run.record_names(&socket, project) {
+            remove_if_present(&run.socket_record());
+        }
+        let bound = std::fs::symlink_metadata(&socket)
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
+        if bound.is_some() && bound == files.socket_id {
+            remove_if_present(&socket);
+        }
+        let names_us = std::fs::read_to_string(run.pid_file())
+            .is_ok_and(|t| t.trim().parse::<u32>().ok() == Some(pid));
+        if names_us {
+            remove_if_present(&run.pid_file());
+        }
     }
 
     fn socket(&self, run: &RunDir) -> PathBuf {
@@ -410,17 +478,32 @@ struct Conn {
 }
 
 /// The refusal of a hello from another project: the daemon on `socket` serves the project at
-/// `root`, and the client's own daemon is not running (ruling task-3-round1).
-fn another_project(socket: &Path, root: &Path) -> ErrorReply {
-    ErrorReply::new(
+/// `root` as process `pid` (ruling task-3-round1; the final ruling names the process). A daemon
+/// whose own project is gone or replaced is `stopping`: its error says so and carries
+/// `stopping: true`, and the client retries once, which starts the project's own daemon.
+/// Otherwise the client's own daemon is not running.
+fn another_project(socket: &Path, root: &Path, pid: u32, stopping: bool) -> ErrorReply {
+    let message = format!(
+        "the daemon on {} serves another project ({}, process {pid})",
+        socket.display(),
+        root.display()
+    );
+    if !stopping {
+        return ErrorReply::new(
+            E_DAEMON_START,
+            message,
+            "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project",
+        );
+    }
+    let mut e = ErrorReply::new(
         E_DAEMON_START,
+        message,
         format!(
-            "the daemon on {} serves another project ({})",
-            socket.display(),
-            root.display()
+            "that daemon is stopping; run the command again. If it keeps answering, end process {pid}"
         ),
-        "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project",
-    )
+    );
+    e.extra.insert("stopping".into(), true.into());
+    e
 }
 
 /// The end of a connection, run on every way out of its task (return, panic, abort): removes
@@ -488,6 +571,41 @@ async fn close_after_reply(mut stream: UnixStream, reply: &HelloReply) {
 }
 
 impl Conn {
+    /// Whether `<root>/.rdy` (from `lstat`) is no longer the `.rdy` this daemon bound with: gone,
+    /// or another directory (a restore, a copy moved into place).
+    fn project_gone(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(self.root.join(".rdy")) {
+            Ok(m) => {
+                ProjectId {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                } != self.project
+            }
+            Err(_) => true,
+        }
+    }
+
+    /// The project check (final ruling): when the project is gone, removes this daemon's run
+    /// files that still name it (`RunFiles::remove_if_ours`), then stops with `ProjectGone`. True
+    /// when the project is gone. Run at each hello and on the idle tick.
+    fn check_project(&self) -> bool {
+        if !self.project_gone() {
+            return false;
+        }
+        if self.reason.set(ExitReason::ProjectGone).is_ok() {
+            log(&format!(
+                "the project's .rdy at {} is gone or replaced; exiting",
+                self.root.display()
+            ));
+        }
+        // before any reply: a client's retry may start a successor at once
+        self.files
+            .remove_if_ours(&self.run, self.project, self.info.pid);
+        self.info.stop.send_replace(true);
+        true
+    }
+
     async fn serve(self: Arc<Self>, mut stream: UnixStream, mut end: ConnEnd) {
         // (a) the peer check
         let peer_uid = match socket::peer_uid(&stream) {
@@ -518,15 +636,32 @@ impl Conn {
                 return;
             }
         };
-        // (c) the project: a client of another project (a copy's stale record, a path reused
-        // after a project was moved away) never gets a session, and never makes this daemon
-        // exit to be replaced
+        // (c) the project. A daemon whose own `.rdy` is gone or replaced (the project deleted,
+        // moved away, restored from a copy) stops: it refuses every hello as stopping, after its
+        // socket is removed, so the client's retry starts the project's own daemon. A client of
+        // another project (a copy's stale record) never gets a session, and never makes this
+        // daemon exit to be replaced.
+        if self.check_project() {
+            let error = another_project(
+                &self.files.socket(&self.run),
+                &self.root,
+                self.info.pid,
+                true,
+            );
+            close_after_reply(stream, &HelloReply::Refused { error }).await;
+            return;
+        }
         if hello.project != self.project {
             log(&format!(
                 "refused a client of another project ({})",
                 hello.project
             ));
-            let error = another_project(&self.files.socket(&self.run), &self.root);
+            let error = another_project(
+                &self.files.socket(&self.run),
+                &self.root,
+                self.info.pid,
+                false,
+            );
             close_after_reply(stream, &HelloReply::Refused { error }).await;
             return;
         }
@@ -695,18 +830,44 @@ impl Conn {
 mod tests {
     use super::*;
 
-    /// df3 fix round 2 (ruling task-3-round1): the refusal of a hello from another project.
+    /// df3 fix round 2 (ruling task-3-round1): the refusal of a hello from another project. The
+    /// final ruling names the process; a daemon whose own project is gone says it is stopping.
     #[test]
     fn df3_the_refusal_of_another_project_names_the_socket_and_the_root() {
-        let e = another_project(Path::new("/tmp/rdy-501/abc.sock"), Path::new("/w/orig"));
+        let e = another_project(
+            Path::new("/tmp/rdy-501/abc.sock"),
+            Path::new("/w/orig"),
+            4242,
+            false,
+        );
         assert_eq!(e.code, E_DAEMON_START);
         assert_eq!(
             e.message,
-            "the daemon on /tmp/rdy-501/abc.sock serves another project (/w/orig)"
+            "the daemon on /tmp/rdy-501/abc.sock serves another project (/w/orig, process 4242)"
         );
         assert_eq!(
             e.fix,
             "this project's daemon is not running; run rdy serve here, or remove a stale .rdy/run/daemon.sock copied from another project"
+        );
+        assert_eq!(e.extra.get("stopping"), None);
+        let e = another_project(
+            Path::new("/tmp/rdy-501/abc.sock"),
+            Path::new("/w/orig"),
+            4242,
+            true,
+        );
+        assert_eq!(e.code, E_DAEMON_START);
+        assert_eq!(
+            e.message,
+            "the daemon on /tmp/rdy-501/abc.sock serves another project (/w/orig, process 4242)"
+        );
+        assert_eq!(
+            e.fix,
+            "that daemon is stopping; run the command again. If it keeps answering, end process 4242"
+        );
+        assert_eq!(
+            e.extra.get("stopping"),
+            Some(&serde_json::Value::Bool(true))
         );
     }
 }

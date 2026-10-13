@@ -6,7 +6,7 @@ use rdy_engine::*;
 use rdy_model::{ActorRun, BlockId, Justification, RelayEvidence, Role};
 use rdy_qa::fixtures::*;
 use rdy_qa::invariants::check;
-use rdy_qa::tensions::{ag, j_implements, put_j, try_decide_in, try_put_j};
+use rdy_qa::tensions::{ag, j_implements, put_j, try_briefed, try_decide_in, try_put_j};
 use rdy_store::Relay;
 use rdy_store::view::ViewOpKind;
 use serde_json::json;
@@ -578,4 +578,105 @@ fn df1_implements_a_decision_this_view_does_not_hold_is_refused() {
     );
     put_j(&mut r, "impl", mv, None);
     check(&r, &scope).unwrap();
+}
+
+/// The orchestrator ruling after G1: `implements` names an accepted decision or one proposed in
+/// this view. A rejected, superseded or revoked decision is refused up front, so rdy never writes
+/// a store-only link that is suspect at once; nothing is written.
+#[test]
+fn df1_implements_a_replaced_decision_is_refused() {
+    let (_d, mut r) = project();
+    let (s, _) = wallets(&mut r);
+    // rejected: an approver may write a decision with a non-proposed status
+    let ops = rdy_qa::fixtures::parse_test_ops(
+        json!([{"op": "create", "type": "decision", "id": "$x", "parent": s.to_string(),
+        "fields": {"statement": "Caps are per member", "status": "rejected",
+                   "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z",
+                   "options": ["yes", "no"]}}]),
+    )
+    .unwrap();
+    let rejected = try_briefed(&mut r, "rej", |r, brief| {
+        r.write_briefed(
+            &approver(),
+            WriteRequest {
+                view: "rej".into(),
+                ops: ops.clone(),
+                justification: None,
+                message: String::new(),
+            },
+            brief,
+        )
+    })
+    .unwrap();
+    let rejected = BlockId::parse(&rejected.created["$x"]).unwrap();
+    land(&mut r, "rej").unwrap();
+    // superseded and revoked: accepted, then replaced and landed
+    let superseded = decide(&mut r, "d0", &s);
+    land(&mut r, "d0").unwrap();
+    let revoked = try_decide_in(&mut r, "dr", &s, "Caps reset monthly.").unwrap();
+    land(&mut r, "dr").unwrap();
+    try_briefed(&mut r, "x", |r, brief| {
+        r.supersede(
+            &ag("x"),
+            "x",
+            &superseded.to_string(),
+            None,
+            DecisionInput {
+                parent: s.to_string(),
+                statement: "Unverified members hold at most 100 EUR.".into(),
+                brief,
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    try_briefed(&mut r, "x", |r, brief| {
+        r.revoke(
+            &ag("x"),
+            "x",
+            &revoked.to_string(),
+            "not needed",
+            &s.to_string(),
+            brief,
+        )
+    })
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    put_j(
+        &mut r,
+        "impl",
+        json!([{"op": "create", "type": "claim", "parent": s.to_string(), "body": "Caps are per wallet."}]),
+        None,
+    );
+    let before = r.store().view("impl").unwrap().changes.len();
+    for (d, status) in [
+        (&rejected, "rejected"),
+        (&superseded, "superseded"),
+        (&revoked, "revoked"),
+    ] {
+        let e = try_put_j(
+            &mut r,
+            "impl",
+            json!([{"op": "create", "type": "claim", "parent": s.to_string(), "body": "Capped."}]),
+            j_implements(d),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{status}: {e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "implements names {d}, which is {status}; implements names an accepted decision or one proposed in this view"
+            ),
+            "{status}"
+        );
+        assert_eq!(
+            e.fix, "name the decision that replaced it, or give an editorial reason",
+            "{status}"
+        );
+        assert_eq!(
+            r.store().view("impl").unwrap().changes.len(),
+            before,
+            "{status}: nothing written"
+        );
+    }
 }

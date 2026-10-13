@@ -2300,14 +2300,41 @@ fn build_ops(
 /// the write's view holds. Checked once, before any op applies, for every write that carries
 /// the justification (a write that only moves or repins included): a block of another type is
 /// refused, and so is an id the view does not hold (one decided in another view and not
-/// landed, or a typo).
-fn check_implements(m: &Materialized, j: Option<&Justification>) -> Result<(), RdyError> {
+/// landed, or a typo). The ruling after G1: a held decision must be accepted (and in force) or
+/// proposed in this view, so a rejected, superseded or revoked one is refused too; the graph is
+/// read only for an accepted decision.
+fn check_implements(
+    st: &ReadState,
+    scope: &Scope,
+    m: &Materialized,
+    j: Option<&Justification>,
+) -> Result<(), RdyError> {
     let Some(Justification::Implements(ids)) = j else {
         return Ok(());
     };
     for id in ids {
         match m.get(id) {
-            Some(b) if b.block_type == decision::DECISION => {}
+            Some(b) if b.block_type == decision::DECISION => {
+                let status = match decision::status(b) {
+                    Some(decision::DecisionStatus::Rejected) => Some("rejected"),
+                    Some(decision::DecisionStatus::Accepted) => match st.graph(scope)?.status(id) {
+                        Some(
+                            s @ (rdy_graph::DerivedStatus::Superseded { .. }
+                            | rdy_graph::DerivedStatus::Revoked { .. }),
+                        ) => Some(s.tag()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(status) = status {
+                    return Err(bad(
+                        format!(
+                            "implements names {id}, which is {status}; implements names an accepted decision or one proposed in this view"
+                        ),
+                        "name the decision that replaced it, or give an editorial reason",
+                    ));
+                }
+            }
             Some(b) => {
                 return Err(bad(
                     format!(
@@ -2605,7 +2632,7 @@ impl Rdy {
         let conflicts = st.conflicts(&scope)?;
         let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
-        check_implements(&m, req.justification.as_ref())?;
+        check_implements(&st, &scope, &m, req.justification.as_ref())?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
         let (ops, created, touched, names, keys) = build_ops(
             &self.pack,

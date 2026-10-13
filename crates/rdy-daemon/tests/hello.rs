@@ -302,9 +302,10 @@ async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
     assert_eq!(
         v["error"]["message"],
         format!(
-            "the daemon on {} serves another project ({})",
+            "the daemon on {} serves another project ({}, process {})",
             d.run.socket().display(),
-            root.display()
+            root.display(),
+            std::process::id()
         )
     );
     assert_eq!(

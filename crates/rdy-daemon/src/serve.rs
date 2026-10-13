@@ -356,8 +356,14 @@ fn serve_thread(
     // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still
     // serves them; then the store closes last, so the process exits right after releasing it
     drop(rt);
-    close(&shared);
-    log("store closed");
+    if matches!(ran, Ok(ExitReason::ProjectGone)) {
+        // final ruling: no store write; the store's path may hold another project now
+        shared.writer.abandon();
+        log("store left as it is (the project is gone)");
+    } else {
+        close(&shared);
+        log("store closed");
+    }
     ran.map_err(ServeError::Runtime)
 }
 

@@ -364,3 +364,87 @@ fn df3_a_copied_project_never_talks_to_the_originals_daemon() {
         .output()
         .unwrap());
 }
+
+/// Ends process `pid` when dropped, so a failed assertion leaves no orphan daemon.
+struct KillOnDrop(u32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if rdy_daemon::process_alive(self.0) {
+            let _ = std::process::Command::new("kill")
+                .arg(self.0.to_string())
+                .output();
+        }
+    }
+}
+
+/// Final ruling (c) + (a), the reviewer's probe: a long-path project (its socket is the short
+/// one in `/tmp/rdy-<uid>`) is moved away, copied back with `cp -R` and the old copy removed,
+/// while its daemon lives. That daemon's `.rdy` is gone, so the restored project's `status`
+/// makes it refuse (stopping) and exit; the client retries once and starts the restored
+/// project's own daemon within its start poll. The old process exits.
+#[test]
+fn df3_a_restored_project_replaces_its_old_daemon() {
+    let base = short_tempdir();
+    let project = long_project(base.path());
+    let _stop = StopOnDrop(&project);
+    ok(&human_command(&project, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    let old = ping_pid(&project) as u32;
+    let _kill = KillOnDrop(old);
+    let away = base.path().join("away");
+    std::fs::rename(&project, &away).unwrap();
+    let copied = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(&away)
+        .arg(&project)
+        .output()
+        .unwrap();
+    assert!(copied.status.success(), "{copied:?}");
+    std::fs::remove_dir_all(&away).unwrap();
+    ok(&human_command(&project, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    let new = ping_pid(&project) as u32;
+    assert_ne!(new, old, "the restored project reached its old daemon");
+    // the old daemon drains (no connections) and exits; bounded, polled
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while rdy_daemon::process_alive(old) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !rdy_daemon::process_alive(old),
+        "the old daemon {old} lives on"
+    );
+    ok(&human_command(&project, &[], &["serve", "--stop"])
+        .output()
+        .unwrap());
+}
+
+/// Final ruling (c): a daemon whose project is deleted exits on its next idle tick (driven
+/// through the test hook, no sleep) and removes the short socket it bound.
+#[test]
+fn df3_a_daemon_exits_when_its_project_is_deleted() {
+    let base = short_tempdir();
+    let project = long_project(base.path());
+    let run = rdy_daemon::start(rdy_daemon::ServeOptions {
+        project: project.clone(),
+        version: "t".into(),
+        detach: false,
+        idle_timeout: None,
+        human_actor: None,
+    })
+    .unwrap();
+    let sock = run.handle().socket();
+    assert!(sock.starts_with("/tmp"), "{}", sock.display());
+    assert!(sock.exists());
+    std::fs::remove_dir_all(&project).unwrap();
+    run.handle().tick();
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+    assert!(
+        !sock.exists(),
+        "the gone project's daemon left {}",
+        sock.display()
+    );
+}

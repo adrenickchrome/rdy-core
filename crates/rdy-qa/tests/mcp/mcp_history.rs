@@ -295,8 +295,10 @@ fn df7_context_history_names_the_relay() {
         from_value(json!({"id": claim, "scope": "canon"})).unwrap(),
     )
     .unwrap();
+    // final review M3: the same {actor, run} object as `author`, `imported_by` and `rdy_log`
     assert_eq!(
-        v["history"][0]["landing"]["relayed_by"], "agent:writer-a/r1",
+        v["history"][0]["landing"]["relayed_by"],
+        json!({"actor": "agent:writer-a", "run": "r1"}),
         "{v}"
     );
     assert_eq!(v["history"][0]["landing"]["approved_by"], "human:qa");
