@@ -214,6 +214,7 @@ fn index_text(
         .filter_map(|p| match p.kind {
             "glossary" => Some(format!("- [Glossary]({})\n", p.page_url)),
             "questions" => Some(format!("- [Open questions]({})\n", p.page_url)),
+            "disagreements" => Some(format!("- [Where the docs disagree]({})\n", p.page_url)),
             _ => None,
         })
         .collect();

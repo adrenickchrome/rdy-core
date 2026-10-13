@@ -85,6 +85,9 @@ pub struct Site<'a> {
     pub open_questions: Vec<BlockId>,
     /// Those questions' anchors on `questions.html`.
     pub question_anchors: BTreeMap<BlockId, String>,
+    /// The entries of `disagreements.html`, in reading order of their docs; none when the render
+    /// has no such page (FW-SW2). Filled by [`Site::set_disagreements`].
+    pub disagreements: Vec<crate::disagree::Disagreement>,
     /// Every term, by name, case-insensitively.
     pub terms: Vec<BlockId>,
     /// The terms' anchors on `glossary.html`.
@@ -204,6 +207,7 @@ impl<'a> Site<'a> {
             governs: BTreeMap::new(),
             open_questions: vec![],
             question_anchors: BTreeMap::new(),
+            disagreements: vec![],
             terms: vec![],
             term_anchors: BTreeMap::new(),
             nav_lists,
@@ -379,6 +383,39 @@ impl<'a> Site<'a> {
             self.terms = terms.iter().map(|b| b.id.clone()).collect();
             self.term_anchors = term_anchors;
         }
+    }
+
+    /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
+    /// reading order of their docs. A top-level doc named `disagreements` keeps its page, and the
+    /// collected page is not written (nor linked), as for `questions.html`.
+    pub fn set_disagreements(&mut self, list: Vec<crate::disagree::Disagreement>) {
+        if self.page_taken("disagreements.html") {
+            return;
+        }
+        let key = |id: &BlockId| {
+            let at = self
+                .m
+                .doc_of(id)
+                .and_then(|d| self.order_pos.get(&d.id).copied())
+                .unwrap_or(usize::MAX);
+            (at, id.clone())
+        };
+        let mut entries: Vec<crate::disagree::Disagreement> = vec![];
+        for d in list {
+            let mut blocks = crate::disagree::distinct(
+                d.blocks.into_iter().filter(|b| self.url_of(b).is_some()),
+            );
+            blocks.sort_by_key(&key);
+            let entry = crate::disagree::Disagreement {
+                sentence: d.sentence,
+                blocks,
+            };
+            if !entry.blocks.is_empty() && !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+        entries.sort_by_cached_key(|e| (key(&e.blocks[0]), e.sentence));
+        self.disagreements = entries;
     }
 
     /// Whether a doc or folder already has the page at `page`.

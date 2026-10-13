@@ -103,6 +103,12 @@ fn gold1_the_canon_pages_match_their_text_goldens() {
 }
 
 #[test]
+fn gold1_the_disagreements_page_matches_its_text_golden() {
+    let (_d, _r, out) = golden::site_disagree();
+    check(out.path(), "disagree", "disagreements.html");
+}
+
+#[test]
 fn gold1_the_frozen_page_matches_its_text_golden() {
     let (_d, _r, _ids, out) = golden::site_frozen();
     check(out.path(), "frozen", "specification/patterns.html");

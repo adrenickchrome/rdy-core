@@ -1,0 +1,75 @@
+//! The disagreements page's list (FW-SW2, D-QWSTV): each open tension of canon whose every side
+//! is canon, with one reader sentence for its kind. The page shows no id, kind name, severity,
+//! count, date or action, and a canon render shows only the published documentation, so an
+//! in-flight change is never a side here.
+use rdy_engine::tensions::{SideRef, TensionStatus};
+use rdy_engine::{RdyError, ReadState, Scope};
+use rdy_model::BlockId;
+use std::collections::BTreeSet;
+
+/// One entry of the page: what the reader is told, and the blocks it is about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disagreement {
+    pub sentence: &'static str,
+    pub blocks: Vec<BlockId>,
+}
+
+/// The reader sentence of a tension kind (by its wire name). The table is closed: a kind that
+/// does not persist in canon (D-84QSN) has none, and its tensions are skipped.
+pub fn sentence(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "fork" => "These pages give two versions of one point.",
+        "duplicate_definition" => "These pages define the same thing twice.",
+        "deprecated_reference" => "This page still points to something that was retired.",
+        "value_disagreement" => "These pages state different values for the same thing.",
+        "restatement_drift" => "This page restates a point that has since changed.",
+        "semantic" => "A reviewer found that these statements contradict each other.",
+        _ => return None,
+    })
+}
+
+/// The disagreements of `scope`, for canon and for a tag at canon's head only. A tag at a past
+/// landing and a view have none: the engine computes tensions for the current state only
+/// (founder ruling 2026-10-12).
+pub fn list(rdy: &ReadState, scope: &Scope) -> Result<Vec<Disagreement>, RdyError> {
+    let current = match scope {
+        Scope::Canon => true,
+        Scope::At(h) => Some(*h) == rdy.canon_head(),
+        _ => false,
+    };
+    if !current {
+        return Ok(vec![]);
+    }
+    let mut out: Vec<Disagreement> = vec![];
+    for t in rdy.tensions()?.iter() {
+        let Some(said) = sentence(t.kind.name()) else {
+            continue;
+        };
+        let all_canon =
+            !t.sides.is_empty() && t.sides.iter().all(|s| matches!(s, SideRef::Canon { .. }));
+        if !all_canon || rdy.tension_status(t) != TensionStatus::Open {
+            continue;
+        }
+        let blocks = t.blocks();
+        if blocks.is_empty() {
+            continue;
+        }
+        let entry = Disagreement {
+            sentence: said,
+            blocks,
+        };
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
+/// `blocks` without repeats, keeping the first of each.
+pub fn distinct(blocks: impl IntoIterator<Item = BlockId>) -> Vec<BlockId> {
+    let mut seen = BTreeSet::new();
+    blocks
+        .into_iter()
+        .filter(|b| seen.insert(b.clone()))
+        .collect()
+}

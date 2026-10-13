@@ -568,6 +568,39 @@ pub fn tiny_with_doc() -> (tempfile::TempDir, Rdy) {
     (d, r)
 }
 
+/// A project named `Retired reference` whose canon holds an open `deprecated_reference`: doc
+/// `Notes` has a claim that references a claim of doc `Spec` (landed first), and `Spec`'s section
+/// is then deprecated (landed second). Both sides of the tension are canon, so the canon site
+/// carries `disagreements.html` (sg9).
+pub fn retired_reference() -> (tempfile::TempDir, Rdy, crate::edit_loop::Spec) {
+    let _clock = fixture_clock();
+    let (d, mut r) = named_project("Retired reference");
+    let s = crate::edit_loop::spec_doc(&mut r);
+    write(&mut r, "notes", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Reading"}},
+        {"op": "create", "type": "claim", "parent": "$s", "body": format!("Readers rely on {{{{{}}}}}.", s.c)}
+    ]))
+    .expect("the notes doc");
+    land(&mut r, "notes").expect("land the reference");
+    write(
+        &mut r,
+        "retire",
+        json!([{"op": "update", "id": s.section.to_string(), "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .expect("deprecate the section");
+    land(&mut r, "retire").expect("land the deprecation");
+    (d, r, s)
+}
+
+/// The canon site of [`retired_reference`].
+pub fn site_disagree() -> (tempfile::TempDir, Rdy, tempfile::TempDir) {
+    let (dir, r, _s) = retired_reference();
+    let out = tempfile::tempdir().expect("tempdir");
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).expect("render the fixture");
+    (dir, r, out)
+}
+
 /// The blocks of [`site_with_decision`].
 #[derive(Clone, Debug)]
 pub struct WalletIds {
