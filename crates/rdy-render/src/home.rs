@@ -97,7 +97,7 @@ pub fn build(
         cards.push(Card {
             title: "Where the docs disagree".into(),
             href: "disagreements.html".into(),
-            summary: "Pages that do not agree with each other.".into(),
+            summary: String::new(),
         });
     }
     let current = versions.last().map(|v| &v.name);

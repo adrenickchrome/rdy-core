@@ -7,11 +7,14 @@ use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::BlockId;
 use std::collections::BTreeSet;
 
-/// One entry of the page: what the reader is told, and the blocks it is about.
+/// One entry of the page: what the reader is told, and the blocks it is about. For the two kinds
+/// whose sentence says "this page" (a retired reference, a restated point that changed), `lead`
+/// is the block of that page and its link comes first; for the others it is `None`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disagreement {
     pub sentence: &'static str,
     pub blocks: Vec<BlockId>,
+    pub lead: Option<BlockId>,
 }
 
 /// The reader sentence of a tension kind (by its wire name). The table is closed: a kind that
@@ -54,15 +57,36 @@ pub fn list(rdy: &ReadState, scope: &Scope) -> Result<Vec<Disagreement>, RdyErro
         if blocks.is_empty() {
             continue;
         }
+        let lead = lead_of(t.kind.name(), &t.summary, &blocks);
         let entry = Disagreement {
             sentence: said,
             blocks,
+            lead,
         };
         if !out.contains(&entry) {
             out.push(entry);
         }
     }
     Ok(out)
+}
+
+/// The block that "this page" names in the sentence of `kind`. The engine keeps a tension's
+/// sides sorted, so the roles are read from the summary the detector wrote: a deprecated
+/// reference opens with the pointing block ("{y} (who) references deprecated {x}"), and a
+/// restatement drift names the restating block last ("{x} (who) changed text that {y} restates").
+/// The other kinds have no such page.
+fn lead_of(kind: &str, summary: &str, blocks: &[BlockId]) -> Option<BlockId> {
+    match kind {
+        "deprecated_reference" => blocks
+            .iter()
+            .find(|b| summary.starts_with(&format!("{b} ")))
+            .cloned(),
+        "restatement_drift" => blocks
+            .iter()
+            .find(|b| summary.contains(&format!(" that {b} restates")))
+            .cloned(),
+        _ => None,
+    }
 }
 
 /// `blocks` without repeats, keeping the first of each.

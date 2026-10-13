@@ -6,6 +6,7 @@ use rdy_model::*;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::*;
 use rdy_qa::golden::retired_reference;
+use rdy_qa::tensions::{created, put, upd};
 use serde_json::json;
 use std::path::Path;
 
@@ -89,6 +90,98 @@ fn sg9_a_canon_with_a_retired_reference_renders_the_page() {
         read(out.path(), "index.html").contains("href=\"disagreements.html\""),
         "home links to the page"
     );
+    // the people surface and the agent surface list the same reference pages
+    let nav = read(out.path(), "index.html");
+    assert!(
+        nav.contains("<span class=\"nav-group-label\">Reference</span>")
+            && nav.contains("href=\"disagreements.html\">Where the docs disagree</a></li>"),
+        "the Reference group of the navigation lists the page: {nav}"
+    );
+    let llms = read(out.path(), "llms.txt");
+    assert!(
+        llms.contains("- [Where the docs disagree](disagreements.html)\n"),
+        "llms.txt lists the page: {llms}"
+    );
+}
+
+/// The link texts of the entries on the page, in order, one list per entry.
+fn entries(page: &str) -> Vec<Vec<String>> {
+    page.split("<div class=\"callout\">")
+        .skip(1)
+        .map(|e| {
+            e.split("<li><a ")
+                .skip(1)
+                .map(|l| {
+                    let text = l.split_once('>').unwrap().1;
+                    text.split_once("</a>").unwrap().0.to_string()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Finding 2 of the round 1 review: the home card adds no text the brief does not give.
+#[test]
+fn sg9_the_home_card_is_a_title_and_nothing_else() {
+    let (_d, r, _s) = retired_reference();
+    let out = render(&r, &Scope::Canon);
+    let home = read(out.path(), "index.html");
+    assert!(
+        home.contains(
+            "<a class=\"card\" href=\"disagreements.html\"><strong>Where the docs disagree</strong></a>"
+        ),
+        "{home}"
+    );
+}
+
+/// Finding 3 of the round 1 review: a sentence that says "this page" is followed by the link of
+/// that page first, whatever the reading order of the docs.
+#[test]
+fn sg9_a_retired_reference_lists_the_pointing_page_first() {
+    let (_d, r, _s) = retired_reference();
+    let out = render(&r, &Scope::Canon);
+    let page = read(out.path(), "disagreements.html");
+    let list = entries(&page);
+    assert_eq!(list.len(), 1, "{page}");
+    assert!(list[0][0].starts_with("Notes"), "the pointing page: {page}");
+    assert!(list[0][1].starts_with("Spec"), "the retired target: {page}");
+}
+
+#[test]
+fn sg9_a_drifted_restatement_lists_the_restating_page_first() {
+    let (_d, mut r) = project();
+    const SAID: &str =
+        "Every job retries for five seconds and then reports a failure to the owner.";
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$x", "parent": "$d", "body": SAID},
+            {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$y", "parent": "$e", "body": format!("In short: {SAID}")}
+        ]),
+    );
+    land(&mut r, "seed").unwrap();
+    put(
+        &mut r,
+        "edit",
+        upd(
+            &created(&w, "$x"),
+            "Every job retries for ten seconds and then reports a failure to the owner.",
+        ),
+    );
+    land(&mut r, "edit").unwrap();
+    let out = render(&r, &Scope::Canon);
+    let page = read(out.path(), "disagreements.html");
+    assert!(
+        page.contains("This page restates a point that has since changed."),
+        "{page}"
+    );
+    let list = entries(&page);
+    assert_eq!(list.len(), 1, "{page}");
+    assert!(list[0][0].starts_with("Ops"), "the restating page: {page}");
+    assert!(list[0][1].starts_with("Jobs"), "the edited page: {page}");
 }
 
 #[test]

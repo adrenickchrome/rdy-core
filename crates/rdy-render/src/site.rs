@@ -386,7 +386,8 @@ impl<'a> Site<'a> {
     }
 
     /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
-    /// reading order of their docs. A top-level doc named `disagreements` keeps its page, and the
+    /// reading order of their docs, except that the lead of an entry (the "this page" of its
+    /// sentence) comes first. A top-level doc named `disagreements` keeps its page, and the
     /// collected page is not written (nor linked), as for `questions.html`.
     pub fn set_disagreements(&mut self, list: Vec<crate::disagree::Disagreement>) {
         if self.page_taken("disagreements.html") {
@@ -402,13 +403,24 @@ impl<'a> Site<'a> {
         };
         let mut entries: Vec<crate::disagree::Disagreement> = vec![];
         for d in list {
+            let lead = d.lead;
+            // the page the sentence calls "this page" must be linkable, else the entry would
+            // point the reader at the wrong one
+            if lead.as_ref().is_some_and(|l| self.url_of(l).is_none()) {
+                continue;
+            }
             let mut blocks = crate::disagree::distinct(
                 d.blocks.into_iter().filter(|b| self.url_of(b).is_some()),
             );
             blocks.sort_by_key(&key);
+            if let Some(l) = &lead {
+                blocks.retain(|b| b != l);
+                blocks.insert(0, l.clone());
+            }
             let entry = crate::disagree::Disagreement {
                 sentence: d.sentence,
                 blocks,
+                lead,
             };
             if !entry.blocks.is_empty() && !entries.contains(&entry) {
                 entries.push(entry);
