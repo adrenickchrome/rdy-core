@@ -3,3 +3,4 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod swarm_actors;
 mod swarm_script;
+mod swarm_sim;

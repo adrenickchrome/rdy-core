@@ -116,6 +116,11 @@ pub struct AgentReport {
     pub proposals: Vec<String>,
     /// The cursor its last inbox read returned.
     pub last_cursor: String,
+    /// The cursor of its last read that acked, if one did: where a read starts again when
+    /// `last_cursor` is past the end of the log after a kill.
+    pub persisted: Option<String>,
+    /// The range of its last inbox read (`InboxRead::range`).
+    pub range: u32,
 }
 
 /// What a call met.
@@ -384,12 +389,16 @@ fn judge(rules: &str, res: &Res) -> (Outcome, Option<String>) {
     }
 }
 
-/// The tension labels a write, view-op or propose reply lists as new on the actor's changes.
+/// The tension labels a reply lists as open: a write, view-op or propose reply's new tensions on
+/// the actor's changes, or a listing's rows. A read-time intent overlap and the landing form of an
+/// open proposal (a row with `proposal`) are left out: neither is a tension of the event-derived
+/// set, so neither is ever logged (sg5).
 pub(crate) fn labels_of(rows: &Value) -> Vec<String> {
     rows.as_array()
         .into_iter()
         .flatten()
         .filter(|t| t["status"].as_str().is_none_or(|s| s == "open"))
+        .filter(|t| t["read_time"] != true && t.get("proposal").is_none())
         .filter_map(|t| t["id"].as_str().map(str::to_string))
         .collect()
 }
@@ -419,6 +428,16 @@ pub(crate) fn spell(mut n: usize) -> String {
     out.iter().rev().collect()
 }
 
+/// The text of a claim that agent `name` writes in pass `pass` to cite `target`: each agent's
+/// own words, so two citations of one block never share a normative text (a
+/// `duplicate_definition`).
+fn cite_text(name: &str, pass: usize, target: &str) -> String {
+    format!(
+        "Agent {name} builds on {{{{{target}}}}} in pass {}.",
+        spell(pass)
+    )
+}
+
 /// The area of every claim an agent created, by block id (a block id is unique in a project, and
 /// a process may run several projects). An agent writing another agent's claim needs it for the
 /// decision it implements.
@@ -427,7 +446,7 @@ fn area_registry() -> &'static Mutex<HashMap<String, usize>> {
     R.get_or_init(Mutex::default)
 }
 
-fn area_of(block: &str) -> Option<usize> {
+pub(crate) fn area_of(block: &str) -> Option<usize> {
     area_registry()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -504,6 +523,23 @@ pub fn spawn(
     journal: Journal,
     gate: Arc<KillGate>,
 ) -> JoinHandle<AgentReport> {
+    spawn_paced(p, cfg, i, acts, journal, gate, None)
+}
+
+/// A wait before each step of an actor, given the step: it returns when the step may run.
+pub(crate) type Pace = Arc<dyn Fn(usize) + Send + Sync>;
+
+/// `spawn`, with a wait before each step (`pace`): a run keeps its agents within a step of
+/// each other (sg5), so a reviewer still runs when a writer creates the claim it judges.
+pub(crate) fn spawn_paced(
+    p: &SwarmProject,
+    cfg: &Config,
+    i: usize,
+    acts: Vec<Act>,
+    journal: Journal,
+    gate: Arc<KillGate>,
+    pace: Option<Pace>,
+) -> JoinHandle<AgentReport> {
     let at = Where::of(p);
     let seed = p.seed.clone();
     let cfg = *cfg;
@@ -527,6 +563,9 @@ pub fn spawn(
         let mut a = Agent::new(link, i, seed);
         a.start_inbox();
         for (step, act) in acts.iter().enumerate() {
+            if let Some(pace) = &pace {
+                pace(step);
+            }
             a.link.step = step;
             a.act(act);
             if a.link.take_recovered() {
@@ -535,6 +574,8 @@ pub fn spawn(
             }
         }
         a.report.last_cursor = a.last_cursor.clone();
+        a.report.persisted = a.persisted.clone();
+        a.report.range = a.range;
         a.report
     })
 }
@@ -1060,8 +1101,10 @@ impl Agent {
         let Some(t) = self.resolve(target) else {
             return self.skipped("cite");
         };
+        self.counter += 1;
+        let body = cite_text(&self.name(), self.counter, &t.id);
         let ops = json!([{"op": "create", "type": "claim", "id": "$y",
-            "parent": self.seed.sections[t.area], "body": format!("Builds on {{{{{}}}}}.", t.id)}]);
+            "parent": self.seed.sections[t.area], "body": body}]);
         let e = self.view_entry("cite");
         let section = self.seed.sections[t.area].clone();
         let res = self.briefed_write(e, "cite", &[section], ops, t.area, true);
@@ -1632,6 +1675,36 @@ mod tests {
         gate.restarted();
         gate.wait_restarted_for(31, Duration::from_millis(50));
         assert_eq!(gate.epoch(), 1);
+    }
+
+    /// sg5 (seed 1): a listing's read-time overlaps and landing forms are not tensions of the
+    /// event-derived set, so `seen` leaves them out and the log check reads only logged kinds.
+    #[test]
+    fn sg5_seen_labels_leave_out_read_time_overlaps_and_landing_forms() {
+        let rows = json!([
+            {"id": "tn-1", "status": "open"},
+            {"id": "tn-2", "status": "open", "read_time": true},
+            {"id": "tn-3", "status": "open", "proposal": "P-abc@2"},
+            {"id": "tn-4", "status": "dismissed"},
+            {"id": "tn-5"},
+        ]);
+        assert_eq!(
+            labels_of(&rows),
+            vec!["tn-1".to_string(), "tn-5".to_string()]
+        );
+    }
+
+    /// sg5 (seed 1): two agents that cite one block write different texts, so their claims never
+    /// make a `duplicate_definition` of the same normative text, which no drain rule resolves.
+    #[test]
+    fn sg5_two_agents_cite_one_block_in_different_words() {
+        let (a, b) = (cite_text("a", 1, "c-X"), cite_text("b", 1, "c-X"));
+        assert_ne!(a, b);
+        assert_ne!(cite_text("a", 1, "c-X"), cite_text("a", 2, "c-X"));
+        for text in [a, b] {
+            assert!(text.contains("{{c-X}}"), "{text}");
+            assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text}");
+        }
     }
 
     /// A propose on a view with nothing in it (a write that was undone) is a refusal outside the

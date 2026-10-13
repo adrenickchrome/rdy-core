@@ -10,9 +10,10 @@
 //! The person lands the oldest unlanded proposal of a shared queue. Journal entries of the
 //! relay carry the actor `agent:relay`; those of a direct command carry `human:qa`, the human
 //! the project's user config names.
-use super::agent::{KillGate, Link, Res, Where, inbox_labels, labels_of, spell};
+use super::agent::{KillGate, Link, Pace, Res, Where, inbox_labels, labels_of, spell};
 use super::journal::{Entry, Journal, Outcome};
 use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
+use super::run::{self, Watch};
 use super::script::PersonAct;
 use crate::daemon::human_command;
 use crate::fixtures::output_within;
@@ -33,6 +34,18 @@ const ADVICE_LOOKS: usize = 3;
 /// The proposals waiting for the person to land, oldest first.
 pub type Queue = Arc<Mutex<Vec<String>>>;
 
+/// What a run adds to the person (sg5): a wait before each act, and the reads around each
+/// landing.
+#[derive(Clone, Default)]
+pub(crate) struct Hooks {
+    /// Called with the step before each act; it returns when the act may run.
+    pub pace: Option<Pace>,
+    /// Where the landings' violations go. With it, the relay reads canon's blocking tensions
+    /// before and after each landing, and each land entry names the proposal's view and the
+    /// view's effective base before the landing (`Entry::view`, `Entry::base`).
+    pub watch: Option<Watch>,
+}
+
 /// Starts the person: one thread, one relay session. It runs `acts` and returns.
 pub fn spawn(
     p: &SwarmProject,
@@ -40,6 +53,18 @@ pub fn spawn(
     journal: Journal,
     queue: Queue,
     gate: Arc<KillGate>,
+) -> JoinHandle<()> {
+    spawn_with(p, acts, journal, queue, gate, Hooks::default())
+}
+
+/// `spawn`, with the run's `hooks`.
+pub(crate) fn spawn_with(
+    p: &SwarmProject,
+    acts: Vec<PersonAct>,
+    journal: Journal,
+    queue: Queue,
+    gate: Arc<KillGate>,
+    hooks: Hooks,
 ) -> JoinHandle<()> {
     let at = Where::of(p);
     let seed = p.seed.clone();
@@ -50,8 +75,12 @@ pub fn spawn(
             seed,
             queue,
             checked_out: false,
+            hooks,
         };
         for (step, act) in acts.iter().enumerate() {
+            if let Some(pace) = &person.hooks.pace {
+                pace(step);
+            }
             person.link.step = step;
             person.act(act);
         }
@@ -64,6 +93,7 @@ struct Person {
     queue: Queue,
     /// Whether `rdy checkout work` has run.
     checked_out: bool,
+    hooks: Hooks,
 }
 
 /// The JSON a command printed: its stdout on success, its last stderr line on failure.
@@ -133,6 +163,24 @@ impl Person {
             return;
         };
         e.block = Some(pref.clone());
+        let before = match &self.hooks.watch {
+            None => None,
+            Some(_) => match run::before_land(&mut self.link, &pref) {
+                Some(b) => {
+                    e.view = Some(b.view.clone());
+                    e.base.clone_from(&b.base);
+                    Some(b)
+                }
+                // the daemon died under a read: the proposal waits at the head of the queue
+                None => {
+                    self.queue
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(0, pref);
+                    return;
+                }
+            },
+        };
         let evidence = format!("Approve {pref}.");
         let question = format!("Land {pref}?");
         let args: Vec<&str> = if relayed {
@@ -155,6 +203,9 @@ impl Person {
         let res = self.link.finish(e, "land", res, |en, v| {
             en.reply = Some(v.clone());
         });
+        if let (Some(w), Some(b), Res::Ok(v)) = (&self.hooks.watch, before, &res) {
+            run::after_land(&mut self.link, w, b, v);
+        }
         let mut q = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         match &res {
             Res::Ok(_) => {}

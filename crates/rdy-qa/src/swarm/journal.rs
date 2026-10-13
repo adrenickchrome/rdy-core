@@ -138,12 +138,14 @@ const UNDO_CODES: &[&str] = &[
 ];
 const ALT_CREATE_CODES: &[&str] = &["E_ALT_MEMBER", "E_VIEW_CLOSED"];
 const PROPOSE_CODES: &[&str] = &[
+    "E_ALT_CHOSEN",
     "E_DEPS_MISSING",
     "E_ALT_UNCHOSEN",
     "E_ALT_MEMBER",
     "E_VIEW_CLOSED",
 ];
 const LAND_CODES: &[&str] = &[
+    "E_ALT_MEMBER",
     "E_PROPOSAL_MOVED",
     "E_CONFLICT_UNRESOLVED",
     "E_BLOCKING_TENSION",

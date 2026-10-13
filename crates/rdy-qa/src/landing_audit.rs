@@ -83,25 +83,12 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
     // onto the view's effective base, on the blocks they write (never the view's current
     // conflict set: a subset may leave a conflict out, and a version that predates the view's
     // resolution still carries it)
-    match carried_conflicts(before, view, &read) {
-        Ok(cs) => {
-            for c in &cs {
-                out.push(viol(
-                    "conflict_landed",
-                    Some(&c.block),
-                    format!(
-                        "landing of {view}: block {} had an unresolved conflict",
-                        c.block
-                    ),
-                ));
-            }
-        }
-        Err(e) => out.push(viol(
-            "conflict_landed",
-            None,
-            format!("landing of {view}: cannot merge its changes: {e}"),
-        )),
-    }
+    out.extend(conflict_rule(
+        before,
+        view,
+        before.effective_base(view),
+        &read,
+    ));
     // alt_unchosen: a change bound to a set whose member the landing did not choose
     for (c, ch) in &read {
         if let Some(choice) = &ch.links.alternative
@@ -121,17 +108,68 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
     out
 }
 
-/// The conflicts `changes` (one landing's changes, proposed from view `view`) carry on the
-/// blocks they write: their merge onto the view's effective base, restricted to those blocks.
+/// Rule `conflict_landed` alone, on `base`: the effective base view `landed.view` read on when
+/// it landed. A state after the landing no longer shows that base, so a caller that read it
+/// before the landing passes it here (the swarm reads it through the relay, sg5).
+pub fn conflicts_at(st: &ReadState, landed: &Landed, base: Option<Hash>) -> Vec<Violation> {
+    let view = &landed.view;
+    let reader = st.reader();
+    let mut out = vec![];
+    let mut read = vec![];
+    for c in &landed.changes {
+        match reader.change(c) {
+            Ok(ch) => read.push((*c, ch)),
+            Err(e) => out.push(viol(
+                "conflict_landed",
+                None,
+                format!("landing of {view}: cannot read change {}: {e}", c.short()),
+            )),
+        }
+    }
+    out.extend(conflict_rule(st, view, base, &read));
+    out
+}
+
+/// The `conflict_landed` violations of `changes` (one landing's changes, proposed from view
+/// `view`) merged onto `base`.
+fn conflict_rule(
+    st: &ReadState,
+    view: &str,
+    base: Option<Hash>,
+    changes: &[(Hash, Change)],
+) -> Vec<Violation> {
+    match carried_conflicts(st, base, changes) {
+        Ok(cs) => cs
+            .iter()
+            .map(|c| {
+                viol(
+                    "conflict_landed",
+                    Some(&c.block),
+                    format!(
+                        "landing of {view}: block {} had an unresolved conflict",
+                        c.block
+                    ),
+                )
+            })
+            .collect(),
+        Err(e) => vec![viol(
+            "conflict_landed",
+            None,
+            format!("landing of {view}: cannot merge its changes: {e}"),
+        )],
+    }
+}
+
+/// The conflicts `changes` (one landing's changes) carry on the blocks they write: their merge
+/// onto `base` (the proposing view's effective base), restricted to those blocks.
 /// The producer of each touched block's base version is read up front, so a damaged index
 /// entry is an error, never "no producer".
 fn carried_conflicts(
     st: &ReadState,
-    view: &str,
+    base: Option<Hash>,
     changes: &[(Hash, Change)],
 ) -> Result<Vec<Conflict>, String> {
     let reader = st.reader();
-    let base = st.effective_base(view);
     let state = reader
         .state_of(base)
         .map_err(|e| format!("cannot read the view's base: {e}"))?;
