@@ -2,7 +2,7 @@
 use rdy_engine::engine::Local;
 use rdy_engine::*;
 use rdy_mcp::tools::*;
-use rdy_model::{BlockId, EditorialClass, Justification};
+use rdy_model::{ActorRun, BlockId, EditorialClass, Justification, RelayEvidence};
 use rdy_qa::fixtures::*;
 use serde_json::{Value, from_value, json};
 use std::sync::Arc;
@@ -244,4 +244,60 @@ fn mhist1_rdy_read_survives_a_damaged_producer_index_without_markers() {
         "{v}"
     );
     assert!(w[0]["fix"].as_str().unwrap().contains("rdy fsck"), "{v}");
+}
+
+/// The repro case `blame-omits-relay`: a landing that carries a relayed approval says who relayed
+/// it in the history entry, as `rdy log` does.
+#[test]
+fn df7_context_history_names_the_relay() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = agent("agent:writer-a", Some("r1"));
+    let w = r
+        .write(
+            &a,
+            WriteRequest {
+                view: "r1".into(),
+                ops: from_value(
+                    json!([{"op": "create", "type": "claim", "parent": section, "body": "Relayed."}]),
+                )
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    let claim = w.created.values().next().unwrap().clone();
+    let p = r.propose(&a, "r1", "c").unwrap();
+    r.land_with(
+        &approver(),
+        &p.r#ref,
+        LandOptions {
+            relay: Some(Relay {
+                by: ActorRun {
+                    actor: "agent:writer-a".into(),
+                    run: Some("r1".into()),
+                },
+                evidence: RelayEvidence {
+                    quoted: "yes, land it".into(),
+                    session_ref: "chat-1".into(),
+                    question: None,
+                },
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut st = mcp(r);
+    let v = rdy_context(
+        &mut st,
+        from_value(json!({"id": claim, "scope": "canon"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        v["history"][0]["landing"]["relayed_by"], "agent:writer-a/r1",
+        "{v}"
+    );
+    assert_eq!(v["history"][0]["landing"]["approved_by"], "human:qa");
 }

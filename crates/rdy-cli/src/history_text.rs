@@ -120,12 +120,17 @@ pub(crate) fn blame_text(reply: &Value) -> String {
             out.push_str(&format!("  {i}"));
         }
         match e["landing"]["id"].as_str() {
-            Some(id) => out.push_str(&format!(
-                "\n    landed {}, approved by {} at {}",
-                short(id),
-                s(&e["landing"], "approved_by"),
-                time(&e["landing"]["at_ms"])
-            )),
+            Some(id) => {
+                out.push_str(&format!(
+                    "\n    landed {}, approved by {} at {}",
+                    short(id),
+                    s(&e["landing"], "approved_by"),
+                    time(&e["landing"]["at_ms"])
+                ));
+                if let Some(r) = e["landing"]["relayed_by"].as_str() {
+                    out.push_str(&format!(", relayed by {r}"));
+                }
+            }
             None => out.push_str("\n    not landed"),
         }
     }
@@ -209,5 +214,22 @@ mod tests {
         );
         let reply = json!({"history": [entry(Some(json!({"actor": "human:imp", "run": null})))]});
         assert!(blame_text(&reply).contains("  imported by human:imp\n"));
+    }
+
+    #[test]
+    fn df7_the_blame_landing_line_ends_with_the_relayer() {
+        let mut e = entry(None);
+        let plain = blame_text(&json!({"history": [e.clone()]}));
+        assert!(
+            plain.ends_with("approved by human:qa at 2026-10-09T10:00:00Z"),
+            "{plain}"
+        );
+        e["landing"]["relayed_by"] = json!("agent:w/r1");
+        let relayed = blame_text(&json!({"history": [e]}));
+        assert!(
+            relayed
+                .ends_with("approved by human:qa at 2026-10-09T10:00:00Z, relayed by agent:w/r1"),
+            "{relayed}"
+        );
     }
 }
