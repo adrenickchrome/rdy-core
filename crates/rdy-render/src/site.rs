@@ -85,6 +85,9 @@ pub struct Site<'a> {
     pub open_questions: Vec<BlockId>,
     /// Those questions' anchors on `questions.html`.
     pub question_anchors: BTreeMap<BlockId, String>,
+    /// The entries of `disagreements.html`, in reading order of their docs; none when the render
+    /// has no such page (FW-SW2). Filled by [`Site::set_disagreements`].
+    pub disagreements: Vec<crate::disagree::Disagreement>,
     /// Every term, by name, case-insensitively.
     pub terms: Vec<BlockId>,
     /// The terms' anchors on `glossary.html`.
@@ -113,6 +116,15 @@ pub struct Site<'a> {
     doc_blocks: BTreeMap<BlockId, Vec<&'a Block>>,
     /// Every summary's words worked out so far (see `summary_words`).
     summaries: RefCell<HashMap<(BlockId, usize, bool), String>>,
+    /// Every block's place worked out so far (see `url_of`): a block is linked from its doc page,
+    /// its permalink, the search and the collected pages, and each walk reads several maps.
+    urls: RefCell<HashMap<BlockId, Option<Url>>>,
+    /// Every block's doc worked out so far (see `doc_of`).
+    /// The doc's id, not the block: a reference held in a cell would make `Site` invariant.
+    docs: RefCell<HashMap<BlockId, Option<BlockId>>>,
+    /// Test hook: how many times `doc_of` was asked.
+    #[cfg(test)]
+    doc_calls: std::cell::Cell<usize>,
 }
 
 impl<'a> Site<'a> {
@@ -204,6 +216,7 @@ impl<'a> Site<'a> {
             governs: BTreeMap::new(),
             open_questions: vec![],
             question_anchors: BTreeMap::new(),
+            disagreements: vec![],
             terms: vec![],
             term_anchors: BTreeMap::new(),
             nav_lists,
@@ -216,6 +229,10 @@ impl<'a> Site<'a> {
             labels: RefCell::default(),
             doc_blocks: BTreeMap::new(),
             summaries: RefCell::default(),
+            urls: RefCell::default(),
+            docs: RefCell::default(),
+            #[cfg(test)]
+            doc_calls: Default::default(),
         };
         site.doc_blocks = site
             .order
@@ -381,6 +398,55 @@ impl<'a> Site<'a> {
         }
     }
 
+    /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
+    /// reading order of their docs, except that the lead of an entry (the "this page" of its
+    /// sentence) comes first. A top-level doc named `disagreements` keeps its page, and the
+    /// collected page is not written (nor linked), as for `questions.html`.
+    pub fn set_disagreements(&mut self, list: Vec<crate::disagree::Disagreement>) {
+        if self.page_taken("disagreements.html") {
+            return;
+        }
+        // where a block's doc comes in reading order; each block's place is read once per entry
+        // (a sort by a computed key would walk its doc chain at every comparison)
+        let at = |id: &BlockId| {
+            self.doc_of(id)
+                .and_then(|d| self.order_pos.get(&d.id).copied())
+                .unwrap_or(usize::MAX)
+        };
+        let mut entries: Vec<crate::disagree::Disagreement> = vec![];
+        let mut seen: BTreeSet<crate::disagree::Disagreement> = BTreeSet::new();
+        for d in list {
+            let lead = d.lead;
+            // the page the sentence calls "this page" must be linkable, else the entry would
+            // point the reader at the wrong one
+            if lead.as_ref().is_some_and(|l| self.url_of(l).is_none()) {
+                continue;
+            }
+            // distinct ids, so the keys are distinct and an unstable sort gives one order
+            let mut keyed: Vec<(usize, BlockId)> = crate::disagree::distinct(d.blocks)
+                .into_iter()
+                .filter(|b| self.url_of(b).is_some())
+                .map(|b| (at(&b), b))
+                .collect();
+            keyed.sort_unstable();
+            let mut blocks: Vec<BlockId> = keyed.into_iter().map(|(_, b)| b).collect();
+            if let Some(l) = &lead {
+                blocks.retain(|b| b != l);
+                blocks.insert(0, l.clone());
+            }
+            let entry = crate::disagree::Disagreement {
+                sentence: d.sentence,
+                blocks,
+                lead,
+            };
+            if !entry.blocks.is_empty() && seen.insert(entry.clone()) {
+                entries.push(entry);
+            }
+        }
+        entries.sort_by_cached_key(|e| ((at(&e.blocks[0]), e.blocks[0].clone()), e.sentence));
+        self.disagreements = entries;
+    }
+
     /// Whether a doc or folder already has the page at `page`.
     fn page_taken(&self, page: &str) -> bool {
         self.page_owner.contains_key(page)
@@ -418,11 +484,31 @@ impl<'a> Site<'a> {
         self.tree.iter()
     }
 
+    /// The doc that holds `id` (itself for a doc), as `Materialized::doc_of` finds it, each
+    /// block's walked once per render.
+    pub fn doc_of(&self, id: &BlockId) -> Option<&'a Block> {
+        #[cfg(test)]
+        self.doc_calls.set(self.doc_calls.get() + 1);
+        if let Some(d) = self.docs.borrow().get(id) {
+            return d.as_ref().and_then(|d| self.m.get(d));
+        }
+        let doc = self.m.doc_of(id);
+        self.docs
+            .borrow_mut()
+            .insert(id.clone(), doc.map(|d| d.id.clone()));
+        doc
+    }
+
     /// Where `id` lives, for any block: a tree block on its page, a block inside a doc on the
     /// doc's page at its anchor, a decision where the first block it governs lives, a term at its
     /// place in its doc, an open question on the questions page.
     pub fn url_of(&self, id: &BlockId) -> Option<Url> {
-        self.url_of_bounded(id, &mut BTreeSet::new())
+        if let Some(u) = self.urls.borrow().get(id) {
+            return u.clone();
+        }
+        let url = self.url_of_bounded(id, &mut BTreeSet::new());
+        self.urls.borrow_mut().insert(id.clone(), url.clone());
+        url
     }
 
     fn url_of_bounded(&self, id: &BlockId, seen: &mut BTreeSet<BlockId>) -> Option<Url> {
@@ -445,7 +531,7 @@ impl<'a> Site<'a> {
                 anchor: Some(a.clone()),
             });
         }
-        let doc = self.m.doc_of(id)?;
+        let doc = self.doc_of(id)?;
         if b.block_type == RATIONALE {
             return Some(Url {
                 page: self.page(&doc.id)?,
@@ -803,6 +889,100 @@ fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Final review M12 (minors item 32): an entry whose "this page" block has no page is
+    /// dropped, since its sentence would point the reader at the wrong page; an entry with no lead
+    /// keeps the blocks that have a page.
+    #[test]
+    fn an_entry_whose_lead_has_no_page_is_dropped() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 1, 1, 2);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        let claim = m
+            .iter()
+            .find(|b| b.block_type == "claim")
+            .expect("a claim")
+            .id
+            .clone();
+        let ghost = BlockId::parse("c-ZZZZZ").expect("an id");
+        assert!(m.get(&ghost).is_none());
+        let mut site = Site::new(&m, st.pack());
+        site.set_disagreements(vec![
+            Disagreement {
+                sentence: "This page still points to something that was retired.",
+                blocks: vec![claim.clone(), ghost.clone()],
+                lead: Some(ghost.clone()),
+            },
+            Disagreement {
+                sentence: "These pages define the same thing twice.",
+                blocks: vec![ghost.clone(), claim.clone()],
+                lead: None,
+            },
+            Disagreement {
+                sentence: "These pages define the same thing twice.",
+                blocks: vec![claim.clone()],
+                lead: None,
+            },
+        ]);
+        assert_eq!(
+            site.disagreements,
+            vec![Disagreement {
+                sentence: "These pages define the same thing twice.",
+                blocks: vec![claim],
+                lead: None,
+            }]
+        );
+    }
+
+    /// render_50k fix: the entries are put in reading order with each block's place read once
+    /// per entry (and its link checked once), never at every comparison of a sort. A wide entry
+    /// (a term defined in every doc) has thousands of blocks.
+    #[test]
+    fn set_disagreements_reads_each_blocks_doc_once() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 4, 4, 8);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        // the claims, last doc first, so the sort has work to do
+        let mut claims: Vec<BlockId> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.clone())
+            .collect();
+        claims.reverse();
+        assert!(claims.len() >= 100, "guard: a wide entry");
+        let mut site = Site::new(&m, st.pack());
+        let before = site.doc_calls.get();
+        site.set_disagreements(vec![Disagreement {
+            sentence: "These pages define the same thing twice.",
+            blocks: claims.clone(),
+            lead: None,
+        }]);
+        let calls = site.doc_calls.get() - before;
+        // one for the place, one inside the link check, one for the entry's first block
+        assert!(
+            calls <= 2 * claims.len() + 1,
+            "{calls} doc reads for {} blocks",
+            claims.len()
+        );
+        let at = |id: &BlockId| {
+            m.doc_of(id)
+                .and_then(|d| site.order_pos.get(&d.id).copied())
+                .unwrap_or(usize::MAX)
+        };
+        let mut want = claims;
+        want.sort_by_key(|b| (at(b), b.clone()));
+        assert_eq!(site.disagreements[0].blocks, want, "reading order");
+    }
 
     #[test]
     fn an_anchor_is_a_slug_cut_to_48_that_is_never_empty_or_id_shaped() {

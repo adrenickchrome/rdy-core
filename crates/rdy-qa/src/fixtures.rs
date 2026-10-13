@@ -23,7 +23,22 @@ pub fn agent(actor: &str, run: Option<&str>) -> Session {
 /// A user config naming `actor` as the human: `<tmp>/rdy/config.yaml`, and the environment
 /// (`XDG_CONFIG_HOME`) that points a client at it. Keep the `TempDir` alive.
 pub fn human_env(actor: &str) -> (tempfile::TempDir, Vec<(String, String)>) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    human_env_of(actor, tempfile::tempdir().expect("tempdir"))
+}
+
+/// `human_env`, with the config under `parent`.
+pub fn human_env_in(
+    actor: &str,
+    parent: &std::path::Path,
+) -> (tempfile::TempDir, Vec<(String, String)>) {
+    let dir = tempfile::Builder::new()
+        .prefix("rdycfg")
+        .tempdir_in(parent)
+        .unwrap_or_else(|e| panic!("tempdir in {}: {e}", parent.display()));
+    human_env_of(actor, dir)
+}
+
+fn human_env_of(actor: &str, dir: tempfile::TempDir) -> (tempfile::TempDir, Vec<(String, String)>) {
     std::fs::create_dir_all(dir.path().join("rdy")).expect("config dir");
     std::fs::write(
         dir.path().join("rdy/config.yaml"),
@@ -130,6 +145,28 @@ pub fn seed_doc(r: &mut Rdy, view: &str) -> (String, String, String) {
 pub fn land(r: &mut Rdy, view: &str) -> Result<String, RdyError> {
     let p = r.propose(&writer(), view, view)?;
     r.land(&approver(), &p.id)
+}
+
+/// Lands `view` straight through the store, with no acceptance change: the way a store lands
+/// that holds no rule about order keys. A tie in an order key gets into canon this way by hand
+/// (an imported tree or an older store holds one the same way).
+pub fn land_with_a_tie(r: &mut Rdy, view: &str) {
+    let by = approver().provenance();
+    let store = r.store_mut();
+    let p = store
+        .propose(view, view, by.clone())
+        .unwrap_or_else(|e| panic!("propose {view}: {e}"));
+    store
+        .land_atomic(rdy_store::LandRequest {
+            proposal: p,
+            accept: None,
+            approver: by,
+            alt: None,
+            relay: None,
+            evidence: None,
+        })
+        .unwrap_or_else(|e| panic!("landing {view}: {e}"));
+    r.invalidate();
 }
 
 pub fn raw(

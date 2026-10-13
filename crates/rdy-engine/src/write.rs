@@ -1,3 +1,13 @@
+//! The write path: an agent's ops become one change on a view.
+//!
+//! Order keys: `after` and `before` are exact, also inside a run of siblings that share one key
+//! (D-8EH6E; parallel appends under one parent leave such a tie, and M2 does not re-key at
+//! landing, ruling task-2-round2). The fallback in `between` re-keys the smaller side of the run.
+//! Known cost: it writes siblings the agent did not touch, so another view's edit of one of them
+//! conflicts when both land, and a pin on one goes stale (`order` is in the content hash). In a
+//! stable doc, an insert with no `implements` or `editorial` also gets `unjustified_change` on a
+//! re-keyed sibling the agent never named. The M3 intake item "Order-key ties and the content
+//! hash" removes the cost.
 use crate::error::*;
 use crate::keys::{self, Keys};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
@@ -355,6 +365,9 @@ struct Overlay<'a> {
     /// Ids of pending (not deleted) blocks, by parent.
     pending_kids: BTreeMap<Option<BlockId>, BTreeSet<BlockId>>,
     sibs: RefCell<BTreeMap<Option<BlockId>, Sibs>>,
+    /// The blocks with a recorded conflict in the view. A re-key of a tied run (`between`) does
+    /// not write one this write has not changed: only an edit that names a version resolves it.
+    conflicted: BTreeSet<BlockId>,
 }
 
 impl<'a> Overlay<'a> {
@@ -364,6 +377,7 @@ impl<'a> Overlay<'a> {
             pending: BTreeMap::new(),
             pending_kids: BTreeMap::new(),
             sibs: RefCell::default(),
+            conflicted: BTreeSet::new(),
         }
     }
 
@@ -641,11 +655,124 @@ fn parse_base(s: &Option<String>) -> Result<Option<Hash>, RdyError> {
         .transpose()
 }
 
+/// Siblings that must get new keys so a block fits where it was asked: `(id, new key)`.
+type Rekeys = Vec<(BlockId, String)>;
+
+/// A sibling in order: its key and id.
+type Slot = (String, BlockId);
+
+/// The order key for a block that goes between two neighbours in (key, id) order, `left` before
+/// `right` (either may be missing at the ends), and the siblings that must be re-keyed for it.
+///
+/// Siblings created in parallel views may share a key (D-8EH6E). A key cannot go strictly
+/// between two siblings that share one, so the tied run is split: the siblings from `right` on
+/// move up, or the siblings up to `left` move down. The side with fewer siblings goes first; a
+/// side that holds a sibling that cannot move (a frozen decision, or a block in conflict that this
+/// write has not changed) is not used, and a side with no room under the key-length cap gives way
+/// to the other. The block lands directly where it was asked.
+///
+/// Known cost of this fallback: it writes siblings the agent did not touch (`apply_rekeys`). A
+/// concurrent edit of one of them in another view then conflicts when both land (pinned by
+/// `sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling`), and,
+/// since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale and a
+/// tension on it gets a new vkey. In a stable doc, the write also edits that stable sibling, so
+/// with no `implements` or `editorial` it opens `unjustified_change` on a block the agent never
+/// named, and `unjustified_change: blocking` refuses the landing; the write's justification
+/// covers the sibling too (pinned by
+/// `sg2_an_insert_into_a_tie_in_a_stable_doc_flags_the_re_keyed_sibling_unless_justified`). A tie
+/// is a state that parallel appends under one parent leave, or that an import leaves; M2 does not
+/// re-key at landing (ruling task-2-round2). The M3 intake item "Order-key ties and the content
+/// hash" (leave `order` out of the content hash at the next store format change) removes the
+/// cost.
+fn between(
+    ov: &Overlay,
+    s: &Sibs,
+    me: Option<&BlockId>,
+    left: Option<&Slot>,
+    right: Option<&Slot>,
+    parent: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
+    let (l, r) = match (left, right) {
+        (Some(l), Some(r)) if l.0 == r.0 => (l, r),
+        _ => {
+            let k = order_between(left.map(|l| l.0.as_str()), right.map(|r| r.0.as_str()))
+                .map_err(|e| order_error(e, parent))?;
+            return Ok((k, vec![]));
+        }
+    };
+    // the siblings but the block being moved: the tied run, and the keys just outside it
+    let others: Vec<&Slot> = s.order.iter().filter(|(_, id)| Some(id) != me).collect();
+    let (down, up): (Vec<&BlockId>, Vec<&BlockId>) = others
+        .iter()
+        .filter(|(o, _)| *o == l.0)
+        .map(|(_, id)| id)
+        .partition(|id| **id <= l.1);
+    // a sibling this write already changed takes its new key in that op (`apply_rekeys`)
+    let movable = |ids: &[&BlockId]| {
+        ids.iter().all(|id| {
+            ov.get(id).is_some_and(|b| !decision::is_frozen(b))
+                && (!ov.conflicted.contains(*id) || ov.pending.contains_key(*id))
+        })
+    };
+    let hi = others
+        .iter()
+        .find(|(o, _)| *o > l.0)
+        .map(|(o, _)| o.as_str());
+    let lo = others
+        .iter()
+        .rev()
+        .find(|(o, _)| *o < l.0)
+        .map(|(o, _)| o.as_str());
+    let split = |go_up: bool| -> Result<(String, Rekeys), rdy_model::OrderError> {
+        if go_up {
+            // the new block, then the siblings that were after it, above the run's key
+            let mut keys = rdy_model::order_run(Some(&l.0), hi, up.len() + 1)?.into_iter();
+            let new = keys.next().expect("one key more than the siblings");
+            Ok((new, up.iter().map(|id| (*id).clone()).zip(keys).collect()))
+        } else {
+            // the siblings up to the anchor, then the new block, below the run's key
+            let mut keys = rdy_model::order_run(lo, Some(&l.0), down.len() + 1)?;
+            let new = keys.pop().expect("one key more than the siblings");
+            Ok((new, down.iter().map(|id| (*id).clone()).zip(keys).collect()))
+        }
+    };
+    let (can_up, can_down) = (movable(&up), movable(&down));
+    let sides: Vec<bool> = if up.len() <= down.len() {
+        vec![true, false]
+    } else {
+        vec![false, true]
+    };
+    let mut first_err = None;
+    for go_up in sides {
+        if !(if go_up { can_up } else { can_down }) {
+            continue;
+        }
+        match split(go_up) {
+            Ok(found) => return Ok(found),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(order_error(e, parent)),
+        None => Err(RdyError::new(
+            E_ORDER_DEPTH,
+            format!(
+                "cannot put a block between {} and {}: they share the order key {:?}, and frozen decisions or blocks in conflict stand on both sides of the gap",
+                l.1, r.1, l.0
+            ),
+            "append the block, place it after a sibling with its own order key, or resolve the conflict first",
+        )),
+    }
+}
+
 fn order_after(
     ov: &Overlay,
     parent: Option<&BlockId>,
     after: Option<&BlockId>,
-) -> Result<String, RdyError> {
+    me: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
     let parent_name = parent
         .map(|p| p.to_string())
         .unwrap_or_else(|| "the document root".to_string());
@@ -663,26 +790,27 @@ fn order_after(
     let key = key.transpose()?;
     ov.with_sibs(parent, |s| match &key {
         None => order_between(s.order.last().map(|(o, _)| o.as_str()), None)
+            .map(|k| (k, vec![]))
             .map_err(|e| order_error(e, parent)),
         Some(k) => {
-            // siblings created in parallel views may share a key: insert after the whole tie
+            // the sibling right behind the anchor: it may share the anchor's key
             let next = s
                 .order
                 .range((Bound::Excluded(k), Bound::Unbounded))
-                .find(|(o, _)| *o != k.0);
-            order_between(Some(&k.0), next.map(|(o, _)| o.as_str()))
-                .map_err(|e| order_error(e, parent))
+                .find(|(_, id)| Some(id) != me);
+            between(ov, s, me, Some(k), next, parent)
         }
     })
 }
 
 /// first1: a key just before sibling `before`. Siblings created in parallel views may share a
-/// key, so the new block goes before the whole tie.
+/// key; the new block still goes directly before `before`.
 fn order_before(
     ov: &Overlay,
     parent: Option<&BlockId>,
     before: &BlockId,
-) -> Result<String, RdyError> {
+    me: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
     let parent_name = parent
         .map(|p| p.to_string())
         .unwrap_or_else(|| "the document root".to_string());
@@ -701,26 +829,110 @@ fn order_before(
             .order
             .range((Bound::Unbounded, Bound::Excluded(&anchor)))
             .rev()
-            .find(|(o, _)| *o != anchor.0);
-        order_between(prev.map(|(o, _)| o.as_str()), Some(&anchor.0))
-            .map_err(|e| order_error(e, parent))
+            .find(|(_, id)| Some(id) != me);
+        between(ov, s, me, prev, Some(&anchor), parent)
     })
 }
 
-/// The order key for a block placed after or before a sibling, or appended.
+/// The order key for a block placed after or before a sibling, or appended, and the siblings
+/// that need new keys so it fits there. `me` is the block being moved, if any.
 fn place(
     ov: &Overlay,
     parent: Option<&BlockId>,
     after: Option<&BlockId>,
     before: Option<&BlockId>,
-) -> Result<String, RdyError> {
+    me: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
     match (after, before) {
         (Some(_), Some(_)) => Err(bad(
             "give after or before, not both",
             "after puts the block behind a sibling, before ahead of one",
         )),
-        (None, Some(b)) => order_before(ov, parent, b),
-        (after, None) => order_after(ov, parent, after),
+        (None, Some(b)) => order_before(ov, parent, b, me),
+        (after, None) => order_after(ov, parent, after, me),
+    }
+}
+
+/// The blocks whose only op in this write is an order re-key of `place`: block → the version
+/// the view held before the write. A later op on such a block replaces the re-key op and starts
+/// from the re-keyed block (`drop_rekey_op`).
+type RekeyOnly = BTreeMap<BlockId, Hash>;
+
+/// Gives the siblings `place` named their new keys.
+///
+/// A sibling that an earlier op of this write already changed takes its new key in that op: the
+/// op's block and the overlay change, and no op is added. Any other sibling gets an update of its
+/// own, which a later op on it replaces (`drop_rekey_op`); so a valid write is never refused
+/// because `place` moved a sibling the write also edits, in either order.
+#[allow(clippy::too_many_arguments)]
+fn apply_rekeys(
+    ov: &mut Overlay,
+    rekeys: Rekeys,
+    touched: &mut BTreeSet<BlockId>,
+    rekey_only: &mut RekeyOnly,
+    conflicts: &ViewConflicts<'_>,
+    store: &rdy_store::Store,
+    ops: &mut Vec<Op>,
+    prior: &mut Vec<Prior>,
+) -> Result<(), RdyError> {
+    for (id, k) in rekeys {
+        if touched.contains(&id) {
+            let Some(mut block) = ov.get(&id).cloned() else {
+                continue;
+            };
+            block.order = k.clone();
+            let pending = ops.iter_mut().rev().find_map(|op| match op {
+                Op::Create { block } | Op::Update { block, .. } if block.id == id => Some(block),
+                _ => None,
+            });
+            if let Some(pending) = pending {
+                pending.order = k;
+            }
+            ov.set(id, Some(block));
+            continue;
+        }
+        let (base_hash, cur) =
+            current_for_edit(ov, &id, &None, touched, rekey_only, conflicts, store, false)?;
+        let mut block: Block = cur.into_owned();
+        // like a move, a doc from M1 stores the name readers already use for it
+        if block.block_type == tree::DOC
+            && !block.fields.contains_key("name")
+            && let Some(n) = ov.base.name_of(&block.id)
+        {
+            block.fields.insert("name".into(), FieldValue::Str(n));
+        }
+        block.order = k;
+        prior.push((true, block.pins.clone())); // like a move: pins unchanged
+        touched.insert(block.id.clone());
+        // `between` never re-keys a conflicted sibling this write has not changed
+        rekey_only.insert(block.id.clone(), base_hash);
+        ov.set(block.id.clone(), Some(block.clone()));
+        ops.push(Op::Update {
+            base: base_hash,
+            block,
+        });
+    }
+    Ok(())
+}
+
+/// A later op of this write is about to change `id`, which only an order re-key had changed so
+/// far: the re-key op goes, and the later op (which starts from the re-keyed block and records the
+/// version the view held) carries the new key. Call it before the op's own `prior` and `ops` push.
+fn drop_rekey_op(
+    id: &BlockId,
+    rekey_only: &mut RekeyOnly,
+    ops: &mut Vec<Op>,
+    prior: &mut Vec<Prior>,
+) {
+    if rekey_only.remove(id).is_none() {
+        return;
+    }
+    if let Some(at) = ops
+        .iter()
+        .position(|op| matches!(op, Op::Update { block, .. } if block.id == *id))
+    {
+        ops.remove(at);
+        prior.remove(at);
     }
 }
 
@@ -740,16 +952,21 @@ pub(crate) struct ViewConflicts<'a> {
 ///
 /// A frozen decision is refused, except that with `update` a clean one is returned: the update
 /// path refuses it once it has built the new block, unless only tracking fields changed (trk1).
+#[allow(clippy::too_many_arguments)]
 fn current_for_edit<'b>(
     ov: &'b Overlay,
     id: &BlockId,
     base: &Option<String>,
     touched: &BTreeSet<BlockId>,
+    rekey_only: &RekeyOnly,
     conflicts: &ViewConflicts<'_>,
     store: &rdy_store::Store,
     update: bool,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
-    if touched.contains(id) {
+    // a block that only an order re-key changed so far: the edit starts from the re-keyed block
+    // and names the version the view held, which the agent read
+    let rekeyed_from = rekey_only.get(id).copied();
+    if touched.contains(id) && rekeyed_from.is_none() {
         return Err(bad(
             format!("{id} is changed more than once in this write"),
             "combine the edits into one op",
@@ -767,7 +984,7 @@ fn current_for_edit<'b>(
             "check the id with rdy_read",
         )
     })?;
-    let cur_hash = cur.version_hash();
+    let cur_hash = rekeyed_from.unwrap_or_else(|| cur.version_hash());
     if let Some(b) = parse_base(base)?
         && b != cur_hash
     {
@@ -1231,7 +1448,7 @@ fn retype(pack: &Pack, ov: &Overlay, block: &mut Block, t: String) -> Result<(),
 
 /// Places `block` (the edit of `id`) under `parent`, after or before a sibling (none: appended;
 /// no parent: the top level), with a move's checks in a move's order. Returns whether its parent
-/// or order key changed.
+/// or order key changed, and the siblings that need new keys for it to fit (see `between`).
 #[allow(clippy::too_many_arguments)]
 fn relocate(
     ov: &Overlay,
@@ -1242,7 +1459,7 @@ fn relocate(
     after: Option<String>,
     before: Option<String>,
     i: usize,
-) -> Result<bool, RdyError> {
+) -> Result<(bool, Rekeys), RdyError> {
     let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
     let after = after.as_deref().map(|a| res.id(a)).transpose()?;
     let before = before.as_deref().map(|b| res.id(b)).transpose()?;
@@ -1284,7 +1501,14 @@ fn relocate(
     }
     let was = (block.parent.take(), std::mem::take(&mut block.order));
     block.parent = parent;
-    block.order = place(ov, block.parent.as_ref(), after.as_ref(), before.as_ref())?;
+    let (order, rekeys) = place(
+        ov,
+        block.parent.as_ref(),
+        after.as_ref(),
+        before.as_ref(),
+        Some(id),
+    )?;
+    block.order = order;
     check_name(ov, block, i, Some("move"))?;
     res.check_rekey(block, ov.get(id), false)?;
     if block.block_type == tree::FOLDER {
@@ -1292,7 +1516,7 @@ fn relocate(
     } else {
         check_depth(ov, block, 0)?;
     }
-    Ok(block.parent != was.0 || block.order != was.1)
+    Ok((block.parent != was.0 || block.order != was.1, rekeys))
 }
 
 /// rkey1: `key_auto` marks a key rdy chose (a create without a key, an import, `rdy keys
@@ -1335,11 +1559,13 @@ fn build_ops(
     rdy_keys: &BTreeSet<BlockId>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
+    ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
     let mut res = Resolver::new(base);
     let mut ops = vec![];
     let mut created = BTreeMap::new();
     let mut names = BTreeMap::new();
     let mut touched = BTreeSet::new();
+    let mut rekey_only = RekeyOnly::new();
     let mut prior: Vec<Prior> = vec![];
     let mut noop_rebalances: Vec<String> = vec![];
     let mut repinned: Vec<BlockId> = vec![];
@@ -1446,7 +1672,18 @@ fn build_ops(
                 }
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
                 let before = before.as_deref().map(|b| res.id(b)).transpose()?;
-                let order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
+                let (order, rekeys) =
+                    place(&ov, parent.as_ref(), after.as_ref(), before.as_ref(), None)?;
+                apply_rekeys(
+                    &mut ov,
+                    rekeys,
+                    &mut touched,
+                    &mut rekey_only,
+                    conflicts,
+                    store,
+                    &mut ops,
+                    &mut prior,
+                )?;
                 let body = res.text(&body, RefMode::for_body(&block_type))?;
                 refuse_key_auto(&fields, &format!("op {i}"))?;
                 let sets_key = fields.contains_key("key");
@@ -1496,7 +1733,7 @@ fn build_ops(
                 let id = res.id(&id)?;
                 refuse_key_auto(&fields, id.as_str())?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, true)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, true)?;
                 let cur: &Block = &cur;
                 let mut block = cur.clone();
                 // a doc from M1 stores the name readers already use for it on its first write
@@ -1543,10 +1780,12 @@ fn build_ops(
                     }
                 }
                 let moves = move_to.is_some();
+                let mut rekeys = Rekeys::new();
                 if let Some(m) = move_to {
-                    relocate(
+                    rekeys = relocate(
                         &ov, &mut res, &mut block, &id, m.parent, m.after, m.before, i,
-                    )?;
+                    )?
+                    .1;
                 }
                 // after the move: a frozen decision that moves is not a tracking-only edit
                 if check_tracking_edit(&id, cur, &block, store.tracking(), justification)? {
@@ -1554,13 +1793,26 @@ fn build_ops(
                 }
                 check_decided_at(session, &block, Some(cur))?;
                 // a move-only update keeps the pins, as a move does
-                prior.push((moves && !edits, cur.pins.clone()));
+                let own_prior = (moves && !edits, cur.pins.clone());
                 // names and keys against what the view held, not the side an edit starts from
                 let was = ov.get(&id);
                 if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
                     check_name(&ov, &block, i, None)?;
                 }
                 res.check_rekey(&block, was, sets_key)?;
+                apply_rekeys(
+                    &mut ov,
+                    rekeys,
+                    &mut touched,
+                    &mut rekey_only,
+                    conflicts,
+                    store,
+                    &mut ops,
+                    &mut prior,
+                )?;
+                // the re-keyed siblings come first, so `prior` stays in step with `ops`
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
+                prior.push(own_prior);
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -1577,7 +1829,7 @@ fn build_ops(
             } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let mut block = cur.into_owned();
                 if block.block_type == tree::DOC
                     && !block.fields.contains_key("name")
@@ -1585,7 +1837,19 @@ fn build_ops(
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
-                relocate(&ov, &mut res, &mut block, &id, parent, after, before, i)?;
+                let (_, rekeys) =
+                    relocate(&ov, &mut res, &mut block, &id, parent, after, before, i)?;
+                apply_rekeys(
+                    &mut ov,
+                    rekeys,
+                    &mut touched,
+                    &mut rekey_only,
+                    conflicts,
+                    store,
+                    &mut ops,
+                    &mut prior,
+                )?;
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
@@ -1597,7 +1861,7 @@ fn build_ops(
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 if cur.block_type == decision::QUESTION {
                     return Err(bad(
@@ -1618,6 +1882,7 @@ fn build_ops(
                 if ov.get(&id).and_then(keys::key_of).is_some() {
                     res.note_key(&id, None);
                 }
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 touched.insert(id.clone());
                 ov.set(id.clone(), None);
                 prior.push((false, BTreeMap::new()));
@@ -1693,8 +1958,16 @@ fn build_ops(
                     if decision::is_frozen(b) || b.order == k {
                         continue;
                     }
-                    let (base_hash, cur) =
-                        current_for_edit(&ov, &b.id, &None, &touched, conflicts, store, false)?;
+                    let (base_hash, cur) = current_for_edit(
+                        &ov,
+                        &b.id,
+                        &None,
+                        &touched,
+                        &rekey_only,
+                        conflicts,
+                        store,
+                        false,
+                    )?;
                     let cur: &Block = &cur;
                     let mut block = cur.clone();
                     // like a move, a doc from M1 stores the name readers already use for it
@@ -1724,7 +1997,7 @@ fn build_ops(
             } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 let cited: BTreeSet<BlockId> = cur
                     .ref_tokens()
@@ -1794,6 +2067,7 @@ fn build_ops(
                 }
                 res.check_rekey(&block, was, false)?;
                 repinned.extend(wanted);
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));

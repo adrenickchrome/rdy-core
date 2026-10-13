@@ -1,0 +1,71 @@
+[
+  {
+    "approved": "P-912c1dee26f7@1",
+    "approved_by": "human:qa",
+    "approved_version": "912c1dee26f77dc5fba5ea5dc96838b898943f88bb4c0b1771576db2b4518a0d",
+    "assurance": "local",
+    "at": "2025-10-09T08:53:20Z",
+    "at_ms": 1760000000023,
+    "changes": 1,
+    "evidence": null,
+    "landing": "4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+    "prev": "b7de003a5dfc6474ab43a619c573863a8ae0992d9aa1f6851f6261d112b766dc",
+    "proposal": "912c1dee26f77dc5fba5ea5dc96838b898943f88bb4c0b1771576db2b4518a0d",
+    "proposed_by": {
+      "actor": "human:qa",
+      "run": "cli"
+    },
+    "rebased_from": [],
+    "relay_evidence": null,
+    "relayed_by": null,
+    "summary": null,
+    "tags": [],
+    "title": "work"
+  },
+  {
+    "approved": "P-04d4ad9459bb@1",
+    "approved_by": "human:qa",
+    "approved_version": "04d4ad9459bbff329505d62576ea4487606ac77d7048563f2c2c3e781e38ad14",
+    "assurance": "local",
+    "at": "2025-10-09T08:53:20Z",
+    "at_ms": 1760000000019,
+    "changes": 2,
+    "evidence": null,
+    "landing": "b7de003a5dfc6474ab43a619c573863a8ae0992d9aa1f6851f6261d112b766dc",
+    "prev": "be3438454099135bc5754abdb279bb61e0906b4044523113ddd61d55768d323a",
+    "proposal": "04d4ad9459bbff329505d62576ea4487606ac77d7048563f2c2c3e781e38ad14",
+    "proposed_by": {
+      "actor": "human:qa",
+      "run": "cli"
+    },
+    "rebased_from": [],
+    "relay_evidence": null,
+    "relayed_by": null,
+    "summary": null,
+    "tags": [],
+    "title": "work"
+  },
+  {
+    "approved": "P-e5d35643a4a7@1",
+    "approved_by": "human:qa",
+    "approved_version": "e5d35643a4a7385b1a2b449087f4a7a3161f2917a64dbfb2d2b865301788b943",
+    "assurance": "local",
+    "at": "2025-10-09T08:53:20Z",
+    "at_ms": 1760000000014,
+    "changes": 1,
+    "evidence": null,
+    "landing": "be3438454099135bc5754abdb279bb61e0906b4044523113ddd61d55768d323a",
+    "prev": "cf2568b670d6cb9111d617fa665fa43f498955d3f8cb721b45a7018ccc2aea1f",
+    "proposal": "e5d35643a4a7385b1a2b449087f4a7a3161f2917a64dbfb2d2b865301788b943",
+    "proposed_by": {
+      "actor": "human:qa",
+      "run": "cli"
+    },
+    "rebased_from": [],
+    "relay_evidence": null,
+    "relayed_by": null,
+    "summary": null,
+    "tags": [],
+    "title": "st"
+  }
+]

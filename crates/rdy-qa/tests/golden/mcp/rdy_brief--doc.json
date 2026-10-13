@@ -1,0 +1,168 @@
+{
+  "base": {
+    "blocks": [
+      {
+        "id": "D-REKH0",
+        "version": "c13764b268a703255fcd6ffa737299a9fe7308938958bcc12790928f3fe3854e"
+      },
+      {
+        "id": "c-CFPE0",
+        "version": "e3538dcd6ff0837e20521111ba0fb43569c29e113eb9b27c83a001df38068c71"
+      },
+      {
+        "id": "c-WKHEZ",
+        "version": "d08882353685daf9502ef16d7a2b38d179aad7e539d16929886873c6df447a79"
+      },
+      {
+        "id": "c-ZCQ17",
+        "version": "3e4880a825e7ac810529cc9e7bb1c09f63668b0396816dfd25d8b0d0ca8b2119"
+      },
+      {
+        "id": "d-TNT6J",
+        "version": "764af75c34fe1d28b1ffb9af8fffa69964f01ddc3c5f9345a2abe9b2fb1b51a1"
+      },
+      {
+        "id": "s-5JKGB",
+        "version": "173caf9dfd3657dc350d4667d798a00165991ee424515404e3f6a52a13bb1883"
+      }
+    ],
+    "depends": 0,
+    "token": "088e7be352b240fba82e3da160552bcd05a56bbe3366d71296c884fbee1dc9bd"
+  },
+  "coverage": {
+    "confidence": "medium",
+    "dimensions": {
+      "complete": 50,
+      "connected": 83,
+      "consistent": 100,
+      "current": 100,
+      "governed": 50,
+      "grounded": 0
+    },
+    "issues": [
+      {
+        "block": "c-CFPE0",
+        "code": "untied_content",
+        "dimension": "grounded",
+        "fix": "link c-CFPE0 to the entity it describes, with describes or a ref",
+        "subject": null
+      },
+      {
+        "block": "c-WKHEZ",
+        "code": "untied_content",
+        "dimension": "grounded",
+        "fix": "link c-WKHEZ to the entity it describes, with describes or a ref",
+        "subject": null
+      },
+      {
+        "block": "c-WKHEZ",
+        "code": "ungrounded",
+        "dimension": "governed",
+        "fix": "link c-WKHEZ to the decision that governs it, with decided_by or implements",
+        "subject": null
+      },
+      {
+        "block": "c-ZCQ17",
+        "code": "untied_content",
+        "dimension": "grounded",
+        "fix": "link c-ZCQ17 to the entity it describes, with describes or a ref",
+        "subject": null
+      },
+      {
+        "block": "c-ZCQ17",
+        "code": "ungrounded",
+        "dimension": "governed",
+        "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+        "subject": null
+      },
+      {
+        "block": "d-TNT6J",
+        "code": "unlinked_doc",
+        "dimension": "connected",
+        "fix": "link to spec from another doc",
+        "subject": "spec"
+      },
+      {
+        "block": "d-TNT6J",
+        "code": "missing_section",
+        "dimension": "complete",
+        "fix": "add the required section Goals",
+        "subject": "Goals"
+      },
+      {
+        "block": "d-TNT6J",
+        "code": "missing_section",
+        "dimension": "complete",
+        "fix": "add the required section Summary",
+        "subject": "Summary"
+      }
+    ],
+    "pages": [
+      {
+        "doc": "d-TNT6J",
+        "path": "spec",
+        "score": 63
+      }
+    ],
+    "reasons": [
+      {
+        "block": "c-CFPE0",
+        "code": "untied_content",
+        "dimension": "grounded",
+        "fix": "link c-CFPE0 to the entity it describes, with describes or a ref",
+        "subject": null
+      },
+      {
+        "block": "c-WKHEZ",
+        "code": "untied_content",
+        "dimension": "grounded",
+        "fix": "link c-WKHEZ to the entity it describes, with describes or a ref",
+        "subject": null
+      },
+      {
+        "block": "c-WKHEZ",
+        "code": "ungrounded",
+        "dimension": "governed",
+        "fix": "link c-WKHEZ to the decision that governs it, with decided_by or implements",
+        "subject": null
+      },
+      {
+        "block": "c-ZCQ17",
+        "code": "untied_content",
+        "dimension": "grounded",
+        "fix": "link c-ZCQ17 to the entity it describes, with describes or a ref",
+        "subject": null
+      },
+      {
+        "block": "c-ZCQ17",
+        "code": "ungrounded",
+        "dimension": "governed",
+        "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+        "subject": null
+      }
+    ],
+    "reasons_omitted": 3,
+    "score": 63
+  },
+  "covers": 6,
+  "dependents": [],
+  "governs": [
+    {
+      "blocks": [
+        "c-CFPE0"
+      ],
+      "decision": "D-REKH0",
+      "statement": "Keep A",
+      "status": "live"
+    }
+  ],
+  "inflight": {
+    "intents": [],
+    "proposals": [],
+    "tensions": [],
+    "views": []
+  },
+  "lineage": [],
+  "suspects": [],
+  "will_go_stale": []
+}

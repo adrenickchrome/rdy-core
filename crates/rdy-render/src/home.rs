@@ -93,6 +93,13 @@ pub fn build(
             summary: "What is still undecided.".into(),
         });
     }
+    if facts.has_disagreements {
+        cards.push(Card {
+            title: "Where the docs disagree".into(),
+            href: "disagreements.html".into(),
+            summary: String::new(),
+        });
+    }
     let current = versions.last().map(|v| &v.name);
     Home {
         description: description.map(String::from),

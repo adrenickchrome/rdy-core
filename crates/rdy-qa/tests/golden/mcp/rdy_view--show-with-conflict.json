@@ -1,0 +1,86 @@
+{
+  "blocks": 2,
+  "changes": [
+    {
+      "actor": "agent:a",
+      "at_ms": 1760000000026,
+      "blocks": [
+        "c-CFPE0"
+      ],
+      "id": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+      "message": "a edits A",
+      "run": "a"
+    },
+    {
+      "actor": "agent:b",
+      "at_ms": 1760000000033,
+      "blocks": [
+        "c-CFPE0",
+        "c-ZCQ17"
+      ],
+      "id": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+      "message": "b edits A and C",
+      "run": "b"
+    }
+  ],
+  "conflicts": [
+    {
+      "base": "e3538dcd6ff0837e20521111ba0fb43569c29e113eb9b27c83a001df38068c71",
+      "block": "c-CFPE0",
+      "id": "00ae8312dd93f64fc5e6eea786e49027593cdcd3ae3bfca23722348354d9d313",
+      "sides": [
+        {
+          "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+          "landed": null,
+          "summary": "agent:a: a edits A",
+          "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
+        },
+        {
+          "change": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+          "landed": null,
+          "summary": "agent:b: b edits A and C",
+          "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
+        }
+      ]
+    }
+  ],
+  "effective_base": "4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+  "head": {
+    "base": "4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+    "changes": 2,
+    "closed": false,
+    "head": "01e961cd6884770c2add29ce0263147dc038fa82682689fd95094d960df58876",
+    "owner": {
+      "actor": "agent:a",
+      "run": "a"
+    },
+    "pinned": false,
+    "view": "a"
+  },
+  "ops": [
+    {
+      "actor": "agent:a",
+      "at_ms": 1760000000037,
+      "id": "01e961cd6884770c2add29ce0263147dc038fa82682689fd95094d960df58876",
+      "kind": "include",
+      "run": "a",
+      "undone": false
+    },
+    {
+      "actor": "agent:a",
+      "at_ms": 1760000000026,
+      "id": "77ef4abbdb48533637acaf6df8e07542bb5b36540d1e17b079963abd3e2aad4d",
+      "kind": "commit",
+      "run": "a",
+      "undone": false
+    },
+    {
+      "actor": "agent:a",
+      "at_ms": 1760000000026,
+      "id": "cb6fda65e012b4e28b18bc829a64d7a01f3af8abd25502faf3a71e8e84a93d54",
+      "kind": "create",
+      "run": "a",
+      "undone": false
+    }
+  ]
+}

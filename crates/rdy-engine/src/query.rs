@@ -1,7 +1,8 @@
 use crate::error::*;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Edge, Suspect};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
+use rdy_model::entity::render_refs;
+use rdy_model::{Block, BlockId, FieldValue, RefMode};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,22 +121,6 @@ fn resolved_text(b: &Block, resolve: &dyn Fn(&str) -> String) -> (String, bool) 
             true,
         ),
     }
-}
-
-fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&str) -> String) -> String {
-    if mode == RefMode::Off {
-        return text.to_string();
-    }
-    let plain = |s: &str| s.replace("\\{{", "{{");
-    let mut out = String::new();
-    let mut last = 0;
-    for span in ref_spans(text, mode) {
-        out.push_str(&plain(&text[last..span.range.start]));
-        out.push_str(&resolve(&span.token));
-        last = span.range.end;
-    }
-    out.push_str(&plain(&text[last..]));
-    out
 }
 
 /// The longest a compact line's fallback text gets, ellipsis included.

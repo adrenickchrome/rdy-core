@@ -1,4 +1,5 @@
 mod assets;
+pub mod disagree;
 mod highlight;
 mod home;
 mod html;
@@ -82,6 +83,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "doc.html",
         "glossary.html",
         "questions.html",
+        "disagreements.html",
         "redirect.html",
         "partials/nav.html",
         "partials/toc.html",
@@ -106,6 +108,7 @@ fn template_of(kind: &str) -> &'static str {
         "doc" => "doc.html",
         "glossary" => "glossary.html",
         "questions" => "questions.html",
+        "disagreements" => "disagreements.html",
         _ => "redirect.html",
     }
 }
@@ -394,7 +397,8 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     let pack = rdy.pack().clone();
     let g = rdy.graph(scope)?;
     let env = env()?;
-    let site = Site::new(&m, &pack);
+    let mut site = Site::new(&m, &pack);
+    site.set_disagreements(disagree::list(rdy, scope)?);
     let review = review::build(rdy, scope)?;
     let sh = page::Shared {
         site: &site,
@@ -437,6 +441,9 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     }
     if !site.open_questions.is_empty() {
         kinds.push(page::Kind::Questions);
+    }
+    if !site.disagreements.is_empty() {
+        kinds.push(page::Kind::Disagreements);
     }
     // a permalink page for every folder, doc and block that has a place on the site: the
     // template is rendered once, and every page fills in its target's href and label

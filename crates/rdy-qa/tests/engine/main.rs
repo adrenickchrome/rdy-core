@@ -6,6 +6,7 @@
 mod engine;
 mod engine_alts;
 mod engine_autokey;
+mod engine_commute;
 mod engine_decision_home;
 mod engine_eff;
 mod engine_gate;

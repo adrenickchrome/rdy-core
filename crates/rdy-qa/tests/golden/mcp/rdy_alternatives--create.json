@@ -1,0 +1,42 @@
+{
+  "set": {
+    "changed_at": "2025-10-09T08:53:20Z",
+    "changed_by": {
+      "actor": "agent:a",
+      "run": "a"
+    },
+    "created_by": {
+      "actor": "agent:a",
+      "run": "a"
+    },
+    "id": "as-3aa9c7204c77",
+    "members": [
+      {
+        "changes": 1,
+        "closed": false,
+        "label": "x",
+        "owner": {
+          "actor": "agent:a",
+          "run": "a"
+        },
+        "view": "alt-x"
+      },
+      {
+        "changes": 1,
+        "closed": false,
+        "label": "y",
+        "owner": {
+          "actor": "agent:a",
+          "run": "a"
+        },
+        "view": "alt-y"
+      }
+    ],
+    "prev": null,
+    "question": null,
+    "set": "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede",
+    "status": "open",
+    "title": "Fee wording",
+    "version": "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede"
+  }
+}

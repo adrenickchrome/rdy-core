@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod render;
 mod render_diagrams;
+mod render_disagree;
 mod render_dx2;
 mod render_llms;
 mod render_markdown;

@@ -120,6 +120,36 @@ pub fn order_between(a: Option<&str>, b: Option<&str>) -> Result<String, OrderEr
     }
 }
 
+/// `n` short keys, increasing, all strictly between `lo` and `hi` (either may be open). The
+/// engine uses it to re-key a run of siblings that share one key, so a block can go between
+/// two of them. Bounds are validated; equal or reversed bounds are `NoRoom`, a result too long
+/// for the key cap is `TooDeep`; it never panics.
+pub fn order_run(lo: Option<&str>, hi: Option<&str>, n: usize) -> Result<Vec<String>, OrderError> {
+    for k in lo.iter().chain(hi.iter()) {
+        if !valid_order_key(k) {
+            return Err(OrderError::Malformed(k.to_string()));
+        }
+    }
+    if let (Some(a), Some(b)) = (lo, hi)
+        && a >= b
+    {
+        return Err(OrderError::NoRoom(a.into(), b.into()));
+    }
+    let mut out = Vec::with_capacity(n);
+    match hi {
+        Some(h) => spread(lo, h, n, &mut out)?,
+        None => {
+            let mut prev = lo.map(str::to_string);
+            for _ in 0..n {
+                let k = order_between(prev.as_deref(), None)?;
+                prev = Some(k.clone());
+                out.push(k);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// New keys for a parent's children in order: `Some(k)` items are fixed anchors and keep `k`;
 /// `None` items get short keys between their neighbouring anchors.
 pub fn rebalance_keys(items: &[Option<String>]) -> Result<Vec<String>, OrderError> {

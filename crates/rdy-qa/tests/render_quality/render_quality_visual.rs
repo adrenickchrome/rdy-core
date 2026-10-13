@@ -1,5 +1,5 @@
 //! The visual review set (vis1). Renders the golden project's three sites and the review project's draft into a fixed
-//! directory under `target/qa/site/` and writes `review-set.json`: the thirteen pages with their
+//! directory under `target/qa/site/` and writes `review-set.json`: the fourteen pages with their
 //! URLs and the browser state to reach. The reviewer screenshots this render, so the set is
 //! always the gate's own.
 use rdy_qa::golden;
@@ -50,6 +50,8 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
     )
     .unwrap();
     replace_dir(review.path(), &root.join("review"));
+    let (_d5, _r5, disagree) = golden::site_disagree();
+    replace_dir(disagree.path(), &root.join("disagree"));
 
     let anchor = ids.soft_keywords_requirement.to_string();
     let guards = ids.guards_section.to_string();
@@ -120,6 +122,12 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "intro.html",
             "none; then open the Removed line; then press Show changes (the markers hide, the button reads not pressed)".into(),
         ),
+        (
+            "disagreements",
+            "disagree",
+            "disagreements.html",
+            "none: one entry, the sentence above two links".into(),
+        ),
     ];
     let set: Vec<_> = rows
         .iter()
@@ -128,7 +136,7 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             json!({"n": i + 1, "name": name, "site": site, "url": format!("{site}/{url}"), "state": state})
         })
         .collect();
-    assert_eq!(set.len(), 13);
+    assert_eq!(set.len(), 14);
     for (_, site, url, _) in &rows {
         let f = root.join(site).join(url);
         assert!(f.is_file(), "the review page {} is missing", f.display());

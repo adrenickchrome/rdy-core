@@ -1,0 +1,8 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Where the docs disagree</h1>
+{% for e in body.disagreements.entries %}<div class="callout"><div><p>{{ e.sentence }}</p>
+<ul>{% for l in e.links %}<li><a href="{{ l.href }}"{% if l.title %} title="{{ l.title }}"{% endif %}>{{ l.text }}</a></li>
+{% endfor %}</ul></div></div>
+{% endfor %}
+{% endblock %}

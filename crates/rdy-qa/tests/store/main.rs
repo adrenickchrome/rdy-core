@@ -10,6 +10,7 @@ mod store_fsck;
 mod store_fsck3;
 mod store_kinds;
 mod store_land;
+mod store_m2_kinds;
 mod store_open;
 mod store_pver;
 mod store_reader;

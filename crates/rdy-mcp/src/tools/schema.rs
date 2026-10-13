@@ -93,6 +93,8 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
                 "text": TEXT_RULES,
                 "edit_loop": EDIT_LOOP_DOC,
+                "brief": BRIEF_DOC,
+                "consequences": CONSEQUENCES_DOC,
             }))
         }
     }

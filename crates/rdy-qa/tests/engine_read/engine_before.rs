@@ -96,7 +96,7 @@ fn first1_before_is_checked_like_after() {
 }
 
 #[test]
-fn first1_before_a_tied_sibling_goes_before_the_whole_tie() {
+fn first1_before_a_tied_sibling_goes_directly_before_it() {
     let (_d, mut r, _doc, s, _a) = section_project();
     land(&mut r, "work").unwrap();
     for (view, body) in [("va", "twin a"), ("vb", "twin b")] {
@@ -107,8 +107,9 @@ fn first1_before_a_tied_sibling_goes_before_the_whole_tie() {
         )
         .unwrap();
     }
-    land(&mut r, "va").unwrap();
-    land(&mut r, "vb").unwrap();
+    // the two claims share an order key (made by hand: see `land_with_a_tie`)
+    land_with_a_tie(&mut r, "va");
+    land_with_a_tie(&mut r, "vb");
     let p = BlockId::parse(&s).unwrap();
     let kids: Vec<(String, String)> = r
         .read()
@@ -124,6 +125,9 @@ fn first1_before_a_tied_sibling_goes_before_the_whole_tie() {
     );
     write(&mut r, "vc", json!([{"op": "create", "type": "claim", "parent": s, "before": kids[2].1, "body": "ahead"}])).unwrap();
     let got = bodies(&mut r, &Scope::View("vc".into()), &s);
-    assert_eq!(got[1], "ahead", "before the whole tie: {got:?}");
+    // directly before the second twin, so between the twins (an exact `before`, also under a tie;
+    // ruling of 2026-10-12 on D-8EH6E)
+    assert_eq!(got[2], "ahead", "directly before the second twin: {got:?}");
+    assert_ne!(got[1], "ahead", "{got:?}");
     check(&r, &Scope::View("vc".into())).unwrap();
 }

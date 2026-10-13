@@ -88,6 +88,9 @@ pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFact
     if facts.has_questions {
         reference.push(plain("Open questions", "questions.html"));
     }
+    if facts.has_disagreements {
+        reference.push(plain("Where the docs disagree", "disagreements.html"));
+    }
     if !reference.is_empty() {
         groups.push(NavGroup {
             label: Some("Reference".into()),

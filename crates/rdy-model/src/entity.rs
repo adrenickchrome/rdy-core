@@ -229,19 +229,23 @@ fn blank_refs(text: &str, mode: RefMode) -> String {
     out
 }
 
-fn leaves(name: &str, v: &FieldValue, out: &mut Vec<(String, String)>) {
+/// How a text source's references are written: `render(text, mode)` is the text with every
+/// reference under `mode` replaced.
+type RenderRefs<'a> = &'a dyn Fn(&str, RefMode) -> String;
+
+fn leaves(name: &str, v: &FieldValue, render: RenderRefs<'_>, out: &mut Vec<(String, String)>) {
     match v {
         FieldValue::Str(s) if !s.is_empty() => {
-            out.push((name.to_string(), blank_refs(s, RefMode::Strict)))
+            out.push((name.to_string(), render(s, RefMode::Strict)))
         }
         FieldValue::List(items) => {
             for (i, item) in items.iter().enumerate() {
-                leaves(&format!("{name}[{i}]"), item, out);
+                leaves(&format!("{name}[{i}]"), item, render, out);
             }
         }
         FieldValue::Map(m) => {
             for (k, item) in m {
-                leaves(&format!("{name}.{k}"), item, out);
+                leaves(&format!("{name}.{k}"), item, render, out);
             }
         }
         _ => {}
@@ -253,13 +257,45 @@ fn leaves(name: &str, v: &FieldValue, out: &mut Vec<(String, String)>) {
 /// fields except the [`METADATA_FIELDS`], a list item as `name[i]` and a map entry as
 /// `name.key`. References are blanked, so one is never read as a mention.
 pub fn text_sources(b: &Block) -> Vec<(String, String)> {
+    sources_with(b, &blank_refs)
+}
+
+/// The same sources as [`text_sources`], for a reader: each reference shows as its bare token,
+/// the way `rdy_read` shows one ([`render_refs`]), never blanked. The mention scan must not use
+/// this: it would read a reference's id as a mention.
+pub fn shown_sources(b: &Block) -> Vec<(String, String)> {
+    sources_with(b, &|text, mode| {
+        render_refs(text, mode, &|tok| tok.to_string())
+    })
+}
+
+/// `text` with each reference under `mode` replaced by what `resolve` gives for its token, and
+/// `\{{` shown as `{{`. A `RefMode::Off` text is returned as it is. `rdy_read` and the review
+/// case files both render text this way.
+pub fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&str) -> String) -> String {
+    if mode == RefMode::Off {
+        return text.to_string();
+    }
+    let plain = |s: &str| s.replace("\\{{", "{{");
+    let mut out = String::new();
+    let mut last = 0;
+    for span in ref_spans(text, mode) {
+        out.push_str(&plain(&text[last..span.range.start]));
+        out.push_str(&resolve(&span.token));
+        last = span.range.end;
+    }
+    out.push_str(&plain(&text[last..]));
+    out
+}
+
+fn sources_with(b: &Block, render: RenderRefs<'_>) -> Vec<(String, String)> {
     let mut out = vec![];
     if RefMode::for_body(&b.block_type) == RefMode::Strict && !b.body.is_empty() {
-        out.push(("body".to_string(), blank_refs(&b.body, RefMode::Strict)));
+        out.push(("body".to_string(), render(&b.body, RefMode::Strict)));
     }
     for (name, v) in &b.fields {
         if !METADATA_FIELDS.contains(&name.as_str()) {
-            leaves(name, v, &mut out);
+            leaves(name, v, render, &mut out);
         }
     }
     out

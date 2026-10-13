@@ -37,10 +37,15 @@ const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// A directory short enough for a socket path under it: `/tmp/rdyd…` (macOS `sun_path` is 104
 /// bytes and its `temp_dir()` is already about 50).
 pub fn short_tempdir() -> tempfile::TempDir {
+    short_tempdir_in(Path::new("/tmp"))
+}
+
+/// `short_tempdir`, under `parent` (itself short: the swarm's `/tmp/rdysw-<pid>`).
+pub fn short_tempdir_in(parent: &Path) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rdyd")
-        .tempdir_in("/tmp")
-        .expect("tempdir in /tmp")
+        .tempdir_in(parent)
+        .unwrap_or_else(|e| panic!("tempdir in {}: {e}", parent.display()))
 }
 
 /// The test handler: `echo` returns the session, cwd and args; `sleep` sleeps `args.ms`;
@@ -369,20 +374,50 @@ pub fn human_command(dir: &Path, env: &[(String, String)], args: &[&str]) -> Com
     cmd
 }
 
-/// How long `Served::kill9` waits for the killed daemon's socket to stop answering.
+/// How long `Served::kill9` waits for the killed daemon to exit.
 const KILL_WAIT: Duration = Duration::from_secs(30);
+
+/// Whether process `pid` has exited: `ps` lists no such process, or lists a zombie (killed, not
+/// yet reaped by its parent).
+pub fn exited(pid: u32) -> bool {
+    match Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(o) => {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            let stat = stat.trim();
+            !o.status.success() || stat.is_empty() || stat.starts_with('Z')
+        }
+        Err(e) => panic!("cannot run ps: {e}"),
+    }
+}
 
 impl Served {
     pub fn new() -> Served {
-        let dir = short_tempdir();
+        Served::with(short_tempdir(), crate::fixtures::human_env("human:qa"))
+    }
+
+    /// `new`, with the project and the user config under `parent` (a short directory).
+    pub fn new_in(parent: &Path) -> Served {
+        Served::with(
+            short_tempdir_in(parent),
+            crate::fixtures::human_env_in("human:qa", parent),
+        )
+    }
+
+    fn with(
+        dir: tempfile::TempDir,
+        (cfg, env): (tempfile::TempDir, Vec<(String, String)>),
+    ) -> Served {
         drop(Rdy::init(dir.path(), "rdy-standard").expect("init the served project"));
-        let mut cfg = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .append(true)
             .open(dir.path().join(".rdy.yaml"))
             .expect("open the project config");
-        io::Write::write_all(&mut cfg, b"serve:\n  idle_timeout: 60\n")
+        io::Write::write_all(&mut file, b"serve:\n  idle_timeout: 60\n")
             .expect("append the serve section");
-        let (cfg, env) = crate::fixtures::human_env("human:qa");
         Served { dir, cfg, env }
     }
 
@@ -482,8 +517,8 @@ impl Served {
             .ok()
     }
 
-    /// SIGKILLs the daemon named by the pid file, then waits until a connect finds no daemon.
-    /// Callable from inside a tokio runtime: the wait runs its own runtime on its own thread.
+    /// SIGKILLs the daemon named by the pid file, then waits until that process is gone
+    /// (`wait_killed`). Callable from inside a tokio runtime.
     pub fn kill9(&self) {
         let pid = self.pid_file().expect("a daemon pid file");
         let status = Command::new("kill")
@@ -491,38 +526,22 @@ impl Served {
             .status()
             .expect("run kill");
         assert!(status.success(), "kill -9 {pid} failed");
-        let run = self.run_dir();
-        let hello = Hello {
-            rdy: PROTO_VERSION,
-            version: env!("CARGO_PKG_VERSION").into(),
-            proto: Proto::Ctl,
-            cwd: self.dir.path().into(),
-        };
-        let gone = std::thread::scope(|sc| {
-            sc.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("kill9 runtime");
-                let deadline = std::time::Instant::now() + KILL_WAIT;
-                loop {
-                    if let Attempt::NoDaemon(_) = rt.block_on(connect(&run, &hello)) {
-                        return true;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return false;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            })
-            .join()
-            .expect("the kill9 wait thread")
-        });
-        assert!(
-            gone,
-            "the daemon {pid} still answers {} s after kill -9",
-            KILL_WAIT.as_secs()
-        );
+        self.wait_killed(pid);
+    }
+
+    /// Waits until the killed daemon `pid` has exited (`ps` no longer lists it, or lists it as
+    /// a zombie). It does not wait for the socket to stop answering: a client may start a
+    /// successor at once (final review M6). Past `KILL_WAIT` it panics (a hang guard).
+    pub fn wait_killed(&self, pid: u32) {
+        let deadline = std::time::Instant::now() + KILL_WAIT;
+        while !exited(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the daemon {pid} still runs {} s after kill -9",
+                KILL_WAIT.as_secs()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// `rdy serve --stop`; a failure is reported on stderr, never a panic.

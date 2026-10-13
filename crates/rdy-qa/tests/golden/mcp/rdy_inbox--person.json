@@ -1,0 +1,30 @@
+{
+  "cursor": "0.28484.0",
+  "entries": [
+    {
+      "event": "intent_posted",
+      "ids": [
+        "1dbfab05bde70505575625b604ee928366e05863499ae88607ca66aaa7f5328b"
+      ],
+      "line": "agent:a posted intent 1dbfab05bde7 on area payments"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "8cc5740f88a2ad0f8e2d8737b5c6ffe70e7270dbe187f35ab852f38689d7e679",
+        "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b"
+      ],
+      "line": "tension 8cc5740f88a2 opened on your change 21742964d864 (edit_collision, blocking): a side changed (change cd27496480bd)"
+    },
+    {
+      "event": "tension_opened",
+      "ids": [
+        "085104e59c78bd30c01c2144fe0c80fd1efa6e54eb0ecb99da117d5ae9e8368e",
+        "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b"
+      ],
+      "line": "tension 085104e59c78 opened on your change 21742964d864 (edit_collision, blocking): a side changed (change 5b2c3a7ea72c)"
+    }
+  ],
+  "more": false,
+  "person": "human:qa"
+}

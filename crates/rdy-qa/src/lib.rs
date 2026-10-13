@@ -8,14 +8,18 @@ pub mod git_repo;
 pub mod golden;
 pub mod inbox;
 pub mod invariants;
+pub mod landing_audit;
 pub mod mcp;
 pub mod packs;
 pub mod perf;
+pub mod reindex_check;
 pub mod report;
 pub mod site;
 pub mod skip;
+pub mod swarm;
 pub mod tensions;
 pub mod wc;
+pub mod wc_check;
 
 /// The libtest name of the test fn `$f` in the calling file (see `fixtures::libtest_name`):
 /// pass it to `--exact` when a test re-runs its own binary.

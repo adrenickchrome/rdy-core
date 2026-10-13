@@ -1,0 +1,20 @@
+[
+  {
+    "description": "The project overview: pack, views, landings, open report, coverage and the tree.",
+    "mimeType": "application/json",
+    "name": "project",
+    "uri": "rdy://project"
+  },
+  {
+    "description": "The schema: block types, fields and the write reference.",
+    "mimeType": "application/json",
+    "name": "pack",
+    "uri": "rdy://pack"
+  },
+  {
+    "description": "Your inbox: the events that concern this session. Reading it never acks.",
+    "mimeType": "application/json",
+    "name": "inbox",
+    "uri": "rdy://inbox"
+  }
+]

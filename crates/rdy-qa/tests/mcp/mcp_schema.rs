@@ -123,3 +123,78 @@ fn ses1_a_reader_session_may_read_canon_by_default() {
         assert_eq!(e.code, "E_RESERVED_VIEW", "{role}: {e}");
     }
 }
+
+#[test]
+fn sg10_schema_has_brief_and_consequences_topics() {
+    let (_d, r) = project();
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
+    let s = rdy_schema(&mut st, p(json!({}))).unwrap();
+    assert_eq!(s["brief"], BRIEF_DOC, "{s}");
+    assert_eq!(s["consequences"], CONSEQUENCES_DOC, "{s}");
+    assert!(
+        EDIT_LOOP_DOC.contains("brief and consequences"),
+        "{EDIT_LOOP_DOC}"
+    );
+    // final review M1: only rdy_view include, exclude and undo return consequences among the
+    // view ops (the create, fork and compare goldens hold none), as edit_loop says
+    assert!(
+        CONSEQUENCES_DOC.starts_with(
+            "Every write, rdy_view include/exclude/undo and propose reply carries consequences."
+        ),
+        "{CONSEQUENCES_DOC}"
+    );
+    assert!(!CONSEQUENCES_DOC.contains("view op"), "{CONSEQUENCES_DOC}");
+    assert!(EDIT_LOOP_DOC.contains("rdy_view include, exclude and undo return consequences"));
+}
+
+#[test]
+fn sg10_the_readme_names_the_m2_concepts() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+    let readme = std::fs::read_to_string(&path).unwrap();
+    for word in [
+        "rdy_brief",
+        "consequences",
+        "intent",
+        "alternative set",
+        "tension",
+        "inbox",
+        "swarm",
+    ] {
+        assert!(readme.contains(word), "README.md lacks {word}");
+    }
+    assert!(!readme.contains("in-flight work"));
+}
+
+/// Fix round 1: the README states the rules the code holds.
+#[test]
+fn sg10_the_readme_states_the_rules_the_code_holds() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+    let readme = std::fs::read_to_string(&path).unwrap();
+    // Dismissal: anyone who writes may dismiss an advisory tension.
+    assert!(readme.contains("Anyone who writes may dismiss an advisory tension."));
+    assert!(!readme.contains("A reviewer or a person of another actor than the authors dismisses"));
+    // The gate refuses only a landing that brings all sides into canon.
+    assert!(readme.contains("stops a landing that would bring all its sides into canon"));
+    // No tool approves: the relay goes through the CLI.
+    assert!(readme.contains("No tool approves yet"));
+    assert!(readme.contains("--relayed-by"));
+    assert!(!readme.contains("with the same acts"));
+    // Confidence is carried by fact sheets, search hits and briefings only.
+    assert!(readme.contains("Fact sheets, search hits and briefings carry a confidence level"));
+    assert!(!readme.contains("Each answer rdy gives"));
+    // `work` is the human's view; the agent's scope is not "work".
+    assert!(!readme.contains("around its work"));
+    // Final review M1: only include, exclude and undo among the view ops list consequences.
+    assert!(readme.contains(
+        "Every write, `rdy_view` include/exclude/undo and propose reply lists `consequences`"
+    ));
+    assert!(!readme.contains("view op and proposal reply"));
+    // The swarm line says what the run checks.
+    assert!(readme.contains("eight scripted agents and one person against one daemon"));
+    assert!(readme.contains("every stable write cites a briefing"));
+    assert!(!readme.contains("every write was briefed"));
+    // The working section stays within 45 lines.
+    let start = readme.find("## Working with agents").unwrap();
+    let end = readme.find("## Daemon").unwrap();
+    assert!(readme[start..end].lines().count() <= 46);
+}

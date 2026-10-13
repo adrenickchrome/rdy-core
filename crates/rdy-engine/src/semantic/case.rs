@@ -1,5 +1,5 @@
 //! Case files (spec §9.3 step 2): everything a reviewer reads to judge one pair, hashed so a verdict binds to exactly what it read.
-use crate::lexicon::{Lexicon, text_in};
+use crate::lexicon::{Lexicon, shown_text_in};
 use crate::semantic::candidates::{Item, Rule, request_label};
 use crate::tensions::index::{DetectCx, canon_index_of};
 use crate::tensions::{DetectScope, SideRef};
@@ -151,7 +151,7 @@ impl ReadState {
                 version: item.version.to_string(),
                 doc,
                 headings,
-                text: text_in(self.pack(), block)
+                text: shown_text_in(self.pack(), block)
                     .into_iter()
                     .map(|(field, text)| CaseText { field, text })
                     .collect(),

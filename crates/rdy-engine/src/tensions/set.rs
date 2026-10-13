@@ -1310,6 +1310,22 @@ impl ReadState {
             .clone()
     }
 
+    /// The tensions of this state whose every side is canon, by id: what
+    /// [`tensions`](Self::tensions)`()?.iter()` lists with every side canon (an in-flight tension
+    /// always has a change side, so these are exactly the set's canon part). Read from the set
+    /// when it is built; otherwise canon's memo (the one a full build fills and shares) joined
+    /// with the stored kinds' all-canon tensions. Never builds the in-flight part.
+    pub fn canon_tensions(&self) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let part = match self.tensions.set.get() {
+            Some(r) => Arc::clone(&r.clone()?.canon),
+            None => canon_of(self, self.detectors, true)?,
+        };
+        Ok(part.tensions.values().cloned().collect())
+    }
+
     /// The state's tension set when it is built, or when its carry runs (the cost follows the
     /// committed change); `None` when only a full build would give it. Never builds the whole
     /// set: a carry that cannot run leaves the cell unbuilt.

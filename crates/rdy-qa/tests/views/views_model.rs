@@ -1,5 +1,5 @@
 //! vmodel1: a reference model of view sets and conflicts. Random command sequences (write,
-//! include, exclude, undo, close, reopen, land, create) run against the engine and against a
+//! include, exclude, undo, close, reopen, land, create, fork) run against the engine and against a
 //! small model over three blocks and up to four views, whose versions are counters. The model's
 //! merge is spec §5.6's rule applied to the counters and its landing rebases as §6.5 says; after
 //! every command each view's included set, conflicts, effective base and block versions must
@@ -60,6 +60,12 @@ enum Cmd {
     Create {
         pinned: bool,
     },
+    /// The next view as a fork of `from`, open or closed: a copy of its base, pin and included
+    /// set. An unpinned, non-empty fork behind canon starts on canon's head without the changes
+    /// that landed.
+    Fork {
+        from: u8,
+    },
 }
 
 fn cmd() -> impl Strategy<Value = Cmd> {
@@ -71,8 +77,9 @@ fn cmd() -> impl Strategy<Value = Cmd> {
         2 => v.clone().prop_map(|view| Cmd::Undo { view }),
         1 => v.clone().prop_map(|view| Cmd::Close { view }),
         2 => v.clone().prop_map(|view| Cmd::Reopen { view }),
-        3 => v.prop_map(|view| Cmd::Land { view }),
+        3 => v.clone().prop_map(|view| Cmd::Land { view }),
         1 => any::<bool>().prop_map(|pinned| Cmd::Create { pinned }),
+        5 => v.prop_map(|from| Cmd::Fork { from }),
     ]
 }
 
@@ -468,15 +475,36 @@ impl Model {
         Err(E_NOTHING_TO_UNDO)
     }
 
-    /// Reopens `view` (the undo of its close at `op`); unpinned with work behind canon, it rebases
-    /// onto canon's head. Returns whether it rebased.
+    /// Reopens `view` (the undo of its close at `op`): it is open again, and then it follows the
+    /// open-view rule (`catch_up_open`). Returns whether it rebased.
     fn reopen(&mut self, view: &str, op: usize) -> bool {
-        let canon = self.canon_at();
-        let landed: Vec<bool> = self.changes.iter().map(|c| c.landed.is_some()).collect();
         let v = self.views.get_mut(view).expect("view");
         v.ops[op].1 = true;
         v.closed = false;
-        if !v.pinned && !v.included.is_empty() && v.base_landing != canon {
+        self.catch_up_open(view)
+    }
+
+    /// Adds `to`, a fork of `from`: a new open view with the source's set, base and pin and no
+    /// ops of its own, which then follows the open-view rule (`catch_up_open`). The model states
+    /// the fork as "a copy that is an open view", not as the store's conditions: an open view
+    /// behind canon is one a landing would have rebased, and a fork of a closed view is the one
+    /// case that can be. Returns whether it rebased.
+    fn fork(&mut self, from: &str, to: &str) -> bool {
+        let mut fork = self.views[from].clone();
+        fork.closed = false;
+        fork.ops = vec![];
+        self.views.insert(to.to_string(), fork);
+        self.catch_up_open(to)
+    }
+
+    /// The open-view rule, which `land` applies to every open view: an open, unpinned view with
+    /// work behind canon starts on canon's head and drops the changes that landed. Returns
+    /// whether it moved.
+    fn catch_up_open(&mut self, view: &str) -> bool {
+        let canon = self.canon_at();
+        let landed: Vec<bool> = self.changes.iter().map(|c| c.landed.is_some()).collect();
+        let v = self.views.get_mut(view).expect("view");
+        if !v.closed && !v.pinned && !v.included.is_empty() && v.base_landing != canon {
             v.included.retain(|&c| !landed[c]);
             v.base_landing = canon;
             return true;
@@ -549,6 +577,8 @@ struct Stats {
     landings_rebasing_3_views: usize,
     conflict_unresolved: usize,
     float_catch_ups: usize,
+    forks: usize,
+    forks_rebasing: usize,
 }
 
 struct Driver<'a> {
@@ -593,6 +623,7 @@ fn kind(c: &Cmd) -> &'static str {
         Cmd::Reopen { .. } => "reopen",
         Cmd::Land { .. } => "land",
         Cmd::Create { .. } => "create",
+        Cmd::Fork { .. } => "fork",
     }
 }
 
@@ -745,6 +776,22 @@ impl<'a> Driver<'a> {
                     return Ok(false);
                 }
                 self.create(self.view_count(), pinned)?;
+            }
+            Cmd::Fork { from } => {
+                if self.view_count() == VIEWS {
+                    return Ok(false);
+                }
+                let src = self.view(from);
+                let to = name(self.view_count());
+                self.r
+                    .view_fork(&session(&to), &src, &to)
+                    .map_err(|e| fail(format!("{what}: {e:?}")))?;
+                let rebases = self.model.fork(&src, &to);
+                let mut s = self.stats.borrow_mut();
+                s.forks += 1;
+                if rebases {
+                    s.forks_rebasing += 1;
+                }
             }
             Cmd::Write { view, block } => {
                 let v = self.view(view);
@@ -1196,10 +1243,79 @@ fn vmodel1_views_match_the_reference_model() {
             s.conflict_unresolved,
         ),
         ("float catch-ups", s.float_catch_ups),
+        ("forks", s.forks),
     ];
     for (what, got) in floors {
         assert!(got >= 1, "{what}: none seen: {s:#?}");
     }
+}
+
+/// sg2: a fixed sequence over fork. Write in v0, fork v0 as v2, include v2's change into a new
+/// v3, land v0. After each command every view agrees with the model, and the checker passes.
+#[test]
+fn sg2_a_fork_then_include_matches_the_model() {
+    let stats = RefCell::new(Stats::default());
+    let _ids = SeededIds::new("sg2_a_fork_then_include_matches_the_model");
+    let mut d = Driver::new(&stats);
+    let steps = [
+        Cmd::Write { view: 0, block: 0 },
+        Cmd::Fork { from: 0 },
+        Cmd::Create { pinned: false },
+        Cmd::Include { from: 2, to: 3 },
+        Cmd::Land { view: 0 },
+    ];
+    for (at, c) in steps.iter().enumerate() {
+        assert!(
+            d.apply(c).unwrap_or_else(|e| panic!("{c:?}: {e}")),
+            "{c:?} was skipped"
+        );
+        d.compare(at + 1, c).unwrap_or_else(|e| panic!("{e}"));
+        if matches!(c, Cmd::Fork { .. }) {
+            let st = d.r.read();
+            assert_eq!(
+                st.included("v2"),
+                st.included("v0"),
+                "the fork holds a copy of the source's set"
+            );
+            assert_eq!(st.included("v2").len(), 1);
+        }
+    }
+    let st = d.r.read();
+    assert!(
+        st.included("v2").is_empty() && st.included("v3").is_empty(),
+        "the landing took the change out of the fork and of the view that included it"
+    );
+    assert_eq!(stats.borrow().forks, 1);
+}
+
+/// sg2: a fork of a closed view behind canon starts on canon's head and drops the changes that
+/// landed from another view (the one case where a fork rebases: open views are rebased at every
+/// landing). v0 writes two blocks; v1 includes the second change and lands; v0 was closed first,
+/// so it keeps a landed change; its fork keeps only the first.
+#[test]
+fn sg2_a_fork_of_a_closed_view_behind_canon_drops_what_landed() {
+    let stats = RefCell::new(Stats::default());
+    let _ids = SeededIds::new("sg2_a_fork_of_a_closed_view_behind_canon_drops_what_landed");
+    let mut d = Driver::new(&stats);
+    let steps = [
+        Cmd::Write { view: 0, block: 0 },
+        Cmd::Write { view: 0, block: 1 },
+        Cmd::Include { from: 0, to: 1 },
+        Cmd::Close { view: 0 },
+        Cmd::Land { view: 1 },
+        Cmd::Fork { from: 0 },
+    ];
+    for (at, c) in steps.iter().enumerate() {
+        assert!(
+            d.apply(c).unwrap_or_else(|e| panic!("{c:?}: {e}")),
+            "{c:?} was skipped"
+        );
+        d.compare(at + 1, c).unwrap_or_else(|e| panic!("{e}"));
+    }
+    let st = d.r.read();
+    assert_eq!(st.included("v0").len(), 2, "the closed view keeps its two");
+    assert_eq!(st.included("v2").len(), 1, "the fork drops the landed one");
+    assert_eq!(stats.borrow().forks_rebasing, 1);
 }
 
 fn update(id: &str, base: &str, body: &str) -> serde_json::Value {

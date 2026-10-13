@@ -128,25 +128,25 @@ fn spec_target(op: &str) -> Option<String> {
         o if (o.starts_with("write") && !o.starts_with("write_batch_"))
             || (o.starts_with("propose") && !o.starts_with("propose_land_")) =>
         {
-            "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
+            "< 5 ms p95 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
-        "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
+        "brief_doc" => "< 5 ms p95 at 10k with the view's graph carried (the read budget, spec 11)",
         "open_chosen_alts_100" => {
             "< 2 s (the cold-open budget, spec 11): open with 100 chosen alternative sets whose winner views wrote 50 changes each after the set was created"
         }
         "brief_expired_intents_1k" => {
-            "< 5 ms p99 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
+            "< 5 ms p95 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
         }
         "context" | "impact" | "resolve_path" => {
             return Some(format!(
-                "< 5 ms p99 (spec 11){COLD_READ_NOTE}{}",
+                "< 5 ms p95 (spec 11){COLD_READ_NOTE}{}",
                 if large { LARGE_TIER_NOTE } else { "" }
             ));
         }
-        "version_position" | "tree_full" => "< 5 ms p99 (spec 11)",
-        "version_position_cached" => "< 10 us p99 on the isolated Linux bench (vpos1)",
+        "version_position" | "tree_full" => "< 5 ms p95 (spec 11)",
+        "version_position_cached" => "< 10 us p95 on the isolated Linux bench (vpos1)",
         "tree_full_memo" => {
-            "< 5 ms p99 at 1k folders / 10k docs, memoised per canon head (M2 spec 15.1)"
+            "< 5 ms p95 at 1k folders / 10k docs, memoised per canon head (M2 spec 15.1)"
         }
         "search_literal" => {
             "no spec target: a full scan of block text, first page (recorded for FW-PR1; semantic search is M5)"
@@ -167,10 +167,10 @@ fn spec_target(op: &str) -> Option<String> {
             "< 1 ms incremental: the read of a 200-change view right after one write seeded it (M2 spec 15.1)"
         }
         "land_rebase_50" => {
-            "< 100 ms p99, one landing with 50 non-empty unpinned views rebasing, 5 of them on the landed blocks (M2 spec 15.1)"
+            "< 100 ms p95, one landing with 50 non-empty unpinned views rebasing, 5 of them on the landed blocks (M2 spec 15.1)"
         }
         "brief_inflight_50" => {
-            "< 5 ms p99 at 10k with 50 live views (the read budget, spec 11; amendment §4.5 item 1)"
+            "< 5 ms p95 at 10k with 50 live views (the read budget, spec 11; amendment §4.5 item 1)"
         }
         "view_consequences_200" => {
             "no spec target: the consequences of a 200-change include, on the read pool (recorded for M2c3; read against the < 50 ms cold figure)"
@@ -185,7 +185,7 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1)"
         }
         "entity_search" => {
-            "< 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page"
+            "< 5 ms p95 (a read, spec 11): an entity search with its fact sheet, first page"
         }
         "search_coverage_sort" => {
             "< 5 ms p95 (the read budget, reference/performance tb-XBXR4): search_literal's query with sort: coverage, first page"
@@ -206,7 +206,7 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage)"
         }
         "context_inflight_1k" | "impact_inflight_1k" | "context_view_1k" | "impact_view_1k" => {
-            "< 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
+            "< 5 ms p95 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
         }
         "inflight_build_1k" | "coord_build_1k" => {
             "no spec target: the in-flight state's (coordination graph's) cold build, once per published state (recorded for M2d1)"
@@ -219,16 +219,16 @@ fn spec_target(op: &str) -> Option<String> {
             "recorded, no spec target: a view close that resolves 50 tensions, logged as one record (plan M2e2)"
         }
         "tension_on_change_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
+            "< 10 ms p95 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
         "tension_value_1k" | "tension_drift_1k" => {
             "< 10 ms p95: the tension delta and on_change report of one write, the part tension detection adds to the write reply, with 1k in-flight changes (reference/performance tb-XBXR4)"
         }
         "tension_on_change_delete_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete never carries, so this is the in-flight build plus a diff that skips the shared canon part"
+            "< 10 ms p95 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete never carries, so this is the in-flight build plus a diff that skips the shared canon part"
         }
         "tension_on_change_view_op_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); the view op's write carries the set (plan M2e2), so this is a diff that skips the structure the two sets share"
+            "< 10 ms p95 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); the view op's write carries the set (plan M2e2), so this is a diff that skips the structure the two sets share"
         }
         "tensions_full_1k" => {
             "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
@@ -249,10 +249,10 @@ fn spec_target(op: &str) -> Option<String> {
             "recorded, no spec target: the first rdy_review_next on a state at 1k in-flight changes, its case file and hash included (plan M2e1)"
         }
         "review_submit_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (proposed: the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included)"
+            "< 10 ms p95 with 1k in-flight changes (proposed: the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included)"
         }
         "review_submit_nolease_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (the review_submit_1k target, task-7 ruling): the writer part of a lease-less rdy_review_submit as the daemon runs it, the request found on a read outside the timer"
+            "< 10 ms p95 with 1k in-flight changes (the review_submit_1k target, task-7 ruling): the writer part of a lease-less rdy_review_submit as the daemon runs it, the request found on a read outside the timer"
         }
         "review_submit_lookup_1k" => {
             "recorded, no spec target: the read-side lookup of a lease-less rdy_review_submit at 1k in-flight changes (the queue walk the daemon runs outside the writer; plan M2e1)"
@@ -264,7 +264,7 @@ fn spec_target(op: &str) -> Option<String> {
             "recorded, no spec target: a person's acceptance of one advised tension of a proposal at 1k in-flight changes, carry and settle included (plan M2e1)"
         }
         "inbox_fetch_200_1k" => {
-            "< 5 ms p99 (M2 spec 15.1: inbox fetch, 200 entries), at 1k in-flight changes"
+            "< 5 ms p95 (M2 spec 15.1: inbox fetch, 200 entries), at 1k in-flight changes"
         }
         "inbox_in_flight_1k" => {
             "recorded, no spec target: one run's in-flight changes, their blocks, citations, views and areas at 1k in-flight changes (plan M2e2)"
@@ -282,13 +282,22 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: one rdy_write of 2,002 ops (~9 MiB) through the MCP parameter path, consequences included (recorded; intake: the &Value parse and the deep clone of ops cost about +30 ms per 9 MiB)"
         }
         "render" => "< 2 s full render at 100k (spec 11)",
+        "render_cold" => {
+            "no spec target: the full render of canon on a fresh handle (canon read outside the timer), the canon tension read of the disagreements page included (FW-SW2); compare with render, whose state keeps that read across runs"
+        }
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
         "new_doc_single" => "in-process comparator for daemon_write_single (no spec target)",
         "daemon_write_single" => {
-            "< 5 ms p99 on Linux NVMe; one durable flush plus < 1 ms on macOS (DECISIONS-rdy-m2 §1 Q1)"
+            "< 5 ms p95 on Linux NVMe; one durable flush plus < 1 ms on macOS (DECISIONS-rdy-m2 §1 Q1)"
         }
         "daemon_cold_start" => "< 2 s at 100k (M2 spec 15.1)",
+        "daemon_write_8_clients" => {
+            "recorded, no spec target: one rdy_write through the daemon while seven other MCP clients write (the write target of M2 spec 15.1 is for one writer; compare with daemon_write_single)"
+        }
+        "invariants_check_all" => {
+            "recorded, no spec target: the invariant checker over canon and every open view (D-XH24M)"
+        }
         "code_index_build" => {
             "a full rebuild in seconds (FW-C6): 2,000 commits, 400 files; recorded, no spec budget"
         }
@@ -301,7 +310,7 @@ fn spec_target(op: &str) -> Option<String> {
         "wc_plan_one_doc" => {
             "recorded, no spec budget (M2f-a): the working copy: one staged doc file planned for commit"
         }
-        "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p99 (reads, spec 11)",
+        "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p95 (reads, spec 11)",
         "log_full" => "recorded: 2000 landings, no spec target",
         // bounds the functional tests used to assert by the clock, moved here (a wall-clock bound
         // in a functional gate fails on a loaded machine, not on a defect); each keeps its figure
@@ -336,7 +345,7 @@ fn spec_target(op: &str) -> Option<String> {
             "< 50 ms: the worst status read on another connection while a write of the most ops one write takes runs (the old conc1 bound)"
         }
         "daemon_mcp_overview" => {
-            "< 5 ms p99 (the read budget, spec 11): rdy_overview over an mcp connection to the daemon"
+            "< 5 ms p95 (the read budget, spec 11): rdy_overview over an mcp connection to the daemon"
         }
         "mcp_stdio_overview" => {
             "< 2 s per call: rdy_overview over `rdy mcp --no-daemon` (the old mcp and mcp_pool bound)"
@@ -2977,6 +2986,29 @@ fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str
     }));
 }
 
+/// `render_cold`: the full render of canon on a fresh handle each run, canon read outside the
+/// timer, so the median holds what the first render after a start pays: the canon tensions the
+/// disagreements page reads are found inside it (final review M2), and a whole tension build in
+/// the render could not hide. `render` reuses one state, whose canon read is memoised after its
+/// first run. Run with the project closed.
+fn tier_render_cold(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    dir: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) {
+    out.push(measure_timed(&format!("render_cold{sfx}"), runs, |i| {
+        let r = Rdy::open(proj).expect("open");
+        let st = r.read();
+        st.materialized(&Scope::Canon).expect("canon");
+        let site = dir.join(format!("site_cold{sfx}{i}"));
+        let s = Instant::now();
+        rdy_render::render_site(&st, &Scope::Canon, &site).expect("render");
+        s.elapsed()
+    }));
+}
+
 /// Cold open: a fresh handle on the project, then the first read of canon.
 fn tier_cold_open(out: &mut Vec<Measure>, proj: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("cold_open{sfx}"), runs, |_| {
@@ -3120,6 +3152,7 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     drop(r);
     tier_cold_open(&mut out, &proj, "", 5);
+    tier_render_cold(&mut out, &proj, dir.path(), "", 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -3151,6 +3184,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
+    out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
     out.extend(bound_ops(dir.path()));
     out.extend(stdio_mcp_ops(dir.path()));
     // the view ops last: the views and landings they leave behind would move the ops above
@@ -3159,6 +3193,7 @@ pub fn run_workload() -> Vec<Measure> {
     // timer, not by the first timed write (plan M2e2)
     r.reconcile_transitions().expect("reconcile");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_invariants(&mut out, &r, TYPICAL_RUNS.read);
     // after the view ops (the view it leaves behind would move the ops before it), before the
     // in-flight ops (which close it and add 1k in-flight changes)
     tier_entities(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
@@ -3184,6 +3219,19 @@ pub fn run_workload() -> Vec<Measure> {
     }
     rdy_model::unseed_ids_for_tests();
     out
+}
+
+/// `invariants_check_all` (typical tier): the checker over canon and every open view, from one
+/// snapshot, then `fsck` and the `logged` rule (D-XH24M). Run after the view ops, so the views
+/// they leave behind are checked. A violation is printed, not asserted: the op times the checker.
+fn tier_invariants(out: &mut Vec<Measure>, r: &Rdy, runs: usize) {
+    let mut violations = 0usize;
+    out.push(measure("invariants_check_all", runs, |_| {
+        violations = crate::invariants::check_all(r).err().map_or(0, |v| v.len());
+    }));
+    if violations > 0 {
+        eprintln!("invariants_check_all: {violations} violations on the workload");
+    }
 }
 
 /// Starts a daemon over `proj` (idle timeout 60 s, human actor `human:qa`, the fixture writer).
@@ -3299,6 +3347,153 @@ fn daemon_mcp_on_copy(proj: &std::path::Path, parent: &std::path::Path) -> Vec<M
     drop(c);
     daemon_stop(run);
     out
+}
+
+/// The writers of `daemon_write_8_clients`: the one that is timed and seven that keep writing.
+const WRITE_CLIENTS: usize = 8;
+
+/// Stops the daemon of a project at drop (`rdy serve --stop` as the human), so a panic in the
+/// op leaves none behind.
+struct StopServe {
+    dir: std::path::PathBuf,
+    env: Vec<(String, String)>,
+}
+
+impl Drop for StopServe {
+    fn drop(&mut self) {
+        let mut cmd = crate::daemon::human_command(&self.dir, &self.env, &["serve", "--stop"]);
+        if let Err(e) = cmd.output() {
+            eprintln!("rdy serve --stop did not run: {e}");
+        }
+    }
+}
+
+/// An `rdy mcp` proxy to the daemon of `dir` with a writer session `actor` and a doc of its own;
+/// returns the client and the id of the doc's section.
+fn write_client(
+    dir: &std::path::Path,
+    env: &[(String, String)],
+    actor: &str,
+) -> (crate::mcp::McpClient, String) {
+    let budget = Duration::from_secs(120);
+    let mut c = crate::mcp::McpClient::start_proxy_at(dir, env);
+    c.call_within(
+        "rdy_session",
+        json!({"actor": actor, "role": "writer"}),
+        budget,
+    )
+    .ok();
+    let made = c
+        .call_within("rdy_write", json!({"ops": [
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": actor.replace(':', "-"), "title": "Eight", "doc_type": "constraints"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}
+        ]}), budget)
+        .ok();
+    let section = made["created"]["$s"]
+        .as_str()
+        .expect("the section id")
+        .to_string();
+    (c, section)
+}
+
+/// Waits for `count` ready signals. It takes the main side's sender, so a writer that dies before
+/// it signals disconnects the channel and the wait returns an error at once; a writer that hangs
+/// ends the wait at `within`.
+fn wait_ready(
+    tx: std::sync::mpsc::Sender<()>,
+    rx: &std::sync::mpsc::Receiver<()>,
+    count: usize,
+    within: Duration,
+) -> Result<(), String> {
+    use std::sync::mpsc::RecvTimeoutError;
+    drop(tx);
+    let end = Instant::now() + within;
+    for got in 0..count {
+        let left = end.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "a background writer ended before it was ready ({got} of {count} ready)"
+                ));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "the background writers were not ready within {within:?} ({got} of {count} ready)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `daemon_write_8_clients` on a copy of the typical project under `parent`: the daemon is the
+/// real one, started by the first `rdy mcp` proxy. Seven proxies write one claim after another
+/// until the timed proxy has made its runs; each timed run is one `rdy_write` of one claim, its
+/// durable flush included. The load is checked: every background writer must have written.
+fn daemon_clients_ops(
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    runs: usize,
+) -> Vec<Measure> {
+    use crate::mcp::Reply;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    let budget = Duration::from_secs(120);
+    let copy = parent.join("p-8c");
+    copy_project(proj, &copy);
+    let (_cfg, env) = crate::fixtures::human_env("human:qa");
+    let _stop = StopServe {
+        dir: copy.clone(),
+        env: env.clone(),
+    };
+    // the timed client first: its proxy starts the daemon the others find
+    let (mut timed, section) = write_client(&copy, &env, "agent:perf8-0");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let writers: Vec<_> = (1..WRITE_CLIENTS)
+        .map(|k| {
+            let (copy, env, stop, ready) = (copy.clone(), env.clone(), stop.clone(), ready_tx.clone());
+            std::thread::spawn(move || {
+                let (mut c, section) = write_client(&copy, &env, &format!("agent:perf8-{k}"));
+                ready.send(()).expect("the timed side waits");
+                let mut n = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    let r = c.call_within(
+                        "rdy_write",
+                        json!({"ops": [{"op": "create", "type": "claim", "parent": section, "body": format!("Load {k} claim {n}.")}]}),
+                        budget,
+                    );
+                    assert!(matches!(r, Reply::Ok(_)), "a background write: {r:?}");
+                    n += 1;
+                }
+                n
+            })
+        })
+        .collect();
+    if let Err(e) = wait_ready(ready_tx, &ready_rx, WRITE_CLIENTS - 1, budget) {
+        stop.store(true, Ordering::Relaxed);
+        panic!("{e}");
+    }
+    let m = measure_timed("daemon_write_8_clients", runs, |i| {
+        let args = json!({"ops": [{"op": "create", "type": "claim", "parent": section, "body": format!("Timed claim {i}.")}]});
+        let s = Instant::now();
+        let r = timed.call_within("rdy_write", args, budget);
+        let took = s.elapsed();
+        assert!(matches!(r, Reply::Ok(_)), "the timed write: {r:?}");
+        took
+    });
+    stop.store(true, Ordering::Relaxed);
+    let written: Vec<usize> = writers
+        .into_iter()
+        .map(|w| w.join().expect("a writer thread"))
+        .collect();
+    eprintln!("daemon_write_8_clients: the seven other clients wrote {written:?} claims");
+    assert!(
+        written.iter().all(|n| *n > 0),
+        "a background client never wrote: the op did not run under load: {written:?}"
+    );
+    vec![m]
 }
 
 /// One JSON-RPC line out, and the reply with `id` back (other lines are skipped).
@@ -3684,6 +3879,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_render(&mut out, &r, parent, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
+    tier_render_cold(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
@@ -3727,7 +3923,7 @@ mod tests {
             "log_page_20",
             "last_changes_doc_50k",
         ] {
-            assert!(spec_target(op).unwrap().contains("< 5 ms p99"), "{op}");
+            assert!(spec_target(op).unwrap().contains("< 5 ms p95"), "{op}");
         }
         assert!(
             spec_target("last_changes_doc_50k")
@@ -4022,7 +4218,7 @@ mod tests {
         assert!(
             spec_target("land_rebase_50")
                 .unwrap()
-                .contains("< 100 ms p99")
+                .contains("< 100 ms p95")
         );
         assert!(
             spec_target("view_incremental")
@@ -4121,6 +4317,212 @@ mod tests {
                 "coord_build_1k"
             ]
         );
+    }
+
+    const SG_WRITE_8: &str = "recorded, no spec target: one rdy_write through the daemon while seven other MCP clients write (the write target of M2 spec 15.1 is for one writer; compare with daemon_write_single)";
+    const SG_CHECK_ALL: &str =
+        "recorded, no spec target: the invariant checker over canon and every open view (D-XH24M)";
+
+    #[test]
+    fn sgperf1_the_m2g_ops_state_their_targets() {
+        assert_eq!(
+            spec_target("daemon_write_8_clients").as_deref(),
+            Some(SG_WRITE_8)
+        );
+        assert_eq!(
+            spec_target("invariants_check_all").as_deref(),
+            Some(SG_CHECK_ALL)
+        );
+        assert!(spec_ceiling_ms("daemon_write_8_clients").is_none());
+        assert!(spec_ceiling_ms("invariants_check_all").is_none());
+        assert!(fsync_bound("daemon_write_8_clients"));
+        assert!(!fsync_bound("invariants_check_all"));
+    }
+
+    /// A writer thread that dies before it signals ready must end the wait with an error, not
+    /// hang it (the main side's own sender must not keep the channel open).
+    #[test]
+    fn sgperf1_a_writer_that_dies_before_ready_ends_the_wait() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let theirs = tx.clone();
+        let dead = std::thread::spawn(move || {
+            let _held = theirs;
+            panic!("the writer died before it was ready");
+        });
+        let started = Instant::now();
+        let r = wait_ready(tx, &rx, 1, Duration::from_secs(30));
+        assert!(dead.join().is_err());
+        let e = r.expect_err("a dead writer fails the wait");
+        assert!(e.contains("ended before it was ready"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    /// A writer that stays alive but never signals ends the wait at the time limit.
+    #[test]
+    fn sgperf1_a_writer_that_never_signals_times_out() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let _alive = tx.clone();
+        let e = wait_ready(tx, &rx, 1, Duration::from_millis(200)).expect_err("times out");
+        assert!(e.contains("not ready within"), "{e}");
+    }
+
+    /// Ready writers pass the wait.
+    #[test]
+    fn sgperf1_ready_writers_pass_the_wait() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        for _ in 0..3 {
+            let t = tx.clone();
+            std::thread::spawn(move || t.send(()).unwrap());
+        }
+        wait_ready(tx, &rx, 3, Duration::from_secs(30)).expect("all ready");
+    }
+
+    /// Every op the gate can run: those the baseline holds, those `spec_target` names, and the
+    /// ops of this plan. No target says p99: the M2 targets are p95 (D-ANNKF).
+    #[test]
+    fn sgperf1_no_target_says_p99() {
+        let src = include_str!("perf.rs");
+        let from = src.find("fn spec_target(").expect("spec_target");
+        let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
+        let mut ops: std::collections::BTreeSet<String> = body
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| {
+                !t.is_empty()
+                    && t.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            })
+            .map(str::to_string)
+            .collect();
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for class in baseline["classes"].as_object().expect("classes").values() {
+            ops.extend(class["ops"].as_object().expect("ops").keys().cloned());
+        }
+        ops.extend([
+            "daemon_write_8_clients".into(),
+            "invariants_check_all".into(),
+        ]);
+        assert!(ops.len() > 100, "{} ops", ops.len());
+        let mut said = vec![];
+        for op in &ops {
+            if spec_target(op).is_some_and(|t| t.contains("p99")) {
+                said.push(op.as_str());
+            }
+        }
+        assert!(said.is_empty(), "these targets say p99: {said:?}");
+        assert!(!body.contains("p99"), "spec_target says p99 in a text");
+    }
+
+    /// The two M2g ops run end to end on a small tree: the checker after the view ops, and the
+    /// eight clients through real proxies to a daemon of their own.
+    #[test]
+    fn sgperf1_the_m2g_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7367_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        prepare_rebased_view(&mut r, &fx, &runs);
+        let mut out = vec![];
+        tier_views(&mut out, &mut r, &fx, "", &runs);
+        rdy_model::unseed_ids_for_tests();
+        let mut ops = vec![];
+        tier_invariants(&mut ops, &r, 2);
+        crate::invariants::check_all(&r).unwrap_or_else(|v| panic!("violations: {v:?}"));
+        drop(r);
+        ops.extend(daemon_clients_ops(&proj, dir.path(), runs.write));
+        let names: Vec<&str> = ops.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["invariants_check_all", "daemon_write_8_clients"]);
+        for m in &ops {
+            assert!(m.median_ms > 0.0, "{m:?}");
+        }
+        // final review M11 (minors item 26): the timed writes are `runs.write`, as PERF.md says
+        assert_eq!(ops[1].runs, runs.write);
+    }
+
+    /// Final review M11 (minors item 27): `run_workload` runs the M2g ops, so taking the wiring
+    /// out fails a test. Both tiers render cold after their warm render.
+    #[test]
+    fn sgperf1_run_workload_runs_the_m2g_ops() {
+        let src = include_str!("perf.rs");
+        let from = src.find("pub fn run_workload(").expect("run_workload");
+        let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
+        let at = |call: &str| {
+            body.find(call)
+                .unwrap_or_else(|| panic!("run_workload does not call {call}"))
+        };
+        assert!(
+            at("tier_views(&mut out, &mut r, &fx, \"\", &TYPICAL_RUNS);")
+                < at("tier_invariants(&mut out, &r, TYPICAL_RUNS.read);"),
+            "the checker runs after the view ops"
+        );
+        at("out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));");
+        at("tier_render_cold(&mut out, &proj, dir.path(), \"\", 5);");
+        let large = src.find("fn run_large_tier(").expect("run_large_tier");
+        let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
+        assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
+    }
+
+    /// Final review M2 (minors item 34): `render_cold` renders on a fresh handle, so each run
+    /// finds canon's tensions for the disagreements page; `render` finds them once. Neither
+    /// builds a whole tension set: the page reads canon only (render_50k fix).
+    #[test]
+    fn sgperf1_render_cold_reads_canon_tensions_in_each_run() {
+        rdy_model::seed_ids_for_tests(0x7367_7067);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let mut out = vec![];
+        let builds = rdy_engine::tensions::set::full_builds;
+        let runs = rdy_engine::tensions::set::canon_part_runs;
+        // a fresh state: the land above built its set in this one
+        let r = {
+            drop(r);
+            Rdy::open(&proj).expect("reopen")
+        };
+        let (before, before_runs) = (builds(), runs());
+        tier_render(&mut out, &r, dir.path(), "", 3);
+        let (warm, warm_runs) = (builds() - before, runs() - before_runs);
+        let end = r.store().log_end();
+        drop(r);
+        let (before, before_runs) = (builds(), runs());
+        tier_render_cold(&mut out, &proj, dir.path(), "", 3);
+        let (cold, cold_runs) = (builds() - before, runs() - before_runs);
+        // the cold renders log nothing, so the ops after them read the project as before
+        let r = Rdy::open(&proj).expect("reopen");
+        assert_eq!(r.store().log_end(), end, "a cold render wrote to the log");
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["render", "render_cold"]);
+        assert_eq!(warm, 0, "the warm render builds no whole set");
+        assert_eq!(cold, 0, "a cold render builds no whole set");
+        assert!(
+            warm_runs <= 1,
+            "the warm render finds canon's part at most once: {warm_runs}"
+        );
+        assert_eq!(cold_runs, 3, "each cold render finds canon's part");
+        assert!(spec_target("render_cold").is_some_and(|t| t.contains("fresh handle")));
+        assert!(!fsync_bound("render_cold"));
     }
 
     /// The tension ops run end to end on a small tree (n and the citing claims scaled down), after
@@ -4257,7 +4659,7 @@ mod tests {
         assert!(
             spec_target("inbox_fetch_200_1k")
                 .unwrap()
-                .contains("< 5 ms p99")
+                .contains("< 5 ms p95")
         );
         assert!(
             spec_target("inbox_ack_1k_50k")
@@ -4280,7 +4682,7 @@ mod tests {
             assert!(spec_target(op).is_some(), "{op} has no target");
         }
         for op in ["review_submit_1k", "review_submit_nolease_1k"] {
-            assert!(spec_target(op).unwrap().contains("< 10 ms p99"), "{op}");
+            assert!(spec_target(op).unwrap().contains("< 10 ms p95"), "{op}");
         }
         assert!(
             spec_target("review_next_1k_50k")
@@ -4328,7 +4730,7 @@ mod tests {
         assert!(
             spec_target("tension_on_change_1k")
                 .unwrap()
-                .contains("< 10 ms p99")
+                .contains("< 10 ms p95")
         );
         assert!(
             spec_target("tensions_canon_50k")
@@ -4390,7 +4792,7 @@ mod tests {
             "impact_view_1k",
             "context_inflight_1k_50k",
         ] {
-            assert!(spec_target(op).unwrap().contains("< 5 ms p99"), "{op}");
+            assert!(spec_target(op).unwrap().contains("< 5 ms p95"), "{op}");
         }
         for op in [
             "inflight_build_1k",
@@ -4440,7 +4842,7 @@ mod tests {
             let budget = if op.starts_with("open_") {
                 "< 2 s"
             } else {
-                "< 5 ms p99"
+                "< 5 ms p95"
             };
             assert!(target.contains(budget), "{op}: {target}");
         }

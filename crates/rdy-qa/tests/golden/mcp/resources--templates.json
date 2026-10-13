@@ -1,0 +1,20 @@
+[
+  {
+    "description": "One block or doc by id or path, in compact form.",
+    "mimeType": "application/json",
+    "name": "doc",
+    "uriTemplate": "rdy://doc/{id}"
+  },
+  {
+    "description": "One view: its owner, changes and state.",
+    "mimeType": "application/json",
+    "name": "view",
+    "uriTemplate": "rdy://view/{name}"
+  },
+  {
+    "description": "One proposal version, P-<id>@<n>, or its latest as P-<id>.",
+    "mimeType": "application/json",
+    "name": "proposal",
+    "uriTemplate": "rdy://proposal/{id}"
+  }
+]

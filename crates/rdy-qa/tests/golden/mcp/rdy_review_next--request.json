@@ -1,0 +1,60 @@
+{
+  "case": {
+    "blocks": [
+      {
+        "doc": "spec",
+        "governing": [],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "D-REKH0",
+        "side": "canon@cf2568b670d6cb9111d617fa665fa43f498955d3f8cb721b45a7018ccc2aea1f",
+        "text": [
+          {
+            "field": "statement",
+            "text": "Keep A"
+          }
+        ],
+        "type": "decision",
+        "version": "c13764b268a703255fcd6ffa737299a9fe7308938958bcc12790928f3fe3854e"
+      },
+      {
+        "doc": "spec",
+        "governing": [],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "c-ZCQ17",
+        "side": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+        "text": [
+          {
+            "field": "body",
+            "text": "C contradicts B."
+          }
+        ],
+        "type": "claim",
+        "version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
+      }
+    ],
+    "entities": [],
+    "kind": "tension",
+    "question": "Do these two blocks disagree? Answer tension when they cannot both hold, else no_tension. A tension names, for each block that takes part, what in it disagrees.",
+    "request": "rq-fba4a3d01c77",
+    "rule": "section",
+    "schema": {
+      "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+      "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
+      "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
+      "verdict": [
+        "tension",
+        "no_tension"
+      ]
+    }
+  },
+  "case_hash": "741900ba047dc272c4eefa1596cbab1af860648d2b8d311d95323c3988602d9d",
+  "kind": "tension",
+  "lease_expires_at": "2025-10-09T09:03:20Z",
+  "request": "rq-fba4a3d01c77"
+}

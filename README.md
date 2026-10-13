@@ -48,6 +48,29 @@ claude mcp add rdy -- rdy mcp --project /path/to/project
 - **Decisions**: immutable once accepted; superseded or revoked only by new decisions.
 - **Schema packs**: the document skeleton and block types; `rdy-standard` is built in and replaceable.
 
+## Working with agents
+
+rdy computes. Agents write. People decide. The loop is: brief, write, consequences, propose, approved, land.
+
+1. **Brief.** The agent calls `rdy_brief` for the blocks it will change. The briefing lists what governs them, what depends on them and what will go stale. It also lists open tensions and other changes in progress, and it gives a token.
+2. **Write.** The agent writes to its own view and passes the token as `brief`. A write to stable content with no current token fails with `E_BRIEF_REQUIRED`. A token that is out of date fails with `E_BRIEF_STALE`.
+3. **Consequences.** Every write, `rdy_view` include/exclude/undo and propose reply lists `consequences`: the blocks the change touches, why, and what to do (`update`, `confirm`, `reaffirm` or `resolve`). The agent answers each one before it proposes. The gate does not check the answers yet.
+4. **Propose, approved, land.** The agent proposes the view. A person approves it, and the proposal lands in canon.
+
+A **view** is a private place for one run's changes. Many views can be open at one time, and each lands on its own.
+
+An **intent** (`rdy_intent`) tells other agents which area or blocks a run plans to change, and for how long.
+
+An **alternative set** (`rdy_alternatives`) holds two or more views that answer one question. Landing one member closes the others.
+
+A **tension** is a disagreement that rdy finds: between changes, between a change and canon, or inside canon. Some are found by rules (a fork, a duplicate definition, a value that differs). Others come from a reviewer's verdict on a pair of blocks (`rdy_review_next`, `rdy_review_submit`). Anyone who writes may dismiss an advisory tension. A blocking one needs a reviewer or a person of another actor than its authors. A blocking tension stops a landing that would bring all its sides into canon. A reviewer may advise that a semantic tension should block. That advice gates nothing until a person accepts it.
+
+`rdy_coverage` scores each block on six dimensions and lists each failed check with its fix. Fact sheets, search hits and briefings carry a confidence level (high, medium or low) with its reasons; confidence never blocks.
+
+The **inbox** tells an agent what changed around its changes: `rdy_inbox` reads it, and the `rdy://inbox` resource sends best-effort notifications. `rdy_inbox {person: true}` reads the person's inbox so the agent can show it in chat.
+
+Chat comes first. A person works through their agent, and the agent calls the tools for them. The CLI is a fallback. No tool approves yet: the agent relays the person's answer with `rdy approve <P-x@n> --relayed-by <agent> --evidence <their words> --question <what you asked>`. `rdy_schema` has one key for each topic: `edit_loop`, `brief`, `consequences`, `views`, `intents`, `alternatives`, `tensions`, `reviews` and `inbox`.
+
 ## Daemon
 
 Each project has one daemon that holds its store; every `rdy` command is a client of it. The
@@ -147,4 +170,4 @@ tier, and writes `target/qa/report.md`. Flags: `--deep` (before a milestone), `-
 
 `--only perf` runs the release build and the perf tier only. `--only <area>` for any other area
 keeps fmt, clippy, the workspace tests, the `rdy-qa` unit tests and the perf tier (unless
-`--skip-perf`) and narrows only the hardening suite to that area's test files.
+`--skip-perf`) and narrows only the hardening suite to that area's test files. The `swarm` area runs eight scripted agents and one person against one daemon, through MCP first. It checks for lost writes, unreported tensions, landings past the gate and inboxes that differ from the log. It also checks that every stable write cites a briefing.

@@ -39,6 +39,7 @@ pub struct Shared<'a> {
 pub struct SiteFacts<'a> {
     pub has_terms: bool,
     pub has_questions: bool,
+    pub has_disagreements: bool,
     /// What a draft changes against the canon it is based on; none for canon and tags.
     pub review: Option<&'a review::Review>,
 }
@@ -161,6 +162,28 @@ pub struct QuestionsBody {
     pub groups: Vec<QuestionGroup>,
 }
 
+/// One link of an entry on the disagreements page.
+#[derive(Clone, Debug, Serialize)]
+pub struct DisagreementLink {
+    pub href: String,
+    /// The block's doc title and the first words of the block.
+    pub text: String,
+    pub title: String,
+}
+
+/// One entry: the reader sentence and the blocks it is about. Never an id, a kind name or a
+/// severity.
+#[derive(Clone, Debug, Serialize)]
+pub struct DisagreementRow {
+    pub sentence: &'static str,
+    pub links: Vec<DisagreementLink>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DisagreementsBody {
+    pub entries: Vec<DisagreementRow>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RedirectBody {
     pub label: String,
@@ -181,6 +204,8 @@ pub struct Body {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions: Option<QuestionsBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub disagreements: Option<DisagreementsBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect: Option<RedirectBody>,
 }
 
@@ -193,7 +218,7 @@ pub struct PageContext {
     pub title: String,
     /// Site-relative, with `/` separators.
     pub page_url: String,
-    /// `home`, `folder`, `doc`, `glossary`, `questions` or `redirect`.
+    /// `home`, `folder`, `doc`, `glossary`, `questions`, `disagreements` or `redirect`.
     pub kind: &'static str,
     /// The prefix that leads from this page to the site's root (`../` per level).
     pub root: String,
@@ -221,6 +246,7 @@ pub enum Kind<'a> {
     Doc(&'a BlockId),
     Glossary,
     Questions,
+    Disagreements,
     /// The permalink page of a block and where it leads.
     Redirect(&'a BlockId, &'a Url),
 }
@@ -277,7 +303,7 @@ impl Shared<'_> {
             _ => {}
         }
         let doc = self
-            .m
+            .site
             .doc_of(&b.id)
             .map(|d| self.site.label(d))
             .unwrap_or_default();
@@ -339,6 +365,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     let facts = SiteFacts {
         has_terms,
         has_questions,
+        has_disagreements: !site.disagreements.is_empty(),
         review: sh.review,
     };
     let (page_url, kind_name, title, current, chain, tail): (
@@ -387,6 +414,14 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             None,
             vec![],
             Some("Open questions"),
+        ),
+        Kind::Disagreements => (
+            "disagreements.html".into(),
+            "disagreements",
+            "Where the docs disagree".into(),
+            None,
+            vec![],
+            Some("Where the docs disagree"),
         ),
         Kind::Redirect(id, _) => {
             let b = sh.m.get(id).expect("a permalink's block exists");
@@ -471,6 +506,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         }
         Kind::Glossary => body.glossary = Some(glossary_body(sh, &page_url)),
         Kind::Questions => body.questions = Some(questions_body(sh, &page_url)),
+        Kind::Disagreements => body.disagreements = Some(disagreements_body(sh, &page_url)),
         Kind::Redirect(id, url) => {
             let (_, label, href) = redirect_target(sh, id, url);
             body.redirect = Some(RedirectBody { label, href });
@@ -771,6 +807,37 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
         })
         .collect();
     GlossaryBody { terms }
+}
+
+/// The disagreements page's entries: each block as a link whose text is its doc title and the
+/// first words of the block (the label rule of a reference, p-2M4KD).
+fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
+    let entries = sh
+        .site
+        .disagreements
+        .iter()
+        .map(|d| DisagreementRow {
+            sentence: d.sentence,
+            links: d
+                .blocks
+                .iter()
+                .filter_map(|id| {
+                    let link = sh.link(page, id)?;
+                    let doc = sh.site.doc_of(id).map(|d| sh.site.label(d));
+                    let text = match doc {
+                        Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
+                        _ => link.label,
+                    };
+                    Some(DisagreementLink {
+                        href: link.href,
+                        text,
+                        title: link.title,
+                    })
+                })
+                .collect(),
+        })
+        .collect();
+    DisagreementsBody { entries }
 }
 
 fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
