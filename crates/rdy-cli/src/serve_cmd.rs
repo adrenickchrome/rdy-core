@@ -144,7 +144,7 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
         project,
     };
     let start_timeout = serve_config(&env.project).start_timeout;
-    let pid = rt.block_on(async {
+    let stopped = rt.block_on(async {
         let client = match connect(&run, &hello).await {
             Attempt::NoDaemon(_) => return Ok(None),
             Attempt::Ready(c) => Some(c),
@@ -156,6 +156,8 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
             Attempt::Refused(e) => return Err(e),
         };
         let mut pid = None;
+        // read while the daemon runs: it removes its record first when it stops
+        let socket = stop_socket(&run);
         if let Some(mut c) = client {
             pid = c
                 .ctl("ping", json!({}))
@@ -166,12 +168,12 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
             c.ctl("stop", json!({})).await?;
             c.close();
         }
-        Ok(Some(pid))
+        Ok(Some((pid, socket)))
     })?;
-    let Some(pid) = pid else {
+    let Some((pid, socket)) = stopped else {
         return Ok("no daemon running");
     };
-    let gone = || exited(pid, || run.socket().exists(), process_alive);
+    let gone = || exited(pid, || socket.exists(), process_alive);
     let quiet = STOP_GRACE + Duration::from_secs(1);
     let said = |p: Option<u32>| {
         let who = p.map_or_else(String::new, |p| format!(" (pid {p})"));
@@ -188,6 +190,14 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
         ));
     }
     Ok("stopped")
+}
+
+/// The socket `stop_daemon` watches when it has no pid: the one the daemon bound, which
+/// `daemon.sock` names, else this client's own (`RunDir::socket`). A client of another spelling of
+/// the project (a symlink, a macOS firmlink) computes another socket, which never exists. Read
+/// once, before the stop: the daemon removes its record before its socket.
+fn stop_socket(run: &RunDir) -> std::path::PathBuf {
+    run.recorded_socket().unwrap_or_else(|| run.socket())
 }
 
 /// Whether the daemon `stop_daemon` asked to stop has exited. With its pid known, its process
@@ -283,6 +293,39 @@ mod tests {
         // with no pid, the socket is all there is to go by
         assert!(!exited(None, || true, |_| false));
         assert!(exited(None, || false, |_| true));
+    }
+
+    /// df3 fix round 1 (review): with no pid, `--stop` waits for the socket the daemon bound,
+    /// which `daemon.sock` names. A client of another spelling computes another socket, which
+    /// never exists, so watching it would say `stopped` while the daemon still holds the store.
+    #[test]
+    fn df3_stop_without_a_pid_waits_for_the_recorded_socket() {
+        let d = tempfile::tempdir().unwrap();
+        let run = RunDir::of_project(d.path());
+        std::fs::create_dir_all(run.path()).unwrap();
+        // the daemon bound a socket other than the one this spelling computes
+        let bound = d.path().join("bound.sock");
+        assert_ne!(bound, run.socket());
+        let project = run.project_id().unwrap();
+        std::fs::write(
+            run.socket_record(),
+            format!("{}\n{project}\n", bound.display()),
+        )
+        .unwrap();
+        std::fs::write(&bound, "").unwrap();
+        assert!(!run.socket().exists());
+        // read once, before the stop
+        let socket = stop_socket(&run);
+        assert_eq!(socket, bound);
+        let gone = || exited(None, || socket.exists(), |_| false);
+        assert!(!gone(), "the recorded socket is still there");
+        // the daemon removes its record first, then its socket
+        std::fs::remove_file(run.socket_record()).unwrap();
+        assert!(!gone(), "the socket outlives the record");
+        std::fs::remove_file(&bound).unwrap();
+        assert!(gone());
+        // with no record, the client's own socket is all there is to go by
+        assert_eq!(stop_socket(&run), run.socket());
     }
 
     #[test]
