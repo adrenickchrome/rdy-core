@@ -135,7 +135,9 @@ pub struct TermRow {
     pub anchor: String,
     pub name: String,
     pub body: String,
-    pub href: String,
+    /// The term's section in the doc that defines it; none when that doc has no page (a
+    /// top-level doc named `glossary`, D-Y4884): the entry then has no "defined in" link.
+    pub href: Option<String>,
     pub doc_title: String,
     pub section_title: String,
 }
@@ -283,12 +285,20 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
-    /// A link from `from` to the block `id`, if it has a place on the site.
+    /// A link from `from` to the block `id`, if the store resolves it; with no href when the
+    /// block has no place on the site (it then reads as its label, unlinked).
     fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
         let b = self.m.get(id)?;
-        let url = self.site.url_of(id)?;
+        let Some(url) = self.site.url_of(id) else {
+            return Some(Link {
+                href: None,
+                label: self.site.label(b),
+                title: String::new(),
+                key: crate::site::typed_key(b).map(String::from),
+            });
+        };
         Some(Link {
-            href: url.href_from(from),
+            href: Some(url.href_from(from)),
             // the site's label never shows an id, even of a reference the target's text holds
             label: self.site.label(b),
             // the hover describes where the link leads: for a decision, the block it governs
@@ -836,7 +846,7 @@ fn term_rows(sh: &Shared, page: &str, terms: &[BlockId]) -> Vec<TermRow> {
         .filter_map(|id| {
             let b = sh.m.get(id)?;
             let (doc_title, section_title) = whereabouts(sh, b);
-            let section = b.parent.as_ref().and_then(|p| sh.site.url_of(p))?;
+            let section = b.parent.as_ref().and_then(|p| sh.site.url_of(p));
             Some(TermRow {
                 anchor: sh.site.term_anchors.get(id)?.clone(),
                 name: sh.site.words(b.field_str("name").unwrap_or("")),
@@ -847,7 +857,7 @@ fn term_rows(sh: &Shared, page: &str, terms: &[BlockId]) -> Vec<TermRow> {
                         doc_page: &sh.doc_page(page, id),
                     },
                 ),
-                href: section.href_from(page),
+                href: section.map(|s| s.href_from(page)),
                 doc_title,
                 section_title,
             })
@@ -870,6 +880,8 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
                 .iter()
                 .filter_map(|id| {
                     let link = sh.link(page, id)?;
+                    // the entries hold only blocks that have a place (`set_disagreements`)
+                    let href = link.href?;
                     let doc = sh.site.doc_of(id).map(|d| sh.site.label(d));
                     let text = match doc {
                         Some(doc) if d.repeats > 1 => doc,
@@ -877,7 +889,7 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
                         _ => link.label,
                     };
                     Some(DisagreementLink {
-                        href: link.href,
+                        href,
                         text,
                         title: link.title,
                     })

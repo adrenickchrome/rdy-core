@@ -113,13 +113,35 @@ fn ls12_each_entry_links_to_its_defining_doc() {
     }
 }
 
+/// The id of the first section of the top-level doc titled `title` in canon.
+fn section_of(r: &Rdy, title: &str) -> String {
+    let m = r.read().materialized(&Scope::Canon).unwrap();
+    let doc = m
+        .children(None)
+        .into_iter()
+        .find(|b| b.field_str("title") == Some(title))
+        .unwrap();
+    m.children(Some(&doc.id))[0].id.to_string()
+}
+
 #[test]
 fn ls12_a_top_level_doc_named_glossary_gives_way() {
     let (_d, mut r) = grouped();
-    rdy_qa::golden::write(&mut r, "work", json!([
+    let w = rdy_qa::golden::write(&mut r, "work", json!([
         {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Words"}},
-        {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Hidden"}, "body": "Not listed."}
+        {"op": "create", "type": "term", "id": "$h", "parent": "$s", "fields": {"name": "Hidden"}, "body": "Kept apart."}
+    ])).unwrap();
+    // fix round 1 (ruling task-12): another doc refers to the hidden term
+    let hidden = w.created["$h"].clone();
+    let words = section_of(&r, "Loose");
+    let (uses, see) = (
+        format!("Uses {{{{{hidden}}}}} a lot."),
+        format!("Balances, see {{{{{hidden}}}}}."),
+    );
+    rdy_qa::golden::write(&mut r, "work", json!([
+        {"op": "create", "type": "claim", "parent": words, "body": uses},
+        {"op": "create", "type": "term", "parent": words, "fields": {"name": "Ledger"}, "body": see}
     ])).unwrap();
     rdy_qa::golden::land(&mut r, "work").unwrap();
     let (out, g, s) = glossary(&r);
@@ -127,13 +149,91 @@ fn ls12_a_top_level_doc_named_glossary_gives_way() {
         g.contains(INTRO),
         "the generated page owns glossary.html: {g}"
     );
-    assert!(!g.contains("Our words") && !g.contains("Hidden"), "{g}");
+    assert!(!g.contains("Our words"), "{g}");
     assert_eq!(
         s.warnings,
         [
             "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it."
         ]
     );
+    let home = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(!home.contains("Our words"), "no link to the doc: {home}");
+    // a reference to a block that resolves but has no page reads as its label, unlinked
+    let unlinked = |what: &str, text: &str| {
+        assert!(!text.contains("unresolved"), "{what}: {text}");
+        assert!(!text.contains(">Hidden</a>"), "{what}: {text}");
+    };
+    let loose = std::fs::read_to_string(out.path().join("loose.html")).unwrap();
+    unlinked("loose.html", &loose);
+    assert!(loose.contains(">Uses Hidden a lot.</"), "{loose}");
+    let full = std::fs::read_to_string(out.path().join("llms-full.txt")).unwrap();
+    unlinked("llms-full.txt", &full);
+    assert!(full.contains("Uses Hidden a lot."), "{full}");
+    assert!(full.contains("Balances, see Hidden."), "{full}");
+    let index = std::fs::read_to_string(out.path().join("search-index.json")).unwrap();
+    assert!(index.contains("Uses Hidden a lot."), "{index}");
+    assert!(index.contains("Balances, see Hidden."), "{index}");
+    // the glossary lists the hidden doc's term in the project's group, with no link
+    unlinked("glossary.html", &g);
+    assert_eq!(
+        order(&g),
+        [
+            "h2 Beta area",
+            "dt alpha",
+            "dt Zeta",
+            "h2 Alpha area",
+            "dt Mid",
+            "h2 Tiny",
+            "dt Hidden",
+            "dt Kappa",
+            "dt Ledger"
+        ],
+        "{g}"
+    );
+    let dd = |term: &str| {
+        g.split_once(&format!(">{term}</dt>"))
+            .unwrap()
+            .1
+            .split_once("</dd>")
+            .unwrap()
+            .0
+            .to_string()
+    };
+    assert_eq!(dd("Hidden"), "<dd>Kept apart.", "no link: {g}");
+    assert!(
+        dd("Ledger").starts_with("<dd>Balances, see Hidden. <a class=\"defined-in\""),
+        "{g}"
+    );
+}
+
+#[test]
+fn ls12_a_top_level_doc_named_glossary_in_any_case_gives_way() {
+    // fix round 1: names are case-insensitive, and so is a case-insensitive file system
+    let (_d, mut r) = grouped();
+    rdy_qa::golden::write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "Glossary", "title": "Our words", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Words"}},
+        {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Hidden"}, "body": "Kept apart."}
+    ])).unwrap();
+    rdy_qa::golden::land(&mut r, "work").unwrap();
+    let (out, g, s) = glossary(&r);
+    assert_eq!(
+        s.warnings,
+        [
+            "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it."
+        ]
+    );
+    let pages: Vec<String> = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.eq_ignore_ascii_case("glossary.html"))
+        .collect();
+    assert_eq!(pages, ["glossary.html"], "the doc builds no page");
+    assert!(
+        g.contains(INTRO),
+        "the generated page owns glossary.html: {g}"
+    );
+    assert!(!g.contains("Our words"), "{g}");
     let home = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(!home.contains("Our words"), "no link to the doc: {home}");
 }

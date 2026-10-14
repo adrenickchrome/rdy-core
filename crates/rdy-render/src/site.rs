@@ -118,9 +118,11 @@ pub struct Site<'a> {
     pub term_anchors: BTreeMap<BlockId, String>,
     /// The glossary page's groups: the top-level folders in tree order, then the project's.
     pub term_groups: Vec<GlossaryGroup>,
-    /// Whether a top-level doc named `glossary` was left off the site: the generated glossary
-    /// owns `glossary.html` (D-Y4884).
+    /// Whether a top-level doc named `glossary` (in any case) was left off the site: the
+    /// generated glossary owns `glossary.html` (D-Y4884).
     pub glossary_doc_dropped: bool,
+    /// The docs left off the site for that reason: their terms are still listed, unlinked.
+    glossary_docs: Vec<BlockId>,
     /// The project's name: the label of the glossary's group of top-level docs.
     project: String,
     /// The navigation's lists, computed once: every folder's children that have a page, in
@@ -171,7 +173,7 @@ impl<'a> Site<'a> {
             out: &mut BTreeMap<BlockId, String>,
             order: &mut Vec<BlockId>,
             tree_order: &mut Vec<BlockId>,
-            dropped: &mut bool,
+            dropped: &mut Vec<BlockId>,
         ) {
             if level > tree::MAX_FOLDER_DEPTH {
                 return;
@@ -181,10 +183,14 @@ impl<'a> Site<'a> {
                 let Some(name) = names.get(&b.id) else {
                     continue;
                 };
-                // the generated glossary owns `glossary.html`: a top-level doc of that name has
-                // no page, no place in the navigation, and its blocks are not linked
-                if parent.is_none() && b.block_type == tree::DOC && name == GLOSSARY_NAME {
-                    *dropped = true;
+                // the generated glossary owns `glossary.html`: a top-level doc of that name, in
+                // any case (names and many file systems ignore case), has no page, no place in
+                // the navigation, and its blocks are not linked
+                if parent.is_none()
+                    && b.block_type == tree::DOC
+                    && name.eq_ignore_ascii_case(GLOSSARY_NAME)
+                {
+                    dropped.push(b.id.clone());
                     continue;
                 }
                 let path = if prefix.is_empty() {
@@ -213,7 +219,7 @@ impl<'a> Site<'a> {
         let mut paths = BTreeMap::new();
         let mut order = vec![];
         let mut tree_order = vec![];
-        let mut dropped = false;
+        let mut dropped = vec![];
         walk(
             m,
             None,
@@ -278,7 +284,8 @@ impl<'a> Site<'a> {
             terms: vec![],
             term_anchors: BTreeMap::new(),
             term_groups: vec![],
-            glossary_doc_dropped: dropped,
+            glossary_doc_dropped: !dropped.is_empty(),
+            glossary_docs: dropped,
             project: project.to_string(),
             nav_lists,
             top_folders,
@@ -448,6 +455,15 @@ impl<'a> Site<'a> {
                 }
             }
         }
+        // a top-level doc that gave way to the generated glossary has no page, but its terms are
+        // still listed, unlinked, in the project's group (ruling task-12)
+        let hidden: Vec<&'a Block> = self
+            .glossary_docs
+            .iter()
+            .flat_map(|d| Self::walk_blocks(self.m, d))
+            .filter(|b| b.block_type == "term")
+            .collect();
+        terms.extend(hidden.into_iter().map(|b| (b, None)));
         terms.sort_by_cached_key(|(b, _)| (self.label(b).to_lowercase(), b.id.clone()));
         let (mut term_anchors, mut taken) = (BTreeMap::new(), reserved_ids());
         for (b, _) in &terms {

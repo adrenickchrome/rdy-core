@@ -5,7 +5,7 @@ use rdy_render::inline::{self, Ctx, Form};
 
 fn link(id: &BlockId) -> Option<Link> {
     (id.to_string() == "t-AAAAA").then(|| Link {
-        href: "#guard".into(),
+        href: Some("#guard".into()),
         label: "Guard".into(),
         title: "Spec › Terms".into(),
         ..Default::default()

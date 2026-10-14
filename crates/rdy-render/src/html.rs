@@ -19,11 +19,15 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// Where a reference to a block leads, as one page sees it.
+/// Where a reference to a block leads, as one page sees it. A block the store cannot resolve has
+/// no `Link` at all (it reads as the unresolved marker).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Link {
-    /// Relative to the page that holds the link (`#anchor` on the same page).
-    pub href: String,
+    /// Relative to the page that holds the link (`#anchor` on the same page). `None` when the
+    /// block resolves but has no place on the site (a top-level doc named `glossary` gives way to
+    /// the generated glossary, D-Y4884): it reads as its label in plain text, with no link and
+    /// no unresolved marker.
+    pub href: Option<String>,
     /// The target's one-line label.
     pub label: String,
     /// The hover text (`Doc › Section`, `Doc`, `Glossary`, `Open questions`); empty for none.
@@ -55,17 +59,20 @@ pub fn words_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String
     ))
 }
 
-/// `<a>` for a link, with its hover title when it has one.
+/// `<a>` for a link, with its hover title when it has one; the label alone, escaped, for a
+/// block with no place on the site.
 fn anchor(l: &Link) -> String {
-    if l.title.is_empty() {
-        format!("<a href=\"{}\">{}</a>", escape(&l.href), escape(&l.label))
-    } else {
-        format!(
+    match &l.href {
+        None => escape(&l.label),
+        Some(href) if l.title.is_empty() => {
+            format!("<a href=\"{}\">{}</a>", escape(href), escape(&l.label))
+        }
+        Some(href) => format!(
             "<a href=\"{}\" title=\"{}\">{}</a>",
-            escape(&l.href),
+            escape(href),
             escape(&l.title),
             escape(&l.label)
-        )
+        ),
     }
 }
 

@@ -26,7 +26,7 @@ fn text_html_escapes_then_links() {
     let t = BlockId::parse("t-MEDGR").unwrap();
     let html = text_html("<b>x</b> & {{t-MEDGR}} {{t-N0PE1}}\nnext", &|id| {
         (id == &t).then(|| rdy_render::Link {
-            href: "doc/d-AAAAA.html#t-MEDGR".into(),
+            href: Some("doc/d-AAAAA.html#t-MEDGR".into()),
             label: "Ledger".into(),
             title: String::new(),
             ..Default::default()
