@@ -1,4 +1,4 @@
-# Cheap checks (FW-HD2): fmt, clippy and the fast suite. The deep and perf gates run
+# Cheap checks (FW-HD2): fmt, clippy and the fast suite; a coverage report beside them. The deep and perf gates run
 # elsewhere; the external gate decides merges.
 name: ci
 on:
@@ -26,3 +26,42 @@ jobs:
         run: test "$(id -u)" -ne 0
       - name: Fast gate (fmt, clippy, tests; no perf)
         run: cargo qa --skip-perf --require-all
+  coverage:
+    # Line and branch coverage of the workspace test suite (cargo-llvm-cov). Reported only:
+    # it never blocks a merge. The summary goes to the run page; the HTML report is an artifact.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Tests with coverage
+        run: cargo llvm-cov --workspace --no-fail-fast --no-report
+      - name: Reports
+        if: always()
+        run: |
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --html --output-dir coverage-html
+          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json
+          { echo '## Coverage'; echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: |
+            coverage-html
+            coverage-summary.txt
+            coverage-summary.json
+          retention-days: 30
