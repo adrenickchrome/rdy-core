@@ -3,9 +3,10 @@
 //!
 //! It binds only after the daemon owns the project (the store lock is held and the socket is
 //! bound and recorded, D-WZ4ZP, D-R7N9J), and it accepts until the daemon stops, for any reason.
-//! Each accepted connection runs the daemon's project check first (D-A6ZZA): a gone or replaced
-//! project gets no reply, and the daemon exits. Every request passes the closed guard; every
-//! answer comes from an in-memory build or a compiled-in asset, and closes the connection.
+//! Each accepted connection runs the daemon's project check first, and again when its request
+//! head arrives (D-A6ZZA): a gone or replaced project gets no reply, and the daemon exits. Every
+//! request passes the closed guard; every answer comes from an in-memory build or a compiled-in
+//! asset, and closes the connection.
 use crate::daemon::{DaemonHandle, log};
 use crate::shared::Shared;
 use crate::site::guard::{Guard, Refusal, Route, ScopeRef, refusal};
@@ -29,6 +30,12 @@ use tokio::task::JoinSet;
 const BACKLOG: u32 = 64;
 /// The connections the site serves at once; past that, a connection gets `Busy`.
 pub const MAX_CONNECTIONS: usize = 64;
+/// The connections past [`MAX_CONNECTIONS`] that get the `Busy` answer at once; past that, a
+/// connection gets what the socket takes at once, and closes.
+const BUSY_RESPONDERS: usize = 8;
+/// How long a connection past [`MAX_CONNECTIONS`] may take to send its head before it gets the
+/// `Busy` answer all the same.
+const BUSY_HEAD_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a connection may take to send its request head; then it closes with no reply.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long an answer may take to write; then the connection closes.
@@ -48,6 +55,8 @@ struct Ctx {
     shared: Arc<Shared>,
     handle: DaemonHandle,
     limit: Arc<Semaphore>,
+    /// The tasks that answer `Busy` past `limit`.
+    busy: Arc<Semaphore>,
 }
 
 /// A listening socket on `at`, with `SO_REUSEADDR` so a successor binds the port at once.
@@ -178,6 +187,7 @@ impl SiteServer {
             shared,
             handle,
             limit: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            busy: Arc::new(Semaphore::new(BUSY_RESPONDERS)),
         });
         let mut loops = JoinSet::new();
         for listener in self.listeners {
@@ -226,12 +236,27 @@ fn accept(stream: TcpStream, ctx: &Arc<Ctx>) {
                 serve_conn(stream, ctx).await;
             });
         }
-        Err(_) => {
+        Err(_) => match Arc::clone(&ctx.busy).try_acquire_owned() {
+            // a short task outside the limit: the answer goes out after the head, so the
+            // head's arrival at a closed socket does not reset the connection and lose it
+            Ok(permit) => {
+                let ctx = Arc::clone(ctx);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let head = tokio::time::timeout(BUSY_HEAD_TIMEOUT, read_head(&stream)).await;
+                    if matches!(head, Ok(Head::Closed)) || gone(&ctx) {
+                        return;
+                    }
+                    send(stream, &refusal(Refusal::Busy), false).await;
+                });
+            }
             // no task: what the reader sent so far is read off, the answer goes out if the
             // socket takes it at once, and the connection closes
-            drain_now(&stream);
-            let _ = stream.try_write(&to_bytes(&refusal(Refusal::Busy), false, now_secs()));
-        }
+            Err(_) => {
+                drain_now(&stream);
+                let _ = stream.try_write(&to_bytes(&refusal(Refusal::Busy), false, now_secs()));
+            }
+        },
     }
 }
 
@@ -245,6 +270,13 @@ fn drain_now(stream: &TcpStream) {
             Ok(n) => drained += n,
         }
     }
+}
+
+/// D-A6ZZA again, once a request is here: true when the daemon is stopping, or its project is
+/// gone or replaced (and the daemon then stops). A connection accepted before the project was
+/// replaced, such as a browser's spare socket, then gets no reply either.
+fn gone(ctx: &Ctx) -> bool {
+    *ctx.handle.stopped().borrow() || ctx.handle.check_project()
 }
 
 /// A request head as read off a connection.
@@ -290,6 +322,9 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
         // no head in time: close with no reply
         Err(_) => return,
     };
+    if gone(&ctx) {
+        return;
+    }
     let bytes = match head {
         Head::Closed => return,
         Head::TooLarge => return send(stream, &refusal(Refusal::TooLarge), false).await,
@@ -326,8 +361,8 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
             .await;
             match sub {
                 Ok(Ok(sub)) => {
-                    // the hold before the head: once the reader has the head, the page holds
-                    // the daemon
+                    // the hold before the head: once the reader has the head, the page (in
+                    // view: live.js closes the stream of a hidden page) holds the daemon
                     let hold = ctx.handle.hold();
                     sse::serve(stream, sub, hold, ctx.handle.stopped(), now_secs()).await;
                     return;

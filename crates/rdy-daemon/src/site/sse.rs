@@ -3,6 +3,9 @@
 //!
 //! The stream ends when its queue closes (the site dropped it, or closed), a write fails, the
 //! reader goes away, or the daemon stops. While it runs, it holds the daemon up ([`IdleHold`]).
+//! The page keeps its stream open only while it is in view (`live.js`, ruling task-6), so a page
+//! in a background tab neither holds the daemon nor takes one of the browser's few connections
+//! to the site.
 use crate::daemon::IdleHold;
 use crate::site::http::{BASE_HEADERS, http_date};
 use crate::site::live::{LiveEvent, Subscription};

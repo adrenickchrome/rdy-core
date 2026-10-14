@@ -1,13 +1,16 @@
 //! ls6: the site's HTTP server and its event streams (D-N5NSN, D-FV6G9; D-A6ZZA): loopback by
-//! default, LAN by opt-in with a warning, the closed guard on every request, an open live page
-//! that keeps the daemon up, and a site that stops with its daemon.
+//! default, LAN by opt-in with a warning, the closed guard on every request, a live page in view
+//! that keeps the daemon up (ruling task-6: a page in a background tab closes its stream), and a
+//! site that stops with its daemon.
 //! Bless the goldens with RDY_QA_BLESS=1 cargo test -p rdy-qa --release --test daemon ls6_responses.
+use rdy_daemon::site::guard::{Refusal, refusal};
+use rdy_daemon::site::server::MAX_CONNECTIONS;
 use rdy_daemon::site::{self, LanOverride, SiteInfo, addr};
-use rdy_daemon::{ExitReason, ServeOptions, Shared, start};
+use rdy_daemon::{Daemon, DaemonConfig, ExitReason, RunDir, ServeOptions, Shared, start};
 use rdy_engine::engine::write_typed;
 use rdy_engine::{Rdy, Scope};
 use rdy_model::BlockId;
-use rdy_qa::daemon::Hosted;
+use rdy_qa::daemon::{EchoHandler, Hosted};
 use rdy_qa::golden::{approver, land, tiny};
 use rdy_qa::http::{self, Sse};
 use serde_json::{Value, json};
@@ -393,6 +396,8 @@ fn ls6_a_lan_address_not_on_this_machine_stays_local() {
     assert!(i.addrs.iter().all(|a| a.ip().is_loopback()), "{i:?}");
 }
 
+/// A live page in view holds the daemon through its stream (F3 as narrowed by ruling task-6: a
+/// page in a background tab closes its stream, and so lets the daemon go).
 #[test]
 fn ls6_an_open_live_page_keeps_the_daemon() {
     let h = host();
@@ -400,7 +405,7 @@ fn ls6_an_open_live_page_keeps_the_daemon() {
     assert_eq!(handle.keepers(), 0, "no client");
     let url = url(&h);
     let page = open_page(&url, "alpha.html");
-    assert_eq!(handle.keepers(), 1, "the open page");
+    assert_eq!(handle.keepers(), 1, "the page in view");
     drop(page);
     let mut keepers = handle.keepers_watch();
     let rt = Hosted::rt();
@@ -409,7 +414,39 @@ fn ls6_an_open_live_page_keeps_the_daemon() {
             .await
             .map(|r| r.is_ok())
     });
-    assert_eq!(back, Ok(true), "the closed page lets the daemon go");
+    assert_eq!(back, Ok(true), "the closed stream lets the daemon go");
+}
+
+/// Fix round 1: a hold taken before the daemon's run starts still keeps it up. `run` arms the
+/// idle timer at its start only when nothing keeps the daemon.
+#[test]
+fn ls6_a_hold_taken_before_the_run_keeps_the_daemon() {
+    let dir = project();
+    // one thread runs the daemon and the test, and timers fire in deadline order
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut config = DaemonConfig::new(RunDir::of_project(dir.path()), "t".into());
+        config.idle_timeout = Some(Duration::ZERO);
+        let mut d = Daemon::new(config, Arc::new(EchoHandler::default()));
+        d.bind().await.unwrap();
+        let handle = d.handle();
+        let hold = handle.hold();
+        let run = tokio::spawn(d.run());
+        // an ordering fence, not a wait for time: this deadline comes after the run's idle
+        // deadline (its start), so a timer armed then has fired and been handled by now
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!run.is_finished(), "the held daemon idled out");
+        drop(hold);
+        let reason = tokio::time::timeout(T, run).await;
+        assert_eq!(
+            reason.unwrap().unwrap().unwrap(),
+            ExitReason::Idle,
+            "with no keeper the idle timer runs"
+        );
+    });
 }
 
 #[test]
@@ -434,6 +471,57 @@ fn ls6_a_replaced_project_stops_the_site() {
     drop(client);
     let run = h.run.take().unwrap();
     assert_eq!(run.wait().unwrap(), ExitReason::ProjectGone);
+}
+
+/// Fix round 1 (D-A6ZZA): a connection accepted before the project was replaced, whose request
+/// comes after, gets no reply. The project check also runs when the request arrives.
+#[test]
+fn ls6_a_request_after_the_project_is_replaced_gets_no_reply() {
+    let mut h = host();
+    let url = url(&h);
+    let port = port_of(&url);
+    // as ls6_a_replaced_project_stops_the_site: only the HTTP side can stop the daemon
+    let rt = Hosted::rt();
+    let client = rt.block_on(h.client(None, None));
+    let mut early = TcpStream::connect(sock(&url)).unwrap();
+    early.set_read_timeout(Some(T)).unwrap();
+    // fence: one listener accepts in order, so once a later connection has its answer,
+    // `early` was accepted, and passed the accept's check
+    assert_eq!(http::get(&url).status, 200);
+    replace_project(h.dir.path());
+    write!(
+        early,
+        "GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    let _ = early.read_to_end(&mut got);
+    assert!(
+        got.is_empty(),
+        "no reply: {}",
+        String::from_utf8_lossy(&got[..got.len().min(200)])
+    );
+    drop(client);
+    let run = h.run.take().unwrap();
+    assert_eq!(run.wait().unwrap(), ExitReason::ProjectGone);
+}
+
+/// Fix round 1: a connection past [`MAX_CONNECTIONS`] gets the `Busy` answer, whole.
+#[test]
+fn ls6_a_connection_past_the_limit_gets_busy() {
+    let h = host();
+    let url = url(&h);
+    let port = port_of(&url);
+    let held: Vec<TcpStream> = (0..MAX_CONNECTIONS)
+        .map(|_| TcpStream::connect(sock(&url)).unwrap())
+        .collect();
+    let r = http::raw(
+        sock(&url),
+        &format!("GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert_eq!(r.status, 503, "{}", r.head);
+    assert_eq!(r.body, refusal(Refusal::Busy).body);
+    drop(held);
 }
 
 #[test]
@@ -465,10 +553,17 @@ fn ls6_a_stopped_daemon_ends_the_streams() {
 fn ls6_a_restarted_daemon_keeps_the_address() {
     let mut h = host();
     let before = url(&h);
+    // served answers and a stream leave the site's side of each closed connection in TIME_WAIT
+    // on the port: the successor binds it all the same
+    assert_eq!(http::get(&before).status, 200);
+    drop(open_page(&before, "alpha.html"));
     h.stop();
     restart(&mut h);
     let after = url(&h);
     if after != before {
+        // a fallback is right only when another process holds the port now
+        let free = TcpListener::bind((Ipv4Addr::LOCALHOST, port_of(&before))).is_ok();
+        assert!(!free, "{before} was free, but the restart moved to {after}");
         let root = rdy_daemon::RunDir::of_project(h.dir.path()).root();
         eprintln!("the derived port was taken meanwhile: {before} became {after}");
         assert!(

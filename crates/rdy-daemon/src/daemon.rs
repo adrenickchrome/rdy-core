@@ -149,8 +149,8 @@ pub struct DaemonHandle {
     check: Arc<ProjectCheck>,
 }
 
-/// What keeps a daemon from idling out: its open socket connections plus its holds (an open
-/// live page, ls6). `count` carries the sum; every change of either part writes it under the
+/// What keeps a daemon from idling out: its open socket connections plus its holds (a live page
+/// in view, ls6). `count` carries the sum; every change of either part writes it under the
 /// watch's lock, so concurrent changes publish their sums in order.
 #[derive(Clone)]
 struct Keepers {
@@ -169,9 +169,9 @@ impl Keepers {
     }
 }
 
-/// While one lives, the daemon's idle timer does not run (ls6: an open live page keeps the
-/// daemon up). The project check still runs on the idle tick, which counts socket connections
-/// only (D-A6ZZA).
+/// While one lives, the daemon's idle timer does not run (ls6: a live page in view keeps the
+/// daemon up; a page in a background tab closes its stream, ruling task-6). The project check
+/// still runs on the idle tick, which counts socket connections only (D-A6ZZA).
 pub struct IdleHold(Keepers);
 
 impl Drop for IdleHold {
@@ -361,8 +361,13 @@ impl Daemon {
         let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
         let mut count = self.keepers.count.subscribe();
-        // armed at the start (no connections yet) and on each drop of the count to 0
-        let mut idle_at = idle.map(|t| tokio::time::Instant::now() + t);
+        // armed at the start when nothing keeps the daemon (a hold taken before this subscribe
+        // is never seen as a change), and on each drop of the count to 0
+        let mut idle_at = if *count.borrow_and_update() == 0 {
+            idle.map(|t| tokio::time::Instant::now() + t)
+        } else {
+            None
+        };
         // the project check while no connection is open (a connection checks at its hello)
         let mut project_tick = tokio::time::interval(PROJECT_TICK);
         project_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
