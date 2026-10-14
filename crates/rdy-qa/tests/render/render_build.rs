@@ -131,16 +131,16 @@ fn assert_label_places(site: &SiteFiles) {
         }
         if page {
             assert!(
-                text[..ranges[0].start].ends_with("data-rdy-version>")
-                    && text[ranges[0].end..].starts_with("</span>"),
+                text[..ranges[0].start].ends_with("data-rdy-version><span data-rdy-label>")
+                    && text[ranges[0].end..].starts_with("</span></span>"),
                 "{path}: the first range is the version pill"
             );
             let before = &text[..ranges[1].start];
             let open = before.rfind("<p class=\"colophon\">").expect("a colophon") + 20;
             assert!(
-                before[open..].ends_with(", ")
-                    && !before[open..].contains(['<', '>'])
-                    && text[ranges[1].end..].starts_with(".</p>"),
+                before[open..].ends_with(", <span data-rdy-label>")
+                    && !before[open..before.len() - 21].contains(['<', '>'])
+                    && text[ranges[1].end..].starts_with("</span>.</p>"),
                 "{path}: the second range is the colophon's label"
             );
         }

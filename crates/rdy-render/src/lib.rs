@@ -4,6 +4,7 @@ mod highlight;
 mod home;
 mod html;
 pub mod inline;
+pub mod live;
 mod llms;
 mod nav;
 mod page;

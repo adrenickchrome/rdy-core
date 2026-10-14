@@ -196,8 +196,15 @@ struct El {
     classes: Vec<String>,
 }
 
+/// The span that marks the version label for the live site (`data-rdy-label`). It shows nothing
+/// of its own, so a page reads as if it were not there: the label stays in its run.
+static LABEL_MARK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<span data-rdy-label>([^<]*)</span>").expect("a valid pattern"));
+
 /// The visible text runs of a page, in document order, with zone and label flags.
 pub fn visible_runs(html: &str) -> Vec<Run> {
+    let html = LABEL_MARK.replace_all(html, "$1");
+    let html = html.as_ref();
     let (mut stack, mut next_id) = (Vec::<El>::new(), 0);
     let mut runs: Vec<(Run, usize)> = vec![];
     let mut per_element: HashMap<usize, usize> = HashMap::new();
