@@ -68,12 +68,13 @@ impl Ingest {
     }
 
     /// Appends batch `n` of the dump at its source place, then its marker. When the batch starts
-    /// in the next segment and the current segment holds frames, the log rolls once first. The
-    /// log's end must then equal the batch's start. The marker's digest must equal the batch's
+    /// at offset 0 of the next segment and the current segment holds frames, the log rolls once
+    /// first. The log's end must then equal the batch's start, so a batch at any other place is
+    /// refused before the log rolls or takes a frame. The marker's digest must equal the batch's
     /// digest. Either failure is `StoreError::Dump`. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
         let end = self.log.end();
-        if b.start.segment == end.segment.wrapping_add(1) && end.offset > 0 {
+        if b.start.segment == end.segment.wrapping_add(1) && b.start.offset == 0 && end.offset > 0 {
             self.log.roll()?;
         }
         let end = self.log.end();

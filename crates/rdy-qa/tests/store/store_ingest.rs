@@ -2,6 +2,7 @@
 //! source log byte for byte; the first open builds the index from it.
 use rdy_store::dump::DumpBatch;
 use rdy_store::ingest::Ingest;
+use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
 use std::path::Path;
 
@@ -144,4 +145,31 @@ fn dl4_ingest_never_writes_into_an_existing_directory() {
         0,
         "nothing written"
     );
+}
+
+#[test]
+fn dl4_a_refused_batch_in_the_next_segment_writes_no_segment() {
+    // A batch that starts in the next segment but not at its offset 0 is refused before the log
+    // rolls, so the refusal leaves no new segment file.
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let bs = batches(&s);
+    let to = base.path().join("dst");
+    let mut i = Ingest::create(&to).unwrap();
+    i.batch(0, &bs[0]).unwrap();
+    let before = segments(&to);
+    assert_eq!(before.len(), 1, "batch 0 is in segment 0");
+    let mut b = bs[1].clone();
+    b.start = Location {
+        segment: 1,
+        offset: 5,
+    };
+    let e = i.batch(1, &b).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { what, .. } if what.starts_with("batch 1 starts at segment 1 offset 5")),
+        "{e}"
+    );
+    let after: Vec<String> = segments(&to).into_iter().map(|(n, _)| n).collect();
+    let before: Vec<String> = before.into_iter().map(|(n, _)| n).collect();
+    assert_eq!(after, before, "no new segment file");
 }
