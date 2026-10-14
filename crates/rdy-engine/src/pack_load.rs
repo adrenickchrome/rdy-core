@@ -161,7 +161,7 @@ pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
 }
 
 /// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.
-fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
+pub(crate) fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
     if !dir.exists() {
         return Ok(Vec::new());
     }

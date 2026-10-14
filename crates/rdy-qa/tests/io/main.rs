@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod io;
 mod io_authors;
+mod io_dump;
 mod io_imported_by;
 mod io_keys;
 mod io_link_keys;
