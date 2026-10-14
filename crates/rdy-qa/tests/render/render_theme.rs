@@ -168,3 +168,29 @@ fn theme1_each_rule_is_defined_once() {
         .count();
     assert_eq!(n, 1, ".visually-hidden is defined {n} times");
 }
+
+/// ls13 (visual review F2, rule 2.7): on a phone the disagreements page's links and its
+/// "Show all" summary are 40 by 40 targets; the desktop look is unchanged. The plain
+/// `div.callout` is the disagreements page's entry alone (a note, an example or a question is
+/// an `aside` or a `callout-question`, whose links are not in a `div > ul`).
+#[test]
+fn ls13_disagreement_links_and_show_all_are_thumb_targets() {
+    let (_d, out) = site();
+    let css = css(out.path());
+    let targets = [
+        "details.more-links summary",
+        "div.callout > div > ul a",
+        "details.more-links a",
+    ];
+    for sel in targets {
+        for w in [360, 900] {
+            assert_eq!(at(&css, sel, "min-height", w), "40px", "{sel} at {w}");
+            assert_eq!(at(&css, sel, "min-width", w), "40px", "{sel} at {w}");
+        }
+        assert_eq!(
+            at(&css, sel, "min-height", 1280),
+            "",
+            "{sel}: desktop unchanged"
+        );
+    }
+}

@@ -178,6 +178,9 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
   .head a, .head button, .head summary, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button { min-height: 40px; min-width: 40px; }
   .head button, .tools button, .code-head button { display: inline-flex; align-items: center; justify-content: center; }
   .sidenav a { display: flex; align-items: center; }
+  /* the disagreements page: its links (a plain div.callout is that page's entry) and Show all */
+  details.more-links summary { min-height: 40px; min-width: 40px; line-height: 40px; }
+  div.callout > div > ul a, details.more-links a { display: inline-flex; align-items: center; min-height: 40px; min-width: 40px; }
 }
 @keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
 
