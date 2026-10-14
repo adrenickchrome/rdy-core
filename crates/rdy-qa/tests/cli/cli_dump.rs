@@ -18,6 +18,26 @@ fn golden_served() -> Served {
     s
 }
 
+/// Runs `rdy serve --stop` in `dir` when dropped, so a daemon a test starts there stops also
+/// when an assert fails.
+struct StopOnDrop<'a> {
+    dir: &'a Path,
+    env: Vec<(String, String)>,
+}
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        match human_command(self.dir, &self.env, &["serve", "--stop"]).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!(
+                "rdy serve --stop failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => eprintln!("rdy serve --stop did not run: {e}"),
+        }
+    }
+}
+
 fn stdout(out: &std::process::Output) -> String {
     assert!(
         out.status.success(),
@@ -108,6 +128,11 @@ fn dl7_rdy_dump_and_rdy_load_round_trip_at_the_cli() {
     );
 
     let env = s.env_pairs();
+    // fsck starts a daemon in `to`; it stops also when an assert below fails
+    let _stop = StopOnDrop {
+        dir: &to,
+        env: env.clone(),
+    };
     let fsck = human_command(&to, &env, &["fsck"]).output().unwrap();
     assert!(
         fsck.status.success(),
@@ -158,4 +183,86 @@ fn dl7_cli_and_tool_replies_match() {
     let tool = c.call("rdy_dump", json!({"out": b.to_str().unwrap()})).ok();
     let keys = |v: &Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
     assert_eq!(keys(&cli), keys(&tool), "{cli} {tool}");
+}
+
+#[test]
+fn dl7_a_load_into_dot_rdy_is_refused() {
+    let s = golden_served();
+    let scratch = short_tempdir();
+    let file = scratch.path().join("p.rdydump");
+    let file_arg = file.to_str().unwrap();
+    stdout(&s.rdy(&["dump", "--out", file_arg]));
+    for dir in [".rdy/packs", ".rdy", ".rdy/new"] {
+        let to = s.dir.path().join(dir);
+        let (ok, e) = s.json(&["--json", "load", file_arg, to.to_str().unwrap()]);
+        assert!(!ok, "{dir}: {e}");
+        assert_eq!(e["code"], "E_BAD_INPUT", "{dir}: {e}");
+        assert_eq!(
+            e["message"],
+            format!("{} is inside a project's .rdy directory", to.display()),
+            "{dir}"
+        );
+        assert_eq!(
+            e["fix"],
+            "load into a new directory outside any .rdy, for example a sibling of the project"
+        );
+    }
+    assert!(!s.dir.path().join(".rdy/packs/.rdy.yaml").exists());
+    assert!(!s.dir.path().join(".rdy/new").exists());
+    let (ok, st) = s.json(&["--json", "status"]);
+    assert!(ok, "the project still opens: {st}");
+}
+
+#[test]
+fn dl7_rdy_load_refuses_a_target_whose_daemon_still_runs() {
+    let s = golden_served();
+    let scratch = short_tempdir();
+    let file = scratch.path().join("p.rdydump");
+    let file_arg = file.to_str().unwrap();
+    // the dump goes through the daemon, which stays up
+    stdout(&s.rdy(&["dump", "--out", file_arg]));
+    let pid = s.daemon_pid().expect("the dump started the daemon");
+    let dir = s.dir.path();
+    let store = dir.join(".rdy/store");
+    let aside = scratch.path().join("store-aside");
+    std::fs::rename(&store, &aside).unwrap();
+    let (ok, e) = s.json(&["--json", "load", file_arg, dir.to_str().unwrap()]);
+    assert!(!ok, "{e}");
+    assert_eq!(e["code"], "E_LOCKED", "{e}");
+    assert_eq!(
+        e["message"],
+        format!("a daemon still runs for {} (pid {pid})", dir.display())
+    );
+    assert_eq!(
+        e["fix"],
+        format!("run rdy serve --stop in {}, then load again", dir.display())
+    );
+    assert!(!store.exists(), "the load wrote no store");
+    // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside
+    std::fs::rename(&aside, &store).unwrap();
+    s.stop();
+    assert!(s.daemon_pid().is_none(), "the daemon stopped");
+    std::fs::rename(&store, &aside).unwrap();
+    let text = stdout(&s.rdy(&["load", file_arg, dir.to_str().unwrap()]));
+    assert!(text.starts_with("loaded "), "{text:?}");
+    let (ok, tags) = s.json(&["--json", "tags"]);
+    assert!(ok && tags != json!([]), "{tags}");
+}
+
+/// `text` with every run of white space made one space (help text wraps by the terminal).
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn dl7_rdy_load_help_gives_the_in_place_move_in_order() {
+    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
+        .args(["load", "--help"])
+        .output()
+        .unwrap();
+    let help = stdout(&out);
+    assert!(
+        one_line(&help).contains(&one_line(rdy_store::format::MOVE_WITH_DUMP)),
+        "{help}"
+    );
 }

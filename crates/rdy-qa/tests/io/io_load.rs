@@ -504,3 +504,139 @@ fn dl6_a_failed_check_undoes_while_locked() {
     }
     assert!(raced, "the racer never tried an open while the load ran");
 }
+
+/// `tree(dir)` without the paths under `skip` (relative to `dir`): a live daemon's run files and
+/// a store it still serves change by themselves.
+fn tree_but(dir: &Path, skip: &[&str]) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut out = BTreeMap::new();
+    for e in walk(dir) {
+        let rel = e.strip_prefix(dir).unwrap().to_path_buf();
+        if skip.iter().any(|s| rel.starts_with(s)) {
+            continue;
+        }
+        out.insert(
+            rel,
+            if e.is_dir() {
+                None
+            } else {
+                Some(std::fs::read(&e).unwrap())
+            },
+        );
+    }
+    out
+}
+
+#[test]
+fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
+    // the rdy binary sets this probe in main; a test process sets it itself
+    rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
+    let dir = rdy_qa::daemon::short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    let r = Rdy::open(dir.path()).unwrap();
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    let mut host = rdy_qa::daemon::Hosted::start_in(dir);
+    let p = host.dir.path().to_path_buf();
+    let store = p.join(".rdy/store");
+    let aside = p.join("store-aside");
+    // the in-place move with the daemon still up: the daemon serves the store set aside
+    std::fs::rename(&store, &aside).unwrap();
+    let skip = [".rdy/run", "store-aside"];
+    let before = tree_but(&p, &skip);
+    let e = load(&file, &p).unwrap_err();
+    assert_eq!(e.code, "E_LOCKED", "{e}");
+    assert_eq!(
+        e.message,
+        format!(
+            "a daemon still runs for {} (pid {})",
+            p.display(),
+            std::process::id()
+        )
+    );
+    assert_eq!(
+        e.fix,
+        format!("run rdy serve --stop in {}, then load again", p.display())
+    );
+    assert_eq!(tree_but(&p, &skip), before, "the target is untouched");
+    // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside
+    std::fs::rename(&aside, &store).unwrap();
+    host.stop();
+    std::fs::rename(&store, &aside).unwrap();
+    let s = load(&file, &p).unwrap();
+    assert_eq!(s.files_kept, [".rdy.yaml"]);
+}
+
+#[test]
+fn dl6_a_bad_target_only_file_is_named() {
+    let (_src, scratch, file) = dumped();
+    let cases = [
+        (".rdy/local.yaml", "actor: [\n"),
+        (".rdy/packs/zz-other.yaml", "name: [\n"),
+    ];
+    for (i, (rel, bytes)) in cases.into_iter().enumerate() {
+        let to = scratch.path().join(format!("new{i}"));
+        let at = to.join(rel);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, bytes).unwrap();
+        let before = tree(&to);
+        let e = load(&file, &to).unwrap_err();
+        assert_eq!(e.code, "E_DUMP", "{rel}: {e}");
+        let head = format!(
+            "the dump loaded, but {}, which the dump does not carry, stops the project from opening: ",
+            at.display()
+        );
+        assert!(e.message.starts_with(&head), "{rel}: {e}");
+        assert_eq!(
+            e.fix,
+            format!("fix or move {}, then load again", at.display())
+        );
+        assert_eq!(tree(&to), before, "{rel}: the target is as it was");
+    }
+}
+
+#[test]
+fn dl6_a_file_that_is_not_a_dump_is_refused() {
+    // pins the fix the load picks by the reader's refusal kind (DumpRefusal::NotADump)
+    let scratch = tempfile::tempdir().unwrap();
+    let f = scratch.path().join("notes.txt");
+    std::fs::write(&f, "not a dump\n").unwrap();
+    let to = scratch.path().join("new");
+    let e = load(&f, &to).unwrap_err();
+    assert_eq!(e.code, "E_DUMP", "{e}");
+    assert_eq!(
+        e.message,
+        format!("{}: it does not start with RDYDUMP", f.display())
+    );
+    assert_eq!(e.fix, "pass a file that rdy dump wrote");
+    assert!(!to.exists());
+}
+
+#[test]
+fn dl6_a_load_into_a_project_dot_rdy_is_refused() {
+    let (src, scratch, file) = dumped();
+    let link = scratch.path().join("link");
+    std::os::unix::fs::symlink(src.path().join(".rdy"), &link).unwrap();
+    let before = tree(src.path());
+    for to in [
+        src.path().join(".rdy"),
+        src.path().join(".rdy/packs"),
+        src.path().join(".rdy/new/deeper"),
+        src.path().join(".rdy/store/../packs"),
+        link.join("packs"),
+        link.clone(),
+    ] {
+        let e = load(&file, &to).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{to:?}: {e}");
+        assert_eq!(
+            e.message,
+            format!("{} is inside a project's .rdy directory", to.display())
+        );
+        assert_eq!(
+            e.fix,
+            "load into a new directory outside any .rdy, for example a sibling of the project"
+        );
+        assert_eq!(tree(src.path()), before, "{to:?}");
+    }
+}

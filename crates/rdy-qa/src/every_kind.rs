@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The ref families of an every-kind store (store format 10): the ten of an M2 store, `canon`
-/// and the open proposals (`proposal/`).
+/// and the open proposals (`proposal/`). A store format that adds a family adds it here; the
+/// frozen v1 fixture test keeps its own list (`V1_FAMILIES` in `io_dump_fixture.rs`).
 pub const FAMILIES: [&str; 12] = [
     "meta/store_format",
     "view/",

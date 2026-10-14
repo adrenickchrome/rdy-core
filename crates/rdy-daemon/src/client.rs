@@ -628,6 +628,34 @@ fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
     }
 }
 
+/// The pid of a live daemon of the project at `project`, by the ties `request_stop` checks
+/// before it signals (D-R7N9J): the socket record names this project's `.rdy`; a connection to
+/// that recorded socket (never a link) has a peer of our uid whose pid the system gives,
+/// `p > 1`; and `.rdy/run/daemon.pid`, opened without following a link, holds exactly `p`.
+/// `None` when any tie fails. It sends nothing: the daemon reads an end of file where a hello
+/// would be, and closes the connection.
+///
+/// `rdy load` asks it before it writes (final ruling 1): a daemon that still serves a store moved
+/// aside would keep taking writes that the loaded project never sees.
+pub fn live_daemon(project: &Path) -> Option<u32> {
+    let run = RunDir::of_project(project);
+    let recorded = run.recorded_socket()?;
+    if fs::symlink_metadata(&recorded)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    let stream = std::os::unix::net::UnixStream::connect(&recorded).ok()?;
+    let (uid, pid) = crate::socket::peer_uid_pid(&stream).ok()?;
+    if uid != crate::socket::own_uid() {
+        return None;
+    }
+    let pid = pid.filter(|&p| p > 1)?;
+    (read_pid_file(&run) == Some(pid)).then_some(pid)
+}
+
 /// The pid `.rdy/run/daemon.pid` holds: decimal digits only, surrounding whitespace trimmed.
 /// `None` when it is missing, a link, too long or anything else.
 fn read_pid_file(run: &RunDir) -> Option<u32> {

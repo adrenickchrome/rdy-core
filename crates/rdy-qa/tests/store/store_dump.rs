@@ -202,21 +202,71 @@ fn dl1_an_unknown_magic_or_format_is_refused() {
         damaged(read_all(&v2).unwrap_err()),
         "dump format 2 is not one this rdy reads"
     );
-    let other = DumpHeader {
-        store_format: STORE_FORMAT + 1,
-        ..header(&s)
-    };
-    let bytes = DumpWriter::new(Vec::new(), &other)
-        .unwrap()
-        .finish()
-        .unwrap()
-        .0;
+    // the writer refuses this header (dl1_a_writer_refuses_a_store_format_it_cannot_read), so
+    // the stream is forged: a batch-less dump whose header names the next store format
+    let mut recs = records(&stream(&s, &[], &[]));
+    recs[0].1[..4].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
+    reseal(&mut recs);
+    let bytes = forge(&recs);
     assert_eq!(
         damaged(read_all(&bytes).unwrap_err()),
         format!(
             "store format {} in a dump of format 1 is not one this rdy reads",
             STORE_FORMAT + 1
         )
+    );
+}
+
+#[test]
+fn dl1_a_writer_refuses_a_store_format_it_cannot_read() {
+    let (_b, s, _) = store_and_batches();
+    for store_format in [STORE_FORMAT + 1, FIRST_UNREAD_BELOW] {
+        let other = DumpHeader {
+            store_format,
+            ..header(&s)
+        };
+        let e = DumpWriter::new(Vec::new(), &other)
+            .err()
+            .unwrap_or_else(|| panic!("store format {store_format} was taken"));
+        assert_eq!(
+            e.to_string(),
+            StoreError::Refused(format!(
+                "store format {store_format} in a dump of format 1 is not one this rdy reads"
+            ))
+            .to_string()
+        );
+    }
+}
+
+/// A store format below every pair of `READS`.
+const FIRST_UNREAD_BELOW: u32 = 9;
+
+#[test]
+fn dl1_each_reader_refusal_has_its_kind() {
+    let (_b, s, batches) = store_and_batches();
+    let good = stream(&s, &batches, &[]);
+    let what = |bytes: &[u8]| damaged(read_all(bytes).unwrap_err());
+    let mut bad = good.clone();
+    bad[0] = b'X';
+    assert_eq!(DumpRefusal::of(&what(&bad)), DumpRefusal::NotADump);
+    assert_eq!(DumpRefusal::of(&what(&[])), DumpRefusal::NotADump);
+    let mut v2 = good.clone();
+    v2[8] = 2;
+    assert_eq!(DumpRefusal::of(&what(&v2)), DumpRefusal::FormatNotRead);
+    let mut recs = records(&stream(&s, &[], &[]));
+    recs[0].1[..4].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
+    reseal(&mut recs);
+    assert_eq!(
+        DumpRefusal::of(&what(&forge(&recs))),
+        DumpRefusal::FormatNotRead
+    );
+    let mut flipped = good.clone();
+    let i = flipped.len() - 200;
+    flipped[i] ^= 1;
+    assert_eq!(DumpRefusal::of(&what(&flipped)), DumpRefusal::Damaged);
+    assert_eq!(
+        DumpRefusal::of(&what(&good[..good.len() - 10])),
+        DumpRefusal::Damaged
     );
 }
 

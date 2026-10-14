@@ -2,7 +2,9 @@
 //! a store of any other format is refused before anything is written; the store is .rdy/store.
 use rdy_engine::{Rdy, RdyError};
 use rdy_qa::fixtures::*;
-use rdy_store::format::{FIRST_DUMP_STORE_FORMAT, REF_STORE_FORMAT, STORE_FORMAT, fix_for};
+use rdy_store::format::{
+    FIRST_DUMP_STORE_FORMAT, MOVE_WITH_DUMP, REF_STORE_FORMAT, STORE_FORMAT, fix_for,
+};
 use rdy_store::index::Index;
 use rdy_store::segment::SegmentLog;
 use rdy_store::{Store, StoreError, kinds};
@@ -478,8 +480,9 @@ fn dl2_a_store_of_an_older_dumpable_format_says_dump_and_load() {
     let next = STORE_FORMAT + 1;
     assert_eq!(
         fix_for(FIRST_DUMP_STORE_FORMAT, next),
-        "dump it with the rdy that wrote it, move .rdy/store aside, then run rdy load <file> with this rdy"
+        "close every session on this project; with the rdy that wrote this store, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy"
     );
+    assert_eq!(fix_for(FIRST_DUMP_STORE_FORMAT, next), MOVE_WITH_DUMP);
     assert_eq!(
         fix_for(STORE_FORMAT, next),
         fix_for(FIRST_DUMP_STORE_FORMAT, next)

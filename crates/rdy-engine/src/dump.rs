@@ -112,15 +112,14 @@ impl ReadState {
         let totals = match self
             .write_dump(BufWriter::new(file), &files)
             .and_then(|(buf, t)| {
-                let file = buf.into_inner().map_err(|e| io(e.into_error()))?;
-                file.sync_all().map_err(io)?;
+                let file = buf
+                    .into_inner()
+                    .map_err(|e| io_at(partial, e.into_error()))?;
+                file.sync_all().map_err(|e| io_at(partial, e))?;
                 Ok(t)
             })
             .and_then(|t| {
-                std::fs::hard_link(partial, out).map_err(|e| match e.kind() {
-                    ErrorKind::AlreadyExists => exists(out),
-                    _ => io(e),
-                })?;
+                link_into_place(partial, out, |a, b| std::fs::hard_link(a, b))?;
                 Ok(t)
             }) {
             Ok(totals) => totals,
@@ -129,8 +128,8 @@ impl ReadState {
                 return Err(e);
             }
         };
-        std::fs::remove_file(partial).map_err(io)?;
-        sync_dir(dir).map_err(io)?;
+        std::fs::remove_file(partial).map_err(|e| io_at(partial, e))?;
+        sync_dir(dir).map_err(|e| io_at(dir, e))?;
         Ok(DumpSummary {
             out: out.display().to_string(),
             dump_format: DUMP_FORMAT,
@@ -174,6 +173,43 @@ impl ReadState {
         read?;
         w.finish().map_err(dest)
     }
+}
+
+/// Links the synced `partial` to `out` with `link` (`std::fs::hard_link`): `out` appears whole
+/// or not at all, and never over a file. A file system without hard links (FAT, exFAT, some
+/// network mounts) gets its own fix: a retry there never passes.
+fn link_into_place(
+    partial: &Path,
+    out: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), RdyError> {
+    link(partial, out).map_err(|e| {
+        if e.kind() == ErrorKind::AlreadyExists {
+            exists(out)
+        } else if no_hard_links(&e) {
+            RdyError::new(
+                E_IO,
+                format!(
+                    "{}: this file system does not support hard links, which rdy dump uses to put the dump in place",
+                    out.display()
+                ),
+                "dump to a local disk, then copy the file",
+            )
+        } else {
+            io_at(out, e)
+        }
+    })
+}
+
+/// Whether `link(2)` failed because the file system has no hard links: `EOPNOTSUPP` (Linux, and
+/// any `Unsupported`), `EPERM` (Linux FAT; the partial file was just created in that directory,
+/// so it is not a permission matter), and `ENOTSUP` (macOS FAT and exFAT).
+fn no_hard_links(e: &std::io::Error) -> bool {
+    const EPERM: i32 = 1;
+    const MACOS_ENOTSUP: i32 = 45;
+    e.kind() == ErrorKind::Unsupported
+        || e.raw_os_error() == Some(EPERM)
+        || (cfg!(target_vendor = "apple") && e.raw_os_error() == Some(MACOS_ENOTSUP))
 }
 
 /// Refuses an `out` in the project's `.rdy` directory or below it: a file there can break the
@@ -276,6 +312,53 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn dl5_a_file_system_without_hard_links_gets_its_own_fix() {
+        let out = std::path::Path::new("/mnt/stick/p.rdydump");
+        let partial = std::path::Path::new("/mnt/stick/p.rdydump.partial-1");
+        let mut no_links = vec![
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            // Linux FAT and exFAT: EPERM
+            std::io::Error::from_raw_os_error(1),
+        ];
+        if cfg!(target_vendor = "apple") {
+            // macOS FAT and exFAT: ENOTSUP
+            no_links.push(std::io::Error::from_raw_os_error(45));
+        }
+        for e in no_links {
+            let shown = e.to_string();
+            let got = super::link_into_place(partial, out, |_, _| Err(e)).unwrap_err();
+            assert_eq!(got.code, E_IO, "{shown}");
+            assert_eq!(
+                got.message,
+                "/mnt/stick/p.rdydump: this file system does not support hard links, which rdy dump uses to put the dump in place",
+                "{shown}"
+            );
+            assert_eq!(
+                got.fix, "dump to a local disk, then copy the file",
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn dl5_a_late_io_error_names_its_path() {
+        let out = std::path::Path::new("/d/p.rdydump");
+        let partial = std::path::Path::new("/d/p.rdydump.partial-1");
+        let e = std::io::Error::from_raw_os_error(28);
+        let shown = e.to_string();
+        let got = super::link_into_place(partial, out, |_, _| Err(e)).unwrap_err();
+        assert_eq!(got.code, E_IO);
+        assert_eq!(got.message, format!("/d/p.rdydump: {shown}"));
+        assert_eq!(got.fix, "check file permissions and disk space");
+        let got = super::link_into_place(partial, out, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        })
+        .unwrap_err();
+        assert_eq!(got.code, crate::error::E_ALREADY_EXISTS);
+        assert_eq!(got.message, "/d/p.rdydump exists");
     }
 
     #[test]

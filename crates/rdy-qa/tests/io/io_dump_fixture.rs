@@ -24,6 +24,23 @@ const FIXTURE_BLAKE3: &str = "1aeddacd0344896487769b3398e43b301d0d2817ce7000684d
 /// The blake3 of the expect file's bytes, set when it was written. A change here needs a founder
 /// decision.
 const EXPECT_BLAKE3: &str = "33adfacbc275c65fdaaafb74ae67e7e98eb541578555ecdb287245f48190d7c6";
+/// The ref families of the v1 fixture (store format 10): the ten of an M2 store, `canon` and the
+/// open proposals (`proposal/`). Frozen with the v1 fixture: a later store format that adds a
+/// family adds it to `every_kind::FAMILIES`, never here.
+const V1_FAMILIES: [&str; 12] = [
+    "meta/store_format",
+    "view/",
+    "tag/",
+    "intent/",
+    "alt/",
+    "dismiss/",
+    "mention/",
+    "pair/",
+    "semantic/",
+    "inbox/",
+    "canon",
+    "proposal/",
+];
 /// The segment size limit of the store the fixture was written from.
 const FIXTURE_SEGMENT_MAX: u64 = 4096;
 /// The bytes in front of each frame's payload in a segment: length, kind and hash.
@@ -201,7 +218,7 @@ fn dl8_the_v1_fixture_covers_every_kind_and_ref_family() {
             "kind {k}"
         );
     }
-    for f in every_kind::FAMILIES {
+    for f in V1_FAMILIES {
         assert!(
             expect["refs"]
                 .as_object()

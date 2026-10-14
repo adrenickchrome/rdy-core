@@ -116,3 +116,57 @@ fn dl7_rdy_load_into_this_project_is_refused() {
         "{e}"
     );
 }
+
+#[test]
+fn dl7_a_load_into_dot_rdy_is_refused() {
+    let s = golden_served();
+    let mut c = agent(&s);
+    c.call("rdy_dump", json!({"out": "p.rdydump"})).ok();
+    for dir in [".rdy/packs", ".rdy", ".rdy/store/../new"] {
+        let r = c.call("rdy_load", json!({"file": "p.rdydump", "dir": dir}));
+        let Some("E_BAD_INPUT") = r.code() else {
+            panic!("{dir}: expected E_BAD_INPUT, got {r:?}")
+        };
+        let rdy_qa::mcp::Reply::ToolError(e) = r else {
+            unreachable!()
+        };
+        assert_eq!(
+            e["message"],
+            format!(
+                "{} is inside a project's .rdy directory",
+                s.dir.path().join(dir).display()
+            ),
+            "{dir}"
+        );
+        assert_eq!(
+            e["fix"],
+            "load into a new directory outside any .rdy, for example a sibling of the project"
+        );
+    }
+    assert!(!s.dir.path().join(".rdy/packs/.rdy.yaml").exists());
+    assert!(!s.dir.path().join(".rdy/new").exists());
+    // the session's own project still works
+    let st = c.call("rdy_tags", json!({}));
+    assert!(st.is_ok(), "{st:?}");
+}
+
+/// `text` with every run of white space made one space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn dl7_rdy_load_describes_the_in_place_move_in_order() {
+    let s = Served::new();
+    let mut c = McpClient::start_proxy(&s);
+    let tools = c.tools();
+    let load = tools
+        .iter()
+        .find(|t| t["name"] == "rdy_load")
+        .expect("rdy_load is listed");
+    let text = load["description"].as_str().unwrap();
+    assert!(
+        one_line(text).contains(&one_line(rdy_store::format::MOVE_WITH_DUMP)),
+        "{text}"
+    );
+}

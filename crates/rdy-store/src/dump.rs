@@ -269,16 +269,27 @@ pub struct DumpWriter<W: Write> {
 }
 
 impl<W: Write> DumpWriter<W> {
-    /// Writes the prelude and the header.
+    /// Writes the prelude and the header. Refuses a header whose store format is not one this
+    /// rdy reads in a dump of `DUMP_FORMAT` (`READS`): its reader would refuse the dump.
     pub fn new(w: W, header: &DumpHeader) -> Result<Self, StoreError> {
         if header.rdy.len() > MAX_RDY_BYTES {
             return Err(StoreError::Refused("the header does not parse".into()));
         }
+        let Some(kinds) = READS
+            .contains(&(DUMP_FORMAT, header.store_format))
+            .then(|| frame_kinds(DUMP_FORMAT, header.store_format))
+            .flatten()
+        else {
+            return Err(StoreError::Refused(store_format_not_read(
+                header.store_format,
+                DUMP_FORMAT,
+            )));
+        };
         let mut me = DumpWriter {
             w,
             phase: Phase::Files,
             last_path: None,
-            kinds: frame_kinds(DUMP_FORMAT, header.store_format).unwrap_or(&[]),
+            kinds,
             chain: Vec::new(),
             totals: DumpTotals::default(),
         };
@@ -452,6 +463,52 @@ fn damaged(at: u64, what: impl Into<String>) -> StoreError {
 
 const ENDS_EARLY: &str = "the file ends before its trailer";
 
+/// What a refusal of the reader (`StoreError::Dump`) means for the person: the caller picks the
+/// fix by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DumpRefusal {
+    /// The file is not a dump: it does not start with the magic.
+    NotADump,
+    /// A dump format, or a store format in a dump, that this rdy does not read.
+    FormatNotRead,
+    /// Damage at a byte.
+    Damaged,
+}
+
+impl DumpRefusal {
+    /// The kind of the reader's refusal `what`. It reads the texts this module writes
+    /// (`NOT_A_DUMP`, `dump_format_not_read`, `store_format_not_read`), so a text and its kind
+    /// change together.
+    pub fn of(what: &str) -> DumpRefusal {
+        if what == NOT_A_DUMP {
+            DumpRefusal::NotADump
+        } else if what.ends_with(NOT_READ)
+            && (what.starts_with(DUMP_FORMAT_WORDS) || what.starts_with(STORE_FORMAT_WORDS))
+        {
+            DumpRefusal::FormatNotRead
+        } else {
+            DumpRefusal::Damaged
+        }
+    }
+}
+
+/// The refusal of a file that does not start with `MAGIC`.
+const NOT_A_DUMP: &str = "it does not start with RDYDUMP";
+/// The end of a refusal of a format this rdy does not read.
+const NOT_READ: &str = " is not one this rdy reads";
+const DUMP_FORMAT_WORDS: &str = "dump format ";
+const STORE_FORMAT_WORDS: &str = "store format ";
+
+/// The refusal of dump format `format`.
+fn dump_format_not_read(format: u32) -> String {
+    format!("{DUMP_FORMAT_WORDS}{format}{NOT_READ}")
+}
+
+/// The refusal of store format `store_format` in a dump of format `format`.
+fn store_format_not_read(store_format: u32, format: u32) -> String {
+    format!("{STORE_FORMAT_WORDS}{store_format} in a dump of format {format}{NOT_READ}")
+}
+
 impl<R: Read> DumpReader<R> {
     /// Reads the prelude and the header. Refuses a file that does not start with the magic, and
     /// a `(dump_format, store_format)` pair outside `READS`. Returns the reader, the dump format
@@ -471,7 +528,7 @@ impl<R: Read> DumpReader<R> {
             .take(MAGIC.len() as u64)
             .read_to_end(&mut magic)?;
         if magic != MAGIC {
-            return Err(damaged(0, "it does not start with RDYDUMP"));
+            return Err(damaged(0, NOT_A_DUMP));
         }
         me.totals.bytes = MAGIC.len() as u64;
         let mut format = [0u8; 4];
@@ -479,10 +536,7 @@ impl<R: Read> DumpReader<R> {
         me.totals.bytes += 4;
         let format = u32::from_le_bytes(format);
         if !READS.iter().any(|(d, _)| *d == format) {
-            return Err(damaged(
-                MAGIC.len() as u64,
-                format!("dump format {format} is not one this rdy reads"),
-            ));
+            return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
         }
         let first = me.record()?;
         if first.kind != rec::HEADER {
@@ -497,10 +551,7 @@ impl<R: Read> DumpReader<R> {
         else {
             return Err(damaged(
                 first.at,
-                format!(
-                    "store format {} in a dump of format {format} is not one this rdy reads",
-                    header.store_format
-                ),
+                store_format_not_read(header.store_format, format),
             ));
         };
         me.kinds = kinds;

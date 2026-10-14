@@ -65,6 +65,9 @@ impl Format {
 /// The fix for a refusal with no store format number to go by.
 const RE_CREATE: &str = "re-create it with this rdy";
 
+/// The in-place move of a project across a store format change (final ruling 1), in order.
+pub const MOVE_WITH_DUMP: &str = "close every session on this project; with the rdy that wrote this store, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy";
+
 /// The fix text for a store that names format `found` when this binary reads `current` (dl2, a
 /// closed rule): a newer format needs a newer rdy; a format from `FIRST_DUMP_STORE_FORMAT` up to
 /// the current one moves with dump and load; an earlier format is re-created.
@@ -72,7 +75,7 @@ pub fn fix_for(found: u32, current: u32) -> &'static str {
     if found > current {
         "a newer rdy wrote this store: open it with that rdy or a later one"
     } else if found >= FIRST_DUMP_STORE_FORMAT && found < current {
-        "dump it with the rdy that wrote it, move .rdy/store aside, then run rdy load <file> with this rdy"
+        MOVE_WITH_DUMP
     } else {
         RE_CREATE
     }
