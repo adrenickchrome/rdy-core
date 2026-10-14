@@ -4,6 +4,7 @@
 mod store;
 mod store_collide;
 mod store_crash;
+mod store_dump;
 mod store_flush;
 mod store_format;
 mod store_fsck;

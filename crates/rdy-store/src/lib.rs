@@ -1,5 +1,6 @@
 mod check;
 pub mod coord;
+pub mod dump;
 pub mod error;
 pub mod format;
 pub mod fsutil;

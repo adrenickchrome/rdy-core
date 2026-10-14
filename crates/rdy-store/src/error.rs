@@ -66,6 +66,10 @@ pub enum StoreError {
     /// would make two blocks each other's ancestors; nothing was written.
     #[error("{message}")]
     ParentCycle { message: String, fix: String },
+    /// A file that is not a dump this rdy reads, or a damaged dump: `at` is the byte offset of
+    /// the record that failed, `what` says how (`crate::dump`).
+    #[error("dump damaged at byte {at}: {what}")]
+    Dump { at: u64, what: String },
 }
 
 pub(crate) fn db<E: std::fmt::Display>(e: E) -> StoreError {
