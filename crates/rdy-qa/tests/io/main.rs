@@ -7,6 +7,7 @@ mod io_dump;
 mod io_imported_by;
 mod io_keys;
 mod io_link_keys;
+mod io_load;
 mod io_onboarding;
 mod io_reader;
 mod io_tree;

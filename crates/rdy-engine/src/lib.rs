@@ -27,6 +27,7 @@ mod io;
 mod keys;
 pub mod lexicon;
 mod lint;
+pub mod load;
 mod materialize;
 pub mod mention_review;
 mod pack_load;
@@ -73,6 +74,7 @@ pub use history::{
 };
 pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
+pub use load::LoadSummary;
 pub use materialize::{Materialized, PathMiss};
 pub use mention_review::{MentionReviewInfo, MentionVerdict};
 pub use paths::TreeNode;
