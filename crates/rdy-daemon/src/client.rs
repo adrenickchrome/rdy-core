@@ -1,7 +1,7 @@
 //! The client side: connecting with a hello, `ctl` requests, and connect-or-start under
 //! `start.lock`.
 
-use crate::error::{E_DAEMON_GONE, E_DAEMON_START, ErrorReply};
+use crate::error::{E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
 use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
 use crate::lock::{FileLock, open_no_follow};
@@ -429,9 +429,18 @@ pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
 #[doc(hidden)]
 pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Attempt {
     match exchange_hello(run, hello, uid).await {
-        Ok((stream, reply)) => attempt(run, stream, reply),
+        Ok(found) => attempt(run, found.stream, found.reply),
         Err(e) => Attempt::NoDaemon(e),
     }
+}
+
+/// What one hello exchange found: the connection, the daemon's first reply, the socket path the
+/// connection went to, and the pid of the process at its other end, when the system gives it.
+struct Found {
+    stream: UnixStream,
+    reply: HelloReply,
+    socket: PathBuf,
+    pid: Option<u32>,
 }
 
 /// The connect, the peer check, the hello and its first reply; any error is "no daemon". The
@@ -442,11 +451,7 @@ pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Att
 /// daemon that answers but serves another project refuses the hello, and that refusal is the
 /// reply: it is never retried elsewhere (`connect_or_start` tries once more only when that
 /// daemon says it is stopping).
-async fn exchange_hello(
-    run: &RunDir,
-    hello: &Hello,
-    uid: u32,
-) -> io::Result<(UnixStream, HelloReply)> {
+async fn exchange_hello(run: &RunDir, hello: &Hello, uid: u32) -> io::Result<Found> {
     let own = run.socket();
     if let Some(recorded) = run.recorded_socket()
         && recorded != own
@@ -458,11 +463,7 @@ async fn exchange_hello(
 }
 
 /// `exchange_hello` on the socket `path`.
-async fn exchange_hello_at(
-    path: &Path,
-    hello: &Hello,
-    uid: u32,
-) -> io::Result<(UnixStream, HelloReply)> {
+async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<Found> {
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::other(format!(
@@ -478,6 +479,12 @@ async fn exchange_hello_at(
             "the socket's peer is uid {peer}, not ours"
         )));
     }
+    // read before the hello, from the connection that gets the reply
+    let pid = stream
+        .peer_cred()
+        .ok()
+        .and_then(|c| c.pid())
+        .and_then(|p| u32::try_from(p).ok());
     let mut line = serde_json::to_vec(hello).map_err(io::Error::other)?;
     line.push(b'\n');
     stream.write_all(&line).await?;
@@ -489,7 +496,12 @@ async fn exchange_hello_at(
         Ok(Err(e)) => Err(io::Error::other(format!(
             "no hello reply from the daemon: {e}"
         ))),
-        Ok(Ok(reply)) => Ok((stream, reply)),
+        Ok(Ok(reply)) => Ok(Found {
+            stream,
+            reply,
+            socket: path.to_path_buf(),
+            pid,
+        }),
     }
 }
 
@@ -507,6 +519,123 @@ fn attempt(run: &RunDir, stream: UnixStream, reply: HelloReply) -> Attempt {
         HelloReply::Refused { error } => Attempt::Refused(error),
         HelloReply::Exiting { .. } => Attempt::Exiting,
     }
+}
+
+/// What `request_stop` did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopRequest {
+    /// The daemon's process, when known.
+    pub pid: Option<u32>,
+    /// The socket to watch for the daemon's exit when `pid` is unknown ([`stop_socket`]), read
+    /// before the stop.
+    pub socket: PathBuf,
+    /// Whether the stop went as a signal to the process (the fallback), not over the socket.
+    pub signalled: bool,
+}
+
+/// The socket a stop watches when it has no pid: the one the daemon bound, which `daemon.sock`
+/// names, else this client's own (`RunDir::socket`). A client of another spelling of the project
+/// (a symlink, a macOS firmlink) computes another socket, which never exists. Read once, before
+/// the stop: the daemon removes its record before its socket.
+pub fn stop_socket(run: &RunDir) -> PathBuf {
+    run.recorded_socket().unwrap_or_else(|| run.socket())
+}
+
+/// Refusal text of `request_stop` when it cannot tie the busy daemon's process to this project.
+const UNTIED_MESSAGE: &str = "the running daemon is another rdy version and has other clients, and rdy cannot tie its process to this project";
+const UNTIED_FIX: &str = "close the daemon's other sessions, then run rdy serve --stop again";
+
+/// Asks the project's daemon to stop, never starting one. `Ok(None)` when no daemon answers.
+///
+/// A daemon of another version with other clients refuses every hello (`E_DAEMON_VERSION`,
+/// D-ABRC8), so the stop cannot go over its socket, and daemons already released cannot change.
+/// Then the client signals the daemon's process (`terminate`, `SIGTERM`, which `rdy serve` takes
+/// as a stop), only when all of these hold: the socket record names this project's `.rdy`
+/// (D-R7N9J); the refusal came on that recorded socket; the peer of that connection runs as our
+/// uid (the peer check of the exchange) and the system gives its pid `p > 1`; and
+/// `.rdy/run/daemon.pid` holds exactly `p`. Otherwise nothing is signalled.
+pub async fn request_stop(
+    run: &RunDir,
+    hello: &Hello,
+    start_timeout: Duration,
+) -> Result<Option<StopRequest>, ErrorReply> {
+    let Ok(found) = exchange_hello(run, hello, crate::socket::own_uid()).await else {
+        return Ok(None);
+    };
+    if let HelloReply::Refused { error } = &found.reply
+        && error.code == E_DAEMON_VERSION
+    {
+        // `found.stream` stays open while we signal, so the pid cannot have been reused
+        return signal_stop(run, &found).map(Some);
+    }
+    let client = match attempt(run, found.stream, found.reply) {
+        Attempt::NoDaemon(_) => return Ok(None),
+        Attempt::Ready(c) => Some(c),
+        Attempt::Starting(p) => Some(p.wait(Instant::now() + start_timeout, &mut |_| {}).await?),
+        // a daemon of another version: it is exiting already
+        Attempt::Exiting => None,
+        Attempt::Refused(e) => return Err(e),
+    };
+    let mut pid = None;
+    // read while the daemon runs: it removes its record first when it stops
+    let socket = stop_socket(run);
+    if let Some(mut c) = client {
+        pid = c
+            .ctl("ping", json!({}))
+            .await
+            .ok()
+            .and_then(|v| v["pid"].as_u64())
+            .and_then(|p| u32::try_from(p).ok());
+        c.ctl("stop", json!({})).await?;
+        c.close();
+    }
+    Ok(Some(StopRequest {
+        pid,
+        socket,
+        signalled: false,
+    }))
+}
+
+/// The fallback of `request_stop`: signals the process of the daemon that refused `found`'s
+/// hello, when the record, the connection and the pid file all tie it to this project.
+fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
+    let untied = || ErrorReply::new(E_DAEMON_VERSION, UNTIED_MESSAGE, UNTIED_FIX);
+    // 1. the record names this project's `.rdy`; 2. the refusal came on its socket
+    let recorded = run.recorded_socket().ok_or_else(untied)?;
+    if found.socket != recorded {
+        return Err(untied());
+    }
+    // 3. the peer's pid, from the connection itself; never init or a process group
+    let pid = found.pid.filter(|&p| p > 1).ok_or_else(untied)?;
+    // 4. the pid file, opened without following a link, names the same process
+    if read_pid_file(run) != Some(pid) {
+        return Err(untied());
+    }
+    match crate::spawn::terminate(pid) {
+        Ok(_) => Ok(StopRequest {
+            pid: Some(pid),
+            socket: recorded,
+            signalled: true,
+        }),
+        Err(e) => Err(ErrorReply::new(
+            E_DAEMON_VERSION,
+            format!("could not send the stop signal to the daemon's process {pid}: {e}"),
+            format!("end process {pid}, then run rdy serve --stop again"),
+        )),
+    }
+}
+
+/// The pid `.rdy/run/daemon.pid` holds: decimal digits only, surrounding whitespace trimmed.
+/// `None` when it is missing, a link, too long or anything else.
+fn read_pid_file(run: &RunDir) -> Option<u32> {
+    let f = open_no_follow(fs::OpenOptions::new().read(true), &run.pid_file()).ok()?;
+    let mut buf = Vec::new();
+    f.take(64).read_to_end(&mut buf).ok()?;
+    let text = std::str::from_utf8(&buf).ok()?.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// Starts a daemon for a run dir and returns at once, with a way to tell whether it has exited.
@@ -780,7 +909,10 @@ impl Start<'_> {
         let mut attempt_no = 0u32;
         loop {
             let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
-                Ok((_, HelloReply::Exiting { version: theirs })) => {
+                Ok(Found {
+                    reply: HelloReply::Exiting { version: theirs },
+                    ..
+                }) => {
                     return Err(ErrorReply::new(
                         E_DAEMON_START,
                         format!(
@@ -790,7 +922,7 @@ impl Start<'_> {
                         VERSION_FIX,
                     ));
                 }
-                Ok((stream, reply)) => attempt(run, stream, reply),
+                Ok(found) => attempt(run, found.stream, found.reply),
                 Err(e) => Attempt::NoDaemon(e),
             };
             match reached {

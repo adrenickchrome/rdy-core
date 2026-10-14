@@ -111,6 +111,32 @@ pub fn process_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Sends `SIGTERM` to `pid`, which `rdy serve` takes as `rdy serve --stop`. `Ok(true)` when it
+/// was sent, `Ok(false)` when the process is gone (`ESRCH`). A `pid` of 1 or less is refused:
+/// never init, and never a process group (`kill(0, ..)` and negative pids).
+#[allow(unsafe_code)]
+pub fn terminate(pid: u32) -> io::Result<bool> {
+    if pid <= 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to signal process {pid}"),
+        ));
+    }
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("bad pid {pid}")))?;
+    // SAFETY: `kill` takes two integers and touches no memory of ours; `pid` is above 1, so it
+    // names one process.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(e)
+    }
+}
+
 /// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process
 /// group (a child of `serve_command` already leads its own session), and is `Ok`. Called by
 /// `rdy serve --detach` after its argument parsing and before it opens the store.
