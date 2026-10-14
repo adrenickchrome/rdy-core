@@ -3,6 +3,7 @@
 //! the session-end hooks.
 use crate::notify::{NotifyMsg, spawn_notifier};
 use crate::session::SessionId;
+use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
@@ -42,6 +43,9 @@ pub struct Shared {
     /// The notifier thread's queue (ib11): the writer forwards each batch's events here, and a
     /// pack reload, after it publishes. Unbounded, so a forward never blocks the writer.
     pub(crate) notify: Sender<NotifyMsg>,
+    /// The live site's state: the last build of each served scope and its open pages. The
+    /// writer tells it of each publish; its `rdy-site` worker builds off the writer.
+    pub site: Arc<LiveSite>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -55,8 +59,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Publishes `rdy`'s state and starts the writer that owns it from now on, and the notifier
-    /// that tells subscribed MCP sessions what the writer's batches changed (ib11). The writer
+    /// Publishes `rdy`'s state and starts the writer that owns it from now on, the notifier
+    /// that tells subscribed MCP sessions what the writer's batches changed (ib11), and the site
+    /// worker that builds the scopes with an open page after each publish (ls5). The writer
     /// receives every event `rdy` emits from now on (`Rdy::subscribe`, before the writer owns it).
     pub fn new(rdy: Rdy) -> Arc<Shared> {
         let open_report = rdy.open_report();
@@ -70,10 +75,13 @@ impl Shared {
         let hub = NotifyHub::new();
         let leaving = Arc::clone(&hub);
         let (notify, queue) = channel();
+        let site = LiveSite::new();
         Arc::new_cyclic(|weak| {
             // the notifier ends when its queue's sender, held here, is dropped with the last
             // `Shared`
             drop(spawn_notifier(weak.clone(), queue));
+            // the site worker ends on `LiveSite::close` (the shutdown) or with the last `Shared`
+            drop(spawn_site_worker(weak.clone(), Arc::clone(&site)));
             Shared {
                 state,
                 open_report,
@@ -86,6 +94,7 @@ impl Shared {
                 leases,
                 hub,
                 notify,
+                site,
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
@@ -136,8 +145,10 @@ impl Shared {
         self.session_end.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Stops the writer: the last state is published and the store is closed.
+    /// Stops the site worker and ends every open page's stream, then stops the writer: the last
+    /// state is published and the store is closed.
     pub fn shutdown(&self) -> Result<(), RdyError> {
+        self.site.close();
         self.writer.shutdown()
     }
 }

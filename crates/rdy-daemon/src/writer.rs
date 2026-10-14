@@ -169,6 +169,8 @@ impl Writer {
         match self.shared.upgrade() {
             Some(sh) => {
                 sh.state.store(rdy.read());
+                // after the store: the site worker reads a state that holds this publish
+                sh.site.published();
                 true
             }
             None => false,
@@ -306,6 +308,7 @@ impl Writer {
         // a reload publishes a state with its tension set built, as a write does
         build_tensions(rdy);
         sh.state.store(rdy.read());
+        sh.site.published();
         if matches!(out, Ok(ReloadOutcome::Reloaded)) {
             // after the publish: the notifier tells the sessions subscribed to rdy://pack and
             // rdy://project; the reply notice (`pack_changed`) stays as it is
