@@ -11,7 +11,9 @@
 //! 3. Create the project directory and its `.rdy` if missing, then `.rdy/store.loading`.
 //! 4. Ingest every batch at its source place; the trailer must verify. The batches must end
 //!    where the header says the source log ends, and there must be at least one (every store
-//!    holds its format batch from its first open).
+//!    holds its format batch from its first open). When the dump's store format is older than
+//!    this rdy's, append one batch that sets `meta/store_format` to this rdy's (FW-UP1, in its
+//!    smallest form). Then write the store's `FORMAT`.
 //! 5. Write each project file the target does not have.
 //! 6. Take the new store's lock, then rename `.rdy/store.loading` to `.rdy/store`. The load
 //!    holds the lock until it ends, so no other rdy process opens the project before step 7
@@ -90,8 +92,15 @@ pub fn load(file: &Path, project: &Path) -> Result<LoadSummary, RdyError> {
     let absent = check_target(project, &files)?;
     let mut made = Made::default();
     let out = (|| {
-        let (batches, frames) =
-            ingest(file, project, &mut reader, first, header.log_end, &mut made)?;
+        let (batches, frames) = ingest(
+            file,
+            project,
+            &mut reader,
+            first,
+            header.log_end,
+            header.store_format,
+            &mut made,
+        )?;
         let mut written = Vec::new();
         let mut kept = Vec::new();
         for (path, bytes) in &files {
@@ -191,14 +200,16 @@ fn check_target(project: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<Strin
 
 /// Steps 3 and 4: creates the project and its `.rdy` if missing, then streams every batch into
 /// `.rdy/store.loading` and verifies the trailer. The batches must end at `log_end`, the end of
-/// the source log that the header names, and there must be at least one. Returns the batches
-/// and frames written.
+/// the source log that the header names, and there must be at least one. Then a dump of a store
+/// format older than this rdy's (`store_format`) gets its one upgrade batch, and the store gets
+/// its `FORMAT`. Returns the dump's batches and frames written.
 fn ingest<R: Read>(
     file: &Path,
     project: &Path,
     reader: &mut DumpReader<R>,
     first: Option<(u64, DumpBatch)>,
     log_end: Location,
+    store_format: u32,
     made: &mut Made,
 ) -> Result<(u64, u64), RdyError> {
     let dot = project.join(".rdy");
@@ -235,16 +246,21 @@ fn ingest<R: Read>(
             None => None,
         };
     }
-    let report = ingest.finish().map_err(|e| target_error(&loading, e))?;
-    if report.end != log_end {
+    let end = ingest.end();
+    if end != log_end {
         return Err(incomplete(format!(
             "its header says the log ends at segment {} offset {}, but its batches end at segment {} offset {}",
-            log_end.segment, log_end.offset, report.end.segment, report.end.offset
+            log_end.segment, log_end.offset, end.segment, end.offset
         )));
     }
-    if report.batches == 0 {
+    if n == 0 {
         return Err(incomplete("it holds no batches".to_string()));
     }
+    // a dump of an older store format gets one logged batch that names this rdy's format
+    ingest
+        .upgrade(store_format)
+        .map_err(|e| target_error(&loading, e))?;
+    let report = ingest.finish().map_err(|e| target_error(&loading, e))?;
     Ok((report.batches, report.frames))
 }
 

@@ -1,7 +1,9 @@
 //! dl4: the ingest writes each dumped batch where the source log held it, so the new log is the
 //! source log byte for byte; the first open builds the index from it.
 use rdy_store::dump::DumpBatch;
+use rdy_store::format::{Format, REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
 use rdy_store::ingest::Ingest;
+use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
 use std::path::Path;
@@ -172,4 +174,125 @@ fn dl4_a_refused_batch_in_the_next_segment_writes_no_segment() {
     let after: Vec<String> = segments(&to).into_iter().map(|(n, _)| n).collect();
     let before: Vec<String> = before.into_iter().map(|(n, _)| n).collect();
     assert_eq!(after, before, "no new segment file");
+}
+
+/// The source log `src` is a prefix of the ingested log `dst`, byte for byte: every segment but
+/// the last is equal, and the last one starts with the source's.
+fn is_prefix(src: &[(String, Vec<u8>)], dst: &[(String, Vec<u8>)]) -> bool {
+    src.len() == dst.len()
+        && src.iter().zip(dst).enumerate().all(|(i, (s, d))| {
+            s.0 == d.0
+                && if i + 1 == src.len() {
+                    d.1.starts_with(&s.1)
+                } else {
+                    d.1 == s.1
+                }
+        })
+}
+
+/// Every frame of `s` from `from` to its log end: (kind, payload).
+fn frames_after(s: &Store, from: Location) -> Vec<(u8, Vec<u8>)> {
+    let mut out = vec![];
+    s.reader()
+        .for_each_frame_from(from, s.log_end(), |_, kind, _, payload, _| {
+            out.push((kind, payload.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+#[test]
+fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
+    // FW-UP1 in its smallest form: a log of an older store format keeps every byte, and one
+    // logged batch after it sets `meta/store_format` to this rdy's. The older number is forced:
+    // no older dump format exists yet.
+    let base = tempfile::tempdir().unwrap();
+    let mut s = rolling_store(base.path());
+    let older = STORE_FORMAT - 1;
+    s.set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(older))])
+        .unwrap();
+    let (src_end, bs) = (s.log_end(), batches(&s));
+    let src = segments(&base.path().join("src"));
+    // without the upgrade batch, the log names the older format and an open refuses it
+    let plain = base.path().join("plain");
+    ingest(&plain, &bs).unwrap();
+    let e = Store::open(&plain).err().expect("an older log is refused");
+    assert!(
+        matches!(&e, StoreError::Format { message, .. } if message.contains(&format!("has store format {older}"))),
+        "{e}"
+    );
+    // with it, the store opens at this rdy's format
+    let to = base.path().join("dst");
+    let mut i = Ingest::create(&to).unwrap();
+    for (n, b) in bs.iter().enumerate() {
+        i.batch(n as u64, b).unwrap();
+    }
+    assert_eq!(
+        i.end(),
+        src_end,
+        "the dump's batches end where the source ends"
+    );
+    assert!(i.upgrade(older).unwrap(), "an upgrade batch is appended");
+    let report = i.finish().unwrap();
+    assert_eq!(report.batches, bs.len() as u64, "the dump's batches only");
+    assert!(
+        is_prefix(&src, &segments(&to)),
+        "the source log is kept byte for byte"
+    );
+    assert_eq!(
+        std::fs::read(to.join("FORMAT")).unwrap(),
+        Format::CURRENT.to_text().into_bytes()
+    );
+    let t = Store::open(&to).unwrap();
+    assert_eq!(report.end, t.log_end());
+    let after = frames_after(&t, src_end);
+    assert_eq!(after.len(), 2, "one ref frame and its marker: {after:?}");
+    assert_eq!(after[0].0, kinds::REF_UPDATE);
+    let u: RefUpdate = postcard::from_bytes(&after[0].1).unwrap();
+    assert_eq!(
+        u,
+        RefUpdate {
+            name: REF_STORE_FORMAT.into(),
+            value: encode_u32(STORE_FORMAT),
+            at: src_end,
+        }
+    );
+    assert_eq!(after[1].0, kinds::BATCH_COMMIT);
+    assert_eq!(
+        t.reader().refs_with_prefix(REF_STORE_FORMAT).unwrap(),
+        vec![(REF_STORE_FORMAT.to_string(), encode_u32(STORE_FORMAT))]
+    );
+}
+
+#[test]
+fn dl8_a_log_of_this_store_format_gets_no_upgrade_batch() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let to = base.path().join("dst");
+    let mut i = Ingest::create(&to).unwrap();
+    for (n, b) in batches(&s).iter().enumerate() {
+        i.batch(n as u64, b).unwrap();
+    }
+    assert!(!i.upgrade(STORE_FORMAT).unwrap(), "nothing is appended");
+    assert_eq!(i.finish().unwrap().end, s.log_end());
+    assert_eq!(segments(&to), segments(&base.path().join("src")));
+}
+
+#[test]
+fn dl8_a_log_of_a_newer_store_format_is_refused() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let to = base.path().join("dst");
+    let mut i = Ingest::create(&to).unwrap();
+    for (n, b) in batches(&s).iter().enumerate() {
+        i.batch(n as u64, b).unwrap();
+    }
+    let newer = STORE_FORMAT + 1;
+    let e = i.upgrade(newer).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { what, .. } if *what == format!("store format {newer} is newer than this rdy's store format {STORE_FORMAT}")),
+        "{e}"
+    );
+    assert_eq!(i.end(), s.log_end(), "nothing is appended");
 }

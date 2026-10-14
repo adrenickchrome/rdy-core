@@ -187,7 +187,21 @@ fn foreign_export(out: &Path) {
 /// line `*.draft.yaml`, and a `.rdy/local.yaml` with `actor: human:qa` (a dump leaves it out).
 /// Closed.
 pub fn project() -> tempfile::TempDir {
-    let (dir, r) = qa_project();
+    build(None)
+}
+
+/// `project`, built on a store whose segments hold `segment_max` bytes: its log rolls where a
+/// batch and its marker do not fit, and a batch that grows past the limit stays in its segment
+/// (the soft limit). The dump format 1 fixture is written from it (dl8).
+pub fn rolling_project(segment_max: u64) -> tempfile::TempDir {
+    build(Some(segment_max))
+}
+
+fn build(segment_max: Option<u64>) -> tempfile::TempDir {
+    let (dir, mut r) = qa_project();
+    if let Some(max) = segment_max {
+        r.store_mut().set_segment_max(max);
+    }
     let e = Local::new(r);
     let s = on(&e, seed);
     // a version tag on the seed landing (TAG, tag/)

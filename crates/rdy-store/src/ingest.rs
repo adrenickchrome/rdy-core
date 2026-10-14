@@ -9,14 +9,19 @@
 //! starts at offset 0 of the next segment. So a held batch that passed the soft segment limit in
 //! the source passes it here too.
 //!
+//! A dump of an older store format gets one more batch after its own: `upgrade` appends it, and
+//! it sets `meta/store_format` to this rdy's store format (FW-UP1, in its smallest form). Until
+//! M3a a store format change only adds kinds and refs (D-F0904), so no frame is re-encoded.
+//!
 //! A converter for another store format must remap every location inside a payload
 //! (`RefUpdate.at`, `InboxCursor.at`) if it changes the layout.
 use crate::dump::DumpBatch;
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
-use crate::kinds::batch_digest;
+use crate::kinds::{self, RefUpdate, batch_digest};
 use crate::segment::{Location, SegmentLog};
+use crate::store::encode;
 use std::path::{Path, PathBuf};
 
 /// The directory of the log inside a store directory.
@@ -30,7 +35,8 @@ pub struct Ingest {
     frames: u64,
 }
 
-/// What an ingest wrote: batches, data frames, and the end of the new log.
+/// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
+/// counted), and the end of the new log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IngestReport {
     pub batches: u64,
@@ -43,9 +49,9 @@ fn dump_error(what: String) -> StoreError {
 }
 
 impl Ingest {
-    /// Creates the store directory `dir` with its `FORMAT` (this rdy's store format) and an empty
-    /// log. `dir` must not exist: an existing `dir` is `StoreError::Io` of kind `AlreadyExists`,
-    /// and nothing is written into it.
+    /// Creates the store directory `dir` with an empty log; `finish` writes its `FORMAT`. `dir`
+    /// must not exist: an existing `dir` is `StoreError::Io` of kind `AlreadyExists`, and
+    /// nothing is written into it.
     pub fn create(dir: &Path) -> Result<Ingest, StoreError> {
         std::fs::create_dir(dir)?;
         let parent = match dir.parent() {
@@ -53,7 +59,6 @@ impl Ingest {
             _ => Path::new("."),
         };
         sync_dir(parent)?;
-        format::write_format_file(dir, Format::CURRENT)?;
         let segments = dir.join(SEGMENTS_DIR);
         std::fs::create_dir(&segments)?;
         sync_dir(dir)?;
@@ -103,11 +108,51 @@ impl Ingest {
         Ok(())
     }
 
-    /// Makes the new log durable: one sync of the log, then of `segments/` and of the store
+    /// The end of the log so far.
+    pub fn end(&self) -> Location {
+        self.log.end()
+    }
+
+    /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
+    /// store format of the dump's log. The cases (closed):
+    /// - `from` is this rdy's store format: nothing is appended;
+    /// - `from` is older: one batch is appended after the dump's batches. It holds one
+    ///   `REF_UPDATE` that sets `meta/store_format` to this rdy's store format, salted with the
+    ///   log end as every ref write is, and its marker. Every earlier byte is kept;
+    /// - `from` is newer: refused with `StoreError::Dump`, and nothing is appended.
+    ///
+    /// Returns whether it appended the batch. Call it once, after the last `batch`.
+    pub fn upgrade(&mut self, from: u32) -> Result<bool, StoreError> {
+        let current = Format::CURRENT.store_format;
+        if from > current {
+            return Err(dump_error(format!(
+                "store format {from} is newer than this rdy's store format {current}"
+            )));
+        }
+        if from == current {
+            return Ok(false);
+        }
+        let start = self.log.end();
+        let update = RefUpdate {
+            name: format::REF_STORE_FORMAT.into(),
+            value: format::encode_u32(current),
+            at: start,
+        };
+        let placed = self
+            .log
+            .append_frames(&[(kinds::REF_UPDATE, encode(&update))], false)?;
+        self.log
+            .append_marker(start, placed.iter().map(|(_, h)| h))?;
+        Ok(true)
+    }
+
+    /// Makes the new log durable: one sync of the log, then of `segments/`. Then writes `FORMAT`
+    /// (this rdy's store format: `upgrade` made the log say it too) and syncs the store
     /// directory. Writes no index.
     pub fn finish(mut self) -> Result<IngestReport, StoreError> {
         self.log.sync()?;
         sync_dir(&self.dir.join(SEGMENTS_DIR))?;
+        format::write_format_file(&self.dir, Format::CURRENT)?;
         sync_dir(&self.dir)?;
         Ok(IngestReport {
             batches: self.batches,
