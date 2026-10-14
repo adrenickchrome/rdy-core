@@ -1,7 +1,7 @@
 //! dl5: `rdy dump` writes the published log's sealed batches and the closed project files as one
 //! stream (D-69AY3, D-D2NPN; F5 of D-FR0C4). Atomic at the target: a complete file at `out`, or
 //! nothing.
-use rdy_engine::{E_ALREADY_EXISTS, E_BAD_INPUT, Engine, Local, Rdy, ReadState};
+use rdy_engine::{E_ALREADY_EXISTS, E_BAD_INPUT, E_IO, Engine, Local, Rdy, ReadState};
 use rdy_qa::every_kind;
 use rdy_qa::fixtures::{land, write, writer};
 use rdy_qa::inbox::on;
@@ -200,7 +200,7 @@ fn dl5_a_pack_file_named_outside_the_set_is_refused() {
     assert_eq!(e.code, E_BAD_INPUT);
     assert_eq!(
         e.message,
-        ".rdy/packs/my pack.yaml: rdy dump carries pack files named with A-Z a-z 0-9 . _ - only"
+        ".rdy/packs/my pack.yaml: rdy dump carries pack files named with A-Z a-z 0-9 . _ - only, and not starting with a dot"
     );
     assert_eq!(e.fix, "rename the pack file");
     assert_eq!(
@@ -275,15 +275,18 @@ fn dl5_a_dump_under_concurrent_writes_is_a_whole_prefix() {
         taken_tx.send(()).unwrap();
         let out = tmp.path().join(format!("{n}.rdydump"));
         st.dump(&out).unwrap();
-        dumps.push(out);
+        dumps.push((out, st));
     }
     writes.join().unwrap();
 
     let last = log_batches(&e.read());
     let mut lens = vec![];
-    for out in &dumps {
+    for (out, st) in &dumps {
         let (header, items) = read_back(out);
         let got = batches_of(&items);
+        // the whole state that was dumped, no batch dropped at its end
+        assert_eq!(got, log_batches(st), "{}", out.display());
+        assert_eq!(header.log_end, st.seq(), "{}", out.display());
         assert!(header.log_end < e.read().seq(), "{}", out.display());
         assert!(got.len() < last.len(), "{}", out.display());
         for (g, l) in got.iter().zip(&last) {
@@ -297,6 +300,7 @@ fn dl5_a_dump_under_concurrent_writes_is_a_whole_prefix() {
         lens.push(got.len());
     }
     assert!(lens.is_sorted() && lens[0] < lens[2], "{lens:?}");
+    drop(dumps);
     let e = Arc::into_inner(e).expect("the writer thread is done");
     e.close().unwrap();
     drop(dir);
@@ -313,4 +317,162 @@ fn dl5_the_header_names_the_rdy_that_wrote_it() {
     assert_eq!(header.store_format, STORE_FORMAT);
     assert_eq!(summary.dump_format, 1);
     assert_eq!(summary.store_format, STORE_FORMAT);
+}
+
+/// The names in `dir` that hold `.partial-`.
+fn partials(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".partial-"))
+        .collect()
+}
+
+#[test]
+fn dl5_a_dump_inside_the_project_rdy_directory_is_refused() {
+    let (dir, r) = qa_project();
+    let root = dir.path();
+    for out in [
+        root.join(".rdy/packs/backup.yaml"),
+        root.join(".rdy/store/seg-000099.log"),
+        root.join(".rdy/p.rdydump"),
+        // the same directory by another spelling
+        root.join(".rdy/packs/../store/p.rdydump"),
+    ] {
+        let e = r.read().dump(&out).unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT, "{}", out.display());
+        assert_eq!(
+            e.message,
+            format!("{} is inside the project .rdy directory", out.display())
+        );
+        assert_eq!(e.fix, "dump to a path outside .rdy");
+        assert!(!out.exists(), "{}", out.display());
+        let parent = out.parent().unwrap();
+        assert_eq!(partials(parent), Vec::<String>::new(), "{}", out.display());
+    }
+    // the project still opens
+    drop(r);
+    Rdy::open(root).unwrap();
+}
+
+#[test]
+fn dl5_a_dump_through_a_symlink_into_rdy_is_refused() {
+    let (dir, r) = qa_project();
+    let tmp = tempfile::tempdir().unwrap();
+    let link = tmp.path().join("packs");
+    std::os::unix::fs::symlink(dir.path().join(".rdy/packs"), &link).unwrap();
+    let out = link.join("backup.yaml");
+    let e = r.read().dump(&out).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.fix, "dump to a path outside .rdy");
+    assert!(!dir.path().join(".rdy/packs/backup.yaml").exists());
+}
+
+#[test]
+fn dl5_a_project_file_over_16_mib_is_refused_and_no_partial_file_is_left() {
+    let (dir, r) = qa_project();
+    std::fs::write(dir.path().join(".rdyignore"), vec![b'#'; (16 << 20) + 1]).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("p.rdydump");
+    let e = r.read().dump(&out).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, ".rdyignore is larger than 16 MiB");
+    assert_eq!(e.fix, "make the file 16 MiB or smaller");
+    assert!(!out.exists());
+    assert_eq!(partials(tmp.path()), Vec::<String>::new());
+
+    // exactly 16 MiB is carried
+    std::fs::write(dir.path().join(".rdyignore"), vec![b'#'; 16 << 20]).unwrap();
+    r.read().dump(&out).unwrap();
+}
+
+#[test]
+fn dl5_more_than_256_project_files_are_refused() {
+    let (dir, r) = qa_project();
+    let root = dir.path();
+    std::fs::write(root.join(".rdyignore"), "# none\n").unwrap();
+    // .rdy.yaml, .rdyignore, rdy-qa.yaml and 254 more: 257
+    for i in 0..254 {
+        std::fs::write(root.join(format!(".rdy/packs/p{i:03}.yaml")), "x: 1\n").unwrap();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("p.rdydump");
+    let e = r.read().dump(&out).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(
+        e.message,
+        "the project has 257 files to dump, and rdy dump carries at most 256"
+    );
+    assert_eq!(e.fix, "keep at most 254 pack files");
+    assert!(!out.exists());
+    assert_eq!(partials(tmp.path()), Vec::<String>::new());
+
+    // 256 are carried
+    std::fs::remove_file(root.join(".rdy/packs/p000.yaml")).unwrap();
+    assert_eq!(r.read().dump(&out).unwrap().files.len(), 256);
+}
+
+#[test]
+fn dl5_a_hidden_pack_file_is_refused_with_the_dot_rule() {
+    let (dir, r) = qa_project();
+    std::fs::write(dir.path().join(".rdy/packs/.draft.yaml"), "name: x\n").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let e = r.read().dump(&tmp.path().join("p.rdydump")).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(
+        e.message,
+        ".rdy/packs/.draft.yaml: rdy dump carries pack files named with A-Z a-z 0-9 . _ - only, and not starting with a dot"
+    );
+    assert_eq!(e.fix, "rename the pack file");
+}
+
+#[test]
+fn dl5_a_partial_file_of_another_dump_is_named_and_kept() {
+    let (_dir, r) = qa_project();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("p.rdydump");
+    let partial = tmp
+        .path()
+        .join(format!("p.rdydump.partial-{}", std::process::id()));
+    std::fs::write(&partial, "another dump\n").unwrap();
+    let e = r.read().dump(&out).unwrap_err();
+    assert_eq!(e.code, E_ALREADY_EXISTS);
+    assert_eq!(
+        e.message,
+        format!(
+            "{} exists: another dump may be writing it",
+            partial.display()
+        )
+    );
+    assert_eq!(e.fix, "remove it if no dump is running, then retry");
+    assert_eq!(std::fs::read(&partial).unwrap(), b"another dump\n");
+    assert!(!out.exists());
+}
+
+#[test]
+fn dl5_io_errors_name_the_path() {
+    let (dir, r) = qa_project();
+    let tmp = tempfile::tempdir().unwrap();
+
+    // out's parent is a file
+    let file = tmp.path().join("notes.txt");
+    std::fs::write(&file, "mine\n").unwrap();
+    let out = file.join("p.rdydump");
+    let e = r.read().dump(&out).unwrap_err();
+    assert_eq!(e.code, E_IO);
+    let partial = format!("{}.partial-{}", out.display(), std::process::id());
+    assert!(e.message.starts_with(&format!("{partial}: ")), "{e:?}");
+    assert_eq!(e.fix, "check file permissions and disk space");
+
+    // the project file is gone
+    let config = dir.path().join(".rdy.yaml");
+    std::fs::remove_file(&config).unwrap();
+    let e = r.read().dump(&tmp.path().join("p.rdydump")).unwrap_err();
+    assert_eq!(e.code, E_IO);
+    assert!(
+        e.message.starts_with(&format!("{}: ", config.display())),
+        "{e:?}"
+    );
+    assert_eq!(e.fix, "check file permissions and disk space");
+    assert_eq!(partials(tmp.path()), Vec::<String>::new());
 }
