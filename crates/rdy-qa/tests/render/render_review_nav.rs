@@ -51,7 +51,7 @@ fn rv1_the_home_page_lists_the_drafts_changed_docs_with_plain_counts() {
         .map(|r| r.text)
         .collect::<Vec<_>>()
         .join(" | ");
-    let list = "Changes in this draft | Intro | Edited | 2 edited \u{b7} 1 new \u{b7} 1 removed | Fresh | New | Old guide | Removed";
+    let list = "Changes in this draft | Intro | 2\u{a0}edited \u{b7} 1\u{a0}new \u{b7} 1\u{a0}removed | Fresh | New | Old guide | Removed";
     assert!(joined.contains(list), "{joined}");
     assert!(joined.find(list).unwrap() < joined.find("Contents").unwrap());
     assert!(h.contains("<section class=\"chg\"><h2 id=\"draft-changes\">Changes in this draft</h2><ul class=\"changes\">"));
@@ -110,4 +110,33 @@ fn rv1_a_draft_with_nothing_a_reader_sees_changed_shows_no_marker() {
         }
     }
     assert!(html(out.path(), "index.html").contains("id=\"show-changes\""));
+}
+
+/// ls13 (visual review F4, rule 2.5): an edited doc's row says it once (its counts, no
+/// "Edited" before "2 edited"), and each number stays on the line of its word.
+#[test]
+fn ls13_the_home_row_of_an_edited_doc_says_it_once_and_keeps_numbers_with_words() {
+    let (_d, _r, _ids, out) = draft();
+    let h = html(out.path(), "index.html");
+    let list = h
+        .split_once("<ul class=\"changes\">")
+        .expect("the list")
+        .1
+        .split_once("</ul>")
+        .unwrap()
+        .0;
+    let intro = list
+        .split("<li>")
+        .find(|li| li.contains(">Intro</a>"))
+        .expect("the Intro row");
+    assert!(!intro.contains(">Edited<"), "{intro}");
+    assert!(
+        intro.contains("<span class=\"changes-count\">2\u{a0}edited \u{b7} 1\u{a0}new \u{b7} 1\u{a0}removed</span>"),
+        "{intro}"
+    );
+    // a new doc and a removed page keep their word
+    assert!(
+        list.contains(">New</span>") && list.contains(">Removed</span>"),
+        "{list}"
+    );
 }

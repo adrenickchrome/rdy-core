@@ -366,6 +366,7 @@ details.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-we
 .changes { list-style: none; margin: 0 0 1rem; padding: 0; }
 .changes li { margin: 0 0 0.35rem; overflow-wrap: anywhere; }
 .changes .chg-label { margin-inline: 0.4rem; }
+.changes .changes-count { margin-inline-start: 0.4rem; }
 #show-changes { font-size: 0.78rem; font-weight: 600; color: var(--ink); background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.25rem 0.7rem; white-space: nowrap; }
 /* the author rule `.head button { display: inline-flex }` at phone width would otherwise beat [hidden] */
 #show-changes[hidden] { display: none; }
