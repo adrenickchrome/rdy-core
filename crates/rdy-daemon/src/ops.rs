@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 mod brief;
+mod dump;
 mod edit;
 mod land;
 mod project;
@@ -26,6 +27,7 @@ mod site_url;
 mod wc;
 
 use brief::brief;
+use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_folder};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
@@ -63,6 +65,7 @@ pub const OPS: &[&str] = &[
     "search",
     "render",
     "export",
+    "dump",
     "check",
     "new_folder",
     "new_doc",
@@ -285,6 +288,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
+        "dump" => dump(cx, parse(op, args, "{out}")?),
         "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),

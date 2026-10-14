@@ -34,6 +34,7 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         "E_DAEMON_GONE",
         E_SITE,
         W_SITE_LAN,
+        E_DUMP,
     ] {
         let (when, fix) = row(code);
         assert!(!when.is_empty() && !fix.is_empty(), "{code}");

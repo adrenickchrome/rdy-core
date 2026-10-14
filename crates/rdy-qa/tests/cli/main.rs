@@ -8,6 +8,7 @@ mod cli_config;
 mod cli_config_file;
 mod cli_coverage;
 mod cli_daemon;
+mod cli_dump;
 mod cli_entities;
 mod cli_inbox;
 mod cli_intents;

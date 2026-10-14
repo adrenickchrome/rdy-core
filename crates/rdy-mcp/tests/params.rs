@@ -109,6 +109,22 @@ fn ls7_rdy_site_refuses_an_unknown_key() {
     assert!(message.contains("scope"), "{message}");
 }
 
+/// dl7: `rdy_dump` takes `out` and nothing else.
+#[test]
+fn dl7_rdy_dump_refuses_an_unknown_key() {
+    let (code, message, _) = refusal::<DumpParams>("rdy_dump", json!({"outs": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("out"), "{message}");
+}
+
+/// dl7: `rdy_load` takes `file` and `dir` and nothing else.
+#[test]
+fn dl7_rdy_load_refuses_an_unknown_key() {
+    let (code, message, _) = refusal::<LoadParams>("rdy_load", json!({"file": "x", "dirs": "y"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("dir"), "{message}");
+}
+
 #[test]
 fn mparm1_shapes_read_like_the_schema() {
     let cases: Vec<(String, (String, String, String))> = vec![
@@ -224,7 +240,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 33 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 35 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`).
     check!(
         AcceptAdviceParams,
@@ -237,11 +253,13 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         CoverageParams,
         DecideParams,
         DismissParams,
+        DumpParams,
         EditorialParams,
         FindingParams,
         IdParams,
         InboxParams,
         IntentParams,
+        LoadParams,
         LogParams,
         MentionParams,
         ProposeParams,

@@ -150,6 +150,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "set serve.site_lan to false to keep the site on this machine; when the site already stays on it, follow the warning's own fix",
     ),
     (
+        "E_DUMP",
+        "the file is not a dump this rdy reads, the dump is damaged, or the loaded project fails fsck",
+        "pass a file rdy dump wrote; a damaged dump is never repaired: dump the project again",
+    ),
+    (
         "W_SKELETON_MISSING",
         "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
         "add the section, or give the doc a doc_type without it (page)",
