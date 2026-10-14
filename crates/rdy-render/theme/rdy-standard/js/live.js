@@ -1,7 +1,5 @@
-// rdy live site: reload this page when it changes; update the version label in place.
-// Only a page in view keeps its stream open: a browser opens few connections to one site, and a
-// stream holds one for its whole life. A page that comes back into view opens its stream again
-// with the revisions it was loaded at, and the server sends reload at once if it changed.
+// rdy live site: reload when the page changes; update the version label in place.
+// Only a page in view holds a stream; it reopens with its revisions when it returns.
 (function () {
   var s = document.currentScript;
   var key = "rdy-live-y:" + location.pathname;
