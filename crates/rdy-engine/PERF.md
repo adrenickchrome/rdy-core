@@ -1332,7 +1332,7 @@ project the later ops open); the copy is removed at the end.
 | `site_build_live` | `rdy_render::live::build_live(&r.read(), &Scope::Canon)` on the tier's project: the whole site built in memory, with each page's revision. Compare with `render`, which writes the same pages to disk | 5 (3 at 50k) | no spec target: the live site's full build (recorded; compare with render) |
 | `site_event_after_land` | one subscription on the page of the doc the write edits, then a body edit of that doc written into a fresh view and landed through the writer. The time runs from just before the write to the subscription's `Reload` (the site worker builds and sends it). Each run waits for the worker to settle, outside the timer | `runs.write` | < 1 s p99 at 10k blocks (proposed, ledger F4; reported until the founder rules) |
 | `site_event_after_view_write` | the same, with the subscription on the view's page and a commit into that view (no landing). Review mode, so the page carries the change marks | `runs.write` | < 1 s p99 at 10k blocks (proposed, ledger F4; reported until the founder rules) |
-| `site_fanout_32` | 32 subscriptions on 32 canon pages, a landing that changes one page, and one `refresh`, less the median of `site_build_live`: the fan-out alone. The `LiveSite` is the op's own, with no worker, so the timed `refresh` is the only build. The op asserts that the edited page got `Reload` | `runs.view_ops` | no spec target: the fan-out to 32 open pages (recorded) |
+| `site_fanout_32` | the fan-out alone: two builds of canon on either side of a landing that changes one page, made outside the timer, then `rdy_render::live::diff` of the two and one send per stream to 32 bounded queues, with the events the site sends (`Reload` for the changed page, the new label for the others). Built from the public functions, so no hook in the site. A tree of fewer than 32 pages has several streams on a page. The op asserts that the diff is not empty and that the edited page got `Reload` | `runs.view_ops` | no spec target: the fan-out to 32 open pages (recorded) |
 | `site_get_page` | `rdy_qa::http::get` of the longest doc page, from a warm build, over the daemon's loopback port. The op asserts status 200 | 50 | < 5 ms p99 (proposed, ledger F4; reported) |
 
 What each cost grows with:
@@ -1344,9 +1344,9 @@ What each cost grows with:
   like `daemon_write_single`), plus the build of canon, plus the diff of the two builds. It grows
   with the pages. `site_event_after_view_write` is a commit (one flush) plus the build of the
   view, which reads the review base besides.
-- `site_fanout_32` is the part of a `refresh` that is not the build: the input key, the diff of
-  the two builds, and one send per open page. It stays small while a build is large; if the two
-  come close, the fan-out has become a cost.
+- `site_fanout_32` is the diff of the two builds plus one send per open stream. It grows with the
+  changed pages times the streams, and with the pages for the diff itself. It is a cost
+  worth a look only if it comes close to `site_build_live`.
 - `site_get_page` is the request head, the guard checks, the page bytes with the live script
   added, and a loopback round trip. It does not grow with the project, but with the length of the
   page.

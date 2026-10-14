@@ -2,9 +2,9 @@
 use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{approver, land, write, writer};
 use rdy_daemon::site::guard::ScopeRef;
-use rdy_daemon::site::live::{LiveEvent, LiveSite, Subscription};
+use rdy_daemon::site::live::{LiveEvent, LiveSite, STREAM_QUEUE, Subscription};
 use rdy_daemon::{
-    Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, Shared,
+    Attempt, Client, Hello, IdleHold, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, Shared,
 };
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
@@ -3022,14 +3022,6 @@ fn tier_render_cold(
     }));
 }
 
-/// The median of the measure named `op` in `out`.
-fn median_of(out: &[Measure], op: &str) -> f64 {
-    out.iter()
-        .find(|m| m.op == op)
-        .unwrap_or_else(|| panic!("no measure {op}"))
-        .median_ms
-}
-
 /// `site_build_live`: the live site's full build of canon, from one state (compare with
 /// `render`, which writes the same pages to disk).
 fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
@@ -3085,16 +3077,45 @@ fn edit_claim_on_writer(
     .unwrap_or_else(|e| panic!("the claim edit failed: {e}"));
 }
 
+/// What `LiveSite::refresh` does after a build, as the public functions give it: the diff of the
+/// two builds, then to each stream (one per page of `pages`) a `Reload` when its page changed,
+/// else the new label when the label changed, else nothing. A full queue drops the event, as the
+/// site drops the stream. Returns how many events were sent.
+fn fan_out(
+    old: &rdy_render::live::LiveBuild,
+    new: &rdy_render::live::LiveBuild,
+    pages: &[String],
+    txs: &[tokio::sync::mpsc::Sender<LiveEvent>],
+) -> usize {
+    let change = rdy_render::live::diff(old, new);
+    let mut sent = 0;
+    for (page, tx) in pages.iter().zip(txs) {
+        let event = if change.reload.contains(page) {
+            Some(LiveEvent::Reload)
+        } else {
+            change.label.clone().map(LiveEvent::Label)
+        };
+        if let Some(event) = event
+            && tx.try_send(event).is_ok()
+        {
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// The site ops, on a real daemon over a copy of the project at `proj` (their landings would
 /// move the project the later ops open). `sfx` names the tier (`""` or `_50k`); `docs` and `fx`
-/// are the tree's doc paths and the fixture; `build_ms` is the tier's `site_build_live` median.
+/// are the tree's doc paths and the fixture. The daemon is held up for the whole run (see
+/// [`site_daemon_start`]).
 ///
 /// - `site_event_after_land`: one subscription on the page of the fixture doc, and a body edit of
 ///   it written and landed through the writer; the time runs from just before the write to the
 ///   page's `Reload`, which the site worker sends.
 /// - `site_event_after_view_write`: the same on the page of view `sev`, and a commit into it.
-/// - `site_fanout_32`: 32 open pages of canon, one landing that changes one of them, and one
-///   `refresh`, less `build_ms`. The site is the op's own (no worker), so nothing else builds.
+/// - `site_fanout_32`: two builds of canon on either side of a landing that changes one page,
+///   made outside the timer; the time is `diff` of the two and one send per stream to 32
+///   bounded queues, with the events the site worker would send (see `LiveSite::refresh`).
 /// - `site_get_page`: `GET` of the longest doc page from a warm build.
 fn site_ops(
     proj: &std::path::Path,
@@ -3103,7 +3124,6 @@ fn site_ops(
     fx: &Fixture,
     sfx: &str,
     runs: &Runs,
-    build_ms: f64,
 ) -> Vec<Measure> {
     let copy = parent.join(format!("p-site{sfx}"));
     copy_project(proj, &copy);
@@ -3111,7 +3131,7 @@ fn site_ops(
         .enable_all()
         .build()
         .expect("client runtime");
-    let run = daemon_start(&copy);
+    let (run, hold) = site_daemon_start(&copy, Duration::from_secs(60));
     // the site address is set before `ready`
     drop(rt.block_on(daemon_ready(&copy)));
     let sh = std::sync::Arc::clone(run.shared());
@@ -3171,23 +3191,26 @@ fn site_ops(
     ));
     drop(sub);
 
-    // the fan-out alone: a site of its own has no worker, so only the timed `refresh` builds
+    // the fan-out alone: the builds on either side of a landing are made outside the timer, on a
+    // site of its own (no worker), and only the diff and the sends are timed
     let site = LiveSite::new();
-    let b = site.refresh(&sh, &canon).expect("canon builds");
     let mut pages: Vec<String> = vec![page.clone()];
-    pages.extend(b.revs.keys().filter(|p| **p != page).take(31).cloned());
+    pages.extend(
+        site.refresh(&sh, &canon)
+            .expect("canon builds")
+            .revs
+            .keys()
+            .filter(|p| **p != page)
+            .take(31)
+            .cloned(),
+    );
+    // a tree of fewer pages has several streams on a page, as several tabs would
+    let pages: Vec<String> = pages.iter().cycle().take(32).cloned().collect();
     out.push(measure_timed(
         &format!("site_fanout_32{sfx}"),
         runs.view_ops,
         |i| {
-            let b = site.refresh(&sh, &canon).expect("canon builds");
-            let mut subs: Vec<Subscription> = pages
-                .iter()
-                .map(|p| {
-                    site.subscribe(&sh, &canon, p, &b.revs[p], &b.label_rev)
-                        .unwrap_or_else(|_| panic!("the site is busy"))
-                })
-                .collect();
+            let old = site.refresh(&sh, &canon).expect("canon builds");
             edit_claim_on_writer(
                 &sh,
                 &claim,
@@ -3196,16 +3219,24 @@ fn site_ops(
                 true,
             );
             site.published();
+            let new = site.refresh(&sh, &canon).expect("canon builds");
+            let (txs, mut rxs): (Vec<_>, Vec<_>) = pages
+                .iter()
+                .map(|_| tokio::sync::mpsc::channel::<LiveEvent>(STREAM_QUEUE))
+                .unzip();
             let s = Instant::now();
-            site.refresh(&sh, &canon).expect("canon builds");
+            let sent = fan_out(&old, &new, &pages, &txs);
             let took = s.elapsed();
+            assert!(
+                sent > 0,
+                "the landing changed a page: the op times a fan-out"
+            );
             assert_eq!(
-                subs[0].rx.try_recv(),
+                rxs[0].try_recv(),
                 Ok(LiveEvent::Reload),
                 "the edited page is told to reload"
             );
-            drop(subs);
-            Duration::from_secs_f64((took.as_secs_f64() * 1000.0 - build_ms).max(0.0) / 1000.0)
+            took
         },
     ));
 
@@ -3227,6 +3258,7 @@ fn site_ops(
     }));
 
     drop(rt);
+    drop(hold);
     daemon_stop(run);
     std::fs::remove_dir_all(&copy).ok();
     out
@@ -3408,15 +3440,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
-    out.extend(site_ops(
-        &proj,
-        dir.path(),
-        &docs,
-        &fx,
-        "",
-        &TYPICAL_RUNS,
-        median_of(&out, "site_build_live"),
-    ));
+    out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &TYPICAL_RUNS));
     out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
     out.extend(bound_ops(dir.path()));
     out.extend(stdio_mcp_ops(dir.path()));
@@ -3469,15 +3493,29 @@ fn tier_invariants(out: &mut Vec<Measure>, r: &Rdy, runs: usize) {
 
 /// Starts a daemon over `proj` (idle timeout 60 s, human actor `human:qa`, the fixture writer).
 fn daemon_start(proj: &std::path::Path) -> ServeRun {
+    daemon_start_idle(proj, Some(Duration::from_secs(60)))
+}
+
+/// [`daemon_start`] with the idle timeout `idle`.
+fn daemon_start_idle(proj: &std::path::Path, idle: Option<Duration>) -> ServeRun {
     rdy_daemon::start(ServeOptions {
         project: proj.to_path_buf(),
         version: "perf".into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: idle,
         human_actor: Some("human:qa".into()),
         site_lan_override: None,
     })
     .unwrap_or_else(|e| panic!("start the daemon: {e}"))
+}
+
+/// A daemon for the site ops, held up for as long as the hold lives. The ops keep no socket
+/// open, and in-process streams and writes are not keepers, so without the hold the idle timer
+/// would run from `ready` and close the site and the writer under a long run.
+fn site_daemon_start(proj: &std::path::Path, idle: Duration) -> (ServeRun, IdleHold) {
+    let run = daemon_start_idle(proj, Some(idle));
+    let hold = run.handle().hold();
+    (run, hold)
 }
 
 /// A `ctl` connection to the daemon at `proj`, past `ready` (waits for it while it is `starting`).
@@ -4122,15 +4160,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
-    out.extend(site_ops(
-        &proj,
-        parent,
-        &docs,
-        &fx,
-        sfx,
-        &LARGE_RUNS,
-        median_of(&out, &format!("site_build_live{sfx}")),
-    ));
+    out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
     // as the daemon does after `ready`, outside every timer (plan M2e2)
@@ -4857,8 +4887,7 @@ mod tests {
         let mut out = vec![];
         tier_site_build(&mut out, &r, "", 2);
         drop(r);
-        let build = median_of(&out, "site_build_live");
-        out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &runs, build));
+        out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &runs));
         rdy_model::unseed_ids_for_tests();
         let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
         assert_eq!(
@@ -4878,6 +4907,14 @@ mod tests {
             assert!(spec_ceiling_ms(&m.op).is_none(), "{} is not enforced", m.op);
         }
         assert!(out[0].median_ms > 0.0, "a build takes time");
+        // the fan-out is timed on its own (a diff and 32 sends), not as a difference of builds
+        // that clamps to 0: it is small, but never nothing
+        assert!(
+            out[3].median_ms > 0.0 && out[3].median_ms < out[0].median_ms,
+            "{:?} against {:?}",
+            out[3],
+            out[0]
+        );
         assert!(
             spec_target("site_build_live")
                 .unwrap()
@@ -4902,6 +4939,33 @@ mod tests {
             "the large tier states its budget"
         );
         assert!(!dir.path().join("p-site").exists(), "the copy is removed");
+    }
+
+    /// The site ops hold no socket and run for minutes at 50k: the daemon they run on must stay
+    /// up past its idle timeout while the hold lives, and exit idle once it is dropped.
+    #[test]
+    fn lsperf2_the_site_ops_daemon_outlives_its_idle_timeout() {
+        rdy_model::seed_ids_for_tests(0x6c73_7067);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 1, 2, 4);
+        drop(Rdy::open(&proj).expect("open"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("client runtime");
+        let (run, hold) = site_daemon_start(&proj, Duration::from_millis(300));
+        drop(rt.block_on(daemon_ready(&proj)));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(run.handle().keepers() >= 1, "the hold keeps the daemon up");
+        drop(rt.block_on(daemon_ready(&proj)));
+        drop(hold);
+        let started = Instant::now();
+        // the idle timer runs again: the daemon exits on its own
+        run.wait().expect("the daemon exits idle");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        rdy_model::unseed_ids_for_tests();
     }
 
     /// The review ops run end to end on a small tree, after the in-flight and tension ops.
