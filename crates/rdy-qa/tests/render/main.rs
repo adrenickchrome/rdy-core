@@ -5,6 +5,7 @@ mod render;
 mod render_build;
 mod render_diagrams;
 mod render_disagree;
+mod render_disagree_group;
 mod render_dx2;
 mod render_live;
 mod render_llms;

@@ -178,8 +178,14 @@ pub struct DisagreementLink {
 #[derive(Clone, Debug, Serialize)]
 pub struct DisagreementRow {
     pub sentence: &'static str,
+    /// The first [`SHOWN_LINKS`] links.
     pub links: Vec<DisagreementLink>,
+    /// The rest, behind "Show all"; empty when there are `SHOWN_LINKS` or fewer.
+    pub more: Vec<DisagreementLink>,
 }
+
+/// How many links of a disagreement show before the fold (ls11).
+pub const SHOWN_LINKS: usize = 5;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DisagreementsBody {
@@ -814,22 +820,24 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
     GlossaryBody { terms }
 }
 
-/// The disagreements page's entries: each block as a link whose text is its doc title and the
-/// first words of the block (the label rule of a reference, p-2M4KD).
+/// The disagreements page's entries: each block of a group of one entry as a link whose text is
+/// its doc title and the first words of the block (the label rule of a reference, p-2M4KD); each
+/// page of a group of more as a link whose text is the doc title alone (the block stands for many
+/// points). The first [`SHOWN_LINKS`] links show; the rest fold.
 fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
     let entries = sh
         .site
         .disagreements
         .iter()
-        .map(|d| DisagreementRow {
-            sentence: d.sentence,
-            links: d
+        .map(|d| {
+            let mut links: Vec<DisagreementLink> = d
                 .blocks
                 .iter()
                 .filter_map(|id| {
                     let link = sh.link(page, id)?;
                     let doc = sh.site.doc_of(id).map(|d| sh.site.label(d));
                     let text = match doc {
+                        Some(doc) if d.repeats > 1 => doc,
                         Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
                         _ => link.label,
                     };
@@ -839,7 +847,13 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
                         title: link.title,
                     })
                 })
-                .collect(),
+                .collect();
+            let more = links.split_off(links.len().min(SHOWN_LINKS));
+            DisagreementRow {
+                sentence: d.sentence,
+                links,
+                more,
+            }
         })
         .collect();
     DisagreementsBody { entries }

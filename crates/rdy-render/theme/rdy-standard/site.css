@@ -282,6 +282,9 @@ details.diagram-source summary { list-style: none; cursor: pointer; display: inl
 details.diagram-source summary::-webkit-details-marker { display: none; }
 details.diagram-source summary:hover { background: var(--accent-soft); color: var(--accent); }
 details.diagram-source[open] summary { color: var(--accent-ink); }
+details.more-links { margin-top: 0.4rem; }
+details.more-links summary { cursor: pointer; color: var(--ink-soft); font-weight: 500; font-size: 0.84rem; }
+details.more-links[open] summary { color: var(--accent-ink); }
 figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /diagram == */
 
