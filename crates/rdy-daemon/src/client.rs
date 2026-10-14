@@ -565,7 +565,10 @@ pub async fn request_stop(
     if let HelloReply::Refused { error } = &found.reply
         && error.code == E_DAEMON_VERSION
     {
-        // `found.stream` stays open while we signal, so the pid cannot have been reused
+        // `signal_stop` checks the four ties just before it signals. A narrow `kill(2)` race
+        // remains, as with any pid-based signal: the daemon could exit after the pid file is
+        // read and its pid be reused before the signal. Holding `found.stream` open does not
+        // prevent this, because the daemon closes its end after the refusal.
         return signal_stop(run, &found).map(Some);
     }
     let client = match attempt(run, found.stream, found.reply) {
