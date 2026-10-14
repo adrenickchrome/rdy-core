@@ -8,6 +8,7 @@ use crate::layout::RunDir;
 use crate::ops::{OpContext, dispatch};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
+use crate::site::{self, LanOverride, SiteServer};
 use crate::writer::panic_text;
 use rdy_engine::{E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
 use rdy_engine::{classify, human_actor_for_env};
@@ -44,6 +45,10 @@ pub struct ServeOptions {
     /// Test hook: `Some` replaces `human_actor_for_env(<root>)` for session classification.
     #[doc(hidden)]
     pub human_actor: Option<String>,
+    /// Test hook: `Some` stands in for the LAN address of the default route while
+    /// `serve.site_lan` is on.
+    #[doc(hidden)]
+    pub site_lan_override: Option<LanOverride>,
 }
 
 #[derive(Debug)]
@@ -177,13 +182,22 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
     }
     let handle = daemon.handle();
     let readiness = daemon.readiness();
+    // (4b) the site, once the daemon owns the project: the store lock is held and the socket is
+    // bound and recorded (D-WZ4ZP, D-R7N9J). No loopback port leaves the daemon without a site.
+    let root = RunDir::of_project(&opts.project).root();
+    let (site, info) = rt.block_on(SiteServer::bind(&root, opts.site_lan_override));
+    for line in site::log_lines(&info) {
+        log(&line);
+    }
+    let _ = shared.site_info.set(info);
     // (5)
     let thread = {
         let shared = Arc::clone(&shared);
         let readiness = readiness.clone();
+        let handle = handle.clone();
         std::thread::Builder::new()
             .name("rdy-serve".into())
-            .spawn(move || serve_thread(rt, daemon, shared, readiness))
+            .spawn(move || serve_thread(rt, daemon, shared, readiness, site, handle))
     };
     let thread = match thread {
         Ok(t) => t,
@@ -325,14 +339,21 @@ pub(crate) fn warm_then_ready(readiness: &Readiness, warm: impl FnOnce()) {
     log("ready");
 }
 
-/// The body of the `rdy-serve` thread: warms canon beside the accept loop, then, once the
-/// daemon exits, closes the store.
+/// The body of the `rdy-serve` thread: warms canon beside the accept loop and serves the site,
+/// then, once the daemon exits, ends the site and closes the store.
 fn serve_thread(
     rt: tokio::runtime::Runtime,
     daemon: Daemon,
     shared: Arc<Shared>,
     readiness: Readiness,
+    site: Option<SiteServer>,
+    handle: DaemonHandle,
 ) -> Result<ExitReason, ServeError> {
+    // the site accepts until the daemon stops; the runtime's drop below ends what is left of
+    // it before the store closes, so a successor finds the port free
+    if let Some(site) = site {
+        rt.spawn(site.run(Arc::clone(&shared), handle));
+    }
     readiness.progress("building canon");
     log("building canon");
     let warm = Arc::clone(&shared);

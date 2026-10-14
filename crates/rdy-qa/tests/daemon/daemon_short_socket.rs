@@ -434,6 +434,7 @@ fn df3_a_daemon_exits_when_its_project_is_deleted() {
         detach: false,
         idle_timeout: None,
         human_actor: None,
+        site_lan_override: None,
     })
     .unwrap();
     let sock = run.handle().socket();

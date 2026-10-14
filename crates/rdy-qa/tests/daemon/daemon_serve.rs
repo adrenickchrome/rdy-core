@@ -21,6 +21,7 @@ fn serve1_start_binds_after_the_store_is_open_and_a_second_start_is_already_runn
         detach: false,
         idle_timeout: None,
         human_actor: None,
+        site_lan_override: None,
     })
     .err()
     .unwrap();
@@ -224,6 +225,7 @@ fn serve1_hellos_during_warm_up_see_starting_then_ready() {
         detach: false,
         idle_timeout: Some(Duration::from_secs(60)),
         human_actor: None,
+        site_lan_override: None,
     })
     .unwrap();
     let rt = Hosted::rt();
@@ -267,6 +269,7 @@ fn serve1_idle_exit_closes_the_store_cleanly() {
         detach: false,
         idle_timeout: Some(Duration::from_millis(300)),
         human_actor: None,
+        site_lan_override: None,
     })
     .unwrap();
     assert_eq!(run.wait().unwrap(), ExitReason::Idle);
@@ -282,6 +285,7 @@ fn start_successor(project: &std::path::Path, version: &str) -> rdy_daemon::Serv
         detach: false,
         idle_timeout: Some(Duration::from_secs(60)),
         human_actor: None,
+        site_lan_override: None,
     })
     .unwrap_or_else(|e| panic!("the successor did not start: {e}"))
 }

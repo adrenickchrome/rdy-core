@@ -145,6 +145,41 @@ pub struct DaemonHandle {
     run: RunDir,
     files: RunFiles,
     tick: Arc<Notify>,
+    keepers: Keepers,
+    check: Arc<ProjectCheck>,
+}
+
+/// What keeps a daemon from idling out: its open socket connections plus its holds (an open
+/// live page, ls6). `count` carries the sum; every change of either part writes it under the
+/// watch's lock, so concurrent changes publish their sums in order.
+#[derive(Clone)]
+struct Keepers {
+    connections: Arc<AtomicUsize>,
+    holds: Arc<AtomicUsize>,
+    count: Arc<watch::Sender<usize>>,
+}
+
+impl Keepers {
+    /// Applies `change` under the watch's lock and publishes the new sum.
+    fn update(&self, change: impl FnOnce(&Self)) {
+        self.count.send_modify(|n| {
+            change(self);
+            *n = self.connections.load(Ordering::SeqCst) + self.holds.load(Ordering::SeqCst);
+        });
+    }
+}
+
+/// While one lives, the daemon's idle timer does not run (ls6: an open live page keeps the
+/// daemon up). The project check still runs on the idle tick, which counts socket connections
+/// only (D-A6ZZA).
+pub struct IdleHold(Keepers);
+
+impl Drop for IdleHold {
+    fn drop(&mut self) {
+        self.0.update(|k| {
+            k.holds.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
 }
 
 impl DaemonHandle {
@@ -181,6 +216,36 @@ impl DaemonHandle {
     pub fn tick(&self) {
         self.tick.notify_one();
     }
+
+    /// Holds the daemon up: the idle timer does not run while the hold lives.
+    pub fn hold(&self) -> IdleHold {
+        self.keepers.update(|k| {
+            k.holds.fetch_add(1, Ordering::SeqCst);
+        });
+        IdleHold(self.keepers.clone())
+    }
+
+    /// Open socket connections plus holds: while above 0, the daemon does not idle out.
+    pub fn keepers(&self) -> usize {
+        *self.keepers.count.borrow()
+    }
+
+    /// [`Self::keepers`] as a watch.
+    pub fn keepers_watch(&self) -> watch::Receiver<usize> {
+        self.keepers.count.subscribe()
+    }
+
+    /// Turns true when the daemon stops, for any reason.
+    pub fn stopped(&self) -> watch::Receiver<bool> {
+        self.info.stop.subscribe()
+    }
+
+    /// The project check (D-A6ZZA) that a hello runs: when the project's `.rdy` is gone or
+    /// replaced, removes this daemon's run files that still name it and stops the daemon with
+    /// `ProjectGone`. True when the project is gone. False before the bind.
+    pub fn check_project(&self) -> bool {
+        self.check.check()
+    }
 }
 
 pub struct Daemon {
@@ -190,12 +255,13 @@ pub struct Daemon {
     readiness: Readiness,
     /// Set by the path that stops the daemon for a reason other than `Stopped`.
     reason: Arc<OnceLock<ExitReason>>,
-    /// Mirrors `info.connections` so `run` can watch it reach 0 (the idle timer).
-    count: Arc<watch::Sender<usize>>,
+    /// `info.connections` plus the holds, so `run` can watch the sum reach 0 (the idle timer).
+    keepers: Keepers,
     files: RunFiles,
     listener: Option<UnixListener>,
-    /// The identity of the project's `.rdy` at the bind: hellos from another project are refused.
-    project: Option<ProjectId>,
+    /// The project check; it holds the identity of the project's `.rdy` from the bind on, and
+    /// hellos from another project are refused.
+    check: Arc<ProjectCheck>,
     /// `DaemonHandle::tick`: an idle tick now.
     tick: Arc<Notify>,
 }
@@ -210,16 +276,32 @@ impl Daemon {
             connections: Arc::new(AtomicUsize::new(0)),
             stop: Arc::new(watch::channel(false).0),
         };
+        let reason = Arc::new(OnceLock::new());
+        let files = RunFiles::default();
+        let keepers = Keepers {
+            connections: Arc::clone(&info.connections),
+            holds: Arc::new(AtomicUsize::new(0)),
+            count: Arc::new(watch::channel(0).0),
+        };
+        let check = Arc::new(ProjectCheck {
+            root: config.run.root(),
+            project: OnceLock::new(),
+            reason: Arc::clone(&reason),
+            run: config.run.clone(),
+            files: files.clone(),
+            pid: info.pid,
+            stop: Arc::clone(&info.stop),
+        });
         Daemon {
             config,
             handler,
             info,
             readiness: Readiness::new(),
-            reason: Arc::new(OnceLock::new()),
-            count: Arc::new(watch::channel(0).0),
-            files: RunFiles::default(),
+            reason,
+            keepers,
+            files,
             listener: None,
-            project: None,
+            check,
             tick: Arc::new(Notify::new()),
         }
     }
@@ -234,6 +316,8 @@ impl Daemon {
             run: self.config.run.clone(),
             files: self.files.clone(),
             tick: Arc::clone(&self.tick),
+            keepers: self.keepers.clone(),
+            check: Arc::clone(&self.check),
         }
     }
 
@@ -242,7 +326,7 @@ impl Daemon {
     pub async fn bind(&mut self) -> io::Result<()> {
         let (listener, path, project) = socket::bind(&self.config.run).await?;
         self.files.bound(path);
-        self.project = Some(project);
+        let _ = self.check.project.set(project);
         self.listener = Some(listener);
         Ok(())
     }
@@ -255,7 +339,7 @@ impl Daemon {
         let (listener, project) = self
             .listener
             .take()
-            .zip(self.project)
+            .zip(self.check.project.get().copied())
             .ok_or_else(|| io::Error::other("run before bind"))?;
         log(&format!(
             "listening on {}",
@@ -272,10 +356,11 @@ impl Daemon {
             files: self.files.clone(),
             project,
             root: self.config.run.root(),
+            check: Arc::clone(&self.check),
         });
         let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
-        let mut count = self.count.subscribe();
+        let mut count = self.keepers.count.subscribe();
         // armed at the start (no connections yet) and on each drop of the count to 0
         let mut idle_at = idle.map(|t| tokio::time::Instant::now() + t);
         // the project check while no connection is open (a connection checks at its hello)
@@ -315,15 +400,13 @@ impl Daemon {
                 }
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
-                        let connections = &self.info.connections;
-                        self.count.send_modify(|n| {
-                            *n = connections.fetch_add(1, Ordering::SeqCst) + 1;
+                        self.keepers.update(|k| {
+                            k.connections.fetch_add(1, Ordering::SeqCst);
                         });
                         idle_at = None;
                         let end = ConnEnd {
                             sessions: self.info.sessions.clone(),
-                            connections: Arc::clone(&self.info.connections),
-                            count: Arc::clone(&self.count),
+                            keepers: self.keepers.clone(),
                             handler: Arc::clone(&self.handler),
                             session: None,
                         };
@@ -475,6 +558,60 @@ struct Conn {
     /// The project this daemon serves (its `.rdy` at the bind) and its canonical root.
     project: ProjectId,
     root: PathBuf,
+    check: Arc<ProjectCheck>,
+}
+
+/// The project check (final ruling, D-A6ZZA), shared by every socket connection, the idle tick
+/// and every `DaemonHandle` (the site runs it at each accepted HTTP connection, ls6).
+struct ProjectCheck {
+    /// The canonical project root.
+    root: PathBuf,
+    /// The identity of the project's `.rdy` at the bind; unset before it.
+    project: OnceLock<ProjectId>,
+    reason: Arc<OnceLock<ExitReason>>,
+    run: RunDir,
+    files: RunFiles,
+    pid: u32,
+    stop: Arc<watch::Sender<bool>>,
+}
+
+impl ProjectCheck {
+    /// Whether `<root>/.rdy` (from `lstat`) is no longer `project`, the `.rdy` this daemon bound
+    /// with: gone, or another directory (a restore, a copy moved into place).
+    fn gone(&self, project: ProjectId) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(self.root.join(".rdy")) {
+            Ok(m) => {
+                ProjectId {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                } != project
+            }
+            Err(_) => true,
+        }
+    }
+
+    /// When the project is gone, removes this daemon's run files that still name it
+    /// (`RunFiles::remove_if_ours`), then stops with `ProjectGone`. True when the project is
+    /// gone; false before the bind.
+    fn check(&self) -> bool {
+        let Some(project) = self.project.get().copied() else {
+            return false;
+        };
+        if !self.gone(project) {
+            return false;
+        }
+        if self.reason.set(ExitReason::ProjectGone).is_ok() {
+            log(&format!(
+                "the project's .rdy at {} is gone or replaced; exiting",
+                self.root.display()
+            ));
+        }
+        // before any reply: a client's retry may start a successor at once
+        self.files.remove_if_ours(&self.run, project, self.pid);
+        self.stop.send_replace(true);
+        true
+    }
 }
 
 /// The refusal of a hello from another project: the daemon on `socket` serves the project at
@@ -510,8 +647,7 @@ fn another_project(socket: &Path, root: &Path, pid: u32, stopping: bool) -> Erro
 /// the session if one was opened, calls `session_ended` once, and uncounts the connection.
 struct ConnEnd {
     sessions: Sessions,
-    connections: Arc<AtomicUsize>,
-    count: Arc<watch::Sender<usize>>,
+    keepers: Keepers,
     handler: Arc<dyn Handler>,
     session: Option<SessionInfo>,
 }
@@ -528,10 +664,10 @@ impl Drop for ConnEnd {
                 log(&format!("session_ended panicked for session {}", s.id));
             }
         }
-        // under the watch's lock, so concurrent ends publish their counts in order
-        let connections = &self.connections;
-        self.count.send_modify(|n| {
-            *n = connections.fetch_sub(1, Ordering::SeqCst) - 1;
+        // under the watch's lock, so concurrent ends publish their counts in order; the sum
+        // keeps the holds
+        self.keepers.update(|k| {
+            k.connections.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }
@@ -571,39 +707,10 @@ async fn close_after_reply(mut stream: UnixStream, reply: &HelloReply) {
 }
 
 impl Conn {
-    /// Whether `<root>/.rdy` (from `lstat`) is no longer the `.rdy` this daemon bound with: gone,
-    /// or another directory (a restore, a copy moved into place).
-    fn project_gone(&self) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::symlink_metadata(self.root.join(".rdy")) {
-            Ok(m) => {
-                ProjectId {
-                    dev: m.dev(),
-                    ino: m.ino(),
-                } != self.project
-            }
-            Err(_) => true,
-        }
-    }
-
-    /// The project check (final ruling): when the project is gone, removes this daemon's run
-    /// files that still name it (`RunFiles::remove_if_ours`), then stops with `ProjectGone`. True
-    /// when the project is gone. Run at each hello and on the idle tick.
+    /// The project check (final ruling, [`ProjectCheck::check`]). Run at each hello and on the
+    /// idle tick.
     fn check_project(&self) -> bool {
-        if !self.project_gone() {
-            return false;
-        }
-        if self.reason.set(ExitReason::ProjectGone).is_ok() {
-            log(&format!(
-                "the project's .rdy at {} is gone or replaced; exiting",
-                self.root.display()
-            ));
-        }
-        // before any reply: a client's retry may start a successor at once
-        self.files
-            .remove_if_ours(&self.run, self.project, self.info.pid);
-        self.info.stop.send_replace(true);
-        true
+        self.check.check()
     }
 
     async fn serve(self: Arc<Self>, mut stream: UnixStream, mut end: ConnEnd) {

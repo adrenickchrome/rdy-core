@@ -3,6 +3,7 @@
 //! the session-end hooks.
 use crate::notify::{NotifyMsg, spawn_notifier};
 use crate::session::SessionId;
+use crate::site::SiteInfo;
 use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
@@ -15,7 +16,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 type SessionEndHook = Box<dyn Fn(SessionId) + Send + Sync>;
 
@@ -48,6 +49,9 @@ pub struct Shared {
     /// The live site's state: the last build of each served scope and its open pages. The
     /// writer tells it of each publish; its `rdy-site` worker builds off the writer.
     pub site: Arc<LiveSite>,
+    /// Where the site listens: set once by the daemon's start, after the bind and before
+    /// `ready` (ls6). Unset for a `Shared` that no daemon serves.
+    pub site_info: OnceLock<SiteInfo>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -98,6 +102,7 @@ impl Shared {
                 hub,
                 notify,
                 site,
+                site_info: OnceLock::new(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);

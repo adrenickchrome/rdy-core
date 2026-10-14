@@ -3242,6 +3242,7 @@ fn daemon_start(proj: &std::path::Path) -> ServeRun {
         detach: false,
         idle_timeout: Some(Duration::from_secs(60)),
         human_actor: Some("human:qa".into()),
+        site_lan_override: None,
     })
     .unwrap_or_else(|e| panic!("start the daemon: {e}"))
 }

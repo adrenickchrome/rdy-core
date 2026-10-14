@@ -1,0 +1,12 @@
+HTTP/1.1 404 Not Found
+Date: <date>
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+X-Frame-Options: DENY
+Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+Connection: close
+Content-Type: text/plain; charset=utf-8
+Content-Length: 74
+
+Not found. Ask your agent for the site's link (rdy_site), or run rdy site.
