@@ -186,6 +186,8 @@ fn spec_target(op: &str) -> Option<String> {
         "view_ls_50" => {
             "no spec target: view_list(all) over 50 open views plus the closed ones, cold (recorded for M2c)"
         }
+        "dump" => "no spec target: the whole project as one dump stream (reported)",
+        "load" => "no spec target: rebuild from a dump, with the index build and fsck (reported)",
         "lexicon_build" => {
             "no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1)"
         }
@@ -3029,6 +3031,40 @@ fn tier_render_cold(
     }));
 }
 
+/// `dump` and `load`: the whole project written as one dump, and a dump rebuilt into a new
+/// directory (index build and `fsck` included). Run with the project closed. The dump is
+/// written by a handle opened outside the timer; the loaded directory and the dump file are
+/// removed outside it.
+fn tier_dump(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) {
+    let r = Rdy::open(proj).expect("open");
+    let mut len = 0;
+    out.push(measure(&format!("dump{sfx}"), runs, |i| {
+        let s = r
+            .read()
+            .dump(&parent.join(format!("d{sfx}-{i}.rdydump")))
+            .expect("dump");
+        len = s.bytes;
+    }));
+    eprintln!("dump{sfx}: {len} bytes");
+    drop(r);
+    out.push(measure_timed(&format!("load{sfx}"), runs, |i| {
+        let file = parent.join(format!("d{sfx}-{i}.rdydump"));
+        let target = parent.join(format!("l{sfx}-{i}"));
+        let s = Instant::now();
+        rdy_engine::load::load(&file, &target).expect("load");
+        let t = s.elapsed();
+        std::fs::remove_dir_all(&target).expect("remove the loaded directory");
+        std::fs::remove_file(&file).expect("remove the dump");
+        t
+    }));
+}
+
 /// `site_build_live`: the live site's full build of canon, from one state (compare with
 /// `render`, which writes the same pages to disk).
 fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
@@ -3416,6 +3452,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     tier_cold_open(&mut out, &proj, "", 5);
     tier_render_cold(&mut out, &proj, dir.path(), "", 5);
+    tier_dump(&mut out, &proj, dir.path(), "", 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -4166,6 +4203,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
+    tier_dump(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
@@ -4754,6 +4792,31 @@ mod tests {
         assert_eq!(ops[1].runs, runs.write);
     }
 
+    /// The dump ops run end to end on a small tree: the project is landed and closed, as in the
+    /// tiers, and each op has a reported target and no spec ceiling.
+    #[test]
+    fn dlperf1_the_dump_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x646c_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        drop(r);
+        let mut out = vec![];
+        tier_dump(&mut out, &proj, dir.path(), "", 2);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["dump", "load"]);
+        for m in &out {
+            assert!(m.median_ms >= 0.0, "{m:?}");
+            assert!(spec_target(&m.op).is_some(), "{} has no target", m.op);
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
+        }
+        assert!(spec_target("load_50k").is_some());
+    }
+
     /// Final review M11 (minors item 27): `run_workload` runs the M2g ops, so taking the wiring
     /// out fails a test. Both tiers render cold after their warm render.
     #[test]
@@ -4772,9 +4835,11 @@ mod tests {
         );
         at("out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));");
         at("tier_render_cold(&mut out, &proj, dir.path(), \"\", 5);");
+        at("tier_dump(&mut out, &proj, dir.path(), \"\", 5);");
         let large = src.find("fn run_large_tier(").expect("run_large_tier");
         let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
         assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
+        assert!(large.contains("tier_dump(&mut out, &proj, parent, sfx, 3);"));
     }
 
     /// Final review M2 (minors item 34): `render_cold` renders on a fresh handle, so each run
