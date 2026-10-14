@@ -56,9 +56,51 @@ fn ls11_a_repeated_disagreement_shows_once() {
         .captures_iter(content)
         .map(|c| c.get(1).unwrap().as_str())
         .collect();
-    assert_eq!(texts, ["Doc 0"; 7], "{content}");
+    // (ls13, F1: seven links that would all read "Doc 0" each lead with their folder)
+    let want: Vec<String> = (0..7).map(|i| format!("Area {i} › Doc 0")).collect();
+    assert_eq!(texts, want, "{content}");
     // (the title attribute keeps the doc and section; only the link text is the doc title)
     assert!(!content.contains(">Doc 0 › "), "{content}");
+}
+
+/// ls13 (visual review F1, rule 2.4): when two or more links of one entry would read the same,
+/// each of them leads with its folder path, joined like the breadcrumb ("Area 3 › Doc 0"), and so
+/// does its hover title. No id and no count.
+#[test]
+fn ls13_same_titles_in_one_entry_show_their_folder() {
+    let (_d, r) = seven_copies();
+    let p = page(&r);
+    let content = p
+        .split_once("<h1>Where the docs disagree</h1>")
+        .expect("the page")
+        .1;
+    let re =
+        regex::Regex::new(r#"<a href="area-(\d)/doc-0\.html#[^"]*" title="([^"]*)">([^<]*)</a>"#)
+            .unwrap();
+    let mut seen = 0;
+    for c in re.captures_iter(content) {
+        let i = &c[1];
+        assert_eq!(&c[3], format!("Area {i} › Doc 0"), "the text: {content}");
+        assert_eq!(
+            &c[2],
+            format!("Area {i} › Doc 0 › Constraints"),
+            "the hover: {content}"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 7, "{content}");
+}
+
+/// ls13 guard: links whose texts differ keep their text as it was, with no folder.
+#[test]
+fn ls13_unique_titles_stay_as_they_are() {
+    let (_d, r, _s) = rdy_qa::golden::retired_reference();
+    let p = page(&r);
+    let content = p
+        .split_once("<h1>Where the docs disagree</h1>")
+        .expect("the page")
+        .1;
+    assert!(!content.contains("Area "), "{content}");
 }
 
 /// Final review M6 (b): one entry over seven pages folds too; its links keep the label of a
@@ -83,7 +125,7 @@ fn ls11_a_lone_entry_over_many_pages_folds() {
     assert_eq!(shown.matches("/doc-0.html#").count(), 5, "{content}");
     assert_eq!(folded.matches("/doc-0.html#").count(), 2, "{content}");
     assert!(
-        shown.contains(">Doc 0 › "),
+        shown.contains("Doc 0 › Claim 0"),
         "a lone entry's labels: {content}"
     );
 }

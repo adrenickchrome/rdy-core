@@ -10,7 +10,7 @@ use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// What a render reads, whichever page it builds.
 pub struct Shared<'a> {
@@ -883,26 +883,33 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
         .disagreements
         .iter()
         .map(|d| {
-            let mut links: Vec<DisagreementLink> = d
+            // each link with the folders above its doc, top first, as the breadcrumb names them
+            let built: Vec<(DisagreementLink, String)> = d
                 .blocks
                 .iter()
                 .filter_map(|id| {
                     let link = sh.link(page, id)?;
                     // the entries hold only blocks that have a place (`set_disagreements`)
                     let href = link.href?;
-                    let doc = sh.site.doc_of(id).map(|d| sh.site.label(d));
+                    let doc = sh.site.doc_of(id);
+                    let folders = doc.map(|doc| folder_path(sh, &doc.id)).unwrap_or_default();
+                    let doc = doc.map(|d| sh.site.label(d));
                     let text = match doc {
                         Some(doc) if d.repeats > 1 => doc,
                         Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
                         _ => link.label,
                     };
-                    Some(DisagreementLink {
-                        href,
-                        text,
-                        title: link.title,
-                    })
+                    Some((
+                        DisagreementLink {
+                            href,
+                            text,
+                            title: link.title,
+                        },
+                        folders,
+                    ))
                 })
                 .collect();
+            let mut links = tell_apart(built);
             let more = links.split_off(links.len().min(SHOWN_LINKS));
             DisagreementRow {
                 sentence: d.sentence,
@@ -912,6 +919,45 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
         })
         .collect();
     DisagreementsBody { entries }
+}
+
+/// The folders above `doc`, top first, joined as the breadcrumb and the hover join them
+/// (`Area 3 › Sub`); empty for a doc at the top level.
+fn folder_path(sh: &Shared, doc: &BlockId) -> String {
+    let chain = sh.site.chain(doc);
+    let folders = chain.split_last().map(|(_, f)| f).unwrap_or_default();
+    folders
+        .iter()
+        .filter_map(|id| sh.m.get(id))
+        .map(|b| sh.site.label(b))
+        .collect::<Vec<_>>()
+        .join(" › ")
+}
+
+/// The links of one entry, told apart (visual review F1, rule 2.4): when two or more of them
+/// would show the same text, each of those leads with its folder path; the same for the hover
+/// title. A link whose text is unique stays as it is.
+fn tell_apart(built: Vec<(DisagreementLink, String)>) -> Vec<DisagreementLink> {
+    let mut texts: HashMap<String, usize> = HashMap::new();
+    let mut titles: HashMap<String, usize> = HashMap::new();
+    for (l, _) in &built {
+        *texts.entry(l.text.clone()).or_default() += 1;
+        *titles.entry(l.title.clone()).or_default() += 1;
+    }
+    built
+        .into_iter()
+        .map(|(mut l, folders)| {
+            if !folders.is_empty() {
+                if texts[&l.text] > 1 {
+                    l.text = format!("{folders} › {}", l.text);
+                }
+                if !l.title.is_empty() && titles[&l.title] > 1 {
+                    l.title = format!("{folders} › {}", l.title);
+                }
+            }
+            l
+        })
+        .collect()
 }
 
 fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
