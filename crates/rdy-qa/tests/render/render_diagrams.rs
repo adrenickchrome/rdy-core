@@ -136,3 +136,70 @@ setTimeout(() => {{ console.log(calls.join(',')); }}, 20);
         "the diagram is drawn once mermaid has loaded"
     );
 }
+
+/// ls13 (visual review F3, rule 2.9): Mermaid sizes each label box from the text as it measures
+/// it when it draws. The site's text face (Onest, `font-display: swap`) was often still loading
+/// at DOMContentLoaded, so the boxes were measured in the fallback face and cut the last letters
+/// once Onest swapped in. The init waits until the text face has loaded before it draws.
+#[test]
+fn ls13_the_init_draws_only_once_the_text_face_has_loaded() {
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "ls13_the_init_draws_only_once_the_text_face_has_loaded",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
+        );
+        return;
+    }
+    let init = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rdy-render/theme/rdy-standard/js/mermaid-init.js");
+    let init = std::fs::read_to_string(&init).unwrap();
+    let harness = format!(
+        r#"
+const listeners = {{}};
+const calls = [];
+let loaded;
+const pre = {{ dataset: {{}}, textContent: 'graph TD\nA-->B', closest() {{ return figure; }} }};
+const figure = {{ classList: {{ add() {{}}, remove() {{}} }}, querySelector() {{ return {{ textContent: 'The flow' }}; }} }};
+global.window = global;
+global.document = {{
+  readyState: 'complete',
+  documentElement: {{ hasAttribute() {{ return false; }} }},
+  addEventListener(n, f) {{ (listeners[n] = listeners[n] || []).push(f); }},
+  querySelectorAll() {{ return [pre]; }},
+  createElement() {{ return {{ className: '', querySelector() {{ return null; }}, set innerHTML(v) {{}} }}; }},
+  fonts: {{
+    load(spec) {{ calls.push('load ' + spec); return new Promise(r => {{ loaded = r; }}); }},
+    ready: Promise.resolve(),
+  }},
+}};
+global.getComputedStyle = () => ({{ getPropertyValue: (n) => n === '--font-text' ? " 'Onest', Arial, sans-serif" : '#fff' }});
+global.matchMedia = undefined;
+global.mermaid = {{
+  initialize() {{ calls.push('initialize'); }},
+  render() {{ calls.push('render'); return Promise.resolve({{ svg: '<svg></svg>' }}); }},
+}};
+(function () {{ {init} }})();
+setTimeout(() => {{
+  calls.push('fonts loaded');
+  loaded([]);
+  setTimeout(() => {{ console.log(calls.join(',')); }}, 20);
+}}, 20);
+"#
+    );
+    let out = std::process::Command::new("node")
+        .arg("-e")
+        .arg(&harness)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "load 14px 'Onest', Arial, sans-serif,fonts loaded,initialize,render",
+        "the diagram is measured in the page's face, not the fallback"
+    );
+}
