@@ -16,6 +16,9 @@ use std::path::Path;
 /// 9 (plan M2e1): REVIEW subject Pair, verdicts Tension and NoTension, kind TENSION (with advice and a relayed acceptance), refs pair/ and semantic/.
 /// 10 (plan M2e2): kind TRANSITION (a batch's tension and suspect moves, founder decision C, D-Z0EMP), and the index's open-tension and open-suspect tables.
 pub const STORE_FORMAT: u32 = 10;
+/// The first store format that a dump of format 1 carries (dl2, D-69AY3). A store of this
+/// format or a later one can move to a newer rdy with dump and load; an earlier one cannot.
+pub const FIRST_DUMP_STORE_FORMAT: u32 = 10;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The log ref holding `store_format`, in ASCII decimal.
@@ -59,17 +62,38 @@ impl Format {
     }
 }
 
-/// The one refusal for a store this binary does not open: `what` says how the store at
-/// `store_dir` tells it was written by another build.
-pub(crate) fn other_build(store_dir: &Path, what: &str) -> StoreError {
+/// The fix for a refusal with no store format number to go by.
+const RE_CREATE: &str = "re-create it with this rdy";
+
+/// The fix text for a store that names format `found` when this binary reads `current` (dl2, a
+/// closed rule): a newer format needs a newer rdy; a format from `FIRST_DUMP_STORE_FORMAT` up to
+/// the current one moves with dump and load; an earlier format is re-created.
+pub fn fix_for(found: u32, current: u32) -> &'static str {
+    if found > current {
+        "a newer rdy wrote this store: open it with that rdy or a later one"
+    } else if found >= FIRST_DUMP_STORE_FORMAT && found < current {
+        "dump it with the rdy that wrote it, move .rdy/store aside, then run rdy load <file> with this rdy"
+    } else {
+        RE_CREATE
+    }
+}
+
+/// The one refusal for a store this binary does not open, with the fix the caller chooses:
+/// `what` says how the store at `store_dir` tells it was written by another build.
+pub(crate) fn other_format(store_dir: &Path, what: &str, fix: &str) -> StoreError {
     StoreError::Format {
         message: format!(
             "this store was written by a different rdy build: {} {what}, and this rdy uses store \
              format {STORE_FORMAT}",
             store_dir.display()
         ),
-        fix: "re-create it with this rdy".into(),
+        fix: fix.into(),
     }
+}
+
+/// The refusal for a store with no format number to go by (the fix is to re-create it).
+pub(crate) fn other_build(store_dir: &Path, what: &str) -> StoreError {
+    other_format(store_dir, what, RE_CREATE)
 }
 
 /// The refusal for a store path where there is nothing: `rdy init` creates a store, and opening
@@ -81,7 +105,7 @@ pub(crate) fn no_store(store_dir: &Path) -> StoreError {
              uses store format {STORE_FORMAT}",
             store_dir.display()
         ),
-        fix: "re-create it with this rdy".into(),
+        fix: RE_CREATE.into(),
     }
 }
 
@@ -120,9 +144,10 @@ pub fn write_format_file(store_dir: &Path, f: Format) -> Result<(), StoreError> 
 /// Refuses a store of any format but this binary's.
 pub fn check_format(f: Format, store_dir: &Path) -> Result<(), StoreError> {
     if f.store_format != STORE_FORMAT {
-        return Err(other_build(
+        return Err(other_format(
             store_dir,
             &format!("has store format {}", f.store_format),
+            fix_for(f.store_format, STORE_FORMAT),
         ));
     }
     Ok(())

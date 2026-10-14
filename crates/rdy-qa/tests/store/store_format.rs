@@ -2,12 +2,15 @@
 //! a store of any other format is refused before anything is written; the store is .rdy/store.
 use rdy_engine::{Rdy, RdyError};
 use rdy_qa::fixtures::*;
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT};
+use rdy_store::format::{FIRST_DUMP_STORE_FORMAT, REF_STORE_FORMAT, STORE_FORMAT, fix_for};
 use rdy_store::index::Index;
 use rdy_store::segment::SegmentLog;
 use rdy_store::{Store, StoreError, kinds};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+const RE_CREATE: &str = "re-create it with this rdy";
+const NEWER_RDY: &str = "a newer rdy wrote this store: open it with that rdy or a later one";
 
 /// The FORMAT text of this binary's format.
 fn current_text() -> String {
@@ -78,7 +81,7 @@ fn fmt3_a_lost_format_file_is_refused_and_not_rewritten() {
     }
     std::fs::remove_file(dir.join("FORMAT")).unwrap();
     let before = tree(&dir);
-    refused(&dir, "has no FORMAT file");
+    refused(&dir, "has no FORMAT file", RE_CREATE);
     assert_eq!(tree(&dir), before);
 }
 
@@ -98,7 +101,7 @@ fn fmt1_an_unreadable_format_file_names_its_fix() {
 }
 
 /// Review Focus 3: the one refusal, whatever told us the store is another build's.
-fn refused(dir: &Path, what: &str) -> RdyError {
+fn refused(dir: &Path, what: &str, fix: &str) -> RdyError {
     let e = Store::open(dir)
         .err()
         .expect("a store of another format is refused");
@@ -112,7 +115,7 @@ fn refused(dir: &Path, what: &str) -> RdyError {
             dir.display()
         )
     );
-    assert_eq!(e.fix, "re-create it with this rdy");
+    assert_eq!(e.fix, fix);
     e
 }
 
@@ -128,7 +131,7 @@ fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
     )
     .unwrap();
     let before = tree(&dir);
-    refused(&dir, &format!("has store format {newer}"));
+    refused(&dir, &format!("has store format {newer}"), NEWER_RDY);
     assert_eq!(tree(&dir), before, "nothing under the store changed");
 }
 
@@ -143,7 +146,11 @@ fn fmt2_an_m2_0_store_is_refused() {
     )
     .unwrap();
     let before = tree(&dir);
-    refused(&dir, "has a FORMAT file with no store_format line");
+    refused(
+        &dir,
+        "has a FORMAT file with no store_format line",
+        RE_CREATE,
+    );
     assert_eq!(tree(&dir), before);
 }
 
@@ -156,7 +163,7 @@ fn fmt2_a_log_that_says_another_format_is_refused() {
         .set_refs(vec![(REF_STORE_FORMAT.into(), b"2".to_vec())])
         .unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
-    refused(&dir, "has store format 2");
+    refused(&dir, "has store format 2", RE_CREATE);
     assert_eq!(
         std::fs::read(dir.join("segments/seg-000000.log")).unwrap(),
         seg
@@ -185,7 +192,7 @@ fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
     }
     std::fs::write(dir.join("FORMAT"), current_text()).unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
-    refused(&dir, "has a log with no store format");
+    refused(&dir, "has a log with no store format", RE_CREATE);
     assert_eq!(
         std::fs::read(dir.join("segments/seg-000000.log")).unwrap(),
         seg
@@ -463,4 +470,35 @@ fn hd2_an_index_without_the_format_ref_is_rebuilt_at_open() {
         Some(STORE_FORMAT.to_string().into_bytes())
     );
     assert_eq!(s.get_blob(&h).unwrap(), b"x");
+}
+
+#[test]
+fn dl2_a_store_of_an_older_dumpable_format_says_dump_and_load() {
+    // no store reaches this case at this release (10 is current); the next bump does
+    let next = STORE_FORMAT + 1;
+    assert_eq!(
+        fix_for(FIRST_DUMP_STORE_FORMAT, next),
+        "dump it with the rdy that wrote it, move .rdy/store aside, then run rdy load <file> with this rdy"
+    );
+    assert_eq!(
+        fix_for(STORE_FORMAT, next),
+        fix_for(FIRST_DUMP_STORE_FORMAT, next)
+    );
+}
+
+#[test]
+fn dl2_a_store_from_before_dump_says_re_create() {
+    assert_eq!(
+        fix_for(FIRST_DUMP_STORE_FORMAT - 1, STORE_FORMAT + 1),
+        "re-create it with this rdy"
+    );
+    assert_eq!(fix_for(2, STORE_FORMAT), "re-create it with this rdy");
+}
+
+#[test]
+fn dl2_a_store_of_a_newer_format_says_use_a_newer_rdy() {
+    assert_eq!(
+        fix_for(STORE_FORMAT + 1, STORE_FORMAT),
+        "a newer rdy wrote this store: open it with that rdy or a later one"
+    );
 }
