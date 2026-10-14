@@ -284,6 +284,13 @@ impl ReadState {
         matches!(scope, Scope::At(h) if Some(*h) != self.canon_head())
     }
 
+    /// True when `scope` has no coverage: a past landing (FW-H7) or a proposal version (ls8).
+    /// Overviews, briefings, fact sheets and search hits leave coverage out silently there, and
+    /// a coverage filter or sort is refused (`coverage_scope`).
+    pub fn coverage_left_out(&self, scope: &Scope) -> bool {
+        matches!(scope, Scope::Proposal(_)) || self.is_past_landing(scope)
+    }
+
     /// The scope coverage is computed in for `scope`: canon's head is canon. `E_BAD_INPUT` for a
     /// past landing: coverage describes the current state only, and coverage over time belongs
     /// to rdyhub (FW-H7). `E_BAD_INPUT` for a proposal version (ls8): its view, or canon, has

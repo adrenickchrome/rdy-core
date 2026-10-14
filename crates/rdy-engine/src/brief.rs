@@ -1435,7 +1435,7 @@ impl ReadState {
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         // a coverage read error never fails a briefing (a briefing gates writes): it is reported
-        let (coverage, coverage_error) = if self.is_past_landing(scope) {
+        let (coverage, coverage_error) = if self.coverage_left_out(scope) {
             (None, None)
         } else {
             match self.brief_coverage(scope, ids, &governs, &dependents, &will_go_stale) {

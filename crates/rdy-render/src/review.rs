@@ -110,12 +110,18 @@ impl Review {
 
 /// The scope a draft is read against: canon at the landing the view is based on, or canon itself
 /// when that is canon's head (or the view floats). A proposal version (ls8) is read against canon
-/// at the landing it is based on (none before the first landing). Canon and as-of scopes have no
-/// base.
+/// at the landing it is based on. A version made before the first landing is based on the empty
+/// canon: while nothing has landed that is canon, so it is reviewed as a view is (D-N5NSN, the
+/// task-8 ruling); once canon has landed no scope names that base, and it has none. Canon and
+/// as-of scopes have no base.
 pub fn base_of(rdy: &ReadState, scope: &Scope) -> Option<Scope> {
     if let Scope::Proposal(p) = scope {
         // an unreadable version has no base here: its own read reports the error
-        return rdy.proposal_base(p).ok().flatten().map(Scope::At);
+        return match rdy.proposal_base(p).ok()? {
+            Some(at) => Some(Scope::At(at)),
+            None if rdy.canon_head().is_none() => Some(Scope::Canon),
+            None => None,
+        };
     }
     let Scope::View(v) = scope else {
         return None;

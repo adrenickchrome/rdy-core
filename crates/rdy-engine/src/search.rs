@@ -393,12 +393,12 @@ impl ReadState {
         // `sort: coverage` lists the lowest first, so only those two need every hit's coverage
         // before the page cut, and only they put it in the page token (membership and order
         // depend on it). Any other search gives coverage to the entries of its page only. A
-        // past landing has no coverage, so a search there carries none.
+        // past landing or a proposal version has no coverage, so a search there carries none.
         let wants_coverage = q.filters.coverage_below.is_some() || q.filters.sort.is_some();
-        // A filter or sort on coverage at a past landing is refused. A coverage read error never
-        // fails a search: the hits carry no coverage (so `coverage_below` keeps none) and
-        // `coverage_error` says why.
-        let past = self.is_past_landing(scope);
+        // A filter or sort on coverage at a past landing or in a proposal version is refused. A
+        // coverage read error never fails a search: the hits carry no coverage (so
+        // `coverage_below` keeps none) and `coverage_error` says why.
+        let past = self.coverage_left_out(scope);
         if past && wants_coverage {
             self.coverage_scope(scope)?;
         }
