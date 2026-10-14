@@ -268,10 +268,25 @@ impl Hosted {
         Hosted::serve(dir, "human:qa", lan_override)
     }
 
+    /// `start_with`, as the version of the `rdy` binary, so that a real `rdy` client (its
+    /// `mcp` proxy, its CLI) talks to this host and does not replace it.
+    pub fn start_for_binary(dir: tempfile::TempDir, lan_override: Option<LanOverride>) -> Hosted {
+        Hosted::serve_as(dir, "human:qa", lan_override, env!("CARGO_PKG_VERSION"))
+    }
+
     fn serve(dir: tempfile::TempDir, human: &str, lan_override: Option<LanOverride>) -> Hosted {
+        Hosted::serve_as(dir, human, lan_override, "t")
+    }
+
+    fn serve_as(
+        dir: tempfile::TempDir,
+        human: &str,
+        lan_override: Option<LanOverride>,
+        version: &str,
+    ) -> Hosted {
         let run = start(ServeOptions {
             project: dir.path().to_path_buf(),
-            version: "t".into(),
+            version: version.into(),
             detach: false,
             idle_timeout: Some(Duration::from_secs(60)),
             human_actor: Some(human.into()),
