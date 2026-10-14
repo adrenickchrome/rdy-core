@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{LABEL_SLOT, Mode, assets, home, nav, review, search, toc, trail, version};
+use crate::{Mode, assets, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -526,13 +526,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         title,
         root: "../".repeat(page_url.matches('/').count()),
         init_js: assets::INIT_JS,
-        version: match sh.mode {
-            Mode::Static => version::label(sh.position),
-            Mode::Live => version::Label {
-                text: LABEL_SLOT.to_string(),
-                ..version::label(sh.position)
-            },
-        },
+        version: version::label(sh.position),
         crumbs: if redirect {
             vec![]
         } else {

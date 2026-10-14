@@ -48,20 +48,110 @@ fn tpl(e: minijinja::Error) -> RdyError {
     )
 }
 
+/// The version label's text, as the `label` filter marks it in a template (`{{ version.text |
+/// label }}`): the formatter writes it as text and records the bytes it took in the page.
+#[derive(Debug)]
+struct LabelText(String);
+
+impl minijinja::value::Object for LabelText {}
+
+/// The page being rendered on this thread, and where the label went in it. A page renders into
+/// it ([`render_page`]), so the formatter knows how many bytes come before the label.
+#[derive(Default)]
+struct PageOut {
+    bytes: Vec<u8>,
+    label_at: Vec<std::ops::Range<usize>>,
+}
+
+thread_local! {
+    static PAGE_OUT: std::cell::RefCell<Option<PageOut>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`].
+struct PageSink;
+
+impl std::io::Write for PageSink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        PAGE_OUT.with_borrow_mut(|o| match o {
+            Some(o) => {
+                o.bytes.extend_from_slice(b);
+                Ok(b.len())
+            }
+            None => Err(std::io::Error::other("no page is being rendered")),
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Renders a page template: its bytes, and the byte ranges where it wrote the version label.
+fn render_page<S: Serialize>(
+    env: &minijinja::Environment<'static>,
+    name: &str,
+    ctx: S,
+) -> Result<(Vec<u8>, Vec<std::ops::Range<usize>>), RdyError> {
+    let t = env.get_template(name).map_err(tpl)?;
+    PAGE_OUT.set(Some(PageOut::default()));
+    let rendered = t.render_captured_to(ctx, PageSink).map(drop);
+    let out = PAGE_OUT.take().unwrap_or_default();
+    rendered.map_err(tpl)?;
+    Ok((out.bytes, out.label_at))
+}
+
+fn write_failure() -> minijinja::Error {
+    minijinja::Error::new(minijinja::ErrorKind::WriteFailure, "cannot write the page")
+}
+
+/// Writes the version label (a [`LabelText`]) into the page [`render_page`] is rendering, and
+/// records the bytes it took. The label must go straight into the page: written into a captured
+/// block (a macro call, `{% set %}`, `{% filter %}`), its place would be unknown, so that is an
+/// error.
+fn write_label(
+    out: &mut minijinja::Output,
+    state: &minijinja::State,
+    label: &LabelText,
+) -> Result<(), minijinja::Error> {
+    let text = match state.auto_escape() {
+        minijinja::AutoEscape::Html => escape(&label.0),
+        _ => label.0.clone(),
+    };
+    let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
+    let start = len();
+    out.write_str(&text).map_err(|_| write_failure())?;
+    match (start, len()) {
+        (Some(start), Some(end)) if end - start == text.len() => {
+            PAGE_OUT.with_borrow_mut(|o| {
+                if let Some(o) = o {
+                    o.label_at.push(start..end);
+                }
+            });
+            Ok(())
+        }
+        _ => Err(minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            "the version label is written only straight into a page that render_page renders",
+        )),
+    }
+}
+
 /// Writes a value into a template: text is HTML-escaped as `html::escape` does, so that a slash
-/// in a path stays a slash (minijinja's own escape turns it into `&#x2f;`).
+/// in a path stays a slash (minijinja's own escape turns it into `&#x2f;`); the version label
+/// goes through [`write_label`].
 fn format_value(
     out: &mut minijinja::Output,
     state: &minijinja::State,
     value: &minijinja::Value,
 ) -> Result<(), minijinja::Error> {
+    if let Some(label) = value.downcast_object_ref::<LabelText>() {
+        return write_label(out, state, label);
+    }
     if matches!(state.auto_escape(), minijinja::AutoEscape::Html)
         && !value.is_safe()
         && let Some(text) = value.as_str()
     {
-        return out.write_str(&escape(text)).map_err(|_| {
-            minijinja::Error::new(minijinja::ErrorKind::WriteFailure, "cannot write the page")
-        });
+        return out.write_str(&escape(text)).map_err(|_| write_failure());
     }
     minijinja::escape_formatter(out, state, value)
 }
@@ -69,6 +159,9 @@ fn format_value(
 fn env() -> Result<minijinja::Environment<'static>, RdyError> {
     let mut env = minijinja::Environment::new();
     env.set_formatter(format_value);
+    env.add_filter("label", |text: String| {
+        minijinja::Value::from_object(LabelText(text))
+    });
     macro_rules! templates {
         ($($name:literal),* $(,)?) => {
             $(env
@@ -373,24 +466,28 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
     }
 }
 
-/// How a build writes the version label: as text (`rdy render --out`), or as [`LABEL_SLOT`] for
-/// the live site, which fills it in when it serves a page.
+/// Which site a build is for: `rdy render --out` (static), or the live site `rdy serve` serves,
+/// whose noscript sentence also names live updates (ledger O9). Both write the same label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Static,
     Live,
 }
 
-/// The one character a [`Mode::Live`] build writes wherever the version label's text goes: in the
-/// version pill, the colophon, `llms.txt` and `llms-full.txt`. No other file holds it.
-pub const LABEL_SLOT: char = '\u{E002}';
-
 /// A built site: every file by its site-relative path (`index.html`, `go/p-AAAAA.html`,
 /// `assets/site.css`, `search-index.json`, `llms.txt`), with its bytes.
 pub struct SiteFiles {
     pub files: BTreeMap<String, Vec<u8>>,
-    /// The version label's text, as a [`Mode::Static`] build writes it.
+    /// The version label's text, as the build wrote it.
     pub label: String,
+    /// Where the build wrote the label: for each file, the byte ranges, in order. Only the HTML
+    /// pages (the version pill and the colophon; never a permalink page under `go/`), `llms.txt`
+    /// and `llms-full.txt` (the head line) have ranges; a file with none has no entry. The build
+    /// records each range as it writes the label and never searches its output for it. The live
+    /// site's filler puts a new label into exactly these ranges (escaped in a page, raw in the
+    /// llms files), last range first, and touches nothing else: a doc can hold the label's text
+    /// or any other character.
+    pub label_at: BTreeMap<String, Vec<std::ops::Range<usize>>>,
     pub summary: RenderSummary,
 }
 
@@ -477,18 +574,18 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     }
     // the pages are rendered on a few threads
     let pages = par_map(&contexts, |ctx| {
-        let html = env
-            .get_template(template_of(ctx.kind))
-            .map_err(tpl)?
-            .render(ctx)
-            .map_err(tpl)?;
-        Ok((ctx.page_url.clone(), html))
+        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
+        Ok((ctx.page_url.clone(), html, at))
     })?;
     summary.pages = pages.len();
-    let mut files: BTreeMap<String, Vec<u8>> = pages
-        .into_iter()
-        .map(|(path, html)| (path, html.into_bytes()))
-        .collect();
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut label_at: BTreeMap<String, Vec<std::ops::Range<usize>>> = BTreeMap::new();
+    for (path, html, at) in pages {
+        if !at.is_empty() {
+            label_at.insert(path.clone(), at);
+        }
+        files.insert(path, html);
+    }
 
     // a permalink page for every folder, doc and block that has a place on the site: the
     // template is rendered once, and every page fills in its target's href and label; a doc page
@@ -519,30 +616,23 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
                 "the prebuilt permalink page differs from the template"
             );
         }
+        label_at.remove(&page_url);
         files.insert(page_url, html.into_bytes());
         summary.redirects += 1;
     }
 
-    let static_label = version::label(&position);
-    let label = match mode {
-        Mode::Static => static_label.clone(),
-        Mode::Live => version::Label {
-            text: LABEL_SLOT.to_string(),
-            ..static_label.clone()
-        },
-    };
+    let label = version::label(&position);
     files.insert(
         "search-index.json".into(),
         search::bytes(&index, &site_name),
     );
-    files.insert(
-        "llms.txt".into(),
-        llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label),
-    );
-    files.insert(
-        "llms-full.txt".into(),
-        llms::full_bytes(&contexts, &site_name, description.as_deref(), &label),
-    );
+    let (llms, at) =
+        llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
+    files.insert("llms.txt".into(), llms);
+    label_at.insert("llms.txt".into(), vec![at]);
+    let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
+    files.insert("llms-full.txt".into(), llms);
+    label_at.insert("llms-full.txt".into(), vec![at]);
     for (path, bytes) in assets::files(has_mermaid) {
         files.insert(path.into(), bytes);
     }
@@ -552,7 +642,8 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     }
     Ok(SiteFiles {
         files,
-        label: static_label.text,
+        label: label.text,
+        label_at,
         summary,
     })
 }
@@ -803,5 +894,43 @@ mod swap_tests {
         assert_eq!(swap_by_rename(&staging, &out, &old), Swap::Swapped(None));
         assert!(out.join("new").exists());
         assert!(!old.exists());
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn env_with(src: &'static str) -> minijinja::Environment<'static> {
+        let mut env = env().unwrap();
+        env.add_template("t.html", src).unwrap();
+        env
+    }
+
+    #[test]
+    fn a_page_records_where_it_wrote_the_label() {
+        let env = env_with("<p>{{ a | label }}</p><i>{{ a | label }}</i>\u{E002}{{ b }}");
+        let ctx = serde_json::json!({"a": "x<y", "b": "x<y"});
+        let (bytes, at) = render_page(&env, "t.html", ctx).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "<p>x&lt;y</p><i>x&lt;y</i>\u{E002}x&lt;y"
+        );
+        assert_eq!(at, vec![3..9, 16..22]);
+    }
+
+    #[test]
+    fn the_label_in_a_captured_block_is_refused() {
+        let env = env_with("{% set x %}{{ a | label }}{% endset %}{{ x }}");
+        let e = render_page(&env, "t.html", serde_json::json!({"a": "v1"})).unwrap_err();
+        assert!(e.message.contains("version label"), "{e}");
+    }
+
+    #[test]
+    fn the_label_outside_a_page_render_is_refused() {
+        let env = env_with("{{ a | label }}");
+        let t = env.get_template("t.html").unwrap();
+        let e = t.render(serde_json::json!({"a": "v1"})).unwrap_err();
+        assert!(e.to_string().contains("version label"), "{e}");
     }
 }
