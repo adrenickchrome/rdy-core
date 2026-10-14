@@ -28,7 +28,7 @@ pub use merge::{
 pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
-    OpenReport, Store, StoreReader, lock_error,
+    OpenReport, Store, StoreLock, StoreReader, lock_error,
 };
 mod state;
 pub use state::{ViewRecord, apply_op};

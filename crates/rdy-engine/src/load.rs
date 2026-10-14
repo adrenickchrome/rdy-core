@@ -9,22 +9,30 @@
 //!    `.rdy/store`, no `.rdy/store.loading`, and no project file with other bytes than the dump.
 //!    A file with the same bytes is kept.
 //! 3. Create the project directory and its `.rdy` if missing, then `.rdy/store.loading`.
-//! 4. Ingest every batch at its source place; the trailer must verify.
+//! 4. Ingest every batch at its source place; the trailer must verify. The batches must end
+//!    where the header says the source log ends, and there must be at least one (every store
+//!    holds its format batch from its first open).
 //! 5. Write each project file the target does not have.
-//! 6. Rename `.rdy/store.loading` to `.rdy/store`.
-//! 7. Open the project (the index build), run `fsck`, and count landings, tags and views.
+//! 6. Take the new store's lock, then rename `.rdy/store.loading` to `.rdy/store`. The load
+//!    holds the lock until it ends, so no other rdy process opens the project before step 7
+//!    ends (D-R7N9J, D-A6ZZA).
+//! 7. Open the project under that lock (the index build), run `fsck`, and count landings, tags
+//!    and views.
 //!
 //! A failure in steps 3 to 7 removes the store, every file step 5 wrote and every directory
-//! step 3 or 5 created, so the target is as it was. The load never deletes a file it did not
-//! write: a pack file at the target that the dump does not hold stays where it is.
+//! step 3 or 5 created, so the target is as it was. The removal runs while the load holds the
+//! store's lock; a load that finds it does not hold the lock removes nothing. The load never
+//! deletes a file it did not write: a pack file at the target that the dump does not hold stays
+//! where it is.
 use crate::Rdy;
-use crate::error::{E_ALREADY_EXISTS, E_DUMP, E_IO, E_LOCKED, RdyError};
+use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_IO, E_LOCKED, RdyError};
 use crate::fsck::FsckReport;
-use rdy_store::StoreError;
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader};
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
 use rdy_store::layout::STORE_DIR;
+use rdy_store::segment::Location;
+use rdy_store::{StoreError, StoreLock};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Read, Write};
@@ -59,7 +67,14 @@ pub struct LoadSummary {
 /// load leaves the target as it was.
 pub fn load(file: &Path, project: &Path) -> Result<LoadSummary, RdyError> {
     // step 1: the prelude and the header
-    let f = File::open(file).map_err(|e| io_at(file, e))?;
+    let f = File::open(file).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => RdyError::new(
+            E_BAD_INPUT,
+            format!("{} does not exist", file.display()),
+            "check the path of the dump",
+        ),
+        _ => io_at(file, e),
+    })?;
     let (mut reader, dump_format, header) =
         DumpReader::open(BufReader::new(f)).map_err(|e| read_error(file, e))?;
     // step 2: the project files come first; then check the target, writing nothing yet
@@ -75,7 +90,8 @@ pub fn load(file: &Path, project: &Path) -> Result<LoadSummary, RdyError> {
     let absent = check_target(project, &files)?;
     let mut made = Made::default();
     let out = (|| {
-        let (batches, frames) = ingest(file, project, &mut reader, first, &mut made)?;
+        let (batches, frames) =
+            ingest(file, project, &mut reader, first, header.log_end, &mut made)?;
         let mut written = Vec::new();
         let mut kept = Vec::new();
         for (path, bytes) in &files {
@@ -86,24 +102,20 @@ pub fn load(file: &Path, project: &Path) -> Result<LoadSummary, RdyError> {
                 kept.push(path.clone());
             }
         }
-        // step 6: the store takes its place
+        // step 6: the store takes its place, locked by this load until the load ends
         let dot = project.join(".rdy");
         let loading = dot.join(LOADING_DIR);
         let store = dot.join(STORE_DIR);
         if std::fs::symlink_metadata(&store).is_ok() {
             return Err(has_store(project));
         }
+        let lock = StoreLock::take(&loading).map_err(|e| target_error(&loading, e))?;
+        made.lock = Some(lock.clone());
         std::fs::rename(&loading, &store).map_err(|e| io_at(&loading, e))?;
         made.store = Some(store);
         sync_dir(&dot).map_err(|e| io_at(&dot, e))?;
         // step 7: the index build, fsck and the counts
-        let (fsck, tags, views) = check(project).map_err(|e| {
-            RdyError::new(
-                E_DUMP,
-                format!("the dump loads, but the project fails fsck: {}", e.message),
-                "run rdy fsck on the source project, repair it, then dump again",
-            )
-        })?;
+        let (fsck, tags, views) = check(project, &lock, &mut made)?;
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format,
@@ -178,12 +190,15 @@ fn check_target(project: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<Strin
 }
 
 /// Steps 3 and 4: creates the project and its `.rdy` if missing, then streams every batch into
-/// `.rdy/store.loading` and verifies the trailer. Returns the batches and frames written.
+/// `.rdy/store.loading` and verifies the trailer. The batches must end at `log_end`, the end of
+/// the source log that the header names, and there must be at least one. Returns the batches
+/// and frames written.
 fn ingest<R: Read>(
     file: &Path,
     project: &Path,
     reader: &mut DumpReader<R>,
     first: Option<(u64, DumpBatch)>,
+    log_end: Location,
     made: &mut Made,
 ) -> Result<(u64, u64), RdyError> {
     let dot = project.join(".rdy");
@@ -221,6 +236,15 @@ fn ingest<R: Read>(
         };
     }
     let report = ingest.finish().map_err(|e| target_error(&loading, e))?;
+    if report.end != log_end {
+        return Err(incomplete(format!(
+            "its header says the log ends at segment {} offset {}, but its batches end at segment {} offset {}",
+            log_end.segment, log_end.offset, report.end.segment, report.end.offset
+        )));
+    }
+    if report.batches == 0 {
+        return Err(incomplete("it holds no batches".to_string()));
+    }
     Ok((report.batches, report.frames))
 }
 
@@ -243,15 +267,48 @@ fn write_new(project: &Path, path: &str, bytes: &[u8], made: &mut Made) -> Resul
     sync_dir(parent).map_err(|e| io_at(parent, e))
 }
 
-/// Step 7: opens the loaded project (which builds its index from the log), runs `fsck`, counts
-/// the tags and views, and closes it.
-fn check(project: &Path) -> Result<(FsckReport, usize, usize), RdyError> {
-    let r = Rdy::open(project)?;
-    let fsck = r.fsck()?;
-    let tags = r.store().count_refs("tag/")?;
-    let views = r.store().count_refs("view/")?;
-    r.close()?;
-    Ok((fsck, tags, views))
+/// Step 7: opens the loaded project under the load's `lock` (the open builds its index from the
+/// log), runs `fsck`, counts the tags and views, and closes it. An open that finds the load
+/// does not hold the store keeps every file (`made.keep`): it is not the load's to remove.
+fn check(
+    project: &Path,
+    lock: &StoreLock,
+    made: &mut Made,
+) -> Result<(FsckReport, usize, usize), RdyError> {
+    let r = match Rdy::open_locked(project, lock) {
+        Ok(r) => r,
+        Err(e) if e.code == E_LOCKED => {
+            made.keep = true;
+            let dir = project.display();
+            return Err(RdyError::new(
+                E_DUMP,
+                format!(
+                    "the dump loaded into {dir}, but another rdy process opened the project before the check finished"
+                ),
+                format!(
+                    "close the other sessions on {dir}, then run rdy fsck there; if it fails, delete {dir} and load again"
+                ),
+            ));
+        }
+        Err(e) => return Err(fails_fsck(e)),
+    };
+    let counted = (|| {
+        let fsck = r.fsck()?;
+        let tags = r.store().count_refs("tag/")?;
+        let views = r.store().count_refs("view/")?;
+        Ok((fsck, tags, views))
+    })();
+    r.close().map_err(fails_fsck)?;
+    counted.map_err(fails_fsck)
+}
+
+/// A failure of step 7 other than the lock: the loaded project does not pass.
+fn fails_fsck(e: RdyError) -> RdyError {
+    RdyError::new(
+        E_DUMP,
+        format!("the dump loads, but the project fails fsck: {}", e.message),
+        "run rdy fsck on the source project, repair it, then dump again",
+    )
 }
 
 /// What a load wrote at the target, to take it back on a failure (step 8).
@@ -263,6 +320,11 @@ struct Made {
     files: Vec<PathBuf>,
     /// The store directory this load created, under its current name.
     store: Option<PathBuf>,
+    /// The new store's lock, held from before the rename until the load ends: the undo runs
+    /// under it.
+    lock: Option<StoreLock>,
+    /// Set when the load finds it does not hold the store: the undo then removes nothing.
+    keep: bool,
 }
 
 impl Made {
@@ -284,11 +346,27 @@ impl Made {
         Ok(())
     }
 
-    /// Removes the store, every file and every directory this load created. A directory that
-    /// holds anything else stays.
+    /// Removes the store, every file and every directory this load created, while the load
+    /// still holds the store's lock; then releases the lock. A directory that holds anything
+    /// else stays. A load that does not hold the store (`keep`) removes nothing.
     fn undo(self) {
+        if self.keep {
+            return;
+        }
         if let Some(store) = &self.store {
-            let _ = std::fs::remove_dir_all(store);
+            // `.rdy/store` goes back to its loading name first, in one step: an open that races
+            // the removal then finds no store, and never adds a file to the one being removed
+            let gone = match store.parent() {
+                Some(dot) if store.file_name() == Some(STORE_DIR.as_ref()) => {
+                    let back = dot.join(LOADING_DIR);
+                    match std::fs::rename(store, &back) {
+                        Ok(()) => back,
+                        Err(_) => store.clone(),
+                    }
+                }
+                _ => store.clone(),
+            };
+            let _ = std::fs::remove_dir_all(gone);
         }
         for f in self.files.iter().rev() {
             let _ = std::fs::remove_file(f);
@@ -296,6 +374,8 @@ impl Made {
         for d in self.dirs.iter().rev() {
             let _ = std::fs::remove_dir(d);
         }
+        // only now may another process take the store, which no longer exists
+        drop(self.lock);
     }
 }
 
@@ -322,6 +402,15 @@ fn read_error(file: &Path, e: StoreError) -> RdyError {
         StoreError::Io(e) => io_at(file, e),
         e => e.into(),
     }
+}
+
+/// The dump's batches are not the whole source log (`what` says how).
+fn incomplete(what: String) -> RdyError {
+    RdyError::new(
+        E_DUMP,
+        format!("the dump is incomplete: {what}"),
+        "make a new dump from the source with rdy dump",
+    )
 }
 
 /// `file` is damaged at byte `at`.

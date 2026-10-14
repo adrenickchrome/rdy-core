@@ -293,3 +293,214 @@ fn dl6_a_dump_of_another_format_is_refused_before_anything_is_written() {
     assert_eq!(e.fix, "load it with the rdy that wrote it, or a later one");
     assert!(!to.exists());
 }
+
+/// Rewrites the dump `file` to `out`, keeping its project files, after `edit` changes its header
+/// and batches. The new trailer is consistent with what `out` holds.
+fn rewrite(
+    file: &Path,
+    out: &Path,
+    edit: impl FnOnce(&mut rdy_store::dump::DumpHeader, &mut Vec<rdy_store::dump::DumpBatch>),
+) {
+    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter};
+    let f = std::io::BufReader::new(std::fs::File::open(file).unwrap());
+    let (mut r, _, mut header) = DumpReader::open(f).unwrap();
+    let mut files = vec![];
+    let mut batches = vec![];
+    while let Some(item) = r.next().unwrap() {
+        match item {
+            DumpItem::File { path, bytes } => files.push((path, bytes)),
+            DumpItem::Batch(b) => batches.push(b),
+        }
+    }
+    edit(&mut header, &mut batches);
+    let mut w = DumpWriter::new(std::fs::File::create(out).unwrap(), &header).unwrap();
+    for (path, bytes) in &files {
+        w.file(path, bytes).unwrap();
+    }
+    for b in &batches {
+        w.batch(b).unwrap();
+    }
+    w.finish().unwrap();
+}
+
+#[test]
+fn dl6_a_dump_with_missing_batches_is_refused() {
+    let (_src, scratch, file) = dumped();
+    let short = scratch.path().join("short.rdydump");
+    let mut log_end = None;
+    rewrite(&file, &short, |h, b| {
+        assert!(b.len() >= 2, "the every-kind log holds batches");
+        b.truncate(b.len() / 2);
+        log_end = Some(h.log_end);
+    });
+    let log_end = log_end.unwrap();
+    let to = scratch.path().join("new");
+    let e = load(&short, &to).unwrap_err();
+    assert_eq!(e.code, "E_DUMP", "{e}");
+    assert!(
+        e.message.starts_with(&format!(
+            "the dump is incomplete: its header says the log ends at segment {} offset {}, but its batches end at segment ",
+            log_end.segment, log_end.offset
+        )),
+        "{e}"
+    );
+    assert_eq!(e.fix, "make a new dump from the source with rdy dump");
+    assert!(!to.exists(), "the load created {to:?} and left it");
+}
+
+#[test]
+fn dl6_a_dump_with_no_batches_is_refused() {
+    // every store holds its format batch from its first open, so a dump of no batches is never
+    // a whole project, even when its header says the log ends at 0/0
+    let (_src, scratch, file) = dumped();
+    let empty = scratch.path().join("empty.rdydump");
+    rewrite(&file, &empty, |h, b| {
+        b.clear();
+        h.log_end = rdy_store::segment::Location {
+            segment: 0,
+            offset: 0,
+        };
+    });
+    let to = scratch.path().join("new");
+    let e = load(&empty, &to).unwrap_err();
+    assert_eq!(e.code, "E_DUMP", "{e}");
+    assert_eq!(e.message, "the dump is incomplete: it holds no batches");
+    assert_eq!(e.fix, "make a new dump from the source with rdy dump");
+    assert!(!to.exists(), "the load created {to:?} and left it");
+}
+
+#[test]
+fn dl6_a_missing_dump_is_refused_and_the_target_untouched() {
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("none.rdydump");
+    let to = scratch.path().join("new");
+    std::fs::create_dir_all(&to).unwrap();
+    std::fs::write(to.join("README.md"), "kept").unwrap();
+    let before = tree(&to);
+    let e = load(&file, &to).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert_eq!(e.message, format!("{} does not exist", file.display()));
+    assert_eq!(e.fix, "check the path of the dump");
+    assert_eq!(tree(&to), before);
+}
+
+/// Loads `file` into `to` while another thread opens the project as soon as `.rdy/store`
+/// appears, and holds it until the load returns. Returns the load's result and what the racer's
+/// opens returned: an error code, or `ok`.
+fn race(
+    file: &Path,
+    to: &Path,
+) -> (
+    Result<rdy_engine::LoadSummary, rdy_engine::RdyError>,
+    std::collections::BTreeSet<String>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = Arc::new(AtomicBool::new(false));
+    let racer = {
+        let done = Arc::clone(&done);
+        let to = to.to_path_buf();
+        std::thread::spawn(move || {
+            let mut seen = std::collections::BTreeSet::new();
+            while !done.load(Ordering::SeqCst) {
+                if !to.join(".rdy/store").exists() {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                match Rdy::open(&to) {
+                    Ok(r) => {
+                        seen.insert("ok".to_string());
+                        while !done.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                        let _ = r.close();
+                        break;
+                    }
+                    Err(e) => {
+                        seen.insert(e.code.to_string());
+                    }
+                }
+            }
+            seen
+        })
+    };
+    let out = load(file, to);
+    done.store(true, Ordering::SeqCst);
+    (out, racer.join().unwrap())
+}
+
+#[test]
+fn dl6_a_racing_open_does_not_break_a_load() {
+    let (src, scratch, file) = dumped();
+    let mut raced = false;
+    for round in 0..4 {
+        let to = scratch.path().join(format!("new{round}"));
+        let (out, seen) = race(&file, &to);
+        raced |= !seen.is_empty();
+        let s = out.unwrap_or_else(|e| panic!("round {round}: {e}; the racer saw {seen:?}"));
+        assert!(
+            seen.iter().all(|c| c == "E_LOCKED" || c == "ok"),
+            "round {round}: {seen:?}"
+        );
+        assert!(s.landings >= 3, "round {round}: {s:?}");
+        // nothing was deleted: the store opens and holds the source log
+        let r = Rdy::open(&to).unwrap();
+        r.fsck().unwrap();
+        r.close().unwrap();
+        for (path, bytes) in segs(src.path()) {
+            let have = std::fs::read(to.join(".rdy/store/segments").join(&path)).ok();
+            let want = bytes.unwrap_or_default();
+            assert!(
+                have.is_some_and(|h| h.starts_with(&want)),
+                "round {round}: segment {path:?} lost bytes"
+            );
+        }
+    }
+    assert!(raced, "the racer never tried an open while the load ran");
+}
+
+/// A dump of the every-kind project with a view ref that names no view op: fsck refuses it.
+fn fsck_failing_dump(scratch: &Path) -> PathBuf {
+    let src = every_kind::project();
+    {
+        let mut r = Rdy::open(src.path()).unwrap();
+        r.store_mut()
+            .set_refs_unchecked_for_tests(vec![("view/forged".into(), vec![0u8; 32])])
+            .unwrap();
+        r.close().unwrap();
+    }
+    let file = scratch.join("forged.rdydump");
+    let r = Rdy::open(src.path()).unwrap();
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    file
+}
+
+#[test]
+fn dl6_a_failed_check_undoes_while_locked() {
+    let scratch = tempfile::tempdir().unwrap();
+    let file = fsck_failing_dump(scratch.path());
+    let mut raced = false;
+    for round in 0..4 {
+        let to = scratch.path().join(format!("new{round}"));
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(to.join("README.md"), "kept").unwrap();
+        let before = tree(&to);
+        let (out, seen) = race(&file, &to);
+        raced |= !seen.is_empty();
+        let e = out.unwrap_err();
+        assert_eq!(e.code, "E_DUMP", "round {round}: {e}");
+        assert!(
+            e.message
+                .starts_with("the dump loads, but the project fails fsck: ")
+                && !e.message.contains("held by another"),
+            "round {round}: {e}; the racer saw {seen:?}"
+        );
+        assert!(
+            !seen.contains("ok"),
+            "round {round}: the racer opened the store the load then removed: {seen:?}"
+        );
+        assert_eq!(tree(&to), before, "round {round}");
+    }
+    assert!(raced, "the racer never tried an open while the load ran");
+}
