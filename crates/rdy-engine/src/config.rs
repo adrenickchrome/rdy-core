@@ -2,6 +2,7 @@
 
 use crate::config_levels;
 use crate::{E_CONFIG, RdyError};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,11 +55,23 @@ pub(crate) struct ServeSection {
     start_timeout: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     idle_timeout: Option<u64>,
+    /// A whole number; `resolve` keeps one in 1024 to 65535.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site_port: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site_lan: Option<bool>,
+    /// A string; `resolve` keeps a private IPv4 address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site_lan_address: Option<String>,
 }
 
 impl ServeSection {
     fn is_empty(&self) -> bool {
-        self.start_timeout.is_none() && self.idle_timeout.is_none()
+        self.start_timeout.is_none()
+            && self.idle_timeout.is_none()
+            && self.site_port.is_none()
+            && self.site_lan.is_none()
+            && self.site_lan_address.is_none()
     }
 
     pub(crate) fn resolve(&self) -> ServeConfig {
@@ -69,21 +82,41 @@ impl ServeSection {
             idle_timeout: self
                 .idle_timeout
                 .map_or(ServeConfig::DEFAULT.idle_timeout, Duration::from_secs),
+            site_port: self
+                .site_port
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p >= 1024),
+            site_lan: self.site_lan.unwrap_or(false),
+            site_lan_address: self
+                .site_lan_address
+                .as_deref()
+                .and_then(|a| a.parse::<Ipv4Addr>().ok())
+                .filter(Ipv4Addr::is_private),
         }
     }
 }
 
-/// How long a client waits for a daemon to start and how long an idle daemon stays up.
+/// How long a client waits for a daemon to start and how long an idle daemon stays up, and where
+/// the live site listens. A site value the daemon cannot use reads as unset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServeConfig {
     pub start_timeout: Duration,
     pub idle_timeout: Duration,
+    /// `serve.site_port`: a port from 1024 to 65535 that the site must use, else derived.
+    pub site_port: Option<u16>,
+    /// `serve.site_lan`: also listen on a private LAN address.
+    pub site_lan: bool,
+    /// `serve.site_lan_address`: the private IPv4 address to use while `site_lan` is true.
+    pub site_lan_address: Option<Ipv4Addr>,
 }
 
 impl ServeConfig {
     pub const DEFAULT: ServeConfig = ServeConfig {
         start_timeout: Duration::from_secs(30),
         idle_timeout: Duration::from_secs(600),
+        site_port: None,
+        site_lan: false,
+        site_lan_address: None,
     };
 }
 
@@ -96,14 +129,16 @@ pub fn serve_config(project: &Path) -> ServeConfig {
         config_levels::effective_lenient(project, config_levels::user_file_from_env().as_deref())
             .merged;
     let section = merged.get("serve");
-    let secs = |key: &str| {
-        section
-            .and_then(|s| s.get(key))
-            .and_then(serde_yaml_ng::Value::as_u64)
-    };
+    let value = |key: &str| section.and_then(|s| s.get(key));
+    let secs = |key: &str| value(key).and_then(serde_yaml_ng::Value::as_u64);
     ServeSection {
         start_timeout: secs("start_timeout"),
         idle_timeout: secs("idle_timeout"),
+        site_port: value("site_port").and_then(serde_yaml_ng::Value::as_i64),
+        site_lan: value("site_lan").and_then(serde_yaml_ng::Value::as_bool),
+        site_lan_address: value("site_lan_address")
+            .and_then(serde_yaml_ng::Value::as_str)
+            .map(str::to_string),
     }
     .resolve()
 }

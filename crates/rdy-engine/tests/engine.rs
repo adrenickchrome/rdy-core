@@ -129,6 +129,51 @@ fn eng1_serve_config_defaults_and_reads_the_serve_section() {
     );
 }
 
+#[test]
+fn ls4_serve_config_reads_the_site_settings() {
+    assert_eq!(ServeConfig::DEFAULT.site_port, None);
+    assert!(!std::hint::black_box(ServeConfig::DEFAULT).site_lan);
+    assert_eq!(ServeConfig::DEFAULT.site_lan_address, None);
+    let (d, r) = project();
+    drop(r);
+    std::fs::write(
+        d.path().join(".rdy.yaml"),
+        "pack: rdy-standard\nserve:\n  site_port: 51234\n  site_lan: true\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.path().join(".rdy")).unwrap();
+    std::fs::write(
+        d.path().join(".rdy/local.yaml"),
+        "serve:\n  site_lan_address: 192.168.1.20\n",
+    )
+    .unwrap();
+    let c = serve_config(d.path());
+    assert_eq!(c.site_port, Some(51234));
+    assert!(c.site_lan);
+    assert_eq!(
+        c.site_lan_address,
+        Some(std::net::Ipv4Addr::new(192, 168, 1, 20))
+    );
+    let r = Rdy::open(d.path()).unwrap();
+    assert_eq!(r.serve_config(), c);
+    drop(r);
+    // a value the daemon cannot use reads as unset
+    std::fs::write(
+        d.path().join(".rdy.yaml"),
+        "pack: rdy-standard\nserve:\n  site_port: 80\n  site_lan: true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.path().join(".rdy/local.yaml"),
+        "serve:\n  site_lan_address: 8.8.8.8\n",
+    )
+    .unwrap();
+    let c = serve_config(d.path());
+    assert_eq!(c.site_port, None);
+    assert_eq!(c.site_lan_address, None);
+    assert!(c.site_lan);
+}
+
 const PACK_A: &str = "name: proj\nversion: '1'\nextends: rdy-standard\n";
 const PACK_BAD: &str = "name: proj\nversion: '1'\nextends: no-such-pack\n";
 

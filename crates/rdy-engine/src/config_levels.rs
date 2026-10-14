@@ -15,6 +15,7 @@ use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 /// The project config at the project root (FW-X5, D-C5955), read by `read_config`,
@@ -112,6 +113,12 @@ pub enum Ty {
     /// A whole number (a YAML integer, any sign). A whole number outside 0 to 100 is not a wrong
     /// type: `range_warnings` warns and drops it.
     Percent,
+    /// A whole number (a YAML integer, any sign). A whole number outside 1024 to 65535 is not a
+    /// wrong type: `range_warnings` warns and drops it.
+    Port,
+    /// A string. A string that is not a private IPv4 address is not a wrong type:
+    /// `range_warnings` warns and drops it.
+    LanAddress,
     /// Not read by `Config` yet: any value.
     Any,
 }
@@ -131,6 +138,24 @@ impl Ty {
                     Value::Number(n) if n.is_i64() || n.is_u64() => Ok(()),
                     other => Err(format!(
                         "invalid type: {}, expected a whole number from 0 to 100",
+                        flow(other)
+                    )),
+                };
+            }
+            Ty::Port => {
+                return match v {
+                    Value::Number(n) if n.is_i64() || n.is_u64() => Ok(()),
+                    other => Err(format!(
+                        "invalid type: {}, expected a whole number from 1024 to 65535",
+                        flow(other)
+                    )),
+                };
+            }
+            Ty::LanAddress => {
+                return match v {
+                    Value::String(_) => Ok(()),
+                    other => Err(format!(
+                        "invalid type: {}, expected a private IPv4 address",
                         flow(other)
                     )),
                 };
@@ -211,6 +236,24 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         levels: ANY,
         ty: Ty::OptU64,
         default: Some("600"),
+    },
+    KeyRule {
+        key: "serve.site_port",
+        levels: ANY,
+        ty: Ty::Port,
+        default: None,
+    },
+    KeyRule {
+        key: "serve.site_lan",
+        levels: ANY,
+        ty: Ty::Bool,
+        default: Some("false"),
+    },
+    KeyRule {
+        key: "serve.site_lan_address",
+        levels: PERSON,
+        ty: Ty::LanAddress,
+        default: None,
     },
     // the default is `human:$USER`, taken from the environment in `effective`
     KeyRule {
@@ -644,6 +687,17 @@ fn unknown_text(
     )
 }
 
+/// Whether some key under section `head` is allowed at `level`. A scalar in that section is then
+/// a wrong type for that key (`E_CONFIG`), not a section that belongs in another file.
+fn section_allowed_at(head: &str, level: Level) -> bool {
+    KEY_LEVELS.iter().any(|r| {
+        r.key
+            .strip_prefix(head)
+            .is_some_and(|rest| rest.starts_with('.'))
+            && r.levels.contains(&level)
+    })
+}
+
 /// The `W_CONFIG_UNKNOWN` warnings of the known keys that `map` (the file of `level`) holds and
 /// `level` may not set, each key removed from `map` so that rdy ignores it. A project-only key's
 /// section that is not a mapping counts too (`reviews: 5`); an empty section does not.
@@ -663,6 +717,7 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
             && map
                 .get(head)
                 .is_some_and(|v| !v.is_mapping() && !v.is_null())
+            && !section_allowed_at(head, level)
         {
             map.remove(head);
             if out.iter().any(|(k, _): &(&str, Issue)| *k == head) {
@@ -691,33 +746,91 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
     out.into_iter().map(|(_, w)| w).collect()
 }
 
-/// The `W_CONFIG_UNKNOWN` warnings of the percent keys of `map` that hold a whole number outside
-/// 0 to 100. Each value is removed from `map`, so the default applies and rdy keeps going (config
-/// mistakes warn).
+/// The `W_CONFIG_UNKNOWN` warnings of the range-checked keys of `map`: a percent outside 0 to 100,
+/// a port outside 1024 to 65535 and an address that is not a private IPv4 literal. Each value is
+/// removed from `map`, so the default applies and rdy keeps going (config mistakes warn).
 fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
     let mut out = Vec::new();
-    for rule in KEY_LEVELS.iter().filter(|r| r.ty == Ty::Percent) {
-        let outside = get_path(map, rule.key).is_some_and(|v| match v {
-            Value::Number(n) => n.as_i64().is_none_or(|i| !(0..=100).contains(&i)),
-            _ => false,
-        });
-        if !outside {
-            continue;
-        }
+    for rule in KEY_LEVELS {
+        let (message, fix) = match rule.ty {
+            Ty::Percent => {
+                let outside = get_path(map, rule.key).is_some_and(|v| match v {
+                    Value::Number(n) => n.as_i64().is_none_or(|i| !(0..=100).contains(&i)),
+                    _ => false,
+                });
+                if !outside {
+                    continue;
+                }
+                (
+                    format!(
+                        "{} must be 0–100; using {}",
+                        rule.key,
+                        rule.default.unwrap_or("0")
+                    ),
+                    format!(
+                        "set {} to a whole number from 0 to 100 in {PROJECT_FILE}",
+                        rule.key
+                    ),
+                )
+            }
+            Ty::Port => {
+                let outside = get_path(map, rule.key).is_some_and(|v| match v {
+                    Value::Number(n) => n.as_i64().is_none_or(|i| !(1024..=65535).contains(&i)),
+                    _ => false,
+                });
+                if !outside {
+                    continue;
+                }
+                (
+                    format!(
+                        "{} must be 1024–65535; using a port derived from the project path",
+                        rule.key
+                    ),
+                    format!(
+                        "set {} to a whole number from 1024 to 65535 in {LOCAL_FILE}",
+                        rule.key
+                    ),
+                )
+            }
+            Ty::LanAddress => {
+                let bad = get_path(map, rule.key).is_some_and(|v| match v {
+                    Value::String(s) => !s.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_private()),
+                    _ => false,
+                });
+                if !bad {
+                    continue;
+                }
+                (
+                    format!(
+                        "{} must be a private IPv4 address of this machine; using the default route's address",
+                        rule.key
+                    ),
+                    format!(
+                        "set {} to a private IPv4 address of this machine in {LOCAL_FILE}, or remove it",
+                        rule.key
+                    ),
+                )
+            }
+            _ => continue,
+        };
         remove_path(map, rule.key);
-        out.push(config_warning(
-            format!(
-                "{} must be 0–100; using {}",
-                rule.key,
-                rule.default.unwrap_or("0")
-            ),
-            format!(
-                "set {} to a whole number from 0 to 100 in {PROJECT_FILE}",
-                rule.key
-            ),
-        ));
+        out.push(config_warning(message, fix));
     }
     out
+}
+
+/// The warning for `serve.site_lan_address` while `serve.site_lan` is not true, from the merged
+/// settings. The value stays: it applies once the setting is on.
+fn lan_address_warning(merged: &Mapping) -> Option<Issue> {
+    get_path(merged, "serve.site_lan_address")?;
+    let on = get_path(merged, "serve.site_lan").and_then(Value::as_bool) == Some(true);
+    if on {
+        return None;
+    }
+    Some(config_warning(
+        "serve.site_lan_address has no effect while serve.site_lan is false".to_string(),
+        format!("set serve.site_lan to true in {LOCAL_FILE}, or remove serve.site_lan_address"),
+    ))
 }
 
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
@@ -839,6 +952,7 @@ fn build(
             });
         }
     }
+    warnings.extend(lan_address_warning(&merged));
     Ok(Effective {
         origins,
         merged,
@@ -1315,6 +1429,105 @@ mod tests {
         assert_eq!(
             w.message,
             "reviews.lease_ttl in .rdy/local.yaml belongs in .rdy.yaml; rdy ignores it here, so leases keep the default of 10 minutes"
+        );
+    }
+
+    #[test]
+    fn ls4_a_site_port_out_of_range_warns_and_is_dropped() {
+        let d = project("pack: p\nserve:\n  site_port: 80\n", None);
+        let e = effective_lenient(d.path(), None);
+        assert_eq!(e.warnings.len(), 1);
+        assert_eq!(e.warnings[0].code, "W_CONFIG_UNKNOWN");
+        assert_eq!(
+            e.warnings[0].message,
+            "serve.site_port must be 1024–65535; using a port derived from the project path"
+        );
+        assert_eq!(
+            e.warnings[0].fix,
+            "set serve.site_port to a whole number from 1024 to 65535 in .rdy/local.yaml"
+        );
+        assert!(get_path(&e.merged, "serve.site_port").is_none());
+    }
+
+    #[test]
+    fn ls4_wrong_types_are_config_errors() {
+        let d = project("pack: p\nserve:\n  site_port: eighty\n", None);
+        let e = effective(d.path(), None).unwrap_err();
+        assert_eq!(e.code, "E_CONFIG");
+        assert!(
+            e.message.starts_with("serve.site_port in .rdy.yaml: "),
+            "{}",
+            e.message
+        );
+        let d = project("pack: p\nserve:\n  site_lan: sometimes\n", None);
+        let e = effective(d.path(), None).unwrap_err();
+        assert!(
+            e.message.starts_with("serve.site_lan in .rdy.yaml: "),
+            "{}",
+            e.message
+        );
+        let d = project("pack: p\n", Some("serve:\n  site_lan_address: 5\n"));
+        let e = effective(d.path(), None).unwrap_err();
+        assert!(
+            e.message
+                .starts_with("serve.site_lan_address in .rdy/local.yaml: "),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn ls4_a_misspelt_lan_key_warns() {
+        let d = project("pack: p\nserve:\n  site_lna: true\n", None);
+        let e = effective_lenient(d.path(), None);
+        assert_eq!(e.warnings[0].code, "W_CONFIG_UNKNOWN");
+        assert!(
+            e.warnings[0].fix.contains("serve.site_lan"),
+            "{}",
+            e.warnings[0].fix
+        );
+    }
+
+    #[test]
+    fn ls4_a_lan_address_must_be_private_and_needs_lan_mode() {
+        let d = project(
+            "pack: p\n",
+            Some("serve:\n  site_lan: true\n  site_lan_address: 8.8.8.8\n"),
+        );
+        let e = effective_lenient(d.path(), None);
+        assert_eq!(e.warnings.len(), 1);
+        assert_eq!(e.warnings[0].code, "W_CONFIG_UNKNOWN");
+        assert_eq!(
+            e.warnings[0].message,
+            "serve.site_lan_address must be a private IPv4 address of this machine; using the default route's address"
+        );
+        assert!(get_path(&e.merged, "serve.site_lan_address").is_none());
+        let d = project(
+            "pack: p\n",
+            Some("serve:\n  site_lan: true\n  site_lan_address: 192.168.1.20\n"),
+        );
+        assert!(effective_lenient(d.path(), None).warnings.is_empty());
+        let d = project(
+            "pack: p\n",
+            Some("serve:\n  site_lan_address: 192.168.1.20\n"),
+        );
+        let e = effective_lenient(d.path(), None);
+        assert_eq!(e.warnings.len(), 1);
+        assert_eq!(
+            e.warnings[0].message,
+            "serve.site_lan_address has no effect while serve.site_lan is false"
+        );
+        let d = project(
+            "pack: p\nserve:\n  site_lan: true\n  site_lan_address: 192.168.1.20\n",
+            None,
+        );
+        let e = effective_lenient(d.path(), None);
+        assert!(
+            e.warnings
+                .iter()
+                .any(|w| w.code == "W_CONFIG_UNKNOWN"
+                    && w.message.contains("serve.site_lan_address")),
+            "the shared file is the wrong level"
         );
     }
 }
