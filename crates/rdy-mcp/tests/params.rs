@@ -100,6 +100,15 @@ fn mparm1_nested_and_list_paths_point_inside() {
     );
 }
 
+/// ls7: `rdy_site` takes `scope` and nothing else; an unknown key names the parameter it was
+/// close to.
+#[test]
+fn ls7_rdy_site_refuses_an_unknown_key() {
+    let (code, message, _) = refusal::<SiteParams>("rdy_site", json!({"scopes": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("scope"), "{message}");
+}
+
 #[test]
 fn mparm1_shapes_read_like_the_schema() {
     let cases: Vec<(String, (String, String, String))> = vec![
@@ -215,7 +224,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 32 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 33 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`).
     check!(
         AcceptAdviceParams,
@@ -245,6 +254,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         SchemaParams,
         SearchParams,
         SessionParams,
+        SiteParams,
         SupersedeParams,
         TagsParams,
         TensionsParams,

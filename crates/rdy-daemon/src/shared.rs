@@ -8,9 +8,9 @@ use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
-use rdy_engine::engine::{Engine, WriteFn};
+use rdy_engine::engine::{Engine, SiteLink, WriteFn};
 use rdy_engine::semantic::lease::LeaseRegistry;
-use rdy_engine::{BriefRegistry, OpenReport, Rdy, RdyError, ReadState};
+use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState};
 use rdy_mcp::notify::NotifyHub;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -201,6 +201,29 @@ impl Engine for DaemonEngine {
 
     fn pack_error(&self) -> Option<String> {
         self.0.pack_error_lock().clone()
+    }
+
+    fn site(&self) -> Result<SiteLink, RdyError> {
+        let off = |reason: &str| {
+            RdyError::new(
+                E_SITE,
+                format!("the live site is off: {reason}"),
+                "set serve.site_port to a free port from 1024 to 65535 in .rdy/local.yaml, then run rdy serve --stop",
+            )
+        };
+        let info = self
+            .0
+            .site_info
+            .get()
+            .ok_or_else(|| off("the daemon has not started it"))?;
+        match &info.url {
+            Ok(url) => Ok(SiteLink {
+                url: url.clone(),
+                lan_url: info.lan_url.clone(),
+                warning: info.warning.clone(),
+            }),
+            Err(reason) => Err(off(reason)),
+        }
     }
 }
 

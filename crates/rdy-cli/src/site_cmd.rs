@@ -31,6 +31,27 @@ pub(crate) struct ImportArgs {
     view: String,
 }
 
+#[derive(clap::Args)]
+pub(crate) struct SiteArgs {
+    /// canon (default), a view name or view:<name>, or proposal:P-x@n. A view or proposal opens in review mode.
+    #[arg(long)]
+    scope: Option<String>,
+}
+
+/// `rdy site`: the link to the live docs site, the CLI twin of `rdy_site`. The URL alone on one
+/// line, then the LAN URL when the site is open to the network; its warning goes to stderr.
+pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply> {
+    let v = call(env, "site_url", json!({"scope": a.scope}))?;
+    let mut lines = vec![text(&v["url"]).to_string()];
+    if !v["lan_url"].is_null() {
+        lines.push(text(&v["lan_url"]).to_string());
+    }
+    if !v["warning"].is_null() {
+        eprintln!("warning: {}", text(&v["warning"]["message"]));
+    }
+    Ok((v, lines.join("\n")))
+}
+
 pub(crate) fn render(env: &Env, a: RenderArgs) -> Result<(Value, String), ErrorReply> {
     let RenderArgs { out, scope } = a;
     let v = call(
