@@ -1,7 +1,12 @@
 //! The visual review set (vis1). Renders the golden project's three sites and the review project's draft into a fixed
-//! directory under `target/qa/site/` and writes `review-set.json`: the fourteen pages with their
+//! directory under `target/qa/site/`, fills four more from the live server, and writes
+//! `review-set.json`: the twenty pages with their
 //! URLs and the browser state to reach. The reviewer screenshots this render, so the set is
 //! always the gate's own.
+use crate::render_quality_live::{
+    CHANGED_DOC, disagree_live, golden_live, grouped_live, longest_doc,
+};
+use rdy_engine::Scope;
 use rdy_qa::golden;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -52,6 +57,21 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
     replace_dir(review.path(), &root.join("review"));
     let (_d5, _r5, disagree) = golden::site_disagree();
     replace_dir(disagree.path(), &root.join("disagree"));
+    // the live rows: the pages as the server sends them (every file, so the pages have their
+    // styles), canon and the `editing` view of the golden project and the disagreement project
+    let g = golden_live();
+    let live_canon = g.live.fetch(&g.canon, "", false);
+    replace_dir(live_canon.path(), &root.join("live-canon"));
+    let live_view = g.live.fetch(&g.view, &g.view_prefix, false);
+    replace_dir(live_view.path(), &root.join("live-view"));
+    let (dh, _stat) = disagree_live();
+    let live_disagree = dh.fetch(&Scope::Canon, "", false);
+    replace_dir(live_disagree.path(), &root.join("live-disagree"));
+    // a disagreement repeated over seven pages: the page folds its list behind "Show all"
+    let (gh, _gstat) = grouped_live();
+    let live_grouped = gh.fetch(&Scope::Canon, "", false);
+    replace_dir(live_grouped.path(), &root.join("live-grouped"));
+    let long_doc = longest_doc(g.static_canon.path());
 
     let anchor = ids.soft_keywords_requirement.to_string();
     let guards = ids.guards_section.to_string();
@@ -128,6 +148,37 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "disagreements.html",
             "none: one entry, the sentence above two links".into(),
         ),
+        ("live-home", "live-canon", "index.html", "none".into()),
+        (
+            "live-doc",
+            "live-canon",
+            long_doc.as_str(),
+            "none: the longest doc, served".into(),
+        ),
+        (
+            "live-view-doc",
+            "live-view",
+            CHANGED_DOC,
+            "none: the changed doc in review mode; then press Show changes".into(),
+        ),
+        (
+            "live-glossary",
+            "live-canon",
+            "glossary.html",
+            "none: the grouped glossary".into(),
+        ),
+        (
+            "live-disagreements",
+            "live-disagree",
+            "disagreements.html",
+            "none: one entry, the sentence above two links".into(),
+        ),
+        (
+            "live-disagreements-grouped",
+            "live-grouped",
+            "disagreements.html",
+            "closed: the entry's list shows the first links above `Show all`; then open the `Show all` fold (the rest of the pages list); then close it".into(),
+        ),
     ];
     let set: Vec<_> = rows
         .iter()
@@ -136,7 +187,7 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             json!({"n": i + 1, "name": name, "site": site, "url": format!("{site}/{url}"), "state": state})
         })
         .collect();
-    assert_eq!(set.len(), 14);
+    assert_eq!(set.len(), 20);
     for (_, site, url, _) in &rows {
         let f = root.join(site).join(url);
         assert!(f.is_file(), "the review page {} is missing", f.display());

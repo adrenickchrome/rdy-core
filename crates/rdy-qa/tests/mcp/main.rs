@@ -30,6 +30,7 @@ mod mcp_schema;
 mod mcp_schema_rows;
 mod mcp_search;
 mod mcp_search_brief;
+mod mcp_site;
 mod mcp_state;
 mod mcp_tensions;
 mod mcp_view_brief;

@@ -292,11 +292,7 @@ impl Rdy {
         self.fingerprint = loaded.fingerprint;
         self.config = loaded.config;
         // entries built under the old pack must not serve the new one
-        self.as_of
-            .lru
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.as_of.clear();
         *self.vpos.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
     }
 }

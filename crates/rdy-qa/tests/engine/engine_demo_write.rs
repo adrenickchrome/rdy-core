@@ -270,7 +270,7 @@ fn df1_repin_two_in_one_write() {
         &mut r,
         "work",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "term", "id": "$a", "parent": "$s", "fields": {"name": "Account"}, "body": "Verified by an ID."},
             {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Verified"}, "body": "See {{$a}}."},
@@ -331,7 +331,7 @@ fn df1_a_repin_from_a_conflict_side_and_a_repin_to_it_stay_refused() {
         &mut r,
         "work",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "term", "id": "$a", "parent": "$s", "fields": {"name": "Account"}, "body": "Verified by an ID."},
             {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Verified"}, "body": "See {{$a}}."},

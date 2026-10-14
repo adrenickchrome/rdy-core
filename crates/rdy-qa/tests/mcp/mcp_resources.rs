@@ -72,7 +72,7 @@ fn ib10_each_resource_reads_as_its_tool() {
         .call(
             "rdy_write",
             json!({"ops": [{"op": "create", "type": "doc", "id": "$d",
-                "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}]}),
+                "fields": {"name": "a", "title": "A", "doc_type": "page"}}]}),
         )
         .ok();
     let doc = w["created"]["$d"].as_str().unwrap().to_string();
@@ -111,7 +111,7 @@ fn ib10_a_proposal_reads_as_rdy_read_does() {
         .call(
             "rdy_write",
             json!({"ops": [{"op": "create", "type": "doc",
-                "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}]}),
+                "fields": {"name": "a", "title": "A", "doc_type": "page"}}]}),
         )
         .ok();
     assert!(w["change"].is_string(), "{w}");

@@ -1,9 +1,14 @@
 //! The perf-regression tier: a fixed workload, per-machine baselines, regression verdicts.
 use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{approver, land, write, writer};
-use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
+use rdy_daemon::site::guard::ScopeRef;
+use rdy_daemon::site::live::{LiveEvent, LiveSite, STREAM_QUEUE, Subscription};
+use rdy_daemon::{
+    Attempt, Client, Hello, IdleHold, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, Shared,
+};
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
+use rdy_engine::engine::write_typed;
 use rdy_engine::{Materialized, Rdy, Scope, Session, now_ms, testkit};
 use rdy_model::{Block, BlockId, Hash, Op, Role};
 use serde::{Deserialize, Serialize};
@@ -285,6 +290,21 @@ fn spec_target(op: &str) -> Option<String> {
         "render_cold" => {
             "no spec target: the full render of canon on a fresh handle (canon read outside the timer), the canon tension read of the disagreements page included (FW-SW2); compare with render, whose state keeps that read across runs"
         }
+        "site_build_live" => {
+            "no spec target: the live site's full build (recorded; compare with render)"
+        }
+        // the large tier states its own text: the budget is the typical tier's, at 50k blocks
+        "site_event_after_land" | "site_event_after_view_write" if large => {
+            return Some(
+                "< 1 s p95, the 10k-block budget applied at 50k blocks (proposed, ledger F4; reported until the founder rules)"
+                    .to_string(),
+            );
+        }
+        "site_event_after_land" | "site_event_after_view_write" => {
+            "< 1 s p95 at 10k blocks (proposed, ledger F4; reported until the founder rules)"
+        }
+        "site_fanout_32" => "no spec target: the fan-out to 32 open pages (recorded)",
+        "site_get_page" => "< 5 ms p95 (proposed, ledger F4; reported)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
         "new_doc_single" => "in-process comparator for daemon_write_single (no spec target)",
@@ -629,7 +649,7 @@ fn deep_block(parent: &std::path::Path) -> (Rdy, BlockId) {
         &mut r,
         "b0",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "glossary", "title": "Glossary", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "glossary", "title": "Glossary", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Version 0."}
         ]),
@@ -2757,7 +2777,7 @@ const MCP_CLAIMS: usize = 2000;
 fn mcp_write_args(i: usize) -> serde_json::Map<String, serde_json::Value> {
     let body = "lorem ipsum dolor sit amet ".repeat(4700 / 27 + 1)[..4700].to_string();
     let mut ops = vec![
-        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "page"}}),
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
     ];
     // each claim's body is its own (the run index and the claim index lead it): every run
@@ -3009,6 +3029,248 @@ fn tier_render_cold(
     }));
 }
 
+/// `site_build_live`: the live site's full build of canon, from one state (compare with
+/// `render`, which writes the same pages to disk).
+fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
+    out.push(measure(&format!("site_build_live{sfx}"), runs, |_| {
+        rdy_render::live::build_live(&r.read(), &Scope::Canon).expect("build_live");
+    }));
+}
+
+/// Waits for the `Reload` of an open page's stream (any `Label` before it is skipped). A stream
+/// that ends, or a `Reload` that does not come in a minute, fails the op.
+fn await_reload(rt: &tokio::runtime::Runtime, sub: &mut Subscription) {
+    let got = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match sub.rx.recv().await {
+                    Some(LiveEvent::Reload) => return,
+                    Some(LiveEvent::Label(_)) => {}
+                    None => panic!("the page's stream ended before its Reload"),
+                }
+            }
+        })
+        .await
+    });
+    got.expect("no Reload within a minute");
+}
+
+/// Drops the events a stream holds.
+fn drain_events(sub: &mut Subscription) {
+    while sub.rx.try_recv().is_ok() {}
+}
+
+/// `view`'s write of `body` into the fixture claim, as the daemon's writer runs it; landed when
+/// `landed`.
+fn edit_claim_on_writer(
+    sh: &std::sync::Arc<Shared>,
+    claim: &str,
+    view: &str,
+    body: String,
+    landed: bool,
+) {
+    let (claim, view) = (claim.to_string(), view.to_string());
+    write_typed(&*sh.engine(), move |r| {
+        write(
+            r,
+            &view,
+            json!([{"op": "update", "id": claim, "body": body}]),
+        )?;
+        if landed {
+            land(r, &view)?;
+        }
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("the claim edit failed: {e}"));
+}
+
+/// What `LiveSite::refresh` does after a build, as the public functions give it: the diff of the
+/// two builds, then to each stream (one per page of `pages`) a `Reload` when its page changed,
+/// else the new label when the label changed, else nothing. A full queue drops the event, as the
+/// site drops the stream. Returns how many events were sent.
+fn fan_out(
+    old: &rdy_render::live::LiveBuild,
+    new: &rdy_render::live::LiveBuild,
+    pages: &[String],
+    txs: &[tokio::sync::mpsc::Sender<LiveEvent>],
+) -> usize {
+    let change = rdy_render::live::diff(old, new);
+    let mut sent = 0;
+    for (page, tx) in pages.iter().zip(txs) {
+        let event = if change.reload.contains(page) {
+            Some(LiveEvent::Reload)
+        } else {
+            change.label.clone().map(LiveEvent::Label)
+        };
+        if let Some(event) = event
+            && tx.try_send(event).is_ok()
+        {
+            sent += 1;
+        }
+    }
+    sent
+}
+
+/// The site ops, on a real daemon over a copy of the project at `proj` (their landings would
+/// move the project the later ops open). `sfx` names the tier (`""` or `_50k`); `docs` and `fx`
+/// are the tree's doc paths and the fixture. The daemon is held up for the whole run (see
+/// [`site_daemon_start`]).
+///
+/// - `site_event_after_land`: one subscription on the page of the fixture doc, and a body edit of
+///   it written and landed through the writer; the time runs from just before the write to the
+///   page's `Reload`, which the site worker sends.
+/// - `site_event_after_view_write`: the same on the page of view `sev`, and a commit into it.
+/// - `site_fanout_32`: two builds of canon on either side of a landing that changes one page,
+///   made outside the timer; the time is `diff` of the two and one send per stream to 32
+///   bounded queues, with the events the site worker would send (see `LiveSite::refresh`).
+/// - `site_get_page`: `GET` of the longest doc page from a warm build.
+fn site_ops(
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    docs: &[String],
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+) -> Vec<Measure> {
+    let copy = parent.join(format!("p-site{sfx}"));
+    copy_project(proj, &copy);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime");
+    let (run, hold) = site_daemon_start(&copy, Duration::from_secs(60));
+    // the site address is set before `ready`
+    drop(rt.block_on(daemon_ready(&copy)));
+    let sh = std::sync::Arc::clone(run.shared());
+    let claim = fx.claim.to_string();
+    let page = format!("{}.html", fx.doc_path);
+    let canon = ScopeRef::Canon;
+    let mut out = vec![];
+
+    let b = sh.site.refresh(&sh, &canon).expect("canon builds");
+    assert!(b.revs.contains_key(&page), "no page {page}");
+    let mut sub = sh
+        .site
+        .subscribe(&sh, &canon, &page, &b.revs[&page], &b.label_rev)
+        .unwrap_or_else(|_| panic!("the site is busy"));
+    out.push(measure_timed(
+        &format!("site_event_after_land{sfx}"),
+        runs.write,
+        |i| {
+            drain_events(&mut sub);
+            let s = Instant::now();
+            edit_claim_on_writer(
+                &sh,
+                &claim,
+                &format!("sel-{i}"),
+                format!("Landed {i}."),
+                true,
+            );
+            await_reload(&rt, &mut sub);
+            let took = s.elapsed();
+            // let the worker finish what the run's other publishes started, outside the timer
+            sh.site.refresh(&sh, &canon).expect("canon builds");
+            took
+        },
+    ));
+    drop(sub);
+
+    let view = ScopeRef::View("sev".into());
+    edit_claim_on_writer(&sh, &claim, "sev", "Seed.".into(), false);
+    let b = sh.site.refresh(&sh, &view).expect("the view builds");
+    assert!(b.revs.contains_key(&page), "no page {page} in the view");
+    let mut sub = sh
+        .site
+        .subscribe(&sh, &view, &page, &b.revs[&page], &b.label_rev)
+        .unwrap_or_else(|_| panic!("the site is busy"));
+    out.push(measure_timed(
+        &format!("site_event_after_view_write{sfx}"),
+        runs.write,
+        |i| {
+            drain_events(&mut sub);
+            let s = Instant::now();
+            edit_claim_on_writer(&sh, &claim, "sev", format!("Committed {i}."), false);
+            await_reload(&rt, &mut sub);
+            let took = s.elapsed();
+            sh.site.refresh(&sh, &view).expect("the view builds");
+            took
+        },
+    ));
+    drop(sub);
+
+    // the fan-out alone: the builds on either side of a landing are made outside the timer, on a
+    // site of its own (no worker), and only the diff and the sends are timed
+    let site = LiveSite::new();
+    let mut pages: Vec<String> = vec![page.clone()];
+    pages.extend(
+        site.refresh(&sh, &canon)
+            .expect("canon builds")
+            .revs
+            .keys()
+            .filter(|p| **p != page)
+            .take(31)
+            .cloned(),
+    );
+    // a tree of fewer pages has several streams on a page, as several tabs would
+    let pages: Vec<String> = pages.iter().cycle().take(32).cloned().collect();
+    out.push(measure_timed(
+        &format!("site_fanout_32{sfx}"),
+        runs.view_ops,
+        |i| {
+            let old = site.refresh(&sh, &canon).expect("canon builds");
+            edit_claim_on_writer(
+                &sh,
+                &claim,
+                &format!("sfo-{i}"),
+                format!("Fanned {i}."),
+                true,
+            );
+            site.published();
+            let new = site.refresh(&sh, &canon).expect("canon builds");
+            let (txs, mut rxs): (Vec<_>, Vec<_>) = pages
+                .iter()
+                .map(|_| tokio::sync::mpsc::channel::<LiveEvent>(STREAM_QUEUE))
+                .unzip();
+            let s = Instant::now();
+            let sent = fan_out(&old, &new, &pages, &txs);
+            let took = s.elapsed();
+            assert!(
+                sent > 0,
+                "the landing changed a page: the op times a fan-out"
+            );
+            assert_eq!(
+                rxs[0].try_recv(),
+                Ok(LiveEvent::Reload),
+                "the edited page is told to reload"
+            );
+            took
+        },
+    ));
+
+    let base = match &sh.site_info.get().expect("the site info").url {
+        Ok(url) => url.clone(),
+        Err(e) => panic!("the daemon has no site: {e}"),
+    };
+    let b = sh.site.refresh(&sh, &canon).expect("canon builds");
+    let longest = docs
+        .iter()
+        .max_by_key(|d| b.files.get(&format!("{d}.html")).map_or(0, Vec::len))
+        .expect("a doc");
+    let url = format!("{base}{longest}.html");
+    // one untimed request, so the timed ones read a warm build
+    assert_eq!(crate::http::get(&url).status, 200, "GET {url}");
+    out.push(measure(&format!("site_get_page{sfx}"), 50, |_| {
+        let got = crate::http::get(&url);
+        assert_eq!(got.status, 200, "GET {url}");
+    }));
+
+    drop(rt);
+    drop(hold);
+    daemon_stop(run);
+    std::fs::remove_dir_all(&copy).ok();
+    out
+}
+
 /// Cold open: a fresh handle on the project, then the first read of canon.
 fn tier_cold_open(out: &mut Vec<Measure>, proj: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("cold_open{sfx}"), runs, |_| {
@@ -3142,6 +3404,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_code(&mut out, &r, &fx, dir.path());
     tier_wc(&mut out, &r, dir.path());
     tier_render(&mut out, &r, dir.path(), "", 5);
+    tier_site_build(&mut out, &r, "", 5);
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
         r.read().export(&Scope::Canon, &export).expect("export");
@@ -3184,6 +3447,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
+    out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &TYPICAL_RUNS));
     out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
     out.extend(bound_ops(dir.path()));
     out.extend(stdio_mcp_ops(dir.path()));
@@ -3236,14 +3500,29 @@ fn tier_invariants(out: &mut Vec<Measure>, r: &Rdy, runs: usize) {
 
 /// Starts a daemon over `proj` (idle timeout 60 s, human actor `human:qa`, the fixture writer).
 fn daemon_start(proj: &std::path::Path) -> ServeRun {
+    daemon_start_idle(proj, Some(Duration::from_secs(60)))
+}
+
+/// [`daemon_start`] with the idle timeout `idle`.
+fn daemon_start_idle(proj: &std::path::Path, idle: Option<Duration>) -> ServeRun {
     rdy_daemon::start(ServeOptions {
         project: proj.to_path_buf(),
         version: "perf".into(),
         detach: false,
-        idle_timeout: Some(Duration::from_secs(60)),
+        idle_timeout: idle,
         human_actor: Some("human:qa".into()),
+        site_lan_override: None,
     })
     .unwrap_or_else(|e| panic!("start the daemon: {e}"))
+}
+
+/// A daemon for the site ops, held up for as long as the hold lives. The ops keep no socket
+/// open, and in-process streams and writes are not keepers, so without the hold the idle timer
+/// would run from `ready` and close the site and the writer under a long run.
+fn site_daemon_start(proj: &std::path::Path, idle: Duration) -> (ServeRun, IdleHold) {
+    let run = daemon_start_idle(proj, Some(idle));
+    let hold = run.handle().hold();
+    (run, hold)
 }
 
 /// A `ctl` connection to the daemon at `proj`, past `ready` (waits for it while it is `starting`).
@@ -3653,7 +3932,7 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
 fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
     use rdy_schema::{MAX_PATH_SEGMENTS, PackSet};
     let mut out = vec![];
-    const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+    const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
     let export = |name: &str| {
         let t = parent.join(name);
         std::fs::create_dir_all(t.join("docs")).expect("mkdir");
@@ -3705,7 +3984,7 @@ fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
         std::fs::create_dir_all(&proj).expect("mkdir");
         let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
         let made = write(&mut r, "work", json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
         ]))
         .expect("doc");
@@ -3808,7 +4087,7 @@ fn stdio_mcp_ops(parent: &std::path::Path) -> Vec<Measure> {
     .ok();
     let made = c
         .call_within("rdy_write", json!({"ops": [
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
         ]}), budget)
         .ok();
@@ -3883,10 +4162,12 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_reads(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_edit_loop(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_render(&mut out, &r, parent, sfx, 3);
+    tier_site_build(&mut out, &r, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
+    out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
     // as the daemon does after `ready`, outside every timer (plan M2e2)
@@ -4117,7 +4398,7 @@ mod tests {
     fn cold_reads_drop_the_caches_before_the_timed_region_and_rebuild_inside_it() {
         let (_d, mut r) = crate::fixtures::project();
         let res = write(&mut r, "work", json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}}
         ]))
         .unwrap();
         let doc = BlockId::parse(&res.created["$d"]).unwrap();
@@ -4383,8 +4664,10 @@ mod tests {
         wait_ready(tx, &rx, 3, Duration::from_secs(30)).expect("all ready");
     }
 
-    /// Every op the gate can run: those the baseline holds, those `spec_target` names, and the
-    /// ops of this plan. No target says p99: the M2 targets are p95 (D-ANNKF).
+    /// Every op the gate can run: those the baseline holds, those `spec_target` names (and their
+    /// `_50k` twins), and the ops of this plan. No target says p99: a target is the p95 of the
+    /// timed runs, and rdy does not measure p99 (D-ANNKF). The live site's proposed targets are
+    /// no exception (final review I2).
     #[test]
     fn sgperf1_no_target_says_p99() {
         let src = include_str!("perf.rs");
@@ -4401,6 +4684,8 @@ mod tests {
             })
             .map(str::to_string)
             .collect();
+        let large: Vec<String> = ops.iter().map(|op| format!("{op}_50k")).collect();
+        ops.extend(large);
         let baseline: serde_json::Value =
             serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
         for class in baseline["classes"].as_object().expect("classes").values() {
@@ -4411,6 +4696,13 @@ mod tests {
             "invariants_check_all".into(),
         ]);
         assert!(ops.len() > 100, "{} ops", ops.len());
+        for op in [
+            "site_event_after_land_50k",
+            "site_get_page",
+            "site_get_page_50k",
+        ] {
+            assert!(ops.contains(op), "guard: {op} is covered");
+        }
         let mut said = vec![];
         for op in &ops {
             if spec_target(op).is_some_and(|t| t.contains("p99")) {
@@ -4418,7 +4710,7 @@ mod tests {
             }
         }
         assert!(said.is_empty(), "these targets say p99: {said:?}");
-        assert!(!body.contains("p99"), "spec_target says p99 in a text");
+        assert!(!body.contains("p99"), "no target text says p99");
     }
 
     /// The two M2g ops run end to end on a small tree: the checker after the view ops, and the
@@ -4578,6 +4870,120 @@ mod tests {
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
+    }
+
+    /// The site ops run end to end on a small tree, on a daemon over a copy of it (ledger F4: their
+    /// targets are proposed and reported, so none is a spec ceiling).
+    #[test]
+    fn lsperf1_the_site_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6c73_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 2,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut out = vec![];
+        tier_site_build(&mut out, &r, "", 2);
+        drop(r);
+        out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &runs));
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "site_build_live",
+                "site_event_after_land",
+                "site_event_after_view_write",
+                "site_fanout_32",
+                "site_get_page"
+            ]
+        );
+        for m in &out {
+            assert!(m.median_ms >= 0.0, "{m:?}");
+            assert!(m.runs >= 2, "{m:?}");
+            assert!(spec_target(&m.op).is_some(), "{}", m.op);
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} is not enforced", m.op);
+        }
+        assert!(out[0].median_ms > 0.0, "a build takes time");
+        // the fan-out is timed on its own (a diff and 32 sends), not as a difference of builds
+        // that clamps to 0: it is small, but never nothing
+        assert!(
+            out[3].median_ms > 0.0 && out[3].median_ms < out[0].median_ms,
+            "{:?} against {:?}",
+            out[3],
+            out[0]
+        );
+        assert!(
+            spec_target("site_build_live")
+                .unwrap()
+                .contains("compare with render")
+        );
+        for op in ["site_event_after_land", "site_event_after_view_write"] {
+            assert!(
+                spec_target(op).unwrap().contains("< 1 s p95 at 10k blocks"),
+                "{op}"
+            );
+            // final review I2: the large tier says what it measures, without "at 10k blocks"
+            let large = spec_target(&format!("{op}_50k")).unwrap();
+            assert_eq!(
+                large,
+                "< 1 s p95, the 10k-block budget applied at 50k blocks (proposed, ledger F4; reported until the founder rules)",
+                "{op}_50k"
+            );
+        }
+        assert!(spec_target("site_get_page").unwrap().contains("< 5 ms p95"));
+        assert!(
+            spec_target("site_fanout_32")
+                .unwrap()
+                .contains("32 open pages")
+        );
+        assert!(
+            spec_target("site_get_page_50k")
+                .unwrap()
+                .contains("large tier"),
+            "the large tier states its budget"
+        );
+        assert!(!dir.path().join("p-site").exists(), "the copy is removed");
+    }
+
+    /// The site ops hold no socket and run for minutes at 50k: the daemon they run on must stay
+    /// up past its idle timeout while the hold lives, and exit idle once it is dropped.
+    #[test]
+    fn lsperf2_the_site_ops_daemon_outlives_its_idle_timeout() {
+        rdy_model::seed_ids_for_tests(0x6c73_7067);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 1, 2, 4);
+        drop(Rdy::open(&proj).expect("open"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("client runtime");
+        let (run, hold) = site_daemon_start(&proj, Duration::from_millis(300));
+        drop(rt.block_on(daemon_ready(&proj)));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(run.handle().keepers() >= 1, "the hold keeps the daemon up");
+        drop(rt.block_on(daemon_ready(&proj)));
+        drop(hold);
+        let started = Instant::now();
+        // the idle timer runs again: the daemon exits on its own
+        run.wait().expect("the daemon exits idle");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        rdy_model::unseed_ids_for_tests();
     }
 
     /// The review ops run end to end on a small tree, after the in-flight and tension ops.

@@ -1,1 +1,1 @@
-<p class="colophon">{% if version.frozen %}A snapshot of {{ site_name }} at {{ version.text }}.{% else %}{{ site_name }}, {{ version.text }}.{% endif %}</p>
+<p class="colophon">{% if version.frozen %}A snapshot of {{ site_name }} at <span data-rdy-label>{{ version.text | label }}</span>.{% else %}{{ site_name }}, <span data-rdy-label>{{ version.text | label }}</span>.{% endif %}</p>

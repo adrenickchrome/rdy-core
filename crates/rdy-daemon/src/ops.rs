@@ -22,6 +22,7 @@ mod project;
 mod read;
 mod search;
 mod site;
+mod site_url;
 mod wc;
 
 use brief::brief;
@@ -32,6 +33,7 @@ use project::{check, fsck, reindex};
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use search::search;
 use site::{export, import, render};
+use site_url::site_url;
 pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
 
@@ -83,6 +85,7 @@ pub const OPS: &[&str] = &[
     "wc_put_blob",
     "coverage",
     "inbox",
+    "site_url",
 ];
 
 #[derive(Deserialize)]
@@ -379,6 +382,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             check_max_tokens(req.max_tokens)?;
             run_inbox(cx.engine, cx.session, req)
         }
+        "site_url" => site_url(cx, parse(op, args, "{scope?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

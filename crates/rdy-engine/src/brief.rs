@@ -903,12 +903,13 @@ fn is_advisory(i: usize) -> bool {
 }
 
 /// A scope as a cursor carries it, in the scope text `resolve_scope` reads: `canon`,
-/// `view:<name>` or `landing:<id>`.
+/// `view:<name>`, `landing:<id>` or `proposal:<version hash>`.
 fn cursor_scope(scope: &Scope) -> String {
     match scope {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view:{v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Proposal(v) => format!("proposal:{v}"),
         Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
@@ -964,6 +965,7 @@ fn scope_label(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view {v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Proposal(v) => format!("proposal:{}", v.short()),
         Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
@@ -1433,7 +1435,7 @@ impl ReadState {
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         // a coverage read error never fails a briefing (a briefing gates writes): it is reported
-        let (coverage, coverage_error) = if self.is_past_landing(scope) {
+        let (coverage, coverage_error) = if self.coverage_left_out(scope) {
             (None, None)
         } else {
             match self.brief_coverage(scope, ids, &governs, &dependents, &will_go_stale) {

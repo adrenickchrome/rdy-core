@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 pub struct ReadParams {
     /// A block id, key or path (wallets/transactions); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.
     pub id: Option<String>,
-    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>", "proposal:P-<id>@<n>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     /// compact (default), markdown or yaml.
     pub format: Option<String>,

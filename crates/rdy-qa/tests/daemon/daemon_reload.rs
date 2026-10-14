@@ -167,7 +167,7 @@ fn reload1_mcp_results_carry_the_notice_once() {
         line.clear();
         r.read_line(&mut line).await.unwrap();
         switch_to(&h, PACK_A);
-        w.write_all(line_of(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}]}}})).as_bytes()).await.unwrap();
+        w.write_all(line_of(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]}}})).as_bytes()).await.unwrap();
         line.clear();
         r.read_line(&mut line).await.unwrap();
         assert!(line.contains("pack_changed"), "{line}");

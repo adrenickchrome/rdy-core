@@ -12,7 +12,7 @@ fn ibrf1_intents_on_covered_blocks_or_their_area_are_listed_and_not_in_the_token
         &writer(),
         "seed",
         "payments/fees",
-        Some("glossary"),
+        Some("page"),
         Some("Fees"),
     )
     .unwrap();

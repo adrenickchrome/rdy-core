@@ -32,7 +32,7 @@ fn state(design: bool) -> (tempfile::TempDir, McpState) {
 
 fn section(st: &mut McpState) -> String {
     let res = rdy_write(st, serde_json::from_value(json!({"ops": [
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Register", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Register", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Rows"}}
     ]})).unwrap()).unwrap();
     res["created"]["$s"].as_str().unwrap().to_string()

@@ -440,7 +440,7 @@ mod tests {
                 rdy_engine::WriteRequest {
                     view: "work".into(),
                     ops: serde_json::from_value(json!([
-                        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "glossary"}},
+                        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
                         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
                         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Ops holds."}
                     ]))

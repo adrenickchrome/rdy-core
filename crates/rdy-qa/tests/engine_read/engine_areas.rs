@@ -14,7 +14,7 @@ fn id(s: &str) -> BlockId {
 }
 /// A doc at `path` with one section and one claim, in `work`; returns (doc, section, claim).
 fn doc_at(r: &mut Rdy, path: &str) -> (String, String, String) {
-    r.new_doc(&writer(), "work", path, Some("glossary"), Some("T"))
+    r.new_doc(&writer(), "work", path, Some("page"), Some("T"))
         .unwrap();
     let doc = r.read().resolve_path(&work(), path).unwrap().to_string();
     let res = write(r, "work", json!([

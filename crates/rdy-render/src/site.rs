@@ -65,6 +65,30 @@ pub fn typed_key(b: &Block) -> Option<&str> {
 static ID_INSIDE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}\b").expect("a pattern"));
 
+/// One disagreement of the disagreements page: entries with the same sentence and the same pages
+/// are one group (ls11). A group of one entry keeps that entry's blocks; a group of more has one
+/// block per page. `repeats` is the number of entries; the page does not show it (D-QWSTV).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisagreementGroup {
+    pub sentence: &'static str,
+    pub blocks: Vec<BlockId>,
+    pub repeats: usize,
+}
+
+/// One group of the glossary page: the terms of the docs under one top-level folder, or of the
+/// top-level docs (the project's group), A to Z (FW-GL1, D-Y4884).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlossaryGroup {
+    /// The folder's label, or the project's name.
+    pub label: String,
+    /// The group heading's anchor on `glossary.html`.
+    pub anchor: String,
+    pub terms: Vec<BlockId>,
+}
+
+/// The page the generated glossary owns: a top-level doc of this name has no place on the site.
+pub const GLOSSARY_NAME: &str = "glossary";
+
 pub struct Site<'a> {
     pub m: &'a Materialized,
     /// Every folder's and doc's tree path.
@@ -87,11 +111,20 @@ pub struct Site<'a> {
     pub question_anchors: BTreeMap<BlockId, String>,
     /// The entries of `disagreements.html`, in reading order of their docs; none when the render
     /// has no such page (FW-SW2). Filled by [`Site::set_disagreements`].
-    pub disagreements: Vec<crate::disagree::Disagreement>,
-    /// Every term, by name, case-insensitively.
+    pub disagreements: Vec<DisagreementGroup>,
+    /// Every term, in the glossary page's order: by group, then by name, case-insensitively.
     pub terms: Vec<BlockId>,
     /// The terms' anchors on `glossary.html`.
     pub term_anchors: BTreeMap<BlockId, String>,
+    /// The glossary page's groups: the top-level folders in tree order, then the project's.
+    pub term_groups: Vec<GlossaryGroup>,
+    /// Whether a top-level doc named `glossary` (in any case) was left off the site: the
+    /// generated glossary owns `glossary.html` (D-Y4884).
+    pub glossary_doc_dropped: bool,
+    /// The docs left off the site for that reason: their terms are still listed, unlinked.
+    glossary_docs: Vec<BlockId>,
+    /// The project's name: the label of the glossary's group of top-level docs.
+    project: String,
     /// The navigation's lists, computed once: every folder's children that have a page, in
     /// order, under `Some(folder)`; the top-level docs that have a page under `None`.
     nav_lists: BTreeMap<Option<BlockId>, Vec<&'a Block>>,
@@ -128,9 +161,10 @@ pub struct Site<'a> {
 }
 
 impl<'a> Site<'a> {
-    pub fn new(m: &'a Materialized, pack: &Pack) -> Site<'a> {
+    pub fn new(m: &'a Materialized, pack: &Pack, project: &str) -> Site<'a> {
         // `level` folders are above `parent`'s children; only a damaged store nests deeper than
         // MAX_FOLDER_DEPTH, and what lies below it gets no page
+        #[allow(clippy::too_many_arguments)]
         fn walk(
             m: &Materialized,
             parent: Option<&BlockId>,
@@ -139,6 +173,7 @@ impl<'a> Site<'a> {
             out: &mut BTreeMap<BlockId, String>,
             order: &mut Vec<BlockId>,
             tree_order: &mut Vec<BlockId>,
+            dropped: &mut Vec<BlockId>,
         ) {
             if level > tree::MAX_FOLDER_DEPTH {
                 return;
@@ -148,6 +183,16 @@ impl<'a> Site<'a> {
                 let Some(name) = names.get(&b.id) else {
                     continue;
                 };
+                // the generated glossary owns `glossary.html`: a top-level doc of that name, in
+                // any case (names and many file systems ignore case), has no page, no place in
+                // the navigation, and its blocks are not linked
+                if parent.is_none()
+                    && b.block_type == tree::DOC
+                    && name.eq_ignore_ascii_case(GLOSSARY_NAME)
+                {
+                    dropped.push(b.id.clone());
+                    continue;
+                }
                 let path = if prefix.is_empty() {
                     name.clone()
                 } else {
@@ -156,7 +201,16 @@ impl<'a> Site<'a> {
                 out.insert(b.id.clone(), path.clone());
                 tree_order.push(b.id.clone());
                 if b.block_type == tree::FOLDER {
-                    walk(m, Some(&b.id), &path, level + 1, out, order, tree_order);
+                    walk(
+                        m,
+                        Some(&b.id),
+                        &path,
+                        level + 1,
+                        out,
+                        order,
+                        tree_order,
+                        dropped,
+                    );
                 } else if b.block_type == tree::DOC {
                     order.push(b.id.clone());
                 }
@@ -165,7 +219,17 @@ impl<'a> Site<'a> {
         let mut paths = BTreeMap::new();
         let mut order = vec![];
         let mut tree_order = vec![];
-        walk(m, None, "", 0, &mut paths, &mut order, &mut tree_order);
+        let mut dropped = vec![];
+        walk(
+            m,
+            None,
+            "",
+            0,
+            &mut paths,
+            &mut order,
+            &mut tree_order,
+            &mut dropped,
+        );
         let (mut nav_lists, mut top_folders, mut nav_pos) =
             (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
         let mut nav_hidden: BTreeSet<BlockId> = order
@@ -219,6 +283,10 @@ impl<'a> Site<'a> {
             disagreements: vec![],
             terms: vec![],
             term_anchors: BTreeMap::new(),
+            term_groups: vec![],
+            glossary_doc_dropped: !dropped.is_empty(),
+            glossary_docs: dropped,
+            project: project.to_string(),
             nav_lists,
             top_folders,
             nav_pos,
@@ -369,51 +437,106 @@ impl<'a> Site<'a> {
             .collect();
         let (mut open, mut question_anchors) = (vec![], BTreeMap::new());
         let mut taken = reserved_ids();
-        let mut terms: Vec<&Block> = vec![];
+        // each term, with the top-level folder its doc sits under (none for a top-level doc)
+        let mut terms: Vec<(&Block, Option<BlockId>)> = vec![];
         for doc in &self.order {
+            let top = self
+                .chain(doc)
+                .into_iter()
+                .next()
+                .filter(|t| self.m.get(t).is_some_and(|b| b.block_type == tree::FOLDER));
             for b in self.blocks_of(doc) {
                 if b.block_type == decision::QUESTION && !answered.contains(&b.id) {
                     open.push(b.id.clone());
                     question_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
                 }
                 if b.block_type == "term" {
-                    terms.push(*b);
+                    terms.push((*b, top.clone()));
                 }
             }
         }
-        terms.sort_by_cached_key(|b| (self.label(b).to_lowercase(), b.id.clone()));
+        // a top-level doc that gave way to the generated glossary has no page, but its terms are
+        // still listed, unlinked, in the project's group (ruling task-12)
+        let hidden: Vec<&'a Block> = self
+            .glossary_docs
+            .iter()
+            .flat_map(|d| Self::walk_blocks(self.m, d))
+            .filter(|b| b.block_type == "term")
+            .collect();
+        terms.extend(hidden.into_iter().map(|b| (b, None)));
+        terms.sort_by_cached_key(|(b, _)| (self.label(b).to_lowercase(), b.id.clone()));
         let (mut term_anchors, mut taken) = (BTreeMap::new(), reserved_ids());
-        for b in &terms {
+        for (b, _) in &terms {
             term_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
         }
-        // a top-level doc named `glossary` or `questions` already has that page: it keeps it,
-        // and the collected page is not written (nor linked)
+        // the groups: the top-level folders in tree order (the navigation's order), then the
+        // top-level docs under the project's name; a group's anchor continues the terms' set
+        let mut by_top: BTreeMap<Option<BlockId>, Vec<BlockId>> = BTreeMap::new();
+        for (b, top) in terms {
+            by_top.entry(top).or_default().push(b.id.clone());
+        }
+        let mut groups = vec![];
+        let tops = self
+            .tree
+            .iter()
+            .filter_map(|id| self.m.get(id))
+            .filter(|b| b.parent.is_none() && b.block_type == tree::FOLDER)
+            .map(|b| (Some(b.id.clone()), Some(b)))
+            .chain([(None, None)]);
+        for (key, folder) in tops {
+            let Some(terms) = by_top.remove(&key) else {
+                continue;
+            };
+            let label = match folder {
+                Some(f) => self.label(f),
+                None => self.project.clone(),
+            };
+            let anchor = unique(label.clone(), &mut taken);
+            groups.push(GlossaryGroup {
+                label,
+                anchor,
+                terms,
+            });
+        }
+        // a top-level doc named `questions` already has that page: it keeps it, and the
+        // collected page is not written (nor linked); `glossary.html` is always the generated
+        // glossary (D-Y4884)
         if !self.page_taken("questions.html") {
             self.open_questions = open;
             self.question_anchors = question_anchors;
         }
-        if !self.page_taken("glossary.html") {
-            self.terms = terms.iter().map(|b| b.id.clone()).collect();
-            self.term_anchors = term_anchors;
-        }
+        self.terms = groups.iter().flat_map(|g| g.terms.clone()).collect();
+        self.term_anchors = term_anchors;
+        self.term_groups = groups;
     }
 
     /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
     /// reading order of their docs, except that the lead of an entry (the "this page" of its
-    /// sentence) comes first. A top-level doc named `disagreements` keeps its page, and the
-    /// collected page is not written (nor linked), as for `questions.html`.
+    /// sentence) comes first. Entries with the same sentence and the same pages are one group
+    /// (ls11). A top-level doc named `disagreements` keeps its page, and the collected page is
+    /// not written (nor linked), as for `questions.html`.
     pub fn set_disagreements(&mut self, list: Vec<crate::disagree::Disagreement>) {
         if self.page_taken("disagreements.html") {
             return;
         }
-        // where a block's doc comes in reading order; each block's place is read once per entry
-        // (a sort by a computed key would walk its doc chain at every comparison)
+        // where a block's doc comes in reading order, and which doc it is; each block's place is
+        // read once per entry (a sort by a computed key would walk its doc chain at every
+        // comparison)
         let at = |id: &BlockId| {
-            self.doc_of(id)
+            let doc = self.doc_of(id);
+            let pos = doc
                 .and_then(|d| self.order_pos.get(&d.id).copied())
-                .unwrap_or(usize::MAX)
+                .unwrap_or(usize::MAX);
+            (pos, doc.map(|d| d.id.clone()))
         };
-        let mut entries: Vec<crate::disagree::Disagreement> = vec![];
+        // an entry, the place of its first block, and its pages (the docs of its blocks, each
+        // once, in the entry's order; a block with no doc stands for its own page)
+        struct Row {
+            entry: crate::disagree::Disagreement,
+            place: usize,
+            pages: Vec<BlockId>,
+        }
+        let mut rows: Vec<Row> = vec![];
         let mut seen: BTreeSet<crate::disagree::Disagreement> = BTreeSet::new();
         for d in list {
             let lead = d.lead;
@@ -423,28 +546,90 @@ impl<'a> Site<'a> {
                 continue;
             }
             // distinct ids, so the keys are distinct and an unstable sort gives one order
-            let mut keyed: Vec<(usize, BlockId)> = crate::disagree::distinct(d.blocks)
-                .into_iter()
-                .filter(|b| self.url_of(b).is_some())
-                .map(|b| (at(&b), b))
-                .collect();
-            keyed.sort_unstable();
-            let mut blocks: Vec<BlockId> = keyed.into_iter().map(|(_, b)| b).collect();
+            let mut keyed: Vec<(usize, BlockId, Option<BlockId>)> =
+                crate::disagree::distinct(d.blocks)
+                    .into_iter()
+                    .filter(|b| self.url_of(b).is_some())
+                    .map(|b| {
+                        let (pos, doc) = at(&b);
+                        (pos, b, doc)
+                    })
+                    .collect();
+            keyed.sort_unstable_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            let mut docs: BTreeMap<BlockId, Option<BlockId>> = BTreeMap::new();
+            let mut blocks: Vec<BlockId> = Vec::with_capacity(keyed.len());
+            for (_, b, doc) in keyed {
+                docs.insert(b.clone(), doc);
+                blocks.push(b);
+            }
             if let Some(l) = &lead {
                 blocks.retain(|b| b != l);
                 blocks.insert(0, l.clone());
             }
+            if blocks.is_empty() {
+                continue;
+            }
+            let place = at(&blocks[0]).0;
+            let mut page_set = BTreeSet::new();
+            let pages: Vec<BlockId> = blocks
+                .iter()
+                .map(|b| docs.get(b).cloned().flatten().unwrap_or_else(|| b.clone()))
+                .filter(|p| page_set.insert(p.clone()))
+                .collect();
             let entry = crate::disagree::Disagreement {
                 sentence: d.sentence,
                 blocks,
                 lead,
             };
-            if !entry.blocks.is_empty() && seen.insert(entry.clone()) {
-                entries.push(entry);
+            if seen.insert(entry.clone()) {
+                rows.push(Row {
+                    entry,
+                    place,
+                    pages,
+                });
             }
         }
-        entries.sort_by_cached_key(|e| ((at(&e.blocks[0]), e.blocks[0].clone()), e.sentence));
-        self.disagreements = entries;
+        // a total order: the whole block list is the last key
+        rows.sort_by(|a, b| {
+            (
+                a.place,
+                &a.entry.blocks[0],
+                a.entry.sentence,
+                &a.entry.blocks,
+            )
+                .cmp(&(
+                    b.place,
+                    &b.entry.blocks[0],
+                    b.entry.sentence,
+                    &b.entry.blocks,
+                ))
+        });
+        // one group per sentence and pages, in the place of its first entry
+        let mut groups: Vec<DisagreementGroup> = vec![];
+        let mut by_key: BTreeMap<(&'static str, Vec<BlockId>), usize> = BTreeMap::new();
+        for Row { entry, pages, .. } in rows {
+            match by_key.entry((entry.sentence, pages)) {
+                std::collections::btree_map::Entry::Occupied(o) => {
+                    groups[*o.get()].repeats += 1;
+                }
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(groups.len());
+                    groups.push(DisagreementGroup {
+                        sentence: entry.sentence,
+                        blocks: entry.blocks,
+                        repeats: 1,
+                    });
+                }
+            }
+        }
+        // a group of more than one entry has one block per page: the first entry's first block
+        // on that page
+        let page_of = |id: &BlockId| at(id).1.unwrap_or_else(|| id.clone());
+        for g in groups.iter_mut().filter(|g| g.repeats > 1) {
+            let mut page_set = BTreeSet::new();
+            g.blocks.retain(|b| page_set.insert(page_of(b)));
+        }
+        self.disagreements = groups;
     }
 
     /// Whether a doc or folder already has the page at `page`.
@@ -911,7 +1096,7 @@ mod tests {
             .clone();
         let ghost = BlockId::parse("c-ZZZZZ").expect("an id");
         assert!(m.get(&ghost).is_none());
-        let mut site = Site::new(&m, st.pack());
+        let mut site = Site::new(&m, st.pack(), "Project");
         site.set_disagreements(vec![
             Disagreement {
                 sentence: "This page still points to something that was retired.",
@@ -931,10 +1116,10 @@ mod tests {
         ]);
         assert_eq!(
             site.disagreements,
-            vec![Disagreement {
+            vec![DisagreementGroup {
                 sentence: "These pages define the same thing twice.",
                 blocks: vec![claim],
-                lead: None,
+                repeats: 1,
             }]
         );
     }
@@ -960,7 +1145,7 @@ mod tests {
             .collect();
         claims.reverse();
         assert!(claims.len() >= 100, "guard: a wide entry");
-        let mut site = Site::new(&m, st.pack());
+        let mut site = Site::new(&m, st.pack(), "Project");
         let before = site.doc_calls.get();
         site.set_disagreements(vec![Disagreement {
             sentence: "These pages define the same thing twice.",
@@ -982,6 +1167,80 @@ mod tests {
         let mut want = claims;
         want.sort_by_key(|b| (at(b), b.clone()));
         assert_eq!(site.disagreements[0].blocks, want, "reading order");
+    }
+
+    /// The claims of a generated tree of `folders` top-level folders of one doc with one claim
+    /// each, in tree order, with the materialized view they come from.
+    fn one_claim_per_doc(dir: &std::path::Path, folders: usize) -> rdy_engine::Rdy {
+        rdy_engine::testkit::generate_tree(dir, folders, 1, 1);
+        rdy_engine::Rdy::open(dir).expect("open")
+    }
+
+    /// Final review M6 (b): a group of one entry over more pages than show also keeps every
+    /// page (the page folds the rest behind Show all), with its one entry counted once.
+    #[test]
+    fn ls11_a_lone_entry_over_many_pages_keeps_them_all() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let r = one_claim_per_doc(dir.path(), 7);
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        let claims: Vec<BlockId> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.clone())
+            .collect();
+        assert_eq!(claims.len(), 7, "guard: one claim on each of seven docs");
+        let mut site = Site::new(&m, st.pack(), "Project");
+        site.set_disagreements(vec![Disagreement {
+            sentence: "These pages define the same thing twice.",
+            blocks: claims.clone(),
+            lead: None,
+        }]);
+        assert_eq!(site.disagreements.len(), 1);
+        assert_eq!(site.disagreements[0].repeats, 1);
+        assert_eq!(site.disagreements[0].blocks.len(), 7, "every page stays");
+    }
+
+    /// Final review M6 (c): two entries with the same sentence over different pages are two
+    /// groups, each of one entry.
+    #[test]
+    fn ls11_the_same_sentence_over_other_pages_is_another_group() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let r = one_claim_per_doc(dir.path(), 4);
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        let claims: Vec<BlockId> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.clone())
+            .collect();
+        assert_eq!(claims.len(), 4, "guard: one claim on each of four docs");
+        let mut site = Site::new(&m, st.pack(), "Project");
+        let same = "These pages define the same thing twice.";
+        site.set_disagreements(vec![
+            Disagreement {
+                sentence: same,
+                blocks: claims[..2].to_vec(),
+                lead: None,
+            },
+            Disagreement {
+                sentence: same,
+                blocks: claims[2..].to_vec(),
+                lead: None,
+            },
+        ]);
+        let groups: Vec<(usize, usize)> = site
+            .disagreements
+            .iter()
+            .map(|g| (g.repeats, g.blocks.len()))
+            .collect();
+        assert_eq!(groups, vec![(1, 2), (1, 2)], "{:?}", site.disagreements);
     }
 
     #[test]

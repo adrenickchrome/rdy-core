@@ -113,7 +113,7 @@ pub fn legacy_doc(r: &mut Rdy, view: &str, id: &str, title: &str, parent: Option
     let bid = BlockId::parse(id).unwrap();
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("title".to_string(), FieldValue::Str(title.into()));
-    fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+    fields.insert("doc_type".to_string(), FieldValue::Str("page".into()));
     let block = Block {
         id: bid.clone(),
         block_type: "doc".into(),

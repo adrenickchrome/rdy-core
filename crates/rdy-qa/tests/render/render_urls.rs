@@ -188,7 +188,7 @@ fn url1_labels_never_fall_back_to_ids() {
         &mut r,
         "work",
         json!([
-            {"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-one","doc_type":"glossary"}},
+            {"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-one","doc_type":"page"}},
             {"op":"create","type":"section","parent":"$d","fields":{"title":"Terms"}}
         ]),
     )
@@ -239,28 +239,6 @@ fn url1_glossary_and_questions_pages_exist_only_when_needed() {
             .unwrap()
             .contains("Open question")
     );
-}
-
-/// A doc named like a collected page keeps its page: the collected page is not written over it.
-#[test]
-fn url1_a_doc_named_glossary_keeps_its_page() {
-    let (_d, mut r) = tiny();
-    write(
-        &mut r,
-        "work",
-        json!([
-            {"op":"create","type":"doc","id":"$d","fields":{"name":"glossary","title":"Our words","doc_type":"glossary"}},
-            {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
-            {"op":"create","type":"term","parent":"$s","fields":{"name":"Ledger"},"body":"Balances."}
-        ]),
-    )
-    .unwrap();
-    land(&mut r, "work").unwrap();
-    let out = tempfile::tempdir().unwrap();
-    let s = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
-    assert_eq!(s.pages, 2, "the home page and the doc");
-    let g = std::fs::read_to_string(out.path().join("glossary.html")).unwrap();
-    assert!(g.contains("Our words") && !g.contains("defined in"), "{g}");
 }
 
 /// The builders every later `render_*` test uses build what their doc comments say.
@@ -368,7 +346,7 @@ fn url1_anchors_never_collide_with_the_pages_own_element_ids() {
 fn msw12_an_authored_untitled_name_is_not_the_default() {
     let (_d, mut r) = tiny();
     write(&mut r, "work", json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-draft","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-draft","doc_type":"page"}},
         {"op":"create","type":"section","parent":"$d","fields":{"title":"Terms"}}
     ])).unwrap();
     land(&mut r, "work").unwrap();

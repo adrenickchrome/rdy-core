@@ -3,14 +3,14 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{assets, home, nav, review, search, toc, trail, version};
+use crate::{Mode, assets, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// What a render reads, whichever page it builds.
 pub struct Shared<'a> {
@@ -31,6 +31,8 @@ pub struct Shared<'a> {
     /// The blobs some page links to, by the site-relative path of their file, filled as pages
     /// are built.
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
+    /// A static site, or a live one whose pages carry the label slot.
+    pub mode: Mode,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -133,14 +135,26 @@ pub struct TermRow {
     pub anchor: String,
     pub name: String,
     pub body: String,
-    pub href: String,
+    /// The term's section in the doc that defines it; none when that doc has no page (a
+    /// top-level doc named `glossary`, D-Y4884): the entry then has no "defined in" link.
+    pub href: Option<String>,
     pub doc_title: String,
     pub section_title: String,
 }
 
+/// The terms of one top-level folder, or of the top-level docs, under a heading (D-Y4884).
+#[derive(Clone, Debug, Serialize)]
+pub struct TermGroup {
+    pub label: String,
+    pub anchor: String,
+    pub terms: Vec<TermRow>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct GlossaryBody {
-    pub terms: Vec<TermRow>,
+    pub groups: Vec<TermGroup>,
+    /// Some term has no link: its doc has no page (a top-level doc named `glossary`).
+    pub some_unlinked: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -176,8 +190,14 @@ pub struct DisagreementLink {
 #[derive(Clone, Debug, Serialize)]
 pub struct DisagreementRow {
     pub sentence: &'static str,
+    /// The first [`SHOWN_LINKS`] links.
     pub links: Vec<DisagreementLink>,
+    /// The rest, behind "Show all"; empty when there are `SHOWN_LINKS` or fewer.
+    pub more: Vec<DisagreementLink>,
 }
+
+/// How many links of a disagreement show before the fold (ls11).
+pub const SHOWN_LINKS: usize = 5;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DisagreementsBody {
@@ -235,6 +255,8 @@ pub struct PageContext {
     pub has_questions: bool,
     /// A draft render, which offers Show changes.
     pub draft: bool,
+    /// A page the live site serves: its version label is the slot, and it updates itself.
+    pub live: bool,
     pub items: Vec<Item>,
     pub body: Body,
 }
@@ -265,12 +287,20 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
-    /// A link from `from` to the block `id`, if it has a place on the site.
+    /// A link from `from` to the block `id`, if the store resolves it; with no href when the
+    /// block has no place on the site (it then reads as its label, unlinked).
     fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
         let b = self.m.get(id)?;
-        let url = self.site.url_of(id)?;
+        let Some(url) = self.site.url_of(id) else {
+            return Some(Link {
+                href: None,
+                label: self.site.label(b),
+                title: String::new(),
+                key: crate::site::typed_key(b).map(String::from),
+            });
+        };
         Some(Link {
-            href: url.href_from(from),
+            href: Some(url.href_from(from)),
             // the site's label never shows an id, even of a reference the target's text holds
             label: self.site.label(b),
             // the hover describes where the link leads: for a decision, the block it governs
@@ -533,13 +563,29 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         } else {
             nav::build(site, current, &page_url, facts)
         },
-        toc: toc::build(&items),
+        // the glossary's "On this page" names its groups, however few; a doc's lists its sections
+        toc: match &body.glossary {
+            Some(g) => toc::Toc {
+                entries: g
+                    .groups
+                    .iter()
+                    .map(|g| toc::TocEntry {
+                        label: g.label.clone(),
+                        anchor: g.anchor.clone(),
+                        depth: 1,
+                        children: vec![],
+                    })
+                    .collect(),
+            },
+            None => toc::build(&items),
+        },
         pager,
         search_href: rel(&page_url, "search-index.json"),
         has_mermaid,
         has_terms,
         has_questions,
         draft: sh.review.is_some(),
+        live: sh.mode == Mode::Live,
         items,
         body,
         kind: kind_name,
@@ -781,15 +827,34 @@ fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
 }
 
 fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
-    let link = |id: &BlockId| sh.link(page, id);
-    let terms = sh
+    let groups: Vec<TermGroup> = sh
         .site
-        .terms
+        .term_groups
+        .iter()
+        .map(|g| TermGroup {
+            label: g.label.clone(),
+            anchor: g.anchor.clone(),
+            terms: term_rows(sh, page, &g.terms),
+        })
+        .collect();
+    let some_unlinked = groups
+        .iter()
+        .any(|g| g.terms.iter().any(|t| t.href.is_none()));
+    GlossaryBody {
+        groups,
+        some_unlinked,
+    }
+}
+
+/// The glossary entries of `terms`: each term, its body and where it is defined.
+fn term_rows(sh: &Shared, page: &str, terms: &[BlockId]) -> Vec<TermRow> {
+    let link = |id: &BlockId| sh.link(page, id);
+    terms
         .iter()
         .filter_map(|id| {
             let b = sh.m.get(id)?;
             let (doc_title, section_title) = whereabouts(sh, b);
-            let section = b.parent.as_ref().and_then(|p| sh.site.url_of(p))?;
+            let section = b.parent.as_ref().and_then(|p| sh.site.url_of(p));
             Some(TermRow {
                 anchor: sh.site.term_anchors.get(id)?.clone(),
                 name: sh.site.words(b.field_str("name").unwrap_or("")),
@@ -800,44 +865,99 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
                         doc_page: &sh.doc_page(page, id),
                     },
                 ),
-                href: section.href_from(page),
+                href: section.map(|s| s.href_from(page)),
                 doc_title,
                 section_title,
             })
         })
-        .collect();
-    GlossaryBody { terms }
+        .collect()
 }
 
-/// The disagreements page's entries: each block as a link whose text is its doc title and the
-/// first words of the block (the label rule of a reference, p-2M4KD).
+/// The disagreements page's entries: each block of a group of one entry as a link whose text is
+/// its doc title and the first words of the block (the label rule of a reference, p-2M4KD); each
+/// page of a group of more as a link whose text is the doc title alone (the block stands for many
+/// points). The first [`SHOWN_LINKS`] links show; the rest fold.
 fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
     let entries = sh
         .site
         .disagreements
         .iter()
-        .map(|d| DisagreementRow {
-            sentence: d.sentence,
-            links: d
+        .map(|d| {
+            // each link with the folders above its doc, top first, as the breadcrumb names them
+            let built: Vec<(DisagreementLink, String)> = d
                 .blocks
                 .iter()
                 .filter_map(|id| {
                     let link = sh.link(page, id)?;
-                    let doc = sh.site.doc_of(id).map(|d| sh.site.label(d));
+                    // the entries hold only blocks that have a place (`set_disagreements`)
+                    let href = link.href?;
+                    let doc = sh.site.doc_of(id);
+                    let folders = doc.map(|doc| folder_path(sh, &doc.id)).unwrap_or_default();
+                    let doc = doc.map(|d| sh.site.label(d));
                     let text = match doc {
+                        Some(doc) if d.repeats > 1 => doc,
                         Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
                         _ => link.label,
                     };
-                    Some(DisagreementLink {
-                        href: link.href,
-                        text,
-                        title: link.title,
-                    })
+                    Some((
+                        DisagreementLink {
+                            href,
+                            text,
+                            title: link.title,
+                        },
+                        folders,
+                    ))
                 })
-                .collect(),
+                .collect();
+            let mut links = tell_apart(built);
+            let more = links.split_off(links.len().min(SHOWN_LINKS));
+            DisagreementRow {
+                sentence: d.sentence,
+                links,
+                more,
+            }
         })
         .collect();
     DisagreementsBody { entries }
+}
+
+/// The folders above `doc`, top first, joined as the breadcrumb and the hover join them
+/// (`Area 3 › Sub`); empty for a doc at the top level.
+fn folder_path(sh: &Shared, doc: &BlockId) -> String {
+    let chain = sh.site.chain(doc);
+    let folders = chain.split_last().map(|(_, f)| f).unwrap_or_default();
+    folders
+        .iter()
+        .filter_map(|id| sh.m.get(id))
+        .map(|b| sh.site.label(b))
+        .collect::<Vec<_>>()
+        .join(" › ")
+}
+
+/// The links of one entry, told apart (visual review F1, rule 2.4): when two or more of them
+/// would show the same text, each of those leads with its folder path; the same for the hover
+/// title. A link whose text is unique stays as it is.
+fn tell_apart(built: Vec<(DisagreementLink, String)>) -> Vec<DisagreementLink> {
+    let mut texts: HashMap<String, usize> = HashMap::new();
+    let mut titles: HashMap<String, usize> = HashMap::new();
+    for (l, _) in &built {
+        *texts.entry(l.text.clone()).or_default() += 1;
+        *titles.entry(l.title.clone()).or_default() += 1;
+    }
+    built
+        .into_iter()
+        .map(|(mut l, folders)| {
+            if !folders.is_empty() {
+                if texts[&l.text] > 1 {
+                    l.text = format!("{folders} › {}", l.text);
+                }
+                if !l.title.is_empty() && titles[&l.title] > 1 {
+                    l.title = format!("{folders} › {}", l.title);
+                }
+            }
+            l
+        })
+        .collect()
 }
 
 fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {

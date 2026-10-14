@@ -4,6 +4,7 @@ mod highlight;
 mod home;
 mod html;
 pub mod inline;
+pub mod live;
 mod llms;
 mod nav;
 mod page;
@@ -48,20 +49,112 @@ fn tpl(e: minijinja::Error) -> RdyError {
     )
 }
 
+/// The version label's text, as the `label` filter marks it in a template (`{{ version.text |
+/// label }}`): the formatter writes it as text and records the bytes it took in the page.
+#[derive(Debug)]
+struct LabelText(String);
+
+impl minijinja::value::Object for LabelText {}
+
+/// The page being rendered on this thread, and where the label went in it. A page renders into
+/// it ([`render_page`]), so the formatter knows how many bytes come before the label.
+#[derive(Default)]
+struct PageOut {
+    bytes: Vec<u8>,
+    label_at: Vec<std::ops::Range<usize>>,
+}
+
+thread_local! {
+    static PAGE_OUT: std::cell::RefCell<Option<PageOut>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`].
+struct PageSink;
+
+impl std::io::Write for PageSink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        PAGE_OUT.with_borrow_mut(|o| match o {
+            Some(o) => {
+                o.bytes.extend_from_slice(b);
+                Ok(b.len())
+            }
+            None => Err(std::io::Error::other("no page is being rendered")),
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Renders a page template: its bytes, and the byte ranges where it wrote the version label.
+fn render_page<S: Serialize>(
+    env: &minijinja::Environment<'static>,
+    name: &str,
+    ctx: S,
+) -> Result<(Vec<u8>, Vec<std::ops::Range<usize>>), RdyError> {
+    let t = env.get_template(name).map_err(tpl)?;
+    PAGE_OUT.set(Some(PageOut::default()));
+    let rendered = t.render_captured_to(ctx, PageSink).map(drop);
+    let out = PAGE_OUT.take().unwrap_or_default();
+    rendered.map_err(tpl)?;
+    Ok((out.bytes, out.label_at))
+}
+
+fn write_failure() -> minijinja::Error {
+    minijinja::Error::new(minijinja::ErrorKind::WriteFailure, "cannot write the page")
+}
+
+/// Writes the version label (a [`LabelText`]) into the page [`render_page`] is rendering, and
+/// records the bytes it took. The label must go straight into the page: written into a captured
+/// block (a macro call, `{% set %}`, `{% filter %}`), its place would be unknown, so that is an
+/// error. An empty label is an error too.
+fn write_label(
+    out: &mut minijinja::Output,
+    state: &minijinja::State,
+    label: &LabelText,
+) -> Result<(), minijinja::Error> {
+    let text = match state.auto_escape() {
+        minijinja::AutoEscape::Html => escape(&label.0),
+        _ => label.0.clone(),
+    };
+    let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
+    let start = len();
+    out.write_str(&text).map_err(|_| write_failure())?;
+    // an empty label takes no bytes, so the check below could not tell a captured block from
+    // the page: it is refused (`version::label` never gives one)
+    match (start, len()) {
+        (Some(start), Some(end)) if !text.is_empty() && end - start == text.len() => {
+            PAGE_OUT.with_borrow_mut(|o| {
+                if let Some(o) = o {
+                    o.label_at.push(start..end);
+                }
+            });
+            Ok(())
+        }
+        _ => Err(minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            "the version label is written only straight into a page that render_page renders",
+        )),
+    }
+}
+
 /// Writes a value into a template: text is HTML-escaped as `html::escape` does, so that a slash
-/// in a path stays a slash (minijinja's own escape turns it into `&#x2f;`).
+/// in a path stays a slash (minijinja's own escape turns it into `&#x2f;`); the version label
+/// goes through [`write_label`].
 fn format_value(
     out: &mut minijinja::Output,
     state: &minijinja::State,
     value: &minijinja::Value,
 ) -> Result<(), minijinja::Error> {
+    if let Some(label) = value.downcast_object_ref::<LabelText>() {
+        return write_label(out, state, label);
+    }
     if matches!(state.auto_escape(), minijinja::AutoEscape::Html)
         && !value.is_safe()
         && let Some(text) = value.as_str()
     {
-        return out.write_str(&escape(text)).map_err(|_| {
-            minijinja::Error::new(minijinja::ErrorKind::WriteFailure, "cannot write the page")
-        });
+        return out.write_str(&escape(text)).map_err(|_| write_failure());
     }
     minijinja::escape_formatter(out, state, value)
 }
@@ -69,6 +162,9 @@ fn format_value(
 fn env() -> Result<minijinja::Environment<'static>, RdyError> {
     let mut env = minijinja::Environment::new();
     env.set_formatter(format_value);
+    env.add_filter("label", |text: String| {
+        minijinja::Value::from_object(LabelText(text))
+    });
     macro_rules! templates {
         ($($name:literal),* $(,)?) => {
             $(env
@@ -215,7 +311,11 @@ pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderS
         }
         Err(e) => return Err(io_at("cannot stage in", &beside, e)),
     };
-    let mut stats = match render_into(rdy, scope, &staging).and_then(|s| {
+    let built = build_site(rdy, scope, Mode::Static).and_then(|site| {
+        write_files(&staging, &site.files)?;
+        Ok(site.summary)
+    });
+    let mut stats = match built.and_then(|s| {
         std::fs::write(
             staging.join(SITE_MARKER),
             "A site rendered by rdy. rdy render replaces this directory as a whole.\n",
@@ -369,7 +469,39 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
     }
 }
 
-fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+/// Which site a build is for: `rdy render --out` (static), or the live site `rdy serve` serves,
+/// whose noscript sentence also names live updates (ledger O9). Both write the same label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Static,
+    Live,
+}
+
+/// A built site: every file by its site-relative path (`index.html`, `go/p-AAAAA.html`,
+/// `assets/site.css`, `search-index.json`, `llms.txt`), with its bytes.
+pub struct SiteFiles {
+    pub files: BTreeMap<String, Vec<u8>>,
+    /// The version label's text, as the build wrote it.
+    pub label: String,
+    /// Where the build wrote the label: for each file, the byte ranges, in order. Only the HTML
+    /// pages (the version pill and the colophon; never a permalink page under `go/`), `llms.txt`
+    /// and `llms-full.txt` (the head line) have ranges; a file with none has no entry. The build
+    /// records each range as it writes the label and never searches its output for it. The live
+    /// site's filler puts a new label into exactly these ranges (escaped in a page, on one line
+    /// in the llms files, as the build writes it there), last range first, and touches nothing else: a doc can hold the label's text
+    /// or any other character.
+    pub label_at: BTreeMap<String, Vec<std::ops::Range<usize>>>,
+    pub summary: RenderSummary,
+}
+
+/// The render's warning when a top-level doc named `glossary` has no page (D-Y4884).
+const GLOSSARY_DOC_DROPPED: &str = "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it.";
+
+/// The same warning when no term is defined anywhere, so the site has no glossary page either.
+const GLOSSARY_DOC_DROPPED_NO_TERMS: &str = "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it.";
+
+/// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
+pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     // when each version's landing was approved (only the versions' landings are read)
@@ -397,7 +529,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     let pack = rdy.pack().clone();
     let g = rdy.graph(scope)?;
     let env = env()?;
-    let mut site = Site::new(&m, &pack);
+    let mut site = Site::new(&m, &pack, &site_name);
     site.set_disagreements(disagree::list(rdy, scope)?);
     let review = review::build(rdy, scope)?;
     let sh = page::Shared {
@@ -413,19 +545,21 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         blobs: &blobs,
         review: review.as_ref(),
         used_blobs: Default::default(),
+        mode,
     };
-    let mut stats = RenderSummary {
+    let mut summary = RenderSummary {
         pages: 0,
         assets: 0,
         redirects: 0,
         warnings: vec![],
     };
-    let ensure_dir = |page: &str| -> Result<(), RdyError> {
-        if let Some(parent) = out.join(page).parent() {
-            std::fs::create_dir_all(parent).map_err(io)?;
-        }
-        Ok(())
-    };
+    if site.glossary_doc_dropped {
+        summary.warnings.push(if site.terms.is_empty() {
+            GLOSSARY_DOC_DROPPED_NO_TERMS.into()
+        } else {
+            GLOSSARY_DOC_DROPPED.into()
+        });
+    }
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
     let mut kinds = vec![page::Kind::Home];
@@ -445,10 +579,35 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     if !site.disagreements.is_empty() {
         kinds.push(page::Kind::Disagreements);
     }
+    let mut index = search::Index::default();
+    let mut contexts = vec![];
+    let mut has_mermaid = false;
+    for kind in kinds {
+        let ctx = page::build(&sh, kind);
+        has_mermaid |= ctx.has_mermaid;
+        page::finish(&sh, &ctx, &mut index);
+        contexts.push(ctx);
+    }
+    // the pages are rendered on a few threads
+    let pages = par_map(&contexts, |ctx| {
+        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
+        Ok((ctx.page_url.clone(), html, at))
+    })?;
+    summary.pages = pages.len();
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut label_at: BTreeMap<String, Vec<std::ops::Range<usize>>> = BTreeMap::new();
+    for (path, html, at) in pages {
+        if !at.is_empty() {
+            label_at.insert(path.clone(), at);
+        }
+        files.insert(path, html);
+    }
+
     // a permalink page for every folder, doc and block that has a place on the site: the
-    // template is rendered once, and every page fills in its target's href and label
+    // template is rendered once, and every page fills in its target's href and label; a doc page
+    // at a permalink's path (a doc named like an id in a folder named `go`) is replaced by the
+    // permalink, as it always was
     let mut redirect: Option<RedirectTemplate> = None;
-    let mut permalinks: Vec<(String, String)> = vec![];
     for id in m.ids() {
         let Some(url) = site.url_of(id) else { continue };
         let t = match &mut redirect {
@@ -461,7 +620,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         let (page_url, label, href) = page::redirect_target(&sh, id, &url);
         let html = t.fill(&label, &href);
         #[cfg(debug_assertions)]
-        if permalinks.len().is_multiple_of(997) {
+        if summary.redirects.is_multiple_of(997) {
             let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
             let full = env
                 .get_template("redirect.html")
@@ -473,63 +632,61 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
                 "the prebuilt permalink page differs from the template"
             );
         }
-        permalinks.push((page_url, html));
+        label_at.remove(&page_url);
+        files.insert(page_url, html.into_bytes());
+        summary.redirects += 1;
     }
-    // they are written while the pages are built; a doc page at a permalink's path (a doc
-    // named like an id in a folder named `go`) is written over by the permalink, as it always was
-    let taken: BTreeSet<String> = permalinks.iter().map(|(p, _)| p.clone()).collect();
-    stats.redirects = permalinks.len();
-    make_dirs(out, &permalinks)?;
-    let writer = {
-        let out = out.to_path_buf();
-        std::thread::spawn(move || write_all(&out, &permalinks))
-    };
-    let pages = (|| -> Result<bool, RdyError> {
-        let mut index = search::Index::default();
-        let mut contexts = vec![];
-        let mut has_mermaid = false;
-        for kind in kinds {
-            let ctx = page::build(&sh, kind);
-            has_mermaid |= ctx.has_mermaid;
-            page::finish(&sh, &ctx, &mut index);
-            contexts.push(ctx);
-        }
-        // the pages are rendered on a few threads
-        let mut files = par_map(&contexts, |ctx| {
-            let html = env
-                .get_template(template_of(ctx.kind))
-                .map_err(tpl)?
-                .render(ctx)
-                .map_err(tpl)?;
-            Ok((ctx.page_url.clone(), html))
-        })?;
-        stats.pages = files.len();
-        files.retain(|(p, _)| !taken.contains(p));
-        make_dirs(out, &files)?;
-        write_all(out, &files)?;
-        search::write(&index, &site_name, out)?;
-        let label = version::label(&position);
-        llms::write_index(
-            &site,
-            out,
-            &contexts,
-            &site_name,
-            description.as_deref(),
-            &label,
-        )?;
-        llms::write_full(out, &contexts, &site_name, description.as_deref(), &label)?;
-        Ok(has_mermaid)
-    })();
-    let written = writer.join().expect("the permalink writer does not panic");
-    let has_mermaid = pages?;
-    written?;
-    assets::write(out, has_mermaid)?;
-    for (path, h) in sh.used_blobs.borrow().iter() {
-        ensure_dir(path)?;
-        std::fs::write(out.join(path), &blobs[h]).map_err(io)?;
-        stats.assets += 1;
+
+    let label = version::label(&position);
+    files.insert(
+        "search-index.json".into(),
+        search::bytes(&index, &site_name),
+    );
+    let (llms, at) =
+        llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
+    files.insert("llms.txt".into(), llms);
+    label_at.insert("llms.txt".into(), vec![at]);
+    let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
+    files.insert("llms-full.txt".into(), llms);
+    label_at.insert("llms-full.txt".into(), vec![at]);
+    for (path, bytes) in assets::files(has_mermaid) {
+        files.insert(path.into(), bytes);
     }
-    Ok(stats)
+    // each blob moves into the file map at its last path, so the build never holds two copies
+    // of it (one hash under two paths is copied once)
+    let used = sh.used_blobs.take();
+    drop(sh);
+    let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
+    for h in used.values() {
+        *uses.entry(h).or_default() += 1;
+    }
+    for (path, h) in &used {
+        let left = uses.get_mut(h).expect("counted above");
+        *left -= 1;
+        let bytes = if *left == 0 {
+            blobs.remove(h)
+        } else {
+            blobs.get(h).cloned()
+        };
+        files.insert(path.clone(), bytes.expect("a used blob is held"));
+        summary.assets += 1;
+    }
+    Ok(SiteFiles {
+        files,
+        label: label.text,
+        label_at,
+        summary,
+    })
+}
+
+/// Writes every file of a built site under `out`.
+fn write_files(out: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), RdyError> {
+    let files: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    make_dirs(out, &files)?;
+    write_all(out, &files)
 }
 
 /// The permalink template rendered once, with a marker where a page's href and label go: the
@@ -609,8 +766,8 @@ fn par_map<T: Sync, R: Send>(
     })
 }
 
-/// Makes the directories of every (site-relative path, text) under `out`.
-fn make_dirs(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
+/// Makes the directories of every (site-relative path, bytes) under `out`.
+fn make_dirs(out: &Path, files: &[(&str, &[u8])]) -> Result<(), RdyError> {
     let dirs: BTreeSet<&Path> = files
         .iter()
         .filter_map(|(p, _)| Path::new(p).parent())
@@ -621,11 +778,11 @@ fn make_dirs(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// Writes every (site-relative path, text) under `out`, on a few threads; their directories
+/// Writes every (site-relative path, bytes) under `out`, on a few threads; their directories
 /// exist.
-fn write_all(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
-    par_map(files, |(path, text)| {
-        std::fs::write(out.join(path), text).map_err(io)
+fn write_all(out: &Path, files: &[(&str, &[u8])]) -> Result<(), RdyError> {
+    par_map(files, |(path, bytes)| {
+        std::fs::write(out.join(path), bytes).map_err(io)
     })
     .map(drop)
 }
@@ -768,5 +925,52 @@ mod swap_tests {
         assert_eq!(swap_by_rename(&staging, &out, &old), Swap::Swapped(None));
         assert!(out.join("new").exists());
         assert!(!old.exists());
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn env_with(src: &'static str) -> minijinja::Environment<'static> {
+        let mut env = env().unwrap();
+        env.add_template("t.html", src).unwrap();
+        env
+    }
+
+    #[test]
+    fn a_page_records_where_it_wrote_the_label() {
+        let env = env_with("<p>{{ a | label }}</p><i>{{ a | label }}</i>\u{E002}{{ b }}");
+        let ctx = serde_json::json!({"a": "x<y", "b": "x<y"});
+        let (bytes, at) = render_page(&env, "t.html", ctx).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "<p>x&lt;y</p><i>x&lt;y</i>\u{E002}x&lt;y"
+        );
+        assert_eq!(at, vec![3..9, 16..22]);
+    }
+
+    #[test]
+    fn the_label_in_a_captured_block_is_refused() {
+        let env = env_with("{% set x %}{{ a | label }}{% endset %}{{ x }}");
+        let e = render_page(&env, "t.html", serde_json::json!({"a": "v1"})).unwrap_err();
+        assert!(e.message.contains("version label"), "{e}");
+    }
+
+    /// Final review M13: an empty label takes no bytes, so its place in a captured block would
+    /// look right; it is refused.
+    #[test]
+    fn an_empty_label_in_a_captured_block_is_refused() {
+        let env = env_with("<p>{% set x %}{{ a | label }}{% endset %}</p>{{ x }}");
+        let e = render_page(&env, "t.html", serde_json::json!({"a": ""})).unwrap_err();
+        assert!(e.message.contains("version label"), "{e}");
+    }
+
+    #[test]
+    fn the_label_outside_a_page_render_is_refused() {
+        let env = env_with("{{ a | label }}");
+        let t = env.get_template("t.html").unwrap();
+        let e = t.render(serde_json::json!({"a": "v1"})).unwrap_err();
+        assert!(e.to_string().contains("version label"), "{e}");
     }
 }

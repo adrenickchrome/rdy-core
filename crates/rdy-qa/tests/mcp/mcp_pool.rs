@@ -15,7 +15,7 @@ fn port1_a_read_after_a_write_sees_it_and_overview_counts_the_states_views() {
         json!({"actor": "a", "run": "r1", "role": "writer"}),
     )
     .ok();
-    let w = c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}]})).ok();
+    let w = c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]})).ok();
     let id = w["created"]["$d"].as_str().unwrap().to_string();
     let read = c.call("rdy_read", json!({"id": id})).ok();
     assert!(read["text"].as_str().unwrap().contains(&id), "{read}");
@@ -39,7 +39,7 @@ fn port1_a_pipelined_write_then_read_is_answered_in_order_and_the_read_sees_the_
     )
     .ok();
     let w = c.next_id();
-    c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": "p", "title": "P", "doc_type": "glossary"}}]}}}).to_string());
+    c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": "p", "title": "P", "doc_type": "page"}}]}}}).to_string());
     let o = c.next_id();
     c.send_raw(&json!({"jsonrpc": "2.0", "id": o, "method": "tools/call", "params": {"name": "rdy_overview", "arguments": {}}}).to_string());
     let first = c.recv_next(Duration::from_secs(30));

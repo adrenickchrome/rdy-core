@@ -148,7 +148,7 @@ fn vhost1_a_5000_change_include_and_a_50_view_landing_stay_correct() {
     // `views` unrelated views, `hot` views on the landed claim, and the proposer
     let (_d, mut r) = project();
     let mut ops = vec![
-        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "page"}}),
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
     ];
     for i in 0..=views {

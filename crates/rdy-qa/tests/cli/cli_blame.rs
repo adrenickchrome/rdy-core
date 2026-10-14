@@ -22,7 +22,7 @@ fn seeded() -> (Served, Seed) {
     let _clock = pin_clock(1_791_190_800_000);
     let mut r = Rdy::open(s.dir.path()).unwrap();
     let res = write(&mut r, "seed", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "One."}
     ]))

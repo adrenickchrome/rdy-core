@@ -349,9 +349,9 @@ fn link_in<'a>(
 ) -> impl Fn(&BlockId) -> Option<Link> + 'a {
     move |id| {
         let b = m.get(id)?;
-        let url = site.url_of(id)?;
         Some(Link {
-            href: url.href_from(from),
+            // a block with no place on the site reads as its label, unlinked
+            href: site.url_of(id).map(|url| url.href_from(from)),
             label: site.summary(b),
             title: String::new(),
             key: crate::site::typed_key(b).map(String::from),

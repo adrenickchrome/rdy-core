@@ -77,7 +77,7 @@ fn kind1_an_asset_with_a_future_tags_bytes_does_not_hide_the_tag() {
         write(
             r,
             "work",
-            json!([{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "glossary"}}]),
+            json!([{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "page"}}]),
         )
         .unwrap();
         Ok(json!(land(r, "work").unwrap()))
@@ -116,7 +116,7 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         write(
             r,
             "work",
-            json!([{"op": "create", "type": "doc", "fields": {"title": "P", "doc_type": "glossary"}}]),
+            json!([{"op": "create", "type": "doc", "fields": {"title": "P", "doc_type": "page"}}]),
         )
         .unwrap();
         Ok(json!(null))
@@ -161,7 +161,7 @@ fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
         write(
             r,
             "work",
-            json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "glossary"}}]),
+            json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "page"}}]),
         )
         .unwrap();
         let p = r

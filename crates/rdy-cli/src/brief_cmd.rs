@@ -10,7 +10,7 @@ pub(crate) struct BriefArgs {
     /// A file in a linked code repo: relative to the repo's top folder, or a path from here.
     #[arg(long = "code")]
     code: Option<String>,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name> (with --code).
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name> (with --code).
     #[arg(long, requires = "code")]
     scope: Option<String>,
     /// The budget for the briefing; the longest lists are cut to fit.

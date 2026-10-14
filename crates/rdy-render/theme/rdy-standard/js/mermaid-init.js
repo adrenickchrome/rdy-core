@@ -65,8 +65,22 @@
     );
   }
 
+  // Mermaid sizes each label box from the text as it measures it while it draws. The text face
+  // is `font-display: swap` and may still be loading: measured in the fallback face, the boxes
+  // come out narrower than the text and cut its last letters once the face swaps in. So wait
+  // until the face has loaded (or failed: then the fallback is what shows, and is measured).
+  function fontsReady() {
+    var fonts = document.fonts;
+    if (!fonts || !fonts.load) return Promise.resolve();
+    var family = token(getComputedStyle(document.documentElement), '--font-text');
+    return fonts.load('14px ' + family).then(
+      function () { return fonts.ready; },
+      function () {}
+    );
+  }
+
   function renderAll() {
-    queue = queue.then(function () {
+    queue = queue.then(fontsReady).then(function () {
       configure();
       return entries.reduce(function (chain, entry) {
         return chain.then(function () {

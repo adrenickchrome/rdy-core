@@ -79,6 +79,7 @@ pub(crate) fn run_serve(
         detach,
         idle_timeout,
         human_actor: None,
+        site_lan_override: None,
     };
     if stop {
         return match stop_daemon(env) {

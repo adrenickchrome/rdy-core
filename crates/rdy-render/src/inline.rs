@@ -647,13 +647,23 @@ fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: 
                 let words = text_html(&ref_words(span, link.as_ref()));
                 match link {
                     _ if in_link => out.push_str(&words),
-                    Some(l) if l.title.is_empty() => {
-                        out.push_str(&format!("<a href=\"{}\">{words}</a>", escape(&l.href)))
+                    // the target resolves but has no place on the site: its words, unlinked
+                    Some(Link { href: None, .. }) => out.push_str(&words),
+                    Some(Link {
+                        href: Some(h),
+                        title,
+                        ..
+                    }) if title.is_empty() => {
+                        out.push_str(&format!("<a href=\"{}\">{words}</a>", escape(&h)))
                     }
-                    Some(l) => out.push_str(&format!(
+                    Some(Link {
+                        href: Some(h),
+                        title,
+                        ..
+                    }) => out.push_str(&format!(
                         "<a href=\"{}\" title=\"{}\">{words}</a>",
-                        escape(&l.href),
-                        escape(&l.title)
+                        escape(&h),
+                        escape(&title)
                     )),
                     None => out.push_str(&format!(
                         "<span class=\"ref unresolved\" title=\"This reference could not be resolved\">{words}</span>"

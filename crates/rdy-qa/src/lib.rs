@@ -6,6 +6,7 @@ pub mod edit_loop;
 pub mod fixtures;
 pub mod git_repo;
 pub mod golden;
+pub mod http;
 pub mod inbox;
 pub mod invariants;
 pub mod landing_audit;

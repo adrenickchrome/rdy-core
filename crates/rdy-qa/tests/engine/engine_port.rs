@@ -5,7 +5,7 @@ use rdy_qa::fixtures::{approver, land, project, write};
 use serde_json::json;
 
 fn one(r: &mut rdy_engine::Rdy, view: &str, name: &str) {
-    write(r, view, json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}])).unwrap();
+    write(r, view, json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": "D", "doc_type": "page"}}])).unwrap();
 }
 
 #[test]

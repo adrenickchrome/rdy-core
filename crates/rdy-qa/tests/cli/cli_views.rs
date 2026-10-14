@@ -219,7 +219,7 @@ fn cview1_close_stale_keeps_the_humans_work_view_and_says_so() {
     with_rdy(&s, |r| {
         r.view_close(&writer(), &["other".into()], "x").unwrap_err();
         assert!(!r.read().view_head("work").unwrap().closed);
-        write(r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "w2", "title": "W2", "doc_type": "glossary"}}])).unwrap();
+        write(r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "w2", "title": "W2", "doc_type": "page"}}])).unwrap();
     });
     std::thread::sleep(std::time::Duration::from_millis(5));
     let (ok, out) = text(&s, &["view", "close", "--stale", "0"]);

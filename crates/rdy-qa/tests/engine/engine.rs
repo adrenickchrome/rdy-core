@@ -6,7 +6,7 @@ use serde_json::json;
 fn section_project() -> (tempfile::TempDir, Rdy, String) {
     let (d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "parent": "$s", "body": "first"}
     ])).unwrap();
@@ -227,7 +227,7 @@ fn ord3_legacy_long_keys_are_repaired_by_rebalance() {
                 "doc",
                 None,
                 "V",
-                &[("name", "legacy"), ("title", "L"), ("doc_type", "glossary")],
+                &[("name", "legacy"), ("title", "L"), ("doc_type", "page")],
                 "",
             ),
             raw(
@@ -283,7 +283,7 @@ fn ord3_rebalance_refuses_a_frozen_decision_with_an_invalid_key() {
                 "doc",
                 None,
                 "V",
-                &[("name", "legacy"), ("title", "L"), ("doc_type", "glossary")],
+                &[("name", "legacy"), ("title", "L"), ("doc_type", "page")],
                 "",
             ),
             raw(
@@ -338,7 +338,7 @@ fn ord3_rebalance_at_the_top_level_keeps_m1_doc_names() {
                 "doc",
                 None,
                 &long,
-                &[("title", "Alpha"), ("doc_type", "glossary")],
+                &[("title", "Alpha"), ("doc_type", "page")],
                 "",
             ),
             raw(
@@ -346,7 +346,7 @@ fn ord3_rebalance_at_the_top_level_keeps_m1_doc_names() {
                 "doc",
                 None,
                 "V",
-                &[("title", "Beta"), ("doc_type", "glossary")],
+                &[("title", "Beta"), ("doc_type", "page")],
                 "",
             ),
         ],
@@ -377,7 +377,7 @@ fn ord3_rebalance_between_tied_frozen_decisions_is_order_depth() {
                 "doc",
                 None,
                 "V",
-                &[("name", "legacy"), ("title", "L"), ("doc_type", "glossary")],
+                &[("name", "legacy"), ("title", "L"), ("doc_type", "page")],
                 "",
             ),
             raw(
@@ -579,7 +579,7 @@ fn ord3_a_frozen_decision_with_a_bad_key_is_told_to_move_its_siblings() {
                 "doc",
                 None,
                 "V",
-                &[("name", "legacy"), ("title", "L"), ("doc_type", "glossary")],
+                &[("name", "legacy"), ("title", "L"), ("doc_type", "page")],
                 "",
             ),
             raw(

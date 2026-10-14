@@ -28,6 +28,7 @@ mod engine_lexicon;
 mod engine_links;
 mod engine_mention_reviews;
 mod engine_pmap;
+mod engine_proposal_scope;
 mod engine_proposal_show;
 mod engine_related;
 mod engine_review_queue;

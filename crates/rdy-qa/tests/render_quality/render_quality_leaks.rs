@@ -232,7 +232,7 @@ fn site12_a_titleless_doc_is_never_labelled_with_its_id() {
     let doc = rdy_qa::fixtures::write(
         &mut r,
         "work",
-        serde_json::json!([{"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-one","doc_type":"glossary"}}]),
+        serde_json::json!([{"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-one","doc_type":"page"}}]),
     )
     .unwrap()
     .created["$d"]
@@ -328,7 +328,7 @@ fn site19_a_missing_figure_reads_as_a_sentence_not_storage_words() {
         &mut r,
         "work",
         serde_json::json!([
-            {"op":"create","type":"doc","id":"$d","fields":{"title":"Gone","doc_type":"glossary"}},
+            {"op":"create","type":"doc","id":"$d","fields":{"title":"Gone","doc_type":"page"}},
             {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}}
         ]),
     )

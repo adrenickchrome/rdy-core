@@ -10,7 +10,7 @@ pub(crate) struct RenderArgs {
     /// Output directory: new, empty, or a site rdy rendered before (replaced as a whole).
     #[arg(long)]
     out: PathBuf,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
 }
@@ -19,7 +19,7 @@ pub(crate) struct RenderArgs {
 pub(crate) struct ExportArgs {
     #[arg(long)]
     out: PathBuf,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
 }
@@ -29,6 +29,33 @@ pub(crate) struct ImportArgs {
     dir: PathBuf,
     #[arg(long)]
     view: String,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct SiteArgs {
+    /// canon (default), a view name or view:<name>, or proposal:P-x@n. A view or proposal opens in review mode.
+    #[arg(long)]
+    scope: Option<String>,
+}
+
+/// `rdy site`: the link to the live docs site, the CLI twin of `rdy_site`. The URL alone on one
+/// line, then the LAN URL when the site is open to the network, then the render's warnings for
+/// the scope's pages as `rdy render` prints them. The LAN warning and its fix go to stderr.
+pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply> {
+    let v = call(env, "site_url", json!({"scope": a.scope}))?;
+    let mut lines = vec![text(&v["url"]).to_string()];
+    if !v["lan_url"].is_null() {
+        lines.push(text(&v["lan_url"]).to_string());
+    }
+    if !v["warning"].is_null() {
+        eprintln!(
+            "warning: {}\nfix: {}",
+            text(&v["warning"]["message"]),
+            text(&v["warning"]["fix"])
+        );
+    }
+    let t = format!("{}{}", lines.join("\n"), warning_lines(&v["warnings"]));
+    Ok((v, t))
 }
 
 pub(crate) fn render(env: &Env, a: RenderArgs) -> Result<(Value, String), ErrorReply> {

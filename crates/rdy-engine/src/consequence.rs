@@ -356,7 +356,7 @@ impl ReadState {
         let m = self.materialized(scope)?;
         let view = match scope {
             Scope::View(v) => Some(v.as_str()),
-            Scope::Canon | Scope::At(_) | Scope::Inflight => None,
+            Scope::Canon | Scope::At(_) | Scope::Inflight | Scope::Proposal(_) => None,
         };
         let written = self.written_in(view);
         Ok(Consequences {

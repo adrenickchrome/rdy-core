@@ -15,7 +15,7 @@ fn md1_block_bodies_fields_and_cells_render_the_subset() {
     let (_d, mut r) = tiny();
     let res = write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "a", "title": "Alpha", "description": "The *first* folder."}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "One", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "One", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "The `match` statement"}},
         {"op": "create", "type": "requirement", "id": "$r", "parent": "$s", "fields": {"priority": "must"}, "body": "Guards:\n- run *after* the pattern\n- see no bindings of later cases"},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Guard"}, "body": "An `if` clause; see **{{$r|the rule}}**."},
@@ -91,7 +91,7 @@ fn md1_relative_links_resolve_from_every_page_that_shows_the_block() {
         {"op": "create", "type": "doc", "id": "$i", "fields": {"title": "Intro", "name": "intro", "doc_type": "overview"}},
         {"op": "create", "type": "section", "parent": "$i", "fields": {"title": "Welcome"}},
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "a", "title": "Alpha"}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "One", "name": "one", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "One", "name": "one", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Ledger"}, "body": "See [the intro](../intro.html) and [terms](#terms)."}
     ])).unwrap();

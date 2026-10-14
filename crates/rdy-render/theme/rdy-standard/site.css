@@ -178,6 +178,9 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
   .head a, .head button, .head summary, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button { min-height: 40px; min-width: 40px; }
   .head button, .tools button, .code-head button { display: inline-flex; align-items: center; justify-content: center; }
   .sidenav a { display: flex; align-items: center; }
+  /* the disagreements page: its links (a plain div.callout is that page's entry) and Show all */
+  details.more-links summary { min-height: 40px; min-width: 40px; line-height: 40px; }
+  div.callout > div > ul a, details.more-links a { display: inline-flex; align-items: center; min-height: 40px; min-width: 40px; }
 }
 @keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
 
@@ -282,6 +285,9 @@ details.diagram-source summary { list-style: none; cursor: pointer; display: inl
 details.diagram-source summary::-webkit-details-marker { display: none; }
 details.diagram-source summary:hover { background: var(--accent-soft); color: var(--accent); }
 details.diagram-source[open] summary { color: var(--accent-ink); }
+details.more-links { margin-top: 0.4rem; }
+details.more-links summary { cursor: pointer; color: var(--ink-soft); font-weight: 500; font-size: 0.84rem; }
+details.more-links[open] summary { color: var(--accent-ink); }
 figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /diagram == */
 
@@ -360,6 +366,7 @@ details.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-we
 .changes { list-style: none; margin: 0 0 1rem; padding: 0; }
 .changes li { margin: 0 0 0.35rem; overflow-wrap: anywhere; }
 .changes .chg-label { margin-inline: 0.4rem; }
+.changes .changes-count { margin-inline-start: 0.4rem; }
 #show-changes { font-size: 0.78rem; font-weight: 600; color: var(--ink); background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.25rem 0.7rem; white-space: nowrap; }
 /* the author rule `.head button { display: inline-flex }` at phone width would otherwise beat [hidden] */
 #show-changes[hidden] { display: none; }

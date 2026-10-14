@@ -15,7 +15,7 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
         .to_string();
     let res = write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area"}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Wallets", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Wallets", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "section", "id": "$sub", "parent": "$s", "fields": {"title": "Details"}},
         {"op": "create", "type": "term", "parent": "$sub", "fields": {"name": "Ledger"}, "body": "Balances."},

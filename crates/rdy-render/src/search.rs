@@ -3,11 +3,10 @@
 use crate::inline::Form;
 use crate::page::PageContext;
 use crate::site::Site;
-use rdy_engine::{E_IO, Materialized, RdyError};
+use rdy_engine::Materialized;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, entity, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::Path;
 
 /// The most characters of an entry's own text the index keeps.
 const TEXT_MAX: usize = 400;
@@ -268,8 +267,8 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
     }
 }
 
-/// Writes `search-index.json` under `out`, the entries in tree order.
-pub fn write(index: &Index, site_name: &str, out: &Path) -> Result<(), RdyError> {
+/// The bytes of `search-index.json`, the entries in tree order.
+pub fn bytes(index: &Index, site_name: &str) -> Vec<u8> {
     let mut entries: Vec<&(usize, Entry)> = index.entries.iter().collect();
     entries.sort_by_key(|(rank, _)| *rank);
     let json = serde_json::json!({
@@ -277,14 +276,7 @@ pub fn write(index: &Index, site_name: &str, out: &Path) -> Result<(), RdyError>
         "site": site_name,
         "entries": entries.iter().map(|(_, e)| e).collect::<Vec<_>>(),
     });
-    let text = serde_json::to_string(&json).expect("json");
-    std::fs::write(out.join("search-index.json"), text).map_err(|e| {
-        RdyError::new(
-            E_IO,
-            format!("cannot write the search index: {e}"),
-            "check the output directory",
-        )
-    })
+    serde_json::to_vec(&json).expect("json")
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use std::process::Command;
 
 fn seeded() -> (tempfile::TempDir, Rdy, String, String) {
     let (d, mut r) = project();
-    let doc = write(&mut r, "work", json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Kept", "doc_type": "glossary"}}]))
+    let doc = write(&mut r, "work", json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Kept", "doc_type": "page"}}]))
         .unwrap()
         .created["$d"]
         .clone();

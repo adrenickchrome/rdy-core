@@ -64,7 +64,7 @@ fn altg1_a_member_cannot_choose_another_member() {
     write(
         &mut r,
         "loner",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "glossary"}}]),
+        json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "page"}}]),
     )
     .unwrap();
     let e = r
@@ -145,13 +145,13 @@ fn altg1_land_rechecks_the_set_at_approval() {
     write(
         &mut r,
         "late",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "glossary"}}]),
+        json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "page"}}]),
     )
     .unwrap();
     write(
         &mut r,
         "late2",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "M", "doc_type": "glossary"}}]),
+        json!([{"op": "create", "type": "doc", "fields": {"title": "M", "doc_type": "page"}}]),
     )
     .unwrap();
     let pl = r.propose(&writer(), "late", "late").unwrap();

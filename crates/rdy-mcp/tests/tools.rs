@@ -22,7 +22,7 @@ fn start(st: &mut McpState) {
 
 fn seed(st: &mut McpState) -> Value {
     rdy_write(st, serde_json::from_value(json!({"ops": [
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Uses the {{$t}}."}
@@ -239,7 +239,7 @@ fn readers_cannot_write_or_upload() {
         serde_json::from_value(json!({"actor": "agent:r", "role": "reader"})).unwrap(),
     )
     .unwrap();
-    let e = rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "glossary"}}]})).unwrap()).unwrap_err();
+    let e = rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "page"}}]})).unwrap()).unwrap_err();
     assert_eq!(e.code, "E_PERMISSION");
     let e = rdy_asset(
         &mut st,
@@ -461,7 +461,7 @@ fn read_as_of_a_version() {
 
 fn folder_tree(st: &mut McpState) -> Value {
     rdy_write(st, serde_json::from_value(json!({"ops": [
-        {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "page"}},
         {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
         {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$t", "fields": {"title": "Summary"}},
@@ -480,7 +480,7 @@ fn overview_returns_the_folder_tree() {
     assert_eq!(
         ov["tree"],
         json!([
-            {"path": "glossary", "name": "glossary", "id": c("$g"), "type": "doc", "title": "Glossary", "doc_type": "glossary"},
+            {"path": "glossary", "name": "glossary", "id": c("$g"), "type": "doc", "title": "Glossary", "doc_type": "page"},
             {"path": "wallets", "name": "wallets", "id": c("$w"), "type": "folder", "children": [
                 {"path": "wallets/transactions", "name": "transactions", "id": c("$t"), "type": "doc", "title": "Transactions", "doc_type": "overview"}
             ]}
@@ -495,7 +495,7 @@ fn overview_collapses_the_deepest_levels_first() {
     let mut ops =
         vec![json!({"op": "create", "type": "folder", "id": "$a", "fields": {"name": "a"}})];
     for i in 0..60 {
-        ops.push(json!({"op": "create", "type": "doc", "parent": "$a", "fields": {"title": format!("A long document title number {i}"), "doc_type": "glossary"}}));
+        ops.push(json!({"op": "create", "type": "doc", "parent": "$a", "fields": {"title": format!("A long document title number {i}"), "doc_type": "page"}}));
     }
     rdy_write(
         &mut st,
@@ -609,7 +609,7 @@ fn chain1_overview_counts_each_views_changes() {
     rdy_write(
         &mut st,
         serde_json::from_value(json!({"ops": [
-            {"op": "create", "type": "doc", "fields": {"title": "Second", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "fields": {"title": "Second", "doc_type": "page"}}
         ]}))
         .unwrap(),
     )
@@ -755,7 +755,7 @@ fn ib3_overview_at_a_past_landing_leaves_coverage_out() {
     start(&mut st);
     let first = land_and_tag(&mut st);
     rdy_write(&mut st, serde_json::from_value(json!({"ops": [
-        {"op": "create", "type": "doc", "id": "$d2", "fields": {"title": "Later", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$d2", "fields": {"title": "Later", "doc_type": "page"}}
     ]})).unwrap())
     .unwrap();
     let p = rdy_propose(

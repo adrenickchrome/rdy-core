@@ -1,5 +1,6 @@
 //! Gate helpers for the `daemon` area: an echo daemon run in a child process (the test binary
 //! re-executed with `RDY_DAEMON_CHILD`), a spawner that starts it, and client options for it.
+use rdy_daemon::site::LanOverride;
 use rdy_daemon::{
     Attempt, Client, CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, ExitReason,
     Handler, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, SessionInfo, Spawned,
@@ -253,21 +254,43 @@ impl Hosted {
     pub fn new_with_human(human: &str) -> Hosted {
         let dir = short_tempdir();
         drop(Rdy::init(dir.path(), "rdy-standard").expect("init the hosted project"));
-        Hosted::serve(dir, human)
+        Hosted::serve(dir, human, None)
     }
 
     /// A host over the project already in `dir` (human actor `human:qa`).
     pub fn start_in(dir: tempfile::TempDir) -> Hosted {
-        Hosted::serve(dir, "human:qa")
+        Hosted::serve(dir, "human:qa", None)
     }
 
-    fn serve(dir: tempfile::TempDir, human: &str) -> Hosted {
+    /// `start_in`, with `lan_override` standing in for the LAN address of the default route
+    /// while `serve.site_lan` is on (`ServeOptions::site_lan_override`).
+    pub fn start_with(dir: tempfile::TempDir, lan_override: Option<LanOverride>) -> Hosted {
+        Hosted::serve(dir, "human:qa", lan_override)
+    }
+
+    /// `start_with`, as the version of the `rdy` binary, so that a real `rdy` client (its
+    /// `mcp` proxy, its CLI) talks to this host and does not replace it.
+    pub fn start_for_binary(dir: tempfile::TempDir, lan_override: Option<LanOverride>) -> Hosted {
+        Hosted::serve_as(dir, "human:qa", lan_override, env!("CARGO_PKG_VERSION"))
+    }
+
+    fn serve(dir: tempfile::TempDir, human: &str, lan_override: Option<LanOverride>) -> Hosted {
+        Hosted::serve_as(dir, human, lan_override, "t")
+    }
+
+    fn serve_as(
+        dir: tempfile::TempDir,
+        human: &str,
+        lan_override: Option<LanOverride>,
+        version: &str,
+    ) -> Hosted {
         let run = start(ServeOptions {
             project: dir.path().to_path_buf(),
-            version: "t".into(),
+            version: version.into(),
             detach: false,
             idle_timeout: Some(Duration::from_secs(60)),
             human_actor: Some(human.into()),
+            site_lan_override: lan_override,
         })
         .unwrap_or_else(|e| panic!("start the host: {e}"));
         Hosted {

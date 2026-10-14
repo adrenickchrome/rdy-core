@@ -30,7 +30,7 @@ fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
                 let r = c.call_within("rdy_session", json!({"actor": format!("agent:a{a}"), "role": "writer"}), CALL_BUDGET);
                 assert!(r.is_ok(), "agent {a} session: {r:?}");
                 for i in 0..per {
-                    let w = c.call_within("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("a{a}-{i}"), "title": "A", "doc_type": "glossary"}}]}), CALL_BUDGET);
+                    let w = c.call_within("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("a{a}-{i}"), "title": "A", "doc_type": "page"}}]}), CALL_BUDGET);
                     assert!(w.is_ok(), "agent {a} write {i}: {w:?}");
                     if i % 5 == 0 {
                         let o = c.call_within("rdy_overview", json!({}), CALL_BUDGET);
@@ -183,7 +183,7 @@ fn conc1_two_connections_each_keep_their_own_order_under_the_pool() {
                 let mut ids = vec![];
                 for i in 0..60 {
                     let w = c.next_id();
-                    c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("k{k}-{i}"), "title": "K", "doc_type": "glossary"}}]}}}).to_string());
+                    c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("k{k}-{i}"), "title": "K", "doc_type": "page"}}]}}}).to_string());
                     let r = c.next_id();
                     c.send_raw(&json!({"jsonrpc": "2.0", "id": r, "method": "tools/call", "params": {"name": "rdy_overview", "arguments": {}}}).to_string());
                     ids.push((w, r, i + 1));

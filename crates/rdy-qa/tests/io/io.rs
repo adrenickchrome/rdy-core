@@ -48,7 +48,7 @@ fn build(r: &mut Rdy, shape: &[(u8, u8)]) {
                 format!("$s{i}_{d}"),
                 format!("$t{i}_{d}"),
             );
-            ops.push(json!({"op": "create", "type": "doc", "id": doc, "parent": f, "fields": {"title": format!("Doc {i} {d} — ünïcødé"), "doc_type": "glossary"}}));
+            ops.push(json!({"op": "create", "type": "doc", "id": doc, "parent": f, "fields": {"title": format!("Doc {i} {d} — ünïcødé"), "doc_type": "page"}}));
             ops.push(json!({"op": "create", "type": "section", "id": sec, "parent": doc, "fields": {"title": "Terms"}}));
             ops.push(json!({"op": "create", "type": "term", "id": term, "parent": sec, "fields": {"name": "Ledger"}, "body": "Line one.\n\"quoted\": colon"}));
             for c in 0..(*claims % 4) {
@@ -152,7 +152,7 @@ fn export_dir(docs: &[(&str, &str)]) -> tempfile::TempDir {
     t
 }
 
-const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
 
 #[test]
 fn io_hostile_trees_are_refused_and_store_nothing() {
@@ -195,7 +195,7 @@ fn io_hostile_trees_are_refused_and_store_nothing() {
         (
             "nested.yaml",
             format!(
-                "{DOC}- id: d-BBBBB\n  type: doc\n  order: a2\n  fields:\n    title: U\n    doc_type: glossary\n"
+                "{DOC}- id: d-BBBBB\n  type: doc\n  order: a2\n  fields:\n    title: U\n    doc_type: page\n"
             ),
         ),
         ("d-AAAAA.yaml", DOC.into()),

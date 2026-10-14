@@ -295,3 +295,10 @@ pub const W_WC_UNSTAGED_MOVE: &str = "W_WC_UNSTAGED_MOVE";
 /// Diagnostic: the commit's write-back left a path as it was, because it holds what the commit
 /// did not record (a file rdy does not track, or later edits).
 pub const W_WC_KEPT: &str = "W_WC_KEPT";
+
+/// The live site is not available to this session: it runs without a daemon, or the daemon's
+/// site is off.
+pub const E_SITE: &str = "E_SITE";
+/// The live site is open to the network (`serve.site_lan`), or could not be limited to this
+/// machine as asked.
+pub const W_SITE_LAN: &str = "W_SITE_LAN";

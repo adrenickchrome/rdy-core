@@ -13,7 +13,7 @@ pub(crate) struct SearchArgs {
     /// Match regardless of case.
     #[arg(short = 'i', long)]
     ignore_case: bool,
-    /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon (the default), an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long)]
     scope: Option<String>,
     /// The budget for this page of matches.

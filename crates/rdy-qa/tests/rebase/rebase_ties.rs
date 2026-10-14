@@ -550,7 +550,7 @@ fn raw_tie(kids: &[RawKid]) -> (tempfile::TempDir, Rdy, Vec<String>) {
             "doc",
             None,
             "a1",
-            &[("name", "tied"), ("title", "T"), ("doc_type", "glossary")],
+            &[("name", "tied"), ("title", "T"), ("doc_type", "page")],
             "",
         ),
         raw(

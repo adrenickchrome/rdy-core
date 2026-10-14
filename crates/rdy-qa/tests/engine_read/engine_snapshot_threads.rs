@@ -29,7 +29,7 @@ fn consistent(m: &rdy_engine::Materialized) {
 fn snap1_readers_on_threads_see_consistent_unchanging_states_while_the_writer_runs() {
     let (_d, mut r0) = project();
     let res = write(&mut r0, "w", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "D", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "D", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}
     ])).unwrap();
     let section = res.created["$s"].clone();

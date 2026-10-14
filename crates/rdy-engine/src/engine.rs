@@ -1,7 +1,8 @@
 //! The one door to a project: reads from the published state, writes through a closure that
 //! runs against `&mut Rdy` on a single writer, in arrival order.
 use crate::semantic::lease::LeaseRegistry;
-use crate::{BriefRegistry, OpenReport, Rdy, RdyError, ReadState};
+use crate::site_scope::{ScopeRef, proposal_ref};
+use crate::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Scope, W_SITE_LAN};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -29,6 +30,97 @@ pub trait Engine: Send + Sync {
     fn pack_error(&self) -> Option<String> {
         None
     }
+    /// The link to the project's live site. An engine that runs without a daemon has none.
+    fn site(&self) -> Result<SiteLink, RdyError> {
+        Err(RdyError::new(
+            E_SITE,
+            "the live site is served by the daemon, and this session runs without one",
+            "drop --no-daemon; for a static site, run rdy render --out <dir>",
+        ))
+    }
+    /// The render's warnings for the live site's pages of `scope`, as `rdy render` gives them
+    /// for the same scope. The scope is built first when the site has no build of it. An engine
+    /// with no site has none.
+    fn site_warnings(&self, _scope: &ScopeRef) -> Result<Vec<String>, RdyError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Where the live site listens (D-N5NSN, D-FV6G9).
+#[derive(Clone, Debug)]
+pub struct SiteLink {
+    /// The loopback address, `http://127.0.0.1:<port>/`.
+    pub url: String,
+    /// The LAN address, while `serve.site_lan` is on and bound.
+    pub lan_url: Option<String>,
+    /// The LAN warning, in plain words.
+    pub warning: Option<SiteWarning>,
+}
+
+/// A `W_SITE_LAN` warning: what is true of the site's LAN address, and what to do about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SiteWarning {
+    pub message: String,
+    pub fix: String,
+}
+
+/// The fix of the `W_SITE_LAN` warning while the site is open to the network.
+pub const SITE_LAN_FIX: &str = "set serve.site_lan to false to keep the site on this machine";
+
+/// The reply of `rdy_site` and the `site_url` op: the link to the live site at `scope` (`canon`
+/// when none), as `{url, scope}`, plus `lan_url` and a `W_SITE_LAN` `warning` while the site is
+/// open to the network (or could not be), and the render's `warnings` for the scope's pages (as
+/// `rdy render` gives them; the scope is built first when it has no build). A view or proposal
+/// version opens in review mode. The link and the scope are spelled as the site reads them
+/// ([`ScopeRef`]): one spelling per scope.
+pub fn site_reply(engine: &dyn Engine, scope: Option<&str>) -> Result<serde_json::Value, RdyError> {
+    let link = engine.site()?;
+    let text = scope.unwrap_or("canon");
+    let st = engine.read();
+    let scope = match st.resolve_read_scope(text, None)? {
+        Scope::Canon => ScopeRef::Canon,
+        Scope::View(name) if name == "." || name == ".." => {
+            return Err(RdyError::new(
+                crate::E_BAD_INPUT,
+                format!(
+                    "a view named {name:?} has no link on the live site: a browser reads that name as a step in the path"
+                ),
+                format!("render the view with rdy render --scope view:{name} --out <dir>"),
+            ));
+        }
+        Scope::View(name) => ScopeRef::View(name),
+        Scope::Proposal(_) => {
+            // `P-x` follows the proposal's latest version; any other form names one version
+            let given = text.strip_prefix("proposal:").unwrap_or(text);
+            let r = crate::gate::resolve_in(&st, given)?;
+            let spelled = if given.starts_with("P-") && !given.contains('@') {
+                format!("P-{}", r.stable.short())
+            } else {
+                r.to_string()
+            };
+            ScopeRef::Proposal(proposal_ref(&spelled).unwrap_or(spelled))
+        }
+        Scope::At(_) | Scope::Inflight => {
+            return Err(RdyError::new(
+                crate::E_BAD_INPUT,
+                format!("the site shows canon, a view or a proposal version, not {text:?}"),
+                "pass canon, a view name, view:<name> or proposal:P-x@n",
+            ));
+        }
+    };
+    let path = scope.path_prefix();
+    let mut v = serde_json::json!({"url": format!("{}{path}", link.url), "scope": scope.text()});
+    if let Some(lan) = &link.lan_url {
+        v["lan_url"] = serde_json::json!(format!("{lan}{path}"));
+    }
+    if let Some(w) = &link.warning {
+        v["warning"] = serde_json::json!({"code": W_SITE_LAN, "message": w.message, "fix": w.fix});
+    }
+    let warnings = engine.site_warnings(&scope)?;
+    if !warnings.is_empty() {
+        v["warnings"] = serde_json::json!(warnings);
+    }
+    Ok(v)
 }
 
 /// The notice for a session that last saw pack generation `*seen`: `pack_changed` once per new

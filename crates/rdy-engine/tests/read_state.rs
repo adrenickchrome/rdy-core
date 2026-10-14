@@ -16,7 +16,7 @@ fn writer() -> Session {
 
 fn doc(r: &mut Rdy, view: &str, name: &str) -> String {
     let ops = serde_json::from_value(serde_json::json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "page"}}
     ]))
     .unwrap();
     r.write(

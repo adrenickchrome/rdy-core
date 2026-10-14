@@ -222,7 +222,7 @@ fn ib11_a_subscribed_view_notifies_on_a_commit() {
         .call(
             "rdy_write",
             json!({"ops": [{"op": "create", "type": "doc",
-                "fields": {"name": "n", "title": "N", "doc_type": "glossary"}}]}),
+                "fields": {"name": "n", "title": "N", "doc_type": "page"}}]}),
         )
         .ok();
     assert!(w["change"].is_string(), "{w}");
@@ -281,7 +281,7 @@ fn ib11_a_closed_session_leaves_the_hub() {
         .call(
             "rdy_write",
             json!({"ops": [{"op": "create", "type": "doc",
-                "fields": {"name": "n", "title": "N", "doc_type": "glossary"}}]}),
+                "fields": {"name": "n", "title": "N", "doc_type": "page"}}]}),
         )
         .ok();
     assert!(w["change"].is_string(), "{w}");
@@ -305,7 +305,7 @@ fn ops_doc(b: &mut McpClient) -> (String, String) {
         .call(
             "rdy_write",
             json!({"ops": [
-                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "glossary"}},
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
                 {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
                 {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Ops holds."}
             ]}),

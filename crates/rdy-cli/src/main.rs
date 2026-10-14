@@ -107,6 +107,8 @@ enum Cmd {
     /// List the folder and doc tree.
     Ls(read_cmd::LsArgs),
     Edit(edit_cmd::EditArgs),
+    /// Print the link to the live docs site; open it in a browser. Pages update by themselves as the scope changes.
+    Site(site_cmd::SiteArgs),
     Render(site_cmd::RenderArgs),
     Export(site_cmd::ExportArgs),
     Import(site_cmd::ImportArgs),
@@ -167,6 +169,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Tag(a) => land_cmd::tag(env, a),
         Cmd::Tags => read_cmd::tags(env),
         Cmd::Edit(a) => edit_cmd::run_edit(env, a),
+        Cmd::Site(a) => site_cmd::site(env, a),
         Cmd::Render(a) => site_cmd::render(env, a),
         Cmd::Export(a) => site_cmd::export(env, a),
         Cmd::Import(a) => site_cmd::import(env, a),

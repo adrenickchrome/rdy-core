@@ -32,7 +32,7 @@ fn project() -> (tempfile::TempDir, Rdy) {
 
 fn skeleton(r: &mut Rdy) -> WriteResult {
     r.write(&agent(), req(json!([
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$terms", "parent": "$doc", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$ledger", "parent": "$terms", "fields": {"name": "Ledger"}, "body": "The record of balances."},
         {"op": "create", "type": "claim", "id": "$c1", "parent": "$terms", "body": "Balances live on the {{$ledger}}."}
@@ -313,9 +313,9 @@ fn successful_move_changes_parent_and_order() {
 fn root_creates_keep_input_order_and_honour_after() {
     let (_d, mut r) = project();
     let res = r.write(&agent(), req(json!([
-        {"op": "create", "type": "doc", "id": "$a", "fields": {"title": "A", "doc_type": "glossary"}},
-        {"op": "create", "type": "doc", "id": "$b", "fields": {"title": "B", "doc_type": "glossary"}},
-        {"op": "create", "type": "doc", "id": "$c", "after": "$a", "fields": {"title": "C", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$a", "fields": {"title": "A", "doc_type": "page"}},
+        {"op": "create", "type": "doc", "id": "$b", "fields": {"title": "B", "doc_type": "page"}},
+        {"op": "create", "type": "doc", "id": "$c", "after": "$a", "fields": {"title": "C", "doc_type": "page"}}
     ]))).unwrap();
     let m = r.read().materialized(&Scope::View("work".into())).unwrap();
     let roots: Vec<String> = m.children(None).iter().map(|b| b.id.to_string()).collect();
@@ -338,7 +338,7 @@ fn after_must_be_a_sibling_even_at_root() {
     assert_eq!(
         code(
             &mut r,
-            json!([{"op": "create", "type": "doc", "after": res.created["$terms"], "fields": {"title": "X", "doc_type": "glossary"}}])
+            json!([{"op": "create", "type": "doc", "after": res.created["$terms"], "fields": {"title": "X", "doc_type": "page"}}])
         ),
         "E_BAD_INPUT"
     );
@@ -711,7 +711,7 @@ fn msw11_a_nonce_lookup_since_a_head_reads_only_the_changes_after_it() {
     let (_d, mut r) = project();
     let commit = |r: &mut Rdy, name: String, nonce: String| {
         let req = req(json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "page"}}
         ]));
         let links = ChangeLinks {
             client_nonce: Some(nonce),
@@ -759,7 +759,7 @@ fn msw11_a_nonce_lookup_since_a_head_stops_at_its_limit() {
     let (_d, mut r) = project();
     let commit = |r: &mut Rdy, name: String, nonce: String| {
         let req = req(json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "page"}}
         ]));
         let links = ChangeLinks {
             client_nonce: Some(nonce),

@@ -62,7 +62,7 @@ fn blob1_a_manifest_that_lies_about_its_length_is_an_error_not_an_allocation() {
 fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
     let (_d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ])).unwrap();
     let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
@@ -110,7 +110,7 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
 fn blob1_a_chunk_with_the_bytes_of_another_object_still_reads() {
     let (_d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ])).unwrap();
     let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
@@ -137,7 +137,7 @@ fn blob1_a_chunk_with_the_bytes_of_another_object_still_reads() {
 fn blob1_a_chunk_stored_first_does_not_make_a_later_block_unreadable() {
     let (_d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}}
     ])).unwrap();
     let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
     let block = r.read().block(&Scope::View("work".into()), &doc).unwrap();
@@ -411,7 +411,7 @@ fn blob1_a_chunk_kind_manifest_that_is_canonical_still_reads() {
 fn blob1_a_figure_naming_a_forged_manifest_is_refused_at_write() {
     let (_d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ])).unwrap();
     let hc = upload_as_chunk(r.store_mut(), vec![9u8; MIB]);
@@ -461,7 +461,7 @@ fn blob1_a_figure_naming_a_forged_manifest_is_refused_at_write() {
 fn blob1_a_pre_uploaded_manifest_survives_write_export_import() {
     let (_d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ])).unwrap();
     let bytes = b"pixels an agent could predict".to_vec();

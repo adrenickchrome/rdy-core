@@ -1,0 +1,284 @@
+//! ls7: `rdy_site` gives the person the live site's link, for canon, a view or a proposal version
+//! (D-N5NSN, D-FV6G9, D-KQ4CA); with no daemon there is no site.
+use rdy_daemon::site::LanOverride;
+use rdy_engine::{ProposalInfo, Rdy};
+use rdy_qa::daemon::{Hosted, Served, human_command, short_tempdir};
+use rdy_qa::fixtures::human_env;
+use rdy_qa::golden::{FIXTURE_DIR, Ids, approver, land, write, writer};
+use rdy_qa::http;
+use rdy_qa::mcp::{McpClient, Reply};
+use serde_json::{Value, json};
+use std::net::Ipv4Addr;
+use std::path::Path;
+
+/// A served project holding the golden corpus, landed and tagged `v1.0.0`, and a view `editing`
+/// with one unlanded change, proposed once. Returns the project, the proposal and the landing.
+fn golden_served() -> (Served, ProposalInfo, String) {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    r.import(&approver(), "import", Path::new(FIXTURE_DIR))
+        .unwrap();
+    let landing = land(&mut r, "import").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    let ids = Ids::new();
+    write(
+        &mut r,
+        "editing",
+        json!([{"op": "update", "id": ids.tutorial_prose.to_string(),
+            "body": "So far we have used three simple patterns. They compose."}]),
+    )
+    .unwrap();
+    let p = r.propose(&writer(), "editing", "tutorial").unwrap();
+    r.close().unwrap();
+    (s, p, landing)
+}
+
+fn agent(s: &Served) -> McpClient {
+    let mut c = McpClient::start_proxy(s);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a", "role": "writer"}),
+    )
+    .ok();
+    c
+}
+
+fn page(url: &str) -> http::Response {
+    http::get(url)
+}
+
+#[test]
+fn ls7_rdy_site_gives_the_link() {
+    let (s, _, _) = golden_served();
+    let mut c = agent(&s);
+    let v = c.call("rdy_site", json!({})).ok();
+    assert_eq!(v["scope"], "canon", "{v}");
+    assert!(v.get("warning").is_none(), "{v}");
+    let url = v["url"].as_str().unwrap();
+    assert!(url.starts_with("http://127.0.0.1:"), "{v}");
+    assert_eq!(page(url).status, 200, "{v}");
+}
+
+#[test]
+fn ls7_rdy_site_for_a_view_and_a_proposal() {
+    let (s, proposal, landing) = golden_served();
+    let proposal_ref = proposal.r#ref.clone();
+    let mut c = agent(&s);
+    let v = c.call("rdy_site", json!({"scope": "editing"})).ok();
+    assert_eq!(v["scope"], "view:editing", "{v}");
+    let url = v["url"].as_str().unwrap();
+    assert!(url.ends_with("~view/editing/"), "{v}");
+    let got = page(url);
+    assert_eq!(got.status, 200, "{v}");
+    assert!(
+        String::from_utf8_lossy(&got.body).contains("Show changes"),
+        "a view serves in review mode"
+    );
+    let same = c.call("rdy_site", json!({"scope": "view:editing"})).ok();
+    assert_eq!(same["url"], v["url"], "{same}");
+
+    let scope = format!("proposal:{proposal_ref}");
+    let p = c.call("rdy_site", json!({ "scope": scope })).ok();
+    assert_eq!(p["scope"], scope.as_str(), "{p}");
+    let url = p["url"].as_str().unwrap();
+    assert!(url.ends_with(&format!("~proposal/{proposal_ref}/")), "{p}");
+    assert_eq!(page(url).status, 200, "{p}");
+
+    // final review M5 and M2: each form of a proposal gets the one spelling the site reads, and
+    // its link serves
+    let (stable, _) = proposal_ref.split_once('@').unwrap();
+    let upper = format!("P-{}", stable[2..].to_ascii_uppercase());
+    for (given, want) in [
+        (format!("proposal:{stable}"), format!("proposal:{stable}")),
+        (format!("proposal:{}", proposal.id), scope.clone()),
+        (format!("proposal:{upper}@+01"), scope.clone()),
+    ] {
+        let p = c.call("rdy_site", json!({ "scope": given })).ok();
+        assert_eq!(p["scope"], want.as_str(), "{given}: {p}");
+        let url = p["url"].as_str().unwrap();
+        let want_path = format!("/~{}/", want.replacen(':', "/", 1));
+        assert!(url.ends_with(&want_path), "{given}: {p}");
+        assert_eq!(page(url).status, 200, "{given}: {p}");
+    }
+
+    let bad = c.call("rdy_site", json!({"scope": "nosuch"}));
+    assert_eq!(bad.code(), Some("E_NOT_FOUND"), "{bad:?}");
+    let bad = c.call("rdy_site", json!({"scope": "proposal:P-ffff@9"}));
+    assert!(!bad.is_ok(), "{bad:?}");
+    // final review M5: the site shows no version or analysis scope
+    for given in [
+        "tag:v1.0.0".to_string(),
+        format!("landing:{landing}"),
+        "inflight".to_string(),
+    ] {
+        let bad = c.call("rdy_site", json!({ "scope": given }));
+        assert_eq!(bad.code(), Some("E_BAD_INPUT"), "{given}: {bad:?}");
+    }
+}
+
+/// Final review M5 and M1: a view name that needs percent-encoding gets a link that serves; a
+/// view named `.` or `..` gets none, since a browser reads that name as a path step.
+#[test]
+fn ls7_rdy_site_for_any_view_name() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    for view in ["team/a b", ".."] {
+        write(
+            &mut r,
+            view,
+            json!([{"op": "create", "type": "doc", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}}]),
+        )
+        .unwrap();
+    }
+    r.close().unwrap();
+    let mut c = agent(&s);
+    let v = c.call("rdy_site", json!({"scope": "team/a b"})).ok();
+    assert_eq!(v["scope"], "view:team/a b", "{v}");
+    let url = v["url"].as_str().unwrap();
+    assert!(url.ends_with("/~view/team%2Fa%20b/"), "{v}");
+    let got = page(url);
+    assert_eq!(got.status, 200, "{v}");
+    assert!(
+        String::from_utf8_lossy(&got.body).contains("Notes"),
+        "the view's page"
+    );
+    let bad = c.call("rdy_site", json!({"scope": ".."}));
+    assert_eq!(bad.code(), Some("E_BAD_INPUT"), "{bad:?}");
+}
+
+/// The render warning of a hidden glossary doc (D-Y4884, Task 12).
+const HIDDEN_GLOSSARY: &str = "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it.";
+
+/// Ruling final (I1): the live path warns as `rdy render` does. `rdy_site` builds the view first
+/// and carries its warning; the daemon log has it once, however often the scope is refreshed or
+/// built again with the same warning; `rdy site` prints it as `rdy render` does.
+#[test]
+fn ls_final_a_hidden_glossary_doc_warns_on_the_live_path() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    write(&mut r, "g1", json!([
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Words"}},
+        {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Hidden"}, "body": "Kept apart."}
+    ]))
+    .unwrap();
+    r.close().unwrap();
+    let mut c = agent(&s);
+    let v = c.call("rdy_site", json!({"scope": "g1"})).ok();
+    assert_eq!(v["warnings"], json!([HIDDEN_GLOSSARY]), "{v}");
+    let url = v["url"].as_str().unwrap().to_string();
+    // two more refreshes: a page request of the same build, then a commit to the view and
+    // rdy_site again (a new build with the same warning)
+    assert_eq!(page(&url).status, 200);
+    let (ok, made) = s.json(&["--json", "new", "doc", "more", "--view", "g1"]);
+    assert!(ok, "{made}");
+    let again = c.call("rdy_site", json!({"scope": "g1"})).ok();
+    assert_eq!(again["warnings"], json!([HIDDEN_GLOSSARY]), "{again}");
+    let log = std::fs::read_to_string(s.run_dir().log_file()).unwrap_or_default();
+    assert_eq!(
+        log.matches(&format!("site: view:g1: warning: {HIDDEN_GLOSSARY}\n"))
+            .count(),
+        1,
+        "{log}"
+    );
+    let out = s.rdy(&["site", "--scope", "g1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{url}\nwarning: {HIDDEN_GLOSSARY}\n")
+    );
+}
+
+#[test]
+fn ls7_rdy_site_needs_a_session() {
+    let (s, _, _) = golden_served();
+    let mut c = McpClient::start_proxy(&s);
+    let r = c.call("rdy_site", json!({}));
+    assert_eq!(r.code(), Some("E_NO_SESSION"), "{r:?}");
+}
+
+#[test]
+fn ls7_no_daemon_has_no_site() {
+    let (s, _, _) = golden_served();
+    let mut c = McpClient::start(s.dir.path());
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a", "role": "writer"}),
+    )
+    .ok();
+    let r = c.call("rdy_site", json!({}));
+    let Reply::ToolError(e) = r else {
+        panic!("expected a tool error, got {r:?}")
+    };
+    assert_eq!(e["code"], "E_SITE", "{e}");
+    assert_eq!(
+        e["message"], "the live site is served by the daemon, and this session runs without one",
+        "{e}"
+    );
+    assert_eq!(
+        e["fix"], "drop --no-daemon; for a static site, run rdy render --out <dir>",
+        "{e}"
+    );
+    let _: Value = e;
+}
+
+#[test]
+fn ls7_lan_mode_gives_the_lan_link_and_the_warning() {
+    let dir = short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(
+        dir.path().join(".rdy/local.yaml"),
+        "serve:\n  site_lan: true\n",
+    )
+    .unwrap();
+    let (_cfg, env) = human_env("human:qa");
+    let h = Hosted::start_for_binary(dir, Some(LanOverride::Addr(Ipv4Addr::LOCALHOST)));
+    let made = human_command(
+        h.dir.path(),
+        &env,
+        &["new", "doc", "ops", "--view", "editing"],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let mut c = McpClient::start_proxy_at(h.dir.path(), &env);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a", "role": "writer"}),
+    )
+    .ok();
+    let v = c.call("rdy_site", json!({"scope": "editing"})).ok();
+    let url = v["url"].as_str().unwrap();
+    let lan = v["lan_url"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(lan.starts_with("http://127.0.0.1:"), "{v}");
+    assert!(lan.ends_with("/~view/editing/"), "{v}");
+    assert!(url.ends_with("/~view/editing/"), "{v}");
+    let w = &v["warning"];
+    assert_eq!(w["code"], "W_SITE_LAN", "{v}");
+    assert_eq!(
+        w["fix"], "set serve.site_lan to false to keep the site on this machine",
+        "{v}"
+    );
+    // final review M3: the message gives no fix of its own, so an agent relays the fix once
+    let root = lan.strip_suffix("~view/editing/").unwrap();
+    assert_eq!(
+        w["message"],
+        format!("anyone on your network can read these docs at {root}"),
+        "{v}"
+    );
+    // canon: the LAN link is the bare root
+    let canon = c.call("rdy_site", json!({})).ok();
+    assert!(
+        canon["lan_url"].as_str().unwrap().ends_with('/')
+            && !canon["lan_url"].as_str().unwrap().contains('~'),
+        "{canon}"
+    );
+}

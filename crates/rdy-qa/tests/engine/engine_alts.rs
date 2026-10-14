@@ -107,7 +107,7 @@ fn alts1_membership_rules() {
     assert_eq!(e.code, E_ALT_MEMBER, "closed member");
     // a doc of its own in view q: seed_doc's "seed" is in canon, so its name would clash
     let w = write(&mut r, "q", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "qdoc", "title": "Q", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "qdoc", "title": "Q", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}
     ])).unwrap();
     let s = w.created["$s"].clone();
@@ -255,7 +255,7 @@ fn alts1_question_permission_and_lookup_rules() {
     );
     // a question block in an open view (o has no view of its own: the in-flight state is read)
     let w = write(&mut r, "q", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "qdoc", "title": "Q", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "qdoc", "title": "Q", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "question", "id": "$q", "parent": "$s", "fields": {"prompt": "Which fee?"}}
     ])).unwrap();

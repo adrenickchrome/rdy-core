@@ -42,7 +42,7 @@ fn mcp4_a_write_through_the_door_is_visible_to_the_next_read() {
     let (_d, mut st) = state();
     session(&mut st, "agent:a", None);
     let ops = vec![
-        json!({"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}),
     ];
     let w = tools::rdy_write(
         &mut st,
@@ -85,14 +85,14 @@ fn mcp4_an_agent_write_into_the_humans_view_is_e_view_owner() {
     let (_d, r) = project();
     let local = Arc::new(Local::new(r));
     rdy_engine::engine::write_typed(&*local, |r| {
-        let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "fields": {"name": "h", "title": "H", "doc_type": "glossary"}}])).unwrap();
+        let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "fields": {"name": "h", "title": "H", "doc_type": "page"}}])).unwrap();
         r.write(&rdy_qa::fixtures::writer(), rdy_engine::WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
     })
     .unwrap();
     let mut st = McpState::new(local);
     session(&mut st, "agent:a", None);
     let ops = vec![
-        json!({"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}),
     ];
     let e = tools::rdy_write(
         &mut st,

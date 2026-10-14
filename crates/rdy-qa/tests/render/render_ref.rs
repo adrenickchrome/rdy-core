@@ -51,7 +51,7 @@ fn ref1_every_block_carries_a_ref_in_the_grammar_and_headings_get_the_button() {
 fn ref1_snippets_cut_at_a_word_boundary_with_an_ellipsis_and_quotes_are_straightened() {
     let (_d, mut r) = tiny();
     let res = write(&mut r, "work", serde_json::json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"title":"Household \"ledger\"","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"title":"Household \"ledger\"","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Components"}},
         {"op":"create","type":"claim","id":"$c","parent":"$s","body":"The Balance store keeps no balance column; every balance is derived from the ledger at read time, which is the whole point of the design."}
     ])).unwrap();

@@ -5,7 +5,7 @@ use rdy_qa::fixtures::*;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
 const FOLDER: &str = "id: fd-AAAAA\ntype: folder\norder: a1\n";
 
 fn export_dir() -> tempfile::TempDir {

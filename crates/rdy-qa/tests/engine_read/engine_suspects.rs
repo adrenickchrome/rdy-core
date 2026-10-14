@@ -136,7 +136,7 @@ fn presentational_project() -> (tempfile::TempDir, Rdy) {
 fn pres1_a_change_to_a_presentational_block_makes_nothing_suspect() {
     let (_d, mut r) = presentational_project();
     let res = write(&mut r, "work", json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"aside","id":"$a","parent":"$s","body":"Decorative."},
         {"op":"create","type":"claim","id":"$c","parent":"$s","body":"Depends on {{$a}}.","links":{"depends_on":[{"target":"$a"}]}}
@@ -187,7 +187,7 @@ fn pres1_a_change_to_a_presentational_block_makes_nothing_suspect() {
 fn pres1_deleting_a_presentational_block_makes_nothing_suspect_but_a_deleted_prose_does() {
     let (_d, mut r) = presentational_project();
     let res = write(&mut r, "work", json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"aside","id":"$a","parent":"$s","body":"Decorative."},
         {"op":"create","type":"prose","id":"$p","parent":"$s","body":"Plain."},

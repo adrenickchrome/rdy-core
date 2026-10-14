@@ -3,7 +3,7 @@
   order: a2
   fields:
     title: Σημασιολογία
-    doc_type: glossary
+    doc_type: page
 - id: s-2Q6JV
   type: section
   parent: d-FCG1T

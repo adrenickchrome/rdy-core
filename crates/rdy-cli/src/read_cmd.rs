@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 pub(crate) struct ShowArgs {
     /// An id or a path such as wallets/transactions; `id@version` or a ref line `[id@version] …` reads under that version.
     id: String,
-    /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon (the default), an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long)]
     scope: Option<String>,
     /// Also list every version: its change, author, landing and approver.
@@ -33,7 +33,7 @@ pub(crate) struct ImpactArgs {
     id: String,
     #[arg(long, default_value_t = 3)]
     depth: u32,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
 }
@@ -41,7 +41,7 @@ pub(crate) struct ImpactArgs {
 #[derive(clap::Args)]
 pub(crate) struct LsArgs {
     path: Option<String>,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
     #[arg(long)]
@@ -50,7 +50,7 @@ pub(crate) struct LsArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct SuspectsArgs {
-    /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon (the default), an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long)]
     scope: Option<String>,
 }

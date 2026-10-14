@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "libc",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "criterion",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "imbl",
  "rdy-model",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "postcard",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-qa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "postcard",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "minijinja",
  "rdy-engine",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-schema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "rdy-model",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "rdy-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "fjall",

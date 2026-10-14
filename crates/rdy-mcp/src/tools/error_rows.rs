@@ -140,6 +140,16 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "write the content that carries it with implements: <decision>, or link that content to it with decided_by; for a process ruling, set needs_content: false",
     ),
     (
+        "E_SITE",
+        "rdy_site or rdy site cannot give the live site's link: this session runs without a daemon (--no-daemon), or the daemon could not bind a loopback port for the site",
+        "drop --no-daemon; for a static site, run rdy render --out <dir>; or set serve.site_port to a free port from 1024 to 65535 in .rdy/local.yaml, then run rdy serve --stop",
+    ),
+    (
+        "W_SITE_LAN",
+        "the live site is open to the network (serve.site_lan is on): anyone who can reach the address can read the docs; or the LAN address could not be bound, and the site stays on this machine; rdy_site and rdy site carry it with the link",
+        "set serve.site_lan to false to keep the site on this machine; when the site already stays on it, follow the warning's own fix",
+    ),
+    (
         "W_SKELETON_MISSING",
         "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
         "add the section, or give the doc a doc_type without it (page)",

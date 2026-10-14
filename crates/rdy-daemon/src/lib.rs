@@ -8,12 +8,13 @@ pub mod handler;
 pub mod hello;
 pub mod layout;
 pub mod session;
+pub mod site;
 pub mod socket;
 
 pub use ctl::{CtlReply, CtlRequest, DaemonInfo, MAX_CTL_LINE_BYTES, serve_ctl};
 pub use daemon::{
-    DEFAULT_IDLE_TIMEOUT, Daemon, DaemonConfig, DaemonHandle, ExitReason, PROGRESS_MIN_INTERVAL,
-    Readiness, STOP_GRACE,
+    DEFAULT_IDLE_TIMEOUT, Daemon, DaemonConfig, DaemonHandle, ExitReason, IdleHold,
+    PROGRESS_MIN_INTERVAL, Readiness, STOP_GRACE,
 };
 pub use error::{
     E_BAD_INPUT, E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, E_LIMIT, E_NO_SESSION, ErrorReply,

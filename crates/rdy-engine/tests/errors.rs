@@ -100,7 +100,7 @@ fn fsck_project(n: usize) -> (tempfile::TempDir, rdy_engine::Rdy, Vec<Hash>) {
         r.write(&w, WriteRequest {
             view: "work".into(),
             ops: serde_json::from_value(serde_json::json!([
-                {"op": "create", "type": "doc", "fields": {"title": format!("D{i}"), "doc_type": "glossary"}}
+                {"op": "create", "type": "doc", "fields": {"title": format!("D{i}"), "doc_type": "page"}}
             ])).unwrap(),
             justification: None,
             message: String::new(),

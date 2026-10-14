@@ -26,7 +26,7 @@ fn text_html_escapes_then_links() {
     let t = BlockId::parse("t-MEDGR").unwrap();
     let html = text_html("<b>x</b> & {{t-MEDGR}} {{t-N0PE1}}\nnext", &|id| {
         (id == &t).then(|| rdy_render::Link {
-            href: "doc/d-AAAAA.html#t-MEDGR".into(),
+            href: Some("doc/d-AAAAA.html#t-MEDGR".into()),
             label: "Ledger".into(),
             title: String::new(),
             ..Default::default()
@@ -292,19 +292,19 @@ fn link_labels_render_references_as_text_on_one_line() {
     );
 }
 
-/// glossary (doc), wallets/ { transactions (doc), balance (doc), cards/ { limits (doc) } }
+/// terms (doc), wallets/ { transactions (doc), balance (doc), cards/ { limits (doc) } }
 fn site_tree(r: &mut Rdy) -> serde_json::Map<String, serde_json::Value> {
     let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
-        {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Terms", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$gs", "parent": "$g", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$term", "parent": "$gs", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
-        {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$ts", "parent": "$t", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "id": "$claim", "parent": "$ts", "body": "Posts to the {{$term}}."},
-        {"op": "create", "type": "doc", "id": "$b", "parent": "$w", "fields": {"title": "Balance", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$b", "parent": "$w", "fields": {"title": "Balance", "doc_type": "page"}},
         {"op": "create", "type": "folder", "id": "$c", "parent": "$w", "fields": {"name": "cards", "description": "Card products."}},
-        {"op": "create", "type": "doc", "id": "$l", "parent": "$c", "fields": {"title": "Limits", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$l", "parent": "$c", "fields": {"title": "Limits", "doc_type": "page"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let p = r.propose(&agent(), "work", "tree").unwrap();
     r.land(&founder(), &p.id).unwrap();
@@ -324,6 +324,7 @@ fn the_site_mirrors_the_folder_tree() {
     let s = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     for p in [
         "index.html",
+        "terms.html",
         "glossary.html",
         "wallets/index.html",
         "wallets/transactions.html",
@@ -333,7 +334,7 @@ fn the_site_mirrors_the_folder_tree() {
     ] {
         assert!(out.path().join(p).exists(), "{p}");
     }
-    assert_eq!(s.pages, 7);
+    assert_eq!(s.pages, 8);
     let read = |p: &str| std::fs::read_to_string(out.path().join(p)).unwrap();
 
     let name = r.read().project_name();
@@ -341,7 +342,7 @@ fn the_site_mirrors_the_folder_tree() {
     let sep = "<span class=\"crumb-sep\" aria-hidden=\"true\"></span>";
     assert!(t.contains(&format!("<nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"../index.html\">{name}</a>{sep}<a href=\"../wallets/index.html\">Wallets</a>{sep}<span aria-current=\"page\">Transactions</span>")), "{t}");
     assert!(
-        t.contains("href=\"../glossary.html#ledger\" title=\"Glossary › Terms\">Ledger</a>"),
+        t.contains("href=\"../terms.html#ledger\" title=\"Terms › Terms\">Ledger</a>"),
         "relative link across folders: {t}"
     );
     assert!(
@@ -491,7 +492,7 @@ fn the_home_page_lists_every_doc_of_a_wide_folder() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let ops: Vec<_> = (0..120)
-        .map(|i| json!({"op": "create", "type": "doc", "fields": {"name": format!("doc-{i:03}"), "title": format!("Doc {i:03}"), "doc_type": "glossary"}}))
+        .map(|i| json!({"op": "create", "type": "doc", "fields": {"name": format!("doc-{i:03}"), "title": format!("Doc {i:03}"), "doc_type": "page"}}))
         .collect();
     r.write(
         &agent(),
@@ -518,7 +519,7 @@ fn hostile_folder_and_doc_titles_are_escaped_in_tree_pages() {
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "evil", "title": evil, "description": evil}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "inner", "title": evil, "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "inner", "title": evil, "doc_type": "page"}},
         {"op": "create", "type": "section", "parent": "$d", "fields": {"title": evil}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let out = tempfile::tempdir().unwrap();

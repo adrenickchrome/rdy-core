@@ -6,14 +6,13 @@
 use crate::page::PageContext;
 use crate::site::Site;
 use crate::version;
-use rdy_engine::{E_IO, RdyError};
-use std::path::Path;
+use std::ops::Range;
 
 /// The most characters of a page's first prose that `llms.txt` shows beside its link.
 const BLURB_MAX: usize = 160;
 
 /// A text as one line: runs of whitespace become one space.
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -168,20 +167,28 @@ fn blurb(p: &PageContext, site: &Site) -> Option<String> {
 }
 
 /// What both files open with, as the home page shows it: the site's name, its description when
-/// the project has one, and the colophon every page's footer carries.
-fn head(site_name: &str, description: Option<&str>, version: &version::Label) -> String {
+/// the project has one, and the colophon every page's footer carries. The range is where the
+/// label's text went.
+fn head(
+    site_name: &str,
+    description: Option<&str>,
+    version: &version::Label,
+) -> (String, Range<usize>) {
     let name = one_line(site_name);
     let mut t = format!("# {name}\n\n");
     if let Some(d) = description.map(one_line).filter(|d| !d.is_empty()) {
         t.push_str(&format!("> {d}\n\n"));
     }
-    let at = one_line(&version.text);
     if version.frozen {
-        t.push_str(&format!("A snapshot of {name} at {at}.\n\n"));
+        t.push_str(&format!("A snapshot of {name} at "));
     } else {
-        t.push_str(&format!("{name}, {at}.\n\n"));
+        t.push_str(&format!("{name}, "));
     }
-    t
+    let start = t.len();
+    t.push_str(&one_line(&version.text));
+    let at = start..t.len();
+    t.push_str(".\n\n");
+    (t, at)
 }
 
 /// The text of `llms.txt`: `pages` are in tree order.
@@ -191,8 +198,8 @@ fn index_text(
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> String {
-    let mut t = head(site_name, description, version);
+) -> (String, Range<usize>) {
+    let (mut t, at) = head(site_name, description, version);
     t.push_str("## Pages\n\n");
     for p in pages.iter().filter(|p| matches!(p.kind, "doc" | "folder")) {
         // a folder's page is `<folder>/index.html`, one level above the pages it holds
@@ -222,7 +229,7 @@ fn index_text(
         t.push_str("\n## Reference\n\n");
         t.extend(reference);
     }
-    t
+    (t, at)
 }
 
 /// How a line of [`reader_text`] joins the one before it.
@@ -487,8 +494,8 @@ fn full_text(
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> String {
-    let mut t = head(site_name, description, version);
+) -> (String, Range<usize>) {
+    let (mut t, at) = head(site_name, description, version);
     for p in pages.iter().filter(|p| matches!(p.kind, "doc" | "folder")) {
         t.push_str(&format!("# {}\n\n", md_text(&one_line(&p.title))));
         let mut parts: Vec<String> = vec![];
@@ -509,48 +516,30 @@ fn full_text(
     }
     t.truncate(t.trim_end().len());
     t.push('\n');
-    t
+    (t, at)
 }
 
-fn write(out: &Path, file: &str, text: String) -> Result<(), RdyError> {
-    std::fs::write(out.join(file), text).map_err(|e| {
-        RdyError::new(
-            E_IO,
-            format!("cannot write {file}: {e}"),
-            "check the output directory",
-        )
-    })
-}
-
-/// Writes `llms.txt` under `out`.
-pub fn write_index(
+/// The bytes of `llms.txt`, and where the label's text is in them.
+pub fn index_bytes(
     site: &Site,
-    out: &Path,
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> Result<(), RdyError> {
-    write(
-        out,
-        "llms.txt",
-        index_text(site, pages, site_name, description, version),
-    )
+) -> (Vec<u8>, Range<usize>) {
+    let (t, at) = index_text(site, pages, site_name, description, version);
+    (t.into_bytes(), at)
 }
 
-/// Writes `llms-full.txt` under `out`.
-pub fn write_full(
-    out: &Path,
+/// The bytes of `llms-full.txt`, and where the label's text is in them.
+pub fn full_bytes(
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> Result<(), RdyError> {
-    write(
-        out,
-        "llms-full.txt",
-        full_text(pages, site_name, description, version),
-    )
+) -> (Vec<u8>, Range<usize>) {
+    let (t, at) = full_text(pages, site_name, description, version);
+    (t.into_bytes(), at)
 }
 
 #[cfg(test)]

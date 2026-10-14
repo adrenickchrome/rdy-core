@@ -336,7 +336,7 @@ impl ReadState {
             None => m.path_of(id),
         };
         // a coverage read error never fails a fact sheet: it is reported
-        let (confidence, coverage_error) = if self.is_past_landing(scope) {
+        let (confidence, coverage_error) = if self.coverage_left_out(scope) {
             (None, None)
         } else {
             match self.sheet_confidence(scope, id, &m) {

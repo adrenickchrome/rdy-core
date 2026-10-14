@@ -46,7 +46,7 @@ fn doc1_schema_shows_the_link_shape_and_every_op() {
 fn doc1_a_malformed_links_value_gets_a_hint_with_the_shape() {
     let (_d, mut r) = project();
     let s = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ]))
     .unwrap()
@@ -94,7 +94,7 @@ fn doc1_the_rdy_write_tool_lists_every_op_and_the_link_shape() {
 fn ses1_a_reader_session_may_read_canon_by_default() {
     let (_d, mut r) = project();
     let doc = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Ledger rules", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Ledger rules", "doc_type": "page"}}
     ]))
     .unwrap()
     .created["$d"]

@@ -11,11 +11,11 @@ fn sess2_fixture_sessions_are_human_and_agents_are_kept_out_of_work() {
     write(
         &mut r,
         "work",
-        json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}]),
+        json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]),
     )
     .unwrap();
     let a = agent("agent:x", Some("r1"));
-    let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "page"}}])).unwrap();
     let e = r
         .write(
             &a,

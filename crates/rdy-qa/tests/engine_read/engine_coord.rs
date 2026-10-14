@@ -162,7 +162,7 @@ fn cgr1_an_in_flight_decision_affects_its_own_docs_area_and_its_targets_areas() 
     let (_d, mut r) = qa_project();
     let seed = Scope::View("seed".into());
     for path in ["payments/fees", "identity/login"] {
-        r.new_doc(&writer(), "seed", path, Some("glossary"), Some("T"))
+        r.new_doc(&writer(), "seed", path, Some("page"), Some("T"))
             .unwrap();
     }
     let pdoc = r

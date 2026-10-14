@@ -28,7 +28,7 @@ fn land_one(r: &mut Rdy, title: &str) -> String {
         WriteRequest {
             view: "work".into(),
             ops: serde_json::from_value(json!([
-                {"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}
+                {"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}
             ]))
             .unwrap(),
             justification: None,
@@ -255,7 +255,7 @@ fn position_of_a_view_with_unlanded_changes() {
             WriteRequest {
                 view: "run-1".into(),
                 ops: serde_json::from_value(json!([
-                    {"op": "create", "type": "doc", "fields": {"title": t, "doc_type": "glossary"}}
+                    {"op": "create", "type": "doc", "fields": {"title": t, "doc_type": "page"}}
                 ]))
                 .unwrap(),
                 justification: None,
@@ -296,7 +296,7 @@ fn a_view_behind_canon_counts_to_its_own_base() {
         WriteRequest {
             view: "slow".into(),
             ops: serde_json::from_value(json!([
-                {"op": "create", "type": "doc", "fields": {"title": "Slow", "doc_type": "glossary"}}
+                {"op": "create", "type": "doc", "fields": {"title": "Slow", "doc_type": "page"}}
             ]))
             .unwrap(),
             justification: None,

@@ -29,7 +29,8 @@ pub struct ChangeRow {
     pub mark: &'static str,
     /// The word a reader sees.
     pub word: &'static str,
-    /// For an edited doc: `2 edited · 1 new · 1 removed`.
+    /// For an edited doc: `2 edited · 1 new · 1 removed`, each number joined to its word by a
+    /// no-break space. When it is there, the row shows it in place of the word.
     pub counts: Option<String>,
 }
 
@@ -136,7 +137,13 @@ fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
                     Mark::New => "new",
                 },
                 word: change.mark.word(),
-                counts: change.counts(),
+                // each number stays on the line of its word (visual review F4)
+                counts: change.counts().map(|c| {
+                    c.split(" \u{b7} ")
+                        .map(|part| part.replace(' ', "\u{a0}"))
+                        .collect::<Vec<_>>()
+                        .join(" \u{b7} ")
+                }),
             })
         })
         .collect();

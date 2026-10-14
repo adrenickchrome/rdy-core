@@ -19,7 +19,7 @@ fn human() -> Session {
 fn doc(e: &Local, name: &str) -> Value {
     let name = name.to_string();
     write_typed(e, move |r| {
-        let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}])).unwrap();
+        let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "page"}}])).unwrap();
         r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
     })
     .unwrap()
@@ -36,7 +36,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 35);
+    assert_eq!(OPS.len(), 36);
     assert_eq!(OPS[0], "session");
     let (d, e) = project();
     let s = human();
@@ -150,14 +150,10 @@ fn ctl2_render_export_and_check_resolve_relative_paths_against_the_session_cwd()
     assert!(v["pages"].as_u64().unwrap() >= 1, "{v}");
     assert!(cwd.path().join("site").is_dir());
     let v = dispatch(&c, "check", json!({"path": "exp"})).unwrap();
-    // the glossary doc has no Terms section yet (W_SKELETON_MISSING); this test is about the rest
-    let rest: Vec<&Value> = v
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|d| d["code"] != "W_SKELETON_MISSING")
-        .collect();
-    assert!(rest.is_empty(), "a fresh export lints clean: {v}");
+    assert!(
+        v.as_array().unwrap().is_empty(),
+        "a fresh export lints clean: {v}"
+    );
     let abs = d.path().join("exp2");
     dispatch(&c, "export", json!({"out": abs.to_string_lossy()})).unwrap();
     assert!(abs.is_dir(), "an absolute path is used as given");
@@ -476,7 +472,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
                 "wc_commit",
                 json!({
                     "view": "work",
-                    "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}],
+                    "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}}],
                     "nonce": nonce,
                     "rewrite": [],
                     "message": "in flight",
@@ -585,7 +581,7 @@ fn msw11_a_wc_nonce_since_the_seen_head_finds_the_commit_behind_many_others() {
             "wc_commit",
             json!({
                 "view": "work",
-                "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}],
+                "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "page"}}],
                 "nonce": nonce,
                 "rewrite": [],
                 "message": "m",
@@ -627,7 +623,7 @@ fn hd3_wc_commit_refuses_an_op_with_an_unknown_field() {
         json!({
             "view": "work", "nonce": "n1", "rewrite": [], "message": "m",
             "ops": [{"op": "create", "type": "doc", "id": "$d", "prent": "x",
-                     "fields": {"name": "a", "title": "D", "doc_type": "glossary"}}]
+                     "fields": {"name": "a", "title": "D", "doc_type": "page"}}]
         }),
     )
     .unwrap_err();
