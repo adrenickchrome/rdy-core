@@ -1,9 +1,14 @@
 //! The perf-regression tier: a fixed workload, per-machine baselines, regression verdicts.
 use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{approver, land, write, writer};
-use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
+use rdy_daemon::site::guard::ScopeRef;
+use rdy_daemon::site::live::{LiveEvent, LiveSite, Subscription};
+use rdy_daemon::{
+    Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, Shared,
+};
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
+use rdy_engine::engine::write_typed;
 use rdy_engine::{Materialized, Rdy, Scope, Session, now_ms, testkit};
 use rdy_model::{Block, BlockId, Hash, Op, Role};
 use serde::{Deserialize, Serialize};
@@ -285,6 +290,14 @@ fn spec_target(op: &str) -> Option<String> {
         "render_cold" => {
             "no spec target: the full render of canon on a fresh handle (canon read outside the timer), the canon tension read of the disagreements page included (FW-SW2); compare with render, whose state keeps that read across runs"
         }
+        "site_build_live" => {
+            "no spec target: the live site's full build (recorded; compare with render)"
+        }
+        "site_event_after_land" | "site_event_after_view_write" => {
+            "< 1 s p99 at 10k blocks (proposed, ledger F4; reported until the founder rules)"
+        }
+        "site_fanout_32" => "no spec target: the fan-out to 32 open pages (recorded)",
+        "site_get_page" => "< 5 ms p99 (proposed, ledger F4; reported)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
         "new_doc_single" => "in-process comparator for daemon_write_single (no spec target)",
@@ -3009,6 +3022,216 @@ fn tier_render_cold(
     }));
 }
 
+/// The median of the measure named `op` in `out`.
+fn median_of(out: &[Measure], op: &str) -> f64 {
+    out.iter()
+        .find(|m| m.op == op)
+        .unwrap_or_else(|| panic!("no measure {op}"))
+        .median_ms
+}
+
+/// `site_build_live`: the live site's full build of canon, from one state (compare with
+/// `render`, which writes the same pages to disk).
+fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
+    out.push(measure(&format!("site_build_live{sfx}"), runs, |_| {
+        rdy_render::live::build_live(&r.read(), &Scope::Canon).expect("build_live");
+    }));
+}
+
+/// Waits for the `Reload` of an open page's stream (any `Label` before it is skipped). A stream
+/// that ends, or a `Reload` that does not come in a minute, fails the op.
+fn await_reload(rt: &tokio::runtime::Runtime, sub: &mut Subscription) {
+    let got = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match sub.rx.recv().await {
+                    Some(LiveEvent::Reload) => return,
+                    Some(LiveEvent::Label(_)) => {}
+                    None => panic!("the page's stream ended before its Reload"),
+                }
+            }
+        })
+        .await
+    });
+    got.expect("no Reload within a minute");
+}
+
+/// Drops the events a stream holds.
+fn drain_events(sub: &mut Subscription) {
+    while sub.rx.try_recv().is_ok() {}
+}
+
+/// `view`'s write of `body` into the fixture claim, as the daemon's writer runs it; landed when
+/// `landed`.
+fn edit_claim_on_writer(
+    sh: &std::sync::Arc<Shared>,
+    claim: &str,
+    view: &str,
+    body: String,
+    landed: bool,
+) {
+    let (claim, view) = (claim.to_string(), view.to_string());
+    write_typed(&*sh.engine(), move |r| {
+        write(
+            r,
+            &view,
+            json!([{"op": "update", "id": claim, "body": body}]),
+        )?;
+        if landed {
+            land(r, &view)?;
+        }
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("the claim edit failed: {e}"));
+}
+
+/// The site ops, on a real daemon over a copy of the project at `proj` (their landings would
+/// move the project the later ops open). `sfx` names the tier (`""` or `_50k`); `docs` and `fx`
+/// are the tree's doc paths and the fixture; `build_ms` is the tier's `site_build_live` median.
+///
+/// - `site_event_after_land`: one subscription on the page of the fixture doc, and a body edit of
+///   it written and landed through the writer; the time runs from just before the write to the
+///   page's `Reload`, which the site worker sends.
+/// - `site_event_after_view_write`: the same on the page of view `sev`, and a commit into it.
+/// - `site_fanout_32`: 32 open pages of canon, one landing that changes one of them, and one
+///   `refresh`, less `build_ms`. The site is the op's own (no worker), so nothing else builds.
+/// - `site_get_page`: `GET` of the longest doc page from a warm build.
+fn site_ops(
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    docs: &[String],
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+    build_ms: f64,
+) -> Vec<Measure> {
+    let copy = parent.join(format!("p-site{sfx}"));
+    copy_project(proj, &copy);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime");
+    let run = daemon_start(&copy);
+    // the site address is set before `ready`
+    drop(rt.block_on(daemon_ready(&copy)));
+    let sh = std::sync::Arc::clone(run.shared());
+    let claim = fx.claim.to_string();
+    let page = format!("{}.html", fx.doc_path);
+    let canon = ScopeRef::Canon;
+    let mut out = vec![];
+
+    let b = sh.site.refresh(&sh, &canon).expect("canon builds");
+    assert!(b.revs.contains_key(&page), "no page {page}");
+    let mut sub = sh
+        .site
+        .subscribe(&sh, &canon, &page, &b.revs[&page], &b.label_rev)
+        .unwrap_or_else(|_| panic!("the site is busy"));
+    out.push(measure_timed(
+        &format!("site_event_after_land{sfx}"),
+        runs.write,
+        |i| {
+            drain_events(&mut sub);
+            let s = Instant::now();
+            edit_claim_on_writer(
+                &sh,
+                &claim,
+                &format!("sel-{i}"),
+                format!("Landed {i}."),
+                true,
+            );
+            await_reload(&rt, &mut sub);
+            let took = s.elapsed();
+            // let the worker finish what the run's other publishes started, outside the timer
+            sh.site.refresh(&sh, &canon).expect("canon builds");
+            took
+        },
+    ));
+    drop(sub);
+
+    let view = ScopeRef::View("sev".into());
+    edit_claim_on_writer(&sh, &claim, "sev", "Seed.".into(), false);
+    let b = sh.site.refresh(&sh, &view).expect("the view builds");
+    assert!(b.revs.contains_key(&page), "no page {page} in the view");
+    let mut sub = sh
+        .site
+        .subscribe(&sh, &view, &page, &b.revs[&page], &b.label_rev)
+        .unwrap_or_else(|_| panic!("the site is busy"));
+    out.push(measure_timed(
+        &format!("site_event_after_view_write{sfx}"),
+        runs.write,
+        |i| {
+            drain_events(&mut sub);
+            let s = Instant::now();
+            edit_claim_on_writer(&sh, &claim, "sev", format!("Committed {i}."), false);
+            await_reload(&rt, &mut sub);
+            let took = s.elapsed();
+            sh.site.refresh(&sh, &view).expect("the view builds");
+            took
+        },
+    ));
+    drop(sub);
+
+    // the fan-out alone: a site of its own has no worker, so only the timed `refresh` builds
+    let site = LiveSite::new();
+    let b = site.refresh(&sh, &canon).expect("canon builds");
+    let mut pages: Vec<String> = vec![page.clone()];
+    pages.extend(b.revs.keys().filter(|p| **p != page).take(31).cloned());
+    out.push(measure_timed(
+        &format!("site_fanout_32{sfx}"),
+        runs.view_ops,
+        |i| {
+            let b = site.refresh(&sh, &canon).expect("canon builds");
+            let mut subs: Vec<Subscription> = pages
+                .iter()
+                .map(|p| {
+                    site.subscribe(&sh, &canon, p, &b.revs[p], &b.label_rev)
+                        .unwrap_or_else(|_| panic!("the site is busy"))
+                })
+                .collect();
+            edit_claim_on_writer(
+                &sh,
+                &claim,
+                &format!("sfo-{i}"),
+                format!("Fanned {i}."),
+                true,
+            );
+            site.published();
+            let s = Instant::now();
+            site.refresh(&sh, &canon).expect("canon builds");
+            let took = s.elapsed();
+            assert_eq!(
+                subs[0].rx.try_recv(),
+                Ok(LiveEvent::Reload),
+                "the edited page is told to reload"
+            );
+            drop(subs);
+            Duration::from_secs_f64((took.as_secs_f64() * 1000.0 - build_ms).max(0.0) / 1000.0)
+        },
+    ));
+
+    let base = match &sh.site_info.get().expect("the site info").url {
+        Ok(url) => url.clone(),
+        Err(e) => panic!("the daemon has no site: {e}"),
+    };
+    let b = sh.site.refresh(&sh, &canon).expect("canon builds");
+    let longest = docs
+        .iter()
+        .max_by_key(|d| b.files.get(&format!("{d}.html")).map_or(0, Vec::len))
+        .expect("a doc");
+    let url = format!("{base}{longest}.html");
+    // one untimed request, so the timed ones read a warm build
+    assert_eq!(crate::http::get(&url).status, 200, "GET {url}");
+    out.push(measure(&format!("site_get_page{sfx}"), 50, |_| {
+        let got = crate::http::get(&url);
+        assert_eq!(got.status, 200, "GET {url}");
+    }));
+
+    drop(rt);
+    daemon_stop(run);
+    std::fs::remove_dir_all(&copy).ok();
+    out
+}
+
 /// Cold open: a fresh handle on the project, then the first read of canon.
 fn tier_cold_open(out: &mut Vec<Measure>, proj: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("cold_open{sfx}"), runs, |_| {
@@ -3142,6 +3365,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_code(&mut out, &r, &fx, dir.path());
     tier_wc(&mut out, &r, dir.path());
     tier_render(&mut out, &r, dir.path(), "", 5);
+    tier_site_build(&mut out, &r, "", 5);
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
         r.read().export(&Scope::Canon, &export).expect("export");
@@ -3184,6 +3408,15 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
+    out.extend(site_ops(
+        &proj,
+        dir.path(),
+        &docs,
+        &fx,
+        "",
+        &TYPICAL_RUNS,
+        median_of(&out, "site_build_live"),
+    ));
     out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
     out.extend(bound_ops(dir.path()));
     out.extend(stdio_mcp_ops(dir.path()));
@@ -3884,10 +4117,20 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_reads(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_edit_loop(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_render(&mut out, &r, parent, sfx, 3);
+    tier_site_build(&mut out, &r, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
+    out.extend(site_ops(
+        &proj,
+        parent,
+        &docs,
+        &fx,
+        sfx,
+        &LARGE_RUNS,
+        median_of(&out, &format!("site_build_live{sfx}")),
+    ));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
     // as the daemon does after `ready`, outside every timer (plan M2e2)
@@ -4385,7 +4628,8 @@ mod tests {
     }
 
     /// Every op the gate can run: those the baseline holds, those `spec_target` names, and the
-    /// ops of this plan. No target says p99: the M2 targets are p95 (D-ANNKF).
+    /// ops of this plan. No target says p99 but the live site's proposed ones (ledger F4): the M2
+    /// targets are p95 (D-ANNKF).
     #[test]
     fn sgperf1_no_target_says_p99() {
         let src = include_str!("perf.rs");
@@ -4413,13 +4657,19 @@ mod tests {
         ]);
         assert!(ops.len() > 100, "{} ops", ops.len());
         let mut said = vec![];
-        for op in &ops {
+        for op in ops.iter().filter(|op| !op.starts_with("site_")) {
             if spec_target(op).is_some_and(|t| t.contains("p99")) {
                 said.push(op.as_str());
             }
         }
         assert!(said.is_empty(), "these targets say p99: {said:?}");
-        assert!(!body.contains("p99"), "spec_target says p99 in a text");
+        // ledger F4: two texts say p99 (the event ops share one; the page get has the other);
+        // both are proposed and reported, none is enforced
+        assert_eq!(
+            body.matches("p99").count(),
+            2,
+            "only the proposed targets of the live site say p99"
+        );
     }
 
     /// The two M2g ops run end to end on a small tree: the checker after the view ops, and the
@@ -4579,6 +4829,79 @@ mod tests {
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
+    }
+
+    /// The site ops run end to end on a small tree, on a daemon over a copy of it (ledger F4: their
+    /// targets are proposed and reported, so none is a spec ceiling).
+    #[test]
+    fn lsperf1_the_site_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6c73_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 2,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut out = vec![];
+        tier_site_build(&mut out, &r, "", 2);
+        drop(r);
+        let build = median_of(&out, "site_build_live");
+        out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &runs, build));
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "site_build_live",
+                "site_event_after_land",
+                "site_event_after_view_write",
+                "site_fanout_32",
+                "site_get_page"
+            ]
+        );
+        for m in &out {
+            assert!(m.median_ms >= 0.0, "{m:?}");
+            assert!(m.runs >= 2, "{m:?}");
+            assert!(spec_target(&m.op).is_some(), "{}", m.op);
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} is not enforced", m.op);
+        }
+        assert!(out[0].median_ms > 0.0, "a build takes time");
+        assert!(
+            spec_target("site_build_live")
+                .unwrap()
+                .contains("compare with render")
+        );
+        for op in ["site_event_after_land", "site_event_after_view_write"] {
+            assert!(
+                spec_target(op).unwrap().contains("< 1 s p99 at 10k blocks"),
+                "{op}"
+            );
+        }
+        assert!(spec_target("site_get_page").unwrap().contains("< 5 ms p99"));
+        assert!(
+            spec_target("site_fanout_32")
+                .unwrap()
+                .contains("32 open pages")
+        );
+        assert!(
+            spec_target("site_get_page_50k")
+                .unwrap()
+                .contains("large tier"),
+            "the large tier states its budget"
+        );
+        assert!(!dir.path().join("p-site").exists(), "the copy is removed");
     }
 
     /// The review ops run end to end on a small tree, after the in-flight and tension ops.

@@ -1318,3 +1318,45 @@ No laptop figures are judged here: the first timing of these ops is the Linux be
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## The live site (2026-10-13)
+
+Five ops, for D-N5NSN and D-FV6G9 (ledger F4). A view updates live as the agent writes, so the
+build and the fan-out are costs of the hot path, and the founder asked for the latency from a write
+to the page's event (2026-10-12). Every op runs on both tiers (`_50k` on the large one). The three
+daemon ops run on a daemon over a copy of the tier's project (their landings would move the
+project the later ops open); the copy is removed at the end.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `site_build_live` | `rdy_render::live::build_live(&r.read(), &Scope::Canon)` on the tier's project: the whole site built in memory, with each page's revision. Compare with `render`, which writes the same pages to disk | 5 (3 at 50k) | no spec target: the live site's full build (recorded; compare with render) |
+| `site_event_after_land` | one subscription on the page of the doc the write edits, then a body edit of that doc written into a fresh view and landed through the writer. The time runs from just before the write to the subscription's `Reload` (the site worker builds and sends it). Each run waits for the worker to settle, outside the timer | `runs.write` | < 1 s p99 at 10k blocks (proposed, ledger F4; reported until the founder rules) |
+| `site_event_after_view_write` | the same, with the subscription on the view's page and a commit into that view (no landing). Review mode, so the page carries the change marks | `runs.write` | < 1 s p99 at 10k blocks (proposed, ledger F4; reported until the founder rules) |
+| `site_fanout_32` | 32 subscriptions on 32 canon pages, a landing that changes one page, and one `refresh`, less the median of `site_build_live`: the fan-out alone. The `LiveSite` is the op's own, with no worker, so the timed `refresh` is the only build. The op asserts that the edited page got `Reload` | `runs.view_ops` | no spec target: the fan-out to 32 open pages (recorded) |
+| `site_get_page` | `rdy_qa::http::get` of the longest doc page, from a warm build, over the daemon's loopback port. The op asserts status 200 | 50 | < 5 ms p99 (proposed, ledger F4; reported) |
+
+What each cost grows with:
+
+- `site_build_live` grows with the pages (one per doc and folder, the generated pages and the
+  permalink pages), as `render` does, but writes no file. It is the cost of one build on the site
+  worker, which a landing or a view commit starts only while a page of that scope is open.
+- `site_event_after_land` is the landing (it ends in durable flushes, so it moves with the drive,
+  like `daemon_write_single`), plus the build of canon, plus the diff of the two builds. It grows
+  with the pages. `site_event_after_view_write` is a commit (one flush) plus the build of the
+  view, which reads the review base besides.
+- `site_fanout_32` is the part of a `refresh` that is not the build: the input key, the diff of
+  the two builds, and one send per open page. It stays small while a build is large; if the two
+  come close, the fan-out has become a cost.
+- `site_get_page` is the request head, the guard checks, the page bytes with the live script
+  added, and a loopback round trip. It does not grow with the project, but with the length of the
+  page.
+
+Targets: none of the five is in `spec_ceiling_ms`, so none is enforced. The founder rules F4
+after two bench runs agree on write-to-event and page-GET times (D-FV6G9); until then the targets
+are proposed and reported. The tests of the M2 targets say p95 (D-ANNKF); these two say p99
+because the ledger proposed them so. `sgperf1_no_target_says_p99` allows exactly these texts.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
+are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
