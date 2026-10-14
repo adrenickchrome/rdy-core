@@ -10,6 +10,7 @@ use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{Engine, SiteLink, WriteFn};
 use rdy_engine::semantic::lease::LeaseRegistry;
+use rdy_engine::site_scope::ScopeRef;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState};
 use rdy_mcp::notify::NotifyHub;
 use serde_json::Value;
@@ -225,6 +226,10 @@ impl Engine for DaemonEngine {
             Err(reason) => Err(off(reason)),
         }
     }
+
+    fn site_warnings(&self, scope: &ScopeRef) -> Result<Vec<String>, RdyError> {
+        Ok(self.0.site.refresh(&self.0, scope)?.warnings.clone())
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +253,160 @@ mod tests {
             vec![6],
             "the ended session left the hub, the other stays"
         );
+        sh.shutdown().unwrap();
+    }
+
+    /// Final review I1 (ruling final): `rdy_site` carries the render's warnings for the scope
+    /// it links, building the scope first when the site has none of it; a scope with none has
+    /// no `warnings`.
+    #[test]
+    fn ls7_rdy_site_carries_the_render_warnings_of_its_scope() {
+        use rdy_engine::engine::site_reply;
+        use rdy_engine::{Session, WriteRequest};
+        use rdy_model::Role;
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let writer = Session::human("human:qa".into(), Role::Writer);
+        let ops = vec![
+            serde_json::json!({"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}}),
+            serde_json::json!({"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Words"}}),
+            serde_json::json!({"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Hidden"}, "body": "Kept apart."}),
+        ];
+        r.write(
+            &writer,
+            WriteRequest {
+                view: "g1".into(),
+                ops: rdy_engine::parse_ops(ops).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+        let sh = Shared::new(r);
+        sh.site_info
+            .set(SiteInfo {
+                url: Ok("http://127.0.0.1:51000/".into()),
+                lan_url: None,
+                warning: None,
+                addrs: vec![],
+            })
+            .unwrap();
+        let e = sh.engine();
+        assert_eq!(sh.site.builds(), 0, "guard: nothing built yet");
+        let v = site_reply(&*e, Some("g1")).unwrap();
+        assert_eq!(
+            v["warnings"],
+            serde_json::json!([
+                "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it."
+            ]),
+            "{v}"
+        );
+        assert_eq!(sh.site.builds(), 1, "the scope was built for its warnings");
+        let canon = site_reply(&*e, None).unwrap();
+        assert!(canon.get("warnings").is_none(), "{canon}");
+        sh.shutdown().unwrap();
+    }
+
+    /// Final review M1 and M2: every link `rdy_site` gives routes, through the site's guard, to
+    /// the scope it names, in the one spelling of that scope; a view named `.` or `..` has no
+    /// link (a browser reads it as a path step).
+    #[test]
+    fn ls7_every_site_link_round_trips_through_the_guard() {
+        use crate::site::guard::{Guard, Route};
+        use crate::site::http::parse_head;
+        use rdy_engine::engine::site_reply;
+        use rdy_engine::{Session, WriteRequest};
+        use rdy_model::Role;
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let writer = Session::human("human:qa".into(), Role::Writer);
+        for view in ["a b", "team/a.b", "ä", "x%2Fy", "p", ".", ".."] {
+            let ops = vec![serde_json::json!({"op": "create", "type": "doc",
+                "fields": {"name": "d", "title": "D", "doc_type": "overview"}})];
+            r.write(
+                &writer,
+                WriteRequest {
+                    view: view.into(),
+                    ops: rdy_engine::parse_ops(ops).unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let p = r.propose(&writer, "p", "P").unwrap();
+        let canonical = p.r#ref.clone();
+        let (stable, _) = canonical.split_once('@').unwrap();
+        let upper = format!("P-{}", stable[2..].to_ascii_uppercase());
+        let sh = Shared::new(r);
+        const ROOT: &str = "http://127.0.0.1:51000";
+        sh.site_info
+            .set(SiteInfo {
+                url: Ok(format!("{ROOT}/")),
+                lan_url: None,
+                warning: None,
+                addrs: vec![],
+            })
+            .unwrap();
+        let e = sh.engine();
+        let cases = [
+            ("canon".to_string(), "canon".to_string()),
+            ("a b".into(), "view:a b".into()),
+            ("view:team/a.b".into(), "view:team/a.b".into()),
+            ("ä".into(), "view:ä".into()),
+            ("x%2Fy".into(), "view:x%2Fy".into()),
+            (
+                format!("proposal:{canonical}"),
+                format!("proposal:{canonical}"),
+            ),
+            (
+                format!("proposal:{upper}@+01"),
+                format!("proposal:{canonical}"),
+            ),
+            (
+                format!("proposal:{upper}@01"),
+                format!("proposal:{canonical}"),
+            ),
+            (format!("proposal:{upper}"), format!("proposal:{stable}")),
+            (
+                format!("proposal:{}", p.id),
+                format!("proposal:{canonical}"),
+            ),
+        ];
+        let guard = Guard {
+            port: 51000,
+            lan: None,
+        };
+        for (given, want) in cases {
+            let v = site_reply(&*e, Some(&given)).unwrap();
+            assert_eq!(v["scope"], want.as_str(), "{given}: {v}");
+            let url = v["url"].as_str().unwrap();
+            let path = url.strip_prefix(ROOT).unwrap();
+            let head = format!("GET {path}index.html HTTP/1.1\r\nHost: 127.0.0.1:51000\r\n\r\n");
+            match guard.check(&parse_head(head.as_bytes()).unwrap()) {
+                Ok(Route::Page { scope, path }) => {
+                    assert_eq!(scope.text(), want, "{given}: {url}");
+                    assert_eq!(path, "index.html", "{given}: {url}");
+                }
+                other => panic!("{given}: {url} routes to {other:?}"),
+            }
+        }
+        for name in [".", ".."] {
+            let err = site_reply(&*e, Some(name)).unwrap_err();
+            assert_eq!(err.code, rdy_engine::E_BAD_INPUT, "{name}: {err:?}");
+            assert_eq!(
+                err.message,
+                format!(
+                    "a view named {name:?} has no link on the live site: a browser reads that name as a step in the path"
+                ),
+                "{name}"
+            );
+            assert_eq!(
+                err.fix,
+                format!("render the view with rdy render --scope view:{name} --out <dir>"),
+                "{name}"
+            );
+        }
         sh.shutdown().unwrap();
     }
 }

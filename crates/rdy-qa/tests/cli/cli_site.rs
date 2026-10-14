@@ -71,8 +71,9 @@ fn ls7_rdy_site_in_lan_mode_prints_the_lan_link_and_warns() {
         "the LAN stand-in is 127.0.0.1: {text:?}"
     );
     let err = String::from_utf8_lossy(&out.stderr);
+    // final review M3: the fix is printed once, on its own line, as an error's is
     let warning = format!(
-        "warning: anyone on your network can read these docs at {}. Set serve.site_lan to false to keep the site on this machine.\n",
+        "warning: anyone on your network can read these docs at {}\nfix: set serve.site_lan to false to keep the site on this machine\n",
         lines[1]
     );
     assert_eq!(err, warning.as_str(), "{err:?}");

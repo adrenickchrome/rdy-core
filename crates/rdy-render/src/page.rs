@@ -153,6 +153,8 @@ pub struct TermGroup {
 #[derive(Clone, Debug, Serialize)]
 pub struct GlossaryBody {
     pub groups: Vec<TermGroup>,
+    /// Some term has no link: its doc has no page (a top-level doc named `glossary`).
+    pub some_unlinked: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -825,7 +827,7 @@ fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
 }
 
 fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
-    let groups = sh
+    let groups: Vec<TermGroup> = sh
         .site
         .term_groups
         .iter()
@@ -835,7 +837,13 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
             terms: term_rows(sh, page, &g.terms),
         })
         .collect();
-    GlossaryBody { groups }
+    let some_unlinked = groups
+        .iter()
+        .any(|g| g.terms.iter().any(|t| t.href.is_none()));
+    GlossaryBody {
+        groups,
+        some_unlinked,
+    }
 }
 
 /// The glossary entries of `terms`: each term, its body and where it is defined.

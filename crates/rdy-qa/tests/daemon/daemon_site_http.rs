@@ -353,12 +353,20 @@ fn ls6_lan_mode_binds_one_private_address_and_warns() {
     let port = port_of(i.url.as_ref().unwrap());
     let lan_url = format!("http://127.0.0.1:{port}/");
     assert_eq!(i.lan_url.as_deref(), Some(lan_url.as_str()));
-    let warning = format!(
-        "anyone on your network can read these docs at {lan_url}. Set serve.site_lan to false to keep the site on this machine."
+    // final review M3: the fix is said once, in `fix`
+    let w = i.warning.clone().unwrap();
+    assert_eq!(
+        w.message,
+        format!("anyone on your network can read these docs at {lan_url}")
     );
-    assert_eq!(i.warning.as_deref(), Some(warning.as_str()));
+    assert_eq!(
+        w.fix,
+        "set serve.site_lan to false to keep the site on this machine"
+    );
     assert!(
-        site::log_lines(&i).contains(&format!("site: warning: {warning}")),
+        site::log_lines(&i).contains(&format!(
+            "site: warning: anyone on your network can read these docs at {lan_url}; fix: set serve.site_lan to false to keep the site on this machine"
+        )),
         "{:?}",
         site::log_lines(&i)
     );
@@ -371,11 +379,15 @@ fn ls6_lan_mode_without_a_private_address_stays_local() {
     let h = Hosted::start_with(dir, Some(LanOverride::NoneFound));
     let i = info(&h);
     assert_eq!(i.lan_url, None);
+    let w = i.warning.clone().unwrap();
     assert_eq!(
-        i.warning.as_deref(),
-        Some(
-            "serve.site_lan is on, but this machine has no private network address; the site stays on this machine"
-        )
+        w.message,
+        "serve.site_lan is on, but this machine has no private network address; the site stays on this machine"
+    );
+    // final review M3: the site already stays on this machine, so the fix says how to share it
+    assert_eq!(
+        w.fix,
+        "connect this machine to a private network, then run rdy serve --stop; or set serve.site_lan to false"
     );
     assert!(i.addrs.iter().all(|a| a.ip().is_loopback()), "{i:?}");
 }
@@ -391,8 +403,20 @@ fn ls6_a_lan_address_not_on_this_machine_stays_local() {
     let i = info(&h);
     assert_eq!(i.lan_url, None);
     let w = i.warning.clone().unwrap();
-    assert!(w.starts_with("could not listen on 10.255.255.254 ("), "{w}");
-    assert!(w.ends_with("); the site stays on this machine"), "{w}");
+    assert!(
+        w.message
+            .starts_with("could not listen on 10.255.255.254 ("),
+        "{w:?}"
+    );
+    assert!(
+        w.message.ends_with("); the site stays on this machine"),
+        "{w:?}"
+    );
+    // final review M3: the fix names the address setting, not the local site it already has
+    assert_eq!(
+        w.fix,
+        "set serve.site_lan_address to a private address of this machine, then run rdy serve --stop"
+    );
     assert!(i.addrs.iter().all(|a| a.ip().is_loopback()), "{i:?}");
 }
 

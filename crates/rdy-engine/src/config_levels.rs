@@ -1501,6 +1501,10 @@ mod tests {
             e.warnings[0].message,
             "serve.site_lan_address must be a private IPv4 address of this machine; using the default route's address"
         );
+        assert_eq!(
+            e.warnings[0].fix,
+            "set serve.site_lan_address to a private IPv4 address of this machine in .rdy/local.yaml, or remove it"
+        );
         assert!(get_path(&e.merged, "serve.site_lan_address").is_none());
         let d = project(
             "pack: p\n",
@@ -1516,6 +1520,10 @@ mod tests {
         assert_eq!(
             e.warnings[0].message,
             "serve.site_lan_address has no effect while serve.site_lan is false"
+        );
+        assert_eq!(
+            e.warnings[0].fix,
+            "set serve.site_lan to true in .rdy/local.yaml, or remove serve.site_lan_address"
         );
         let d = project(
             "pack: p\nserve:\n  site_lan: true\n  site_lan_address: 192.168.1.20\n",

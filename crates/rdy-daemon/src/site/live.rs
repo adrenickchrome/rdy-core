@@ -33,7 +33,9 @@ use tokio::sync::mpsc;
 pub const MAX_STREAMS: usize = 32;
 /// The events a stream holds before it is dropped.
 pub const STREAM_QUEUE: usize = 8;
-/// The scopes that keep a build while no page of theirs is open.
+/// The scopes that keep a build while no page of theirs is open. A scope with an open page
+/// keeps its build as long as the page is open (the next build is diffed against it), so at most
+/// [`MAX_STREAMS`] builds stay, one per open page at worst: [`MAX_STREAMS`] bounds the memory.
 pub const MAX_SCOPES: usize = 8;
 
 /// How often the worker looks whether any `Shared` still lives while no publish wakes it. A
@@ -266,6 +268,12 @@ impl LiveSite {
         self.builds.fetch_add(1, Ordering::SeqCst);
         let mut inner = lock(&self.inner);
         let s = inner.touch(scope);
+        // the render's warnings, logged once each when a build of the scope first has them
+        // (FW-UX1: the person hears of them through the agent's `rdy_site` too)
+        let before: &[String] = s.build.as_ref().map_or(&[], |old| &old.warnings);
+        for w in new.warnings.iter().filter(|w| !before.contains(w)) {
+            log(&format!("site: {}: warning: {w}", scope.text()));
+        }
         let change = s.build.as_ref().map(|old| diff(old, &new));
         s.streams.retain_mut(|stream| {
             let event = match &change {

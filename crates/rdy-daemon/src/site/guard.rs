@@ -13,34 +13,8 @@ pub struct Guard {
     pub lan: Option<Ipv4Addr>,
 }
 
-/// A scope the site serves: canon at the root, a view under `~view/`, a proposal version under
-/// `~proposal/`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ScopeRef {
-    Canon,
-    View(String),
-    Proposal(String),
-}
-
-impl ScopeRef {
-    /// The scope as rdy reads it: `canon`, `view:<name>` or `proposal:<ref>`.
-    pub fn text(&self) -> String {
-        match self {
-            ScopeRef::Canon => "canon".to_string(),
-            ScopeRef::View(name) => format!("view:{name}"),
-            ScopeRef::Proposal(r) => format!("proposal:{r}"),
-        }
-    }
-
-    /// Where the scope's pages start, under the site's root: empty for canon.
-    pub fn path_prefix(&self) -> String {
-        match self {
-            ScopeRef::Canon => String::new(),
-            ScopeRef::View(name) => format!("~view/{}/", percent_encode(name)),
-            ScopeRef::Proposal(r) => format!("~proposal/{r}/"),
-        }
-    }
-}
+pub use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_scope::{proposal_ref, view_name_ok};
 
 /// What a request that passes the guard asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -229,36 +203,6 @@ fn is_rev(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A view name as the engine allows it: non-empty, with no `:` (p-SBS6W). It may hold `/`, `.`
-/// or `\`: it is one decoded segment, never a path.
-fn view_name_ok(name: &str) -> bool {
-    !name.is_empty() && !name.contains(':')
-}
-
-/// The one spelling of a proposal ref: `P-` and 4 to 64 hex digits (either case), then optionally
-/// `@` and a whole number from 1 (the forms `resolve_in` reads), as `P-<lowercase hex>[@<n>]`
-/// with `n` free of leading zeros. `None` for any other text. One version so has one `ScopeRef`,
-/// and so one build.
-fn proposal_ref(r: &str) -> Option<String> {
-    let rest = r.strip_prefix("P-")?;
-    let (prefix, n) = match rest.split_once('@') {
-        Some((prefix, n)) => (prefix, Some(n)),
-        None => (rest, None),
-    };
-    if !(4..=64).contains(&prefix.len()) || !prefix.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let prefix = prefix.to_ascii_lowercase();
-    let Some(n) = n else {
-        return Some(format!("P-{prefix}"));
-    };
-    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let n = n.parse::<u32>().ok().filter(|n| *n >= 1)?;
-    Some(format!("P-{prefix}@{n}"))
-}
-
 /// Rule 5 on a page path's decoded segments: each is UTF-8 with no NUL, `\` or `/`, none is `.`
 /// or `..`, and only the last may be empty. The path is the segments joined by `/`, with
 /// `index.html` appended when it is empty or ends in `/`.
@@ -325,20 +269,6 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// `s` with every byte outside `A-Z a-z 0-9 - _ ~` percent-encoded. `.` is encoded too, so a
-/// view named `.` or `..` stays one segment (ruling task-3).
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// The response for a refusal: plain text, with `Allow` on a 405.
 pub fn refusal(f: Refusal) -> Response {
     let (status, body) = match f {
@@ -369,6 +299,7 @@ pub fn refusal(f: Refusal) -> Response {
 mod tests {
     use super::*;
     use crate::site::http::{Request, parse_head};
+    use rdy_engine::site_scope::percent_encode;
     use std::net::Ipv4Addr;
 
     fn g() -> Guard {

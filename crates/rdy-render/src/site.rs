@@ -1169,6 +1169,80 @@ mod tests {
         assert_eq!(site.disagreements[0].blocks, want, "reading order");
     }
 
+    /// The claims of a generated tree of `folders` top-level folders of one doc with one claim
+    /// each, in tree order, with the materialized view they come from.
+    fn one_claim_per_doc(dir: &std::path::Path, folders: usize) -> rdy_engine::Rdy {
+        rdy_engine::testkit::generate_tree(dir, folders, 1, 1);
+        rdy_engine::Rdy::open(dir).expect("open")
+    }
+
+    /// Final review M6 (b): a group of one entry over more pages than show also keeps every
+    /// page (the page folds the rest behind Show all), with its one entry counted once.
+    #[test]
+    fn ls11_a_lone_entry_over_many_pages_keeps_them_all() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let r = one_claim_per_doc(dir.path(), 7);
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        let claims: Vec<BlockId> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.clone())
+            .collect();
+        assert_eq!(claims.len(), 7, "guard: one claim on each of seven docs");
+        let mut site = Site::new(&m, st.pack(), "Project");
+        site.set_disagreements(vec![Disagreement {
+            sentence: "These pages define the same thing twice.",
+            blocks: claims.clone(),
+            lead: None,
+        }]);
+        assert_eq!(site.disagreements.len(), 1);
+        assert_eq!(site.disagreements[0].repeats, 1);
+        assert_eq!(site.disagreements[0].blocks.len(), 7, "every page stays");
+    }
+
+    /// Final review M6 (c): two entries with the same sentence over different pages are two
+    /// groups, each of one entry.
+    #[test]
+    fn ls11_the_same_sentence_over_other_pages_is_another_group() {
+        use crate::disagree::Disagreement;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let r = one_claim_per_doc(dir.path(), 4);
+        let st = r.read();
+        let m = st
+            .materialized(&rdy_engine::Scope::View("work".into()))
+            .expect("the view");
+        let claims: Vec<BlockId> = m
+            .iter()
+            .filter(|b| b.block_type == "claim")
+            .map(|b| b.id.clone())
+            .collect();
+        assert_eq!(claims.len(), 4, "guard: one claim on each of four docs");
+        let mut site = Site::new(&m, st.pack(), "Project");
+        let same = "These pages define the same thing twice.";
+        site.set_disagreements(vec![
+            Disagreement {
+                sentence: same,
+                blocks: claims[..2].to_vec(),
+                lead: None,
+            },
+            Disagreement {
+                sentence: same,
+                blocks: claims[2..].to_vec(),
+                lead: None,
+            },
+        ]);
+        let groups: Vec<(usize, usize)> = site
+            .disagreements
+            .iter()
+            .map(|g| (g.repeats, g.blocks.len()))
+            .collect();
+        assert_eq!(groups, vec![(1, 2), (1, 2)], "{:?}", site.disagreements);
+    }
+
     #[test]
     fn an_anchor_is_a_slug_cut_to_48_that_is_never_empty_or_id_shaped() {
         let mut taken = BTreeSet::new();

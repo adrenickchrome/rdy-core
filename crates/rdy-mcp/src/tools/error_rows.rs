@@ -147,7 +147,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "W_SITE_LAN",
         "the live site is open to the network (serve.site_lan is on): anyone who can reach the address can read the docs; or the LAN address could not be bound, and the site stays on this machine; rdy_site and rdy site carry it with the link",
-        "set serve.site_lan to false to keep the site on this machine",
+        "set serve.site_lan to false to keep the site on this machine; when the site already stays on it, follow the warning's own fix",
     ),
     (
         "W_SKELETON_MISSING",

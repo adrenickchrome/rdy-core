@@ -9,6 +9,7 @@ pub mod sse;
 
 pub use server::SiteServer;
 
+use rdy_engine::engine::SiteWarning;
 use std::net::{Ipv4Addr, SocketAddr};
 
 /// Where the site listens, as the daemon's start found it (`Shared::site_info`, set once before
@@ -21,8 +22,8 @@ pub struct SiteInfo {
     /// The LAN address, while `serve.site_lan` is on and its address is bound.
     pub lan_url: Option<String>,
     /// The LAN warning: anyone on the network can read the site, or why it stays on this
-    /// machine although `serve.site_lan` is on.
-    pub warning: Option<String>,
+    /// machine although `serve.site_lan` is on; with its fix.
+    pub warning: Option<SiteWarning>,
     /// Every address the site is bound to.
     pub addrs: Vec<SocketAddr>,
 }
@@ -43,10 +44,10 @@ pub fn log_lines(info: &SiteInfo) -> Vec<String> {
             "site: could not listen on 127.0.0.1 ({reason}); the site is off until the daemon restarts"
         ),
     }];
-    if let Some(warning) = &info.warning {
+    if let Some(w) = &info.warning {
         lines.push(match info.lan_url {
-            Some(_) => format!("site: warning: {warning}"),
-            None => format!("site: {warning}"),
+            Some(_) => format!("site: warning: {}; fix: {}", w.message, w.fix),
+            None => format!("site: {}; fix: {}", w.message, w.fix),
         });
     }
     lines

@@ -15,6 +15,7 @@ use crate::site::http::{
 };
 use crate::site::live::resolve;
 use crate::site::{LanOverride, SiteInfo, addr, sse};
+use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
 use rdy_engine::serve_config;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -28,6 +29,15 @@ use tokio::task::JoinSet;
 
 /// The listen backlog of each bound address.
 const BACKLOG: u32 = 64;
+
+/// The fix of the `W_SITE_LAN` warning when `serve.site_lan` is on and the machine has no
+/// private network address: the site already stays on this machine.
+pub const NO_LAN_ADDRESS_FIX: &str = "connect this machine to a private network, then run rdy serve --stop; or set serve.site_lan to false";
+
+/// The fix of the `W_SITE_LAN` warning when the LAN address could not be bound.
+pub const LAN_BIND_FIX: &str =
+    "set serve.site_lan_address to a private address of this machine, then run rdy serve --stop";
+
 /// The connections the site serves at once; past that, a connection gets `Busy`.
 pub const MAX_CONNECTIONS: usize = 64;
 /// The connections past [`MAX_CONNECTIONS`] that get the `Busy` answer at once; past that, a
@@ -132,10 +142,10 @@ impl SiteServer {
             };
             match ip {
                 None => {
-                    warning = Some(
-                        "serve.site_lan is on, but this machine has no private network address; the site stays on this machine"
-                            .to_string(),
-                    );
+                    warning = Some(SiteWarning {
+                        message: "serve.site_lan is on, but this machine has no private network address; the site stays on this machine".to_string(),
+                        fix: NO_LAN_ADDRESS_FIX.to_string(),
+                    });
                 }
                 Some(ip) => {
                     let at = SocketAddr::from((ip, port));
@@ -151,16 +161,22 @@ impl SiteServer {
                     match out {
                         Ok(()) => {
                             let url = addr::url(&ip.to_string(), port);
-                            warning = Some(format!(
-                                "anyone on your network can read these docs at {url}. Set serve.site_lan to false to keep the site on this machine."
-                            ));
+                            warning = Some(SiteWarning {
+                                message: format!(
+                                    "anyone on your network can read these docs at {url}"
+                                ),
+                                fix: SITE_LAN_FIX.to_string(),
+                            });
                             lan_url = Some(url);
                             lan = Some(ip);
                         }
                         Err(e) => {
-                            warning = Some(format!(
-                                "could not listen on {ip} ({e}); the site stays on this machine"
-                            ));
+                            warning = Some(SiteWarning {
+                                message: format!(
+                                    "could not listen on {ip} ({e}); the site stays on this machine"
+                                ),
+                                fix: LAN_BIND_FIX.to_string(),
+                            });
                         }
                     }
                 }

@@ -12,7 +12,7 @@ use std::ops::Range;
 const BLURB_MAX: usize = 160;
 
 /// A text as one line: runs of whitespace become one space.
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

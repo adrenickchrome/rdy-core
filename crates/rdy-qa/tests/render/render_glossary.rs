@@ -6,6 +6,9 @@ use serde_json::json;
 
 const INTRO: &str = "<p class=\"lede\">Every term these docs define is listed here, grouped by the part of the docs that defines it. Each term links to the page that defines it.</p>";
 
+/// The intro when a term's doc has no page (a top-level doc named `glossary`): final review M9.
+const INTRO_SOME_UNLINKED: &str = "<p class=\"lede\">Every term these docs define is listed here, grouped by the part of the docs that defines it. Each term links to the page that defines it, when that page is on this site.</p>";
+
 /// `Tiny` with: folder `beta` ("Beta area", first in the tree) holding folder `inner` with doc
 /// "Deep" (terms "Zeta" and "alpha"); folder `alpha` ("Alpha area") with doc "Mid" (term "Mid");
 /// and the top-level doc "Loose" (term "Kappa"). Landed.
@@ -146,8 +149,8 @@ fn ls12_a_top_level_doc_named_glossary_gives_way() {
     rdy_qa::golden::land(&mut r, "work").unwrap();
     let (out, g, s) = glossary(&r);
     assert!(
-        g.contains(INTRO),
-        "the generated page owns glossary.html: {g}"
+        g.contains(INTRO_SOME_UNLINKED),
+        "the generated page owns glossary.html, and says not every term links: {g}"
     );
     assert!(!g.contains("Our words"), "{g}");
     assert_eq!(
@@ -230,7 +233,7 @@ fn ls12_a_top_level_doc_named_glossary_in_any_case_gives_way() {
         .collect();
     assert_eq!(pages, ["glossary.html"], "the doc builds no page");
     assert!(
-        g.contains(INTRO),
+        g.contains(INTRO_SOME_UNLINKED),
         "the generated page owns glossary.html: {g}"
     );
     assert!(!g.contains("Our words"), "{g}");
@@ -261,4 +264,29 @@ fn ls12_the_grouped_glossary_passes_the_leak_scan() {
     let (_d, r) = grouped();
     let (out, _g, _s) = glossary(&r);
     assert!(rdy_qa::site::leaks(out.path()).is_empty());
+}
+
+/// Final review M9: with no term anywhere, the site has no glossary page, and the warning does
+/// not say it has one.
+#[test]
+fn ls12_a_hidden_glossary_doc_with_no_terms_names_no_generated_page() {
+    let _clock = rdy_qa::golden::fixture_clock();
+    let (_d, mut r) = rdy_qa::golden::tiny();
+    rdy_qa::golden::write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}},
+        {"op": "create", "type": "section", "parent": "$g", "fields": {"title": "Words"}}
+    ])).unwrap();
+    rdy_qa::golden::land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let s = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    assert!(
+        !out.path().join("glossary.html").exists(),
+        "no term, no page"
+    );
+    assert_eq!(
+        s.warnings,
+        [
+            "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it."
+        ]
+    );
 }

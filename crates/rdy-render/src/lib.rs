@@ -108,7 +108,7 @@ fn write_failure() -> minijinja::Error {
 /// Writes the version label (a [`LabelText`]) into the page [`render_page`] is rendering, and
 /// records the bytes it took. The label must go straight into the page: written into a captured
 /// block (a macro call, `{% set %}`, `{% filter %}`), its place would be unknown, so that is an
-/// error.
+/// error. An empty label is an error too.
 fn write_label(
     out: &mut minijinja::Output,
     state: &minijinja::State,
@@ -121,8 +121,10 @@ fn write_label(
     let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
     let start = len();
     out.write_str(&text).map_err(|_| write_failure())?;
+    // an empty label takes no bytes, so the check below could not tell a captured block from
+    // the page: it is refused (`version::label` never gives one)
     match (start, len()) {
-        (Some(start), Some(end)) if end - start == text.len() => {
+        (Some(start), Some(end)) if !text.is_empty() && end - start == text.len() => {
             PAGE_OUT.with_borrow_mut(|o| {
                 if let Some(o) = o {
                     o.label_at.push(start..end);
@@ -485,8 +487,8 @@ pub struct SiteFiles {
     /// pages (the version pill and the colophon; never a permalink page under `go/`), `llms.txt`
     /// and `llms-full.txt` (the head line) have ranges; a file with none has no entry. The build
     /// records each range as it writes the label and never searches its output for it. The live
-    /// site's filler puts a new label into exactly these ranges (escaped in a page, raw in the
-    /// llms files), last range first, and touches nothing else: a doc can hold the label's text
+    /// site's filler puts a new label into exactly these ranges (escaped in a page, on one line
+    /// in the llms files, as the build writes it there), last range first, and touches nothing else: a doc can hold the label's text
     /// or any other character.
     pub label_at: BTreeMap<String, Vec<std::ops::Range<usize>>>,
     pub summary: RenderSummary,
@@ -494,6 +496,9 @@ pub struct SiteFiles {
 
 /// The render's warning when a top-level doc named `glossary` has no page (D-Y4884).
 const GLOSSARY_DOC_DROPPED: &str = "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it.";
+
+/// The same warning when no term is defined anywhere, so the site has no glossary page either.
+const GLOSSARY_DOC_DROPPED_NO_TERMS: &str = "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it.";
 
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
@@ -549,7 +554,11 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         warnings: vec![],
     };
     if site.glossary_doc_dropped {
-        summary.warnings.push(GLOSSARY_DOC_DROPPED.into());
+        summary.warnings.push(if site.terms.is_empty() {
+            GLOSSARY_DOC_DROPPED_NO_TERMS.into()
+        } else {
+            GLOSSARY_DOC_DROPPED.into()
+        });
     }
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
@@ -643,8 +652,23 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     for (path, bytes) in assets::files(has_mermaid) {
         files.insert(path.into(), bytes);
     }
-    for (path, h) in sh.used_blobs.borrow().iter() {
-        files.insert(path.clone(), blobs[h].clone());
+    // each blob moves into the file map at its last path, so the build never holds two copies
+    // of it (one hash under two paths is copied once)
+    let used = sh.used_blobs.take();
+    drop(sh);
+    let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
+    for h in used.values() {
+        *uses.entry(h).or_default() += 1;
+    }
+    for (path, h) in &used {
+        let left = uses.get_mut(h).expect("counted above");
+        *left -= 1;
+        let bytes = if *left == 0 {
+            blobs.remove(h)
+        } else {
+            blobs.get(h).cloned()
+        };
+        files.insert(path.clone(), bytes.expect("a used blob is held"));
         summary.assets += 1;
     }
     Ok(SiteFiles {
@@ -930,6 +954,15 @@ mod label_tests {
     fn the_label_in_a_captured_block_is_refused() {
         let env = env_with("{% set x %}{{ a | label }}{% endset %}{{ x }}");
         let e = render_page(&env, "t.html", serde_json::json!({"a": "v1"})).unwrap_err();
+        assert!(e.message.contains("version label"), "{e}");
+    }
+
+    /// Final review M13: an empty label takes no bytes, so its place in a captured block would
+    /// look right; it is refused.
+    #[test]
+    fn an_empty_label_in_a_captured_block_is_refused() {
+        let env = env_with("<p>{% set x %}{{ a | label }}{% endset %}</p>{{ x }}");
+        let e = render_page(&env, "t.html", serde_json::json!({"a": ""})).unwrap_err();
         assert!(e.message.contains("version label"), "{e}");
     }
 

@@ -39,6 +39,7 @@ pub mod search;
 pub mod section;
 pub mod semantic;
 mod session;
+pub mod site_scope;
 pub mod suggest;
 pub mod tensions;
 pub mod testkit;

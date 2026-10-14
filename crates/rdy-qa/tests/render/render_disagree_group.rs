@@ -44,6 +44,48 @@ fn ls11_a_repeated_disagreement_shows_once() {
             "area-{i} once: {p}"
         );
     }
+    // final review M6 (a): a grouped link reads as the doc title alone (the block stands for
+    // many points), so no link reads "Doc 0 › <first words>"
+    let content = p
+        .split_once("<h1>Where the docs disagree</h1>")
+        .expect("the page")
+        .1;
+    let re =
+        regex::Regex::new(r#"<a [^>]*href="area-\d/doc-0\.html#[^"]*"[^>]*>([^<]*)</a>"#).unwrap();
+    let texts: Vec<&str> = re
+        .captures_iter(content)
+        .map(|c| c.get(1).unwrap().as_str())
+        .collect();
+    assert_eq!(texts, ["Doc 0"; 7], "{content}");
+    // (the title attribute keeps the doc and section; only the link text is the doc title)
+    assert!(!content.contains(">Doc 0 › "), "{content}");
+}
+
+/// Final review M6 (b): one entry over seven pages folds too; its links keep the label of a
+/// reference (the doc title and the first words of the block).
+#[test]
+fn ls11_a_lone_entry_over_many_pages_folds() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    rdy_engine::testkit::generate_tree(&proj, 7, 1, 1);
+    let mut r = Rdy::open(&proj).unwrap();
+    rdy_qa::fixtures::land(&mut r, "work").unwrap();
+    let p = page(&r);
+    let content = p
+        .split_once("<h1>Where the docs disagree</h1>")
+        .expect("the page")
+        .1;
+    assert_eq!(content.matches(SAME).count(), 1, "{content}");
+    let (shown, folded) = content
+        .split_once("<details class=\"more-links\">")
+        .expect("a fold");
+    assert_eq!(shown.matches("/doc-0.html#").count(), 5, "{content}");
+    assert_eq!(folded.matches("/doc-0.html#").count(), 2, "{content}");
+    assert!(
+        shown.contains(">Doc 0 › "),
+        "a lone entry's labels: {content}"
+    );
 }
 
 #[test]

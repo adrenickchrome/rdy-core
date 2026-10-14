@@ -26,6 +26,9 @@ pub struct LiveBuild {
     pub label_rev: String,
     /// Where the build wrote the label in each file (see `SiteFiles::label_at`).
     pub label_at: BTreeMap<String, Vec<Range<usize>>>,
+    /// The render's warnings for this build, as `rdy render` gives them (`RenderSummary`), in
+    /// the same order.
+    pub warnings: Vec<String>,
 }
 
 /// The first 16 lowercase hex digits of the hash of `bytes`.
@@ -65,7 +68,7 @@ pub fn build_live(st: &ReadState, scope: &Scope) -> Result<LiveBuild, RdyError> 
         files,
         label,
         label_at,
-        ..
+        summary,
     } = build_site(st, scope, Mode::Live)?;
     let revs = files
         .iter()
@@ -82,6 +85,7 @@ pub fn build_live(st: &ReadState, scope: &Scope) -> Result<LiveBuild, RdyError> 
         label,
         label_rev,
         label_at,
+        warnings: summary.warnings,
     })
 }
 
@@ -208,8 +212,8 @@ fn percent_encode(s: &str) -> String {
 }
 
 /// The bytes the server sends for `path`, or none for a path the site does not have. The
-/// version label goes into exactly the ranges the build recorded (escaped in an HTML page, raw
-/// in `llms.txt` and `llms-full.txt`), last range first, and nothing else is searched or
+/// version label goes into exactly the ranges the build recorded (escaped in an HTML page, on
+/// one line in `llms.txt` and `llms-full.txt`, as the static build writes them), last range first, and nothing else is searched or
 /// changed. An HTML page also gets the live script tag right before its first `</head>`. Any
 /// other file is sent as it is. `scope_text` is the scope as the events route reads it
 /// (`canon`, `view:<name>`, `proposal:P-<x>@<n>`).
@@ -217,10 +221,11 @@ pub fn page(build: &LiveBuild, path: &str, scope_text: &str) -> Option<Vec<u8>> 
     let mut bytes = build.files.get(path)?.clone();
     let html = path.ends_with(".html");
     if let Some(ranges) = build.label_at.get(path) {
+        // as the static build writes it: escaped in a page, on one line in the llms files
         let text = if html {
             escape(&build.label)
         } else {
-            build.label.clone()
+            crate::llms::one_line(&build.label)
         };
         for r in ranges.iter().rev() {
             bytes.splice(r.clone(), text.bytes());

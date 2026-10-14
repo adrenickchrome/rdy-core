@@ -293,11 +293,18 @@ fn spec_target(op: &str) -> Option<String> {
         "site_build_live" => {
             "no spec target: the live site's full build (recorded; compare with render)"
         }
+        // the large tier states its own text: the budget is the typical tier's, at 50k blocks
+        "site_event_after_land" | "site_event_after_view_write" if large => {
+            return Some(
+                "< 1 s p95, the 10k-block budget applied at 50k blocks (proposed, ledger F4; reported until the founder rules)"
+                    .to_string(),
+            );
+        }
         "site_event_after_land" | "site_event_after_view_write" => {
-            "< 1 s p99 at 10k blocks (proposed, ledger F4; reported until the founder rules)"
+            "< 1 s p95 at 10k blocks (proposed, ledger F4; reported until the founder rules)"
         }
         "site_fanout_32" => "no spec target: the fan-out to 32 open pages (recorded)",
-        "site_get_page" => "< 5 ms p99 (proposed, ledger F4; reported)",
+        "site_get_page" => "< 5 ms p95 (proposed, ledger F4; reported)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
         "new_doc_single" => "in-process comparator for daemon_write_single (no spec target)",
@@ -4657,9 +4664,10 @@ mod tests {
         wait_ready(tx, &rx, 3, Duration::from_secs(30)).expect("all ready");
     }
 
-    /// Every op the gate can run: those the baseline holds, those `spec_target` names, and the
-    /// ops of this plan. No target says p99 but the live site's proposed ones (ledger F4): the M2
-    /// targets are p95 (D-ANNKF).
+    /// Every op the gate can run: those the baseline holds, those `spec_target` names (and their
+    /// `_50k` twins), and the ops of this plan. No target says p99: a target is the p95 of the
+    /// timed runs, and rdy does not measure p99 (D-ANNKF). The live site's proposed targets are
+    /// no exception (final review I2).
     #[test]
     fn sgperf1_no_target_says_p99() {
         let src = include_str!("perf.rs");
@@ -4676,6 +4684,8 @@ mod tests {
             })
             .map(str::to_string)
             .collect();
+        let large: Vec<String> = ops.iter().map(|op| format!("{op}_50k")).collect();
+        ops.extend(large);
         let baseline: serde_json::Value =
             serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
         for class in baseline["classes"].as_object().expect("classes").values() {
@@ -4686,20 +4696,21 @@ mod tests {
             "invariants_check_all".into(),
         ]);
         assert!(ops.len() > 100, "{} ops", ops.len());
+        for op in [
+            "site_event_after_land_50k",
+            "site_get_page",
+            "site_get_page_50k",
+        ] {
+            assert!(ops.contains(op), "guard: {op} is covered");
+        }
         let mut said = vec![];
-        for op in ops.iter().filter(|op| !op.starts_with("site_")) {
+        for op in &ops {
             if spec_target(op).is_some_and(|t| t.contains("p99")) {
                 said.push(op.as_str());
             }
         }
         assert!(said.is_empty(), "these targets say p99: {said:?}");
-        // ledger F4: two texts say p99 (the event ops share one; the page get has the other);
-        // both are proposed and reported, none is enforced
-        assert_eq!(
-            body.matches("p99").count(),
-            2,
-            "only the proposed targets of the live site say p99"
-        );
+        assert!(!body.contains("p99"), "no target text says p99");
     }
 
     /// The two M2g ops run end to end on a small tree: the checker after the view ops, and the
@@ -4922,11 +4933,18 @@ mod tests {
         );
         for op in ["site_event_after_land", "site_event_after_view_write"] {
             assert!(
-                spec_target(op).unwrap().contains("< 1 s p99 at 10k blocks"),
+                spec_target(op).unwrap().contains("< 1 s p95 at 10k blocks"),
                 "{op}"
             );
+            // final review I2: the large tier says what it measures, without "at 10k blocks"
+            let large = spec_target(&format!("{op}_50k")).unwrap();
+            assert_eq!(
+                large,
+                "< 1 s p95, the 10k-block budget applied at 50k blocks (proposed, ledger F4; reported until the founder rules)",
+                "{op}_50k"
+            );
         }
-        assert!(spec_target("site_get_page").unwrap().contains("< 5 ms p99"));
+        assert!(spec_target("site_get_page").unwrap().contains("< 5 ms p95"));
         assert!(
             spec_target("site_fanout_32")
                 .unwrap()

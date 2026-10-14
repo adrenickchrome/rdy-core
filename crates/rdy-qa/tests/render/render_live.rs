@@ -113,8 +113,17 @@ fn ls2_an_unchanged_key_means_unchanged_pages() {
     // the key is the only reason the site worker builds; a write it misses would leave a page stale
     let _clock = rdy_qa::golden::fixture_clock();
     let (_dir, mut r) = two_docs();
-    let scopes = [Scope::Canon, Scope::View("draft".into())];
     edit_second_prose(&mut r, "draft", "Alpha", "Draft text.", false);
+    // final review M8: a proposal version too; a landing moves canon's head under it
+    edit_second_prose(&mut r, "prop", "Beta", "Proposed text.", false);
+    let p = r
+        .propose(&rdy_qa::golden::writer(), "prop", "Proposed")
+        .unwrap();
+    let proposal = r
+        .read()
+        .resolve_scope(&format!("proposal:{}", p.r#ref))
+        .unwrap();
+    let scopes = [Scope::Canon, Scope::View("draft".into()), proposal];
     let mut keys: Vec<_> = scopes
         .iter()
         .map(|s| inputs_key(&r.read(), s, 0).unwrap())
@@ -172,6 +181,30 @@ fn ls2_an_unchanged_key_means_unchanged_pages() {
         inputs_key(&r.read(), &Scope::Canon, 0).unwrap(),
         inputs_key(&r.read(), &Scope::Canon, 1).unwrap(),
         "pack generation"
+    );
+}
+
+/// Final review M11: a proposal version based on canon's head is read against canon itself, as
+/// a view is (no as-of build of the same state); once canon moves on, against canon at its base.
+#[test]
+fn ls2_a_proposal_at_canons_head_is_reviewed_against_canon() {
+    use rdy_render::review::base_of;
+    let _clock = rdy_qa::golden::fixture_clock();
+    let (_dir, mut r) = two_docs();
+    edit_second_prose(&mut r, "prop", "Alpha", "Proposed.", false);
+    let p = r
+        .propose(&rdy_qa::golden::writer(), "prop", "Proposed")
+        .unwrap();
+    let scope = r
+        .read()
+        .resolve_scope(&format!("proposal:{}", p.r#ref))
+        .unwrap();
+    assert_eq!(base_of(&r.read(), &scope), Some(Scope::Canon));
+    edit_second_prose(&mut r, "work", "Beta", "Landed.", true);
+    assert!(
+        matches!(base_of(&r.read(), &scope), Some(Scope::At(_))),
+        "{:?}",
+        base_of(&r.read(), &scope)
     );
 }
 
@@ -297,4 +330,15 @@ fn ls2_a_new_label_goes_only_into_the_recorded_ranges() {
     assert!(!html.contains(&format!("<span data-rdy-label>{old}</span>")));
     let llms = String::from_utf8(page(&b, "llms.txt", "canon").unwrap()).unwrap();
     assert!(llms.contains(&b.label), "the llms files take the label raw");
+    // final review M4: the llms files take the label on one line, as the static build writes it
+    // (a proposal title or a view name can hold a run of spaces or a line break)
+    b.label = "Two  spaces\nand a newline".into();
+    let html = String::from_utf8(page(&b, "alpha.html", "canon").unwrap()).unwrap();
+    assert_eq!(html.matches(&escape(&b.label)).count(), 2, "{html}");
+    for f in ["llms.txt", "llms-full.txt"] {
+        let text = String::from_utf8(page(&b, f, "canon").unwrap()).unwrap();
+        assert!(text.contains("Two spaces and a newline"), "{f}: {text}");
+        assert!(!text.contains("Two  spaces"), "{f}: {text}");
+        assert!(!text.contains("\nand a newline"), "{f}: {text}");
+    }
 }
