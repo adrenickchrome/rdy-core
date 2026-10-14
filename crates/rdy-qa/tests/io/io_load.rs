@@ -569,6 +569,35 @@ fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
 }
 
 #[test]
+fn dl6_the_daemon_probe_answers_in_and_out_of_a_runtime() {
+    // a pin: `rdy load` asks the probe with no runtime, and `rdy_load` asks it from a blocking
+    // thread of the server's runtime; a caller inside a runtime must not make it panic either
+    let dir = rdy_qa::daemon::short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let mut host = rdy_qa::daemon::Hosted::start_in(dir);
+    let p = host.dir.path().to_path_buf();
+    let me = Some(std::process::id());
+    assert_eq!(rdy_daemon::live_daemon(&p), me, "no runtime");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let q = p.clone();
+    let blocking = rt.block_on(async move {
+        tokio::task::spawn_blocking(move || rdy_daemon::live_daemon(&q))
+            .await
+            .unwrap()
+    });
+    assert_eq!(blocking, me, "a blocking thread of a runtime");
+    let q = p.clone();
+    let inside = rt.block_on(async move { rdy_daemon::live_daemon(&q) });
+    assert_eq!(inside, me, "inside an async task");
+    host.stop();
+    assert_eq!(rdy_daemon::live_daemon(&p), None, "after the stop");
+}
+
+#[test]
 fn dl6_a_bad_target_only_file_is_named() {
     let (_src, scratch, file) = dumped();
     let cases = [

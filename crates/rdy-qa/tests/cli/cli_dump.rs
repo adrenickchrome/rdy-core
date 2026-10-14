@@ -262,7 +262,7 @@ fn dl7_rdy_load_help_gives_the_in_place_move_in_order() {
         .unwrap();
     let help = stdout(&out);
     assert!(
-        one_line(&help).contains(&one_line(rdy_store::format::MOVE_WITH_DUMP)),
+        one_line(&help).contains(&one_line(&rdy_store::format::move_with_dump("<n>"))),
         "{help}"
     );
 }

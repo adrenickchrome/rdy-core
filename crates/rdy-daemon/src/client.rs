@@ -647,13 +647,35 @@ pub fn live_daemon(project: &Path) -> Option<u32> {
     {
         return None;
     }
-    let stream = std::os::unix::net::UnixStream::connect(&recorded).ok()?;
-    let (uid, pid) = crate::socket::peer_uid_pid(&stream).ok()?;
-    if uid != crate::socket::own_uid() {
-        return None;
-    }
-    let pid = pid.filter(|&p| p > 1)?;
+    let pid = peer_pid(&recorded)?;
     (read_pid_file(&run) == Some(pid)).then_some(pid)
+}
+
+/// The pid of the process at the other end of a connection to `socket`, read as
+/// `exchange_hello_at` reads it: the peer's uid with `socket::peer_uid` (it must be ours), then
+/// the pid with tokio's `peer_cred`, `p > 1`. The connection runs on a thread of its own with a
+/// current-thread runtime: `live_daemon`'s caller may have no runtime (`rdy load`), or may be in
+/// one (`rdy_load` on a blocking thread), where `block_on` would panic.
+fn peer_pid(socket: &Path) -> Option<u32> {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .ok()?;
+            rt.block_on(async {
+                let stream = UnixStream::connect(socket).await.ok()?;
+                if crate::socket::peer_uid(&stream).ok()? != crate::socket::own_uid() {
+                    return None;
+                }
+                let pid = stream.peer_cred().ok()?.pid()?;
+                u32::try_from(pid).ok().filter(|&p| p > 1)
+            })
+        })
+        .join()
+        .ok()
+        .flatten()
+    })
 }
 
 /// The pid `.rdy/run/daemon.pid` holds: decimal digits only, surrounding whitespace trimmed.

@@ -3,7 +3,7 @@
 use rdy_engine::{Rdy, RdyError};
 use rdy_qa::fixtures::*;
 use rdy_store::format::{
-    FIRST_DUMP_STORE_FORMAT, MOVE_WITH_DUMP, REF_STORE_FORMAT, STORE_FORMAT, fix_for,
+    FIRST_DUMP_STORE_FORMAT, REF_STORE_FORMAT, STORE_FORMAT, fix_for, move_with_dump,
 };
 use rdy_store::index::Index;
 use rdy_store::segment::SegmentLog;
@@ -478,14 +478,16 @@ fn hd2_an_index_without_the_format_ref_is_rebuilt_at_open() {
 fn dl2_a_store_of_an_older_dumpable_format_says_dump_and_load() {
     // no store reaches this case at this release (10 is current); the next bump does
     let next = STORE_FORMAT + 1;
+    // final-round1 ruling 2: the fix names the format found, not "the rdy that wrote this store"
+    // (rdy 0.2.0 wrote format 10 and has no rdy dump)
     assert_eq!(
-        fix_for(FIRST_DUMP_STORE_FORMAT, next),
-        "close every session on this project; with the rdy that wrote this store, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy"
+        fix_for(10, next),
+        "close every session on this project; with rdy 0.3.0 or a later rdy that reads store format 10, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy"
     );
-    assert_eq!(fix_for(FIRST_DUMP_STORE_FORMAT, next), MOVE_WITH_DUMP);
+    assert_eq!(fix_for(FIRST_DUMP_STORE_FORMAT, next), move_with_dump("10"));
     assert_eq!(
         fix_for(STORE_FORMAT, next),
-        fix_for(FIRST_DUMP_STORE_FORMAT, next)
+        move_with_dump(&STORE_FORMAT.to_string())
     );
 }
 

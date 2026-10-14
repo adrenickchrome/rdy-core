@@ -15,7 +15,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Rebuild a project from a dump file in dir, a directory with no rdy store. Every hash, landing, tag and view is kept; the load builds the index and runs fsck. To move this project across a store format change, give the person these steps, in this order: close every session on this project; with the rdy that wrote this store, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy."
+        description = "Rebuild a project from a dump file in dir, a directory with no rdy store. Every hash, landing, tag and view is kept; the load builds the index and runs fsck. To move this project across a store format change, give the person these steps, in this order: close every session on this project; with rdy 0.3.0 or a later rdy that reads store format <n>, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy."
     )]
     async fn rdy_load(&self, Parameters(p): Parameters<LoadParams>) -> CallToolResult {
         self.run("rdy_load", p, tools::rdy_load).await

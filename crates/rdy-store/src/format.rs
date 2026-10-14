@@ -65,19 +65,28 @@ impl Format {
 /// The fix for a refusal with no store format number to go by.
 const RE_CREATE: &str = "re-create it with this rdy";
 
-/// The in-place move of a project across a store format change (final ruling 1), in order.
-pub const MOVE_WITH_DUMP: &str = "close every session on this project; with the rdy that wrote this store, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy";
+/// The in-place move of a project across a store format change (final ruling 1, worded by
+/// final-round1 ruling 2), in order. `found` is the store format the project has now: the rdy
+/// that wrote the store may have no `rdy dump` (0.2.0 and earlier), so the fix names a release
+/// that has one and reads that format. The CLI help and the `rdy_load` text give it with `<n>`.
+pub fn move_with_dump(found: &str) -> String {
+    format!(
+        "close every session on this project; with rdy 0.3.0 or a later rdy that reads store \
+         format {found}, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; \
+         then run rdy load <file> . with this rdy"
+    )
+}
 
 /// The fix text for a store that names format `found` when this binary reads `current` (dl2, a
 /// closed rule): a newer format needs a newer rdy; a format from `FIRST_DUMP_STORE_FORMAT` up to
 /// the current one moves with dump and load; an earlier format is re-created.
-pub fn fix_for(found: u32, current: u32) -> &'static str {
+pub fn fix_for(found: u32, current: u32) -> String {
     if found > current {
-        "a newer rdy wrote this store: open it with that rdy or a later one"
+        "a newer rdy wrote this store: open it with that rdy or a later one".into()
     } else if found >= FIRST_DUMP_STORE_FORMAT && found < current {
-        MOVE_WITH_DUMP
+        move_with_dump(&found.to_string())
     } else {
-        RE_CREATE
+        RE_CREATE.into()
     }
 }
 
@@ -150,7 +159,7 @@ pub fn check_format(f: Format, store_dir: &Path) -> Result<(), StoreError> {
         return Err(other_format(
             store_dir,
             &format!("has store format {}", f.store_format),
-            fix_for(f.store_format, STORE_FORMAT),
+            &fix_for(f.store_format, STORE_FORMAT),
         ));
     }
     Ok(())

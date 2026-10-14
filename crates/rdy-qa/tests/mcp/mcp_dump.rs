@@ -166,7 +166,7 @@ fn dl7_rdy_load_describes_the_in_place_move_in_order() {
         .expect("rdy_load is listed");
     let text = load["description"].as_str().unwrap();
     assert!(
-        one_line(text).contains(&one_line(rdy_store::format::MOVE_WITH_DUMP)),
+        one_line(text).contains(&one_line(&rdy_store::format::move_with_dump("<n>"))),
         "{text}"
     );
 }
