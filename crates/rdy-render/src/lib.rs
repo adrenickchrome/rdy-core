@@ -215,7 +215,11 @@ pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderS
         }
         Err(e) => return Err(io_at("cannot stage in", &beside, e)),
     };
-    let mut stats = match render_into(rdy, scope, &staging).and_then(|s| {
+    let built = build_site(rdy, scope, Mode::Static).and_then(|site| {
+        write_files(&staging, &site.files)?;
+        Ok(site.summary)
+    });
+    let mut stats = match built.and_then(|s| {
         std::fs::write(
             staging.join(SITE_MARKER),
             "A site rendered by rdy. rdy render replaces this directory as a whole.\n",
@@ -369,7 +373,29 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
     }
 }
 
-fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+/// How a build writes the version label: as text (`rdy render --out`), or as [`LABEL_SLOT`] for
+/// the live site, which fills it in when it serves a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Static,
+    Live,
+}
+
+/// The one character a [`Mode::Live`] build writes wherever the version label's text goes: in the
+/// version pill, the colophon, `llms.txt` and `llms-full.txt`. No other file holds it.
+pub const LABEL_SLOT: char = '\u{E002}';
+
+/// A built site: every file by its site-relative path (`index.html`, `go/p-AAAAA.html`,
+/// `assets/site.css`, `search-index.json`, `llms.txt`), with its bytes.
+pub struct SiteFiles {
+    pub files: BTreeMap<String, Vec<u8>>,
+    /// The version label's text, as a [`Mode::Static`] build writes it.
+    pub label: String,
+    pub summary: RenderSummary,
+}
+
+/// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
+pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     // when each version's landing was approved (only the versions' landings are read)
@@ -413,18 +439,13 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         blobs: &blobs,
         review: review.as_ref(),
         used_blobs: Default::default(),
+        mode,
     };
-    let mut stats = RenderSummary {
+    let mut summary = RenderSummary {
         pages: 0,
         assets: 0,
         redirects: 0,
         warnings: vec![],
-    };
-    let ensure_dir = |page: &str| -> Result<(), RdyError> {
-        if let Some(parent) = out.join(page).parent() {
-            std::fs::create_dir_all(parent).map_err(io)?;
-        }
-        Ok(())
     };
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
@@ -445,10 +466,35 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     if !site.disagreements.is_empty() {
         kinds.push(page::Kind::Disagreements);
     }
+    let mut index = search::Index::default();
+    let mut contexts = vec![];
+    let mut has_mermaid = false;
+    for kind in kinds {
+        let ctx = page::build(&sh, kind);
+        has_mermaid |= ctx.has_mermaid;
+        page::finish(&sh, &ctx, &mut index);
+        contexts.push(ctx);
+    }
+    // the pages are rendered on a few threads
+    let pages = par_map(&contexts, |ctx| {
+        let html = env
+            .get_template(template_of(ctx.kind))
+            .map_err(tpl)?
+            .render(ctx)
+            .map_err(tpl)?;
+        Ok((ctx.page_url.clone(), html))
+    })?;
+    summary.pages = pages.len();
+    let mut files: BTreeMap<String, Vec<u8>> = pages
+        .into_iter()
+        .map(|(path, html)| (path, html.into_bytes()))
+        .collect();
+
     // a permalink page for every folder, doc and block that has a place on the site: the
-    // template is rendered once, and every page fills in its target's href and label
+    // template is rendered once, and every page fills in its target's href and label; a doc page
+    // at a permalink's path (a doc named like an id in a folder named `go`) is replaced by the
+    // permalink, as it always was
     let mut redirect: Option<RedirectTemplate> = None;
-    let mut permalinks: Vec<(String, String)> = vec![];
     for id in m.ids() {
         let Some(url) = site.url_of(id) else { continue };
         let t = match &mut redirect {
@@ -461,7 +507,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         let (page_url, label, href) = page::redirect_target(&sh, id, &url);
         let html = t.fill(&label, &href);
         #[cfg(debug_assertions)]
-        if permalinks.len().is_multiple_of(997) {
+        if summary.redirects.is_multiple_of(997) {
             let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
             let full = env
                 .get_template("redirect.html")
@@ -473,63 +519,52 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
                 "the prebuilt permalink page differs from the template"
             );
         }
-        permalinks.push((page_url, html));
+        files.insert(page_url, html.into_bytes());
+        summary.redirects += 1;
     }
-    // they are written while the pages are built; a doc page at a permalink's path (a doc
-    // named like an id in a folder named `go`) is written over by the permalink, as it always was
-    let taken: BTreeSet<String> = permalinks.iter().map(|(p, _)| p.clone()).collect();
-    stats.redirects = permalinks.len();
-    make_dirs(out, &permalinks)?;
-    let writer = {
-        let out = out.to_path_buf();
-        std::thread::spawn(move || write_all(&out, &permalinks))
+
+    let static_label = version::label(&position);
+    let label = match mode {
+        Mode::Static => static_label.clone(),
+        Mode::Live => version::Label {
+            text: LABEL_SLOT.to_string(),
+            ..static_label.clone()
+        },
     };
-    let pages = (|| -> Result<bool, RdyError> {
-        let mut index = search::Index::default();
-        let mut contexts = vec![];
-        let mut has_mermaid = false;
-        for kind in kinds {
-            let ctx = page::build(&sh, kind);
-            has_mermaid |= ctx.has_mermaid;
-            page::finish(&sh, &ctx, &mut index);
-            contexts.push(ctx);
-        }
-        // the pages are rendered on a few threads
-        let mut files = par_map(&contexts, |ctx| {
-            let html = env
-                .get_template(template_of(ctx.kind))
-                .map_err(tpl)?
-                .render(ctx)
-                .map_err(tpl)?;
-            Ok((ctx.page_url.clone(), html))
-        })?;
-        stats.pages = files.len();
-        files.retain(|(p, _)| !taken.contains(p));
-        make_dirs(out, &files)?;
-        write_all(out, &files)?;
-        search::write(&index, &site_name, out)?;
-        let label = version::label(&position);
-        llms::write_index(
-            &site,
-            out,
-            &contexts,
-            &site_name,
-            description.as_deref(),
-            &label,
-        )?;
-        llms::write_full(out, &contexts, &site_name, description.as_deref(), &label)?;
-        Ok(has_mermaid)
-    })();
-    let written = writer.join().expect("the permalink writer does not panic");
-    let has_mermaid = pages?;
-    written?;
-    assets::write(out, has_mermaid)?;
-    for (path, h) in sh.used_blobs.borrow().iter() {
-        ensure_dir(path)?;
-        std::fs::write(out.join(path), &blobs[h]).map_err(io)?;
-        stats.assets += 1;
+    files.insert(
+        "search-index.json".into(),
+        search::bytes(&index, &site_name),
+    );
+    files.insert(
+        "llms.txt".into(),
+        llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label),
+    );
+    files.insert(
+        "llms-full.txt".into(),
+        llms::full_bytes(&contexts, &site_name, description.as_deref(), &label),
+    );
+    for (path, bytes) in assets::files(has_mermaid) {
+        files.insert(path.into(), bytes);
     }
-    Ok(stats)
+    for (path, h) in sh.used_blobs.borrow().iter() {
+        files.insert(path.clone(), blobs[h].clone());
+        summary.assets += 1;
+    }
+    Ok(SiteFiles {
+        files,
+        label: static_label.text,
+        summary,
+    })
+}
+
+/// Writes every file of a built site under `out`.
+fn write_files(out: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), RdyError> {
+    let files: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    make_dirs(out, &files)?;
+    write_all(out, &files)
 }
 
 /// The permalink template rendered once, with a marker where a page's href and label go: the
@@ -609,8 +644,8 @@ fn par_map<T: Sync, R: Send>(
     })
 }
 
-/// Makes the directories of every (site-relative path, text) under `out`.
-fn make_dirs(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
+/// Makes the directories of every (site-relative path, bytes) under `out`.
+fn make_dirs(out: &Path, files: &[(&str, &[u8])]) -> Result<(), RdyError> {
     let dirs: BTreeSet<&Path> = files
         .iter()
         .filter_map(|(p, _)| Path::new(p).parent())
@@ -621,11 +656,11 @@ fn make_dirs(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// Writes every (site-relative path, text) under `out`, on a few threads; their directories
+/// Writes every (site-relative path, bytes) under `out`, on a few threads; their directories
 /// exist.
-fn write_all(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
-    par_map(files, |(path, text)| {
-        std::fs::write(out.join(path), text).map_err(io)
+fn write_all(out: &Path, files: &[(&str, &[u8])]) -> Result<(), RdyError> {
+    par_map(files, |(path, bytes)| {
+        std::fs::write(out.join(path), bytes).map_err(io)
     })
     .map(drop)
 }

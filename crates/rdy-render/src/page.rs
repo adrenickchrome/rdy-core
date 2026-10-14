@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{assets, home, nav, review, search, toc, trail, version};
+use crate::{LABEL_SLOT, Mode, assets, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -31,6 +31,8 @@ pub struct Shared<'a> {
     /// The blobs some page links to, by the site-relative path of their file, filled as pages
     /// are built.
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
+    /// A static site, or a live one whose pages carry the label slot.
+    pub mode: Mode,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -235,6 +237,8 @@ pub struct PageContext {
     pub has_questions: bool,
     /// A draft render, which offers Show changes.
     pub draft: bool,
+    /// A page the live site serves: its version label is the slot, and it updates itself.
+    pub live: bool,
     pub items: Vec<Item>,
     pub body: Body,
 }
@@ -522,7 +526,13 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         title,
         root: "../".repeat(page_url.matches('/').count()),
         init_js: assets::INIT_JS,
-        version: version::label(sh.position),
+        version: match sh.mode {
+            Mode::Static => version::label(sh.position),
+            Mode::Live => version::Label {
+                text: LABEL_SLOT.to_string(),
+                ..version::label(sh.position)
+            },
+        },
         crumbs: if redirect {
             vec![]
         } else {
@@ -540,6 +550,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_terms,
         has_questions,
         draft: sh.review.is_some(),
+        live: sh.mode == Mode::Live,
         items,
         body,
         kind: kind_name,

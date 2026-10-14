@@ -2,6 +2,7 @@
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
 mod render;
+mod render_build;
 mod render_diagrams;
 mod render_disagree;
 mod render_dx2;

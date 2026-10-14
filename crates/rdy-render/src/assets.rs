@@ -1,6 +1,4 @@
-//! The theme's files, written under `assets/`, and the blob extensions of figure files.
-use rdy_engine::{E_IO, RdyError};
-use std::path::Path;
+//! The theme's files, served under `assets/`, and the blob extensions of figure files.
 
 macro_rules! theme {
     ($p:literal) => {
@@ -55,37 +53,18 @@ pub fn app_js(has_mermaid: bool) -> Vec<u8> {
     out
 }
 
-fn io(path: &Path, e: std::io::Error) -> RdyError {
-    RdyError::new(
-        E_IO,
-        format!("cannot write {}: {e}", path.display()),
-        "check the output directory",
-    )
-}
-
-fn put(out: &Path, name: &str, bytes: &[u8]) -> Result<(), RdyError> {
-    let path = out.join(name);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-    }
-    std::fs::write(&path, bytes).map_err(|e| io(&path, e))
-}
-
-/// Writes the theme under `out`: the stylesheet, the scripts and the fonts, and the diagram
-/// library when `has_mermaid`. Returns how many files it wrote.
-pub fn write(out: &Path, has_mermaid: bool) -> Result<usize, RdyError> {
-    let mut n = 0;
-    for (name, bytes) in THEME {
-        put(out, name, bytes)?;
-        n += 1;
-    }
-    put(out, "assets/app.js", &app_js(has_mermaid))?;
-    n += 1;
+/// The theme's files by their site-relative paths: the stylesheet, the fonts, the scripts, and
+/// the diagram library when `has_mermaid`.
+pub fn files(has_mermaid: bool) -> Vec<(&'static str, Vec<u8>)> {
+    let mut out: Vec<(&'static str, Vec<u8>)> = THEME
+        .iter()
+        .map(|(name, bytes)| (*name, bytes.to_vec()))
+        .collect();
+    out.push(("assets/app.js", app_js(has_mermaid)));
     if has_mermaid {
-        put(out, MERMAID.0, MERMAID.1)?;
-        n += 1;
+        out.push((MERMAID.0, MERMAID.1.to_vec()));
     }
-    Ok(n)
+    out
 }
 
 /// The file extension of a figure's blob by its media type.

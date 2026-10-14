@@ -34,7 +34,7 @@
   </main>
   {% if toc.entries %}<aside class="index"><details class="toc-fold" open><summary class="fold-summary">On this page</summary><nav aria-label="On this page">{% include "partials/toc.html" %}</nav></details></aside>{% endif %}
 </div>
-<noscript><p class="noscript">Search needs JavaScript. Everything else on this page works without it.</p></noscript>
+<noscript><p class="noscript">{% if live %}Search and live updates need JavaScript.{% else %}Search needs JavaScript.{% endif %} Everything else on this page works without it.</p></noscript>
 <script src="{{ root }}assets/app.js" defer></script>
 {% if has_mermaid %}<script src="{{ root }}assets/js/mermaid.min.js" defer></script>
 {% endif %}</body>

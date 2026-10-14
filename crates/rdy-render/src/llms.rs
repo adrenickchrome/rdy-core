@@ -6,8 +6,6 @@
 use crate::page::PageContext;
 use crate::site::Site;
 use crate::version;
-use rdy_engine::{E_IO, RdyError};
-use std::path::Path;
 
 /// The most characters of a page's first prose that `llms.txt` shows beside its link.
 const BLURB_MAX: usize = 160;
@@ -512,45 +510,25 @@ fn full_text(
     t
 }
 
-fn write(out: &Path, file: &str, text: String) -> Result<(), RdyError> {
-    std::fs::write(out.join(file), text).map_err(|e| {
-        RdyError::new(
-            E_IO,
-            format!("cannot write {file}: {e}"),
-            "check the output directory",
-        )
-    })
-}
-
-/// Writes `llms.txt` under `out`.
-pub fn write_index(
+/// The bytes of `llms.txt`.
+pub fn index_bytes(
     site: &Site,
-    out: &Path,
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> Result<(), RdyError> {
-    write(
-        out,
-        "llms.txt",
-        index_text(site, pages, site_name, description, version),
-    )
+) -> Vec<u8> {
+    index_text(site, pages, site_name, description, version).into_bytes()
 }
 
-/// Writes `llms-full.txt` under `out`.
-pub fn write_full(
-    out: &Path,
+/// The bytes of `llms-full.txt`.
+pub fn full_bytes(
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> Result<(), RdyError> {
-    write(
-        out,
-        "llms-full.txt",
-        full_text(pages, site_name, description, version),
-    )
+) -> Vec<u8> {
+    full_text(pages, site_name, description, version).into_bytes()
 }
 
 #[cfg(test)]
