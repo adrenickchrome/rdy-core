@@ -822,6 +822,7 @@ impl ReadState {
             Scope::View(v) if v.contains(':') => format!("view:{v}"),
             Scope::View(v) => v.clone(),
             Scope::At(h) => format!("landing:{h}"),
+            Scope::Proposal(v) => format!("proposal:{v}"),
             Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
         };
         // per-block authorship: who last wrote each block, and when it landed; an in-flight

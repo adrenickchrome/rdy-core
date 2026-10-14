@@ -127,12 +127,14 @@ pub struct Compare {
     pub conflicted: Vec<CompareEntry>,
 }
 
-/// The scope as the compare shows it: `canon`, the view's name, or `landing:<short>`.
+/// The scope as the compare shows it: `canon`, the view's name, `landing:<short>` or
+/// `proposal:<short>`.
 fn scope_text(s: &Scope) -> String {
     match s {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => v.clone(),
         Scope::At(h) => format!("landing:{}", h.short()),
+        Scope::Proposal(v) => format!("proposal:{}", v.short()),
         Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }

@@ -15,7 +15,7 @@ pub struct SearchParams {
     pub regex: Option<bool>,
     /// Match regardless of case (default false).
     pub ignore_case: Option<bool>,
-    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    /// "canon", a view name, "tag:<version>", "landing:<id>", "proposal:P-<id>@<n>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     /// The budget for this page of matches (default 4000).
     pub max_tokens: Option<usize>,

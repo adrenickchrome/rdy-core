@@ -171,6 +171,11 @@ impl<'a> Memo<'a> {
             ),
             Scope::Canon => (None, state.canon_head()),
             Scope::At(h) => (None, Some(*h)),
+            // ls8: a proposal version reads as a view: its changes on its base
+            Scope::Proposal(v) => {
+                let p = state.proposal_version(v)?;
+                (Some(p.changes.iter().copied().collect()), p.canon_at)
+            }
             // the in-flight state is canon with every open view's changes
             Scope::Inflight => (
                 Some(state.inflight_set()?.changes.iter().copied().collect()),

@@ -199,6 +199,9 @@ pub enum Scope {
     /// insc1: canon plus the distinct changes of every open view, merged. An analysis scope:
     /// read-only, with no head and no owner.
     Inflight,
+    /// ls8: a proposal version (its hash): canon at the version's base plus its changes, in
+    /// their stored order. Read-only, and it never moves: a version never changes.
+    Proposal(rdy_model::Hash),
 }
 
 /// UTC RFC 3339 timestamp with second precision, e.g. 2026-10-03T19:35:01Z.

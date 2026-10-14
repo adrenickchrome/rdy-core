@@ -187,7 +187,7 @@ impl ReadState {
     ) -> Result<(Inflight, Vec<Arc<Tension>>), RdyError> {
         let own = match scope {
             Scope::View(v) => Some(v.as_str()),
-            Scope::Canon | Scope::At(_) | Scope::Inflight => None,
+            Scope::Canon | Scope::At(_) | Scope::Inflight | Scope::Proposal(_) => None,
         };
         let mut views = vec![];
         for name in self.view_names() {

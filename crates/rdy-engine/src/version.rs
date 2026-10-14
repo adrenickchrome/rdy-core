@@ -12,12 +12,14 @@ pub const AS_OF_CACHE_ENTRIES: usize = 4;
 /// How many version positions stay cached at once; the cache is cleared when it is full.
 const VPOS_CACHE_ENTRIES: usize = 1024;
 
-/// What a cached version position is for. A view's key holds its head op.
+/// What a cached version position is for. A view's key holds its head op; a proposal's, its
+/// version hash (a version never changes).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum VposScope {
     Canon,
     At(Hash),
     View(String, Option<Hash>),
+    Proposal(Hash),
 }
 
 /// One cached position's key: the canon head and tag count of the state that asked, and the
@@ -406,7 +408,9 @@ impl ReadState {
         Ok(scope)
     }
 
-    /// Reads scope text: `canon`, `tag:<version>`, `landing:<id>`, `view:<name>`, or a view name.
+    /// Reads scope text: `canon`, `tag:<version>`, `landing:<id>`, `proposal:P-x@n` (also
+    /// `proposal:P-x`, the latest version, or `proposal:<version hash>`), `view:<name>`, or a
+    /// view name.
     pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
         if text == "canon" {
             return Ok(Scope::Canon);
@@ -434,6 +438,10 @@ impl ReadState {
         if let Some(id) = text.strip_prefix("landing:") {
             return Ok(Scope::At(self.resolve_landing(id)?));
         }
+        // ls8: a proposal version reads as its base plus its changes
+        if let Some(r) = text.strip_prefix("proposal:") {
+            return Ok(Scope::Proposal(crate::gate::resolve_in(self, r)?.version));
+        }
         let view = text.strip_prefix("view:").unwrap_or(text);
         if view.is_empty() {
             return Err(RdyError::new(
@@ -457,6 +465,7 @@ impl ReadState {
             Scope::Inflight => return self.version_position(&Scope::Canon),
             Scope::Canon => (VposScope::Canon, None),
             Scope::At(h) => (VposScope::At(*h), None),
+            Scope::Proposal(v) => (VposScope::Proposal(*v), None),
             Scope::View(name) => {
                 let head = self.view_head(name).cloned();
                 (
@@ -498,6 +507,16 @@ impl ReadState {
         let (base, view) = match scope {
             Scope::Canon | Scope::Inflight => (canon, None),
             Scope::At(h) => (Some(*h), None),
+            // ls8: a proposal version stands where its base stands, and reads as a draft named
+            // by its title (no proposal ref or hash reaches a page)
+            Scope::Proposal(v) => {
+                let p = self.proposal_version(v)?;
+                let pos = ViewPosition {
+                    name: p.title,
+                    unlanded_changes: p.changes.len() as u32,
+                };
+                (p.canon_at, Some(pos))
+            }
             Scope::View(name) => {
                 let pos = ViewPosition {
                     name: name.clone(),

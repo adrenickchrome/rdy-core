@@ -230,10 +230,10 @@ pub fn coverage_error_text(e: &RdyError) -> String {
     format!("{}: {}", e.code, e.message)
 }
 
-/// The memo key of `scope` (one `coverage_scope` gave: never a past landing).
+/// The memo key of `scope` (one `coverage_scope` gave: never a past landing or a proposal).
 pub(super) fn memo_label(scope: &Scope) -> String {
     match scope {
-        Scope::Canon | Scope::At(_) => "canon".to_string(),
+        Scope::Canon | Scope::At(_) | Scope::Proposal(_) => "canon".to_string(),
         Scope::View(v) => format!("view/{v}"),
         Scope::Inflight => "inflight".to_string(),
     }
@@ -254,7 +254,7 @@ impl Counted {
     /// canon's head.
     fn of(st: &ReadState, scope: &Scope) -> Counted {
         match scope {
-            Scope::Canon | Scope::At(_) => Counted::Canon,
+            Scope::Canon | Scope::At(_) | Scope::Proposal(_) => Counted::Canon,
             Scope::View(v) => Counted::View(st.included(v).iter().copied().collect()),
             Scope::Inflight => Counted::All,
         }
@@ -286,9 +286,18 @@ impl ReadState {
 
     /// The scope coverage is computed in for `scope`: canon's head is canon. `E_BAD_INPUT` for a
     /// past landing: coverage describes the current state only, and coverage over time belongs
-    /// to rdyhub (FW-H7).
+    /// to rdyhub (FW-H7). `E_BAD_INPUT` for a proposal version (ls8): its view, or canon, has
+    /// the coverage.
     pub fn coverage_scope(&self, scope: &Scope) -> Result<Scope, RdyError> {
         match scope {
+            Scope::Proposal(v) => Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "coverage is computed for canon and views, not for proposal:{}",
+                    v.short()
+                ),
+                "ask for the proposal's view, or canon",
+            )),
             Scope::At(h) if self.is_past_landing(scope) => Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("coverage is computed for the current state only, not at landing:{h}"),

@@ -13,7 +13,9 @@ use crate::tensions::set::TensionCell;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
-use rdy_model::{AltSet, AltStatus, Block, BlockId, Change, Hash, Intent, IntentStatus, Op, Tag};
+use rdy_model::{
+    AltSet, AltStatus, Block, BlockId, Change, Hash, Intent, IntentStatus, Op, Proposal, Tag,
+};
 use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
@@ -518,16 +520,41 @@ pub(crate) fn applies_cleanly(m: &Materialized, ops: &[Op]) -> bool {
     true
 }
 
+/// One least-recently-used list of entries by hash, least recently used at the front.
+type EntryLru = Mutex<VecDeque<(Hash, Arc<Entry>)>>;
+
 /// The as-of entries, shared by `Rdy` and every state it publishes: at most
-/// `AS_OF_CACHE_ENTRIES`, least recently used at the front.
+/// `AS_OF_CACHE_ENTRIES`, least recently used at the front. ls8: the proposal versions' entries
+/// beside them, by version hash, at most as many; a version never changes, so neither list is
+/// ever stale.
 #[derive(Default)]
 pub(crate) struct AsOfCache {
-    pub(crate) lru: Mutex<VecDeque<(Hash, Arc<Entry>)>>,
+    pub(crate) lru: EntryLru,
+    pub(crate) proposals: EntryLru,
+}
+
+fn lock_lru(lru: &EntryLru) -> std::sync::MutexGuard<'_, VecDeque<(Hash, Arc<Entry>)>> {
+    lru.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Adds `entry` for `h` at the most recently used end of `lru` and drops the least recently used
+/// beyond the cap.
+fn push_capped(lru: &mut VecDeque<(Hash, Arc<Entry>)>, h: Hash, entry: &Arc<Entry>) {
+    lru.push_back((h, Arc::clone(entry)));
+    while lru.len() > AS_OF_CACHE_ENTRIES {
+        lru.pop_front();
+    }
 }
 
 impl AsOfCache {
     fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<(Hash, Arc<Entry>)>> {
-        self.lru.lock().unwrap_or_else(|e| e.into_inner())
+        lock_lru(&self.lru)
+    }
+
+    /// Drops every entry (entries built under an old pack must not serve a new one).
+    pub(crate) fn clear(&self) {
+        self.lock().clear();
+        lock_lru(&self.proposals).clear();
     }
 
     /// The entry for landing `h`, marked most recently used; a new one evicts the least recently
@@ -550,10 +577,24 @@ impl AsOfCache {
             return Ok(entry);
         }
         let entry = Arc::new(Entry::new(None, Some(*h), None, Arc::new(vec![])));
-        lru.push_back((*h, Arc::clone(&entry)));
-        while lru.len() > AS_OF_CACHE_ENTRIES {
-            lru.pop_front();
+        push_capped(&mut lru, *h, &entry);
+        Ok(entry)
+    }
+
+    /// ls8: the entry for proposal version `v`, marked most recently used: no name, the version's
+    /// base, no head and its changes in their stored order, so it reads as a view with that base
+    /// and that set reads, conflicts included. The store read runs outside the lock.
+    fn touch_proposal(&self, reader: &StoreReader, v: &Hash) -> Result<Arc<Entry>, RdyError> {
+        if let Some(entry) = Self::hit(&mut lock_lru(&self.proposals), v) {
+            return Ok(entry);
         }
+        let p = proposal_version_in(reader, v)?;
+        let mut lru = lock_lru(&self.proposals);
+        if let Some(entry) = Self::hit(&mut lru, v) {
+            return Ok(entry);
+        }
+        let entry = Arc::new(Entry::new(None, p.canon_at, None, Arc::new(p.changes)));
+        push_capped(&mut lru, *v, &entry);
         Ok(entry)
     }
 
@@ -568,17 +609,39 @@ impl AsOfCache {
 
     /// The entry for `h` if cached, without marking it used.
     fn peek(&self, h: &Hash) -> Option<Arc<Entry>> {
-        self.lock()
+        Self::peek_in(&self.lru, h)
+    }
+
+    /// ls8: the entry for proposal version `v` if cached, without marking it used.
+    fn peek_proposal(&self, v: &Hash) -> Option<Arc<Entry>> {
+        Self::peek_in(&self.proposals, v)
+    }
+
+    fn peek_in(lru: &EntryLru, h: &Hash) -> Option<Arc<Entry>> {
+        lock_lru(lru)
             .iter()
             .find(|(x, _)| x == h)
             .map(|(_, e)| Arc::clone(e))
     }
 
-    /// Drops `entry` (a failed build) so that a later read retries it: an as-of entry outlives
-    /// every publish, so its cell must not keep an error.
+    /// Drops `entry` (a failed build) so that a later read retries it: an as-of or proposal
+    /// entry outlives every publish, so its cell must not keep an error.
     fn forget(&self, entry: &Arc<Entry>) {
         self.lock().retain(|(_, e)| !Arc::ptr_eq(e, entry));
+        lock_lru(&self.proposals).retain(|(_, e)| !Arc::ptr_eq(e, entry));
     }
+}
+
+/// ls8: proposal version `v` as stored; `E_NOT_FOUND` when `v` is not a proposal version.
+fn proposal_version_in(reader: &StoreReader, v: &Hash) -> Result<Proposal, RdyError> {
+    if !reader.has_kind(rdy_store::kinds::PROPOSAL, v)? {
+        return Err(RdyError::new(
+            E_NOT_FOUND,
+            format!("{} is not a proposal version", v.short()),
+            "read a proposal version with proposal:P-<id>@<n>",
+        ));
+    }
+    Ok(reader.proposal(v)?)
 }
 
 /// An immutable published state of the project: the heads, view sets and tags it was published
@@ -780,6 +843,23 @@ impl ReadState {
             .is_some_and(|b| b.lexicon.get().is_some())
     }
 
+    /// ls8: proposal version `v` as stored; `E_NOT_FOUND` when `v` is not a proposal version.
+    pub fn proposal_version(&self, v: &Hash) -> Result<Proposal, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        proposal_version_in(&self.reader, v)
+    }
+
+    /// ls8: the landing proposal version `v` is based on (`None` before the first landing),
+    /// read from its cached entry.
+    pub fn proposal_base(&self, v: &Hash) -> Result<Option<Hash>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        Ok(self.as_of.touch_proposal(&self.reader, v)?.base)
+    }
+
     /// The conflicts the scope's merge recorded (always empty for canon and as-of scopes).
     pub fn conflicts(&self, scope: &Scope) -> Result<Arc<Vec<Conflict>>, RdyError> {
         Ok(Arc::clone(&self.built(scope)?.conflicts))
@@ -844,6 +924,7 @@ impl ReadState {
                 e => e.cloned(),
             },
             Scope::At(h) => self.as_of.peek(h),
+            Scope::Proposal(v) => self.as_of.peek_proposal(v),
             Scope::Inflight => self
                 .inflight_cell
                 .entry
@@ -879,6 +960,14 @@ impl ReadState {
             },
             Scope::At(h) => {
                 let entry = self.as_of.touch(&self.reader, h)?;
+                let built = self.build(&entry);
+                if built.is_err() {
+                    self.as_of.forget(&entry);
+                }
+                built
+            }
+            Scope::Proposal(v) => {
+                let entry = self.as_of.touch_proposal(&self.reader, v)?;
                 let built = self.build(&entry);
                 if built.is_err() {
                     self.as_of.forget(&entry);

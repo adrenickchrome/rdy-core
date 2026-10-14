@@ -10,7 +10,7 @@ pub(crate) struct RenderArgs {
     /// Output directory: new, empty, or a site rdy rendered before (replaced as a whole).
     #[arg(long)]
     out: PathBuf,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
 }
@@ -19,7 +19,7 @@ pub(crate) struct RenderArgs {
 pub(crate) struct ExportArgs {
     #[arg(long)]
     out: PathBuf,
-    /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+    /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
 }

@@ -903,12 +903,13 @@ fn is_advisory(i: usize) -> bool {
 }
 
 /// A scope as a cursor carries it, in the scope text `resolve_scope` reads: `canon`,
-/// `view:<name>` or `landing:<id>`.
+/// `view:<name>`, `landing:<id>` or `proposal:<version hash>`.
 fn cursor_scope(scope: &Scope) -> String {
     match scope {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view:{v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Proposal(v) => format!("proposal:{v}"),
         Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
@@ -964,6 +965,7 @@ fn scope_label(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view {v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Proposal(v) => format!("proposal:{}", v.short()),
         Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
