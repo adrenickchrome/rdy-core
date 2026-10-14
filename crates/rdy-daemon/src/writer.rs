@@ -215,11 +215,14 @@ impl Writer {
     /// generation and clears the pack error; files that do not load stay out (the loaded pack
     /// stays), are recorded as seen (as the reload read them, so a fix that lands meanwhile is
     /// still a change) so they are not parsed again until they change, and set the pack error,
-    /// bumping the generation when the error is new. A failed check is logged.
+    /// bumping the generation when the error is new. A failed check is logged. The generation
+    /// moves only after the state that holds the move is published: the site keys its builds by
+    /// the generation, and a newer generation read with an older state would keep the old
+    /// pack's pages under the new key.
     ///
-    /// A panic never ends the writer: the caches may be half-updated, so they are cleared (the
-    /// caller republishes); the previous pack stays loaded, the pack error says so, and the call
-    /// answers `E_INTERNAL`.
+    /// A panic never ends the writer: the caches may be half-updated, so they are cleared and a
+    /// clean state is published; the previous pack stays loaded, the pack error says so, and the
+    /// call answers `E_INTERNAL`.
     fn maybe_reload(&mut self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
         match catch_unwind(AssertUnwindSafe(|| self.reload_unguarded(rdy))) {
             Ok(out) => out,
@@ -232,11 +235,22 @@ impl Writer {
                 // the watch still sees the change, so the next write retries the reload: like an
                 // invalid pack, the generation moves and the log speaks only when the error is new
                 if let Some(sh) = self.shared.upgrade() {
-                    let mut error = sh.pack_error_lock();
-                    if error.as_deref() != Some(text.as_str()) {
-                        *error = Some(text.clone());
+                    let new = {
+                        let mut error = sh.pack_error_lock();
+                        let new = error.as_deref() != Some(text.as_str());
+                        if new {
+                            *error = Some(text.clone());
+                        }
+                        new
+                    };
+                    build_tensions(rdy);
+                    sh.state.store(rdy.read());
+                    // after the store, as a reload's: see the doc above
+                    if new {
                         sh.pack_gen.fetch_add(1, Ordering::SeqCst);
-                        drop(error);
+                    }
+                    sh.site.published();
+                    if new {
                         log(&text);
                     }
                 }
@@ -262,15 +276,18 @@ impl Writer {
         if let Some(f) = sh.after_reload.lock().unwrap().take() {
             f();
         }
-        match &out {
+        /// What moves the generation, logged once it moved.
+        enum Moved {
+            Reloaded,
+            Invalid(String),
+            Cleared,
+        }
+        // the pack error is set here, before the generation moves (`Shared::pack_status`)
+        let moved = match &out {
             Ok(ReloadOutcome::Reloaded) => {
                 sh.watch.seen(rdy.pack_fingerprint());
-                let generation = {
-                    let mut error = sh.pack_error_lock();
-                    *error = None;
-                    sh.pack_gen.fetch_add(1, Ordering::SeqCst) + 1
-                };
-                log(&format!("pack reloaded (generation {generation})"));
+                *sh.pack_error_lock() = None;
+                Some(Moved::Reloaded)
             }
             Ok(ReloadOutcome::Invalid {
                 error: e,
@@ -282,32 +299,43 @@ impl Writer {
                 let text = e.to_string();
                 let mut error = sh.pack_error_lock();
                 if error.as_deref() != Some(text.as_str()) {
-                    *error = Some(text);
-                    sh.pack_gen.fetch_add(1, Ordering::SeqCst);
-                    drop(error);
-                    log(&format!("pack invalid: {e}"));
+                    *error = Some(text.clone());
+                    Some(Moved::Invalid(text))
+                } else {
+                    None
                 }
             }
             Ok(ReloadOutcome::Unchanged) => {
                 sh.watch.seen(rdy.pack_fingerprint());
                 // the files are back to the loaded pack's bytes: nothing stands in error, and the
                 // pack did not change
-                let mut error = sh.pack_error_lock();
-                if error.take().is_some() {
-                    // each session hears `pack_changed` once: the pack stands as loaded, but the
-                    // `pack_error` it was told about is gone
-                    let generation = sh.pack_gen.fetch_add(1, Ordering::SeqCst) + 1;
-                    drop(error);
-                    log(&format!(
-                        "pack error cleared: the files are back to the loaded pack (generation {generation})"
-                    ));
-                }
+                // each session hears `pack_changed` once: the pack stands as loaded, but the
+                // `pack_error` it was told about is gone
+                sh.pack_error_lock().take().map(|_| Moved::Cleared)
             }
-            Err(e) => log(&format!("pack check failed: {e}")),
-        }
+            Err(e) => {
+                log(&format!("pack check failed: {e}"));
+                None
+            }
+        };
         // a reload publishes a state with its tension set built, as a write does
         build_tensions(rdy);
+        #[cfg(test)]
+        if let Some(f) = sh.before_reload_store.lock().unwrap().take() {
+            f();
+        }
         sh.state.store(rdy.read());
+        // after the store: a reader that sees the new generation sees this state or a newer one
+        if let Some(moved) = moved {
+            let generation = sh.pack_gen.fetch_add(1, Ordering::SeqCst) + 1;
+            log(&match moved {
+                Moved::Reloaded => format!("pack reloaded (generation {generation})"),
+                Moved::Invalid(e) => format!("pack invalid: {e}"),
+                Moved::Cleared => format!(
+                    "pack error cleared: the files are back to the loaded pack (generation {generation})"
+                ),
+            });
+        }
         sh.site.published();
         if matches!(out, Ok(ReloadOutcome::Reloaded)) {
             // after the publish: the notifier tells the sessions subscribed to rdy://pack and
@@ -384,12 +412,9 @@ impl Writer {
                     self.retry_republish(&mut rdy);
                     // its outcome is logged and reported in the replies' notices; a reload logs
                     // its moves in a batch of its own, before the write's
-                    if self.maybe_reload(&mut rdy).is_err() {
-                        // a reload that panicked leaves its publish to the caller: the forward
-                        // below reads a state that holds any batch the reload sealed
-                        build_tensions(&rdy);
-                        self.publish(&rdy);
-                    }
+                    // a reload publishes, even one that panicked: the forward below reads a state
+                    // that holds any batch the reload sealed
+                    let _ = self.maybe_reload(&mut rdy);
                     // the reload's batch is sealed and published, and `f` has opened no batch
                     // yet: the reload's batch is forwarded now, with the subscriptions as of its
                     // publish, so a write that changes them and then fails its seal never decides

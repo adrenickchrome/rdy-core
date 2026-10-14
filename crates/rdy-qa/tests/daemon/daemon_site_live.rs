@@ -377,3 +377,52 @@ fn ls5_a_dismissal_reloads_the_disagreements_page() {
         "home no longer links it"
     );
 }
+
+/// Fix round 1, finding 3: a scope that does not resolve keeps no state, so request-chosen
+/// names cannot grow the daemon's memory; a stream of such a scope takes its entry with it.
+#[test]
+fn ls5_an_unknown_scope_leaves_nothing_behind() {
+    let h = host_two_docs();
+    let sh = shared(&h);
+    for i in 0..1000 {
+        let name = format!("{}{i}", "x".repeat(4000));
+        assert!(sh.site.refresh(&sh, &ScopeRef::View(name)).is_err());
+    }
+    assert_eq!(sh.site.scopes(), 0, "a failed refresh keeps no scope");
+    let s = sh
+        .site
+        .subscribe(
+            &sh,
+            &ScopeRef::View("nowhere".into()),
+            "index.html",
+            OLD,
+            OLD,
+        )
+        .unwrap();
+    assert_eq!(sh.site.scopes(), 1, "the stream holds its scope");
+    drop(s);
+    assert_eq!(
+        sh.site.scopes(),
+        0,
+        "the last stream takes its scope with it"
+    );
+}
+
+/// Fix round 1, finding 4 (Best effort, then exact): a page whose stream opened while its scope
+/// did not build is compared with the scope's first build, as a subscribe compares it.
+#[test]
+fn ls5_a_page_opened_before_its_scope_builds_gets_reload() {
+    let h = host_two_docs();
+    let sh = shared(&h);
+    // no view `draft` yet: the stream opens with nothing to compare
+    let mut alpha = sh
+        .site
+        .subscribe(&sh, &d(), "alpha.html", OLD, OLD)
+        .unwrap();
+    assert!(empty(&mut alpha), "no build, no comparison");
+    on_writer(&sh, |r| {
+        edit_second_prose(r, "draft", "Alpha", "Draft one.", false)
+    });
+    sh.site.refresh(&sh, &d()).unwrap();
+    assert_eq!(alpha.rx.try_recv(), Ok(LiveEvent::Reload));
+}

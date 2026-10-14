@@ -28,10 +28,12 @@ pub struct Shared {
     pub writer: WriterHandle,
     /// The pack files as last seen by the writer.
     pub watch: PackWatch,
-    /// Bumped by the writer on each reload and on each new or fixed pack error.
+    /// Bumped by the writer on each reload and on each new or fixed pack error, after it stores
+    /// the state that holds the change: read it before `state`, and a state is never older than
+    /// its generation.
     pub pack_gen: AtomicU64,
     /// Why the pack files on disk do not load, while they do not. The writer sets it before it
-    /// bumps `pack_gen`, under this lock.
+    /// bumps `pack_gen`.
     pub pack_error: Mutex<Option<String>>,
     /// The project's briefing registry, taken from the `Rdy` before the writer owns it.
     pub briefs: Arc<BriefRegistry>,
@@ -50,6 +52,9 @@ pub struct Shared {
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
     pub(crate) after_reload: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test hook: run once by the writer in a pack reload, right before it stores the state.
+    #[cfg(test)]
+    pub(crate) before_reload_store: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Test count: the log lines the writer wrote for a failed clean republish.
     #[cfg(test)]
     pub(crate) republish_failure_logs: std::sync::atomic::AtomicUsize,
@@ -76,12 +81,10 @@ impl Shared {
         let leaving = Arc::clone(&hub);
         let (notify, queue) = channel();
         let site = LiveSite::new();
-        Arc::new_cyclic(|weak| {
+        let sh = Arc::new_cyclic(|weak| {
             // the notifier ends when its queue's sender, held here, is dropped with the last
             // `Shared`
             drop(spawn_notifier(weak.clone(), queue));
-            // the site worker ends on `LiveSite::close` (the shutdown) or with the last `Shared`
-            drop(spawn_site_worker(weak.clone(), Arc::clone(&site)));
             Shared {
                 state,
                 open_report,
@@ -104,11 +107,17 @@ impl Shared {
                 #[cfg(test)]
                 after_reload: Mutex::new(None),
                 #[cfg(test)]
+                before_reload_store: Mutex::new(None),
+                #[cfg(test)]
                 republish_failure_logs: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(test)]
                 delivered: Mutex::new(Vec::new()),
             }
-        })
+        });
+        // the site worker ends on `LiveSite::close` (the shutdown) or with the last `Shared`.
+        // It starts once `sh` lives: inside `new_cyclic` it could see no `Shared` yet and end.
+        drop(spawn_site_worker(Arc::downgrade(&sh), Arc::clone(&sh.site)));
+        sh
     }
 
     /// The engine over this daemon: reads from the published state, writes on the writer.
