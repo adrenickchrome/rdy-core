@@ -83,9 +83,12 @@ pub fn parse_head(head: &[u8]) -> Result<Request, ParseError> {
     };
     let mut headers = Vec::new();
     let mut ended = false;
-    for line in lines {
+    let mut lines = lines.peekable();
+    while let Some(line) = lines.next() {
         if line.is_empty() {
-            ended = true;
+            // The empty line counts only when its own line break follows it: a head cut after
+            // the last header's line break is not one.
+            ended = lines.peek().is_some();
             break;
         }
         if headers.len() == MAX_HEADERS {
@@ -248,6 +251,39 @@ mod tests {
             parse_head(format!("GET / HTTP/1.1\r\n{many}\r\n").as_bytes()).unwrap_err(),
             ParseError::TooLarge
         );
+    }
+
+    /// Fix round 1: each parse rule of the brief has an assertion that fails without it.
+    #[test]
+    fn ls3_each_head_rule_is_pinned() {
+        let not_utf8 = b"GET /\xff HTTP/1.1\r\nHost: 127.0.0.1:5\r\n\r\n";
+        assert_eq!(parse_head(not_utf8).unwrap_err(), ParseError::Malformed);
+        let spaced = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:5\r\nBad Name: x\r\n\r\n";
+        assert_eq!(parse_head(spaced).unwrap_err(), ParseError::Malformed);
+        let old = parse_head(b"GET / HTTP/1.0\r\nHost: 127.0.0.1:5\r\n\r\n").unwrap();
+        assert_eq!(old.method, Method::Get);
+        assert_eq!(old.target, "/");
+        assert_eq!(old.all("host"), vec!["127.0.0.1:5"]);
+    }
+
+    /// Fix round 1: a head is the bytes up to and including the first empty line, so a head cut
+    /// before that line ends is malformed.
+    #[test]
+    fn ls3_a_head_cut_before_its_empty_line_is_malformed() {
+        for head in [
+            &b"GET / HTTP/1.1\r\nHost: 127.0.0.1:51000\r\n"[..],
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1:51000\r\n\r",
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1:51000",
+            b"GET / HTTP/1.1\r\n",
+        ] {
+            assert_eq!(
+                parse_head(head).unwrap_err(),
+                ParseError::Malformed,
+                "{}",
+                String::from_utf8_lossy(head).escape_debug()
+            );
+        }
+        assert!(parse_head(b"GET / HTTP/1.1\n\n").is_ok());
     }
 
     #[test]

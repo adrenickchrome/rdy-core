@@ -113,14 +113,21 @@ impl Guard {
                 return Err(Refusal::Origin);
             }
         }
-        // 5. A clean path.
+        // 5. A clean path: split at `/` first, then each segment percent-decoded on its own, so
+        // a view name may hold an encoded `/` (ruling task-3).
         let (raw_path, query) = match r.target.split_once('?') {
             Some((p, q)) => (p, Some(q)),
             None => (r.target.as_str(), None),
         };
-        let path = clean_path(raw_path).ok_or(Refusal::NotFound)?;
+        let segments = raw_path
+            .strip_prefix('/')
+            .ok_or(Refusal::NotFound)?
+            .split('/')
+            .map(|seg| percent_decode(seg, false))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(Refusal::NotFound)?;
         // 6. The routes.
-        route(&r.method, &path, query)
+        route(&r.method, &segments, query)
     }
 
     fn is_own_host(&self, value: &str) -> bool {
@@ -132,8 +139,27 @@ impl Guard {
     }
 }
 
-/// Routes a clean path (no leading `/`).
-fn route(method: &Method, path: &str, query: Option<&str>) -> Result<Route, Refusal> {
+/// Routes a path from its percent-decoded segments (the path after its leading `/`, split at
+/// `/` before decoding).
+fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<Route, Refusal> {
+    if segments[0].starts_with(b"~") {
+        let [kind, name, rest @ ..] = segments else {
+            return Err(Refusal::NotFound);
+        };
+        // `/~view/<name>` with no `/` after the name has no page: its relative links would break.
+        if rest.is_empty() {
+            return Err(Refusal::NotFound);
+        }
+        let name = std::str::from_utf8(name).map_err(|_| Refusal::NotFound)?;
+        let scope = match kind.as_slice() {
+            b"~view" if view_name_ok(name) => ScopeRef::View(name.to_string()),
+            b"~proposal" => ScopeRef::Proposal(proposal_ref(name).ok_or(Refusal::NotFound)?),
+            _ => return Err(Refusal::NotFound),
+        };
+        let path = page_path(rest).ok_or(Refusal::NotFound)?;
+        return Ok(Route::Page { scope, path });
+    }
+    let path = page_path(segments).ok_or(Refusal::NotFound)?;
     if path == "_rdy/live.js" {
         return Ok(Route::LiveJs);
     }
@@ -146,25 +172,9 @@ fn route(method: &Method, path: &str, query: Option<&str>) -> Result<Route, Refu
     if path == "_rdy" || path.starts_with("_rdy/") {
         return Err(Refusal::NotFound);
     }
-    if path.starts_with('~') {
-        let mut parts = path.splitn(3, '/');
-        let (Some(kind), Some(name), Some(rest)) = (parts.next(), parts.next(), parts.next())
-        else {
-            return Err(Refusal::NotFound);
-        };
-        let scope = match kind {
-            "~view" if view_name_ok(name) => ScopeRef::View(name.to_string()),
-            "~proposal" if proposal_ref_ok(name) => ScopeRef::Proposal(name.to_string()),
-            _ => return Err(Refusal::NotFound),
-        };
-        return Ok(Route::Page {
-            scope,
-            path: with_index(rest),
-        });
-    }
     Ok(Route::Page {
         scope: ScopeRef::Canon,
-        path: with_index(path),
+        path,
     })
 }
 
@@ -192,10 +202,12 @@ fn events(query: &str) -> Result<Route, Refusal> {
     if !is_rev(&rev) || !is_rev(&label) {
         return Err(Refusal::Malformed);
     }
-    let page = clean_path(&format!("/{page}")).ok_or(Refusal::Malformed)?;
+    // The value is decoded once, so each `/` in it separates two segments.
+    let segments: Vec<Vec<u8>> = page.split('/').map(|s| s.as_bytes().to_vec()).collect();
+    let page = page_path(&segments).ok_or(Refusal::Malformed)?;
     Ok(Route::Events {
         scope,
-        page: with_index(&page),
+        page,
         rev,
         label,
     })
@@ -209,8 +221,7 @@ fn parse_scope(text: &str) -> Option<ScopeRef> {
     if let Some(name) = text.strip_prefix("view:") {
         return view_name_ok(name).then(|| ScopeRef::View(name.to_string()));
     }
-    let r = text.strip_prefix("proposal:")?;
-    proposal_ref_ok(r).then(|| ScopeRef::Proposal(r.to_string()))
+    proposal_ref(text.strip_prefix("proposal:")?).map(ScopeRef::Proposal)
 }
 
 /// 16 lowercase hex digits: a page revision or a label hash.
@@ -218,57 +229,60 @@ fn is_rev(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A view name: one clean, non-empty path segment.
+/// A view name as the engine allows it: non-empty, with no `:` (p-SBS6W). It may hold `/`, `.`
+/// or `\`: it is one decoded segment, never a path.
 fn view_name_ok(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+    !name.is_empty() && !name.contains(':')
 }
 
-/// `P-` and 4 to 64 hex digits (either case), then optionally `@` and a whole number from 1: the
-/// forms `resolve_in` reads.
-fn proposal_ref_ok(r: &str) -> bool {
-    let Some(rest) = r.strip_prefix("P-") else {
-        return false;
-    };
+/// The one spelling of a proposal ref: `P-` and 4 to 64 hex digits (either case), then optionally
+/// `@` and a whole number from 1 (the forms `resolve_in` reads), as `P-<lowercase hex>[@<n>]`
+/// with `n` free of leading zeros. `None` for any other text. One version so has one `ScopeRef`,
+/// and so one build.
+fn proposal_ref(r: &str) -> Option<String> {
+    let rest = r.strip_prefix("P-")?;
     let (prefix, n) = match rest.split_once('@') {
         Some((prefix, n)) => (prefix, Some(n)),
         None => (rest, None),
     };
-    let prefix_ok =
-        (4..=64).contains(&prefix.len()) && prefix.bytes().all(|b| b.is_ascii_hexdigit());
-    let n_ok = n.is_none_or(|n| {
-        !n.is_empty()
-            && n.bytes().all(|b| b.is_ascii_digit())
-            && n.parse::<u32>().is_ok_and(|n| n >= 1)
-    });
-    prefix_ok && n_ok
-}
-
-/// A path with `index.html` appended when it is empty or ends in `/`.
-fn with_index(path: &str) -> String {
-    if path.is_empty() || path.ends_with('/') {
-        format!("{path}index.html")
-    } else {
-        path.to_string()
-    }
-}
-
-/// Check 5: `raw` percent-decoded, without its leading `/`. `None` when it does not start with
-/// `/`, does not decode to UTF-8, holds a NUL or a `\`, or has a `.` or `..` segment or an empty
-/// segment other than a trailing one.
-fn clean_path(raw: &str) -> Option<String> {
-    let rest = raw.strip_prefix('/')?;
-    let decoded = String::from_utf8(percent_decode(rest, false)?).ok()?;
-    if decoded.contains(['\0', '\\']) {
+    if !(4..=64).contains(&prefix.len()) || !prefix.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let segments: Vec<&str> = decoded.split('/').collect();
-    let last = segments.len() - 1;
+    let prefix = prefix.to_ascii_lowercase();
+    let Some(n) = n else {
+        return Some(format!("P-{prefix}"));
+    };
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n = n.parse::<u32>().ok().filter(|n| *n >= 1)?;
+    Some(format!("P-{prefix}@{n}"))
+}
+
+/// Rule 5 on a page path's decoded segments: each is UTF-8 with no NUL, `\` or `/`, none is `.`
+/// or `..`, and only the last may be empty. The path is the segments joined by `/`, with
+/// `index.html` appended when it is empty or ends in `/`.
+fn page_path(segments: &[Vec<u8>]) -> Option<String> {
+    let last = segments.len().checked_sub(1)?;
+    let mut path = String::new();
     for (i, seg) in segments.iter().enumerate() {
-        if *seg == "." || *seg == ".." || (seg.is_empty() && i != last) {
+        let seg = std::str::from_utf8(seg).ok()?;
+        if seg == "."
+            || seg == ".."
+            || seg.contains(['\0', '\\', '/'])
+            || (seg.is_empty() && i != last)
+        {
             return None;
         }
+        if i > 0 {
+            path.push('/');
+        }
+        path.push_str(seg);
     }
-    Some(decoded)
+    if path.is_empty() || path.ends_with('/') {
+        path.push_str("index.html");
+    }
+    Some(path)
 }
 
 /// A query value, percent-decoded with `+` as a space (form encoding).
@@ -311,11 +325,12 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// `s` with every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded.
+/// `s` with every byte outside `A-Z a-z 0-9 - _ ~` percent-encoded. `.` is encoded too, so a
+/// view named `.` or `..` stays one segment (ruling task-3).
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'~') {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -598,5 +613,160 @@ mod tests {
         assert_eq!(refusal(Refusal::TooLarge).status, 431);
         assert_eq!(refusal(Refusal::Busy).status, 503);
         assert_eq!(refusal(Refusal::Broken).status, 500);
+    }
+
+    const H: &str = "127.0.0.1:51000";
+    const REV: &str = "00112233aabbccdd";
+
+    fn events(query: &str) -> Result<Route, Refusal> {
+        g().check(&get(&format!("/_rdy/events?{query}"), H))
+    }
+
+    fn view(name: &str, path: &str) -> Route {
+        Route::Page {
+            scope: ScopeRef::View(name.into()),
+            path: path.into(),
+        }
+    }
+
+    /// Fix round 1, ruling task-3: a view name may hold any character but ':' (p-SBS6W), and
+    /// every view serves at `/~view/<name>/` (D-FV6G9).
+    #[test]
+    fn ls3_every_view_name_round_trips() {
+        for name in ["a", "team/a", "..", ".", "a b", "ä/ü", "x%2Fy"] {
+            let scope = ScopeRef::View(name.into());
+            let target = format!("/{}index.html", scope.path_prefix());
+            assert_eq!(
+                g().check(&get(&target, H)),
+                Ok(view(name, "index.html")),
+                "{name}: {target}"
+            );
+            let q = format!(
+                "scope={}&page=index.html&rev={REV}&label={REV}",
+                percent_encode(&scope.text())
+            );
+            assert_eq!(
+                events(&q),
+                Ok(Route::Events {
+                    scope,
+                    page: "index.html".into(),
+                    rev: REV.into(),
+                    label: REV.into()
+                }),
+                "{name}: {q}"
+            );
+        }
+        assert_eq!(
+            ScopeRef::View("team/a.b".into()).path_prefix(),
+            "~view/team%2Fa%2Eb/"
+        );
+        // Unencoded, the first segment is the name.
+        assert_eq!(
+            g().check(&get("/~view/team/a/index.html", H)),
+            Ok(view("team", "a/index.html"))
+        );
+        assert_eq!(
+            g().check(&get("/~view/team%2Fa/system/", H)),
+            Ok(view("team/a", "system/index.html"))
+        );
+        let raw = format!("scope=view:team/a&page=index.html&rev={REV}&label={REV}");
+        assert!(
+            matches!(events(&raw), Ok(Route::Events { scope: ScopeRef::View(n), .. }) if n == "team/a")
+        );
+    }
+
+    /// A view name follows the engine's rule (non-empty, no ':'); the page path after it follows
+    /// rule 5.
+    #[test]
+    fn ls3_a_view_name_follows_the_engine_rule() {
+        for t in [
+            "/~view/a:b/index.html",
+            "/~view/a%3Ab/index.html",
+            "/~view/%FF/index.html",
+            "/~view/a%2/index.html",
+            "/~view/a",
+            "/~view/a/./index.html",
+            "/~view/a/x%2Fy.html",
+            "/~view/a/x%5Cy.html",
+            "/~view/a//index.html",
+            "/a%2Fb.html",
+            "/_rdy%2Flive.js",
+        ] {
+            assert_eq!(g().check(&get(t, H)), Err(Refusal::NotFound), "{t}");
+        }
+        for scope in ["view:", "view:a:b", "view:a%3Ab", "view:%FF"] {
+            let q = format!("scope={scope}&page=index.html&rev={REV}&label={REV}");
+            assert_eq!(events(&q), Err(Refusal::Malformed), "{q}");
+        }
+    }
+
+    /// Fix round 1: one proposal version has one `ScopeRef`, so one build.
+    #[test]
+    fn ls3_a_proposal_ref_has_one_spelling() {
+        let want = Ok(Route::Page {
+            scope: ScopeRef::Proposal("P-7a2c9e@1".into()),
+            path: "index.html".into(),
+        });
+        for r in ["P-7A2C9E@1", "P-7a2c9e@01", "P-7a2c9e@1", "P-7a2C9E@0001"] {
+            assert_eq!(g().check(&get(&format!("/~proposal/{r}/"), H)), want, "{r}");
+        }
+        assert_eq!(
+            g().check(&get("/~proposal/P-ABCD@01/index.html", H)),
+            Ok(Route::Page {
+                scope: ScopeRef::Proposal("P-abcd@1".into()),
+                path: "index.html".into()
+            })
+        );
+        assert_eq!(
+            g().check(&get("/~proposal/P-ABCD/index.html", H)),
+            Ok(Route::Page {
+                scope: ScopeRef::Proposal("P-abcd".into()),
+                path: "index.html".into()
+            })
+        );
+        let q = format!("scope=proposal:P-ABCD@01&page=index.html&rev={REV}&label={REV}");
+        assert!(
+            matches!(events(&q), Ok(Route::Events { scope: ScopeRef::Proposal(r), .. }) if r == "P-abcd@1")
+        );
+    }
+
+    /// Fix round 1: each refusal rule of the brief has an assertion that fails without it.
+    #[test]
+    fn ls3_each_refusal_rule_is_pinned() {
+        for t in [
+            "/./index.html",
+            "/%ff.html",
+            "/~proposal/P-abc/",
+            &format!("/~proposal/P-{}/", "a".repeat(65)),
+            "/~proposal/P-abcd@/",
+            "/~proposal/P-abcd@+1/",
+        ] {
+            assert_eq!(g().check(&get(t, H)), Err(Refusal::NotFound), "{t}");
+        }
+        assert!(
+            g().check(&get(&format!("/~proposal/P-{}/", "a".repeat(64)), H))
+                .is_ok()
+        );
+        for q in [
+            format!("scope=canon&page=/x&rev={REV}&label={REV}"),
+            format!("scope=canon&page=../x&rev={REV}&label={REV}"),
+            format!("scope=canon&page=a/./x&rev={REV}&label={REV}"),
+            format!("scope=canon&page=index.html&rev={REV}"),
+            format!("scope=canon&page=index.html&rev={REV}&label=FFEEDDCCBBAA9988"),
+            format!("page=index.html&rev={REV}&label={REV}"),
+        ] {
+            assert_eq!(events(&q), Err(Refusal::Malformed), "{q}");
+        }
+        let origins = req(
+            "GET /index.html HTTP/1.1\nHost: localhost:51000\nOrigin: http://localhost:51000\nOrigin: http://rebound.invalid",
+        );
+        assert_eq!(g().check(&origins), Err(Refusal::Origin));
+        let lengths = req(
+            "GET /index.html HTTP/1.1\nHost: 127.0.0.1:51000\nContent-Length: 0\nContent-Length: 3",
+        );
+        assert_eq!(g().check(&lengths), Err(Refusal::Body));
+        let foreign_first =
+            req("GET /index.html HTTP/1.1\nHost: 127.0.0.1:51000\nHost: rebound.invalid:51000");
+        assert_eq!(g().check(&foreign_first), Err(Refusal::Host));
     }
 }
