@@ -859,7 +859,7 @@ impl SegmentLog {
     /// Starts segment `current + 1`. The new writer, reader and length are committed together,
     /// only once the file and the directory are durable; on any failure the log is exactly as
     /// before and the new file is removed best-effort (`truncate_to` sweeps a leftover next segment).
-    fn roll(&mut self) -> io::Result<()> {
+    pub(crate) fn roll(&mut self) -> io::Result<()> {
         self.writer.sync_all()?;
         let path = seg_path(&self.dir, self.readers.len() as u32);
         let writer = OpenOptions::new()

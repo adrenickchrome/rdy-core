@@ -6,6 +6,7 @@ pub mod format;
 pub mod fsutil;
 pub mod inbox;
 pub mod index;
+pub mod ingest;
 pub mod kinds;
 mod land;
 pub mod layout;

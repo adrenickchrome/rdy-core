@@ -1,0 +1,147 @@
+//! dl4: the ingest writes each dumped batch where the source log held it, so the new log is the
+//! source log byte for byte; the first open builds the index from it.
+use rdy_store::dump::DumpBatch;
+use rdy_store::ingest::Ingest;
+use rdy_store::{Store, StoreError};
+use std::path::Path;
+
+fn batches(s: &Store) -> Vec<DumpBatch> {
+    let mut out = vec![];
+    s.reader()
+        .for_each_batch(s.log_end(), |b| {
+            out.push(b);
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+fn ingest(to: &Path, bs: &[DumpBatch]) -> Result<(), StoreError> {
+    let mut i = Ingest::create(to)?;
+    for (n, b) in bs.iter().enumerate() {
+        i.batch(n as u64, b)?;
+    }
+    i.finish().map(|_| ())
+}
+
+fn segments(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = std::fs::read_dir(dir.join("segments"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .map(|p| {
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&p).unwrap(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// A store whose small segments roll several times, with held batches that pass the soft limit.
+fn rolling_store(base: &Path) -> Store {
+    let mut s = Store::create(&base.join("src")).unwrap();
+    s.set_segment_max(4096);
+    for i in 0..20 {
+        s.put_blob(format!("blob {i} {}", "x".repeat(300)).as_bytes())
+            .unwrap();
+    }
+    s.set_held(true).unwrap();
+    for i in 0..6 {
+        s.put_blob(format!("held {i} {}", "y".repeat(900)).as_bytes())
+            .unwrap();
+    }
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
+    s.set_refs(vec![("view/v".into(), b"head".to_vec())])
+        .unwrap();
+    s
+}
+
+#[test]
+fn dl4_an_ingested_log_is_the_source_log_byte_for_byte() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let to = base.path().join("dst");
+    ingest(&to, &batches(&s)).unwrap();
+    assert_eq!(segments(&to), segments(&base.path().join("src")));
+    assert_eq!(
+        std::fs::read(to.join("FORMAT")).unwrap(),
+        std::fs::read(base.path().join("src/FORMAT")).unwrap()
+    );
+}
+
+#[test]
+fn dl4_ingest_rolls_where_the_source_rolled() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    assert!(
+        segments(&base.path().join("src")).len() >= 3,
+        "the source rolled"
+    );
+    let to = base.path().join("dst");
+    ingest(&to, &batches(&s)).unwrap();
+    assert_eq!(
+        segments(&to).len(),
+        segments(&base.path().join("src")).len()
+    );
+}
+
+#[test]
+fn dl4_the_first_open_builds_the_index_from_the_log() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let want = s.index_dump_for_tests().unwrap();
+    let to = base.path().join("dst");
+    ingest(&to, &batches(&s)).unwrap();
+    let mut t = Store::open(&to).unwrap();
+    assert!(t.open_report().index_rebuilt || t.open_report().caught_up_frames > 0);
+    assert_eq!(t.index_dump_for_tests().unwrap(), want, "the open's index");
+    t.reindex().unwrap();
+    assert_eq!(
+        t.index_dump_for_tests().unwrap(),
+        want,
+        "a reindex changes nothing"
+    );
+    assert_eq!(t.verify().unwrap(), s.verify().unwrap());
+}
+
+#[test]
+fn dl4_a_batch_out_of_place_is_refused() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let mut bs = batches(&s);
+    bs.swap(1, 2);
+    let e = ingest(&base.path().join("dst"), &bs).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { what, .. } if what.starts_with("batch 1 starts at segment")),
+        "{e}"
+    );
+}
+
+#[test]
+fn dl4_a_batch_that_does_not_match_its_digest_is_refused() {
+    let base = tempfile::tempdir().unwrap();
+    let s = rolling_store(base.path());
+    let mut bs = batches(&s);
+    bs[3].digest = rdy_model::Hash::of(b"another");
+    let e = ingest(&base.path().join("dst"), &bs).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { what, .. } if what == "batch 3 does not match its digest"),
+        "{e}"
+    );
+}
+
+#[test]
+fn dl4_ingest_never_writes_into_an_existing_directory() {
+    let base = tempfile::tempdir().unwrap();
+    let to = base.path().join("dst");
+    std::fs::create_dir(&to).unwrap();
+    assert!(Ingest::create(&to).is_err());
+    assert_eq!(
+        std::fs::read_dir(&to).unwrap().count(),
+        0,
+        "nothing written"
+    );
+}

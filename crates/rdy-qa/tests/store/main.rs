@@ -9,6 +9,7 @@ mod store_flush;
 mod store_format;
 mod store_fsck;
 mod store_fsck3;
+mod store_ingest;
 mod store_kinds;
 mod store_land;
 mod store_m2_kinds;
