@@ -12,7 +12,8 @@
 //! - **Records:** each is framed as a store frame: `len: u32`, `kind: u8`, `hash: [u8; 32]`
 //!   (`Hash::of(payload)`), `payload`. Record kinds of the container: `HEADER = 0xF0`,
 //!   `FILE = 0xF1`, `BATCH = 0xF2`, `TRAILER = 0xFF`. The frames of a batch keep their store
-//!   kinds (1 to 19, never 14).
+//!   kinds: exactly the kinds that the header's store format assigns (`frame_kinds`; for the pair
+//!   (1, 10): 1 to 9, 13, and 15 to 19). Never 14 (the batch marker), never an unassigned kind.
 //! - **Order (closed):** one `HEADER`; zero or more `FILE`; zero or more `BATCH`, each followed
 //!   by exactly its `frames` store frames; one `TRAILER`; the end of the file.
 //! - **`HEADER` payload:** `store_format: u32`, `log_end.segment: u32`, `log_end.offset: u64`,
@@ -24,15 +25,22 @@
 //!   `.yml`. At most 256 `FILE` records; each file at most 16 MiB; paths strictly ascending, no
 //!   repeats.
 //! - **`BATCH` payload:** `start.segment: u32`, `start.offset: u64`, `frames: u32`,
-//!   `digest: [u8; 32]`: the source batch's `BatchCommit`. The next `frames` records are that
-//!   batch's data frames, byte for byte as the log holds them.
+//!   `digest: [u8; 32]` (the source batch's `BatchCommit`), then `kinds: [u8; 32]`: `Hash::of`
+//!   over `kind: u8 || hash: [u8; 32]` of each of the batch's frames, in order. `frames` is at
+//!   least 1. The next `frames` records are that batch's data frames, byte for byte as the log
+//!   holds them.
 //! - **`TRAILER` payload:** `batches: u64`, `frames: u64`, `files: u32`, `digest: [u8; 32]`:
-//!   `Hash::of` over the 32-byte hashes of every record from `HEADER` up to the last record
-//!   before the trailer, store frames included, in order.
+//!   `Hash::of` over `kind: u8 || len: u64 || hash: [u8; 32]` (`len` the payload's length) of
+//!   every record from `HEADER` up to the last record before the trailer, store frames included,
+//!   in order.
 //!
-//! A reader checks every record's hash, the order above, each batch's frame count and digest,
-//! and the trailer's counts and digest. Any failure is `StoreError::Dump`: rdy never repairs a
-//! dump.
+//! A record's hash covers its payload only, so the `BATCH` record's `kinds` and the trailer's
+//! digest bind every record's kind (and the trailer every length and the order): a flipped kind
+//! byte fails them.
+//!
+//! A reader checks every record's hash, the order above, each frame's kind, each batch's frame
+//! count and both its digests, and the trailer's counts and digest. Any failure is
+//! `StoreError::Dump`: rdy never repairs a dump.
 use crate::error::StoreError;
 use crate::kinds::{self, BatchCommit, batch_digest};
 use crate::segment::{HEADER as FRAME_HEADER, Location};
@@ -62,7 +70,7 @@ pub mod rec {
     pub const TRAILER: u8 = 0xFF;
 }
 
-const BATCH_LEN: usize = 4 + 8 + 4 + 32;
+const BATCH_LEN: usize = 4 + 8 + 4 + 32 + 32;
 const TRAILER_LEN: usize = 8 + 8 + 4 + 32;
 
 /// One store frame of a batch, as the log holds it.
@@ -122,9 +130,54 @@ pub fn is_project_file(path: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// True if `kind` is a store kind that may stand in a batch: 1 to 19, never a batch marker.
-fn is_frame_kind(kind: u8) -> bool {
-    (1..=19).contains(&kind) && kind != kinds::BATCH_COMMIT
+/// The store kinds a batch's frames may have, for each `(dump_format, store_format)` pair of
+/// `READS`: exactly the kinds that store format assigns, never the batch marker. The writer and
+/// the reader both use this one table. A pair, once released, never changes its set.
+const FRAME_KINDS: &[((u32, u32), &[u8])] = &[(
+    (1, 10),
+    &[
+        kinds::BLOCK,
+        kinds::CHANGE,
+        kinds::PROPOSAL,
+        kinds::LANDING,
+        kinds::SNAPSHOT,
+        kinds::BLOB_CHUNK,
+        kinds::BLOB_MANIFEST,
+        kinds::REF_UPDATE,
+        kinds::TAG,
+        kinds::VIEW_OP,
+        kinds::INTENT,
+        kinds::ALT_SET,
+        kinds::REVIEW,
+        kinds::TENSION,
+        kinds::TRANSITION,
+    ],
+)];
+
+/// The store kinds a batch's frames may have in a dump of `dump_format` whose frames are of
+/// `store_format`; None for a pair this rdy does not read.
+pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]> {
+    FRAME_KINDS
+        .iter()
+        .find(|(pair, _)| *pair == (dump_format, store_format))
+        .map(|(_, k)| *k)
+}
+
+/// The `BATCH` record's `kinds`: `Hash::of` over each frame's `kind || hash`, in order.
+fn kinds_digest(frames: &[Frame]) -> Hash {
+    let mut b = Vec::with_capacity(frames.len() * 33);
+    for f in frames {
+        b.push(f.kind);
+        b.extend_from_slice(&f.hash.0);
+    }
+    Hash::of(&b)
+}
+
+/// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`.
+fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) {
+    chain.push(kind);
+    chain.extend_from_slice(&len.to_le_bytes());
+    chain.extend_from_slice(&hash.0);
 }
 
 fn cannot_stand(kind: u8) -> String {
@@ -208,8 +261,10 @@ pub struct DumpWriter<W: Write> {
     w: W,
     phase: Phase,
     last_path: Option<String>,
-    /// The 32-byte hashes of every record so far (the trailer's digest covers them).
-    hashes: Vec<u8>,
+    /// The store kinds a frame may have (`frame_kinds` of the header's pair).
+    kinds: &'static [u8],
+    /// `kind || len || hash` of every record so far (the trailer's digest covers them).
+    chain: Vec<u8>,
     totals: DumpTotals,
 }
 
@@ -223,7 +278,8 @@ impl<W: Write> DumpWriter<W> {
             w,
             phase: Phase::Files,
             last_path: None,
-            hashes: Vec::new(),
+            kinds: frame_kinds(DUMP_FORMAT, header.store_format).unwrap_or(&[]),
+            chain: Vec::new(),
             totals: DumpTotals::default(),
         };
         me.w.write_all(MAGIC)?;
@@ -239,7 +295,8 @@ impl<W: Write> DumpWriter<W> {
         if self.phase != Phase::Files {
             return Err(StoreError::Refused(cannot_stand(rec::FILE)));
         }
-        if !is_project_file(path) {
+        // a path longer than its `u16` length field could not be read back
+        if !is_project_file(path) || path.len() > usize::from(u16::MAX) {
             return Err(StoreError::Refused(not_carried(path)));
         }
         if self.last_path.as_deref().is_some_and(|last| path <= last) {
@@ -262,13 +319,18 @@ impl<W: Write> DumpWriter<W> {
     }
 
     /// Writes one sealed batch: its `BATCH` record, then its frames byte for byte. Refuses a
-    /// frame of a kind that cannot stand in a batch (a batch marker among them), a frame whose
-    /// hash is not its payload's, and a batch whose digest is not its frames'.
+    /// frame of a kind that cannot stand in a batch (a batch marker or an unassigned kind among
+    /// them), a frame whose hash is not its payload's, and a batch whose digest is not its
+    /// frames'.
     pub fn batch(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
         let n = self.totals.batches + 1;
-        // every check before the first byte, so a refused batch writes nothing
+        // every check before the first byte, so a refused batch writes nothing; no store writes
+        // a batch of no frames
+        if b.frames.is_empty() {
+            return Err(StoreError::Refused(cannot_stand(rec::BATCH)));
+        }
         for f in &b.frames {
-            if !is_frame_kind(f.kind) {
+            if !self.kinds.contains(&f.kind) {
                 return Err(StoreError::Refused(cannot_stand(f.kind)));
             }
             if Hash::of(&f.payload) != f.hash {
@@ -294,6 +356,7 @@ impl<W: Write> DumpWriter<W> {
         p.extend_from_slice(&b.start.offset.to_le_bytes());
         p.extend_from_slice(&count.to_le_bytes());
         p.extend_from_slice(&b.digest.0);
+        p.extend_from_slice(&kinds_digest(&b.frames).0);
         self.record(rec::BATCH, &p)?;
         for f in &b.frames {
             // the hash was checked above: each payload is hashed once
@@ -311,7 +374,7 @@ impl<W: Write> DumpWriter<W> {
         p.extend_from_slice(&self.totals.batches.to_le_bytes());
         p.extend_from_slice(&self.totals.frames.to_le_bytes());
         p.extend_from_slice(&self.totals.files.to_le_bytes());
-        p.extend_from_slice(&Hash::of(&self.hashes).0);
+        p.extend_from_slice(&Hash::of(&self.chain).0);
         self.record(rec::TRAILER, &p)?;
         self.w.flush()?;
         Ok((self.w, self.totals))
@@ -322,8 +385,8 @@ impl<W: Write> DumpWriter<W> {
         self.write_record(kind, Hash::of(payload), payload)
     }
 
-    /// Writes one record whose payload hashes to `hash`, and adds the hash to the running digest
-    /// (the trailer's own is not).
+    /// Writes one record whose payload hashes to `hash`, and adds it to the running digest (the
+    /// trailer's own is not).
     fn write_record(&mut self, kind: u8, hash: Hash, payload: &[u8]) -> Result<(), StoreError> {
         let len =
             u32::try_from(payload.len()).map_err(|_| StoreError::Refused(cannot_stand(kind)))?;
@@ -332,7 +395,7 @@ impl<W: Write> DumpWriter<W> {
         self.w.write_all(&hash.0)?;
         self.w.write_all(payload)?;
         if kind != rec::TRAILER {
-            self.hashes.extend_from_slice(&hash.0);
+            link(&mut self.chain, kind, payload.len() as u64, &hash);
         }
         self.totals.bytes += FRAME_HEADER + payload.len() as u64;
         Ok(())
@@ -340,13 +403,18 @@ impl<W: Write> DumpWriter<W> {
 }
 
 /// Reads a dump and checks every record on the way (verify on receive). `next` returns `None`
-/// only after a verified trailer and the end of the file.
+/// only after a verified trailer and the end of the file. After an error the reader stays
+/// failed: every later `next` returns that error again.
 pub struct DumpReader<R: Read> {
     r: R,
     phase: ReadPhase,
+    /// The error that ended the read, if one did.
+    failed: Option<StoreError>,
     last_path: Option<String>,
-    /// The 32-byte hashes of every record read so far, the trailer's excepted.
-    hashes: Vec<u8>,
+    /// The store kinds a frame may have (`frame_kinds` of the dump's pair).
+    kinds: &'static [u8],
+    /// `kind || len || hash` of every record read so far, the trailer's excepted.
+    chain: Vec<u8>,
     totals: DumpTotals,
 }
 
@@ -366,6 +434,15 @@ struct Record {
     payload: Vec<u8>,
 }
 
+/// A copy of an error of the reader, to return again on every later `next`.
+fn again(e: &StoreError) -> StoreError {
+    match e {
+        StoreError::Dump { at, what } => damaged(*at, what.clone()),
+        StoreError::Io(io) => StoreError::Io(io::Error::new(io.kind(), io.to_string())),
+        other => StoreError::Decode(other.to_string()),
+    }
+}
+
 fn damaged(at: u64, what: impl Into<String>) -> StoreError {
     StoreError::Dump {
         at,
@@ -383,8 +460,10 @@ impl<R: Read> DumpReader<R> {
         let mut me = DumpReader {
             r,
             phase: ReadPhase::Files,
+            failed: None,
             last_path: None,
-            hashes: Vec::new(),
+            kinds: &[],
+            chain: Vec::new(),
             totals: DumpTotals::default(),
         };
         let mut magic = Vec::with_capacity(MAGIC.len());
@@ -411,7 +490,11 @@ impl<R: Read> DumpReader<R> {
         }
         let header = parse_header(&first.payload)
             .ok_or_else(|| damaged(first.at, "the header does not parse"))?;
-        if !READS.contains(&(format, header.store_format)) {
+        let Some(kinds) = READS
+            .contains(&(format, header.store_format))
+            .then(|| frame_kinds(format, header.store_format))
+            .flatten()
+        else {
             return Err(damaged(
                 first.at,
                 format!(
@@ -419,14 +502,28 @@ impl<R: Read> DumpReader<R> {
                     header.store_format
                 ),
             ));
-        }
-        me.hashes.extend_from_slice(&first.hash.0);
+        };
+        me.kinds = kinds;
+        me.link(&first);
         Ok((me, format, header))
     }
 
     /// The next project file or batch; `None` after a verified trailer at the end of the file.
+    /// After an error, every later call returns that error again: never an item or `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<DumpItem>, StoreError> {
+        if let Some(e) = &self.failed {
+            return Err(again(e));
+        }
+        let out = self.step();
+        if let Err(e) = &out {
+            self.failed = Some(again(e));
+        }
+        out
+    }
+
+    /// One step of `next`.
+    fn step(&mut self) -> Result<Option<DumpItem>, StoreError> {
         if self.phase == ReadPhase::Done {
             return Ok(None);
         }
@@ -434,12 +531,12 @@ impl<R: Read> DumpReader<R> {
         match record.kind {
             rec::FILE if self.phase == ReadPhase::Files => {
                 let item = self.file(&record)?;
-                self.hashes.extend_from_slice(&record.hash.0);
+                self.link(&record);
                 Ok(Some(item))
             }
             rec::BATCH => {
                 self.phase = ReadPhase::Batches;
-                self.hashes.extend_from_slice(&record.hash.0);
+                self.link(&record);
                 self.batch(&record).map(|b| Some(DumpItem::Batch(b)))
             }
             rec::TRAILER => {
@@ -505,10 +602,12 @@ impl<R: Read> DumpReader<R> {
             let offset = c.u64()?;
             let frames = c.u32()?;
             let digest = c.hash()?;
+            let kinds = c.hash()?;
             c.0.is_empty()
-                .then_some((Location { segment, offset }, frames, digest))
+                .then_some((Location { segment, offset }, frames, digest, kinds))
         })();
-        let Some((start, count, digest)) = parsed else {
+        // no store writes a batch of no frames
+        let Some((start, count, digest, kinds)) = parsed.filter(|p| p.1 > 0) else {
             return Err(damaged(record.at, cannot_stand(record.kind)));
         };
         // no buffer is sized from an unread count: frames are pushed as they are read
@@ -524,17 +623,18 @@ impl<R: Read> DumpReader<R> {
                     ),
                 ));
             }
-            if !is_frame_kind(f.kind) {
+            if !self.kinds.contains(&f.kind) {
                 return Err(damaged(f.at, cannot_stand(f.kind)));
             }
-            self.hashes.extend_from_slice(&f.hash.0);
+            self.link(&f);
             frames.push(Frame {
                 kind: f.kind,
                 hash: f.hash,
                 payload: f.payload,
             });
         }
-        if batch_digest(frames.iter().map(|f| &f.hash)) != digest {
+        if batch_digest(frames.iter().map(|f| &f.hash)) != digest || kinds_digest(&frames) != kinds
+        {
             return Err(damaged(
                 record.at,
                 format!("batch {n} does not match its digest"),
@@ -565,7 +665,7 @@ impl<R: Read> DumpReader<R> {
             || batches != self.totals.batches
             || frames != self.totals.frames
             || files != self.totals.files
-            || digest != Hash::of(&self.hashes)
+            || digest != Hash::of(&self.chain)
         {
             return Err(mismatch());
         }
@@ -581,6 +681,11 @@ impl<R: Read> DumpReader<R> {
         }
         self.phase = ReadPhase::Done;
         Ok(())
+    }
+
+    /// Adds a read record to the bytes the trailer's digest covers.
+    fn link(&mut self, r: &Record) {
+        link(&mut self.chain, r.kind, r.payload.len() as u64, &r.hash);
     }
 
     /// Reads one record and checks its hash. The end of the file inside a record, or where a
@@ -622,8 +727,8 @@ impl<R: Read> DumpReader<R> {
 impl StoreReader {
     /// Calls `f` with every sealed batch of `[ORIGIN, upto)`, in log order: its marker's start
     /// and digest, and its data frames byte for byte. Each marker is checked against the frames
-    /// it closes (start, count, digest). A mismatch, or frames after the last marker, is
-    /// `StoreError::Decode`.
+    /// it closes (start, count, digest); a marker that closes no frames does not match. A
+    /// mismatch, or frames after the last marker, is `StoreError::Decode`.
     pub fn for_each_batch(
         &self,
         upto: Location,
@@ -654,7 +759,9 @@ impl StoreReader {
             };
             let marker = BatchCommit::decode(payload).ok_or_else(mismatch)?;
             let frames = std::mem::take(&mut pending);
-            if (!frames.is_empty() && marker.start != start)
+            // a marker of no frames closes no batch (a store's open treats one as torn)
+            if frames.is_empty()
+                || marker.start != start
                 || marker.frames as usize != frames.len()
                 || batch_digest(frames.iter().map(|f| &f.hash)) != marker.digest
             {

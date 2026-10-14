@@ -397,3 +397,390 @@ fn dl1_a_hash_valid_record_out_of_order_or_count_is_refused() {
     assert_eq!(forge(&recs), good);
     assert!(read_all(&good).is_ok());
 }
+
+/// The digest a `BATCH` record carries over its frames' kinds: `Hash::of` over each frame's
+/// `kind byte || hash`, in order.
+fn kinds_digest(frames: &[(u8, Vec<u8>)]) -> Hash {
+    let mut b = vec![];
+    for (k, p) in frames {
+        b.push(*k);
+        b.extend_from_slice(&Hash::of(p).0);
+    }
+    Hash::of(&b)
+}
+
+/// The trailer digest of dump format 1 over `recs` (the trailer left out): `Hash::of` over each
+/// record's `kind byte || 8-byte payload length || hash`.
+fn trailer_digest(recs: &[(u8, Vec<u8>)]) -> Hash {
+    let mut b = vec![];
+    for (k, p) in recs {
+        b.push(*k);
+        b.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        b.extend_from_slice(&Hash::of(p).0);
+    }
+    Hash::of(&b)
+}
+
+/// The trailer payload that closes `recs` (the trailer left out), with `digest`.
+fn trailer_with(recs: &[(u8, Vec<u8>)], digest: Hash) -> Vec<u8> {
+    let batches = recs.iter().filter(|(k, _)| *k == rec::BATCH).count() as u64;
+    let frames = recs.iter().filter(|(k, _)| *k < rec::HEADER).count() as u64;
+    let files = recs.iter().filter(|(k, _)| *k == rec::FILE).count() as u32;
+    let mut p = batches.to_le_bytes().to_vec();
+    p.extend_from_slice(&frames.to_le_bytes());
+    p.extend_from_slice(&files.to_le_bytes());
+    p.extend_from_slice(&digest.0);
+    p
+}
+
+/// `recs` with its last record (the trailer) made true again.
+fn reseal(recs: &mut [(u8, Vec<u8>)]) {
+    let n = recs.len() - 1;
+    let digest = trailer_digest(&recs[..n]);
+    recs[n].1 = trailer_with(&recs[..n], digest);
+}
+
+/// The index of the `BATCH` record whose frames hold record `i`, and its number (from 1).
+fn batch_of(recs: &[(u8, Vec<u8>)], i: usize) -> (usize, usize) {
+    let j = (0..i).rev().find(|j| recs[*j].0 == rec::BATCH).unwrap();
+    let n = recs[..=j].iter().filter(|(k, _)| *k == rec::BATCH).count();
+    (j, n)
+}
+
+/// The frames of the `BATCH` record at `j`.
+fn frames_of(recs: &[(u8, Vec<u8>)], j: usize) -> Vec<(u8, Vec<u8>)> {
+    let n = u32::from_le_bytes(recs[j].1[12..16].try_into().unwrap()) as usize;
+    recs[j + 1..=j + n].to_vec()
+}
+
+#[test]
+fn dl1_a_flipped_frame_kind_is_refused() {
+    let (_b, s, batches) = store_and_batches();
+    let good = stream(&s, &batches, &[]);
+    let recs = records(&good);
+    use rdy_store::kinds::{BLOB_CHUNK, BLOB_MANIFEST, REF_UPDATE, TAG};
+    for (from, to) in [(REF_UPDATE, TAG), (BLOB_MANIFEST, BLOB_CHUNK)] {
+        let i = recs.iter().rposition(|(k, _)| *k == from).unwrap();
+        let (j, n) = batch_of(&recs, i);
+        let mut r = recs.clone();
+        r[i].0 = to;
+        // the frame's hash covers its payload only, so the record itself still verifies
+        assert_eq!(
+            damaged(read_all(&forge(&r)).unwrap_err()),
+            format!("batch {n} does not match its digest"),
+            "{from} to {to}"
+        );
+        // with the batch's kinds digest forced to match, the trailer refuses it
+        let d = kinds_digest(&frames_of(&r, j));
+        r[j].1[48..80].copy_from_slice(&d.0);
+        assert_eq!(
+            damaged(read_all(&forge(&r)).unwrap_err()),
+            "the trailer's counts or digest do not match the dump",
+            "{from} to {to}, at the trailer"
+        );
+        // and a trailer digest over the record hashes alone (no kinds) is refused too
+        let last = r.len() - 1;
+        let mut blind = vec![];
+        for (_, p) in &r[..last] {
+            blind.extend_from_slice(&Hash::of(p).0);
+        }
+        r[last].1 = trailer_with(&r[..last], Hash::of(&blind));
+        assert_eq!(
+            damaged(read_all(&forge(&r)).unwrap_err()),
+            "the trailer's counts or digest do not match the dump",
+            "{from} to {to}, a kind-blind trailer"
+        );
+        // the same stream, sealed with the format's own digest, reads: only the kind changed
+        reseal(&mut r);
+        assert!(read_all(&forge(&r)).is_ok(), "{from} to {to}, resealed");
+    }
+}
+
+#[test]
+fn dl1_an_unassigned_kind_is_refused() {
+    let (_b, s, batches) = store_and_batches();
+    assert_eq!(
+        frame_kinds(DUMP_FORMAT, STORE_FORMAT),
+        Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 15, 16, 17, 18, 19][..]),
+        "exactly the kinds store format 10 assigns"
+    );
+    for (d, sf) in READS {
+        assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
+    }
+    let good = stream(&s, &batches, &[]);
+    let recs = records(&good);
+    let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
+    for k in [10u8, 11, 12, 14] {
+        // the reader
+        let mut r = recs.clone();
+        r[first].0 = k;
+        assert_eq!(
+            damaged(read_all(&forge(&r)).unwrap_err()),
+            format!("a record of kind {k} cannot stand here"),
+            "the reader, kind {k}"
+        );
+        // the writer
+        let mut b = batches[1].clone();
+        b.frames[0].kind = k;
+        let mut w = DumpWriter::new(Vec::new(), &header(&s)).unwrap();
+        match w.batch(&b) {
+            Err(StoreError::Refused(m)) => {
+                assert_eq!(m, format!("a record of kind {k} cannot stand here"))
+            }
+            other => panic!("the writer, kind {k}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn dl1_a_reordered_record_is_refused() {
+    let (_b, s, batches) = store_and_batches();
+    let good = stream(&s, &batches, &[]);
+    let recs = records(&good);
+    let starts: Vec<usize> = (0..recs.len())
+        .filter(|i| recs[*i].0 == rec::BATCH)
+        .collect();
+    // two whole batches swapped, each with its frames: every record verifies, the order does not
+    let (a, b) = (starts[1], starts[2]);
+    let mut r = recs[..a].to_vec();
+    r.extend_from_slice(&recs[b..starts[3]]);
+    r.extend_from_slice(&recs[a..b]);
+    r.extend_from_slice(&recs[starts[3]..]);
+    assert_eq!(
+        damaged(read_all(&forge(&r)).unwrap_err()),
+        "the trailer's counts or digest do not match the dump"
+    );
+    // two frames of one batch swapped (the blob's chunks and manifest)
+    let big = starts[3];
+    assert!(frames_of(&recs, big).len() >= 2);
+    let mut r = recs.clone();
+    r.swap(big + 1, big + 2);
+    assert_eq!(
+        damaged(read_all(&forge(&r)).unwrap_err()),
+        "batch 4 does not match its digest"
+    );
+}
+
+/// The byte offset of record `k` of `good` (0 is the header).
+fn offset_of(good: &[u8], k: usize) -> usize {
+    let mut at = 12usize;
+    for _ in 0..k {
+        let len = u32::from_le_bytes(good[at..at + 4].try_into().unwrap()) as usize;
+        at += 37 + len;
+    }
+    at
+}
+
+/// Reads `bytes` to its first error, then calls `next` twice more: each call gives that error
+/// again, never an item or the end.
+fn stays_failed(bytes: &[u8], want: &str) {
+    let (mut r, _, _) = DumpReader::open(bytes).unwrap();
+    let first = loop {
+        match r.next() {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("no error before the end"),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(damaged(first), want);
+    for i in 0..2 {
+        assert_eq!(
+            damaged(r.next().unwrap_err()),
+            want,
+            "call {i} after the error"
+        );
+    }
+}
+
+#[test]
+fn dl1_a_reader_stays_failed_after_an_error() {
+    let (_b, s, batches) = store_and_batches();
+    let good = stream(&s, &batches, &[]);
+    const TRAILER: usize = 37 + 8 + 8 + 4 + 32;
+    // one junk byte after the trailer, then a copy of the trailer: a retry must not read it
+    let mut extra = good.clone();
+    extra.push(0);
+    extra.extend_from_slice(&good[good.len() - TRAILER..]);
+    stays_failed(&extra, "bytes follow the trailer");
+    // a hash error at the first batch record: a retry must not read on from its frames
+    let mut bad = good.clone();
+    bad[offset_of(&good, 1) + 37] ^= 0x01;
+    stays_failed(&bad, "a record's hash does not match its bytes");
+}
+
+#[test]
+fn dl1_a_path_longer_than_its_length_field_is_refused() {
+    let (_b, s, _) = store_and_batches();
+    let path = format!(".rdy/packs/{}.yaml", "a".repeat(65536));
+    assert!(is_project_file(&path));
+    let mut w = DumpWriter::new(Vec::new(), &header(&s)).unwrap();
+    match w.file(&path, b"x") {
+        Err(StoreError::Refused(m)) => assert_eq!(
+            m,
+            format!("the project file path {path:?} is not one rdy carries")
+        ),
+        other => panic!("not refused: {other:?}"),
+    }
+    // nothing was written: the writer still finishes a dump that reads
+    let bytes = w.finish().unwrap().0;
+    assert!(read_all(&bytes).unwrap().is_empty());
+}
+
+#[test]
+fn dl1_a_batch_of_no_frames_is_refused() {
+    let (_b, s, batches) = store_and_batches();
+    let end = s.log_end();
+    // the writer
+    let empty = DumpBatch {
+        start: end,
+        digest: Hash::of(b""),
+        frames: vec![],
+    };
+    let mut w = DumpWriter::new(Vec::new(), &header(&s)).unwrap();
+    match w.batch(&empty) {
+        Err(StoreError::Refused(m)) => assert_eq!(m, "a record of kind 242 cannot stand here"),
+        other => panic!("not refused: {other:?}"),
+    }
+    // the reader: a hash-valid BATCH record of no frames, with true digests and a true trailer
+    let mut r = records(&stream(&s, &batches, &[]));
+    let mut p = end.segment.to_le_bytes().to_vec();
+    p.extend_from_slice(&end.offset.to_le_bytes());
+    p.extend_from_slice(&0u32.to_le_bytes());
+    p.extend_from_slice(&Hash::of(b"").0);
+    p.extend_from_slice(&kinds_digest(&[]).0);
+    let last = r.len() - 1;
+    r.insert(last, (rec::BATCH, p));
+    reseal(&mut r);
+    assert_eq!(
+        damaged(read_all(&forge(&r)).unwrap_err()),
+        "a record of kind 242 cannot stand here"
+    );
+}
+
+/// The batch markers of `s`'s log: each one's location and payload.
+fn markers(s: &Store) -> Vec<(Location, Vec<u8>)> {
+    let mut out = vec![];
+    s.reader()
+        .for_each_frame_from(
+            Location {
+                segment: 0,
+                offset: 0,
+            },
+            s.log_end(),
+            |loc, kind, _, payload, _| {
+                if kind == rdy_store::kinds::BATCH_COMMIT {
+                    out.push((loc, payload.to_vec()));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    out
+}
+
+/// Writes `frame` at `loc` of the log of the store at `dir`, in place.
+fn write_at(dir: &std::path::Path, loc: Location, frame: &[u8]) {
+    use std::os::unix::fs::FileExt;
+    let path = rdy_store::segment::seg_path(&dir.join("segments"), loc.segment);
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.write_all_at(frame, loc.offset).unwrap();
+}
+
+fn decode_text(e: StoreError) -> String {
+    match e {
+        StoreError::Decode(m) => m,
+        other => panic!("not a decode error: {other}"),
+    }
+}
+
+/// A change to a marker payload.
+type Bend = fn(&[u8]) -> Vec<u8>;
+
+/// The marker payload `p`, decoded, changed by `bend` and encoded again.
+fn bend_marker(p: &[u8], bend: fn(&mut rdy_store::kinds::BatchCommit)) -> Vec<u8> {
+    let mut m = rdy_store::kinds::BatchCommit::decode(p).unwrap();
+    bend(&mut m);
+    postcard::to_allocvec(&m).unwrap()
+}
+
+#[test]
+fn dl1_for_each_batch_refuses_a_marker_that_does_not_match_its_batch() {
+    use rdy_store::kinds::{BATCH_COMMIT, BatchCommit};
+    let cases: [(&str, Bend); 4] = [
+        ("digest", |p| bend_marker(p, |m| m.digest.0[0] ^= 1)),
+        ("count", |p| bend_marker(p, |m| m.frames += 1)),
+        ("start", |p| bend_marker(p, |m| m.start.segment += 1)),
+        ("junk", |p| vec![0xFF; p.len()]),
+    ];
+    for (what, bend) in cases {
+        let (base, s, batches) = store_and_batches();
+        let ms = markers(&s);
+        assert_eq!(ms.len(), batches.len(), "{what}");
+        // the marker of the third batch (the ref write), with its true frame hash
+        let (loc, p) = &ms[2];
+        let q = bend(p);
+        assert_eq!(q.len(), p.len(), "{what}: the marker keeps its length");
+        assert!(
+            BatchCommit::decode(&q).is_none() == (what == "junk"),
+            "{what}"
+        );
+        write_at(&base.path().join("s"), *loc, &record(BATCH_COMMIT, &q));
+        let start = batches[2].start;
+        assert_eq!(
+            decode_text(
+                s.reader()
+                    .for_each_batch(s.log_end(), |_| Ok(()))
+                    .unwrap_err()
+            ),
+            format!(
+                "batch at segment {} offset {} does not match its marker; run rdy fsck",
+                start.segment, start.offset
+            ),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn dl1_for_each_batch_refuses_a_marker_of_no_frames() {
+    use rdy_store::kinds::{BATCH_COMMIT, BatchCommit, batch_digest};
+    let (base, s, _) = store_and_batches();
+    let end = s.log_end();
+    let m = BatchCommit {
+        start: end,
+        frames: 0,
+        digest: batch_digest([]),
+    };
+    let frame = record(BATCH_COMMIT, &postcard::to_allocvec(&m).unwrap());
+    write_at(&base.path().join("s"), end, &frame);
+    let upto = Location {
+        segment: end.segment,
+        offset: end.offset + frame.len() as u64,
+    };
+    assert_eq!(
+        decode_text(s.reader().for_each_batch(upto, |_| Ok(())).unwrap_err()),
+        format!(
+            "batch at segment {} offset {} does not match its marker; run rdy fsck",
+            end.segment, end.offset
+        )
+    );
+}
+
+#[test]
+fn dl1_for_each_batch_refuses_a_log_that_ends_inside_a_batch() {
+    let (_b, mut s, _) = store_and_batches();
+    s.set_held(true).unwrap();
+    s.set_refs(vec![("view/b".into(), b"y".to_vec())]).unwrap();
+    assert!(
+        s.open_batch().is_some_and(|b| !b.is_empty()),
+        "a held open batch"
+    );
+    let end = s.log_end();
+    assert_eq!(
+        decode_text(s.reader().for_each_batch(end, |_| Ok(())).unwrap_err()),
+        format!(
+            "the log does not end at a batch marker at segment {} offset {}; run rdy fsck",
+            end.segment, end.offset
+        )
+    );
+}
