@@ -4,6 +4,7 @@
 mod io;
 mod io_authors;
 mod io_dump;
+mod io_dump_fixture;
 mod io_imported_by;
 mod io_keys;
 mod io_link_keys;
