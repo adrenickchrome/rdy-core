@@ -1,9 +1,11 @@
 //! The visual review set (vis1). Renders the golden project's three sites and the review project's draft into a fixed
-//! directory under `target/qa/site/`, fills three more from the live server, and writes
-//! `review-set.json`: the nineteen pages with their
+//! directory under `target/qa/site/`, fills four more from the live server, and writes
+//! `review-set.json`: the twenty pages with their
 //! URLs and the browser state to reach. The reviewer screenshots this render, so the set is
 //! always the gate's own.
-use crate::render_quality_live::{CHANGED_DOC, disagree_live, golden_live, longest_doc};
+use crate::render_quality_live::{
+    CHANGED_DOC, disagree_live, golden_live, grouped_live, longest_doc,
+};
 use rdy_engine::Scope;
 use rdy_qa::golden;
 use serde_json::json;
@@ -65,6 +67,10 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
     let (dh, _stat) = disagree_live();
     let live_disagree = dh.fetch(&Scope::Canon, "", false);
     replace_dir(live_disagree.path(), &root.join("live-disagree"));
+    // a disagreement repeated over seven pages: the page folds its list behind "Show all"
+    let (gh, _gstat) = grouped_live();
+    let live_grouped = gh.fetch(&Scope::Canon, "", false);
+    replace_dir(live_grouped.path(), &root.join("live-grouped"));
     let long_doc = longest_doc(g.static_canon.path());
 
     let anchor = ids.soft_keywords_requirement.to_string();
@@ -167,6 +173,12 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "disagreements.html",
             "none: one entry, the sentence above two links".into(),
         ),
+        (
+            "live-disagreements-grouped",
+            "live-grouped",
+            "disagreements.html",
+            "closed: the entry's list shows the first links above `Show all`; then open the `Show all` fold (the rest of the pages list); then close it".into(),
+        ),
     ];
     let set: Vec<_> = rows
         .iter()
@@ -175,7 +187,7 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             json!({"n": i + 1, "name": name, "site": site, "url": format!("{site}/{url}"), "state": state})
         })
         .collect();
-    assert_eq!(set.len(), 19);
+    assert_eq!(set.len(), 20);
     for (_, site, url, _) in &rows {
         let f = root.join(site).join(url);
         assert!(f.is_file(), "the review page {} is missing", f.display());

@@ -148,7 +148,7 @@ pub(crate) fn disagree_live() -> (LiveHost, tempfile::TempDir) {
 
 /// A canon whose one disagreement repeats over seven pages: its page folds a list behind
 /// "Show all" (as ls11), on a daemon, with its static render.
-fn grouped_live() -> (LiveHost, tempfile::TempDir) {
+pub(crate) fn grouped_live() -> (LiveHost, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     rdy_engine::testkit::generate_tree(dir.path(), 7, 1, 3);
     let mut r = Rdy::open(dir.path()).unwrap();
