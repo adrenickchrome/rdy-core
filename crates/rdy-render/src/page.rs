@@ -140,9 +140,17 @@ pub struct TermRow {
     pub section_title: String,
 }
 
+/// The terms of one top-level folder, or of the top-level docs, under a heading (D-Y4884).
+#[derive(Clone, Debug, Serialize)]
+pub struct TermGroup {
+    pub label: String,
+    pub anchor: String,
+    pub terms: Vec<TermRow>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct GlossaryBody {
-    pub terms: Vec<TermRow>,
+    pub groups: Vec<TermGroup>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -543,7 +551,22 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         } else {
             nav::build(site, current, &page_url, facts)
         },
-        toc: toc::build(&items),
+        // the glossary's "On this page" names its groups, however few; a doc's lists its sections
+        toc: match &body.glossary {
+            Some(g) => toc::Toc {
+                entries: g
+                    .groups
+                    .iter()
+                    .map(|g| toc::TocEntry {
+                        label: g.label.clone(),
+                        anchor: g.anchor.clone(),
+                        depth: 1,
+                        children: vec![],
+                    })
+                    .collect(),
+            },
+            None => toc::build(&items),
+        },
         pager,
         search_href: rel(&page_url, "search-index.json"),
         has_mermaid,
@@ -792,10 +815,23 @@ fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
 }
 
 fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
-    let link = |id: &BlockId| sh.link(page, id);
-    let terms = sh
+    let groups = sh
         .site
-        .terms
+        .term_groups
+        .iter()
+        .map(|g| TermGroup {
+            label: g.label.clone(),
+            anchor: g.anchor.clone(),
+            terms: term_rows(sh, page, &g.terms),
+        })
+        .collect();
+    GlossaryBody { groups }
+}
+
+/// The glossary entries of `terms`: each term, its body and where it is defined.
+fn term_rows(sh: &Shared, page: &str, terms: &[BlockId]) -> Vec<TermRow> {
+    let link = |id: &BlockId| sh.link(page, id);
+    terms
         .iter()
         .filter_map(|id| {
             let b = sh.m.get(id)?;
@@ -816,8 +852,7 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
                 section_title,
             })
         })
-        .collect();
-    GlossaryBody { terms }
+        .collect()
 }
 
 /// The disagreements page's entries: each block of a group of one entry as a link whose text is

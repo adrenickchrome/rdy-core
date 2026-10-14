@@ -24,7 +24,7 @@ fn doc(
     name: &str,
 ) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
     let ops = serde_json::from_value(serde_json::json!([
-        {"op": "create", "type": "doc", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "fields": {"name": name, "title": "D", "doc_type": "page"}}
     ]))
     .unwrap();
     r.write(

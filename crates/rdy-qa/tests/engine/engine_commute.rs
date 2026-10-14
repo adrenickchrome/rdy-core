@@ -39,7 +39,7 @@ fn run(key: u64, edits: &[(usize, String)], order: &[usize]) -> Outcome {
     let _ids = SeededIds::new(key);
     let (_dir, mut r) = project();
     let mut ops = vec![
-        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "commute", "title": "Commute", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "commute", "title": "Commute", "doc_type": "page"}}),
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
     ];
     for i in 0..CLAIMS {

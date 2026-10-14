@@ -75,6 +75,20 @@ pub struct DisagreementGroup {
     pub repeats: usize,
 }
 
+/// One group of the glossary page: the terms of the docs under one top-level folder, or of the
+/// top-level docs (the project's group), A to Z (FW-GL1, D-Y4884).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlossaryGroup {
+    /// The folder's label, or the project's name.
+    pub label: String,
+    /// The group heading's anchor on `glossary.html`.
+    pub anchor: String,
+    pub terms: Vec<BlockId>,
+}
+
+/// The page the generated glossary owns: a top-level doc of this name has no place on the site.
+pub const GLOSSARY_NAME: &str = "glossary";
+
 pub struct Site<'a> {
     pub m: &'a Materialized,
     /// Every folder's and doc's tree path.
@@ -98,10 +112,17 @@ pub struct Site<'a> {
     /// The entries of `disagreements.html`, in reading order of their docs; none when the render
     /// has no such page (FW-SW2). Filled by [`Site::set_disagreements`].
     pub disagreements: Vec<DisagreementGroup>,
-    /// Every term, by name, case-insensitively.
+    /// Every term, in the glossary page's order: by group, then by name, case-insensitively.
     pub terms: Vec<BlockId>,
     /// The terms' anchors on `glossary.html`.
     pub term_anchors: BTreeMap<BlockId, String>,
+    /// The glossary page's groups: the top-level folders in tree order, then the project's.
+    pub term_groups: Vec<GlossaryGroup>,
+    /// Whether a top-level doc named `glossary` was left off the site: the generated glossary
+    /// owns `glossary.html` (D-Y4884).
+    pub glossary_doc_dropped: bool,
+    /// The project's name: the label of the glossary's group of top-level docs.
+    project: String,
     /// The navigation's lists, computed once: every folder's children that have a page, in
     /// order, under `Some(folder)`; the top-level docs that have a page under `None`.
     nav_lists: BTreeMap<Option<BlockId>, Vec<&'a Block>>,
@@ -138,9 +159,10 @@ pub struct Site<'a> {
 }
 
 impl<'a> Site<'a> {
-    pub fn new(m: &'a Materialized, pack: &Pack) -> Site<'a> {
+    pub fn new(m: &'a Materialized, pack: &Pack, project: &str) -> Site<'a> {
         // `level` folders are above `parent`'s children; only a damaged store nests deeper than
         // MAX_FOLDER_DEPTH, and what lies below it gets no page
+        #[allow(clippy::too_many_arguments)]
         fn walk(
             m: &Materialized,
             parent: Option<&BlockId>,
@@ -149,6 +171,7 @@ impl<'a> Site<'a> {
             out: &mut BTreeMap<BlockId, String>,
             order: &mut Vec<BlockId>,
             tree_order: &mut Vec<BlockId>,
+            dropped: &mut bool,
         ) {
             if level > tree::MAX_FOLDER_DEPTH {
                 return;
@@ -158,6 +181,12 @@ impl<'a> Site<'a> {
                 let Some(name) = names.get(&b.id) else {
                     continue;
                 };
+                // the generated glossary owns `glossary.html`: a top-level doc of that name has
+                // no page, no place in the navigation, and its blocks are not linked
+                if parent.is_none() && b.block_type == tree::DOC && name == GLOSSARY_NAME {
+                    *dropped = true;
+                    continue;
+                }
                 let path = if prefix.is_empty() {
                     name.clone()
                 } else {
@@ -166,7 +195,16 @@ impl<'a> Site<'a> {
                 out.insert(b.id.clone(), path.clone());
                 tree_order.push(b.id.clone());
                 if b.block_type == tree::FOLDER {
-                    walk(m, Some(&b.id), &path, level + 1, out, order, tree_order);
+                    walk(
+                        m,
+                        Some(&b.id),
+                        &path,
+                        level + 1,
+                        out,
+                        order,
+                        tree_order,
+                        dropped,
+                    );
                 } else if b.block_type == tree::DOC {
                     order.push(b.id.clone());
                 }
@@ -175,7 +213,17 @@ impl<'a> Site<'a> {
         let mut paths = BTreeMap::new();
         let mut order = vec![];
         let mut tree_order = vec![];
-        walk(m, None, "", 0, &mut paths, &mut order, &mut tree_order);
+        let mut dropped = false;
+        walk(
+            m,
+            None,
+            "",
+            0,
+            &mut paths,
+            &mut order,
+            &mut tree_order,
+            &mut dropped,
+        );
         let (mut nav_lists, mut top_folders, mut nav_pos) =
             (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
         let mut nav_hidden: BTreeSet<BlockId> = order
@@ -229,6 +277,9 @@ impl<'a> Site<'a> {
             disagreements: vec![],
             terms: vec![],
             term_anchors: BTreeMap::new(),
+            term_groups: vec![],
+            glossary_doc_dropped: dropped,
+            project: project.to_string(),
             nav_lists,
             top_folders,
             nav_pos,
@@ -379,33 +430,68 @@ impl<'a> Site<'a> {
             .collect();
         let (mut open, mut question_anchors) = (vec![], BTreeMap::new());
         let mut taken = reserved_ids();
-        let mut terms: Vec<&Block> = vec![];
+        // each term, with the top-level folder its doc sits under (none for a top-level doc)
+        let mut terms: Vec<(&Block, Option<BlockId>)> = vec![];
         for doc in &self.order {
+            let top = self
+                .chain(doc)
+                .into_iter()
+                .next()
+                .filter(|t| self.m.get(t).is_some_and(|b| b.block_type == tree::FOLDER));
             for b in self.blocks_of(doc) {
                 if b.block_type == decision::QUESTION && !answered.contains(&b.id) {
                     open.push(b.id.clone());
                     question_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
                 }
                 if b.block_type == "term" {
-                    terms.push(*b);
+                    terms.push((*b, top.clone()));
                 }
             }
         }
-        terms.sort_by_cached_key(|b| (self.label(b).to_lowercase(), b.id.clone()));
+        terms.sort_by_cached_key(|(b, _)| (self.label(b).to_lowercase(), b.id.clone()));
         let (mut term_anchors, mut taken) = (BTreeMap::new(), reserved_ids());
-        for b in &terms {
+        for (b, _) in &terms {
             term_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
         }
-        // a top-level doc named `glossary` or `questions` already has that page: it keeps it,
-        // and the collected page is not written (nor linked)
+        // the groups: the top-level folders in tree order (the navigation's order), then the
+        // top-level docs under the project's name; a group's anchor continues the terms' set
+        let mut by_top: BTreeMap<Option<BlockId>, Vec<BlockId>> = BTreeMap::new();
+        for (b, top) in terms {
+            by_top.entry(top).or_default().push(b.id.clone());
+        }
+        let mut groups = vec![];
+        let tops = self
+            .tree
+            .iter()
+            .filter_map(|id| self.m.get(id))
+            .filter(|b| b.parent.is_none() && b.block_type == tree::FOLDER)
+            .map(|b| (Some(b.id.clone()), Some(b)))
+            .chain([(None, None)]);
+        for (key, folder) in tops {
+            let Some(terms) = by_top.remove(&key) else {
+                continue;
+            };
+            let label = match folder {
+                Some(f) => self.label(f),
+                None => self.project.clone(),
+            };
+            let anchor = unique(label.clone(), &mut taken);
+            groups.push(GlossaryGroup {
+                label,
+                anchor,
+                terms,
+            });
+        }
+        // a top-level doc named `questions` already has that page: it keeps it, and the
+        // collected page is not written (nor linked); `glossary.html` is always the generated
+        // glossary (D-Y4884)
         if !self.page_taken("questions.html") {
             self.open_questions = open;
             self.question_anchors = question_anchors;
         }
-        if !self.page_taken("glossary.html") {
-            self.terms = terms.iter().map(|b| b.id.clone()).collect();
-            self.term_anchors = term_anchors;
-        }
+        self.terms = groups.iter().flat_map(|g| g.terms.clone()).collect();
+        self.term_anchors = term_anchors;
+        self.term_groups = groups;
     }
 
     /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
@@ -994,7 +1080,7 @@ mod tests {
             .clone();
         let ghost = BlockId::parse("c-ZZZZZ").expect("an id");
         assert!(m.get(&ghost).is_none());
-        let mut site = Site::new(&m, st.pack());
+        let mut site = Site::new(&m, st.pack(), "Project");
         site.set_disagreements(vec![
             Disagreement {
                 sentence: "This page still points to something that was retired.",
@@ -1043,7 +1129,7 @@ mod tests {
             .collect();
         claims.reverse();
         assert!(claims.len() >= 100, "guard: a wide entry");
-        let mut site = Site::new(&m, st.pack());
+        let mut site = Site::new(&m, st.pack(), "Project");
         let before = site.doc_calls.get();
         site.set_disagreements(vec![Disagreement {
             sentence: "These pages define the same thing twice.",

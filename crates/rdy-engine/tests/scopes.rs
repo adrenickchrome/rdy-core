@@ -23,7 +23,7 @@ fn land_one(r: &mut Rdy, title: &str) -> String {
         WriteRequest {
             view: "work".into(),
             ops: serde_json::from_value(json!([
-                {"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}
+                {"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}
             ]))
             .unwrap(),
             justification: None,
@@ -52,7 +52,7 @@ fn legacy_view(r: &mut Rdy, name: &str) -> BlockId {
     let id = BlockId::parse("d-AAAAB").unwrap();
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("title".to_string(), FieldValue::Str("Legacy".into()));
-    fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+    fields.insert("doc_type".to_string(), FieldValue::Str("page".into()));
     let block = Block {
         id: id.clone(),
         block_type: "doc".into(),
@@ -173,7 +173,7 @@ fn legacy_colon_views_stay_readable_and_proposable_but_not_writable() {
     let write = |view: &str| WriteRequest {
         view: view.into(),
         ops: serde_json::from_value(json!([
-            {"op": "create", "type": "doc", "fields": {"title": "New", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "fields": {"title": "New", "doc_type": "page"}}
         ]))
         .unwrap(),
         justification: None,

@@ -21,7 +21,7 @@ fn req(
 /// A landed glossary doc with a section, a claim and a decision; returns (doc, section, claim, decision).
 fn seeded(r: &mut Rdy) -> (String, String, String, String) {
     let res = write(r, "seed", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "One."}
     ]))

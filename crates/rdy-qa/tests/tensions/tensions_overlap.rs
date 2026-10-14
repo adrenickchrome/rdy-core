@@ -15,7 +15,7 @@ fn payments(r: &mut Rdy) -> (BlockId, BlockId, BlockId) {
         &writer(),
         "seed",
         "payments/fees",
-        Some("glossary"),
+        Some("page"),
         Some("Fees"),
     )
     .unwrap();

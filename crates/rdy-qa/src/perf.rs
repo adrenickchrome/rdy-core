@@ -629,7 +629,7 @@ fn deep_block(parent: &std::path::Path) -> (Rdy, BlockId) {
         &mut r,
         "b0",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "glossary", "title": "Glossary", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "glossary", "title": "Glossary", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Version 0."}
         ]),
@@ -2757,7 +2757,7 @@ const MCP_CLAIMS: usize = 2000;
 fn mcp_write_args(i: usize) -> serde_json::Map<String, serde_json::Value> {
     let body = "lorem ipsum dolor sit amet ".repeat(4700 / 27 + 1)[..4700].to_string();
     let mut ops = vec![
-        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "page"}}),
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
     ];
     // each claim's body is its own (the run index and the claim index lead it): every run
@@ -3653,7 +3653,7 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
 fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
     use rdy_schema::{MAX_PATH_SEGMENTS, PackSet};
     let mut out = vec![];
-    const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+    const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
     let export = |name: &str| {
         let t = parent.join(name);
         std::fs::create_dir_all(t.join("docs")).expect("mkdir");
@@ -3705,7 +3705,7 @@ fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
         std::fs::create_dir_all(&proj).expect("mkdir");
         let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
         let made = write(&mut r, "work", json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
         ]))
         .expect("doc");
@@ -3808,7 +3808,7 @@ fn stdio_mcp_ops(parent: &std::path::Path) -> Vec<Measure> {
     .ok();
     let made = c
         .call_within("rdy_write", json!({"ops": [
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
         ]}), budget)
         .ok();
@@ -4117,7 +4117,7 @@ mod tests {
     fn cold_reads_drop_the_caches_before_the_timed_region_and_rebuild_inside_it() {
         let (_d, mut r) = crate::fixtures::project();
         let res = write(&mut r, "work", json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}}
         ]))
         .unwrap();
         let doc = BlockId::parse(&res.created["$d"]).unwrap();

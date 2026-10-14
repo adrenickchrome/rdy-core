@@ -492,6 +492,9 @@ pub struct SiteFiles {
     pub summary: RenderSummary,
 }
 
+/// The render's warning when a top-level doc named `glossary` has no page (D-Y4884).
+const GLOSSARY_DOC_DROPPED: &str = "the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it.";
+
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
     let position = rdy.version_position(scope)?;
@@ -521,7 +524,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     let pack = rdy.pack().clone();
     let g = rdy.graph(scope)?;
     let env = env()?;
-    let mut site = Site::new(&m, &pack);
+    let mut site = Site::new(&m, &pack, &site_name);
     site.set_disagreements(disagree::list(rdy, scope)?);
     let review = review::build(rdy, scope)?;
     let sh = page::Shared {
@@ -545,6 +548,9 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         redirects: 0,
         warnings: vec![],
     };
+    if site.glossary_doc_dropped {
+        summary.warnings.push(GLOSSARY_DOC_DROPPED.into());
+    }
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
     let mut kinds = vec![page::Kind::Home];

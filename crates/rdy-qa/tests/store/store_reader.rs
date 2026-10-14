@@ -12,7 +12,7 @@ fn rdr1_an_engine_readers_view_matches_the_engines_after_each_write() {
         write(
             &mut r,
             "work",
-            json!([{"op": "create", "type": "doc", "fields": {"name": format!("d{i}"), "title": "D", "doc_type": "glossary"}}]),
+            json!([{"op": "create", "type": "doc", "fields": {"name": format!("d{i}"), "title": "D", "doc_type": "page"}}]),
         )
         .unwrap();
         assert_eq!(

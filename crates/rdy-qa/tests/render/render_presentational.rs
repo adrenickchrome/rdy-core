@@ -81,7 +81,7 @@ fn pres1_asides_and_notes_get_no_trail_or_copy_ref() {
     .unwrap();
     let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let base = write(&mut r, "work", serde_json::json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."},
         {"op": "create", "type": "note", "id": "$n", "parent": "$s", "body": "Margin."}

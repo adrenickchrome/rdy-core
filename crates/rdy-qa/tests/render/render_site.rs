@@ -6,7 +6,7 @@ use serde_json::json;
 fn one_doc() -> (tempfile::TempDir, Rdy, String) {
     let (d, mut r) = project();
     let doc = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "parent": "$d", "fields": {"title": "Terms"}}
     ]))
     .unwrap()

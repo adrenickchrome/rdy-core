@@ -5,7 +5,7 @@ use rdy_qa::invariants::check;
 use serde_json::json;
 
 fn doc_ops(title: &str) -> serde_json::Value {
-    json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])
+    json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}])
 }
 
 #[test]

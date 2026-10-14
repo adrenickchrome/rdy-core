@@ -28,9 +28,9 @@ fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, Value) {
 #[test]
 fn port1_status_reports_the_states_views_landings_and_seq() {
     let (dir, mut r) = project();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}])).unwrap();
     land(&mut r, "work").unwrap();
-    write(&mut r, "side", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "side", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "page"}}])).unwrap();
     drop(r);
     let (ok, v) = rdy(dir.path(), &["status"]);
     assert!(ok, "{v}");
@@ -52,7 +52,7 @@ fn port1_status_reports_the_states_views_landings_and_seq() {
 #[test]
 fn port1_reindex_republishes_the_state() {
     let (dir, mut r) = project();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}])).unwrap();
     let old = r.read();
     r.reindex().unwrap();
     let new = r.read();
@@ -81,9 +81,9 @@ fn port1_reindex_republishes_the_state() {
 #[test]
 fn port1_render_reads_the_state_it_is_given() {
     let (dir, mut r) = project();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "Alpha", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "Alpha", "doc_type": "page"}}])).unwrap();
     let held = r.read();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "Beta", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "Beta", "doc_type": "page"}}])).unwrap();
     let out = dir.path().join("site-held");
     let s = rdy_render::render_site(&held, &rdy_engine::Scope::View("work".into()), &out).unwrap();
     let out2 = dir.path().join("site-now");

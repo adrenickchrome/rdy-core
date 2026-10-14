@@ -19,7 +19,7 @@ fn bodies(r: &mut Rdy, scope: &Scope, parent: &str) -> Vec<String> {
 fn section_project() -> (tempfile::TempDir, Rdy, String, String, String) {
     let (d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "first"}
     ]))
@@ -57,7 +57,7 @@ fn first1_before_puts_a_block_first() {
     .unwrap();
     assert_eq!(bodies(&mut r, &scope, &s), ["last", "zeroth", "first"]);
     // at the top level too
-    let top = write(&mut r, "work", json!([{"op": "create", "type": "doc", "before": doc, "fields": {"title": "Intro", "doc_type": "glossary"}}]))
+    let top = write(&mut r, "work", json!([{"op": "create", "type": "doc", "before": doc, "fields": {"title": "Intro", "doc_type": "page"}}]))
         .unwrap()
         .created["op0"]
         .clone();

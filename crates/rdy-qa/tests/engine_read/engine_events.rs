@@ -18,7 +18,7 @@ fn evt1_live_events_equal_the_replay_and_each_write_emits_after_its_state() {
     let (_d, mut r) = project();
     let from = r.read().seq();
     let rx = r.subscribe();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}}])).unwrap();
     let first = drain(&rx);
     assert_eq!(first.len(), 2, "{first:?}");
     assert_eq!(
@@ -26,10 +26,10 @@ fn evt1_live_events_equal_the_replay_and_each_write_emits_after_its_state() {
         r.read().seq(),
         "the event carries the state's seq"
     );
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "page"}}])).unwrap();
     land(&mut r, "work").unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    write(&mut r, "other", json!([{"op": "create", "type": "doc", "fields": {"name": "c", "title": "C", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "other", json!([{"op": "create", "type": "doc", "fields": {"name": "c", "title": "C", "doc_type": "page"}}])).unwrap();
     let mut live = first;
     live.extend(drain(&rx));
     let replay = r.replay_events(from).unwrap();
@@ -74,7 +74,7 @@ fn evt1_live_events_equal_the_replay_and_each_write_emits_after_its_state() {
 fn evt1_invalidate_never_re_emits_the_last_batch() {
     let (_d, mut r) = project();
     let rx = r.subscribe();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}])).unwrap();
     assert_eq!(drain(&rx).len(), 2);
     r.invalidate();
     r.invalidate();
@@ -91,13 +91,13 @@ fn evt1_a_reopened_project_replays_what_it_missed_and_emits_only_new_batches() {
     {
         let mut r = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
         from = r.read().seq();
-        write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}])).unwrap();
+        write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}])).unwrap();
     }
     let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let rx = r.subscribe();
     assert_eq!(r.replay_events(from).unwrap().len(), 2);
     assert!(drain(&rx).is_empty(), "nothing before open is emitted live");
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "page"}}])).unwrap();
     assert_eq!(
         drain(&rx).len(),
         1,

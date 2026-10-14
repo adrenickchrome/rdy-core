@@ -19,7 +19,7 @@ struct Seed {
 /// implementing the decision and the term as an editorial typo fix, landed.
 fn seeded(r: &mut Rdy) -> Seed {
     let res = write(r, "seed", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "One."}

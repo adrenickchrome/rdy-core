@@ -320,7 +320,7 @@ fn cres1_a_resolution_from_a_side_checks_the_sides_name_against_the_view() {
         &a,
         "a",
         json!([{"op": "create", "type": "doc",
-        "fields": {"name": "other", "title": "Other", "doc_type": "glossary"}}]),
+        "fields": {"name": "other", "title": "Other", "doc_type": "page"}}]),
     )
     .unwrap();
     let e = write_as(

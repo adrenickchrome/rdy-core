@@ -13,7 +13,7 @@ fn seed_ab(r: &mut Rdy) -> (String, String) {
         r,
         "seed",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "o", "title": "O", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "o", "title": "O", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$a", "parent": "$d", "fields": {"title": "A"}},
             {"op": "create", "type": "section", "id": "$b", "parent": "$d", "fields": {"title": "B"}},
         ]),

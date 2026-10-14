@@ -6,7 +6,7 @@ use serde_json::json;
 fn section_project() -> (tempfile::TempDir, Rdy, String) {
     let (d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ]))
     .unwrap();
@@ -50,7 +50,7 @@ fn blob2_a_figure_must_name_a_blob_in_the_store() {
     write(&mut r, "work", figure(&s, &real)).unwrap();
 }
 
-const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
 
 /// A format-2 export holding one doc with one figure naming `blob`.
 fn export_with_figure(blob: &str) -> tempfile::TempDir {

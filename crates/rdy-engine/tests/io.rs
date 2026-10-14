@@ -753,7 +753,7 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
     let mut a = Rdy::init(a_dir.path(), "rdy-standard").unwrap();
     let mut fields = BTreeMap::new();
     fields.insert("title".to_string(), FieldValue::Str("Old Notes".into()));
-    fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+    fields.insert("doc_type".to_string(), FieldValue::Str("page".into()));
     let block = Block {
         id: BlockId::parse("d-AAAAB").unwrap(),
         block_type: "doc".into(),
@@ -837,7 +837,7 @@ fn raw_doc(r: &mut Rdy, id: &str, name: &str) {
     let mut fields = BTreeMap::new();
     fields.insert("title".to_string(), FieldValue::Str(name.into()));
     fields.insert("name".to_string(), FieldValue::Str(name.into()));
-    fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+    fields.insert("doc_type".to_string(), FieldValue::Str("page".into()));
     let block = Block {
         id: BlockId::parse(id).unwrap(),
         block_type: "doc".into(),
@@ -913,7 +913,7 @@ fn import_refuses_a_second_doc_or_a_folder_inside_a_doc_file() {
         mutate_docs(out.path(), |l| {
             let head = id_of(l, "doc");
             let entry: serde_yaml_ng::Value = serde_yaml_ng::from_str(&if ty == "doc" {
-                format!("{{id: d-QQQQQ, type: doc, parent: {head}, order: W, fields: {{name: other, title: Other, doc_type: glossary}}}}")
+                format!("{{id: d-QQQQQ, type: doc, parent: {head}, order: W, fields: {{name: other, title: Other, doc_type: page}}}}")
             } else {
                 format!("{{id: fd-QQQQQ, type: folder, parent: {head}, order: W}}")
             })
@@ -931,7 +931,7 @@ fn import_refuses_an_inner_block_whose_parent_is_in_another_doc_file() {
     mutate_docs(out.path(), |l| head = id_of(l, "doc"));
     std::fs::write(
         out.path().join("docs/other.yaml"),
-        format!("- id: d-QQQQQ\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: glossary\n- id: s-QQQQQ\n  type: section\n  parent: {head}\n  order: V\n  fields:\n    title: Terms\n"),
+        format!("- id: d-QQQQQ\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: page\n- id: s-QQQQQ\n  type: section\n  parent: {head}\n  order: V\n  fields:\n    title: Terms\n"),
     )
     .unwrap();
     assert_import_fails(out.path(), "E_FILE_FORMAT");
@@ -965,7 +965,8 @@ fn import_refuses_folders_nested_more_than_32_deep() {
 
 #[test]
 fn a_duplicated_doc_is_reported_as_a_duplicate_id_not_a_name_clash() {
-    let doc = "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Notes\n    doc_type: glossary\n";
+    let doc =
+        "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Notes\n    doc_type: page\n";
     let out = tempfile::tempdir().unwrap();
     std::fs::write(
         out.path().join("rdy-export.yaml"),

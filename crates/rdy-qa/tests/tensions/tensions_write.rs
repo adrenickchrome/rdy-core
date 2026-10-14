@@ -278,7 +278,7 @@ proptest! {
 /// A landed doc at `path` with one section, and (when `claim`) one claim under it: the section
 /// and the claim.
 fn landed_doc(r: &mut rdy_engine::Rdy, path: &str, claim: bool) -> (BlockId, Option<BlockId>) {
-    r.new_doc(&writer(), "seed", path, Some("glossary"), Some("Doc"))
+    r.new_doc(&writer(), "seed", path, Some("page"), Some("Doc"))
         .unwrap();
     let doc = r
         .read()

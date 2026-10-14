@@ -8,7 +8,7 @@ fn snap1_every_write_is_visible_to_the_next_read_and_the_state_is_republished_ea
     let (_d, mut r) = project();
     let mut seqs = vec![r.read().seq()];
     for i in 0..10 {
-        let res = write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": format!("d{i}"), "title": "D", "doc_type": "glossary"}}])).unwrap();
+        let res = write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": format!("d{i}"), "title": "D", "doc_type": "page"}}])).unwrap();
         let s = r.read();
         seqs.push(s.seq());
         let created = rdy_model::BlockId::parse(res.created.values().next().unwrap()).unwrap();
@@ -31,9 +31,9 @@ fn snap1_every_write_is_visible_to_the_next_read_and_the_state_is_republished_ea
 #[test]
 fn snap1_two_states_from_two_views_share_canons_build() {
     let (_d, mut r) = project();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}])).unwrap();
     land(&mut r, "work").unwrap();
-    write(&mut r, "x", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "x", json!([{"op": "create", "type": "doc", "fields": {"name": "b", "title": "B", "doc_type": "page"}}])).unwrap();
     let s = r.read();
     let canon = s.materialized(&Scope::Canon).unwrap();
     let x = s.materialized(&Scope::View("x".into())).unwrap();

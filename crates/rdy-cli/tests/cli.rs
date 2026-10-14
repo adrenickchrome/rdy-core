@@ -79,7 +79,7 @@ fn import_propose_approve_render_fsck() {
             kind: rdy_engine::SessionKind::Human,
         };
         r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."}
         ])).unwrap(), justification: None, message: String::new() }).unwrap();
@@ -133,7 +133,7 @@ fn project_with_term() -> (tempfile::TempDir, String) {
         kind: rdy_engine::SessionKind::Human,
     };
     let res = r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
@@ -223,7 +223,7 @@ fn seed_and_land(dir: &std::path::Path, title: &str) -> String {
         .map(|d| d.id.to_string());
     let ops = match doc {
         None => {
-            serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])
+            serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}])
         }
         Some(d) => serde_json::json!([{"op": "update", "id": d, "fields": {"title": title}}]),
     };
@@ -298,7 +298,7 @@ fn status_warns_about_legacy_colon_views() {
         let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
         let mut fields = std::collections::BTreeMap::new();
         fields.insert("title".to_string(), FieldValue::Str("Legacy".into()));
-        fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+        fields.insert("doc_type".to_string(), FieldValue::Str("page".into()));
         let block = Block {
             id: BlockId::parse("d-AAAAB").unwrap(),
             block_type: "doc".into(),
@@ -354,7 +354,7 @@ fn check_exit_codes_and_pack_outside_a_project() {
     let t = tempfile::tempdir().unwrap();
     std::fs::write(
         t.path().join("ok.yaml"),
-        "- id: d-AAAAA\n  type: doc\n  order: V\n  fields:\n    title: T\n    doc_type: glossary\n",
+        "- id: d-AAAAA\n  type: doc\n  order: V\n  fields:\n    title: T\n    doc_type: page\n",
     )
     .unwrap();
     let (ok, _, err) = rdy(t.path(), &["check", "ok.yaml"]);
@@ -363,7 +363,7 @@ fn check_exit_codes_and_pack_outside_a_project() {
     assert!(ok && out.contains("ok"), "{out}");
     std::fs::write(
         t.path().join("index.yaml"),
-        "- id: d-BBBBB\n  type: doc\n  order: V\n  fields:\n    title: T\n    doc_type: glossary\n",
+        "- id: d-BBBBB\n  type: doc\n  order: V\n  fields:\n    title: T\n    doc_type: page\n",
     )
     .unwrap();
     let (ok, out, _) = rdy(t.path(), &["check", ".", "--pack", "rdy-standard"]);
@@ -459,7 +459,7 @@ fn chain1_status_counts_each_views_changes() {
                 &w,
                 WriteRequest {
                     view: view.into(),
-                    ops: serde_json::from_value(serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])).unwrap(),
+                    ops: serde_json::from_value(serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}])).unwrap(),
                     justification: None,
                     message: String::new(),
                 },

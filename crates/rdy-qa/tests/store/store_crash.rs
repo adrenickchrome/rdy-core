@@ -122,7 +122,7 @@ fn kill1_a_killed_mcp_server_keeps_every_acknowledged_write() {
     let mut ids = vec![];
     for i in 0..10 {
         let w = c
-            .call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"title": format!("Killed {i}"), "doc_type": "glossary"}}]}))
+            .call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"title": format!("Killed {i}"), "doc_type": "page"}}]}))
             .ok();
         ids.push(w["created"]["$d"].as_str().unwrap().to_string());
     }

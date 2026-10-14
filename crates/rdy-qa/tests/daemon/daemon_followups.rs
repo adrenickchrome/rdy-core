@@ -59,7 +59,7 @@ fn dfu1_a_dead_daemon_answers_every_in_flight_mcp_request() {
         let ops: Vec<Value> = (0..500)
             .map(|k| {
                 json!({"op": "create", "type": "doc",
-            "fields": {"name": format!("k{i}-{k}"), "title": "K", "doc_type": "glossary"}})
+            "fields": {"name": format!("k{i}-{k}"), "title": "K", "doc_type": "page"}})
             })
             .collect();
         c.send_raw(

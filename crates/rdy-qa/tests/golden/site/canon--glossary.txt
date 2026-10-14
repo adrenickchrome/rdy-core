@@ -81,6 +81,8 @@ chrome	L	Open questions
 chrome	L	Structural pattern matching
 chrome	L	Glossary
 chrome	L	Glossary
+chrome	-	Every term these docs define is listed here, grouped by the part of the docs that defines it. Each term links to the page that defines it.
+chrome	L	Specification
 chrome	L	__match_args__
 chrome	-	A class attribute that lists, in order, the attributes that positional subpatterns of a class pattern refer to.
 chrome	-	defined in The match statement and its patterns › Terms
@@ -88,17 +90,10 @@ chrome	L	As-pattern
 chrome	-	A pattern followed by
 chrome	-	and a name. It matches its left side and also binds the subject to the name.
 chrome	-	defined in The match statement and its patterns › Terms
-chrome	L	Binding
-chrome	-	Giving a name a value as a result of a successful match. Bindings outlive the block.
-chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Capture pattern
 chrome	-	A bare name other than
 chrome	-	. It always succeeds and binds the subject to the name.
 chrome	-	defined in The match statement and its patterns › Terms
-chrome	L	Case block
-chrome	-	One
-chrome	-	clause with its pattern, optional guard and indented block.
-chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Class pattern
 chrome	-	A dotted name followed by parentheses that hold subpatterns. It tests the type of the subject, then its attributes.
 chrome	-	defined in The match statement and its patterns › Terms
@@ -129,13 +124,6 @@ chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Sequence pattern
 chrome	-	A pattern written with square brackets or parentheses. It tests the length of the subject, then each item in turn.
 chrome	-	defined in The match statement and its patterns › Terms
-chrome	L	Soft keyword
-chrome	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
-chrome	-	and
-chrome	-	are soft keywords. See
-chrome	-	match and case are soft keywords.
-chrome	-	.
-chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Subject
 chrome	-	The value that follows
 chrome	-	. It is evaluated once; if the expression contains a comma, the subject is a tuple.
@@ -149,4 +137,23 @@ chrome	L	Wildcard
 chrome	-	The single underscore,
 chrome	-	. It matches any subject and binds nothing.
 chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Tutorial
+chrome	L	Binding
+chrome	-	Giving a name a value as a result of a successful match. Bindings outlive the block.
+chrome	-	defined in Pattern matching by example › Terms
+chrome	L	Case block
+chrome	-	One
+chrome	-	clause with its pattern, optional guard and indented block.
+chrome	-	defined in Pattern matching by example › Terms
+chrome	L	Soft keyword
+chrome	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
+chrome	-	and
+chrome	-	are soft keywords. See
+chrome	-	match and case are soft keywords.
+chrome	-	.
+chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	On this page
+chrome	L	On this page
+chrome	L	Specification
+chrome	L	Tutorial

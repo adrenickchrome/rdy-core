@@ -12,7 +12,7 @@ fn put(root: &Path, rel: &str, text: &str) {
     std::fs::write(p, text).unwrap();
 }
 
-const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: V\n  fields:\n    title: Transactions\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: V\n  fields:\n    title: Terms\n";
+const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: V\n  fields:\n    title: Transactions\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: V\n  fields:\n    title: Terms\n";
 const FOLDER: &str = "id: fd-AAAAA\ntype: folder\norder: V\n";
 
 fn check(root: &Path) -> Vec<Diagnostic> {
@@ -187,7 +187,7 @@ fn a_doc_file_holds_one_doc_and_no_folders() {
     for (ty, extra) in [
         (
             "doc",
-            "  fields:\n    name: other\n    title: Other\n    doc_type: glossary\n",
+            "  fields:\n    name: other\n    title: Other\n    doc_type: page\n",
         ),
         ("folder", ""),
     ] {
@@ -216,9 +216,8 @@ fn inner_blocks_stay_inside_their_files_doc() {
     put(
         t.path(),
         "b.yaml",
-        "- id: d-BBBBB\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: glossary\n- id: s-BBBBB\n  type: section\n  parent: d-AAAAA\n  order: V\n  fields:\n    title: Terms\n",
+        "- id: d-BBBBB\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: page\n- id: s-BBBBB\n  type: section\n  parent: d-AAAAA\n  order: V\n  fields:\n    title: Terms\n",
     );
-    // d-BBBBB also lacks its Terms section (W_SKELETON_MISSING); this test is about the error
     let d = one_error(t.path());
     assert_eq!(
         (d.code.as_str(), d.line, d.column),
@@ -256,7 +255,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
                 view: "work".into(),
                 ops: serde_json::from_value(json!([
                     {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
-                    {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "glossary"}},
+                    {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "page"}},
                     {"op": "create", "type": "section", "id": "$s", "parent": "$t", "fields": {"title": "Terms"}}
                 ]))
                 .unwrap(),
@@ -276,7 +275,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
                 order: "V".into(),
                 fields: [
                     ("title".to_string(), FieldValue::Str("Old".into())),
-                    ("doc_type".to_string(), FieldValue::Str("glossary".into())),
+                    ("doc_type".to_string(), FieldValue::Str("page".into())),
                 ]
                 .into_iter()
                 .collect(),
@@ -312,7 +311,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
         t.path(),
         "notes.yaml",
         &format!(
-            "- id: d-NNNNN\n  type: doc\n  order: V\n  fields:\n    title: Notes\n    doc_type: glossary\n- id: s-NNNNN\n  type: section\n  parent: d-NNNNN\n  order: V\n  fields:\n    title: Terms\n- id: c-NNNNN\n  type: claim\n  parent: s-NNNNN\n  order: V\n  body: See {{{{{s}}}}}.\n"
+            "- id: d-NNNNN\n  type: doc\n  order: V\n  fields:\n    title: Notes\n    doc_type: page\n- id: s-NNNNN\n  type: section\n  parent: d-NNNNN\n  order: V\n  fields:\n    title: Terms\n- id: c-NNNNN\n  type: claim\n  parent: s-NNNNN\n  order: V\n  body: See {{{{{s}}}}}.\n"
         ),
     );
     put(
@@ -323,7 +322,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
     put(
         t.path(),
         "wallets/limits.yaml",
-        "- id: d-MMMMM\n  type: doc\n  order: W\n  fields:\n    title: Limits\n    doc_type: glossary\n",
+        "- id: d-MMMMM\n  type: doc\n  order: W\n  fields:\n    title: Limits\n    doc_type: page\n",
     );
     let d = check_path(&pack(), Some(&canon), t.path()).unwrap();
     assert!(
@@ -335,12 +334,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
     assert_eq!(nameless.len(), 1, "one summary warning: {d:#?}");
     assert_eq!(nameless[0].file, "canon");
     assert!(nameless[0].message.contains("2 docs"), "{:?}", nameless[0]);
-    // limits.yaml's doc has no Terms section (W_SKELETON_MISSING); this test is about the rest
-    assert_eq!(
-        d.iter().filter(|d| d.code != "W_SKELETON_MISSING").count(),
-        1,
-        "{d:#?}"
-    );
+    assert_eq!(d.len(), 1, "{d:#?}");
     // without canon the reference is unknown
     assert!(
         check(t.path()).iter().any(|d| d.code == "E_UNKNOWN_REF"),

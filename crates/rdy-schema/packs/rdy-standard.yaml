@@ -117,6 +117,5 @@ doc_types:
   constraints:    { skeleton: [{ title: Constraints, required: true }] }
   components:     { skeleton: [{ title: Components, required: true }, { title: Interfaces, required: false }] }
   flows:          { skeleton: [{ title: Flows, required: true }] }
-  glossary:       { skeleton: [{ title: Terms, required: true }] }
   decisions-log:  { skeleton: [{ title: Decisions, required: true }] }
   open-questions: { skeleton: [{ title: Questions, required: true }] }

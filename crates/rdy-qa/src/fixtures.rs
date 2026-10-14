@@ -130,7 +130,7 @@ pub fn body_of(r: &Rdy, scope: &rdy_engine::Scope, id: &str) -> String {
 /// One glossary doc "Seed" with one section and one claim, written into `view` by `writer()`.
 pub fn seed_doc(r: &mut Rdy, view: &str) -> (String, String, String) {
     let res = write(r, view, serde_json::json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "one"}
     ])).expect("seed");

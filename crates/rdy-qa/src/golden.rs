@@ -390,7 +390,7 @@ pub fn hostile() -> (tempfile::TempDir, Rdy) {
     let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
     let res = write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "evil", "title": EVIL, "description": EVIL}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "page", "title": EVIL, "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "page", "title": EVIL, "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": EVIL}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": EVIL}, "body": EVIL},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": format!("{EVIL} {{{{$t}}}}")},
@@ -439,7 +439,7 @@ pub fn generated_tree() -> (tempfile::TempDir, Rdy) {
                 format!("$s{fi}{d}"),
                 format!("$t{fi}{d}"),
             );
-            ops.push(json!({"op": "create", "type": "doc", "id": doc, "parent": f, "fields": {"title": format!("Doc {fi}{d}"), "doc_type": "glossary"}}));
+            ops.push(json!({"op": "create", "type": "doc", "id": doc, "parent": f, "fields": {"title": format!("Doc {fi}{d}"), "doc_type": "page"}}));
             ops.push(json!({"op": "create", "type": "section", "id": sec, "parent": doc, "fields": {"title": "Terms"}}));
             ops.push(json!({"op": "create", "type": "term", "id": term, "parent": sec, "fields": {"name": format!("Term{fi}{d}")}, "body": "A term."}));
         }
@@ -491,7 +491,7 @@ pub fn generated_tree() -> (tempfile::TempDir, Rdy) {
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
     // unlanded changes in a view
     write(&mut r, "draft", json!([
-        {"op": "create", "type": "doc", "parent": sec("$fc"), "fields": {"title": "Draft doc", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "parent": sec("$fc"), "fields": {"title": "Draft doc", "doc_type": "page"}},
     ])).unwrap();
     (d, r)
 }
@@ -546,7 +546,7 @@ pub fn first_doc_id(r: &Rdy) -> BlockId {
 /// first holding one prose block.
 pub fn small_site(r: &mut Rdy) {
     write(r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "prose", "parent": "$s", "body": "Who the ledger belongs to."}
     ]))
@@ -559,7 +559,7 @@ pub fn tiny_with_doc() -> (tempfile::TempDir, Rdy) {
     let _clock = fixture_clock();
     let (d, mut r) = tiny();
     write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "page"}},
         {"op": "create", "type": "section", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "section", "parent": "$d", "fields": {"title": "Notes"}}
     ]))
@@ -625,7 +625,7 @@ pub fn site_with_decision() -> (tempfile::TempDir, Rdy, WalletIds) {
     let (d, mut r) = named_project("Wallets");
     let res = write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "wallets", "title": "Wallets"}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "transactions", "title": "Transactions", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "transactions", "title": "Transactions", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Guards"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "question", "id": "$q", "parent": "$s", "fields": {"prompt": "Is a ledger a sequence?"}}
@@ -680,7 +680,7 @@ pub fn tree_site() -> (tempfile::TempDir, Rdy) {
         json!({"op": "create", "type": "prose", "parent": "$is", "body": "Where to start."}),
         json!({"op": "create", "type": "folder", "id": "$a", "fields": {"name": "a", "title": "Alpha"}}),
         json!({"op": "create", "type": "folder", "id": "$b", "fields": {"name": "b", "title": "Beta"}}),
-        json!({"op": "create", "type": "doc", "id": "$one", "parent": "$a", "fields": {"name": "one", "title": "One", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "doc", "id": "$one", "parent": "$a", "fields": {"name": "one", "title": "One", "doc_type": "page"}}),
         json!({"op": "create", "type": "section", "id": "$os", "parent": "$one", "fields": {"title": "Terms"}}),
         json!({"op": "create", "type": "term", "parent": "$os", "fields": {"name": "Ledger"}, "body": "Balances are derived."}),
         json!({"op": "create", "type": "doc", "id": "$two", "parent": "$a", "fields": {"name": "two", "title": "Two", "doc_type": "overview"}}),
@@ -755,7 +755,7 @@ pub fn every_type_site() -> (tempfile::TempDir, Rdy, TypeIds) {
         .expect("blob")
         .to_string();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "all", "title": "All", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "all", "title": "All", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$sec", "parent": "$doc", "fields": {"title": "Terms"}},
         {"op": "create", "type": "prose", "id": "$prose", "parent": "$sec", "body": "Plain words."},
         {"op": "create", "type": "requirement", "id": "$req", "parent": "$sec", "fields": {"priority": "must"}, "body": "It must."},
@@ -860,7 +860,7 @@ pub fn decided_site() -> (tempfile::TempDir, Rdy, DecidedIds) {
     let _clock = fixture_clock();
     let (d, mut r) = named_project("Ledgers");
     let base = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "ledgers", "title": "Ledgers", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "ledgers", "title": "Ledgers", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Rules"}},
         {"op": "create", "type": "prose", "parent": "$s", "body": "Plain words."},
         {"op": "create", "type": "requirement", "id": "$r", "parent": "$s", "fields": {"priority": "must"}, "body": "Ledgers are atomic when settled."},
@@ -1026,7 +1026,7 @@ pub fn presentational_site() -> (tempfile::TempDir, Rdy, PresentationalIds) {
     .expect("config");
     let mut r = Rdy::open(dir.path()).expect("open");
     let base = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Depends on {{$a}}.",

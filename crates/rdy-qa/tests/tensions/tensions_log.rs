@@ -346,7 +346,7 @@ fn ib15_a_reload_that_makes_a_cited_type_informative_logs_its_suspect() {
     std::fs::write(d.path().join(".rdy.yaml"), "pack: p\n").unwrap();
     let mut r = Rdy::open(d.path()).unwrap();
     let res = write(&mut r, "work", serde_json::json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"aside","id":"$a","parent":"$s","body":"Decorative."},
         {"op":"create","type":"claim","id":"$c","parent":"$s","body":"Depends on {{$a}}.",

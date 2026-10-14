@@ -129,7 +129,12 @@ fn kind1_reindex_rebuilds_the_typed_entries() {
 #[test]
 fn kind1_landing_a_hash_that_is_only_a_chunk_is_not_a_proposal() {
     let (_d, mut r) = project();
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"title": "One", "doc_type": "glossary"}}])).unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "doc", "fields": {"title": "One", "doc_type": "page"}}]),
+    )
+    .unwrap();
     let h = r
         .store_mut()
         .write(vec![(kinds::BLOB_CHUNK, b"not a proposal".to_vec())])

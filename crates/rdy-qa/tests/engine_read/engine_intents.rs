@@ -202,7 +202,7 @@ fn iwr1_a_write_records_its_intent_and_hears_of_other_sessions_intents() {
         &writer(),
         "seed",
         "payments/fees",
-        Some("glossary"),
+        Some("page"),
         Some("Fees"),
     )
     .unwrap();
@@ -348,7 +348,7 @@ fn iwr1_a_delete_or_a_move_out_of_an_area_still_hears_of_the_area_intent() {
         &writer(),
         "seed",
         "payments/fees",
-        Some("glossary"),
+        Some("page"),
         Some("Fees"),
     )
     .unwrap();
@@ -356,7 +356,7 @@ fn iwr1_a_delete_or_a_move_out_of_an_area_still_hears_of_the_area_intent() {
         &writer(),
         "seed",
         "notes/other",
-        Some("glossary"),
+        Some("page"),
         Some("Other"),
     )
     .unwrap();

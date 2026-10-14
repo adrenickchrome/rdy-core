@@ -72,7 +72,7 @@ async fn ord1_pipelined_calls_on_a_multi_thread_runtime_apply_and_answer_in_orde
             assert_eq!(recv(&mut cr).await["id"], 1);
             // 100 write/read pairs, all sent before any reply is read
             for i in 0..100u64 {
-                send(&mut cw, call(10 + 2 * i, "rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("n{i:03}"), "title": "N", "doc_type": "glossary"}}]}))).await;
+                send(&mut cw, call(10 + 2 * i, "rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("n{i:03}"), "title": "N", "doc_type": "page"}}]}))).await;
                 send(&mut cw, call(11 + 2 * i, "rdy_overview", json!({}))).await;
             }
             for i in 0..100u64 {

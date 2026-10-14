@@ -248,7 +248,7 @@ fn own1_an_agent_proposes_only_a_view_it_owns() {
 }
 
 fn new_doc(name: &str) -> serde_json::Value {
-    json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": name, "doc_type": "glossary"}}])
+    json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": name, "doc_type": "page"}}])
 }
 
 #[test]

@@ -10,7 +10,7 @@ fn tree1_the_full_tree_is_memoised_within_a_state_and_fresh_after_a_write() {
     let (_d, mut r) = project();
     write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f"}},
-        {"op": "create", "type": "doc", "parent": "$f", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "parent": "$f", "fields": {"name": "a", "title": "A", "doc_type": "page"}}
     ])).unwrap();
     let work = Scope::View("work".into());
     let s = r.read();
@@ -24,7 +24,7 @@ fn tree1_the_full_tree_is_memoised_within_a_state_and_fresh_after_a_write() {
     );
     assert_eq!(t1.len(), 1);
     assert_eq!(t1[0].children.len(), 1);
-    write(&mut r, "work", json!([{"op": "create", "type": "doc", "parent": t1[0].id.clone(), "fields": {"name": "b", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "parent": t1[0].id.clone(), "fields": {"name": "b", "title": "B", "doc_type": "page"}}])).unwrap();
     let s2 = r.read();
     let t3 = s2.tree_full(&work).unwrap();
     assert!(!Arc::ptr_eq(&t1, &t3));
@@ -49,7 +49,7 @@ fn tree1_resolve_path_and_path_of_round_trip_on_the_state() {
     let (_d, mut r) = project();
     write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "Top"}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "leaf", "title": "L", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "leaf", "title": "L", "doc_type": "page"}}
     ])).unwrap();
     let s = r.read();
     let work = Scope::View("work".into());

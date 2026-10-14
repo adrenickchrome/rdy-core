@@ -4,7 +4,7 @@ use rdy_qa::fixtures::*;
 use serde_json::json;
 
 fn doc(title: &str) -> serde_json::Value {
-    json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])
+    json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}])
 }
 
 #[test]

@@ -62,7 +62,7 @@ fn dia1_without_scripts_the_source_alt_and_caption_remain() {
 #[test]
 fn dia1_a_d2_diagram_shows_its_source_and_caption_only() {
     let (_d, mut r) = tiny();
-    write(&mut r, "work", serde_json::json!([{"op":"create","type":"doc","id":"$d","fields":{"title":"D","doc_type":"glossary"}},{"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},{"op":"create","type":"diagram","parent":"$s","fields":{"lang":"d2","alt":"Boxes"},"body":"a -> b"}])).unwrap();
+    write(&mut r, "work", serde_json::json!([{"op":"create","type":"doc","id":"$d","fields":{"title":"D","doc_type":"page"}},{"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},{"op":"create","type":"diagram","parent":"$s","fields":{"lang":"d2","alt":"Boxes"},"body":"a -> b"}])).unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();

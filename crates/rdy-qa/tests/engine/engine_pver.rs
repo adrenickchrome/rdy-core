@@ -294,7 +294,7 @@ fn hb1_strict_and_require_up_to_date_refuse_any_moved_base() {
 fn hb1_approving_across_a_sibling_rekey_warns() {
     let (_d, mut r) = project();
     let res = write(&mut r, "seed", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "id": "$f", "parent": "$s", "body": "first"},
         {"op": "create", "type": "claim", "id": "$t", "parent": "$s", "after": "$f", "body": "second"}

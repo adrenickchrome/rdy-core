@@ -91,7 +91,7 @@ fn mcp2_write_ops_and_max_tokens_are_limited() {
     let (_d, mut c) = server();
     session(&mut c);
     let doc = c.call("rdy_write", json!({"ops": [
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
     ]})).ok();
     let s = doc["created"]["$s"].as_str().unwrap().to_string();
@@ -278,7 +278,7 @@ fn hd3_rdy_write_keeps_the_did_you_mean_for_an_unknown_op_field() {
             json!({"ops": [
                 {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f", "title": "F"}},
                 {"op": "create", "type": "doc", "id": "$d", "parent": "$f",
-                 "fields": {"name": "d", "title": "D", "doc_type": "glossary"}}
+                 "fields": {"name": "d", "title": "D", "doc_type": "page"}}
             ]}),
         )
         .ok();

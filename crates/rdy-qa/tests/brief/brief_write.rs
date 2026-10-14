@@ -356,7 +356,7 @@ fn bwr1_a_create_is_exempt_by_its_parents_type_not_its_own() {
     .unwrap();
     let mut r = Rdy::open(dir.path()).unwrap();
     let base = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "glossary", "lifecycle": "stable"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "page", "lifecycle": "stable"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."}
     ]))

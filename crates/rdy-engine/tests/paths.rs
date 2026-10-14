@@ -66,7 +66,7 @@ fn tree() -> (tempfile::TempDir, Rdy, WriteResult) {
             {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "overview"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$t", "fields": {"title": "Summary"}},
             {"op": "create", "type": "folder", "id": "$c", "parent": "$w", "fields": {"name": "cards"}},
-            {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "page"}}
         ]),
     );
     (dir, r, res)
@@ -234,12 +234,7 @@ fn nameless_docs_have_effective_names() {
     ] {
         raw_create(
             &mut r,
-            raw(
-                i,
-                "doc",
-                None,
-                &[("title", title), ("doc_type", "glossary")],
-            ),
+            raw(i, "doc", None, &[("title", title), ("doc_type", "page")]),
         );
     }
     let work = Scope::View("work".into());
@@ -345,7 +340,7 @@ fn new_folder_and_doc_create_missing_parents_in_one_change() {
         "limits is a doc"
     );
     let g = r
-        .new_doc(&agent(), "work", "glossary", Some("glossary"), None)
+        .new_doc(&agent(), "work", "glossary", Some("page"), None)
         .unwrap();
     let gid = BlockId::parse(
         &g.created

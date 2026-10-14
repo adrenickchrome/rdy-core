@@ -7,7 +7,7 @@ use serde_json::json;
 fn priv1_accessors_agree_with_each_other_and_with_the_store() {
     let (_d, mut r) = project();
     let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "T", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "T", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
         {"op": "create", "type": "claim", "parent": "$s", "body": "One."}
     ]))
@@ -43,7 +43,7 @@ fn priv1_accessors_agree_with_each_other_and_with_the_store() {
 fn priv1_the_graph_builds_from_an_iterator_and_looks_blocks_up_through_the_lookup() {
     let (_d, mut r) = project();
     write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "T", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "T", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A."},
         {"op": "create", "type": "claim", "parent": "$s", "body": "Cites {{$a}}."}

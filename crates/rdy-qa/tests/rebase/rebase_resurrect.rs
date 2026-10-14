@@ -14,7 +14,7 @@ fn seeded() -> (tempfile::TempDir, Rdy, String, String, String, String) {
         &mut r,
         "seed",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "g", "title": "G", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "g", "title": "G", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s1", "parent": "$d", "fields": {"title": "One"}},
             {"op": "create", "type": "section", "id": "$s2", "parent": "$d", "fields": {"title": "Two"}},
             {"op": "create", "type": "term", "id": "$t", "parent": "$s1", "fields": {"name": "Tide"}, "body": "first"}

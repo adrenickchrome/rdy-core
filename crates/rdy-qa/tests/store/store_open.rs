@@ -64,7 +64,7 @@ fn seg1_rdy_open_names_the_missing_segment_in_its_fix() {
         &mut r,
         "work",
         json!([
-            {"op": "create", "type": "doc", "fields": {"title": "Kept", "doc_type": "glossary"}}
+            {"op": "create", "type": "doc", "fields": {"title": "Kept", "doc_type": "page"}}
         ]),
     )
     .unwrap();

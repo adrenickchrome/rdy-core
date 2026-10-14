@@ -11,7 +11,7 @@ proptest! {
     fn pmap1_with_matches_the_merge_state_for_random_single_view_histories(steps in proptest::collection::vec((0u8..3, 0u8..6), 1..12)) {
         let (_d, mut r) = project();
         write(&mut r, "work", json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "T", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "T", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
             {"op": "create", "type": "claim", "parent": "$s", "body": "seed"}
         ])).unwrap();

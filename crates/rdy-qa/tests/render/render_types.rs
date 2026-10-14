@@ -110,7 +110,7 @@ fn type1_every_marker_and_eyebrow_starts_with_a_capital() {
 fn type1_anchors_are_unique_non_empty_and_never_ids() {
     let (_d, mut r) = tiny();
     let res = write(&mut r, "work", serde_json::json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"title":"Σημασιολογία","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"title":"Σημασιολογία","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s1","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"section","id":"$s2","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"section","id":"$s3","parent":"$d","fields":{"title":"Ωμέγα"}},
@@ -162,7 +162,7 @@ fn type1_references_inside_fields_link_or_read_as_labels_never_as_ids() {
     let (_d, mut r) = tiny();
     let blob = r.store_mut().put_blob(b"\x89PNG fake").unwrap().to_string();
     let base = write(&mut r, "work", serde_json::json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"name":"refs","title":"Refs","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"refs","title":"Refs","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"term","id":"$t","parent":"$s","fields":{"name":"Ledger"},"body":"Balances."}
     ])).unwrap();
@@ -233,7 +233,7 @@ fn type1_a_bodyless_type_without_its_own_rendering_keeps_its_wrapper_and_shows_i
     std::fs::write(dir.path().join(".rdy.yaml"), "pack: p\nname: People\n").unwrap();
     let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let res = write(&mut r, "work", serde_json::json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"name":"people","title":"People","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"people","title":"People","doc_type":"page"}},
         {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
         {"op":"create","type":"person","id":"$pe","parent":"$s","fields":{"name":"Ada"}}
     ])).unwrap();
@@ -266,7 +266,7 @@ fn type1_a_bodyless_type_without_its_own_rendering_keeps_its_wrapper_and_shows_i
 fn type1_titles_that_reference_each_other_read_as_labels_a_bounded_number_of_times() {
     let (_d, mut r) = tiny();
     let res = write(&mut r, "work", serde_json::json!([
-        {"op":"create","type":"doc","id":"$d","fields":{"name":"loop","title":"Loop","doc_type":"glossary"}},
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"loop","title":"Loop","doc_type":"page"}},
         {"op":"create","type":"section","id":"$a","parent":"$d","fields":{"title":"Alpha"}}
     ])).unwrap();
     let a = res.created["$a"].clone();

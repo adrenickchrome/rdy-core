@@ -10,7 +10,7 @@ use std::sync::Arc;
 fn snap1_a_landing_seeds_canon_from_the_previous_canon_and_shares_untouched_blocks() {
     let (_d, mut r) = project();
     write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
         {"op": "create", "type": "claim", "parent": "$s", "body": "one"}
     ])).unwrap();
@@ -58,8 +58,8 @@ fn snap1_a_landing_seeds_canon_from_the_previous_canon_and_shares_untouched_bloc
 #[test]
 fn snap1_propose_and_land_check_against_the_states_canon_and_refuse_as_before() {
     let (_d, mut r) = project();
-    let res = write(&mut r, "a", json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "dup", "title": "A", "doc_type": "glossary"}}])).unwrap();
-    write(&mut r, "b", json!([{"op": "create", "type": "doc", "fields": {"name": "DUP", "title": "B", "doc_type": "glossary"}}])).unwrap();
+    let res = write(&mut r, "a", json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "dup", "title": "A", "doc_type": "page"}}])).unwrap();
+    write(&mut r, "b", json!([{"op": "create", "type": "doc", "fields": {"name": "DUP", "title": "B", "doc_type": "page"}}])).unwrap();
     land(&mut r, "a").unwrap();
     let e = r
         .propose(&rdy_qa::fixtures::writer(), "b", "clash")
@@ -75,7 +75,7 @@ fn snap1_propose_and_land_check_against_the_states_canon_and_refuse_as_before() 
             .is_some()
     );
     // a proposal republishes the state (its frame must reach the event stream) without changing content
-    write(&mut r, "c", json!([{"op": "create", "type": "doc", "fields": {"name": "c", "title": "C", "doc_type": "glossary"}}])).unwrap();
+    write(&mut r, "c", json!([{"op": "create", "type": "doc", "fields": {"name": "c", "title": "C", "doc_type": "page"}}])).unwrap();
     let s1 = r.read();
     r.propose(&rdy_qa::fixtures::writer(), "c", "fine").unwrap();
     let s2 = r.read();

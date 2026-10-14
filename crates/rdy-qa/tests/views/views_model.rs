@@ -636,7 +636,7 @@ impl<'a> Driver<'a> {
     fn new(stats: &'a RefCell<Stats>) -> Driver<'a> {
         let (dir, mut r) = project();
         let res = write(&mut r, "seed", json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "model", "title": "Model", "doc_type": "glossary"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "model", "title": "Model", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
             {"op": "create", "type": "claim", "id": "$b0", "parent": "$s", "body": "b0"},
             {"op": "create", "type": "claim", "id": "$b1", "parent": "$s", "body": "b1"},

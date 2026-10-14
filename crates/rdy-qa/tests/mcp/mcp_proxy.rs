@@ -23,7 +23,7 @@ fn proxy1_the_proxy_starts_the_daemon_and_tools_run_against_it() {
     let mut c = McpClient::start_proxy(&s);
     session(&mut c, "agent:p");
     let pid = s.daemon_pid().expect("the proxy started a daemon");
-    let w = c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}]})).ok();
+    let w = c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]})).ok();
     assert!(w["change"].is_string(), "{w}");
     let o = c.call("rdy_overview", json!({})).ok();
     assert!(
@@ -57,7 +57,7 @@ fn proxy1_two_hundred_pipelined_mixed_requests_answer_in_order_and_each_read_see
     let mut ids = vec![];
     for i in 0..100 {
         let w = c.next_id();
-        c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("n{i:03}"), "title": "N", "doc_type": "glossary"}}]}}}).to_string());
+        c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("n{i:03}"), "title": "N", "doc_type": "page"}}]}}}).to_string());
         let r = c.next_id();
         c.send_raw(&json!({"jsonrpc": "2.0", "id": r, "method": "tools/call", "params": {"name": "rdy_overview", "arguments": {}}}).to_string());
         ids.push((w, r, i + 1));

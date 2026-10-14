@@ -164,7 +164,7 @@ fn key1_no_rendered_file_holds_a_key() {
 fn direct1_a_doc_without_sections_renders_searches_and_cites_cleanly() {
     let (_d, mut r) = tiny();
     write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Flat", "name": "flat", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Flat", "name": "flat", "doc_type": "page"}},
         {"op": "create", "type": "prose", "parent": "$d", "body": "Everything here sits *directly* in the doc."},
         {"op": "create", "type": "term", "parent": "$d", "fields": {"name": "Ledger"}, "body": "Where balances come from."},
         {"op": "create", "type": "question", "parent": "$d", "fields": {"prompt": "Is a flat doc enough?"}},

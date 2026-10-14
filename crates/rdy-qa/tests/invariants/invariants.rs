@@ -20,7 +20,7 @@ fn a_clean_project_passes_in_view_and_canon() {
     let (_d, mut r) = project();
     write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "wallets"}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "parent": "$s", "body": "Uses the {{$t}}."}
@@ -42,7 +42,7 @@ fn each_rule_catches_its_violation() {
             "doc",
             None,
             "V",
-            &[("name", name), ("title", "T"), ("doc_type", "glossary")],
+            &[("name", name), ("title", "T"), ("doc_type", "page")],
             "",
         )
     };
@@ -96,7 +96,7 @@ fn each_rule_catches_its_violation() {
                 "doc",
                 Some("s-AAAAA"),
                 "V",
-                &[("name", "b"), ("title", "T"), ("doc_type", "glossary")],
+                &[("name", "b"), ("title", "T"), ("doc_type", "page")],
                 "",
             ),
         ],
@@ -200,7 +200,7 @@ fn msw2_a_cross_class_id_prefix_is_a_schema_violation() {
                 "doc",
                 None,
                 "V",
-                &[("name", "a"), ("title", "T"), ("doc_type", "glossary")],
+                &[("name", "a"), ("title", "T"), ("doc_type", "page")],
                 "",
             ),
             raw(

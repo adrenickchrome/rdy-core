@@ -26,7 +26,7 @@ fn project() -> (tempfile::TempDir, Rdy) {
 
 fn create_doc(r: &mut Rdy, view: &str, name: &str) -> rdy_engine::WriteResult {
     let ops = serde_json::from_value(serde_json::json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "page"}}
     ]))
     .unwrap();
     r.write(
@@ -264,7 +264,7 @@ fn eng1_a_write_that_panics_leaves_local_republishing_the_store_on_the_next_lock
             // the read state is left behind the store, as a write that panics midway leaves it
             let mut fields = std::collections::BTreeMap::new();
             fields.insert("title".to_string(), FieldValue::Str("Half".into()));
-            fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+            fields.insert("doc_type".to_string(), FieldValue::Str("page".into()));
             let block = Block {
                 id: BlockId::parse("d-AAAAB").unwrap(),
                 block_type: "doc".into(),

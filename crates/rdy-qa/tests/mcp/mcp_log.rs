@@ -11,7 +11,7 @@ use std::sync::Arc;
 fn logt1_rdy_log_takes_limit_and_since_and_names_the_proposer() {
     let (_d, mut r) = project();
     let res = write(&mut r, "seed", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "One."}
     ]))

@@ -356,7 +356,7 @@ fn export_with(entry: &str) -> tempfile::TempDir {
     )
     .unwrap();
     std::fs::create_dir_all(t.path().join("docs")).unwrap();
-    let doc = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+    let doc = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
     std::fs::write(t.path().join("docs/t.yaml"), format!("{doc}{entry}")).unwrap();
     t
 }
@@ -436,7 +436,7 @@ fn hd3_a_move_with_parent_id_is_refused_and_names_parent() {
         json!([
             {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f", "title": "F"}},
             {"op": "create", "type": "doc", "id": "$d", "parent": "$f",
-             "fields": {"name": "d", "title": "D", "doc_type": "glossary"}}
+             "fields": {"name": "d", "title": "D", "doc_type": "page"}}
         ]),
     )
     .unwrap();

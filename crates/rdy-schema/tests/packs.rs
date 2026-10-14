@@ -274,7 +274,7 @@ fn rec1_a_doc_type_may_set_nav_false_and_it_defaults_to_true() {
     assert!(!pack.doc_types["record"].nav);
     assert!(pack.doc_types["memo"].nav, "the default is true");
     assert!(
-        pack.doc_types["glossary"].nav,
+        pack.doc_types["constraints"].nav,
         "an inherited doc type keeps the default"
     );
     assert!(

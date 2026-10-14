@@ -99,11 +99,11 @@ fn dtype1_a_doc_warns_only_for_its_own_types_skeleton() {
     let (_d, mut st) = state();
     let (page, _) = doc(&mut st, "Free form", "page");
     assert!(skeleton(&page).is_empty(), "page has no skeleton: {page}");
-    let (glossary, _) = doc(&mut st, "Words", "glossary");
+    let (constraints, _) = doc(&mut st, "Rules", "constraints");
     assert_eq!(
-        skeleton(&glossary),
-        vec!["required section \"Terms\" is missing"],
-        "only glossary's own section, never overview's: {glossary}"
+        skeleton(&constraints),
+        vec!["required section \"Constraints\" is missing"],
+        "only constraints' own section, never overview's: {constraints}"
     );
 }
 

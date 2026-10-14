@@ -127,7 +127,7 @@ fn insc1_inflight_is_a_reserved_name_and_a_read_only_scope() {
     let e = write(
         &mut r,
         "inflight",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "X", "doc_type": "glossary"}}]),
+        json!([{"op": "create", "type": "doc", "fields": {"title": "X", "doc_type": "page"}}]),
     )
     .unwrap_err();
     assert_eq!(e.code, E_RESERVED_VIEW);

@@ -8,7 +8,7 @@ use serde_json::json;
 fn mer1_labels_in_diagram_source_are_escaped_for_mermaid() {
     let (_d, mut r) = project();
     write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger ] \"q\" (x) | y"}, "body": "Balances."},
         {"op": "create", "type": "term", "id": "$u", "parent": "$s", "fields": {"name": "C# ;x"}, "body": "A language."},

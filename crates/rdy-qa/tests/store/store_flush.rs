@@ -54,7 +54,7 @@ fn mark1_every_store_write_ends_with_a_marker_that_matches_its_batch() {
     write(
         &mut r,
         "work",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "Marked", "doc_type": "glossary"}}]),
+        json!([{"op": "create", "type": "doc", "fields": {"title": "Marked", "doc_type": "page"}}]),
     )
     .unwrap();
     let bytes = std::fs::read(seg(r.store().dir(), 0)).unwrap();
@@ -464,7 +464,7 @@ fn ckpt1_the_mcp_server_checkpoints_when_idle() {
         ),
         Reply::Ok(_)
     ));
-    c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "Idle", "doc_type": "glossary"}}]})).ok();
+    c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "Idle", "doc_type": "page"}}]})).ok();
     // the checkpoint lands once the server has been idle for CHECKPOINT_IDLE: poll a copy of
     // the store until an open of it has nothing to catch up, with a generous deadline
     let t = std::time::Instant::now();

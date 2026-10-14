@@ -146,8 +146,8 @@ fn base(r: &mut Rdy) {
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area"}},
         {"op": "create", "type": "folder", "id": "$g", "fields": {"name": "zone"}},
         {"op": "create", "type": "folder", "id": "$h", "parent": "$f", "fields": {"name": "inner"}},
-        {"op": "create", "type": "doc", "id": "$d1", "parent": "$f", "fields": {"title": "One", "doc_type": "glossary"}},
-        {"op": "create", "type": "doc", "id": "$d2", "fields": {"title": "Two", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$d1", "parent": "$f", "fields": {"title": "One", "doc_type": "page"}},
+        {"op": "create", "type": "doc", "id": "$d2", "fields": {"title": "Two", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s1", "parent": "$d1", "fields": {"title": "Terms"}},
         {"op": "create", "type": "section", "id": "$s2", "parent": "$d2", "fields": {"title": "Terms"}},
         {"op": "create", "type": "section", "id": "$s3", "parent": "$s1", "fields": {"title": "More"}},
@@ -458,8 +458,8 @@ impl Sim<'_> {
                     0 => pick(&ids(r, &sc, &["section"]), *parent).map(|p| json!({"op": "create", "type": "claim", "parent": p, "body": "new claim"})),
                     1 => pick(&ids(r, &sc, &["doc", "section"]), *parent).map(|p| json!({"op": "create", "type": "section", "parent": p, "fields": {"title": "S"}})),
                     2 => Some(match pick(&ids(r, &sc, &["folder"]), *parent) {
-                        Some(p) if parent % 2 == 0 => json!({"op": "create", "type": "doc", "parent": p, "fields": {"name": nm, "title": "D", "doc_type": "glossary"}}),
-                        _ => json!({"op": "create", "type": "doc", "fields": {"name": nm, "title": "D", "doc_type": "glossary"}}),
+                        Some(p) if parent % 2 == 0 => json!({"op": "create", "type": "doc", "parent": p, "fields": {"name": nm, "title": "D", "doc_type": "page"}}),
+                        _ => json!({"op": "create", "type": "doc", "fields": {"name": nm, "title": "D", "doc_type": "page"}}),
                     }),
                     _ => Some(match pick(&ids(r, &sc, &["folder"]), *parent) {
                         Some(p) if parent % 2 == 0 => json!({"op": "create", "type": "folder", "parent": p, "fields": {"name": nm}}),
