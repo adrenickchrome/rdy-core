@@ -1363,3 +1363,24 @@ No laptop figures are judged here: the first timing of these ops is the Linux be
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## Dump and load (2026-10-14)
+
+Two ops, reported with no target. Both run on both tiers (`dump_50k` and `load_50k` on the large
+one), right after `render_cold`, with the project closed:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `dump` | `ReadState::dump` of the whole project to a new file: the project files, then every sealed batch of the log. The handle is opened outside the timer. The size of the dump goes to stderr as `dump: N bytes` | 5 (3 at 50k) | recorded, no spec target: the whole project as one dump stream |
+| `load` | `rdy_engine::load::load` of that dump into a new directory: the store rebuilt from the stream, the index build and `fsck` included. The loaded directory and the dump file are removed outside the timer | 5 (3 at 50k) | recorded, no spec target: rebuild from a dump, with the index build and fsck |
+
+What each cost grows with:
+
+- `dump` grows with the bytes of the log and the project files, read once and written once.
+- `load` grows with the same bytes, plus the index build and `fsck` over the loaded store. Compare
+  with `cold_open`, which also builds from the log, and with `export_import`.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
+are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>

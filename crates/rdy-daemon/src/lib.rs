@@ -31,9 +31,10 @@ pub mod spawn;
 
 pub use client::{
     Attempt, Client, DEFAULT_START_TIMEOUT, HELD_GRACE, LOCK_RETRY, LOG_TAIL_LINES, Pending,
-    SpawnFn, StartOptions, connect, connect_backoff, connect_or_start, log_tail, log_tail_since,
+    SpawnFn, StartOptions, StopRequest, connect, connect_backoff, connect_or_start, live_daemon,
+    log_tail, log_tail_since, request_stop, stop_socket,
 };
-pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve};
+pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve, terminate};
 mod notify;
 pub mod shared;
 pub mod writer;

@@ -241,6 +241,11 @@ impl From<StoreError> for RdyError {
             ),
             StoreError::Format { message, fix } => RdyError::new(E_STORE_FORMAT, message, fix),
             StoreError::ParentCycle { message, fix } => RdyError::new(E_BAD_INPUT, message, fix),
+            StoreError::Dump { at, what } => RdyError::new(
+                E_DUMP,
+                format!("the dump is damaged at byte {at}: {what}"),
+                "dump the project again; rdy never repairs a dump",
+            ),
             StoreError::Refused(message) => RdyError::new(
                 E_BAD_INPUT,
                 message,
@@ -302,3 +307,6 @@ pub const E_SITE: &str = "E_SITE";
 /// The live site is open to the network (`serve.site_lan`), or could not be limited to this
 /// machine as asked.
 pub const W_SITE_LAN: &str = "W_SITE_LAN";
+
+/// A file that is not a dump this rdy reads, a damaged dump, or a loaded project that fails fsck.
+pub const E_DUMP: &str = "E_DUMP";

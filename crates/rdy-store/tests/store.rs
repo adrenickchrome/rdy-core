@@ -1,5 +1,5 @@
 use rdy_model::*;
-use rdy_store::{Store, StoreError, kinds};
+use rdy_store::{Store, StoreError, StoreLock, kinds};
 use std::collections::BTreeMap;
 
 fn block(id: &str, body: &str) -> Block {
@@ -40,6 +40,35 @@ fn second_open_is_locked() {
         Store::create(dir.path()),
         Err(StoreError::Locked(_))
     ));
+}
+
+#[test]
+fn dl6_an_open_adopts_a_held_lock_and_only_that_one() {
+    // the lock a load takes before it renames its store into place
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    Store::create(a.path()).unwrap().close().unwrap();
+    Store::create(b.path()).unwrap().close().unwrap();
+    let held = StoreLock::take(a.path()).unwrap();
+    assert!(
+        matches!(Store::open(a.path()), Err(StoreError::Locked(_))),
+        "another open is refused while the lock is held"
+    );
+    assert!(
+        matches!(
+            Store::open_locked(b.path(), &held),
+            Err(StoreError::Locked(_))
+        ),
+        "the lock of another store is not adopted"
+    );
+    let s = Store::open_locked(a.path(), &held).unwrap();
+    s.close().unwrap();
+    assert!(
+        matches!(Store::open(a.path()), Err(StoreError::Locked(_))),
+        "the caller still holds the lock after the store closes"
+    );
+    drop(held);
+    Store::open(a.path()).unwrap().close().unwrap();
 }
 
 #[test]

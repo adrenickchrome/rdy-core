@@ -1,11 +1,11 @@
 use crate::conn::{Env, VERSION, io_error, require_project, runtime, start_options};
 use crate::output::print_error;
 use rdy_daemon::{
-    Attempt, E_DAEMON_GONE, ErrorReply, Hello, PROTO_VERSION, Proto, RunDir, STOP_GRACE,
-    ServeError, ServeOptions, connect, connect_or_start, process_alive, serve,
+    E_DAEMON_GONE, ErrorReply, Hello, PROTO_VERSION, Proto, RunDir, STOP_GRACE, ServeError,
+    ServeOptions, StopRequest, connect_or_start, process_alive, request_stop, serve,
 };
 use rdy_engine::{E_IO, serve_config};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -145,35 +145,20 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
         project,
     };
     let start_timeout = serve_config(&env.project).start_timeout;
-    let stopped = rt.block_on(async {
-        let client = match connect(&run, &hello).await {
-            Attempt::NoDaemon(_) => return Ok(None),
-            Attempt::Ready(c) => Some(c),
-            Attempt::Starting(p) => {
-                Some(p.wait(Instant::now() + start_timeout, &mut |_| {}).await?)
-            }
-            // a daemon of another version: it is exiting already
-            Attempt::Exiting => None,
-            Attempt::Refused(e) => return Err(e),
-        };
-        let mut pid = None;
-        // read while the daemon runs: it removes its record first when it stops
-        let socket = stop_socket(&run);
-        if let Some(mut c) = client {
-            pid = c
-                .ctl("ping", json!({}))
-                .await
-                .ok()
-                .and_then(|v| v["pid"].as_u64())
-                .and_then(|p| u32::try_from(p).ok());
-            c.ctl("stop", json!({})).await?;
-            c.close();
-        }
-        Ok(Some((pid, socket)))
-    })?;
-    let Some((pid, socket)) = stopped else {
+    let stopped = rt.block_on(request_stop(&run, &hello, start_timeout))?;
+    let Some(stop) = stopped else {
         return Ok("no daemon running");
     };
+    let StopRequest {
+        pid,
+        socket,
+        signalled,
+    } = stop;
+    if let (true, Some(p)) = (signalled, pid) {
+        eprintln!(
+            "the daemon is another rdy version and has other clients; sent a stop signal to its process {p}"
+        );
+    }
     let gone = || exited(pid, || socket.exists(), process_alive);
     let quiet = STOP_GRACE + Duration::from_secs(1);
     let said = |p: Option<u32>| {
@@ -191,14 +176,6 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
         ));
     }
     Ok("stopped")
-}
-
-/// The socket `stop_daemon` watches when it has no pid: the one the daemon bound, which
-/// `daemon.sock` names, else this client's own (`RunDir::socket`). A client of another spelling of
-/// the project (a symlink, a macOS firmlink) computes another socket, which never exists. Read
-/// once, before the stop: the daemon removes its record before its socket.
-fn stop_socket(run: &RunDir) -> std::path::PathBuf {
-    run.recorded_socket().unwrap_or_else(|| run.socket())
 }
 
 /// Whether the daemon `stop_daemon` asked to stop has exited. With its pid known, its process
@@ -242,6 +219,7 @@ fn wait_gone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdy_daemon::stop_socket;
     use std::cell::Cell;
 
     const MS: Duration = Duration::from_millis(1);

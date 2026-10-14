@@ -69,6 +69,20 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
+        Rdy::open_with(project, None)
+    }
+
+    /// Opens `project` as [`Rdy::open`] does, under `lock`, the store lock the caller took and
+    /// keeps (a load, from before the rename of its store until it ends). A lock that is not
+    /// this project's store's is `E_LOCKED`.
+    pub(crate) fn open_locked(
+        project: &Path,
+        lock: &rdy_store::StoreLock,
+    ) -> Result<Rdy, RdyError> {
+        Rdy::open_with(project, Some(lock))
+    }
+
+    fn open_with(project: &Path, lock: Option<&rdy_store::StoreLock>) -> Result<Rdy, RdyError> {
         // each file read once: the config and pack are loaded from the bytes the fingerprint
         // hashed, so the watch's fingerprint is exactly what is loaded. The config's own error
         // comes first (not a project, a bad config); an unreadable pack file fails the open
@@ -86,7 +100,11 @@ impl Rdy {
         // .rdy.yaml with no store is refused in the words every path uses, after the config's
         // and the pack's own errors
         crate::config_levels::require_project(project)?;
-        let mut store = layout::open_project_store(&project.join(".rdy"))?;
+        let dot = project.join(".rdy");
+        let mut store = match lock {
+            Some(lock) => layout::open_project_store_locked(&dot, lock)?,
+            None => layout::open_project_store(&dot)?,
+        };
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());
         // plan M2e2 (D-Z0EMP): every write joins the open batch, and `publish` seals it with

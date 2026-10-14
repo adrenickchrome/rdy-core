@@ -15,6 +15,7 @@ mod schema;
 mod schema_docs;
 mod session;
 mod site;
+mod store;
 mod tension;
 mod write;
 
@@ -34,5 +35,6 @@ pub use schema::*;
 pub use schema_docs::*;
 pub use session::*;
 pub use site::*;
+pub use store::*;
 pub use tension::*;
 pub use write::*;

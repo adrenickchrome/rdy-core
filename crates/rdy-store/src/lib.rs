@@ -1,10 +1,12 @@
 mod check;
 pub mod coord;
+pub mod dump;
 pub mod error;
 pub mod format;
 pub mod fsutil;
 pub mod inbox;
 pub mod index;
+pub mod ingest;
 pub mod kinds;
 mod land;
 pub mod layout;
@@ -26,7 +28,7 @@ pub use merge::{
 pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
-    OpenReport, Store, StoreReader, lock_error,
+    OpenReport, Store, StoreLock, StoreReader, lock_error,
 };
 mod state;
 pub use state::{ViewRecord, apply_op};

@@ -13,6 +13,7 @@ mod brief_text;
 mod config_cmd;
 mod conn;
 mod coverage_cmd;
+mod dump_cmd;
 mod edit_cmd;
 mod history_text;
 mod inbox_cmd;
@@ -112,6 +113,12 @@ enum Cmd {
     Render(site_cmd::RenderArgs),
     Export(site_cmd::ExportArgs),
     Import(site_cmd::ImportArgs),
+    /// Write the whole project, with its history, views and proposals, to one dump file; every hash is kept.
+    Dump(dump_cmd::DumpArgs),
+    /// Rebuild a project from a dump in a directory with no store (default: the current directory); every hash is kept.
+    ///
+    /// To move a project across a store format change, in this order: close every session on this project; with rdy 0.3.0 or a later rdy that reads store format <n>, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy.
+    Load(dump_cmd::LoadArgs),
     Reindex,
     Fsck(project_cmd::FsckArgs),
     /// Run the MCP server over stdio.
@@ -173,6 +180,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Render(a) => site_cmd::render(env, a),
         Cmd::Export(a) => site_cmd::export(env, a),
         Cmd::Import(a) => site_cmd::import(env, a),
+        Cmd::Dump(a) => dump_cmd::dump(env, a),
+        Cmd::Load(a) => dump_cmd::load(env, a, cli.project),
         Cmd::Reindex => project_cmd::reindex(env),
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
         Cmd::Check(_) | Cmd::Serve(_) => unreachable!("handled in main"),
@@ -180,6 +189,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
 }
 
 fn main() -> ExitCode {
+    // `rdy load` refuses a target a live daemon still serves; the engine asks this probe
+    rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
     let cli = Cli::parse();
     let as_json = cli.json;
     let cwd = match std::env::current_dir() {

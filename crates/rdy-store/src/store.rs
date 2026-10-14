@@ -92,8 +92,9 @@ pub struct Store {
     /// The store's own reader, which holds the only store-side `Arc` of the index. None only once
     /// the clean close (`close` or `Drop`) has dropped it.
     reader: Option<StoreReader>,
-    /// Declared after `reader`, so the database is closed before the lock is released.
-    _lock: HeldLock,
+    /// Declared after `reader`, so the database is closed before the lock is released (by this
+    /// store; a caller that gave the lock to `open_locked` may hold it longer).
+    _lock: StoreLock,
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
     ///
@@ -292,6 +293,47 @@ impl HeldLock {
     }
 }
 
+/// The lock of a store directory, held (lock1). An open store holds one; a caller can take one
+/// first and give it to [`Store::open_locked`], so no other process opens the store between
+/// the two (a load holds it from before the rename of its store until the load ends). The lock
+/// is released when the last holder drops it.
+#[derive(Clone)]
+pub struct StoreLock(Arc<HeldLock>);
+
+impl StoreLock {
+    /// Creates `dir/lock` if missing and takes its lock without waiting; another holder is
+    /// `Locked`.
+    pub fn take(dir: &Path) -> Result<StoreLock, StoreError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))?;
+        Ok(StoreLock(Arc::new(HeldLock::take(file, dir)?)))
+    }
+
+    /// Whether this is the lock of the store at `dir`: the held file is the file at `dir/lock`.
+    /// A store directory renamed after the lock was taken keeps its lock.
+    fn guards(&self, dir: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            match (
+                self.0.0.metadata(),
+                std::fs::symlink_metadata(dir.join("lock")),
+            ) {
+                (Ok(held), Ok(at)) => held.dev() == at.dev() && held.ino() == at.ino(),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = dir;
+            true
+        }
+    }
+}
+
 impl Drop for HeldLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
@@ -486,7 +528,7 @@ impl Store {
         };
         format::write_format_file(dir, Format::CURRENT)?;
         synced.push(dir.to_path_buf());
-        Store::open_current_format(dir, synced)
+        Store::open_current_format(dir, synced, None)
     }
 
     /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
@@ -494,7 +536,19 @@ impl Store {
     /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         Store::check_existing(dir)?;
-        Store::open_current_format(dir, vec![])
+        Store::open_current_format(dir, vec![], None)
+    }
+
+    /// Opens an existing store as [`Store::open`] does, under `lock`, which the caller took on
+    /// this store's lock file and keeps. The store shares the lock while it is open; the lock is
+    /// released only when the caller drops it too. A lock that is not this store's is `Locked`:
+    /// the caller does not hold the store.
+    pub fn open_locked(dir: &Path, lock: &StoreLock) -> Result<Store, StoreError> {
+        Store::check_existing(dir)?;
+        if !lock.guards(dir) {
+            return Err(StoreError::Locked(dir.to_path_buf()));
+        }
+        Store::open_current_format(dir, vec![], Some(lock.clone()))
     }
 
     /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
@@ -515,17 +569,28 @@ impl Store {
     }
 
     /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).
-    fn open_current_format(dir: &Path, mut synced: Vec<PathBuf>) -> Result<Store, StoreError> {
+    fn open_current_format(
+        dir: &Path,
+        mut synced: Vec<PathBuf>,
+        held: Option<StoreLock>,
+    ) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
-        // dur1: each directory created here is fsynced into its parent before any write is acked
-        synced.extend(fsutil::create_dir_durable(&segments)?);
+        // dur1: each directory created here is fsynced into its parent before any write is acked.
+        // Only `segments` itself is created, never `dir`: a store removed after the check above
+        // (a failed load takes its store back) is not made again by an open that raced it.
+        match std::fs::create_dir(&segments) {
+            Ok(()) => {
+                fsutil::sync_dir(dir)?;
+                synced.push(dir.to_path_buf());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
         let fresh = !dir.join("index.redb").exists() || !dir.join("lock").exists();
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dir.join("lock"))?;
-        let lock = HeldLock::take(lock, dir)?; // lock1
+        let lock = match held {
+            Some(lock) => lock,
+            None => StoreLock::take(dir)?, // lock1
+        };
         // A rebuild killed part way leaves its temp index (up to the size of the whole index).
         // The lock is held, so no rebuild is running: remove it. This is best effort: a temp
         // that cannot be removed costs only disk space, and the next reindex tries again.
@@ -1272,7 +1337,7 @@ impl Store {
     /// store is open holds one until it execs.
     #[doc(hidden)]
     pub fn share_lock_descriptor_for_tests(&self) -> std::io::Result<File> {
-        self._lock.0.try_clone()
+        self._lock.0.0.try_clone()
     }
 
     /// Test hook: the end of the log.
