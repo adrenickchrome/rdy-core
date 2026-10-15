@@ -1,6 +1,7 @@
 //! The visible-text goldens of the review set's nine pages (gold1). Each golden is the page's
 //! runs, one per line: `zone`, `L` for a label or `-`, then the text, tab-separated. Write them
 //! with `RDY_QA_BLESS=1 cargo test -p rdy-qa --release --test render_quality render_quality_pages::`.
+use crate::render_quality_live::{golden_live, versions_page};
 use rdy_qa::{golden, site::*};
 use std::path::{Path, PathBuf};
 
@@ -145,4 +146,48 @@ fn gold1_the_golden_project_is_dated_by_the_fixture_clock_not_the_wall_clock() {
             v.at_ms
         );
     }
+}
+
+/// The structure of a page the review work adds: one `h1`, headings that never skip a level, a
+/// `main`, a `nav` with a label.
+fn assert_structure(what: &str, html: &str) {
+    let titles = page_titles(html);
+    let ones = titles.iter().filter(|(l, _)| *l == 1).count();
+    assert_eq!(ones, 1, "{what}: {ones} h1 in {titles:?}");
+    assert_eq!(titles[0].0, 1, "{what}: the h1 comes first: {titles:?}");
+    for w in titles.windows(2) {
+        assert!(w[1].0 <= w[0].0 + 1, "{what}: a skipped level: {titles:?}");
+    }
+    assert!(html.contains("<main"), "{what}: main");
+    let labelled_nav = regex::Regex::new(r#"<nav\b[^>]*\baria-label="[^"]+""#).unwrap();
+    assert!(labelled_nav.is_match(html), "{what}: nav with a label");
+}
+
+#[test]
+fn sr10_the_new_pages_have_one_h1_and_landmarks() {
+    let g = golden_live();
+    let view = g.live.fetch(&g.view, &g.view_prefix, true);
+    let canon = g.live.fetch(&g.canon, "", true);
+    let crumbs_nav =
+        regex::Regex::new(r#"<nav class="crumbs" aria-label="[^"]+">(.*?)</nav>"#).unwrap();
+    for (what, html) in [
+        ("changes.html", golden::html(view.path(), "changes.html")),
+        (
+            "changes-since.html",
+            golden::html(canon.path(), "changes-since.html"),
+        ),
+    ] {
+        assert_structure(what, &html);
+        assert!(html.contains("<header"), "{what}: header");
+        // the breadcrumbs lead back up the site
+        let crumbs = crumbs_nav
+            .captures(&html)
+            .unwrap_or_else(|| panic!("{what}: breadcrumbs"))[1]
+            .to_string();
+        assert!(
+            crumbs.contains("<a href=") && crumbs.contains("aria-current=\"page\""),
+            "{what}: the crumbs link up and mark the page: {crumbs}"
+        );
+    }
+    assert_structure("/~versions/", &versions_page(&g));
 }

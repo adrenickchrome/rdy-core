@@ -1,10 +1,10 @@
-//! The visual review set (vis1). Renders the golden project's three sites and the review project's draft into a fixed
-//! directory under `target/qa/site/`, fills four more from the live server, and writes
-//! `review-set.json`: the twenty pages with their
+//! The visual review set (vis1). Renders the golden project's three sites and the review project's view into a fixed
+//! directory under `target/qa/site/`, fills four more from the live server (canon's also holds the
+//! versions page and the tag's site), and writes `review-set.json`: the twenty-six pages with their
 //! URLs and the browser state to reach. The reviewer screenshots this render, so the set is
 //! always the gate's own.
 use crate::render_quality_live::{
-    CHANGED_DOC, disagree_live, golden_live, grouped_live, longest_doc,
+    CHANGED_DOC, disagree_live, golden_live, grouped_live, longest_doc, versions_page,
 };
 use rdy_engine::Scope;
 use rdy_qa::golden;
@@ -62,6 +62,15 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
     let g = golden_live();
     let live_canon = g.live.fetch(&g.canon, "", false);
     replace_dir(live_canon.path(), &root.join("live-canon"));
+    // the versions page and the tag's site, as the server sends them, beside canon's pages
+    let versions = root.join("live-canon/~versions");
+    std::fs::create_dir_all(&versions).unwrap();
+    std::fs::write(versions.join("index.html"), versions_page(&g)).unwrap();
+    let live_tag = g.live.fetch(&g.tag, &g.tag_prefix, false);
+    replace_dir(
+        live_tag.path(),
+        &root.join("live-canon").join(&g.tag_prefix),
+    );
     let live_view = g.live.fetch(&g.view, &g.view_prefix, false);
     replace_dir(live_view.path(), &root.join("live-view"));
     let (dh, _stat) = disagree_live();
@@ -131,13 +140,13 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "scroll to the `Quick sketches` section".into(),
         ),
         (
-            "draft-home",
+            "review-home",
             "review",
             "index.html",
-            "none: the Changes in this draft list above Contents".into(),
+            "none: the Changes in this view list above Contents".into(),
         ),
         (
-            "draft-page",
+            "review-page",
             "review",
             "intro.html",
             "none; then open the Removed line; then press Show changes (the markers hide, the button reads not pressed)".into(),
@@ -179,6 +188,42 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "disagreements.html",
             "closed: the entry's list shows the first links above `Show all`; then open the `Show all` fold (the rest of the pages list); then close it".into(),
         ),
+        (
+            "since",
+            "canon",
+            "changes-since.html",
+            "none".into(),
+        ),
+        (
+            "review-changes",
+            "review",
+            "changes.html",
+            "none".into(),
+        ),
+        (
+            "review-doc-diff",
+            "review",
+            "intro.html",
+            "click #show-diff".into(),
+        ),
+        (
+            "live-versions",
+            "live-canon",
+            "~versions/index.html",
+            "none".into(),
+        ),
+        (
+            "live-menu-open",
+            "live-canon",
+            "index.html",
+            "click .pill".into(),
+        ),
+        (
+            "live-tag",
+            "live-canon",
+            "~tag/v1.0.0/index.html",
+            "none".into(),
+        ),
     ];
     let set: Vec<_> = rows
         .iter()
@@ -187,7 +232,7 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             json!({"n": i + 1, "name": name, "site": site, "url": format!("{site}/{url}"), "state": state})
         })
         .collect();
-    assert_eq!(set.len(), 20);
+    assert_eq!(set.len(), 26);
     for (_, site, url, _) in &rows {
         let f = root.join(site).join(url);
         assert!(f.is_file(), "the review page {} is missing", f.display());

@@ -82,8 +82,11 @@ pub(crate) struct Golden {
     pub canon: Scope,
     pub view: Scope,
     pub proposal: Scope,
+    /// The site of the tag `v1.0.0` (`/~tag/v1.0.0/`, a read-only scope).
+    pub tag: Scope,
     pub view_prefix: String,
     pub proposal_prefix: String,
+    pub tag_prefix: String,
     pub static_canon: tempfile::TempDir,
     pub static_view: tempfile::TempDir,
     pub static_proposal: tempfile::TempDir,
@@ -108,6 +111,7 @@ pub(crate) fn golden_live() -> Golden {
     let canon = Scope::Canon;
     let view = Scope::View("editing".into());
     let proposal = r.read().resolve_scope(&format!("proposal:{pref}")).unwrap();
+    let tag = r.read().resolve_scope("tag:v1.0.0").unwrap();
     let render = |scope: &Scope| {
         let out = tempfile::tempdir().unwrap();
         rdy_render::render_site(&r.read(), scope, out.path()).expect("the static render");
@@ -123,8 +127,10 @@ pub(crate) fn golden_live() -> Golden {
         canon,
         view,
         proposal,
+        tag,
         view_prefix: "~view/editing/".into(),
         proposal_prefix: format!("~proposal/{pref}/"),
+        tag_prefix: "~tag/v1.0.0/".into(),
         static_canon,
         static_view,
         static_proposal,
@@ -386,4 +392,424 @@ fn ls10_no_page_shows_a_call_to_action() {
         }
     }
     assert!(seen > 30, "guard: {seen} pages were scanned");
+}
+
+// -------------------------------------------------------------------------------- sr10
+// The site quality bar on the review pages (D-VE4NK; bar 7.2): the served pages of a view, a
+// proposal version and a tag, the diff summary pages, the versions page and the new header. These
+// tests are guards of Tasks 2 to 8: they may pass at once; a failure is a defect of the task that
+// owns the rule.
+
+/// The scopes the server sends, with the path prefix of each: canon, the `editing` view, its
+/// proposal version and the tag `v1.0.0`.
+fn sr10_scopes(g: &Golden) -> [(&'static str, &Scope, &str); 4] {
+    [
+        ("canon", &g.canon, ""),
+        ("view:editing", &g.view, g.view_prefix.as_str()),
+        (
+            "the proposal version",
+            &g.proposal,
+            g.proposal_prefix.as_str(),
+        ),
+        ("tag:v1.0.0", &g.tag, g.tag_prefix.as_str()),
+    ]
+}
+
+/// The versions page, as the server sends it.
+pub(crate) fn versions_page(g: &Golden) -> String {
+    let r = http::get(&format!("{}~versions/", g.live.url));
+    assert_eq!(r.status, 200, "GET /~versions/: {}", r.head);
+    String::from_utf8(r.body).expect("the versions page is text")
+}
+
+/// `html` with the `hidden` attribute removed from every tag, so that the text a script shows
+/// (the inline diffs, the toggles) is read too. A quoted value is kept whole, so the word inside a
+/// title stays.
+fn unhidden(html: &str) -> String {
+    static TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<[a-zA-Z][^>]*>").unwrap());
+    static HIDDEN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)"[^"]*"|'[^']*'|\shidden(?:="[^"]*")?([\s/>]|$)"#).unwrap()
+    });
+    TAGS.replace_all(html, |t: &regex::Captures| {
+        HIDDEN
+            .replace_all(&t[0], |a: &regex::Captures| {
+                match a.get(1) {
+                    // the bare attribute: keep what follows it
+                    Some(after) => after.as_str().to_string(),
+                    None => a[0].to_string(),
+                }
+            })
+            .into_owned()
+    })
+    .into_owned()
+}
+
+/// The inner HTML of the first element whose opening tag holds `marker`, up to its matching close.
+fn inner_of(html: &str, marker: &str) -> Option<String> {
+    let at = html.find(marker)?;
+    let open = html[..at].rfind('<')?;
+    let name: String = html[open + 1..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let start = open + html[open..].find('>')? + 1;
+    let (open_tag, close_tag) = (format!("<{name}"), format!("</{name}>"));
+    let (mut depth, mut i) = (1usize, start);
+    while i < html.len() {
+        let rest = &html[i..];
+        let next_close = rest.find(&close_tag)?;
+        let next_open = rest.find(&open_tag).filter(|&o| {
+            let after = rest[o + open_tag.len()..].chars().next();
+            o < next_close && after.is_some_and(|c| c.is_whitespace() || c == '>' || c == '/')
+        });
+        match next_open {
+            Some(o) => {
+                depth += 1;
+                i += o + open_tag.len();
+            }
+            None => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(html[start..i + next_close].to_string());
+                }
+                i += next_close + close_tag.len();
+            }
+        }
+    }
+    None
+}
+
+/// Whether `html` is a permalink page, a one-line "this page has moved" with no header.
+fn is_redirect(html: &str) -> bool {
+    html.contains("data-rdy-kind=\"redirect\"")
+}
+
+/// The header's version fragment: the pill and its chips.
+fn version_fragment(page: &str, html: &str) -> String {
+    inner_of(html, "data-rdy-version")
+        .unwrap_or_else(|| panic!("{page}: the header has no [data-rdy-version]"))
+}
+
+/// The visible text of `fragment`, one string per run.
+fn runs_of(fragment: &str) -> Vec<String> {
+    visible_runs(fragment).into_iter().map(|r| r.text).collect()
+}
+
+/// The words of a fragment: its visible runs joined by a space.
+fn words_of(fragment: &str) -> String {
+    runs_of(fragment).join(" ")
+}
+
+/// The `title` and `aria-label` values in `html`.
+fn hovers(html: &str) -> Vec<String> {
+    let mut out = vec![];
+    for key in ["title", "aria-label"] {
+        out.extend(
+            rdy_qa::site::attrs(html, key)
+                .into_iter()
+                .map(rdy_qa::site::unescape),
+        );
+    }
+    out
+}
+
+#[test]
+fn sr10_served_review_pages_pass_the_leak_scan() {
+    let g = golden_live();
+    for (what, scope, prefix) in sr10_scopes(&g) {
+        let served = g.live.fetch(scope, prefix, true);
+        let pages = page_set(served.path());
+        assert!(pages.len() > 10, "{what}: guard: pages were served");
+        match what {
+            "canon" => assert!(
+                pages.iter().any(|p| p == "changes-since.html"),
+                "{what}: the landings since the tag have a page: {pages:?}"
+            ),
+            "view:editing" | "the proposal version" => assert!(
+                pages.iter().any(|p| p == "changes.html"),
+                "{what}: a review render has its change summary: {pages:?}"
+            ),
+            _ => {}
+        }
+        // every hidden attribute removed: the text a script shows is read too
+        let mut unhid = 0;
+        for page in &pages {
+            let (html, path) = (read(served.path(), page), served.path().join(page));
+            let open = unhidden(&html);
+            if open != html {
+                unhid += 1;
+            }
+            std::fs::write(path, open).unwrap();
+        }
+        if what != "canon" && what != "tag:v1.0.0" {
+            assert!(unhid > 0, "{what}: guard: some page held a hidden element");
+        }
+        let found = leaks(served.path());
+        assert!(found.is_empty(), "{what}: {found:#?}");
+    }
+}
+
+#[test]
+fn sr10_the_versions_page_passes_the_leak_scan() {
+    let g = golden_live();
+    let page = versions_page(&g);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), unhidden(&page)).unwrap();
+    // guard: the page lists the three kinds, so the scan reads names, authors and counts
+    let words = words_of(&page);
+    for h in ["Versions", "Proposals", "Views"] {
+        assert!(words.contains(h), "the versions page lists {h}: {words}");
+    }
+    assert!(
+        words.contains("Edit the tutorial"),
+        "the proposal is listed by its title: {words}"
+    );
+    let found = leaks(dir.path());
+    assert!(found.is_empty(), "the versions page: {found:#?}");
+}
+
+#[test]
+fn sr10_review_pages_work_without_javascript() {
+    let g = golden_live();
+    let view = g.live.fetch(&g.view, &g.view_prefix, true);
+    for page in [CHANGED_DOC, "changes.html"] {
+        let html = read(view.path(), page);
+        let words = texts(&html);
+        for want in ["Edited", "New"] {
+            // the changed doc keeps the mark of a changed block; the New mark sits on the summary
+            // page and on the home page's list
+            if page == CHANGED_DOC && want == "New" {
+                continue;
+            }
+            assert!(
+                words.iter().any(|t| t == want),
+                "{page}: the {want} word shows without the script: {words:?}"
+            );
+        }
+        assert!(
+            words
+                .iter()
+                .any(|t| t.starts_with("Reviewing view · editing")),
+            "{page}: the review bar's sentence: {words:?}"
+        );
+        let head = version_fragment(page, &html);
+        let head_words = runs_of(&head);
+        assert!(
+            head_words.iter().any(|t| t == "v1.0.0"),
+            "{page}: the pill text: {head_words:?}"
+        );
+        // the chips are words; the pill and each chip are links, or a span when they lead nowhere
+        let chips: Vec<_> = head.split("<a class=\"chip").skip(1).collect();
+        let spans: Vec<_> = head.split("<span class=\"chip").skip(1).collect();
+        assert!(
+            chips.len() + spans.len() >= 2,
+            "{page}: the landings chip and the review chip: {head}"
+        );
+        assert!(
+            chips.iter().all(|c| c.contains("href=\"")),
+            "{page}: a chip link has an href: {head}"
+        );
+        for chip in head.split("class=\"chip").skip(1) {
+            let text = chip
+                .split_once('>')
+                .and_then(|(_, r)| r.split_once('<'))
+                .map(|(t, _)| t)
+                .unwrap();
+            assert!(
+                head_words.iter().any(|t| t == text) && text.starts_with('+'),
+                "{page}: the chip text {text:?} is visible text: {head_words:?}"
+            );
+        }
+        assert!(
+            head.contains("<a class=\"pill\" href=\""),
+            "{page}: the pill is a link: {head}"
+        );
+        // the review chip leads to the summary page, which holds the diff without the script
+        assert!(
+            head.contains("changes.html"),
+            "{page}: the review chip opens the summary: {head}"
+        );
+    }
+}
+
+#[test]
+fn sr10_no_review_page_shows_a_call_to_action() {
+    // guard (k-N0EJF, D-X61DT): nothing on the site acts, waits on a person or counts reviews
+    let g = golden_live();
+    let (dh, _stat) = disagree_live();
+    let mut sites: Vec<_> = sr10_scopes(&g)
+        .into_iter()
+        .map(|(what, scope, prefix)| (what, g.live.fetch(scope, prefix, true)))
+        .collect();
+    sites.push(("disagreements", dh.fetch(&Scope::Canon, "", true)));
+    let mut seen = 0;
+    for (what, site) in &sites {
+        for page in page_set(site.path()) {
+            let html = unhidden(&read(site.path(), &page));
+            seen += 1;
+            for bad in ["Approve", "needs you", "ready to", "waiting on", "<form"] {
+                assert!(!html.contains(bad), "{what} {page} holds {bad:?}");
+            }
+        }
+    }
+    assert!(seen > 40, "guard: {seen} pages were scanned");
+    let versions = versions_page(&g);
+    for bad in ["Approve", "needs you", "ready to", "waiting on", "<form"] {
+        assert!(!versions.contains(bad), "the versions page holds {bad:?}");
+    }
+}
+
+#[test]
+fn sr10_the_header_has_no_storage_words() {
+    // guard (F11, C1): the visible words of the version fragment hold no storage word; the word
+    // `landings` of the landings chip's hover is in `title` and `aria-label` only
+    let f11 = rdy_qa::site::PATTERNS
+        .iter()
+        .find_map(|(id, rule)| match rule {
+            rdy_qa::site::Rule::ChromeContext(rx) if *id == "F11" => Some(rx.clone()),
+            _ => None,
+        })
+        .expect("the F11 rule");
+    let g = golden_live();
+    let hover_attrs = Regex::new(r#"\s(?:title|aria-label)="[^"]*""#).unwrap();
+    let mut hovered = 0;
+    let mut seen = 0;
+    for (what, scope, prefix) in sr10_scopes(&g) {
+        let served = g.live.fetch(scope, prefix, true);
+        for page in page_set(served.path()) {
+            let html = read(served.path(), &page);
+            if is_redirect(&html) {
+                continue;
+            }
+            let head = version_fragment(&format!("{what} {page}"), &html);
+            seen += 1;
+            for run in runs_of(&head) {
+                assert!(
+                    !f11.is_match(&run),
+                    "{what} {page}: a storage word in the header: {run:?}"
+                );
+            }
+            // take the hover attributes out: the word may stay nowhere else
+            let bare = hover_attrs.replace_all(&head, "").into_owned();
+            assert!(
+                !bare.to_lowercase().contains("landing"),
+                "{what} {page}: `landings` outside title and aria-label: {bare}"
+            );
+            if head.contains("landings since") {
+                hovered += 1;
+                assert!(
+                    hovers(&head)
+                        .iter()
+                        .any(|h| h.contains("landings since v1.0.0")),
+                    "{what} {page}: the hover reads N landings since the tag: {head}"
+                );
+            }
+        }
+    }
+    assert!(seen > 40, "guard: {seen} headers were read");
+    assert!(hovered > 0, "guard: some header carries the landings hover");
+}
+
+#[test]
+fn sr10_no_review_chrome_says_draft() {
+    // guard (D-BMX8P, O9): "draft" is the lifecycle word only. The header, the review bar, the
+    // list heading, the change pages, the colophon and the versions page never use it for a view
+    // or a proposal. Doc content is not read: an author may write the word.
+    let g = golden_live();
+    let says_draft = |what: &str, text: &str| {
+        assert!(
+            !text.to_lowercase().contains("draft"),
+            "{what} says draft: {text:?}"
+        );
+    };
+    let mut seen = 0;
+    for (what, scope, prefix) in [
+        ("view:editing", &g.view, g.view_prefix.as_str()),
+        (
+            "the proposal version",
+            &g.proposal,
+            g.proposal_prefix.as_str(),
+        ),
+    ] {
+        let served = g.live.fetch(scope, prefix, true);
+        let pages = page_set(served.path());
+        for page in &pages {
+            let html = read(served.path(), page);
+            if is_redirect(&html) {
+                continue;
+            }
+            let at = format!("{what} {page}");
+            // the header: the pill, the chips, every aria-label and title
+            let head = inner_of(&html, "class=\"head\"").expect("the header");
+            says_draft(&format!("{at} header"), &words_of(&head));
+            for h in hovers(&head) {
+                says_draft(&format!("{at} header hover"), &h);
+            }
+            says_draft(
+                &format!("{at} version"),
+                &words_of(&version_fragment(&at, &html)),
+            );
+            let bar = inner_of(&html, "class=\"review-bar\"").expect("the review bar");
+            says_draft(&format!("{at} review bar"), &words_of(&bar));
+            for h in hovers(&bar) {
+                says_draft(&format!("{at} review bar hover"), &h);
+            }
+            let colophon = inner_of(&html, "class=\"colophon\"").expect("the colophon");
+            says_draft(&format!("{at} colophon"), &words_of(&colophon));
+            seen += 1;
+        }
+        // the home page's list heading
+        let home = read(served.path(), "index.html");
+        let heading = inner_of(&home, "id=\"review-changes\"")
+            .unwrap_or_else(|| panic!("{what}: the home page lists the changes"));
+        says_draft(&format!("{what} home list heading"), &heading);
+        assert!(
+            heading.starts_with("Changes in this "),
+            "{what}: the list heading: {heading}"
+        );
+        // the change pages: the h1 and the sentence under it
+        for page in ["changes.html", "changes-since.html"] {
+            if !pages.iter().any(|p| p == page) {
+                continue;
+            }
+            let html = read(served.path(), page);
+            let h1 = inner_of(&html, "<h1").expect("an h1");
+            says_draft(&format!("{what} {page} h1"), &h1);
+            let lede = inner_of(&html, "class=\"lede\"").expect("the sentence");
+            says_draft(&format!("{what} {page} sentence"), &lede);
+        }
+    }
+    assert!(seen > 20, "guard: {seen} pages were read");
+    // the versions page: the h1, the h2s and the menu's labels
+    let page = versions_page(&g);
+    let titles = rdy_qa::site::page_titles(&page);
+    assert!(
+        titles.len() >= 4,
+        "guard: an h1 and three lists: {titles:?}"
+    );
+    for (_, t) in &titles {
+        says_draft("the versions page heading", t);
+    }
+    for h in hovers(&page) {
+        says_draft("the versions page label", &h);
+    }
+    assert_eq!(titles[0].1, "Versions, proposals and views");
+}
+
+#[test]
+fn sr10_the_helpers_read_hidden_attributes_and_nested_elements() {
+    // a bare `hidden` goes; a word inside a quoted value stays
+    assert_eq!(
+        unhidden(
+            r#"<div class="a" hidden><p title="a hidden word" hidden="">x hidden y</p><button hidden>b</button></div>"#
+        ),
+        r#"<div class="a"><p title="a hidden word">x hidden y</p><button>b</button></div>"#
+    );
+    // the element is read to its own close, through a nested element of the same name
+    let html = r#"<p><span class="v" data-rdy-version><span>a</span> <span>b</span></span><span>c</span></p>"#;
+    assert_eq!(
+        inner_of(html, "data-rdy-version").as_deref(),
+        Some("<span>a</span> <span>b</span>")
+    );
+    assert_eq!(inner_of(html, "no-such-marker"), None);
 }
