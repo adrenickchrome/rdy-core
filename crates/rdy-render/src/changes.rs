@@ -213,9 +213,6 @@ pub fn summary(
         Of::Since(_) => since_rows(site, rv, &order, sides),
     };
     let mut taken = reserved_ids();
-    // the ids of the review bar's buttons
-    taken.insert("show-changes".into());
-    taken.insert("show-diff".into());
     let mut groups: Vec<Group> = vec![];
     let mut group_of: BTreeMap<BlockId, usize> = BTreeMap::new();
     for row in &rows {

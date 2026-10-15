@@ -1055,9 +1055,20 @@ pub(crate) fn name_as_title(name: &str, id: &BlockId) -> String {
 
 /// Element ids the page chrome owns (the `<main>` skip-link target, the search box and its
 /// results, the sidebar and its menu button and scrim, the contents list, the version
-/// switcher). A block anchor never equals one, so each per-page `taken` set starts with them.
+/// switcher, the review bar's two buttons). A block anchor never equals one, so each per-page
+/// `taken` set starts with them. The buttons are reserved on every scope: the bar shows only on a
+/// review page, but a document's anchors must not move between a review render and a canon one.
 const RESERVED_IDS: &[&str] = &[
-    "main", "search", "results", "sidebar", "menu", "scrim", "contents", "versions",
+    "main",
+    "search",
+    "results",
+    "sidebar",
+    "menu",
+    "scrim",
+    "contents",
+    "versions",
+    "show-changes",
+    "show-diff",
 ];
 
 /// A fresh per-page `taken` set, holding [`RESERVED_IDS`].

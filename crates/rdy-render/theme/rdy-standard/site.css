@@ -166,13 +166,14 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 }
 
 /* below 900px: one column, the pages follow the content, the drawer replaces the column; the
-   header has three rows: the brand and the tools, the version pill and its chips, the search */
+   header has two rows: the brand, the version pill with its chips and the Menu button, then the
+   search (D-42YMF); the brand gives way first, and the version menu opens under row one */
 @media (max-width: 900px) {
-  .head { grid-template-columns: minmax(0, 1fr) auto; padding: 0.55rem 16px; gap: 0.4rem 0.5rem; }
+  .head { grid-template-columns: minmax(0, 1fr) auto auto; padding: 0.55rem 16px; gap: 0.4rem 0.5rem; }
   .brand { grid-column: 1; grid-row: 1; font-size: 0.9rem; max-width: none; }
-  .head-tools { grid-column: 2; grid-row: 1; gap: 0.4rem; }
-  .version { grid-column: 1 / -1; grid-row: 2; }
-  .head .search-wrap { grid-column: 1 / -1; grid-row: 3; max-width: none; }
+  .version { grid-column: 2; grid-row: 1; justify-self: end; }
+  .head-tools { grid-column: 3; grid-row: 1; gap: 0.4rem; }
+  .head .search-wrap { grid-column: 1 / -1; grid-row: 2; max-width: none; }
   .theme button { padding: 0.15rem 0.45rem; font-size: 0.74rem; }
   .head .theme { display: none; }
   .theme-drawer { display: inline-flex; margin: 1.25rem 0 0; }
@@ -356,7 +357,8 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 
 /* == version == */
 /* the pill and its chips are one line that never wraps: they size to their text, and a pill
-   too long for the row cuts its text (head section); on their own row on a phone */
+   too long for the row cuts its text (head section); on a phone they sit on the header's first row,
+   between the brand and the Menu button */
 .version { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 0.35rem; }
 .pill, .chip { display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; }
 .version .lock { width: 12px; height: 12px; flex: none; }
@@ -372,7 +374,7 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 .vmenu a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
 .vmenu-meta, .vmenu-none { color: var(--ink-soft); font-size: 0.82rem; }
 @media (max-width: 900px) {
-  .vmenu-pop { grid-column: 1 / -1; grid-row: 2 / 3; left: 0; right: 0; width: auto; max-width: none; }
+  .vmenu-pop { grid-column: 1 / -1; grid-row: 1 / 2; left: 0; right: 0; width: auto; max-width: none; }
 }
 /* == /version == */
 

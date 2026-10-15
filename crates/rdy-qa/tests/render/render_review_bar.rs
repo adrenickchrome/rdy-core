@@ -444,6 +444,83 @@ fn sr7_at_phone_width_the_review_bar_is_one_line_and_the_toggles_sit_under_it() 
     }
 }
 
+/// RULING F6 / D-42YMF: on a narrow screen the header's first row holds the brand, the version
+/// pill with its chips and the Menu button; the search box has the second row. The version
+/// menu opens under that first row, spanning the header with its 16 px gutters.
+#[test]
+fn sr7_the_narrow_header_holds_the_brand_the_pill_and_the_menu_on_row_one() {
+    let css = review_css();
+    let at = |sel: &str, prop: &str, w: u32| cascaded(&css, sel, prop, w);
+    let norm = |v: Option<String>| v.map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "));
+    for w in [360, 480, 900] {
+        // one grid row of brand, version and tools; the search box on the row below
+        assert_eq!(
+            at(".brand", "grid-row", w).as_deref(),
+            Some("1"),
+            "brand {w}"
+        );
+        assert_eq!(
+            at(".version", "grid-row", w).as_deref(),
+            Some("1"),
+            "version {w}"
+        );
+        assert_eq!(
+            at(".head-tools", "grid-row", w).as_deref(),
+            Some("1"),
+            "tools {w}"
+        );
+        assert_eq!(
+            at(".head .search-wrap", "grid-row", w).as_deref(),
+            Some("2"),
+            "search {w}"
+        );
+        // three distinct columns on row one, in the order brand, pill, Menu
+        let col = |sel: &str| at(sel, "grid-column", w).unwrap_or_default();
+        assert_eq!(col(".brand"), "1", "{w}");
+        assert_eq!(col(".version"), "2", "{w}");
+        assert_eq!(col(".head-tools"), "3", "{w}");
+        assert_eq!(
+            norm(at(".head .search-wrap", "grid-column", w)).as_deref(),
+            Some("1 / -1"),
+            "{w}"
+        );
+        // the brand gives way first; the pill and the Menu button keep their size
+        let cols = at(".head", "grid-template-columns", w).unwrap_or_default();
+        assert_eq!(
+            cols.split_whitespace().count(),
+            4,
+            "{w}: {cols}: minmax(0, 1fr) auto auto"
+        );
+        assert!(cols.starts_with("minmax(0, 1fr) auto auto"), "{w}: {cols}");
+        // the popover opens under row one, across the header
+        assert_eq!(
+            norm(at(".vmenu-pop", "grid-row", w)).as_deref(),
+            Some("1 / 2"),
+            "pop {w}"
+        );
+        assert_eq!(
+            norm(at(".vmenu-pop", "grid-column", w)).as_deref(),
+            Some("1 / -1"),
+            "pop {w}"
+        );
+        assert_eq!(at(".vmenu-pop", "left", w).as_deref(), Some("0"), "{w}");
+        assert_eq!(at(".vmenu-pop", "right", w).as_deref(), Some("0"), "{w}");
+    }
+    // above 900 px: the brand, the pill, the search box and the tools share row one
+    for w in [901, 1280] {
+        assert_eq!(at(".version", "grid-row", w).as_deref(), Some("1"), "{w}");
+        assert_eq!(
+            at(".version", "grid-column", w).as_deref(),
+            Some("2"),
+            "{w}"
+        );
+        assert_eq!(
+            at(".head .search-wrap", "grid-row", w).as_deref(),
+            Some("1")
+        );
+    }
+}
+
 #[test]
 fn sr7_touch_targets_are_40px_at_phone_width() {
     let css = review_css();
@@ -557,5 +634,97 @@ fn sr7_the_version_menu_is_a_panel_under_the_pill() {
             Some("none"),
             "width {w}"
         );
+    }
+}
+
+/// The ids of every element of `h` that carries one, in document order.
+fn ids_of(h: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut rest = h;
+    while let Some(at) = rest.find(" id=\"") {
+        rest = &rest[at + 5..];
+        let end = rest.find('"').unwrap();
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// The review controls' ids belong to the chrome on every scope: a section named like a control
+/// gets its own anchor, so an id is never twice on a page and a link to the section lands on the
+/// section, not on the button (and no button rule styles a document block).
+#[test]
+fn sr7_a_section_named_like_a_review_control_gets_its_own_anchor() {
+    let (_d, mut r, ids) = review_project();
+    let intro = ids.intro.to_string();
+    write(
+        &mut r,
+        REVIEW_VIEW,
+        serde_json::json!([
+            {"op": "create", "type": "section", "id": "$sd", "parent": intro, "fields": {"title": "Show diff"}},
+            {"op": "create", "type": "prose", "parent": "$sd", "body": "About the diff toggle."},
+            {"op": "create", "type": "section", "id": "$sc", "parent": intro, "fields": {"title": "Show changes"}},
+            {"op": "create", "type": "prose", "parent": "$sc", "body": "About the changes toggle."}
+        ]),
+    )
+    .unwrap();
+    let view = Scope::View(REVIEW_VIEW.into());
+    let pscope = proposal_scope(&mut r);
+    // canon after the view lands: no button on a canon page, but the same anchors
+    let mut sites = vec![view, pscope];
+    let landed = {
+        land(&mut r, REVIEW_VIEW).unwrap();
+        Scope::Canon
+    };
+    sites.push(landed);
+    for scope in &sites {
+        let out = tempfile::tempdir().unwrap();
+        rdy_render::render_site(&r.read(), scope, out.path()).unwrap();
+        let review = !matches!(scope, Scope::Canon);
+        let mut seen = 0;
+        for (p, h) in layout_pages(out.path()) {
+            let all = ids_of(&h);
+            let mut sorted = all.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                all.len(),
+                "{scope:?} {p}: a repeated id in {all:?}"
+            );
+            // a button id is on a review page's bar and nowhere else
+            for id in ["show-changes", "show-diff"] {
+                let n = all.iter().filter(|i| *i == id).count();
+                assert_eq!(n, usize::from(review), "{scope:?} {p}: {id}");
+                if review {
+                    let tag = between(&h, &format!("<button id=\"{id}\""), ">");
+                    assert!(tag.contains("type=\"button\""), "{p}: {tag}");
+                }
+            }
+            for (title, anchor) in [
+                ("Show diff", "show-diff-2"),
+                ("Show changes", "show-changes-2"),
+            ] {
+                let heading = format!(">{title}</h2>");
+                let Some(at) = h.find(&heading) else { continue };
+                seen += 1;
+                // the anchor is on the section's own block, which holds the heading
+                let block = &h[h[..at].rfind("<div class=\"block ").unwrap()..at];
+                assert!(
+                    block.starts_with("<div class=\"block block-section")
+                        && block.contains(&format!(" id=\"{anchor}\"")),
+                    "{scope:?} {p}: the heading's block is {block}"
+                );
+                // every link to the section resolves to its heading, not to a button
+                assert!(h.contains(&format!("href=\"#{anchor}\"")), "{scope:?} {p}");
+                for bad in ["#show-diff\"", "#show-changes\""] {
+                    assert!(
+                        !h.contains(&format!("href=\"{bad}")),
+                        "{scope:?} {p}: {bad}"
+                    );
+                }
+            }
+        }
+        assert!(seen >= 2, "{scope:?}: the sections were not rendered");
     }
 }

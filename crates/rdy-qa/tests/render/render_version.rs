@@ -132,10 +132,10 @@ fn ver1_the_home_page_has_cards_for_top_level_entries_and_no_decisions() {
 }
 
 /// FF-C: the pill shows at every width, so a frozen snapshot is marked at the top of a phone page
-/// too (C7); below 900px it and its chips have the header's second row to themselves (Task 5's
-/// narrow head grid keeps the brand and the tools on the first), on one line that never wraps.
+/// too (C7); below 900px it and its chips sit on the header's first row, between the brand and the
+/// Menu button (sr7, D-42YMF), on one line that never wraps.
 #[test]
-fn ver1_the_pill_shows_at_every_width_and_has_its_own_row_on_a_phone() {
+fn ver1_the_pill_shows_at_every_width_and_sits_on_row_one_on_a_phone() {
     let (_d, _r, _ids, out) = site_canon();
     let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
     let css = rdy_qa::site::parse_css(&text);
@@ -156,6 +156,6 @@ fn ver1_the_pill_shows_at_every_width_and_has_its_own_row_on_a_phone() {
         }
     }
     for w in [320, 375, 600, 900] {
-        assert_eq!(at("grid-row", w).as_deref(), Some("2"), "width {w}");
+        assert_eq!(at("grid-row", w).as_deref(), Some("1"), "width {w}");
     }
 }
