@@ -55,8 +55,14 @@ fn info(t: &Tag) -> VersionInfo {
     }
 }
 
-/// Parses a version name: one optional leading `v`, then a SemVer 2.0.0 version without build
-/// metadata (SemVer ignores build metadata when ordering, so two versions would share a position).
+/// The most bytes a version name may hold. The one bound for the name: `parse_version` refuses
+/// a longer name, so `rdy tag` never stores one, and the live site's request head
+/// (`MAX_HEAD_BYTES` in rdy-daemon) is sized to carry the longest name with its page path and
+/// the other request-head bytes (rdy-daemon asserts the fit at compile time).
+pub const MAX_VERSION_BYTES: usize = 256;
+
+/// Parses a version name: at most [`MAX_VERSION_BYTES`] bytes, one optional leading `v`, then a
+/// SemVer 2.0.0 version without build metadata (SemVer ignores build metadata when ordering, so two versions would share a position).
 pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
     let bad = |why: String| {
         RdyError::new(
@@ -65,6 +71,11 @@ pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
             "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)",
         )
     };
+    if name.len() > MAX_VERSION_BYTES {
+        return Err(bad(format!(
+            "a version name takes at most {MAX_VERSION_BYTES} bytes"
+        )));
+    }
     let bare = name.strip_prefix('v').unwrap_or(name);
     let v = semver::Version::parse(bare).map_err(|e| bad(e.to_string()))?;
     if !v.build.is_empty() {
@@ -557,6 +568,18 @@ impl ReadState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ruling task-2 (1): the one bound for a version name.
+    #[test]
+    fn sr2_a_version_name_has_one_bound() {
+        let at = format!("v1.0.0-{}", "a".repeat(MAX_VERSION_BYTES - 7));
+        assert_eq!(at.len(), MAX_VERSION_BYTES);
+        assert!(parse_version(&at).is_ok());
+        let over = format!("{at}a");
+        let e = parse_version(&over).unwrap_err();
+        assert_eq!(e.code, E_BAD_TAG_NAME);
+        assert!(e.message.contains("at most 256 bytes"), "{e}");
+    }
 
     #[test]
     fn an_ambiguous_prefix_lists_the_candidates() {

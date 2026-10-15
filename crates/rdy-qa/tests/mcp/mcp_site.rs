@@ -178,6 +178,34 @@ fn sr2_a_long_valid_version_has_a_site() {
     assert_eq!(page(url).status, 200, "{v}");
 }
 
+/// Fix round 2 (ruling task-2 (1)): the longest version name rdy stores has a site that the
+/// server really serves, and a name one byte over is refused where it would be stored.
+#[test]
+fn sr2_the_longest_version_has_a_site() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    r.import(&approver(), "import", Path::new(FIXTURE_DIR))
+        .unwrap();
+    land(&mut r, "import").unwrap();
+    let max = rdy_engine::MAX_VERSION_BYTES;
+    let too_long = format!("v1.0.0-{}", "a".repeat(max - 6));
+    assert_eq!(too_long.len(), max + 1);
+    let err = r.tag(&approver(), &too_long, None, None).unwrap_err();
+    assert_eq!(err.code, "E_BAD_TAG_NAME", "{err:?}");
+    let name = format!("v1.0.0-{}", "a".repeat(max - 7));
+    assert_eq!(name.len(), max);
+    r.tag(&approver(), &name, None, None).unwrap();
+    r.close().unwrap();
+    let mut c = agent(&s);
+    let v = c
+        .call("rdy_site", json!({"scope": format!("tag:{name}")}))
+        .ok();
+    let url = v["url"].as_str().unwrap();
+    assert!(url.ends_with(&format!("/~tag/{name}/")), "{v}");
+    assert_eq!(page(url).status, 200, "{v}");
+    assert_eq!(page(&format!("{url}index.html")).status, 200, "{v}");
+}
+
 #[test]
 fn sr2_rdy_site_gives_the_changes_link() {
     let s = golden_served_ahead();

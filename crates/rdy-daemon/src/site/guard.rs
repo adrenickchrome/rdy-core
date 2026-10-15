@@ -725,6 +725,19 @@ mod tests {
                 path: "index.html".into()
             })
         );
+        // the one bound is `parse_version`'s: the longest name routes, one byte more does not
+        let max = format!("v1.0.0-{}", "a".repeat(rdy_engine::MAX_VERSION_BYTES - 7));
+        assert_eq!(
+            g().check(&get(&format!("/~tag/{max}/"), H)),
+            Ok(Route::Page {
+                scope: ScopeRef::Tag(max.clone()),
+                path: "index.html".into()
+            })
+        );
+        assert_eq!(
+            g().check(&get(&format!("/~tag/{max}a/"), H)),
+            Err(Refusal::NotFound)
+        );
     }
 
     /// Ruling task-2 (2): a tag name goes into the path as it is, and the guard maps the path

@@ -63,8 +63,9 @@ pub fn view_name_ok(name: &str) -> bool {
 /// A tag name as the site reads it: exactly what `parse_version` accepts, with no length cap of
 /// its own (every version rdy stores has a site; ruling task-2). A SemVer name holds only
 /// `0-9 A-Z a-z . -` here (build metadata is refused), never starts with `.` or `-`, and is
-/// never a path step, so it is one path segment as it is. The request head's own limit
-/// (`MAX_HEAD_BYTES`) bounds the whole path.
+/// never a path step, so it is one path segment as it is. The one bound on its length is
+/// `MAX_VERSION_BYTES`, which `parse_version` enforces; the request head's limit
+/// (`MAX_HEAD_BYTES` in rdy-daemon) is asserted to carry the longest name at compile time.
 pub fn tag_name_ok(name: &str) -> bool {
     crate::version::parse_version(name).is_ok()
 }

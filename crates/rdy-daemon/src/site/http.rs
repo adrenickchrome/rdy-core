@@ -5,6 +5,10 @@
 
 /// The largest request head the site reads, in bytes, the empty line included.
 pub const MAX_HEAD_BYTES: usize = 8192;
+// The longest version name (`rdy_engine::MAX_VERSION_BYTES`) must fit the head with its page
+// path and the other headers, in its encoded spelling too (3 bytes a byte), in the request line
+// and in the events query (ruling task-2): the name's share stays under half the head.
+const _: () = assert!(rdy_engine::MAX_VERSION_BYTES * 3 * 4 <= MAX_HEAD_BYTES / 2);
 /// The most header lines a request head may hold.
 pub const MAX_HEADERS: usize = 64;
 
@@ -217,6 +221,28 @@ pub fn text(status: u16, body: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fix round 2 (ruling task-2 (1)): the longest version name `parse_version` accepts has a
+    /// route the request head can carry, with the events request and ordinary headers too.
+    #[test]
+    fn sr2_the_longest_version_fits_the_request_head() {
+        let name = format!("v1.0.0-{}", "a".repeat(rdy_engine::MAX_VERSION_BYTES - 7));
+        assert_eq!(name.len(), rdy_engine::MAX_VERSION_BYTES);
+        assert!(rdy_engine::parse_version(&name).is_ok());
+        let headers = "Host: 127.0.0.1:58022\r\nUser-Agent: a-browser/1.0\r\nAccept: */*\r\n\
+             Accept-Language: en\r\nAccept-Encoding: gzip, deflate\r\nCookie: x=1\r\n";
+        // the encoded spelling is three times as long: the site still reads it
+        for spelled in [name.clone(), name.replace('.', "%2E")] {
+            let page = format!("GET /~tag/{spelled}/index.html HTTP/1.1\r\n{headers}\r\n");
+            let r = parse_head(page.as_bytes()).unwrap();
+            assert!(r.target.contains(&spelled));
+            let events = format!(
+                "GET /_rdy/events?scope=tag:{spelled}&page=index.html&rev={0}&label={0} HTTP/1.1\r\n{headers}\r\n",
+                "0".repeat(64)
+            );
+            assert!(parse_head(events.as_bytes()).is_ok());
+        }
+    }
 
     #[test]
     fn ls3_a_head_parses_and_a_bad_one_does_not() {
