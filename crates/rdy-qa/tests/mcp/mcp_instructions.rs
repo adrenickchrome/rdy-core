@@ -54,3 +54,63 @@ fn ib7_the_instructions_tell_an_agent_to_read_its_inbox() {
         "{i}"
     );
 }
+
+const DI13_SENTENCES: [&str; 8] = [
+    "At session start, also call rdy_pending and tell the person in one line what waits; do not list it unless asked.",
+    "When the person states something that should hold, record it at once with rdy_decide as a proposed decision, in their words, and say so in one line.",
+    "A decision is worth recording when every agent should keep to it next month; a passing preference is not.",
+    "Propose at the point rdy_session's propose.cadence sets, by default at a natural break; under changes, propose when a write reply says propose_due.",
+    "Present a batch card from rdy_pending at the end of an iteration, then each exception on its own; show each option label word for word and never change the options, the recommendation or the version.",
+    "Relay the person's answer with rdy_answer: pass the card_hash you showed, their words as evidence and your question; interrupt the person only for a blocking item.",
+    "While coding, a change within the design is just code; a gap is a proposed decision plus the doc update; a contradiction is a finding plus a superseding decision, and you stop when it is blocking or one_way.",
+    "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions in the decision home, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
+];
+
+fn di13_has(sentence: &str) {
+    let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
+    assert!(s.contains(&sentence), "missing: {sentence}");
+    assert!(rdy_mcp::server::INSTRUCTIONS.contains(sentence));
+}
+
+#[test]
+fn di13_the_instructions_check_the_queue_at_session_start() {
+    di13_has(DI13_SENTENCES[0]);
+}
+
+#[test]
+fn di13_the_instructions_capture_without_nagging() {
+    di13_has(DI13_SENTENCES[1]);
+    di13_has(DI13_SENTENCES[2]);
+}
+
+#[test]
+fn di13_the_instructions_explain_the_cadence() {
+    di13_has(DI13_SENTENCES[3]);
+}
+
+#[test]
+fn di13_the_instructions_present_the_batch_and_relay_with_rdy_answer() {
+    di13_has(DI13_SENTENCES[4]);
+    di13_has(DI13_SENTENCES[5]);
+}
+
+#[test]
+fn di13_the_instructions_carry_the_adjustment_lines() {
+    di13_has(DI13_SENTENCES[6]);
+}
+
+#[test]
+fn di13_the_instructions_plan_structure_first() {
+    di13_has(DI13_SENTENCES[7]);
+}
+
+#[test]
+fn di13_the_new_sentences_sit_after_the_inbox_line() {
+    let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
+    assert_eq!(s.len(), 26);
+    assert!(s[12].starts_with("Read rdy_inbox at session start"));
+    for (k, want) in DI13_SENTENCES.iter().enumerate() {
+        assert_eq!(s[13 + k], *want, "index {}", 13 + k);
+    }
+    assert!(s[21].starts_with("Record decisions in the project's decision home"));
+}
