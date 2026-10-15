@@ -228,7 +228,7 @@ pub(crate) fn version_number(st: &ReadState, h: &Hash) -> Result<u32, RdyError> 
 }
 
 /// `pref` is not its proposal's latest version: name the latest, and how to approve it.
-fn moved(
+pub(crate) fn moved(
     st: &ReadState,
     pref: &ProposalRef,
     latest: &Hash,
@@ -305,7 +305,9 @@ fn approver_stale(e: rdy_store::StoreError, view: &str) -> RdyError {
 /// FW-B9: what a relayed approval must satisfy, and the evidence it records. Only a human
 /// session records a relay, and it names the exact version it relays (the one the human was
 /// shown): a full hash or `P-<id>@<n>`. Returns the evidence to store: the options' own for a
-/// local approval, `text` for a relay that names none.
+/// local approval, `text` for a relay that names none. A relay's evidence is `text`, or `card`
+/// with the hash of the card the person answered (O20: only `answer` passes one); `elicited`
+/// and a card with no hash are refused.
 fn relay_evidence_kind(
     s: &Session,
     text: &str,
@@ -360,11 +362,16 @@ fn relay_evidence_kind(
         ));
     }
     match &opts.evidence {
-        Some(e) if e.kind != EvidenceKind::Text => Err(RdyError::new(
-            E_BAD_INPUT,
-            "only a text relay is recorded from the command line",
-            "quote the human's words with --evidence",
-        )),
+        Some(e)
+            if !(e.kind == EvidenceKind::Text
+                || (e.kind == EvidenceKind::Card && e.card_hash.is_some())) =>
+        {
+            Err(RdyError::new(
+                E_BAD_INPUT,
+                "only a text relay is recorded from the command line",
+                "quote the human's words with --evidence",
+            ))
+        }
         Some(e) => Ok(Some(e.clone())),
         None => Ok(Some(ApprovalEvidence {
             kind: EvidenceKind::Text,

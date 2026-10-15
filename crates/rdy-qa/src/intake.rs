@@ -4,9 +4,11 @@
 use crate::edit_loop::{Spec, spec_doc};
 use crate::fixtures::{land, writer};
 use crate::tensions::{ag, created, put, try_briefed, upd};
+use rdy_engine::answer::relay::RelayInput;
+use rdy_engine::answer::{AnswerInfo, AnswerRequest};
 use rdy_engine::consequence::propose_and_report;
-use rdy_engine::pending::{CARD_MAX_TOKENS, Pending, PendingQuery};
-use rdy_engine::{DecisionInput, Local, ProposalInfo, Rdy, Scope};
+use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, Pending, PendingQuery};
+use rdy_engine::{DecisionInput, Local, ProposalInfo, Rdy, Scope, Session};
 use rdy_model::*;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -337,4 +339,41 @@ pub fn put_answer(dir: &Path, mut r: Rdy, a: &Answer) -> Rdy {
     r.store_mut().put_answer(a).expect("put_answer");
     r.close().expect("close");
     Rdy::open(dir).expect("reopen")
+}
+
+/// Confirms each exception that stands beside the batch `pref` in the queue, in queue order, as
+/// the human session `s` answering for itself (`Rdy::answer`, option `confirm`, no relay): each
+/// is its own answer. The batch must be ready, or its exceptions are no items. Returns the
+/// answers.
+pub fn confirm_exceptions(r: &mut Rdy, s: &Session, pref: &str) -> Vec<AnswerInfo> {
+    let q = r
+        .read()
+        .pending(&PendingQuery {
+            person: s.actor.clone(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .expect("pending");
+    let refs: Vec<String> = q
+        .items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(pref))
+        .map(|i| i.r#ref.clone())
+        .collect();
+    refs.iter()
+        .map(|item| {
+            r.answer(
+                s,
+                &s.actor,
+                AnswerRequest {
+                    r#ref: item.clone(),
+                    option: "confirm".into(),
+                    card_hash: None,
+                    note: None,
+                    relay: RelayInput::default(),
+                },
+            )
+            .unwrap_or_else(|e| panic!("confirm {item}: {e}"))
+        })
+        .collect()
 }

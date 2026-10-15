@@ -54,7 +54,7 @@ pub(super) fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError>
 
 pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
     // the session kind, then the flags' pairing, then the relaying actor and run (D-HA7YZ)
-    let (s, by) = relay_approver(cx, a.relayed_by.as_deref(), a.evidence.is_some())?;
+    let (s, by) = relay_approver(cx, a.relayed_by.as_deref(), a.evidence.as_deref())?;
     // the reply names the relayer as recorded (the session's actor and run), not the flag
     let recorded = by.clone();
     let bad = |message: &str, fix: &str| RdyError::new(E_BAD_INPUT, message, fix);
