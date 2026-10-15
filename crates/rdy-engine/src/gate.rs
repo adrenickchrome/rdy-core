@@ -579,6 +579,77 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
     Ok(open)
 }
 
+/// The landing checks of version `pref` (`p`, with its changes `changes` read), computed on a
+/// published state for the needs-you queue: checks 1 to 3 of the plan's closed readiness list
+/// ("Readiness before M3b", D-3JZP4). Each failed check is one issue with the code, message and
+/// fix the landing gives today:
+/// 1. a conflict on a block the version writes (`gconf1`, `E_CONFLICT_UNRESOLVED`);
+/// 2. a blocking tension the landing would put into canon (`tgat1`, `E_BLOCKING_TENSION`);
+/// 3. an error in the canon the landing would give (`E_VALIDATION`, or the merge's refusal).
+///
+/// A version with a conflict has no merge onto canon, so checks 2 and 3 are not made for it, as
+/// the landing stops at the conflict. A key rdy derives again at the landing (K1) is not a clash.
+pub(crate) fn landing_readiness(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    changes: &[Change],
+) -> Result<Vec<Issue>, RdyError> {
+    let as_issue = |e: RdyError| Issue {
+        severity: Severity::Error,
+        code: e.code,
+        block: None,
+        message: e.message,
+        fix: e.fix,
+    };
+    let blocking = blocking_conflicts(st, &p.view, &p.changes)?;
+    if !blocking.is_empty() {
+        return Ok(vec![as_issue(unresolved(st, &p.view, &blocking)?)]);
+    }
+    let mut out = vec![];
+    let applied = st.landing_order(changes);
+    let landing = st.landing_tensions_applied(&p.view, &p.changes, changes, &applied)?;
+    let mut cache = crate::tensions::info::InfoCache::default();
+    let refusing: Vec<TensionInfo> = st
+        .refusing_among(&p.changes, landing)
+        .iter()
+        .map(|t| st.tension_info_with(t, &mut cache))
+        .collect();
+    if !refusing.is_empty() {
+        out.push(as_issue(blocking_tensions(pref, &refusing)));
+    }
+    match prospective(st, changes, Some(&p.view)) {
+        Ok((next, applied)) => {
+            let canon = st.materialized(&Scope::Canon)?;
+            let vm = st.materialized(&Scope::View(p.view.clone()))?;
+            let rekeyed: BTreeSet<BlockId> =
+                crate::keys::rederive(&next, &rekeyable_in(changes, &applied, &canon), &vm)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+            let issues = Rdy::issues_in(st, changes, &next, &applied)?;
+            let first = issues.iter().find(|i| {
+                i.severity == Severity::Error
+                    && !(i.code == E_KEY_CLASH
+                        && i.block.as_ref().is_some_and(|b| rekeyed.contains(b)))
+            });
+            if let Some(first) = first {
+                out.push(as_issue(RdyError::new(
+                    E_VALIDATION,
+                    first.message.clone(),
+                    first.fix.clone(),
+                )));
+            }
+        }
+        // the merge's refusals, worded for the approver as the landing words them
+        Err(e) if [E_STALE_BASE, E_ALREADY_EXISTS, E_FROZEN].contains(&e.code) => {
+            out.push(as_issue(e));
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(out)
+}
+
 /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
 /// merge onto the view's effective base, on those blocks only. For the view's whole set these
 /// are the view's conflicts on the blocks it writes; a subset leaves out conflicts it does
@@ -1267,12 +1338,12 @@ impl Rdy {
         approving: Option<&str>,
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
         let (next, applied) = prospective(st, changes, approving)?;
-        Ok((self.issues_in(st, changes, &next, &applied)?, applied))
+        Ok((Self::issues_in(st, changes, &next, &applied)?, applied))
     }
 
     /// The issues of `next`, the canon that landing `changes` (applied at `applied`) would give.
+    /// It reads no store of its own, so the queue's readiness check runs it on a published state.
     fn issues_in(
-        &self,
         st: &ReadState,
         changes: &[Change],
         next: &Materialized,
@@ -1784,7 +1855,7 @@ impl Rdy {
                 &vm,
             );
             if re.is_empty() {
-                issues = self.issues_in(&st, &changes, &next, &applied)?;
+                issues = Self::issues_in(&st, &changes, &next, &applied)?;
             } else {
                 let mut change = self.rekey_change(&st, s, view, &re, &ids)?;
                 // alts1: a change in a member view of an open set records the set, as a write does
