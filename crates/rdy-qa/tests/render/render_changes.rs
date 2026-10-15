@@ -1033,12 +1033,22 @@ fn sr6_inline_code_in_prose_stays_code() {
         )),
         "{doc}"
     );
-    // the summary and the page that carries the inline diff; the home page's card and the
-    // block's permalink page read the prose as plain words on every site (reported in the
-    // task-6 fix round 1, not a diff's)
+    // the home page's card keeps the code span code (ruling final-round1)
+    let home = read(out.path(), "index.html");
+    assert!(
+        home.contains("<strong>Guide</strong><span>Open <code>after.json</code> first.</span>"),
+        "{home}"
+    );
+    // the summary, the page that carries the inline diff and the home page; the block's
+    // permalink page (go/*.html) puts its label in <title>, where no markup goes, and stays out
+    // of this scan (ruling final-round1, logged for later)
     let leaks: Vec<String> = unhidden_leaks(out.path())
         .into_iter()
-        .filter(|l| l.starts_with("changes.html ") || l.starts_with("guide.html "))
+        .filter(|l| {
+            l.starts_with("changes.html ")
+                || l.starts_with("guide.html ")
+                || l.starts_with("index.html ")
+        })
         .collect();
     assert!(leaks.is_empty(), "{leaks:#?}");
 }

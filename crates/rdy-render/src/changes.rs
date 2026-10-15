@@ -584,11 +584,11 @@ pub fn diff_html(pieces: &[Piece], wrap: &Wrap) -> String {
 
 /// One character of a side's text as a reader reads it, and the code span it is in: `0` for
 /// none, else the span's number on that side (two neighbouring spans stay two elements).
-type Ch = (char, u32);
+pub(crate) type Ch = (char, u32);
 
 /// Reads one side's coded text back (rule 7), in order, across the pieces of a diff.
 #[derive(Default)]
-struct Decoder {
+pub(crate) struct Decoder {
     /// The last character was [`CODE_ESC`]: the next one is authored text.
     esc: bool,
     span: u32,
@@ -596,7 +596,7 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn read(&mut self, text: &str) -> Vec<Ch> {
+    pub(crate) fn read(&mut self, text: &str) -> Vec<Ch> {
         let mut out = vec![];
         for c in text.chars() {
             if std::mem::take(&mut self.esc) {
@@ -618,7 +618,7 @@ impl Decoder {
 }
 
 /// Characters as runs, escaped, each run of a code span in a `<code>` element.
-fn runs_html(out: &mut String, chars: &[Ch]) {
+pub(crate) fn runs_html(out: &mut String, chars: &[Ch]) {
     for run in chars.chunk_by(|a, b| a.1 == b.1) {
         let text: String = run.iter().map(|r| r.0).collect();
         if run[0].1 == 0 {
