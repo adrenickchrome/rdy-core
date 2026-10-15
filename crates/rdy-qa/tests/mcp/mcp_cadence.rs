@@ -138,14 +138,14 @@ fn di11_an_unknown_cadence_warns_and_uses_break() {
         "{w}"
     );
     drop(c);
-    // a wrong value in the person's file does not hide the project's word
+    // a wrong value in the person's file wins at its level, as `break`, over the project's word
     let (dir, _s) = configured(
         "propose:\n  cadence: task\n",
         Some("actor: human:qa\npropose:\n  cadence: Always\n"),
     );
     let mut c = McpClient::start(dir.path());
     let s = session(&mut c, "writer");
-    assert_eq!(s["propose"], json!({"cadence": "task"}), "{s}");
+    assert_eq!(s["propose"], json!({"cadence": "break"}), "{s}");
     warning(
         &s,
         "propose.cadence must be break, task, changes or asked; using break",
@@ -174,6 +174,20 @@ fn di11_propose_changes_out_of_range_warns() {
             "{w}"
         );
     }
+    // a wrong count in the person's file wins at its level, as 10, over the project's count
+    let (dir, _s) = configured(
+        "propose:\n  cadence: changes\n  changes: 4\n",
+        Some("actor: human:qa\npropose:\n  changes: 0\n"),
+    );
+    let mut c = McpClient::start(dir.path());
+    let s = session(&mut c, "writer");
+    assert_eq!(
+        s["propose"],
+        json!({"cadence": "changes", "changes": 10}),
+        "{s}"
+    );
+    warning(&s, "propose.changes must be 1–1000; using 10");
+    drop(c);
     // the ends of the range are values
     for ok in ["1", "1000"] {
         let (dir, _s) = configured(

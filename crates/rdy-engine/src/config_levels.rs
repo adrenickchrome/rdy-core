@@ -120,10 +120,10 @@ pub enum Ty {
     /// `range_warnings` warns and drops it.
     LanAddress,
     /// A whole number (a YAML integer, any sign). A whole number outside 1 to 1000 is not a
-    /// wrong type: `range_warnings` warns and drops it.
+    /// wrong type: `range_warnings` warns and sets the key's default at that level.
     Count,
     /// A string. A string that is not one of the choices is not a wrong type: `range_warnings`
-    /// warns and drops it.
+    /// warns and sets the key's default at that level.
     Choice(&'static [&'static str]),
     /// Not read by `Config` yet: any value.
     Any,
@@ -797,7 +797,10 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
 
 /// The `W_CONFIG_UNKNOWN` warnings of the range-checked keys of `map`: a percent outside 0 to 100,
 /// a port outside 1024 to 65535, an address that is not a private IPv4 literal, a count outside 1
-/// to 1000 and a choice that is not one of its words. Each value is removed from `map`, so the default applies and rdy keeps going (config mistakes warn).
+/// to 1000 and a choice that is not one of its words. rdy keeps going (config mistakes warn). A
+/// percent, a port and an address are removed from `map`, so the next level or the default
+/// applies. A count and a choice get the key's default at the level that holds the wrong value:
+/// the message says "using <default>", so a lower level never answers instead (FW-PC1).
 fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
     let mut out = Vec::new();
     for rule in KEY_LEVELS {
@@ -897,7 +900,14 @@ fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
             }
             _ => continue,
         };
-        remove_path(map, rule.key);
+        let default: Option<Value> = match rule.ty {
+            Ty::Count | Ty::Choice(_) => rule.default.and_then(|d| serde_yaml_ng::from_str(d).ok()),
+            _ => None,
+        };
+        match default {
+            Some(d) => set_path(map, rule.key, d),
+            None => remove_path(map, rule.key),
+        }
         out.push(config_warning(message, fix));
     }
     out
@@ -1669,8 +1679,30 @@ mod tests {
             e.warnings[1].fix,
             "set propose.changes to a whole number from 1 to 1000"
         );
-        assert!(get_path(&e.merged, "propose.cadence").is_none());
-        assert!(get_path(&e.merged, "propose.changes").is_none());
+        // the default applies at the level that holds the wrong value
+        assert_eq!(
+            get_path(&e.merged, "propose.cadence"),
+            Some(&Value::from("break"))
+        );
+        assert_eq!(
+            get_path(&e.merged, "propose.changes"),
+            Some(&Value::from(10))
+        );
+        let row = |k: &str| e.origins.iter().find(|o| o.key == k).unwrap().clone();
+        assert_eq!(row("propose.cadence").level, Level::Project);
+        assert_eq!(row("propose.changes").level, Level::Project);
+        // and it wins over a lower level: a person's wrong word is `break`, not the project's
+        let d = project(
+            "pack: p\npropose:\n  cadence: task\n  changes: 4\n",
+            Some("propose:\n  cadence: Always\n  changes: 1001\n"),
+        );
+        let e = effective(d.path(), None).unwrap();
+        assert_eq!(e.warnings.len(), 2, "{:?}", e.warnings);
+        let row = |k: &str| e.origins.iter().find(|o| o.key == k).unwrap().clone();
+        assert_eq!(row("propose.cadence").value, Value::from("break"));
+        assert_eq!(row("propose.cadence").level, Level::Local);
+        assert_eq!(row("propose.changes").value, Value::from(10));
+        assert_eq!(row("propose.changes").level, Level::Local);
         // a negative whole number is a wrong value, not a wrong type
         let d = project("pack: p\npropose:\n  changes: -4\n", None);
         let e = effective(d.path(), None).unwrap();

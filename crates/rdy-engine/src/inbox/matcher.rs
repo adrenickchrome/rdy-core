@@ -3,10 +3,11 @@
 //! the events below match here.
 use super::Entry;
 use super::inflight::RunInFlight;
-use crate::gate::{ProposalRef, open_proposals, version_number};
+use crate::gate::{ProposalRef, landed_as, version_number};
 use crate::semantic::candidates::Request;
+use crate::tensions::semantic::pair_of;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
-use rdy_model::{BlockId, Hash, Op};
+use rdy_model::{BlockId, Hash, Op, Proposal};
 use rdy_store::inbox::InboxSub;
 use std::collections::BTreeSet;
 
@@ -197,31 +198,90 @@ pub fn match_event(
             )
         }
         EventKind::ReviewSubmitted { review, pair, .. } => {
-            // the verdict carries advice when the pair's tension was opened by this review with
-            // the reviewer's advice; it waits for an answer on the open versions that hold it
-            let Some(open) = st.semantic().tension(pair) else {
-                return Ok(None);
-            };
-            if open.record.review != *review || open.record.advice.is_none() {
+            // the verdict carries advice (read from the stored first version of the pair's
+            // tension, which this review opened), and it waits on the proposal version that met
+            // it first; neither reads whether the advice was answered since, or which version of
+            // the proposal is latest now, so the entry is the same on every read
+            if !verdict_carries_advice(st, review, pair)? {
                 return Ok(None);
             }
-            for (pref, p) in open_proposals(st)? {
-                let advised = st.advised_of(&p.view, &p.changes)?;
-                if advised
-                    .iter()
-                    .any(|a| a.open.record.key == *pair && !a.open.record.blocking)
-                {
-                    return Ok(entry(
-                        "pending_added",
-                        vec![review.to_string()],
-                        pending_line(&pref),
-                    ));
-                }
+            match first_holding(st, pair)? {
+                Some(pref) => entry(
+                    "pending_added",
+                    vec![review.to_string()],
+                    pending_line(&pref),
+                ),
+                None => None,
             }
-            None
         }
         _ => None,
     })
+}
+
+/// Whether the verdict `review` carries the reviewer's advice: the first version of the pair's
+/// tension is the one that review opened, and it holds the advice. `false` for any other verdict.
+/// An acceptance adds a later version; it never changes the first one.
+fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<bool, RdyError> {
+    let Some(open) = st.semantic().tension(pair) else {
+        return Ok(false);
+    };
+    let mut first = open.record.clone();
+    while let Some(prev) = first.prev {
+        first = st.reader().semantic_tension(&prev)?;
+    }
+    Ok(first.review == *review && first.advice.is_some())
+}
+
+/// The proposal version that first held the tension of `pair`: over the version chains of the
+/// proposals that have not landed, the oldest version whose landing form lists the pair's tension
+/// (open or dismissed, accepted or not, as `advised_of` finds it but with no status condition);
+/// ties go to the earlier time, then to the smaller version hash. A later version, a dismissal and
+/// an acceptance change none of it, so the same verdict names the same version on every read.
+fn first_holding(st: &ReadState, pair: &Hash) -> Result<Option<ProposalRef>, RdyError> {
+    let reader = st.reader();
+    let mut best: Option<((i64, Hash), ProposalRef)> = None;
+    for (key, latest) in reader.refs_with_prefix("proposal/")? {
+        let (Some(stable), Ok(latest)) = (
+            key.strip_prefix("proposal/")
+                .and_then(|h| h.parse::<Hash>().ok()),
+            <[u8; 32]>::try_from(latest.as_slice()).map(Hash),
+        ) else {
+            continue;
+        };
+        if landed_as(st, &reader.proposal(&latest)?)?.is_some() {
+            continue;
+        }
+        // walk the chain from the latest back, keeping the oldest version that holds the pair
+        let mut found: Option<(i64, Hash)> = None;
+        let mut cur = Some(latest);
+        while let Some(version) = cur {
+            let p = reader.proposal(&version)?;
+            if holds_pair(st, &p, pair)? {
+                found = Some((p.provenance.at_ms, version));
+            }
+            cur = p.prev;
+        }
+        let Some(at) = found else { continue };
+        if best.as_ref().is_none_or(|(b, _)| at < *b) {
+            best = Some((
+                at,
+                ProposalRef {
+                    version: at.1,
+                    stable,
+                    n: version_number(st, &at.1)?,
+                },
+            ));
+        }
+    }
+    Ok(best.map(|(_, pref)| pref))
+}
+
+/// Whether the landing form of version `p` lists the semantic tension of `pair`.
+fn holds_pair(st: &ReadState, p: &Proposal, pair: &Hash) -> Result<bool, RdyError> {
+    Ok(st
+        .landing_stored_tensions(&p.view, &p.changes)?
+        .iter()
+        .any(|t| pair_of(t) == Some(*pair)))
 }
 
 /// The line of a `pending_added` entry.

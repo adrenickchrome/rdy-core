@@ -561,6 +561,25 @@ pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, Rd
     Ok(None)
 }
 
+/// The latest version of view `view`'s open proposal, read from its one `open/<view>` ref; `None`
+/// when the view has none or its latest version has landed. It reads no other proposal and counts
+/// no versions, so its cost does not grow with the proposals of other views or with history.
+pub(crate) fn open_proposal_of_view(
+    st: &ReadState,
+    view: &str,
+) -> Result<Option<Proposal>, RdyError> {
+    let Some(b) = st.reader().get_ref(&format!("open/{view}"))? else {
+        return Ok(None);
+    };
+    if b.len() != 32 {
+        return Ok(None);
+    }
+    let stable = ref_hash(&b, "an open ref")?;
+    let latest = latest_version(st, &stable)?;
+    let p = st.reader().proposal(&latest)?;
+    Ok(landed_as(st, &p)?.is_none().then_some(p))
+}
+
 /// Every open proposal at its latest version: each `open/<view>` ref whose latest version has
 /// not landed, sorted by the ref's text (`P-<stable short>@<n>`).
 pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposal)>, RdyError> {

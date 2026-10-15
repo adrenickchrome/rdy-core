@@ -1,7 +1,9 @@
 //! di11 (D-JV6Z8, O10): the inbox entry `pending_added` for a new proposal version and for a
 //! verdict that carries advice. It never reads readiness, so a re-derived inbox is the same.
-use rdy_engine::Rdy;
 use rdy_engine::inbox::api::INBOX_DOC;
+use rdy_engine::tensions::api::AcceptRequest;
+use rdy_engine::{Rdy, Session};
+use rdy_model::Role;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::*;
 use rdy_qa::intake::verdict_on;
@@ -199,4 +201,110 @@ fn di11_pending_added_is_stable_across_reindex() {
     );
     r.close().expect("close");
     reindex_reproduces(dir.path()).expect("reindex reproduces the inbox");
+}
+
+/// A project with an open proposal `P-x@1` whose view holds the claim `$q`, a subscription at the
+/// head of the log, and a verdict that advises blocking on `$q` and the spec's section content:
+/// the one `pending_added` entry the verdict gave.
+fn advised_project() -> (
+    tempfile::TempDir,
+    Rdy,
+    rdy_qa::edit_loop::Spec,
+    rdy_engine::ProposalInfo,
+    InboxSub,
+    (Vec<String>, String),
+) {
+    let (dir, mut r) = project();
+    let spec = spec_doc(&mut r);
+    let q = created(
+        &put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec."}]),
+        ),
+        "$q",
+    );
+    let p = r
+        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    let sub = watcher_at_head(&r);
+    verdict_on(
+        &mut r,
+        &rdy_engine::Scope::Inflight,
+        &q,
+        &spec.c,
+        "agent:r",
+        true,
+    );
+    let mut entries = pending_added(&r, &sub);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let first = entries.remove(0);
+    assert_eq!(
+        first.1,
+        format!("{} waits for an answer; read rdy_pending", p.r#ref)
+    );
+    (dir, r, spec, p, sub, first)
+}
+
+#[test]
+fn di11_an_advised_entry_stays_after_the_advice_is_accepted() {
+    let (_dir, mut r, _spec, p, sub, first) = advised_project();
+    let shown = r.read().proposal_show(&p.r#ref).expect("show");
+    assert_eq!(shown.advised.len(), 1, "{shown:?}");
+    let req = AcceptRequest {
+        proposal: p.r#ref.clone(),
+        advised_digest: shown.advised_digest.clone().unwrap_or_default(),
+        evidence: Some("yes, block on it".into()),
+        question: Some("Accept the reviewer's advice to block?".into()),
+        session_ref: Some("chat-1".into()),
+        ..Default::default()
+    };
+    let a = r.accept_advice(&ag("relay"), req).expect("accept");
+    assert_eq!(a.accepted.len(), 1, "{a:?}");
+    // the same cursor reads the same entry: the verdict carried the advice when it was submitted
+    assert_eq!(pending_added(&r, &sub), vec![first]);
+}
+
+#[test]
+fn di11_an_advised_entry_stays_after_the_advice_is_dismissed() {
+    let (_dir, mut r, _spec, p, sub, first) = advised_project();
+    let shown = r.read().proposal_show(&p.r#ref).expect("show");
+    let tension = shown.advised[0].tension.clone();
+    let rev = Session::agent("agent:rev".into(), Some("rev".into()), Role::Reviewer).unwrap();
+    r.dismiss_tension(&rev, &tension, "both stand for now")
+        .expect("dismiss");
+    assert!(
+        r.read().proposal_show(&p.r#ref).unwrap().advised.is_empty(),
+        "a dismissed tension is no longer advised"
+    );
+    assert_eq!(pending_added(&r, &sub), vec![first]);
+}
+
+#[test]
+fn di11_an_advised_entry_keeps_its_proposal_when_a_replacement_is_published() {
+    let (_dir, mut r, spec, p, sub, first) = advised_project();
+    // a second claim and a replacement version: the verdict's entry still names the first
+    put(
+        &mut r,
+        "v1",
+        json!([{"op": "create", "type": "claim", "parent": spec.section.to_string(), "body": "Guests may not write."}]),
+    );
+    let p2 = r
+        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    assert_eq!(p2.version, 2, "{p2:?}");
+    let entries = pending_added(&r, &sub);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.0 == first.0)
+            .collect::<Vec<_>>(),
+        vec![&first],
+        "{entries:?}"
+    );
+    assert!(
+        first.1.starts_with(&p.r#ref),
+        "the entry names the version the verdict met: {first:?}"
+    );
 }

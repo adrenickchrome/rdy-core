@@ -1017,21 +1017,20 @@ fn report<T: Serialize + 'static>(
 }
 
 /// FW-PC1 (D-0GGW9): whether a proposal is due for `view`. Only under cadence `changes`: the
-/// view's included changes that no open proposal of the view carries (its latest version, or
-/// every change when it has none) number at least `propose.changes`. A state that cannot be read
-/// says no: the nudge never fails a write.
+/// view's included changes that its open proposal does not carry (its latest version, read from
+/// the view's own open ref; every change when it has none) number at least `propose.changes`. A
+/// state that cannot be read says no: the nudge never fails a write. No other proposal is read
+/// and no version is counted.
 fn propose_due(st: &ReadState, view: &str) -> bool {
     if st.propose_cadence() != crate::ProposeCadence::Changes {
         return false;
     }
-    let Ok(open) = crate::gate::open_proposals(st) else {
+    let Ok(open) = crate::gate::open_proposal_of_view(st, view) else {
         return false;
     };
     let carried: BTreeSet<Hash> = open
-        .iter()
-        .filter(|(_, p)| p.view == view)
-        .flat_map(|(_, p)| p.changes.iter().copied())
-        .collect();
+        .map(|p| p.changes.into_iter().collect())
+        .unwrap_or_default();
     let waiting = st
         .included(view)
         .iter()
