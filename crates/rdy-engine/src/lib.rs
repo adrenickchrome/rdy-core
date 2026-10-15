@@ -34,6 +34,7 @@ mod materialize;
 pub mod mention_review;
 mod pack_load;
 mod paths;
+pub mod pending;
 pub mod proposal_show;
 mod publish;
 mod query;
