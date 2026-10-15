@@ -2,7 +2,7 @@
 use super::*;
 use rdy_engine::consequence::{land_and_report, propose_and_report};
 use rdy_engine::engine::write_typed;
-use rdy_engine::{E_BAD_INPUT, LandOptions, RdyError, Relay, alt};
+use rdy_engine::{LandOptions, RdyError, Relay, alt};
 use rdy_model::RelayEvidence;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -53,37 +53,28 @@ pub(super) fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError>
 }
 
 pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
-    // the session kind, then the flags' pairing, then the relaying actor and run (D-HA7YZ)
-    let (s, by) = relay_approver(cx, a.relayed_by.as_deref(), a.evidence.as_deref())?;
-    // the reply names the relayer as recorded (the session's actor and run), not the flag
-    let recorded = by.clone();
-    let bad = |message: &str, fix: &str| RdyError::new(E_BAD_INPUT, message, fix);
-    let relay = match (by, a.evidence) {
-        (Some(by), Some(quoted)) => Some(Relay {
-            by,
-            evidence: RelayEvidence {
-                quoted,
-                session_ref: a.session_ref.unwrap_or_else(|| "cli".into()),
-                question: a.question.filter(|q| !q.trim().is_empty()),
-            },
-        }),
-        (None, None) => {
-            if a.session_ref.is_some() {
-                return Err(bad(
-                    "session_ref needs relayed_by",
-                    "pass relayed_by and evidence with it, or drop session_ref",
-                ));
-            }
-            if a.question.is_some() {
-                return Err(bad(
-                    "question needs relayed_by",
-                    "pass relayed_by and evidence with it, or drop question",
-                ));
-            }
-            None
-        }
-        _ => return Err(bad(RELAY_PAIR, RELAY_PAIR_FIX)),
+    // the session kind, then the flags' pairing, then the relaying actor and run, then the
+    // quote, question and session_ref limits: the whole relay goes through the table (D-HA7YZ)
+    let input = RelayInput {
+        relayed_by: a.relayed_by,
+        evidence: a.evidence,
+        question: a.question,
+        session_ref: a.session_ref,
+        kind: None,
     };
+    let (s, relay) = relay_approver(cx, &input)?;
+    // the landing records the words as given and checks them itself (an empty session_ref is
+    // refused there, not replaced by the table's default); the relayer is the table's
+    let relay = relay.map(|r| Relay {
+        by: r.by,
+        evidence: RelayEvidence {
+            quoted: input.evidence.unwrap_or_default(),
+            session_ref: input.session_ref.unwrap_or_else(|| "cli".into()),
+            question: input.question.filter(|q| !q.trim().is_empty()),
+        },
+    });
+    // the reply names the relayer as recorded (the session's actor and run), not the flag
+    let recorded = relay.as_ref().map(|r| r.by.clone());
     let opts = LandOptions {
         strict: a.strict.unwrap_or(false),
         relay,

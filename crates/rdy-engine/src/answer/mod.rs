@@ -12,16 +12,19 @@
 //!
 //! # Binding (closed)
 //!
-//! The item must be in the person's queue now, read with no session, so a snooze does not hide
-//! it from an answer.
+//! The ref is an item ref of the closed grammar of O3 ([`is_item_ref`]), or `E_BAD_INPUT`. The
+//! item must be in the person's queue now, read with no session, so a snooze does not hide it
+//! from an answer.
 //! - A proposal ref that is no longer its proposal's latest version: `E_PROPOSAL_MOVED`, with the
 //!   text of an approval of a moved version.
 //! - Any other ref that is not in the queue (its version moved, it was answered, it landed, or
 //!   its batch is not ready): `E_ITEM_MOVED`, `<ref> changed since it was shown`. A batch that is
 //!   not ready lists its issues.
 //! - A relayed answer passes `card_hash`. A local answer may omit it, and then binds to the
-//!   version only. When the card's hash is not the hash given: `E_PROPOSAL_MOVED` for an
-//!   `approve` item, `E_ITEM_MOVED` for the others.
+//!   version only. A decision version proposed in two views stands beside each batch with the
+//!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
+//!   no card of the ref has the hash given: `E_PROPOSAL_MOVED` for an `approve` item,
+//!   `E_ITEM_MOVED` for the others.
 //! - The option is one of the item's option ids, or `E_BAD_INPUT`.
 //!
 //! Each refusal of a moved item carries the item's fresh card, when the queue has one, in
@@ -39,8 +42,9 @@ use crate::gate::{LandInfo, latest_version, moved, resolve_in};
 use crate::pending::PendingQuery;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption, Pending};
 use crate::proposal_show::is_proposal_ref;
+use crate::tensions::set::tension_hex;
 use crate::{Rdy, ReadState, Session};
-use rdy_model::{ActorRun, EvidenceKind, Hash};
+use rdy_model::{ActorRun, BlockId, EvidenceKind, Hash};
 use rdy_store::Relay;
 use relay::{MAX_QUOTE, RelayInput, relayed};
 use serde::Serialize;
@@ -224,12 +228,19 @@ fn bind(
     relayed: bool,
     pick: Pick<'_>,
 ) -> Result<Bound, RdyError> {
+    if !is_item_ref(r) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{r} is not an item ref"),
+            "pass an item ref as rdy_pending gives it: P-<id>@<n>, <D-id>@<version>, <Q-id>@<version>, advice:P-<id>@<n> or a tension id",
+        ));
+    }
     let q = st.pending(&PendingQuery {
         person: person.to_string(),
         session_ref: None,
         max_tokens: CARD_MAX_TOKENS,
     })?;
-    let Some(item) = q.items.iter().find(|i| i.r#ref == r) else {
+    let Some(first) = q.items.iter().find(|i| i.r#ref == r) else {
         return Err(gone(st, &q, r)?);
     };
     let card_hash = match shown {
@@ -249,14 +260,21 @@ fn bind(
         }
         None => None,
     };
-    if card_hash.is_some_and(|h| h.to_string() != item.card_hash) {
-        let code = if item.kind == ItemKind::Approve {
-            E_PROPOSAL_MOVED
-        } else {
-            E_ITEM_MOVED
-        };
-        return Err(changed(code, r).with_corrected(card_of(item)));
-    }
+    // the card of ref r with the hash shown: a decision version beside two batches has two
+    let item = match card_hash.map(|h| h.to_string()) {
+        None => first,
+        Some(h) => match q.items.iter().find(|i| i.r#ref == r && i.card_hash == h) {
+            Some(item) => item,
+            None => {
+                let code = if first.kind == ItemKind::Approve {
+                    E_PROPOSAL_MOVED
+                } else {
+                    E_ITEM_MOVED
+                };
+                return Err(changed(code, r).with_corrected(card_of(first)));
+            }
+        },
+    };
     let option = match pick {
         Pick::Id(id) => item.options.iter().find(|o| o.id == id).ok_or_else(|| {
             let ids: Vec<&str> = item.options.iter().map(|o| o.id.as_str()).collect();
@@ -283,6 +301,26 @@ fn bind(
         option: option.clone(),
         card_hash,
     })
+}
+
+/// Whether `r` is an item ref (O3, closed): `P-<id>@<n>` (an approval), `<block id>@<version
+/// short>` (a decision's confirm or a question's answer: the 12 lowercase hex digits of the
+/// block's version), `advice:P-<id>@<n>` (a version's advised tensions) or a tension id (`tn-`
+/// and 6 to 64 hex digits, or the hex alone). The refs of relayed acts that are not items
+/// (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
+pub fn is_item_ref(r: &str) -> bool {
+    let proposal_version = |p: &str| p.contains('@') && is_proposal_ref(p);
+    let block_version = |p: &str| {
+        p.split_once('@').is_some_and(|(id, v)| {
+            BlockId::parse(id).is_ok()
+                && v.len() == 12
+                && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    };
+    match r.strip_prefix("advice:") {
+        Some(p) => proposal_version(p),
+        None => proposal_version(r) || block_version(r) || tension_hex(r).is_some(),
+    }
 }
 
 /// The refusal of `r`, which is not in the queue `q`: a proposal version that is not its

@@ -8,10 +8,11 @@ use rdy_engine::engine::Engine;
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::tensions::api::{TensionsRequest, run_resolve, run_tensions};
 use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Scope, Session, alt, intent, view_api,
+    E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Relay, Scope, Session, alt, intent,
+    view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
-use rdy_model::{ActorRun, Role};
+use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -147,33 +148,30 @@ pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
 ///   (taken from the session, never parsed from the flag);
 /// - an agent session whose `relayed_by` is anything else: refused (`E_PERMISSION`), with a fix
 ///   that names the session's actor, a spelling this check accepts;
-/// - a quote longer than the table allows: the table's refusal (`E_BAD_INPUT`).
+/// - a human session with `session_ref` or `question` and no relay: refused (`E_BAD_INPUT`,
+///   `<field> needs relayed_by`), `session_ref` named first;
+/// - a quote or a question longer than the table allows, or a `session_ref` longer than a view
+///   name: the table's refusal (`E_BAD_INPUT`).
+///
+/// The whole relay (`relayed_by`, `evidence`, `question`, `session_ref`) goes through the table.
+/// The relayer it returns is the one the landing records.
 pub(crate) fn relay_approver(
     cx: &OpContext,
-    relayed_by: Option<&str>,
-    evidence: Option<&str>,
-) -> Result<(Session, Option<ActorRun>), RdyError> {
+    input: &RelayInput,
+) -> Result<(Session, Option<Relay>), RdyError> {
     let s = cx.session;
-    let input = RelayInput {
-        relayed_by: relayed_by.map(str::to_string),
-        evidence: evidence.map(str::to_string),
-        ..RelayInput::default()
-    };
-    match relayed(s, cx.human, &input, false) {
+    match relayed(s, cx.human, input, false) {
         // a human approves as the session's own actor, as before the table
         Ok((_, None)) => Ok((approver(s)?, None)),
-        Ok((who, Some(relay))) => Ok((who, Some(relay.by))),
-        Err(refusal) => Err(approval_refusal(s, relayed_by, evidence, refusal)),
+        Ok((who, Some(relay))) => Ok((who, Some(relay))),
+        Err(refusal) => Err(approval_refusal(s, input, refusal)),
     }
 }
 
 /// A refusal of the relay table in the approval's own texts and codes.
-fn approval_refusal(
-    s: &Session,
-    relayed_by: Option<&str>,
-    evidence: Option<&str>,
-    refusal: RelayRefusal,
-) -> RdyError {
+fn approval_refusal(s: &Session, input: &RelayInput, refusal: RelayRefusal) -> RdyError {
+    let relayed_by = input.relayed_by.as_deref();
+    let evidence = input.evidence.as_deref();
     let pair = || RdyError::new(E_BAD_INPUT, RELAY_PAIR, RELAY_PAIR_FIX);
     let not_relaying = || RdyError::new(E_PERMISSION, AGENT_NOT_RELAYING, AGENT_NOT_RELAYING_FIX);
     match refusal {
@@ -196,6 +194,19 @@ fn approval_refusal(
         },
         RelayRefusal::NoRelayedBy | RelayRefusal::RelayedByOverMcp => not_relaying(),
         RelayRefusal::NotItself { by, .. } => not_itself(s, &by).unwrap_or_else(pair),
+        // a person's session_ref or question with no relay: named in the approval's order
+        RelayRefusal::NeedsEvidence { .. } if relayed_by.is_none() && evidence.is_none() => {
+            let field = if input.session_ref.is_some() {
+                "session_ref"
+            } else {
+                "question"
+            };
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{field} needs relayed_by"),
+                format!("pass relayed_by and evidence with it, or drop {field}"),
+            )
+        }
         RelayRefusal::NeedsEvidence { .. } => pair(),
         r @ (RelayRefusal::TooLong | RelayRefusal::SessionRefTooLong) => r.error(),
     }

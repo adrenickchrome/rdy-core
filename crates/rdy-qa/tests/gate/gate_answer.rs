@@ -995,3 +995,180 @@ fn di7_the_daemon_relay_texts_do_not_change() {
     assert_eq!(v["assurance"], "relayed", "{v}");
     assert_eq!(v["relayed_by"], json!({"actor": ME, "run": "r1"}), "{v}");
 }
+
+/// Fix round 1: the same decision version proposed in two views stands beside each batch as its
+/// own card, with the same ref and different hashes (each card names its batch). A relayed
+/// answer binds to the card whose ref and hash it names, not to the first card with the ref.
+#[test]
+fn di7_a_decision_in_two_batches_binds_to_the_card_shown() {
+    let (dir, mut r, b) = batch_project();
+    r.view_fork(&ag("batch2"), rdy_qa::intake::BATCH_VIEW, "batch2")
+        .expect("fork the batch view");
+    let (mut r, report) = rdy_qa::intake::propose_reported(
+        dir.path(),
+        r,
+        "batch2",
+        "Guest mode again",
+        Some(rdy_qa::intake::BATCH_SUMMARY),
+    );
+    let second = report["ref"].as_str().expect("ref").to_string();
+    assert_ne!(second, b.r#ref);
+    let q = pending(&r);
+    let firsts = exceptions_of(&q, &b.r#ref);
+    let seconds = exceptions_of(&q, &second);
+    let shared = seconds
+        .iter()
+        .find(|s| firsts.iter().any(|f| f.r#ref == s.r#ref))
+        .unwrap_or_else(|| panic!("a shared exception in {firsts:#?} and {seconds:#?}"))
+        .r#ref
+        .clone();
+    // the queue orders the two batches by when they were raised, then by ref: take whichever
+    // card of the ref comes second, the one a lookup by ref alone never reaches
+    let cards: Vec<&Item> = q.items.iter().filter(|i| i.r#ref == shared).collect();
+    assert_eq!(cards.len(), 2, "one card beside each batch: {cards:#?}");
+    let (other, shown) = (cards[0].clone(), cards[1].clone());
+    assert_ne!(other.batch, shown.batch, "two batches");
+    assert_ne!(
+        other.card_hash, shown.card_hash,
+        "each card names its batch"
+    );
+    let info = r
+        .answer(
+            &agent(),
+            PERSON,
+            req(
+                &shown.r#ref,
+                "confirm",
+                Some(&shown.card_hash),
+                words("Yes."),
+            ),
+        )
+        .expect("the card shown binds");
+    assert_eq!(
+        (info.r#ref.as_str(), info.act.as_str()),
+        (shown.r#ref.as_str(), "confirm")
+    );
+    let a = answer_of(&r, &shown.r#ref);
+    assert_eq!(a.card_hash, Some(hash(&shown.card_hash)));
+}
+
+/// Fix round 1 (O3): an item ref outside the closed grammar is bad input, never a moved item; a
+/// well-formed ref whose item is gone stays `E_ITEM_MOVED`.
+#[test]
+fn di7_a_malformed_item_ref_is_bad_input() {
+    let (_d, mut r, _m) = ready_and_not_ready();
+    for bad in [
+        "garbage",
+        "",
+        "P-abc",
+        "P-0123abcd",
+        "P-0123abcd@",
+        "P-0123abcd@x",
+        "D-ABCDE",
+        "D-ABCDE@",
+        "D-ABCDE@0123456789a",
+        "D-ABCDE@0123456789AB",
+        "D-ABC@0123456789ab",
+        "advice:garbage",
+        "tag:v0.1.0",
+        "own:work",
+        "tn-xyz",
+    ] {
+        let e = r
+            .answer(
+                &approver(),
+                PERSON,
+                req(bad, "approve", None, RelayInput::default()),
+            )
+            .unwrap_err();
+        refused(&e, E_BAD_INPUT, &format!("{bad} is not an item ref"));
+        assert_eq!(
+            e.fix,
+            "pass an item ref as rdy_pending gives it: P-<id>@<n>, <D-id>@<version>, <Q-id>@<version>, advice:P-<id>@<n> or a tension id",
+            "{bad}"
+        );
+    }
+    for gone in [
+        "P-0123abcd@1",
+        "D-ABCDE@0123456789ab",
+        "Q-ABCDE@0123456789ab",
+        "advice:P-0123abcd@1",
+        "tn-0123456789ab",
+    ] {
+        let e = r
+            .answer(
+                &approver(),
+                PERSON,
+                req(gone, "approve", None, RelayInput::default()),
+            )
+            .unwrap_err();
+        assert_ne!(e.code, E_BAD_INPUT, "{gone}: {e}");
+    }
+    assert!(answers(&r).is_empty());
+}
+
+/// Fix round 1: the daemon's approval runs the whole relay through the shared table: the
+/// question and the session_ref are held to its limits too, and its own texts keep their order.
+#[test]
+fn di7_the_daemon_approval_checks_the_whole_relay() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let human = Session::human(PERSON.into(), Role::Writer);
+    let a = agent();
+    let cwd = dir.path().to_path_buf();
+    dispatch(&ctx(&e, &human, &cwd), "new_doc", json!({"path": "a"})).unwrap();
+    let p = dispatch(&ctx(&e, &human, &cwd), "propose", json!({"title": "t"})).unwrap();
+    let id = p["id"].as_str().unwrap().to_string();
+    let approve = |s: &Session, extra: Value| {
+        let mut args = json!({"proposal": id});
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        dispatch(&ctx(&e, s, &cwd), "approve", args)
+    };
+    let too_long = RelayRefusal::TooLong.error();
+    let err = approve(
+        &a,
+        json!({"relayed_by": ME, "evidence": "Yes.", "question": "q".repeat(2001)}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str(), err.fix.as_str()),
+        (
+            too_long.code,
+            too_long.message.as_str(),
+            too_long.fix.as_str()
+        )
+    );
+    let long_ref = RelayRefusal::SessionRefTooLong.error();
+    let err = approve(
+        &a,
+        json!({"relayed_by": ME, "evidence": "Yes.", "session_ref": "s".repeat(500)}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str()),
+        (long_ref.code, long_ref.message.as_str())
+    );
+    // a person's session_ref is named before their question, as before the table
+    let err = approve(
+        &human,
+        json!({"question": "Land it?", "session_ref": "chat-7"}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str(), err.fix.as_str()),
+        (
+            E_BAD_INPUT,
+            "session_ref needs relayed_by",
+            "pass relayed_by and evidence with it, or drop session_ref"
+        )
+    );
+    // nothing landed: the version is still there to approve
+    let v = approve(
+        &a,
+        json!({"relayed_by": ME, "evidence": "Yes.", "question": "q".repeat(2000)}),
+    )
+    .unwrap();
+    assert_eq!(v["assurance"], "relayed", "{v}");
+}
