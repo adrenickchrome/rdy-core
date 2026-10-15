@@ -53,6 +53,7 @@ pub mod view_query;
 pub mod views;
 pub mod wc;
 mod wc_check;
+pub mod worddiff;
 mod write;
 mod yaml_pos;
 
