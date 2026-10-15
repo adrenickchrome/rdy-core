@@ -568,22 +568,139 @@ fn sr10_the_versions_page_passes_the_leak_scan() {
     assert!(found.is_empty(), "the versions page: {found:#?}");
 }
 
+/// The `editing` view of a project whose tutorial holds a changed block of each kind: the golden
+/// project (the view edits the tutorial prose) plus a block added to the tutorial in the same
+/// view. The golden project itself is kept as it is: its pins count its changes.
+fn mixed_view_live() -> (LiveHost, Scope, &'static str) {
+    let _clock = golden::fixture_clock();
+    let (dir, mut r, ids) = golden::project();
+    golden::write(
+        &mut r,
+        "editing",
+        json!([{"op": "create", "type": "prose", "parent": ids.tutorial_doc.to_string(),
+            "body": "A paragraph added to the tutorial."}]),
+    )
+    .expect("the block added to the tutorial");
+    drop(r);
+    (
+        LiveHost::new(dir),
+        Scope::View("editing".into()),
+        "~view/editing/",
+    )
+}
+
+/// The `<article>` of a page: the document's own text, without the navigation around it.
+fn article_of(page: &str, html: &str) -> String {
+    inner_of(html, "data-rdy=\"content\"").unwrap_or_else(|| panic!("{page}: no content article"))
+}
+
+/// One chip of the header: its tag, its class and its href.
+#[derive(Debug)]
+struct ChipTag {
+    tag: String,
+    class: String,
+    href: Option<String>,
+    text: String,
+}
+
+/// The chips of a header fragment, in order.
+fn chip_tags(head: &str) -> Vec<ChipTag> {
+    static CHIP: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"<(a|span)\s([^>]*\bclass="(chip[^"]*)"[^>]*)>([^<]*)</(?:a|span)>"#).unwrap()
+    });
+    static HREF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bhref="([^"]*)""#).unwrap());
+    CHIP.captures_iter(head)
+        .map(|c| ChipTag {
+            tag: c[1].to_string(),
+            class: c[3].to_string(),
+            href: HREF.captures(&c[2]).map(|h| h[1].to_string()),
+            text: c[4].to_string(),
+        })
+        .collect()
+}
+
+/// What is wrong with the chips of `head`, judged one by one. A chip is a link with its own
+/// non-empty href; a `<span>` is allowed only for a class in `unlinked_ok` (O1: the page it would
+/// open is a top-level doc's page, so it is not written). A chip shows only when its count is
+/// not zero, so a chip with no link is never a zero count.
+fn chip_problems(head: &str, unlinked_ok: &[&str]) -> Vec<String> {
+    let chips = chip_tags(head);
+    let mut out = vec![];
+    for want in ["chip chip-since", "chip chip-review"] {
+        if !chips.iter().any(|c| c.class == want) {
+            out.push(format!("no `{want}` chip"));
+        }
+    }
+    for c in &chips {
+        if !(c.text.starts_with('+') && c.text[1..].parse::<u32>().is_ok_and(|n| n > 0)) {
+            out.push(format!(
+                "the chip text {:?} is not a count above zero",
+                c.text
+            ));
+        }
+        match (c.tag.as_str(), c.href.as_deref()) {
+            ("a", Some(h)) if !h.trim().is_empty() => {}
+            ("a", _) => out.push(format!("`{}` is a link with no href", c.class)),
+            _ if unlinked_ok.contains(&c.class.as_str()) => {}
+            _ => out.push(format!("`{}` is a <{}> with no link", c.class, c.tag)),
+        }
+    }
+    out
+}
+
+#[test]
+fn sr10_each_chip_must_link_on_its_own() {
+    // guard of the guard: a nonzero chip that is a span, or a link with an empty href, fails even
+    // when the other chip is a good link
+    let good = r##"<a class="pill" href="x/"><span class="pill-text">v1</span></a> <a class="chip chip-since" href="changes-since.html" title="t">+2</a> <a class="chip chip-review" href="changes.html" title="t">+3</a>"##;
+    assert_eq!(chip_problems(good, &[]), Vec::<String>::new());
+    let since_span = good.replace(
+        r#"<a class="chip chip-since" href="changes-since.html" title="t">+2</a>"#,
+        r#"<span class="chip chip-since" title="t">+2</span>"#,
+    );
+    let found = chip_problems(&since_span, &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("chip chip-since"), "{found:?}");
+    let review_span = good.replace(
+        r#"<a class="chip chip-review" href="changes.html" title="t">+3</a>"#,
+        r#"<span class="chip chip-review" title="t">+3</span>"#,
+    );
+    assert_eq!(chip_problems(&review_span, &[]).len(), 1);
+    // O1: the span is allowed for the class whose page a doc owns, and for that class only
+    assert!(chip_problems(&review_span, &["chip chip-review"]).is_empty());
+    assert_eq!(chip_problems(&since_span, &["chip chip-review"]).len(), 1);
+    let empty = good.replace(r#"href="changes.html""#, r#"href="""#);
+    assert_eq!(chip_problems(&empty, &["chip chip-review"]).len(), 1);
+    let missing = good.replace(r#" href="changes.html""#, "");
+    assert_eq!(chip_problems(&missing, &[]).len(), 1);
+    // a chip that is lost shows too, and a zero count is not a chip
+    let lost = good.replace(
+        r#" <a class="chip chip-review" href="changes.html" title="t">+3</a>"#,
+        "",
+    );
+    assert_eq!(chip_problems(&lost, &[]).len(), 1);
+    let zero = good.replace(">+3<", ">+0<");
+    assert_eq!(chip_problems(&zero, &[]).len(), 1);
+}
+
 #[test]
 fn sr10_review_pages_work_without_javascript() {
-    let g = golden_live();
-    let view = g.live.fetch(&g.view, &g.view_prefix, true);
+    // the tutorial of this view holds an edited block and a new block
+    let (host, scope, prefix) = mixed_view_live();
+    let view = host.fetch(&scope, prefix, true);
     for page in [CHANGED_DOC, "changes.html"] {
         let html = read(view.path(), page);
         let words = texts(&html);
+        // the changed document: the marks of its own blocks, in its article
+        let own = if page == CHANGED_DOC {
+            texts(&article_of(page, &html))
+        } else {
+            words.clone()
+        };
         for want in ["Edited", "New"] {
-            // the changed doc keeps the mark of a changed block; the New mark sits on the summary
-            // page and on the home page's list
-            if page == CHANGED_DOC && want == "New" {
-                continue;
-            }
             assert!(
-                words.iter().any(|t| t == want),
-                "{page}: the {want} word shows without the script: {words:?}"
+                own.iter().any(|t| t == want),
+                "{page}: the {want} word shows without the script: {own:?}"
             );
         }
         assert!(
@@ -598,36 +715,29 @@ fn sr10_review_pages_work_without_javascript() {
             head_words.iter().any(|t| t == "v1.0.0"),
             "{page}: the pill text: {head_words:?}"
         );
-        // the chips are words; the pill and each chip are links, or a span when they lead nowhere
-        let chips: Vec<_> = head.split("<a class=\"chip").skip(1).collect();
-        let spans: Vec<_> = head.split("<span class=\"chip").skip(1).collect();
-        assert!(
-            chips.len() + spans.len() >= 2,
-            "{page}: the landings chip and the review chip: {head}"
-        );
-        assert!(
-            chips.iter().all(|c| c.contains("href=\"")),
-            "{page}: a chip link has an href: {head}"
-        );
-        for chip in head.split("class=\"chip").skip(1) {
-            let text = chip
-                .split_once('>')
-                .and_then(|(_, r)| r.split_once('<'))
-                .map(|(t, _)| t)
-                .unwrap();
+        // each chip is a word and a link of its own: no chip stands in for the other
+        let found = chip_problems(&head, &[]);
+        assert!(found.is_empty(), "{page}: {found:?} in {head}");
+        for chip in chip_tags(&head) {
             assert!(
-                head_words.iter().any(|t| t == text) && text.starts_with('+'),
-                "{page}: the chip text {text:?} is visible text: {head_words:?}"
+                head_words.contains(&chip.text),
+                "{page}: the chip text {:?} is visible text: {head_words:?}",
+                chip.text
+            );
+            let want = match chip.class.as_str() {
+                "chip chip-since" => "changes-since.html",
+                // the review chip leads to the summary, which holds the diff without the script
+                _ => "changes.html",
+            };
+            assert!(
+                chip.href.as_deref().is_some_and(|h| h.ends_with(want)),
+                "{page}: `{}` opens {want}: {head}",
+                chip.class
             );
         }
         assert!(
             head.contains("<a class=\"pill\" href=\""),
             "{page}: the pill is a link: {head}"
-        );
-        // the review chip leads to the summary page, which holds the diff without the script
-        assert!(
-            head.contains("changes.html"),
-            "{page}: the review chip opens the summary: {head}"
         );
     }
 }
