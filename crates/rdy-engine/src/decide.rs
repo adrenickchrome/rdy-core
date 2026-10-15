@@ -10,6 +10,18 @@ use std::collections::BTreeMap;
 pub struct DecisionInput {
     pub parent: String,
     pub statement: String,
+    /// The card's plain-words title (FW-I1).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The card's one line on why a person must answer it.
+    #[serde(default)]
+    pub why: Option<String>,
+    /// What the author recommends the person does with the decision: `confirm` or `reject`.
+    #[serde(default)]
+    pub recommend: Option<String>,
+    /// The recommendation's reason, in one line.
+    #[serde(default)]
+    pub recommend_reason: Option<String>,
     #[serde(default)]
     pub options: Vec<String>,
     #[serde(default)]
@@ -52,8 +64,12 @@ pub struct DecisionInput {
 }
 
 /// The decision fields that rdy_decide sets itself (from its own parameters, or rdy); `fields` may not carry them.
-pub const DECISION_OWN_FIELDS: [&str; 11] = [
+pub const DECISION_OWN_FIELDS: [&str; 15] = [
     "statement",
+    "title",
+    "why",
+    "recommend",
+    "recommend_reason",
     "status",
     "options",
     "authority_basis",
@@ -104,6 +120,10 @@ fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
         ("reversibility", &d.reversibility),
         ("kind", &d.kind),
         ("review_by", &d.review_by),
+        ("title", &d.title),
+        ("why", &d.why),
+        ("recommend", &d.recommend),
+        ("recommend_reason", &d.recommend_reason),
         (decision::EFFECTIVE_FROM, &d.effective_from),
     ] {
         if let Some(v) = v {
@@ -175,7 +195,7 @@ impl Rdy {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("fields.{name} is set by rdy_decide, not through fields"),
-                "pass statement, options, authority_basis, attested_by, reversibility, kind, review_by and effective_from as their own parameters; rdy sets status, decided_at and recorded_at",
+                "pass statement, title, why, recommend, recommend_reason, options, authority_basis, attested_by, reversibility, kind, review_by and effective_from as their own parameters; rdy sets status, decided_at and recorded_at",
             ));
         }
         let brief = d.brief.clone();

@@ -14,6 +14,14 @@ pub struct DecideParams {
     /// The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
     pub parent: Option<String>,
     pub statement: String,
+    /// The card's plain-words title: what a person is asked to confirm, in 80 characters or fewer. A decision with no title gets a W_CARD_WORDS warning.
+    pub title: Option<String>,
+    /// The card's one line on why a person must answer, in 160 characters or fewer.
+    pub why: Option<String>,
+    /// What you recommend the person does with this decision: confirm or reject. Give recommend_reason with it.
+    pub recommend: Option<String>,
+    /// The reason for the recommendation, in one line of 200 characters or fewer.
+    pub recommend_reason: Option<String>,
     pub options: Option<Vec<String>>,
     pub authority_basis: Option<String>,
     pub attested_by: Option<String>,
@@ -26,7 +34,7 @@ pub struct DecideParams {
     pub conditional_on: Option<Vec<String>>,
     pub refines: Option<Vec<String>>,
     pub answers: Option<Vec<String>>,
-    /// Pack-defined decision fields, e.g. {"key": "FW-E3", "disposition": "built in M2c3"}: rdy_schema decision lists them; validated against the pack as rdy_write validates fields. Not statement, options or the other fields with their own parameter, nor status, decided_at or recorded_at.
+    /// Pack-defined decision fields, e.g. {"key": "FW-E3", "disposition": "built in M2c3"}: rdy_schema decision lists them; validated against the pack as rdy_write validates fields. Not statement, title, why, recommend, recommend_reason, options or the other fields with their own parameter, nor status, decided_at or recorded_at.
     pub fields: Option<serde_json::Map<String, Value>>,
     /// When the decision takes effect (RFC 3339); defaults to when it is recorded.
     pub effective_from: Option<String>,
@@ -82,6 +90,10 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         // a placeholder: the tools overwrite it with the resolved parent (given, or the home)
         parent: p.parent.unwrap_or_default(),
         statement: p.statement,
+        title: p.title,
+        why: p.why,
+        recommend: p.recommend,
+        recommend_reason: p.recommend_reason,
         options: p.options.unwrap_or_default(),
         authority_basis: p.authority_basis,
         attested_by: p.attested_by,

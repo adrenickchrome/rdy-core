@@ -156,6 +156,10 @@ fn dfld1_fields_cannot_set_what_rdy_decide_owns() {
     let s = section(&mut st);
     for name in [
         "statement",
+        "title",
+        "why",
+        "recommend",
+        "recommend_reason",
         "status",
         "options",
         "kind",
@@ -177,7 +181,7 @@ fn dfld1_fields_cannot_set_what_rdy_decide_owns() {
         );
         assert_eq!(
             e.fix,
-            "pass statement, options, authority_basis, attested_by, reversibility, kind, review_by and effective_from as their own parameters; rdy sets status, decided_at and recorded_at"
+            "pass statement, title, why, recommend, recommend_reason, options, authority_basis, attested_by, reversibility, kind, review_by and effective_from as their own parameters; rdy sets status, decided_at and recorded_at"
         );
     }
 }

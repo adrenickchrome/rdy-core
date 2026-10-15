@@ -2,6 +2,7 @@ pub mod accept;
 pub mod alt;
 mod areas;
 pub mod brief;
+pub mod card_words;
 pub mod code_brief;
 pub mod code_index;
 mod config;
