@@ -165,15 +165,14 @@ fn di6_a_question_without_options_is_not_an_item() {
 fn di6_an_answered_question_leaves_the_queue() {
     let (dir, r, spec, q, item) = with_question(refund_question());
     assert!(find(&queue(&r, None), &item).is_some());
-    // the person's answer is recorded: the question waits for its decision to land
-    let r2 = put_answer(
+    // the person's answer is recorded: the question is still open in canon, so it stays
+    let mut r = put_answer(
         dir.path(),
         r,
         &answer(&item, AnswerAct::AnswerQuestion, "o1", "Finance"),
     );
-    assert!(find(&queue(&r2, None), &item).is_none());
+    assert!(find(&queue(&r, None), &item).is_some());
     // a decision that answers it lands: the question is answered in canon
-    let mut r = r2;
     r.decide(
         &writer(),
         "decide",
@@ -185,6 +184,8 @@ fn di6_an_answered_question_leaves_the_queue() {
         },
     )
     .unwrap();
+    // proposed in a view only: canon still holds the question open
+    assert!(find(&queue(&r, None), &item).is_some());
     land(&mut r, "decide").unwrap();
     assert!(find(&queue(&r, None), &item).is_none());
     assert!(
@@ -192,6 +193,37 @@ fn di6_an_answered_question_leaves_the_queue() {
             .items
             .iter()
             .all(|i| i.kind != ItemKind::Answer)
+    );
+}
+
+#[test]
+fn di6_an_abandoned_answering_decision_leaves_the_question_in_the_queue() {
+    let (dir, mut r, spec, q, item) = with_question(refund_question());
+    r.decide(
+        &writer(),
+        "decide",
+        DecisionInput {
+            parent: spec.section.to_string(),
+            statement: "Finance approves refunds".into(),
+            answers: vec![q.to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let r = put_answer(
+        dir.path(),
+        r,
+        &answer(&item, AnswerAct::AnswerQuestion, "o1", "Finance"),
+    );
+    let mut r = r;
+    // the answering decision is abandoned: it never reaches canon
+    r.view_close(&writer(), &["decide".to_string()], "not this one")
+        .unwrap();
+    let after = queue(&r, None);
+    assert!(
+        find(&after, &item).is_some(),
+        "the question is unanswered in canon: {:?}",
+        refs(&after)
     );
 }
 
@@ -367,9 +399,12 @@ fn di6_a_blocking_tension_that_no_open_proposal_holds_is_no_item() {
 }
 
 #[test]
-fn di6_an_accepted_advice_is_not_asked_again() {
-    // the person accepted the advice: the tension blocks, and the person answered it already
+fn di6_an_accepted_advice_leaves_its_blocking_tension_as_an_item() {
+    // the person accepted the advice: the advice card is answered, but the tension blocks
+    // until it is dismissed or a side changes, so it is a blocking resolve item
     let (_d, mut r, b) = batch_project();
+    let advice = format!("advice:{}", b.r#ref);
+    assert!(find(&queue(&r, None), &advice).is_some());
     r.accept_advice(
         &writer(),
         rdy_engine::tensions::api::AcceptRequest {
@@ -380,12 +415,19 @@ fn di6_an_accepted_advice_is_not_asked_again() {
     )
     .unwrap();
     let q = queue(&r, None);
-    assert!(
-        q.items.iter().all(|i| i.kind != ItemKind::Resolve),
-        "{:?}",
-        refs(&q)
-    );
+    assert!(find(&q, &advice).is_none(), "{:?}", refs(&q));
     assert_eq!(q.not_ready.len(), 1);
+    let blocking: Vec<&Item> = q.items.iter().filter(|i| i.blocking).collect();
+    assert_eq!(blocking.len(), 1, "{:?}", refs(&q));
+    let i = blocking[0];
+    assert_eq!((i.kind, i.batch.as_deref()), (ItemKind::Resolve, None));
+    assert!(i.why.contains(&b.r#ref), "{}", i.why);
+    // a person dismisses it: it leaves the queue
+    let person = Session::human("human:founder".into(), Role::Approver);
+    r.dismiss_tension(&person, &i.r#ref.clone(), "judged fine")
+        .unwrap();
+    let q = queue(&r, None);
+    assert!(q.items.iter().all(|i| !i.blocking), "{:?}", refs(&q));
 }
 
 #[test]

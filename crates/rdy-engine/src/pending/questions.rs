@@ -2,8 +2,9 @@
 //!
 //! A question is an item when both hold:
 //! - it is open in canon: no accepted decision links to it with `answers` (as the coverage
-//!   report counts an open question, `IssueCode::OpenQuestion`), and the person has not answered
-//!   its current version (an answer waits for its decision to land);
+//!   report counts an open question, `IssueCode::OpenQuestion`). A recorded `answer_question`
+//!   answer does not close it: the question leaves the queue when its answering decision lands
+//!   in canon, and stays while that decision is only proposed, abandoned or rejected;
 //! - it carries authored `options`: a list of two to four non-blank labels (F7).
 //!
 //! Any other open question is no item and stays on the coverage report. The list is closed.
@@ -14,13 +15,13 @@
 //! `recommended` label, when it is one of the options, is the recommendation, with
 //! `recommend_reason` as its reason. Whoever last wrote the question raised it.
 use super::item::{Item, ItemKind, ItemOption};
-use super::queue::{PendingQuery, answered, item, later, text};
+use super::queue::{PendingQuery, item, later, text};
 use crate::error::RdyError;
 use crate::session::{now_ms, rfc3339};
 use crate::{ReadState, Scope};
 use rdy_graph::EdgeKind;
 use rdy_model::decision::{self, DecisionStatus};
-use rdy_model::{AnswerAct, Block, BlockId};
+use rdy_model::{Block, BlockId};
 
 /// The most options a card offers (`o1` to `o4`).
 const OPTIONS_MAX: usize = 4;
@@ -48,9 +49,6 @@ pub(crate) fn question_items(st: &ReadState, _q: &PendingQuery) -> Result<Vec<It
     let mut out = vec![];
     for (b, labels) in open {
         let r = format!("{}@{}", b.id, b.version_hash().short());
-        if answered(st, &r, AnswerAct::AnswerQuestion)? {
-            continue;
-        }
         let title = text(b, "title")
             .or_else(|| text(b, "prompt"))
             .unwrap_or_default();

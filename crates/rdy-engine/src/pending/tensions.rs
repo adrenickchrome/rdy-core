@@ -16,9 +16,12 @@
 //! words counts as the person. Its options are `dismiss` and `later`: the person has no
 //! "accept" for a tension that already blocks.
 //!
-//! The list is closed. Three cases are no item:
+//! A tension that blocks because the person accepted the advice is an item too: accepting makes
+//! it block, it does not resolve or dismiss it. The advice card is gone after the accept; this
+//! item stays while the tension is open.
+//!
+//! The list is closed. Two cases are no item:
 //! - a tension that is dismissed (it is not open);
-//! - a tension that came from the person accepting advice: the person answered it already;
 //! - a tension of a version whose proposal the person rejected.
 //!
 //! A version that is not ready is still searched: the person's dismissal may be what makes it
@@ -29,7 +32,6 @@ use crate::ReadState;
 use crate::error::RdyError;
 use crate::gate::open_proposals;
 use crate::session::{now_ms, rfc3339};
-use crate::tensions::semantic::pair_of;
 use crate::tensions::{Tension, TensionSeverity, tension_label};
 use rdy_model::{AnswerAct, Proposal};
 use std::collections::BTreeMap;
@@ -135,7 +137,7 @@ fn blocking_items(
             continue;
         }
         for t in open_tensions(st, p)? {
-            if t.severity != TensionSeverity::Blocking || accepted_advice(st, &t) {
+            if t.severity != TensionSeverity::Blocking {
                 continue;
             }
             found
@@ -153,14 +155,6 @@ fn blocking_items(
         .into_values()
         .map(|b| blocking_item(&b, now))
         .collect())
-}
-
-/// Whether `t` is a semantic tension that blocks because the person accepted the reviewers'
-/// advice (D-WMCFW): the person answered it already.
-fn accepted_advice(st: &ReadState, t: &Tension) -> bool {
-    pair_of(t)
-        .and_then(|k| st.semantic().tension(&k))
-        .is_some_and(|o| o.record.advice.is_some() && o.record.blocking)
 }
 
 fn blocking_item(b: &Blocking, now: i64) -> Item {
