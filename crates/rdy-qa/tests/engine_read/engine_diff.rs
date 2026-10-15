@@ -563,3 +563,141 @@ fn sr4_type_change_and_parent_move() {
     assert_eq!(changed[0].fields, vec!["type".to_string()]);
     assert_eq!(cmp.moved.len(), 1, "{cmp:?}");
 }
+
+/// The fields project with its entity landed first under the section, so the section holds
+/// `thing`, `a`, `b` and the prose `b` is last: (dir, rdy, section, a, b, thing).
+fn last_project() -> (tempfile::TempDir, Rdy, BlockId, BlockId, BlockId, BlockId) {
+    let (d, mut r, s, a, b, thing) = fields_project();
+    write(
+        &mut r,
+        "prep",
+        json!([{"op": "move", "id": thing.to_string(), "parent": s.to_string(),
+                "before": a.to_string()}]),
+    )
+    .unwrap();
+    land(&mut r, "prep").unwrap();
+    let canon = r.read().materialized(&Scope::Canon).unwrap();
+    assert_eq!(
+        children(&canon, &s),
+        vec![thing.clone(), a.clone(), b.clone()],
+        "the prep landed"
+    );
+    (d, r, s, a, b, thing)
+}
+
+/// `b`'s order key in canon and in `view`, and the section's children in `view`.
+fn keys_and_children(
+    r: &Rdy,
+    view: &Scope,
+    s: &BlockId,
+    b: &BlockId,
+) -> (String, String, Vec<BlockId>) {
+    let st = r.read();
+    let (from, to) = (
+        st.materialized(&Scope::Canon).unwrap(),
+        st.materialized(view).unwrap(),
+    );
+    let (old, new) = (from.get(b).unwrap(), to.get(b).unwrap());
+    (old.order.clone(), new.order.clone(), children(&to, s))
+}
+
+#[test]
+fn sr4_appending_the_last_block_to_its_parent_is_no_move() {
+    let (_d, mut r, s, a, b, thing) = last_project();
+    // `b` is already last: appending it to its own parent gives it a new key, not a new place
+    write(
+        &mut r,
+        "again",
+        json!([{"op": "move", "id": b.to_string(), "parent": s.to_string()}]),
+    )
+    .unwrap();
+    let view = Scope::View("again".into());
+    let (old_key, new_key, kids) = keys_and_children(&r, &view, &s, &b);
+    assert_ne!(old_key, new_key, "the append gives a new order key");
+    assert_eq!(
+        kids,
+        vec![thing.clone(), a.clone(), b.clone()],
+        "the place is the same"
+    );
+    let diff = r.read().diff(&Scope::Canon, &view).unwrap();
+    for e in &diff.entries {
+        assert_eq!(e.moved, None, "{}: no movement", e.id);
+        assert_ne!(e.change, DiffChange::Moved, "{}", e.id);
+    }
+    assert_eq!(diff.counts.moved, 0);
+    // the new key alone is a stored change with nothing to show (rule 1: neither)
+    let e = entry(&diff, &b);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert!(e.fields.is_empty(), "{:?}", e.fields);
+    assert_eq!(e.body, None);
+    assert_eq!(e.links, None);
+    assert_eq!(e.type_change, None);
+}
+
+#[test]
+fn sr4_appending_the_last_block_with_a_field_change_is_no_move() {
+    let (_d, mut r, s, a, b, thing) = last_project();
+    write(
+        &mut r,
+        "againf",
+        json!([{"op": "update", "id": b.to_string(), "fields": {"normal": "new"},
+                "move_to": {"parent": s.to_string()}}]),
+    )
+    .unwrap();
+    let view = Scope::View("againf".into());
+    let (old_key, new_key, kids) = keys_and_children(&r, &view, &s, &b);
+    assert_ne!(old_key, new_key, "the append gives a new order key");
+    assert_eq!(
+        kids,
+        vec![thing.clone(), a.clone(), b.clone()],
+        "the place is the same"
+    );
+    let diff = r.read().diff(&Scope::Canon, &view).unwrap();
+    assert_eq!(entry_ids(&diff), vec![b.clone()]);
+    let e = entry(&diff, &b);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert_eq!(e.fields, vec![old_to_new("normal")]);
+    assert_eq!(e.moved, None, "no movement");
+    assert_eq!(
+        diff.counts,
+        DiffCounts {
+            added: 0,
+            removed: 0,
+            updated: 1,
+            moved: 0
+        }
+    );
+}
+
+#[test]
+fn sr4_a_block_its_siblings_move_around_does_not_move() {
+    let (_d, mut r, s, a, b, thing) = last_project();
+    // `a` changes a field and keeps its key; `b` moves to the front, so `a` is now last
+    write(
+        &mut r,
+        "around",
+        json!([{"op": "update", "id": a.to_string(), "fields": {"normal": "new"}},
+               {"op": "move", "id": b.to_string(), "parent": s.to_string(),
+                "before": thing.to_string()}]),
+    )
+    .unwrap();
+    let view = Scope::View("around".into());
+    let to = r.read().materialized(&view).unwrap();
+    assert_eq!(children(&to, &s), vec![b.clone(), thing.clone(), a.clone()]);
+    let diff = r.read().diff(&Scope::Canon, &view).unwrap();
+    let e = entry(&diff, &a);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert_eq!(e.moved, None, "`a` did not move: `b` did");
+    let e = entry(&diff, &b);
+    assert_eq!(e.change, DiffChange::Moved);
+    assert!(e.moved.as_ref().unwrap().reordered_only);
+    assert_eq!(
+        diff.counts,
+        DiffCounts {
+            added: 0,
+            removed: 0,
+            updated: 1,
+            moved: 1
+        }
+    );
+}

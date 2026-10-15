@@ -11,8 +11,11 @@
 //!    `deleted` (→ [`DiffChange::Removed`]), `changed` and `moved`. For a block on both sides
 //!    (task-4 rulings 1 and 2):
 //!    - its content changed when its body, its links, its type or any custom field differs;
-//!    - its place changed when its parent differs, or, under the same parent, its order key
-//!      (`reordered_only: true`);
+//!    - its place changed when its parent differs, or, under the same parent, when its order
+//!      key differs and its place among its siblings differs too (`reordered_only: true`). Its
+//!      place among its siblings is its index among the siblings that the parent holds on both
+//!      sides. A new key at the same place (an append of the last block, a rebalance) is no
+//!      move, and neither is a sibling moving around a block that keeps its key;
 //!    - content changed: [`DiffChange::Updated`], with `moved` set when its place also changed;
 //!    - only its place changed: [`DiffChange::Moved`];
 //!    - neither (a pins-only change): `Updated` with nothing set. The engine reports it, and
@@ -214,8 +217,50 @@ fn doc_of(m: &Materialized, id: &BlockId) -> Option<BlockId> {
     m.doc_of(id).map(|d| d.id.clone())
 }
 
+/// Each block's index among the siblings its parent holds on both sides, in `from` and in `to`,
+/// one parent at a time (rule 1: the place among the siblings).
+struct SiblingPlaces<'a> {
+    from: &'a Materialized,
+    to: &'a Materialized,
+    by_parent: BTreeMap<Option<BlockId>, BTreeMap<BlockId, (usize, usize)>>,
+}
+
+impl<'a> SiblingPlaces<'a> {
+    fn new(from: &'a Materialized, to: &'a Materialized) -> Self {
+        Self {
+            from,
+            to,
+            by_parent: BTreeMap::new(),
+        }
+    }
+
+    /// Whether `id`, under `parent` on both sides, has another index among the siblings both
+    /// sides hold there.
+    fn reordered(&mut self, parent: Option<&BlockId>, id: &BlockId) -> bool {
+        let (from, to) = (self.from, self.to);
+        let places = self.by_parent.entry(parent.cloned()).or_insert_with(|| {
+            let old: Vec<&BlockId> = from.children(parent).iter().map(|b| &b.id).collect();
+            let new: Vec<&BlockId> = to.children(parent).iter().map(|b| &b.id).collect();
+            let in_new: BTreeSet<&BlockId> = new.iter().copied().collect();
+            let in_old: BTreeSet<&BlockId> = old.iter().copied().collect();
+            let mut out: BTreeMap<BlockId, (usize, usize)> = BTreeMap::new();
+            for (i, id) in old.into_iter().filter(|id| in_new.contains(id)).enumerate() {
+                out.insert(id.clone(), (i, 0));
+            }
+            for (i, id) in new.into_iter().filter(|id| in_old.contains(id)).enumerate() {
+                if let Some(slot) = out.get_mut(id) {
+                    slot.1 = i;
+                }
+            }
+            out
+        });
+        places.get(id).is_some_and(|(a, b)| a != b)
+    }
+}
+
 /// One entry for a block on both sides (rules 1 to 4, from the blocks' own members).
-fn both_sides(from: &Materialized, to: &Materialized, old: &Block, new: &Block) -> DiffEntry {
+fn both_sides(places: &mut SiblingPlaces, old: &Block, new: &Block) -> DiffEntry {
+    let (from, to) = (places.from, places.to);
     let fields = changed_fields(old, new);
     let type_change = (old.block_type != new.block_type).then(|| FromTo {
         from: old.block_type.clone(),
@@ -228,7 +273,10 @@ fn both_sides(from: &Materialized, to: &Materialized, old: &Block, new: &Block) 
     let body = (old.body != new.body).then(|| worddiff::diff(&old.body, &new.body, unit_of(new)));
     let content = !fields.is_empty() || type_change.is_some() || links.is_some() || body.is_some();
     let same_parent = old.parent == new.parent;
-    let moved = (!same_parent || old.order != new.order).then(|| Moved {
+    // a new key alone is no move: the place among the siblings must differ too
+    let reordered =
+        same_parent && old.order != new.order && places.reordered(new.parent.as_ref(), &new.id);
+    let moved = (!same_parent || reordered).then(|| Moved {
         from_parent: old.parent.clone(),
         to_parent: new.parent.clone(),
         from_path: from.path_of(&old.id),
@@ -342,12 +390,13 @@ impl ReadState {
 
         // (place in `to`, before (0) or at (1) that place, `from` index) sorts the entries
         let mut keyed: Vec<((usize, u8, usize), DiffEntry)> = vec![];
+        let mut places = SiblingPlaces::new(&mf, &mt);
         for id in &both {
             let (Some(old), Some(new)) = (mf.get(id), mt.get(id)) else {
                 continue;
             };
             let at = to_pos.get(id).map_or(to_order.len(), |p| p.0);
-            keyed.push(((at, 1, 0), both_sides(&mf, &mt, old, new)));
+            keyed.push(((at, 1, 0), both_sides(&mut places, old, new)));
         }
         for id in &added {
             if let Some(b) = mt.get(id) {
