@@ -63,11 +63,12 @@ fn sr5_the_header_shows_the_pill_and_chips() {
     }
 }
 
-/// The review project's changed blocks, by rule O2 (worked out by hand): (a) the edited lede,
-/// the edited prose and the new prose (the new decision is not visible): 3; (b) the section and
-/// the prose of the new doc Fresh: 2; (c) the removed line `Gone soon.`: 1; (d) the section and
-/// the prose of the removed doc Old guide: 2; (e) no doc or folder field changed: 0. Total 8.
-const REVIEW_BLOCKS: u32 = 8;
+/// The review project's changed blocks, by rule O2 and the task-5 ruling (worked out by hand):
+/// (a) the edited lede, the edited prose and the new prose (the new decision is not visible): 3;
+/// (b) the section and the prose of the new doc Fresh: 2; (c) the removed line `Gone soon.`: 1;
+/// (d) the section and the prose of the removed doc Old guide: 2; (e) the added doc Fresh and
+/// the removed doc Old guide: 2 (no doc or folder moved or changed a field). Total 10.
+const REVIEW_BLOCKS: u32 = 10;
 
 #[test]
 fn sr5_a_review_page_has_the_accent_chip_and_no_title_in_the_pill() {
@@ -385,4 +386,229 @@ fn sr5_static_headers_follow_the_page_root() {
         "{}",
         header_of(&page)
     );
+}
+
+/// The ruling on task 5 (D-ZPAVR, D-42YMF, D-W40KZ): a doc or folder that a view adds or removes
+/// is one changed block, as any other added or removed block. A view that only adds an empty doc
+/// has changed what a reader sees, so its page never says "no changes yet".
+#[test]
+fn sr5_an_added_empty_doc_is_a_change() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny_with_doc();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "empty", "title": "Empty", "doc_type": "overview"}}]),
+    )
+    .unwrap();
+    let st = r.read();
+    let scope = Scope::View("w".into());
+    let rv = rdy_render::review::build(&st, &scope)
+        .unwrap()
+        .expect("a view has a review");
+    assert_eq!(rv.changed_blocks(), 1);
+    let site = build_site(&st, &scope, Mode::Static).unwrap();
+    assert!(
+        site.files.contains_key("empty.html"),
+        "guard: the doc has a page"
+    );
+    assert!(
+        site.label.ends_with(" · view: w, 1 change, not landed"),
+        "{}",
+        site.label
+    );
+    let home = String::from_utf8_lossy(&site.files["index.html"]).to_string();
+    assert!(
+        header_of(&home).ends_with(&review_chip("", 1)),
+        "{}",
+        header_of(&home)
+    );
+    // the change list names the new doc
+    assert!(
+        home.contains(
+            "<li><a href=\"empty.html\">Empty</a> <span class=\"chg-label chg-new\">New</span></li>"
+        ),
+        "{home}"
+    );
+}
+
+/// The ruling on task 5: a removed folder counts one, each doc removed with it counts one, and
+/// each block of those docs counts as before.
+#[test]
+fn sr5_a_removed_folder_counts_the_folder_and_its_docs() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny_with_doc();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "guides", "title": "Guides"}},
+            {"op": "create", "type": "doc", "id": "$g", "parent": "$f", "fields": {"name": "setup", "title": "Setup", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$g", "body": "How to set up."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = |k: &str| made.created[k].clone();
+    write(
+        &mut r,
+        "w",
+        json!([
+            {"op": "delete", "id": id("$p")},
+            {"op": "delete", "id": id("$g")},
+            {"op": "delete", "id": id("$f")}
+        ]),
+    )
+    .unwrap();
+    let st = r.read();
+    let scope = Scope::View("w".into());
+    let site = build_site(&st, &scope, Mode::Static).unwrap();
+    // the folder, the doc and its prose
+    assert!(
+        site.label.ends_with(" · view: w, 3 changes, not landed"),
+        "{}",
+        site.label
+    );
+    let home = String::from_utf8_lossy(&site.files["index.html"]).to_string();
+    assert!(
+        header_of(&home).ends_with(&review_chip("", 3)),
+        "{}",
+        header_of(&home)
+    );
+    assert!(
+        home.contains(
+            "<li><span class=\"changes-gone\">Guides</span> <span class=\"chg-label chg-removed\">Removed</span></li>"
+        ),
+        "{home}"
+    );
+}
+
+/// A proposal version made before the first landing is based on the empty project. After an
+/// unrelated first landing no scope names that base, and the page shows no review marks (the
+/// task-8 ruling), but the version keeps its name and its count: its blocks are counted against
+/// the empty base it was made on, never as zero.
+#[test]
+fn sr5_a_pre_landing_proposal_keeps_its_name_and_count_after_a_first_landing() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    write(
+        &mut r,
+        "w",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "proposed", "title": "Proposed doc", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "parent": "$d", "body": "Before anything lands."}
+        ]),
+    )
+    .unwrap();
+    let p = r.propose(&writer(), "w", "Initial proposal").unwrap();
+    let scope = r
+        .read()
+        .resolve_scope(&format!("proposal:{}", p.id))
+        .unwrap();
+    // the doc and its prose
+    let want = " · proposal: Initial proposal, 2 changes, not landed";
+    let before = build_site(&r.read(), &scope, Mode::Static).unwrap();
+    assert!(before.label.ends_with(want), "{}", before.label);
+    write(
+        &mut r,
+        "x",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "landed", "title": "Landed doc", "doc_type": "overview"}}]),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    assert_eq!(
+        rdy_render::review::base_of(&r.read(), &scope),
+        None,
+        "guard: no scope names the empty base"
+    );
+    let after = build_site(&r.read(), &scope, Mode::Static).unwrap();
+    assert_eq!(after.label, before.label);
+    let page = String::from_utf8_lossy(&after.files["proposed.html"]).to_string();
+    assert!(
+        header_of(&page).ends_with(&review_chip("", 2)),
+        "{}",
+        header_of(&page)
+    );
+    assert!(!page.contains("chg-label"), "no review marks: {page}");
+}
+
+/// A tag name can be long (sr2 bounds it, not the header). Its pill shrinks and cuts its text
+/// with an ellipsis; the chips keep their size; the row stays one line inside the page at every
+/// phone width, with Show changes beside it or not (site quality bar §2.7).
+#[test]
+fn sr5_a_long_tag_shrinks_the_pill_and_keeps_the_chips() {
+    let (_d, _r, out) = long_tag_view();
+    let home = read(out.path(), "index.html");
+    assert_eq!(
+        header_of(&home),
+        format!(
+            "<a class=\"pill\" href=\"index.html#versions\"><span class=\"pill-text\">{LONG_TAG}</span></a> {} {}",
+            since_chip("", 1, LONG_TAG),
+            review_chip("", 1)
+        ),
+        "guard: the pill and both chips"
+    );
+    let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
+    let css = rdy_qa::site::parse_css(&text);
+    let at = |sel: &str, p: &str, w: u32| rdy_qa::site::cascaded(&css, sel, p, w);
+    for w in [320, 360, 375, 600, 900, 901, 1024, 1440] {
+        // the row is bounded by its grid area, and may shrink below its text
+        assert_eq!(at(".version", "min-width", w).as_deref(), Some("0"), "{w}");
+        assert_eq!(
+            at(".version", "max-width", w).as_deref(),
+            Some("100%"),
+            "{w}"
+        );
+        // the pill gives way; its text is cut with an ellipsis, never overflows
+        assert_eq!(at(".pill", "flex", w).as_deref(), Some("0 1 auto"), "{w}");
+        for (p, v) in [
+            ("min-width", "0"),
+            ("overflow", "hidden"),
+            ("text-overflow", "ellipsis"),
+            ("white-space", "nowrap"),
+        ] {
+            assert_eq!(
+                at(".pill-text", p, w).as_deref(),
+                Some(v),
+                ".pill-text {p} at {w}"
+            );
+        }
+        // the chips never shrink
+        assert_eq!(at(".chip", "flex", w).as_deref(), Some("none"), "{w}");
+    }
+    // a phone keeps the 40 px floor; a wide screen lets the pill shrink to its text's cut
+    for w in [320, 360, 900] {
+        assert_eq!(at(".pill", "min-width", w).as_deref(), Some("40px"), "{w}");
+    }
+    for w in [901, 1440] {
+        assert_eq!(at(".pill", "min-width", w).as_deref(), Some("0"), "{w}");
+    }
+}
+
+/// A tag 48 characters long.
+const LONG_TAG: &str = "v1.0.0-release-candidate-feature-preview-october";
+
+/// `Tiny` with doc Identity, tagged [`LONG_TAG`], then one landing that renames the doc, then a
+/// view `w` that renames it again; the site of `w`.
+fn long_tag_view() -> (tempfile::TempDir, rdy_engine::Rdy, tempfile::TempDir) {
+    let _clock = fixture_clock();
+    let (d, mut r) = tiny_with_doc();
+    r.tag(&approver(), LONG_TAG, None, None).unwrap();
+    let doc = first_doc_id(&r).to_string();
+    write(
+        &mut r,
+        "later",
+        json!([{"op": "update", "id": doc, "fields": {"title": "Identity, landed"}}]),
+    )
+    .unwrap();
+    land(&mut r, "later").unwrap();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": doc, "fields": {"title": "Identity, in review"}}]),
+    )
+    .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("w".into()), out.path()).unwrap();
+    (d, r, out)
 }

@@ -581,8 +581,13 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     let mut site = Site::new(&m, &pack, &site_name);
     site.set_disagreements(disagree::list(rdy, scope)?);
     let review = review::build(rdy, scope)?;
-    let reviewed = match &review {
-        Some(rv) => reviewed_of(rdy, scope, rv)?,
+    // a proposal version with no base here still names itself and counts against its own base
+    let blocks = match &review {
+        Some(rv) => Some(rv.changed_blocks()),
+        None => review::unreviewed_changed_blocks(rdy, scope)?,
+    };
+    let reviewed = match blocks {
+        Some(blocks) => reviewed_of(rdy, scope, blocks)?,
         None => None,
     };
     let header = version::header(&position, reviewed.as_ref());
@@ -742,13 +747,12 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
 }
 
 /// What a review render shows (D-BMX8P): a view's name and owner, or a proposal version's title
-/// and author, with the blocks it changes (`Review::changed_blocks`). None for any other scope.
+/// and author, with the `blocks` it changes (`Review::changed_blocks`). None for any other scope.
 fn reviewed_of(
     rdy: &ReadState,
     scope: &Scope,
-    review: &review::Review,
+    blocks: u32,
 ) -> Result<Option<version::Reviewed>, RdyError> {
-    let blocks = review.changed_blocks();
     Ok(match scope {
         Scope::View(name) => Some(version::Reviewed {
             kind: version::ReviewedKind::View,

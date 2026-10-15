@@ -55,8 +55,7 @@ fn ls2_a_proposal_version_renders_in_review_mode() {
         &mut r,
         "w",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "proposed-doc", "title": "Proposed doc", "doc_type": "overview"}},
-            {"op": "create", "type": "prose", "parent": "$d", "body": "What the doc is for."}
+            {"op": "create", "type": "doc", "fields": {"name": "proposed-doc", "title": "Proposed doc", "doc_type": "overview"}}
         ]),
     )
     .unwrap();
@@ -66,8 +65,8 @@ fn ls2_a_proposal_version_renders_in_review_mode() {
     let pref = r.resolve_proposal(&p.id).unwrap().to_string();
     let scope = r.read().resolve_scope(&format!("proposal:{pref}")).unwrap();
     let b = build_live(&r.read(), &scope, &format!("/~proposal/{pref}/")).unwrap();
-    // the new doc's paragraph is the one changed block (O2); "draft" is only the lifecycle state
-    // (D-BMX8P, O9)
+    // the new doc is the one changed block (O2, the task-5 ruling); "draft" is only the
+    // lifecycle state (D-BMX8P, O9)
     assert!(
         b.label
             .ends_with("· proposal: Add a doc, 1 change, not landed"),

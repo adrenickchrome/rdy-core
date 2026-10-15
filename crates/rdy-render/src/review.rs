@@ -109,13 +109,14 @@ impl Review {
         &self.removed_pages
     }
 
-    /// The blocks a review render changes (O2, closed), as the review chip, the text label and
-    /// the change summary count them. Each block counts once, when it is any of: (a) a visible
-    /// non-tree block marked Edited or New; (b) a visible non-tree block under a New doc; (c) a
-    /// block of a removed line (the removed block and its removed visible descendants); (d) a
-    /// visible non-tree block under a removed page. Then (e) each doc or folder whose own block
-    /// changed in a field a reader sees (`title`, `name`, `description`) counts one. Decisions,
-    /// rationale and pins-only changes never count.
+    /// The blocks a review render changes (O2, closed; the task-5 ruling), as the review chip,
+    /// the text label and the change summary count them. Each block counts once, when it is any
+    /// of: (a) a visible non-tree block marked Edited or New; (b) a visible non-tree block under a
+    /// New doc; (c) a block of a removed line (the removed block and its removed visible
+    /// descendants); (d) a visible non-tree block under a removed page; (e) a doc or folder that
+    /// the review render adds or removes, each one (a folder's docs too), or whose own place
+    /// (its parent, or its order under the same parent) or own field a reader sees (`title`,
+    /// `name`, `description`) changed. Decisions, rationale and pins-only changes never count.
     pub fn changed_blocks(&self) -> u32 {
         self.changed_blocks
     }
@@ -161,18 +162,25 @@ fn count_changed(rv: &Review, cmp: &Compare, dm: &Materialized, bm: &Materialize
                 .map(|(b, _)| &b.id),
         );
     }
-    // (e) a doc's or folder's own field a reader sees
-    let pages = cmp
-        .changed
+    // (e) the docs and folders added, removed or moved, and those whose own field a reader sees
+    // changed (a move to another parent is in `moved`; a new place under the same parent is an
+    // `order` change)
+    let tree_entry = |e: &&CompareEntry| tree::is_tree_type(&e.block_type);
+    let pages: Vec<BlockId> = cmp
+        .added
         .iter()
-        .filter(|e| e.fields.iter().any(|f| PAGE_FIELDS.contains(&f.as_str())))
+        .chain(&cmp.deleted)
+        .chain(&cmp.moved)
+        .filter(tree_entry)
+        .chain(cmp.changed.iter().filter(tree_entry).filter(|e| {
+            e.fields
+                .iter()
+                .any(|f| f == "order" || PAGE_FIELDS.contains(&f.as_str()))
+        }))
         .filter_map(|e| BlockId::parse(&e.id).ok())
-        .filter(|id| {
-            dm.get(id)
-                .is_some_and(|b| tree::is_tree_type(&b.block_type))
-        })
-        .count();
-    u32::try_from(counted.len() + pages).unwrap_or(u32::MAX)
+        .collect();
+    counted.extend(pages.iter());
+    u32::try_from(counted.len()).unwrap_or(u32::MAX)
 }
 
 /// The scope a draft is read against: canon at the landing the view is based on, or canon itself
@@ -209,6 +217,42 @@ pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError>
     let cmp = rdy.compare(scope, &base)?;
     let (dm, bm) = (rdy.materialized(scope)?, rdy.materialized(&base)?);
     Ok(Some(review(&cmp, &dm, &bm)))
+}
+
+/// The count of [`Review::changed_blocks`] for a proposal version that has no base here: one
+/// made before the first landing, read once canon has landed. It was made on the empty project,
+/// so it is counted against that: every block it holds is added. Its page shows no marks
+/// ([`base_of`]), but it still names the version and its count. Any other scope gives none.
+pub fn unreviewed_changed_blocks(rdy: &ReadState, scope: &Scope) -> Result<Option<u32>, RdyError> {
+    let Scope::Proposal(p) = scope else {
+        return Ok(None);
+    };
+    if rdy.proposal_base(p)?.is_some() || rdy.canon_head().is_none() {
+        return Ok(None);
+    }
+    let dm = rdy.materialized(scope)?;
+    let empty = Materialized::default();
+    let cmp = Compare {
+        a: String::new(),
+        b: String::new(),
+        added: dm
+            .iter()
+            .map(|b| CompareEntry {
+                id: b.id.to_string(),
+                block_type: b.block_type.clone(),
+                path: None,
+                fields: vec![],
+                from_parent: None,
+                to_parent: None,
+                conflict: None,
+            })
+            .collect(),
+        deleted: vec![],
+        changed: vec![],
+        moved: vec![],
+        conflicted: vec![],
+    };
+    Ok(Some(review(&cmp, &dm, &empty).changed_blocks()))
 }
 
 /// On the page: neither a decision nor its rationale.

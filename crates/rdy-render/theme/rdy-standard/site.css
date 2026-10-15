@@ -91,9 +91,11 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .brand { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 0.98rem; white-space: nowrap; min-width: 0; max-width: 24rem; }
 .brand svg { width: 22px; height: 22px; flex: none; }
 .brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.version { grid-column: 2; grid-row: 1; justify-self: start; white-space: nowrap; }
-.pill { font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; text-decoration: none; }
-.chip { font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.15rem 0.5rem; white-space: nowrap; text-decoration: none; }
+.version { grid-column: 2; grid-row: 1; justify-self: start; white-space: nowrap; min-width: 0; max-width: 100%; }
+/* a long tag: the pill gives way and cuts its text (the 40 px rule below sets its floor on a phone) */
+.pill { font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; text-decoration: none; flex: 0 1 auto; min-width: 0; }
+.pill-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.15rem 0.5rem; white-space: nowrap; text-decoration: none; flex: none; }
 .chip-since { color: var(--ink-soft); background: var(--surface-2); }
 .chip-review { color: var(--accent-ink); background: var(--accent-soft); }
 .head .search-wrap { grid-column: 3; grid-row: 1; }
@@ -347,8 +349,8 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /pager == */
 
 /* == version == */
-/* the pill and its chips are one line that never wraps or cuts: they size to their text (head
-   section), on their own row on a phone */
+/* the pill and its chips are one line that never wraps: they size to their text, and a pill
+   too long for the row cuts its text (head section); on their own row on a phone */
 .version { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 0.35rem; }
 .pill, .chip { display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; }
 .version .lock { width: 12px; height: 12px; flex: none; }
