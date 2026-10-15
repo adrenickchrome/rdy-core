@@ -100,21 +100,23 @@ fn ib4_a_landing_in_a_declared_area_matches_and_one_outside_does_not() {
     let a = sub_at_head(&r, &ag("a"), &["payments"]);
     put(&mut r, "b", upd(&ident, "identity edit"));
     land(&mut r, "b").unwrap();
-    assert!(
-        events(&entries(&r, &a)).is_empty(),
+    // di11: a new proposal reaches every session (pending_added); only landings are area-bound
+    assert_eq!(
+        events(&entries(&r, &a)),
+        ["pending_added"],
         "identity is not a's area"
     );
     put(&mut r, "c", upd(&pay, "payments edit"));
     let l = land(&mut r, "c").unwrap();
     let es = entries(&r, &a);
-    assert_eq!(events(&es), ["landed"]);
-    assert!(es[0].line.starts_with("landing "), "{}", es[0].line);
+    assert_eq!(events(&es), ["pending_added", "pending_added", "landed"]);
+    assert!(es[2].line.starts_with("landing "), "{}", es[2].line);
     assert!(
-        es[0]
+        es[2]
             .line
             .ends_with("of view c changed 1 blocks in your areas (payments)"),
         "{}",
-        es[0].line
+        es[2].line
     );
     let _ = l;
 }
@@ -128,7 +130,7 @@ fn ib4_with_no_declared_areas_the_areas_of_your_blocks_apply() {
     let a = sub_at_head(&r, &ag("a"), &[]);
     put(&mut r, "b", upd(&pay2, "b lands in payments"));
     land(&mut r, "b").unwrap();
-    assert_eq!(events(&entries(&r, &a)), ["landed"]);
+    assert_eq!(events(&entries(&r, &a)), ["pending_added", "landed"]);
 }
 
 #[test]
@@ -235,7 +237,8 @@ fn ib4_other_kinds_never_match() {
     );
     let p = r.propose(&writer(), "b", "b").unwrap();
     let _ = p;
-    assert!(entries(&r, &a).is_empty());
+    // di11: the write and the view ops match nothing; the proposal is the one entry (O10)
+    assert_eq!(events(&entries(&r, &a)), ["pending_added"]);
 }
 
 /// Ruling task-4.1: a cut inside a batch counts the batch's raw items, not its matched entries,

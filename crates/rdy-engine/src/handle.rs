@@ -58,6 +58,7 @@ impl Rdy {
             decisions: None,
             serve: ServeSection::default(),
             coverage: None,
+            propose: None,
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
@@ -120,6 +121,7 @@ impl Rdy {
         let require_up_to_date = cfg.require_up_to_date();
         let idle_days = cfg.idle_days();
         let coverage_target = cfg.coverage_target();
+        let (propose_cadence, propose_changes) = (cfg.propose_cadence(), cfg.propose_changes());
         let decisions_home = cfg.decisions_home();
         let lease_ttl_ms = i64::from(cfg.lease_ttl_minutes()) * 60_000;
         // a placeholder until the first publish below, which replaces all of it
@@ -137,6 +139,8 @@ impl Rdy {
             require_up_to_date,
             idle_days,
             coverage_target,
+            propose_cadence,
+            propose_changes,
             decisions_home,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),

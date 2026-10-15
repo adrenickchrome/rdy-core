@@ -28,7 +28,7 @@
           "blocks": [
             "c-TWVHA"
           ],
-          "id": "tn-8cc5740f88a2",
+          "id": "tn-4fcdb94d1cef",
           "kind": "edit_collision",
           "severity": "blocking",
           "sides": [
@@ -40,9 +40,9 @@
                   "version": "4cd060ea3b0e142744a4935c7c0e92930fdfb68dae9097235a0bc849228daaf4"
                 }
               ],
-              "change": "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b",
+              "change": "82360dd5464cdf8773b671ef0fad1e4dc198912f08432cd907ab08e48c774a6d",
               "run": "cli",
-              "side": "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b",
+              "side": "82360dd5464cdf8773b671ef0fad1e4dc198912f08432cd907ab08e48c774a6d",
               "views": [
                 "work"
               ]
@@ -55,9 +55,9 @@
                   "version": "e3c4ea16c472675bb7741ccc73eb7f276afd15762e38b2652f8d1106fe709f46"
                 }
               ],
-              "change": "cd27496480bdc54930a5291fca3d17ece8a6a6775ad24cd145c1d72c1538b6c2",
+              "change": "c3c966c82e25ee482072c70002cc315cae3fb466456577dc7d543d9e0e92b5bf",
               "run": "a",
-              "side": "cd27496480bdc54930a5291fca3d17ece8a6a6775ad24cd145c1d72c1538b6c2",
+              "side": "c3c966c82e25ee482072c70002cc315cae3fb466456577dc7d543d9e0e92b5bf",
               "views": [
                 "alt-x"
               ]
@@ -65,7 +65,7 @@
           ],
           "status": "open",
           "summary": "two changes edit c-TWVHA from one base",
-          "tension": "8cc5740f88a2ad0f8e2d8737b5c6ffe70e7270dbe187f35ab852f38689d7e679"
+          "tension": "4fcdb94d1cef1246f668929a1134f9e42158627a3718dded1802e92fb7a38da9"
         }
       ],
       "view": "alt-x"
@@ -98,7 +98,7 @@
           "blocks": [
             "c-TWVHA"
           ],
-          "id": "tn-085104e59c78",
+          "id": "tn-43edacc2406f",
           "kind": "edit_collision",
           "severity": "blocking",
           "sides": [
@@ -110,9 +110,9 @@
                   "version": "4cd060ea3b0e142744a4935c7c0e92930fdfb68dae9097235a0bc849228daaf4"
                 }
               ],
-              "change": "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b",
+              "change": "82360dd5464cdf8773b671ef0fad1e4dc198912f08432cd907ab08e48c774a6d",
               "run": "cli",
-              "side": "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b",
+              "side": "82360dd5464cdf8773b671ef0fad1e4dc198912f08432cd907ab08e48c774a6d",
               "views": [
                 "work"
               ]
@@ -125,9 +125,9 @@
                   "version": "c3eebd3ee9e9f343fb1f5835d548bec1b83ab42934bd33ed7e71e796dc2fab8f"
                 }
               ],
-              "change": "5b2c3a7ea72c66519b7a501d4fc51b61aefc5da8f60b8e4e549d665c661c4f77",
+              "change": "b883ec48bf85567f7c89b7b8c9fca489688400e46f1441ad81b83a1b43fa0f22",
               "run": "a",
-              "side": "5b2c3a7ea72c66519b7a501d4fc51b61aefc5da8f60b8e4e549d665c661c4f77",
+              "side": "b883ec48bf85567f7c89b7b8c9fca489688400e46f1441ad81b83a1b43fa0f22",
               "views": [
                 "alt-y"
               ]
@@ -135,7 +135,7 @@
           ],
           "status": "open",
           "summary": "two changes edit c-TWVHA from one base",
-          "tension": "085104e59c78bd30c01c2144fe0c80fd1efa6e54eb0ecb99da117d5ae9e8368e"
+          "tension": "43edacc2406fcbb56772b8174c13f93e08b479297a103531bed075e37c516ec0"
         }
       ],
       "view": "alt-y"
@@ -151,7 +151,7 @@
       "actor": "agent:a",
       "run": "a"
     },
-    "id": "as-3aa9c7204c77",
+    "id": "as-eb8639d8407d",
     "members": [
       {
         "changes": 1,
@@ -176,9 +176,9 @@
     ],
     "prev": null,
     "question": null,
-    "set": "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede",
+    "set": "eb8639d8407d8f299faff096bd1aca6c7e328588efa2a2c28758bf6a21f65828",
     "status": "open",
     "title": "Fee wording",
-    "version": "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede"
+    "version": "eb8639d8407d8f299faff096bd1aca6c7e328588efa2a2c28758bf6a21f65828"
   }
 }

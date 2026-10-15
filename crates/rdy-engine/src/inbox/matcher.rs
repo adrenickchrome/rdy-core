@@ -3,6 +3,7 @@
 //! the events below match here.
 use super::Entry;
 use super::inflight::RunInFlight;
+use crate::gate::{ProposalRef, open_proposals, version_number};
 use crate::semantic::candidates::Request;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, Op};
@@ -180,8 +181,52 @@ pub fn match_event(
                 ),
             )
         }
+        // O10 (D-JV6Z8): the two events that put something in the needs-you queue. Neither reads
+        // readiness, so a re-derived inbox stays the same.
+        EventKind::Proposed { proposal, .. } => {
+            let stable = st.reader().proposal(proposal)?.stable.unwrap_or(*proposal);
+            let pref = ProposalRef {
+                version: *proposal,
+                stable,
+                n: version_number(st, proposal)?,
+            };
+            entry(
+                "pending_added",
+                vec![proposal.to_string()],
+                pending_line(&pref),
+            )
+        }
+        EventKind::ReviewSubmitted { review, pair, .. } => {
+            // the verdict carries advice when the pair's tension was opened by this review with
+            // the reviewer's advice; it waits for an answer on the open versions that hold it
+            let Some(open) = st.semantic().tension(pair) else {
+                return Ok(None);
+            };
+            if open.record.review != *review || open.record.advice.is_none() {
+                return Ok(None);
+            }
+            for (pref, p) in open_proposals(st)? {
+                let advised = st.advised_of(&p.view, &p.changes)?;
+                if advised
+                    .iter()
+                    .any(|a| a.open.record.key == *pair && !a.open.record.blocking)
+                {
+                    return Ok(entry(
+                        "pending_added",
+                        vec![review.to_string()],
+                        pending_line(&pref),
+                    ));
+                }
+            }
+            None
+        }
         _ => None,
     })
+}
+
+/// The line of a `pending_added` entry.
+fn pending_line(pref: &ProposalRef) -> String {
+    format!("{pref} waits for an answer; read rdy_pending")
 }
 
 /// How many blocks the changes of `landing` write (create or update) that are in one of `areas`

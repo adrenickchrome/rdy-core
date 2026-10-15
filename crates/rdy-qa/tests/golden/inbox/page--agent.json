@@ -10,6 +10,13 @@
       "line": "tension 0260e4682e71 opened on your change 6e3e2e0e10c8 (edit_collision, blocking): a side changed (change 62c4254aa068)"
     },
     {
+      "event": "pending_added",
+      "ids": [
+        "c66a83566bc61a4d6bf92d2d68024f481483ff7d0d28cfb86372a4889cb8866a"
+      ],
+      "line": "P-c66a83566bc6@1 waits for an answer; read rdy_pending"
+    },
+    {
       "event": "intent_posted",
       "ids": [
         "e6d149772c917dea7bd9f75cd491b0e54d8b13d753a0c52b1767abd1b3e5897a"
@@ -23,6 +30,13 @@
         "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
       ],
       "line": "tension af61f1dd8ba4 opened on your change 6e3e2e0e10c8 (edit_collision, blocking): a side changed (change 0c3f84a38d23)"
+    },
+    {
+      "event": "pending_added",
+      "ids": [
+        "9d36720c2c2400047acd29d14fad66f0c01c9af0524ddc1681535c88cbcd165d"
+      ],
+      "line": "P-9d36720c2c24@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "landed",

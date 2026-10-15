@@ -30,7 +30,62 @@ pub(crate) struct Config {
     /// The coverage the corpus aims at (FW-CO4a).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) coverage: Option<CoverageConfig>,
+    /// When an agent proposes (FW-PC1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) propose: Option<ProposeConfig>,
 }
+
+/// The `propose:` section. Both keys are defaulted, so a section that holds only a misspelt key
+/// opens with its warning (config typos warn).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProposeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cadence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changes: Option<u32>,
+}
+
+/// When an agent proposes (`propose.cadence`, FW-PC1, D-0GGW9). It never blocks a write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProposeCadence {
+    /// At a natural break, such as the end of a task or an iteration: the default.
+    #[default]
+    Break,
+    /// After each task.
+    Task,
+    /// After `propose.changes` changes in the view; write replies then say `propose_due`.
+    Changes,
+    /// Only when the person asks.
+    Asked,
+}
+
+impl ProposeCadence {
+    /// The word the config and `rdy_session` use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProposeCadence::Break => "break",
+            ProposeCadence::Task => "task",
+            ProposeCadence::Changes => "changes",
+            ProposeCadence::Asked => "asked",
+        }
+    }
+
+    /// The cadence a config word names; `None` for any other word.
+    fn parse(word: &str) -> Option<ProposeCadence> {
+        [
+            ProposeCadence::Break,
+            ProposeCadence::Task,
+            ProposeCadence::Changes,
+            ProposeCadence::Asked,
+        ]
+        .into_iter()
+        .find(|c| c.as_str() == word)
+    }
+}
+
+/// `propose.changes` when the config does not set it (a value outside 1 to 1000 is dropped with a
+/// warning, so it gives this too).
+pub const DEFAULT_PROPOSE_CHANGES: u32 = 10;
 
 /// The `coverage:` section of `.rdy.yaml`. Defaulted, so a section that holds only a misspelt
 /// key opens with its warning (config typos warn).
@@ -198,6 +253,25 @@ impl Config {
         self.coverage
             .as_ref()
             .map_or(DEFAULT_COVERAGE_TARGET, |c| c.target)
+    }
+
+    /// `propose.cadence`; `break` when unset (an unknown word never gets here: the levels drop it
+    /// with a warning).
+    pub(crate) fn propose_cadence(&self) -> ProposeCadence {
+        self.propose
+            .as_ref()
+            .and_then(|p| p.cadence.as_deref())
+            .and_then(ProposeCadence::parse)
+            .unwrap_or_default()
+    }
+
+    /// `propose.changes`: the changes that make a proposal due under cadence `changes`.
+    pub(crate) fn propose_changes(&self) -> u32 {
+        self.propose
+            .as_ref()
+            .and_then(|p| p.changes)
+            .filter(|n| (1..=1000).contains(n))
+            .unwrap_or(DEFAULT_PROPOSE_CHANGES)
     }
 
     pub(crate) fn idle_days(&self) -> u32 {

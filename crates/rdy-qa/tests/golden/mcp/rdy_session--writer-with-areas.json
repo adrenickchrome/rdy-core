@@ -2,6 +2,13 @@
   "areas": [
     "payments"
   ],
+  "pending": {
+    "blocking": 0,
+    "items": 0
+  },
+  "propose": {
+    "cadence": "break"
+  },
   "role": "writer",
   "view": "a"
 }

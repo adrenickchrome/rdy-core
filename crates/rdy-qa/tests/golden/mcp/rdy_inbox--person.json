@@ -4,25 +4,39 @@
     {
       "event": "intent_posted",
       "ids": [
-        "1dbfab05bde70505575625b604ee928366e05863499ae88607ca66aaa7f5328b"
+        "7406ea17fe2487c366543f0c5d39dbf33b1ef0f3b0d126b1164b8ca01d2dbf9f"
       ],
-      "line": "agent:a posted intent 1dbfab05bde7 on area payments"
+      "line": "agent:a posted intent 7406ea17fe24 on area payments"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "8cc5740f88a2ad0f8e2d8737b5c6ffe70e7270dbe187f35ab852f38689d7e679",
-        "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b"
+        "4fcdb94d1cef1246f668929a1134f9e42158627a3718dded1802e92fb7a38da9",
+        "82360dd5464cdf8773b671ef0fad1e4dc198912f08432cd907ab08e48c774a6d"
       ],
-      "line": "tension 8cc5740f88a2 opened on your change 21742964d864 (edit_collision, blocking): a side changed (change cd27496480bd)"
+      "line": "tension 4fcdb94d1cef opened on your change 82360dd5464c (edit_collision, blocking): a side changed (change c3c966c82e25)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "085104e59c78bd30c01c2144fe0c80fd1efa6e54eb0ecb99da117d5ae9e8368e",
-        "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b"
+        "43edacc2406fcbb56772b8174c13f93e08b479297a103531bed075e37c516ec0",
+        "82360dd5464cdf8773b671ef0fad1e4dc198912f08432cd907ab08e48c774a6d"
       ],
-      "line": "tension 085104e59c78 opened on your change 21742964d864 (edit_collision, blocking): a side changed (change 5b2c3a7ea72c)"
+      "line": "tension 43edacc2406f opened on your change 82360dd5464c (edit_collision, blocking): a side changed (change b883ec48bf85)"
+    },
+    {
+      "event": "pending_added",
+      "ids": [
+        "7c392ad83dc39722fc5c323da994464da23aac8a527500e15dad607240c0c219"
+      ],
+      "line": "P-7c392ad83dc3@1 waits for an answer; read rdy_pending"
+    },
+    {
+      "event": "pending_added",
+      "ids": [
+        "af795e5a3436b07af8e26850cba8b1d87b2c9c75b560f984861bc5621ed34afd"
+      ],
+      "line": "P-7c392ad83dc3@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false,

@@ -4,6 +4,7 @@
 mod mcp;
 mod mcp_accept;
 mod mcp_alts;
+mod mcp_cadence;
 mod mcp_compact;
 mod mcp_coverage;
 mod mcp_decision_home;

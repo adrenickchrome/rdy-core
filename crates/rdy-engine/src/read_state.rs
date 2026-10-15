@@ -667,6 +667,10 @@ pub struct ReadState {
     pub(crate) idle_days: u32,
     /// `coverage.target` in `.rdy.yaml` (default 80), read by a full publish.
     pub(crate) coverage_target: u32,
+    /// `propose.cadence` (default `break`), read by a full publish (FW-PC1).
+    pub(crate) propose_cadence: crate::ProposeCadence,
+    /// `propose.changes` (default 10), read by a full publish (FW-PC1).
+    pub(crate) propose_changes: u32,
     /// `decisions.home` in `.rdy.yaml`, read by a full publish (FW-PR2).
     pub(crate) decisions_home: Option<Arc<str>>,
     pub(crate) reader: StoreReader,
@@ -775,6 +779,18 @@ impl ReadState {
     /// read when this state was published.
     pub fn coverage_target(&self) -> u32 {
         self.coverage_target
+    }
+
+    /// When an agent proposes (`propose.cadence`), as the config read when this state was
+    /// published.
+    pub fn propose_cadence(&self) -> crate::ProposeCadence {
+        self.propose_cadence
+    }
+
+    /// The changes that make a proposal due under cadence `changes` (`propose.changes`), as the
+    /// config read when this state was published.
+    pub fn propose_changes(&self) -> u32 {
+        self.propose_changes
     }
 
     /// The verdicts and semantic tensions of this state (plan M2e1).

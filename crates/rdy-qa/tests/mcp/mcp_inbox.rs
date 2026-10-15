@@ -50,10 +50,11 @@ fn ib7_rdy_inbox_lists_a_landing_in_your_areas() {
     let s = served();
     let mut a = agent(&s, Some(json!(["payments"])));
     land(&s, "payments/fees");
+    // di11: the proposal waits for an answer (every session hears it), then the landing
     let first = a.call("rdy_inbox", json!({})).ok();
-    assert_eq!(kinds(&first), vec!["landed"], "{first}");
+    assert_eq!(kinds(&first), vec!["pending_added", "landed"], "{first}");
     let acked = a.call("rdy_inbox", json!({"ack": true})).ok();
-    assert_eq!(kinds(&acked), vec!["landed"], "{acked}");
+    assert_eq!(kinds(&acked), vec!["pending_added", "landed"], "{acked}");
     assert_eq!(acked["acked"], true, "{acked}");
     let third = a.call("rdy_inbox", json!({})).ok();
     assert_eq!(third["entries"], json!([]), "{third}");
@@ -78,7 +79,7 @@ fn ib7_an_agent_reads_and_acks_the_persons_inbox_from_chat() {
     let read = a
         .call("rdy_inbox", json!({"person": true, "ack": true}))
         .ok();
-    assert_eq!(kinds(&read), vec!["landed"], "{read}");
+    assert_eq!(kinds(&read), vec!["pending_added", "landed"], "{read}");
     assert_eq!(read["acked"], true, "{read}");
     assert_eq!(read["person"], "human:qa", "{read}");
     // the cursor is the person's, saved: a second read starts past the page, and answers the
@@ -93,7 +94,7 @@ fn ib7_an_agent_reads_and_acks_the_persons_inbox_from_chat() {
     // the agent's own inbox is untouched: the person's ack did not move its cursor, so the
     // landing in its area is still there
     let own = a.call("rdy_inbox", json!({})).ok();
-    assert_eq!(kinds(&own), vec!["landed"], "{own}");
+    assert_eq!(kinds(&own), vec!["pending_added", "landed"], "{own}");
     assert!(own.get("started").is_none(), "{own}");
     assert!(own.get("person").is_none(), "{own}");
 }

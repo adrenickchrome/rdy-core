@@ -115,7 +115,9 @@ pub use write::{
     json_to_field, parse_justification, parse_op, parse_ops,
 };
 
-pub use config::{DEFAULT_LEASE_TTL_MINUTES, ServeConfig, serve_config};
+pub use config::{
+    DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig, serve_config,
+};
 pub use engine::{Engine, Local, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{

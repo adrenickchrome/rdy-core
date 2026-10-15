@@ -962,6 +962,10 @@ fn report<T: Serialize + 'static>(
     };
     let states = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
     let before = states.as_ref().map(|s| &*s.0);
+    // FW-PC1: a nudge, never a refusal; absent unless the count is reached under cadence `changes`
+    if v.is_object() && propose_due(&engine.read(), view) {
+        v["propose_due"] = true.into();
+    }
     // the write's changes: an import lists one per author in `changes` (oldest first, the last
     // is `change`); every other write has the one `change`
     let change = v
@@ -1010,6 +1014,30 @@ fn report<T: Serialize + 'static>(
     }
     attach_related(&mut v, engine, view, &changes);
     Ok(v)
+}
+
+/// FW-PC1 (D-0GGW9): whether a proposal is due for `view`. Only under cadence `changes`: the
+/// view's included changes that no open proposal of the view carries (its latest version, or
+/// every change when it has none) number at least `propose.changes`. A state that cannot be read
+/// says no: the nudge never fails a write.
+fn propose_due(st: &ReadState, view: &str) -> bool {
+    if st.propose_cadence() != crate::ProposeCadence::Changes {
+        return false;
+    }
+    let Ok(open) = crate::gate::open_proposals(st) else {
+        return false;
+    };
+    let carried: BTreeSet<Hash> = open
+        .iter()
+        .filter(|(_, p)| p.view == view)
+        .flat_map(|(_, p)| p.changes.iter().copied())
+        .collect();
+    let waiting = st
+        .included(view)
+        .iter()
+        .filter(|c| !carried.contains(*c))
+        .count();
+    waiting >= st.propose_changes() as usize
 }
 
 /// cc16 (FW-CH3): `coverage: {before, after, pages}`, the change `changes` made to the coverage

@@ -181,7 +181,8 @@ fn ib11_a_landing_in_your_area_notifies_your_inbox() {
         a.notifications()
     );
     let page = a.call("rdy_inbox", json!({})).ok();
-    assert_eq!(kinds(&page), vec!["landed"], "{page}");
+    // di11: the proposal waits for an answer, then the landing
+    assert_eq!(kinds(&page), vec!["pending_added", "landed"], "{page}");
 }
 
 #[test]
@@ -199,10 +200,11 @@ fn ib11_a_landing_outside_your_areas_does_not_match() {
     // the inbox, not the absence of a notification, says the identity landing did not match
     let page = a.call("rdy_inbox", json!({})).ok();
     let got = entries(&page);
-    assert!(!got.is_empty(), "{page}");
-    assert_eq!(got[0]["event"], "landed", "{page}");
+    // di11: a new proposal reaches every session (pending_added); only landings are area-bound
+    let landed: Vec<&Value> = got.iter().filter(|e| e["event"] == "landed").collect();
+    assert_eq!(landed.len(), 1, "{page}");
     assert!(
-        got[0]["line"].as_str().unwrap().ends_with("(payments)"),
+        landed[0]["line"].as_str().unwrap().ends_with("(payments)"),
         "{page}"
     );
     assert!(

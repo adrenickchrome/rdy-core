@@ -1,6 +1,6 @@
 {
   "added": [
-    "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731"
+    "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54"
   ],
   "added_deps": [],
   "cascaded": [],
@@ -9,19 +9,19 @@
     {
       "base": "e3538dcd6ff0837e20521111ba0fb43569c29e113eb9b27c83a001df38068c71",
       "block": "c-CFPE0",
-      "id": "00ae8312dd93f64fc5e6eea786e49027593cdcd3ae3bfca23722348354d9d313",
+      "id": "3359044b21a363fe14dcfcff162a5fc27d19021ed29425726014a7234c062044",
       "sides": [
         {
-          "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
-          "landed": null,
-          "summary": "agent:a: a edits A",
-          "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
-        },
-        {
-          "change": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+          "change": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
           "landed": null,
           "summary": "agent:b: b edits A and C",
           "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
+        },
+        {
+          "change": "a320dfcc976e9fb0eca004e8f193a3a8fed86ca9f9ef9cdd09c125184e246d81",
+          "landed": null,
+          "summary": "agent:a: a edits A",
+          "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
         }
       ]
     }
@@ -33,10 +33,10 @@
         "edge": "conflict"
       },
       "block": "c-CFPE0",
-      "conflict": "00ae8312dd93f64fc5e6eea786e49027593cdcd3ae3bfca23722348354d9d313",
+      "conflict": "3359044b21a363fe14dcfcff162a5fc27d19021ed29425726014a7234c062044",
       "fix": "write the block from the version you want (rdy_context lists the sides), or exclude one side's change",
       "follow_up": "resolve",
-      "id": "cq-8f49e477d26020c4",
+      "id": "cq-97f454f45b460432",
       "kind": "conflict"
     },
     {
@@ -47,9 +47,9 @@
       "block": "c-CFPE0",
       "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
       "follow_up": "resolve",
-      "id": "cq-edac95080ad9dcba",
+      "id": "cq-815d8bfffc1f50d1",
       "kind": "tension",
-      "tension": "tn-abd52083b644"
+      "tension": "tn-99c026266bfb"
     },
     {
       "because": {
@@ -58,11 +58,11 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "update",
-      "id": "cq-bcb98962a27a4bbb",
+      "id": "cq-0f93870dde0556df",
       "kind": "dependent"
     }
   ],
-  "head": "01e961cd6884770c2add29ce0263147dc038fa82682689fd95094d960df58876",
+  "head": "611ba5ee4c88912a642af28af8a25c223f8c30fcfdd3262036b26df571fb5a1b",
   "on_change": {
     "resolved": [],
     "tensions": [
@@ -70,27 +70,11 @@
         "blocks": [
           "c-CFPE0"
         ],
-        "id": "tn-abd52083b644",
+        "id": "tn-99c026266bfb",
         "kind": "unjustified_change",
         "overridden": true,
         "severity": "blocking",
         "sides": [
-          {
-            "actor": "agent:a",
-            "blocks": [
-              {
-                "block": "c-CFPE0",
-                "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
-              }
-            ],
-            "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
-            "run": "a",
-            "side": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
-            "views": [
-              "a",
-              "a-fork"
-            ]
-          },
           {
             "actor": "agent:b",
             "blocks": [
@@ -99,18 +83,34 @@
                 "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
               }
             ],
-            "change": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+            "change": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
             "run": "b",
-            "side": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+            "side": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
             "views": [
               "a",
               "b"
             ]
+          },
+          {
+            "actor": "agent:a",
+            "blocks": [
+              {
+                "block": "c-CFPE0",
+                "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
+              }
+            ],
+            "change": "a320dfcc976e9fb0eca004e8f193a3a8fed86ca9f9ef9cdd09c125184e246d81",
+            "run": "a",
+            "side": "a320dfcc976e9fb0eca004e8f193a3a8fed86ca9f9ef9cdd09c125184e246d81",
+            "views": [
+              "a",
+              "a-fork"
+            ]
           }
         ],
         "status": "open",
-        "summary": "changes 592ccd6c6f77, 8868cbe8fbf3 edit stable normative block c-CFPE0 without a justification",
-        "tension": "abd52083b644d49eaa734e3b259d2d9b1988cdfcb99237fcfbd66637a863b68b"
+        "summary": "changes 86ee8c14d973, a320dfcc976e edit stable normative block c-CFPE0 without a justification",
+        "tension": "99c026266bfb74a649e968dc1582941cc50b62ecafe11549546419c5e6ef31ab"
       }
     ]
   },
