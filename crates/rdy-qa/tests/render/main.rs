@@ -3,14 +3,17 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod render;
 mod render_build;
+mod render_changes;
 mod render_diagrams;
 mod render_disagree;
 mod render_disagree_group;
 mod render_dx2;
 mod render_glossary;
+mod render_header;
 mod render_live;
 mod render_llms;
 mod render_markdown;
+mod render_menu;
 mod render_mermaid;
 mod render_nav;
 mod render_no_coverage;
@@ -18,6 +21,7 @@ mod render_plain;
 mod render_presentational;
 mod render_ref;
 mod render_review;
+mod render_review_bar;
 mod render_review_nav;
 mod render_review_page;
 mod render_review_toggle;

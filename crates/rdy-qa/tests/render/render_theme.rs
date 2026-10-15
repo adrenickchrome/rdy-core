@@ -116,7 +116,7 @@ fn theme1_anchors_land_below_the_sticky_header() {
 }
 
 /// FF-C: the brand sizes to its name, the version pill is never cut, and on a phone the pill
-/// (with its lock and "snapshot") has a header row of its own.
+/// (with its lock and "snapshot") sits on the first header row, with the brand and the Menu button (sr7).
 #[test]
 fn theme1_the_header_shows_the_whole_name_and_pill_at_every_width() {
     let (_d, out) = site();
@@ -137,8 +137,8 @@ fn theme1_the_header_shows_the_whole_name_and_pill_at_every_width() {
     }
     for w in [360, 900] {
         assert_ne!(at(&css, ".version", "display", w), "none", "{w}");
-        assert_eq!(at(&css, ".version", "grid-row", w), "2", "{w}");
-        assert_eq!(at(&css, ".head .search-wrap", "grid-row", w), "3", "{w}");
+        assert_eq!(at(&css, ".version", "grid-row", w), "1", "{w}");
+        assert_eq!(at(&css, ".head .search-wrap", "grid-row", w), "2", "{w}");
     }
 }
 

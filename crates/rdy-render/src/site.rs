@@ -633,7 +633,7 @@ impl<'a> Site<'a> {
     }
 
     /// Whether a doc or folder already has the page at `page`.
-    fn page_taken(&self, page: &str) -> bool {
+    pub(crate) fn page_taken(&self, page: &str) -> bool {
         self.page_owner.contains_key(page)
     }
 
@@ -843,6 +843,21 @@ impl<'a> Site<'a> {
         })
     }
 
+    /// As [`Site::plain`], but each code span of `text` stands between the code marks
+    /// ([`inline::plain_refs_coded`]): a word diff keeps a code span code (the task-6 ruling).
+    /// A reference reads as plain words, as on the page.
+    pub(crate) fn plain_coded(
+        &self,
+        text: &str,
+        mode: RefMode,
+        form: Form,
+        unresolved: &dyn Fn(&str) -> String,
+    ) -> String {
+        inline::plain_refs_coded(text, mode, form, &|span| {
+            self.ref_words(span, 0, unresolved)
+        })
+    }
+
     /// The words a reference with no display text reads as: its target's current key when typed
     /// as one and the target has one, else the target's label, or `unresolved(token)` when it
     /// leads nowhere.
@@ -1026,7 +1041,7 @@ fn upper_first(s: &str) -> String {
 
 /// A tree name worded as a title: `-` becomes a space, the first letter is upper-cased, and the
 /// name `untitled-<id>` that a doc without a title gets (the one `id` gives) reads as `Untitled`.
-fn name_as_title(name: &str, id: &BlockId) -> String {
+pub(crate) fn name_as_title(name: &str, id: &BlockId) -> String {
     if name == rdy_model::tree::default_name(None, id) {
         return "Untitled".to_string();
     }
@@ -1040,19 +1055,30 @@ fn name_as_title(name: &str, id: &BlockId) -> String {
 
 /// Element ids the page chrome owns (the `<main>` skip-link target, the search box and its
 /// results, the sidebar and its menu button and scrim, the contents list, the version
-/// switcher). A block anchor never equals one, so each per-page `taken` set starts with them.
+/// switcher, the review bar's two buttons). A block anchor never equals one, so each per-page
+/// `taken` set starts with them. The buttons are reserved on every scope: the bar shows only on a
+/// review page, but a document's anchors must not move between a review render and a canon one.
 const RESERVED_IDS: &[&str] = &[
-    "main", "search", "results", "sidebar", "menu", "scrim", "contents", "versions",
+    "main",
+    "search",
+    "results",
+    "sidebar",
+    "menu",
+    "scrim",
+    "contents",
+    "versions",
+    "show-changes",
+    "show-diff",
 ];
 
 /// A fresh per-page `taken` set, holding [`RESERVED_IDS`].
-fn reserved_ids() -> BTreeSet<String> {
+pub(crate) fn reserved_ids() -> BTreeSet<String> {
     RESERVED_IDS.iter().map(|s| s.to_string()).collect()
 }
 
 /// `text` as an anchor not in `taken`, which then holds it: slugged, cut to [`ANCHOR_MAX`],
 /// `part` when nothing is left, `-x` after anything shaped like an id, `-2`, `-3`... on a clash.
-fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
+pub(crate) fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
     let slug = tree::slug(&text);
     let cut: String = slug.chars().take(ANCHOR_MAX).collect();
     let mut base = cut.trim_end_matches(['-', '.']).to_string();

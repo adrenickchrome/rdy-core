@@ -1,6 +1,6 @@
 //! The search index: `search-index.json`, one entry per doc, section, term, question and folder,
 //! read by the client in `theme/rdy-standard/js/search.js`.
-use crate::inline::Form;
+use crate::inline::{Form, code_escape};
 use crate::page::PageContext;
 use crate::site::Site;
 use rdy_engine::Materialized;
@@ -84,30 +84,72 @@ fn clip(s: &str, max: usize) -> String {
 /// `text` as a reader sees it ([`Site::plain`]): Markdown flattened, a reference as its display
 /// text or its target's label (nothing when it leads nowhere), `\{{` a literal `{{`.
 fn plain(text: &str, mode: RefMode, form: Form, site: &Site) -> String {
-    site.plain(text, mode, form, 0, &|_| String::new())
+    Read { site, coded: false }.plain(text, mode, form)
 }
 
 /// A field's words: a statement or prompt reads as running text, any other as a label.
 fn field(b: &Block, name: &str, site: &Site) -> String {
-    let form = match name {
-        "statement" | "prompt" => Form::Spans,
-        _ => Form::Label,
-    };
-    plain(b.field_str(name).unwrap_or(""), RefMode::Strict, form, site)
+    Read { site, coded: false }.field(b, name)
 }
 
-fn cell(v: &FieldValue, site: &Site) -> String {
-    match v {
-        FieldValue::Str(s) => plain(s, RefMode::Strict, Form::Spans, site),
-        FieldValue::Bool(b) => b.to_string(),
-        FieldValue::Int(i) => i.to_string(),
-        _ => String::new(),
+/// How a block's own text is read: as the search index reads it, or `coded`, with each code
+/// span between the code marks for a word diff ([`Site::plain_coded`]).
+#[derive(Clone, Copy)]
+struct Read<'a, 's> {
+    site: &'a Site<'s>,
+    coded: bool,
+}
+
+impl Read<'_, '_> {
+    fn plain(&self, text: &str, mode: RefMode, form: Form) -> String {
+        if self.coded {
+            self.site.plain_coded(text, mode, form, &|_| String::new())
+        } else {
+            self.site.plain(text, mode, form, 0, &|_| String::new())
+        }
+    }
+
+    /// Text read as it is, with no Markdown: in the coded form, escaped ([`code_escape`]).
+    fn raw(&self, text: &str) -> String {
+        if self.coded {
+            code_escape(text)
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn field(&self, b: &Block, name: &str) -> String {
+        let form = match name {
+            "statement" | "prompt" => Form::Spans,
+            _ => Form::Label,
+        };
+        self.plain(b.field_str(name).unwrap_or(""), RefMode::Strict, form)
+    }
+
+    fn cell(&self, v: &FieldValue) -> String {
+        match v {
+            FieldValue::Str(s) => self.plain(s, RefMode::Strict, Form::Spans),
+            FieldValue::Bool(b) => b.to_string(),
+            FieldValue::Int(i) => i.to_string(),
+            _ => String::new(),
+        }
     }
 }
 
 /// The text a reader can find in `b` itself (not in its children), with its own whitespace.
-fn own_text(b: &Block, site: &Site) -> String {
-    let body = || plain(&b.body, RefMode::for_body(&b.block_type), Form::Body, site);
+pub(crate) fn own_text(b: &Block, site: &Site) -> String {
+    own_text_in(b, Read { site, coded: false })
+}
+
+/// As [`own_text`], with each code span of the block's spans between the code marks
+/// ([`crate::inline::plain_refs_coded`]) and every authored character kept, escaped where it
+/// is a mark character ([`code_escape`]): the word diff of a change summary reads it (sr6).
+pub(crate) fn own_text_coded(b: &Block, site: &Site) -> String {
+    own_text_in(b, Read { site, coded: true })
+}
+
+fn own_text_in(b: &Block, r: Read) -> String {
+    let body = || r.plain(&b.body, RefMode::for_body(&b.block_type), Form::Body);
     let list = |name: &str| match b.fields.get(name) {
         Some(FieldValue::List(l)) => l.clone(),
         _ => vec![],
@@ -116,39 +158,39 @@ fn own_text(b: &Block, site: &Site) -> String {
         // a decision has no place in the text
         decision::DECISION => String::new(),
         "term" | "component" | "actor" | "interface" | "entity" => {
-            format!("{}: {}", field(b, "name", site), body())
+            format!("{}: {}", r.field(b, "name"), body())
         }
         "value" => {
-            let v = entity::value_text(b).unwrap_or_default();
-            format!("{}: {v} {}", field(b, "name", site), body())
+            let v = r.raw(&entity::value_text(b).unwrap_or_default());
+            format!("{}: {v} {}", r.field(b, "name"), body())
                 .trim_end()
                 .to_string()
         }
-        "question" => field(b, "prompt", site),
-        "diagram" | "figure" => field(b, "alt", site),
-        "code" => b.body.clone(),
+        "question" => r.field(b, "prompt"),
+        "diagram" | "figure" => r.field(b, "alt"),
+        "code" => r.raw(&b.body),
         "table" => {
-            let rows = list("rows").into_iter().map(|r| match r {
+            let rows = list("rows").into_iter().map(|row| match row {
                 FieldValue::List(cells) => cells
                     .iter()
-                    .map(|c| cell(c, site))
+                    .map(|c| r.cell(c))
                     .collect::<Vec<_>>()
                     .join(" "),
-                other => cell(&other, site),
+                other => r.cell(&other),
             });
             list("columns")
                 .iter()
-                .map(|c| cell(c, site))
+                .map(|c| r.cell(c))
                 .chain(rows)
                 .collect::<Vec<_>>()
                 .join(" ")
         }
         "flow" => {
             let steps = list("steps").into_iter().map(|s| match s {
-                FieldValue::Str(t) => plain(&t, RefMode::Strict, Form::Spans, site),
-                other => cell(&other, site),
+                FieldValue::Str(t) => r.plain(&t, RefMode::Strict, Form::Spans),
+                other => r.cell(&other),
             });
-            std::iter::once(field(b, "name", site))
+            std::iter::once(r.field(b, "name"))
                 .chain(steps)
                 .chain(std::iter::once(body()))
                 .collect::<Vec<_>>()

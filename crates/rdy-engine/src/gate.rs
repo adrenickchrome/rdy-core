@@ -675,6 +675,12 @@ fn is_zero(n: &usize) -> bool {
 }
 
 impl ReadState {
+    /// Every open proposal at its latest version, sorted by the ref's text (see
+    /// [`open_proposals`]).
+    pub fn open_proposals(&self) -> Result<Vec<(ProposalRef, Proposal)>, RdyError> {
+        open_proposals(self)
+    }
+
     /// The tensions that refuse landing `changes` (one version's changes, proposed from view
     /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, not
     /// dismissed, and with every side canon or one of `changes`, so that landing them would put

@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{Mode, assets, home, nav, review, search, toc, trail, version};
+use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -26,13 +26,35 @@ pub struct Shared<'a> {
     pub landed_ms: &'a BTreeMap<String, i64>,
     /// The figure blobs the store holds, by hash, with their bytes.
     pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
-    /// What a draft changes against the canon it is based on; none for canon and tags.
+    /// What a review render changes against the base a scope names: the pages' review marks
+    /// read it. None for canon and tags, and for a proposal version made on the empty project
+    /// once canon has landed (no scope names its base; the task-8 ruling).
     pub review: Option<&'a review::Review>,
+    /// What a review render changes, as its change rows read it ([`review::listed`]): `review`,
+    /// else that proposal version against the empty project. The home page's list reads it, as
+    /// the change summary and the menu's count do (O12).
+    pub listed: Option<&'a review::Review>,
+    /// The view or proposal version a review render shows, and the blocks it changes; none for
+    /// canon and tags.
+    pub reviewed: Option<version::Reviewed>,
+    /// The header's words: the pill and its chips.
+    pub header: version::Header,
+    /// The header's markup, rendered once per relative root in a static build, once in a live
+    /// one (see [`Shared::header_html`]).
+    pub headers: RefCell<BTreeMap<String, String>>,
     /// The blobs some page links to, by the site-relative path of their file, filled as pages
     /// are built.
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
-    /// A static site, or a live one whose pages carry the label slot.
-    pub mode: Mode,
+    /// A static site, or a live one whose pages carry the label and header slots.
+    pub mode: Mode<'a>,
+    /// The word diff of each changed block of a review render, by id: an edited block on its
+    /// page carries it for Show diff (sr6). Empty for canon and tags.
+    pub inline_diffs: BTreeMap<BlockId, String>,
+    /// The build writes `changes.html` (a review render whose path no doc owns); the review
+    /// chip links it only then.
+    pub changes_page: bool,
+    /// The build writes `changes-since.html`; the landings chip links it only then.
+    pub since_page: bool,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -42,8 +64,11 @@ pub struct SiteFacts<'a> {
     pub has_terms: bool,
     pub has_questions: bool,
     pub has_disagreements: bool,
-    /// What a draft changes against the canon it is based on; none for canon and tags.
+    /// What a review render changes against the base a scope names: the navigation's marks
+    /// read it ([`Shared::review`]).
     pub review: Option<&'a review::Review>,
+    /// The rows of the home page's list of changes read it ([`Shared::listed`], O12).
+    pub listed: Option<&'a review::Review>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -85,6 +110,9 @@ pub struct Item {
     pub ref_: String,
     /// The word the block carries in a draft render; none on canon and tags.
     pub change: Option<review::Mark>,
+    /// For a block marked Edited on a review page: its word diff, which the page holds hidden
+    /// until Show diff turns it on (sr6).
+    pub diff_html: Option<String>,
     /// The removed lines a draft shows just before this block.
     pub removed_before: Vec<RemovedLine>,
 }
@@ -107,8 +135,12 @@ pub struct DocBody {
     pub lede_anchor: Option<String>,
     /// The word the doc's own block carries in a draft render.
     pub change: Option<review::Mark>,
+    /// The word diff of the doc's own block (its title), when it is marked Edited (sr6).
+    pub diff: Option<String>,
     /// The word the lede carries in a draft render.
     pub lede_change: Option<review::Mark>,
+    /// The lede's word diff, when it is marked Edited (sr6).
+    pub lede_diff: Option<String>,
     /// The removed lines a draft shows after the last block.
     pub removed_end: Vec<RemovedLine>,
 }
@@ -227,6 +259,8 @@ pub struct Body {
     pub disagreements: Option<DisagreementsBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect: Option<RedirectBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<changes::Summary>,
 }
 
 /// Everything a template reads.
@@ -238,13 +272,17 @@ pub struct PageContext {
     pub title: String,
     /// Site-relative, with `/` separators.
     pub page_url: String,
-    /// `home`, `folder`, `doc`, `glossary`, `questions`, `disagreements` or `redirect`.
+    /// `home`, `folder`, `doc`, `glossary`, `questions`, `disagreements`, `changes` or
+    /// `redirect`.
     pub kind: &'static str,
     /// The prefix that leads from this page to the site's root (`../` per level).
     pub root: String,
     /// The text of the inline script that sets the theme before the page paints.
     pub init_js: &'static str,
+    /// The text label of the colophon (and the `frozen` flag of the header).
     pub version: version::Label,
+    /// The header's version markup: the pill and its chips (`version::header_html`).
+    pub header: String,
     pub crumbs: Vec<Crumb>,
     pub nav: nav::Nav,
     pub toc: toc::Toc,
@@ -253,8 +291,13 @@ pub struct PageContext {
     pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
-    /// A draft render, which offers Show changes.
-    pub draft: bool,
+    /// A review render with marks, which offers Show changes and Show diff (sr7).
+    pub reviewing: bool,
+    /// The review bar's words (`version::review_bar`); none on canon and tags.
+    pub review_bar: Option<String>,
+    /// The heading of the home page's list of changes (`version::changes_heading`); none on canon
+    /// and tags.
+    pub review_heading: Option<&'static str>,
     /// A page the live site serves: its version label is the slot, and it updates itself.
     pub live: bool,
     pub items: Vec<Item>,
@@ -271,6 +314,10 @@ pub enum Kind<'a> {
     Disagreements,
     /// The permalink page of a block and where it leads.
     Redirect(&'a BlockId, &'a Url),
+    /// The change summary of a review render (`changes.html`).
+    Changes(&'a changes::Summary),
+    /// The summary of the landings since the tag (`changes-since.html`).
+    ChangesSince(&'a changes::Summary),
 }
 
 /// A reader's word for a block's type: the one the eyebrow, the toc and the search use.
@@ -287,6 +334,50 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
+    /// The header's markup for a page at relative root `root` (RULING F4). A static page links
+    /// to the home page's Versions list and to the change pages by its root; a live page links
+    /// to `/~versions/`, whose menu the pill opens, and to the change pages under the scope's
+    /// path, the same on every page. Each distinct markup is rendered once.
+    pub fn header_html(&self, root: &str) -> String {
+        let key = match self.mode {
+            Mode::Static => root,
+            Mode::Live { .. } => "",
+        };
+        if let Some(h) = self.headers.borrow().get(key) {
+            return h.clone();
+        }
+        let (base, versions, menu) = match self.mode {
+            Mode::Static => (
+                root.to_string(),
+                format!("{root}index.html#versions"),
+                false,
+            ),
+            Mode::Live { root } => (
+                root.to_string(),
+                format!(
+                    "/{}",
+                    rdy_engine::site_scope::ScopeRef::Versions.path_prefix()
+                ),
+                true,
+            ),
+        };
+        let since = format!("{base}{}", rdy_engine::site_scope::SINCE_PAGE);
+        let changes = format!("{base}{}", rdy_engine::site_scope::CHANGES_PAGE);
+        let html = version::header_html(
+            &self.header,
+            &version::HeaderLinks {
+                versions: &versions,
+                since: self.since_page.then_some(since.as_str()),
+                changes: self.changes_page.then_some(changes.as_str()),
+                menu,
+            },
+        );
+        self.headers
+            .borrow_mut()
+            .insert(key.to_string(), html.clone());
+        html
+    }
+
     /// A link from `from` to the block `id`, if the store resolves it; with no href when the
     /// block has no place on the site (it then reads as its label, unlinked).
     fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
@@ -397,6 +488,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_questions,
         has_disagreements: !site.disagreements.is_empty(),
         review: sh.review,
+        listed: sh.listed,
     };
     let (page_url, kind_name, title, current, chain, tail): (
         String,
@@ -464,6 +556,22 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 None,
             )
         }
+        Kind::Changes(c) => (
+            rdy_engine::site_scope::CHANGES_PAGE.into(),
+            "changes",
+            c.heading.clone(),
+            None,
+            vec![],
+            Some(c.heading.as_str()),
+        ),
+        Kind::ChangesSince(c) => (
+            rdy_engine::site_scope::SINCE_PAGE.into(),
+            "changes",
+            c.heading.clone(),
+            None,
+            vec![],
+            Some(c.heading.as_str()),
+        ),
     };
     let mut body = Body::default();
     let mut items = vec![];
@@ -541,18 +649,22 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             let (_, label, href) = redirect_target(sh, id, url);
             body.redirect = Some(RedirectBody { label, href });
         }
+        Kind::Changes(c) | Kind::ChangesSince(c) => body.changes = Some((*c).clone()),
     }
     // a permalink page is a bare redirect: it shows no navigation and no crumbs, so it builds
     // none (building the site's navigation once per block made a render O(blocks x pages))
     let redirect = kind_name == "redirect";
+    let root = "../".repeat(page_url.matches('/').count());
+    let header = sh.header_html(&root);
     PageContext {
         site_name: sh.site_name.to_string(),
         site_description: sh.description.map(String::from),
         lang: "en",
         title,
-        root: "../".repeat(page_url.matches('/').count()),
+        root,
         init_js: assets::INIT_JS,
-        version: version::label(sh.position),
+        version: version::text_label(sh.position, sh.reviewed.as_ref()),
+        header,
         crumbs: if redirect {
             vec![]
         } else {
@@ -584,8 +696,13 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_mermaid,
         has_terms,
         has_questions,
-        draft: sh.review.is_some(),
-        live: sh.mode == Mode::Live,
+        reviewing: sh.review.is_some(),
+        review_bar: sh.reviewed.as_ref().map(version::review_bar),
+        review_heading: sh
+            .reviewed
+            .as_ref()
+            .map(|r| version::changes_heading(r.kind)),
+        live: matches!(sh.mode, Mode::Live { .. }),
         items,
         body,
         kind: kind_name,
@@ -651,7 +768,9 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         lede: lede_block.map(|p| inline::spans_html(&p.body, &own)),
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
         change: sh.review.and_then(|r| r.mark(&doc.id)),
+        diff: edited_diff(sh, &doc.id),
         lede_change: lede_block.and_then(|l| sh.review.and_then(|r| r.mark(&l.id))),
+        lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],
     };
     let (mut items, mut has_mermaid) = (vec![], false);
@@ -732,6 +851,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             ref_head,
             ref_,
             change: sh.review.and_then(|r| r.mark(&b.id)),
+            diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
         });
     }
@@ -754,6 +874,12 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         }
     }
     (doc_body, items, has_mermaid)
+}
+
+/// The word diff a block marked Edited carries on a review page (sr6); none for any other block.
+fn edited_diff(sh: &Shared, id: &BlockId) -> Option<String> {
+    let edited = sh.review.and_then(|r| r.mark(id)) == Some(review::Mark::Edited);
+    edited.then(|| sh.inline_diffs.get(id).cloned()).flatten()
 }
 
 /// The old text of removed blocks as HTML, written outside the block pipeline: each heading text

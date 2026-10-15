@@ -104,8 +104,8 @@ pub struct CompareEntry {
     pub block_type: String,
     /// The block's path, for a folder or a doc.
     pub path: Option<String>,
-    /// The field names whose values differ, then `body`, `links` and `order` when they differ
-    /// (`order` only under the same parent: a moved block's new key is part of the move).
+    /// The field names whose values differ, then `type`, `body`, `links` and `order` when they
+    /// differ (`order` only under the same parent: a moved block's new key is part of the move).
     pub fields: Vec<String>,
     /// For a moved block: its parent in `b`.
     pub from_parent: Option<String>,
@@ -155,7 +155,8 @@ fn touched(ops: &[rdy_model::Op]) -> Vec<BlockId> {
         .collect()
 }
 
-/// The names whose values differ between `a` and `b`, then `body`, `links` and `order`. A block
+/// The names whose values differ between `a` and `b`, then `type`, `body`, `links` and `order`. A
+/// type change is listed, so a retyped block is changed even when it also moves. A block
 /// under a new parent gets a new order key as part of the move, so `order` is listed only when
 /// the parent is the same: a pure move is listed under `moved` only.
 fn differing(a: &Block, b: &Block) -> Vec<String> {
@@ -165,6 +166,9 @@ fn differing(a: &Block, b: &Block) -> Vec<String> {
         .filter(|k| a.fields.get(*k) != b.fields.get(*k))
         .cloned()
         .collect();
+    if a.block_type != b.block_type {
+        out.push("type".into());
+    }
     if a.body != b.body {
         out.push("body".into());
     }

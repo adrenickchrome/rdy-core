@@ -11,6 +11,7 @@ pub mod coord_graph;
 pub mod coverage;
 mod decide;
 pub mod did_you_mean;
+pub mod diff;
 pub mod dump;
 pub mod engine;
 mod error;
@@ -53,6 +54,7 @@ pub mod view_query;
 pub mod views;
 pub mod wc;
 mod wc_check;
+pub mod worddiff;
 mod write;
 mod yaml_pos;
 
@@ -62,6 +64,7 @@ pub use brief::{
 };
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
+pub use diff::{Diff, DiffChange, DiffEntry};
 pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
@@ -96,7 +99,8 @@ pub use session::{
 };
 pub use tree_io::Diagnostic;
 pub use version::{
-    AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
+    AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, VersionInfo, VersionPosition, VersionRef, ViewPosition,
+    parse_version,
 };
 pub use view_query::{
     ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, ViewDetail, ViewSummary,

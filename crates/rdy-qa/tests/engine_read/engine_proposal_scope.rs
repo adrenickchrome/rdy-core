@@ -190,7 +190,7 @@ fn ls8_a_first_proposal_before_any_landing_is_reviewed() {
     assert!(doc.contains("id=\"show-changes\""), "{doc}");
     assert!(doc.contains(NEW), "the proposed doc is new: {doc}");
     let index = rdy_qa::golden::html(out.path(), "index.html");
-    assert!(index.contains("Changes in this draft"), "{index}");
+    assert!(index.contains("Changes in this proposal"), "{index}");
 }
 
 /// The task-8 ruling, rule 2 (guard): once canon has landed, a version made before the first

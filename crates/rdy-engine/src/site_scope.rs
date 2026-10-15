@@ -3,13 +3,42 @@
 //! `rdy_site` (which writes the link). One spelling per scope, so one build per scope.
 
 /// A scope the site serves: canon at the root, a view under `~view/`, a proposal version under
-/// `~proposal/`.
+/// `~proposal/`, a tag under `~tag/`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScopeRef {
     Canon,
     View(String),
     /// `P-<lowercase hex>[@<n>]`, as [`proposal_ref`] spells it.
     Proposal(String),
+    /// A tag, by the name it is stored under: the frozen site of one version.
+    Tag(String),
+    /// The live site's versions page: not a read scope.
+    Versions,
+}
+
+/// The change summary of a view or proposal, under the scope's prefix.
+pub const CHANGES_PAGE: &str = "changes.html";
+/// The change summary of canon since its current tag, at the site's root.
+pub const SINCE_PAGE: &str = "changes-since.html";
+
+/// Whether a top-level doc of `m` owns the summary page `page` ([`CHANGES_PAGE`] or
+/// [`SINCE_PAGE`]): a top-level doc's page is `<name>.html`, so a doc named `changes` or
+/// `changes-since` has it. The site then keeps the doc's page and leaves out its summary (O1).
+/// The one rule for both sides: the renderer reads it to leave the summary out, and `rdy_site`
+/// to give a summary link only when the site has the summary.
+pub fn summary_page_taken(m: &crate::Materialized, page: &str) -> bool {
+    debug_assert!(
+        page == CHANGES_PAGE || page == SINCE_PAGE,
+        "a summary page: {page:?}"
+    );
+    let Some(stem) = page.strip_suffix(".html") else {
+        return false;
+    };
+    m.names_under(None).into_iter().any(|(id, name)| {
+        name == stem
+            && m.get(&id)
+                .is_some_and(|b| b.block_type == rdy_model::tree::DOC)
+    })
 }
 
 impl ScopeRef {
@@ -19,6 +48,8 @@ impl ScopeRef {
             ScopeRef::Canon => "canon".to_string(),
             ScopeRef::View(name) => format!("view:{name}"),
             ScopeRef::Proposal(r) => format!("proposal:{r}"),
+            ScopeRef::Tag(name) => format!("tag:{name}"),
+            ScopeRef::Versions => "versions".to_string(),
         }
     }
 
@@ -29,6 +60,16 @@ impl ScopeRef {
             ScopeRef::View(name) => format!("~view/{}/", percent_encode(name)),
             // the one spelling holds only `P`, `-`, hex digits and `@`: safe in a path as it is
             ScopeRef::Proposal(r) => format!("~proposal/{r}/"),
+            // a version name holds only `0-9 A-Z a-z . -`, each valid as it is in a path segment,
+            // and is never a step (`.` or `..`): written literally (ruling task-2)
+            ScopeRef::Tag(name) => {
+                debug_assert!(
+                    tag_name_ok(name),
+                    "a tag path holds a version name: {name:?}"
+                );
+                format!("~tag/{name}/")
+            }
+            ScopeRef::Versions => "~versions/".to_string(),
         }
     }
 }
@@ -37,6 +78,16 @@ impl ScopeRef {
 /// or `\`: on the site it is one encoded segment, never a path.
 pub fn view_name_ok(name: &str) -> bool {
     !name.is_empty() && !name.contains(':')
+}
+
+/// A tag name as the site reads it: what `parse_version` accepts, of at most
+/// `MAX_VERSION_BYTES` bytes. A SemVer name holds only `0-9 A-Z a-z . -` here (build metadata
+/// is refused), never starts with `.` or `-`, and is never a path step, so it is one path
+/// segment as it is. The bound is the site's single bound (ruling final (3)): a stored tag over
+/// it (only an older release could store one) has no page, and the request head's limit
+/// (`MAX_HEAD_BYTES` in rdy-daemon) is asserted to carry the longest served name at compile time.
+pub fn tag_name_ok(name: &str) -> bool {
+    name.len() <= crate::version::MAX_VERSION_BYTES && crate::version::parse_version(name).is_ok()
 }
 
 /// The one spelling of a proposal ref: `P-` and 4 to 64 hex digits (either case), then optionally

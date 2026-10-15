@@ -1,11 +1,14 @@
 chrome	-	Pattern matching by example · Structural pattern matching
 chrome	-	Skip to content
 chrome	-	Structural pattern matching
-chrome	L	v1.0.0, 2 changes since · draft: editing, 2 pending changes
+chrome	L	v1.0.0
+chrome	L	+2
+chrome	L	+4
 chrome	-	Search these pages
 chrome	-	Auto
 chrome	-	Light
 chrome	-	Dark
+chrome	-	Reviewing view · editing · by qa
 chrome	L	Pages
 chrome	L	Home
 chrome	L	Overview
@@ -82,6 +85,9 @@ chrome	-	+10 more
 chrome	L	Reference
 chrome	L	Glossary
 chrome	L	Open questions
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
 chrome	L	Structural pattern matching
 chrome	L	Tutorial
 chrome	L	Pattern matching by example
@@ -420,7 +426,7 @@ chrome	L	Previous
 chrome	L	Σημασιολογία
 chrome	L	Next
 chrome	L	Unused variable syntax
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since · draft: editing, 2 pending changes.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since · view: editing, 4 changes, not landed.
 chrome	L	On this page
 chrome	L	On this page
 chrome	L	Introduction

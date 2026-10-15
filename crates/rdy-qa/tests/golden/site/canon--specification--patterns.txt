@@ -1,7 +1,8 @@
 chrome	-	The match statement and its patterns · Structural pattern matching
 chrome	-	Skip to content
 chrome	-	Structural pattern matching
-chrome	L	v1.0.0, 2 changes since
+chrome	L	v1.0.0
+chrome	L	+2
 chrome	-	Search these pages
 chrome	-	Auto
 chrome	-	Light
@@ -78,6 +79,9 @@ chrome	-	+10 more
 chrome	L	Reference
 chrome	L	Glossary
 chrome	L	Open questions
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
 chrome	L	Structural pattern matching
 chrome	L	Specification
 chrome	L	The match statement and its patterns
@@ -904,7 +908,7 @@ chrome	L	Previous
 chrome	L	Overview
 chrome	L	Next
 chrome	L	How a match runs
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since.
 chrome	L	On this page
 chrome	L	On this page
 chrome	L	Summary

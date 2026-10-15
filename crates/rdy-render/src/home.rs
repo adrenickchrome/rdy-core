@@ -1,11 +1,12 @@
 //! The home page's context: a card for every top-level folder and doc, and the versions, newest
 //! first, in a reader's words (a date and the message, never a hash).
+use crate::changes::{Ch, Decoder, runs_html};
 use crate::inline::Form;
 use crate::page::SiteFacts;
-use crate::review::{Mark, Review};
+use crate::review::{DocChange, Mark, Review};
 use crate::site::{Site, rel};
 use rdy_engine::{Materialized, VersionInfo};
-use rdy_model::{Block, RefMode, tree};
+use rdy_model::{Block, BlockId, RefMode, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -16,12 +17,16 @@ const SUMMARY_MAX: usize = 160;
 pub struct Card {
     pub title: String,
     pub href: String,
+    /// HTML: escaped words, each authored code span in a `<code>` element (ruling final-round1).
     pub summary: String,
 }
 
 /// One line of the home page's list of a draft's changes.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChangeRow {
+    /// The doc or removed page the row is about (never written on a page).
+    #[serde(skip)]
+    pub id: BlockId,
     pub title: String,
     /// The page, or none for a removed page (there is nothing to link to).
     pub href: Option<String>,
@@ -69,14 +74,19 @@ pub fn build(
         .filter_map(|b| {
             let page = site.page(&b.id)?;
             let summary = if b.block_type == tree::FOLDER {
-                site.description_words(b.field_str("description").unwrap_or_default())
+                site.plain_coded(
+                    b.field_str("description").unwrap_or_default(),
+                    RefMode::Strict,
+                    Form::Spans,
+                    &|_| String::new(),
+                )
             } else {
                 first_prose(site, m, b, 0)
             };
             Some(Card {
                 title: site.label(b),
                 href: rel("index.html", &page),
-                summary: cut(&summary, SUMMARY_MAX),
+                summary: summary_html(&summary, SUMMARY_MAX),
             })
         })
         .collect();
@@ -104,7 +114,7 @@ pub fn build(
     let current = versions.last().map(|v| &v.name);
     Home {
         description: description.map(String::from),
-        changes: facts.review.map(|r| changes(site, r)).unwrap_or_default(),
+        changes: facts.listed.map(|r| changes(site, r)).unwrap_or_default(),
         cards,
         versions: versions
             .iter()
@@ -123,42 +133,60 @@ pub fn build(
 }
 
 /// The changed docs of a draft in reading order, then its removed pages.
-fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
+pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
     let mut rows: Vec<ChangeRow> = site
         .tree_pages()
         .filter_map(|id| {
             let change = review.doc(id)?;
             let b = site.m.get(id)?;
-            Some(ChangeRow {
-                title: site.label(b),
-                href: site.page(id).map(|p| rel("index.html", &p)),
-                mark: match change.mark {
-                    Mark::Edited => "edited",
-                    Mark::New => "new",
-                },
-                word: change.mark.word(),
-                // each number stays on the line of its word (visual review F4)
-                counts: change.counts().map(|c| {
-                    c.split(" \u{b7} ")
-                        .map(|part| part.replace(' ', "\u{a0}"))
-                        .collect::<Vec<_>>()
-                        .join(" \u{b7} ")
-                }),
-            })
+            Some(doc_row(site, b, change))
         })
         .collect();
-    rows.extend(review.removed_pages().iter().map(|b| ChangeRow {
+    rows.extend(
+        review
+            .removed_pages()
+            .iter()
+            .map(|b| removed_row(b, site.label(b))),
+    );
+    rows
+}
+
+/// The row of doc `b`, which `site` holds, with what the draft changes in it.
+pub(crate) fn doc_row(site: &Site, b: &Block, change: &DocChange) -> ChangeRow {
+    ChangeRow {
+        id: b.id.clone(),
         title: site.label(b),
+        href: site.page(&b.id).map(|p| rel("index.html", &p)),
+        mark: match change.mark {
+            Mark::Edited => "edited",
+            Mark::New => "new",
+        },
+        word: change.mark.word(),
+        // each number stays on the line of its word (visual review F4)
+        counts: change.counts().map(|c| {
+            c.split(" \u{b7} ")
+                .map(|part| part.replace(' ', "\u{a0}"))
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ")
+        }),
+    }
+}
+
+/// The row of a removed doc or folder `b`, titled `title`: there is no page to link to.
+pub(crate) fn removed_row(b: &Block, title: String) -> ChangeRow {
+    ChangeRow {
+        id: b.id.clone(),
+        title,
         href: None,
         mark: "removed",
         word: "Removed",
         counts: None,
-    }));
-    rows
+    }
 }
 
-/// The first prose block under `b` (depth first, in order), as plain text: a reference reads as
-/// its target's label (an unknown one is dropped, never an id) and `\{{` as `{{`.
+/// The first prose block under `b` (depth first, in order), as coded text ([`Site::plain_coded`]):
+/// a reference reads as its target's label (an unknown one is dropped, never an id), `\{{` as
+/// `{{`, and each code span stands between the code marks.
 fn first_prose(site: &Site, m: &Materialized, b: &Block, depth: usize) -> String {
     // a damaged store can nest sections without end
     if depth > tree::MAX_FOLDER_DEPTH + 64 {
@@ -166,7 +194,7 @@ fn first_prose(site: &Site, m: &Materialized, b: &Block, depth: usize) -> String
     }
     for c in m.children(Some(&b.id)) {
         if c.block_type == "prose" && !c.body.trim().is_empty() {
-            return plain(site, c);
+            return coded(site, c);
         }
         let inner = first_prose(site, m, c, depth + 1);
         if !inner.is_empty() {
@@ -176,36 +204,60 @@ fn first_prose(site: &Site, m: &Materialized, b: &Block, depth: usize) -> String
     String::new()
 }
 
-fn plain(site: &Site, b: &Block) -> String {
-    site.plain(
+fn coded(site: &Site, b: &Block) -> String {
+    site.plain_coded(
         &b.body,
         RefMode::for_body(&b.block_type),
         Form::Body,
-        0,
         &|_| String::new(),
     )
 }
 
+/// A card's summary as HTML from coded text `coded` ([`Site::plain_coded`]): cut as [`cut`] says,
+/// escaped, each code span in a `<code>` element, as on its page (ruling final-round1).
+fn summary_html(coded: &str, max: usize) -> String {
+    let mut out = String::new();
+    runs_html(&mut out, &cut(&Decoder::default().read(coded), max));
+    out
+}
+
 /// `text` with its whitespace collapsed, cut at a word boundary to at most `max` characters, with
-/// `…` when something was cut.
-fn cut(text: &str, max: usize) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.chars().count() <= max {
-        return text;
+/// `…` when something was cut. A collapsed space keeps the code span of the first whitespace it
+/// stands for; a cut inside a code span ends the span there.
+fn cut(text: &[Ch], max: usize) -> Vec<Ch> {
+    let mut words: Vec<Ch> = Vec::with_capacity(text.len());
+    let mut space: Option<u32> = None;
+    for &(c, span) in text {
+        if c.is_whitespace() {
+            space.get_or_insert(span);
+            continue;
+        }
+        if let Some(s) = space.take().filter(|_| !words.is_empty()) {
+            words.push((' ', s));
+        }
+        words.push((c, span));
     }
-    let head: String = text.chars().take(max).collect();
+    if words.len() <= max {
+        return words;
+    }
     // the cut falls on a word boundary when the next character is a space
-    let next_is_space = text.chars().nth(max).is_some_and(char::is_whitespace);
-    let kept = if next_is_space {
-        head.as_str()
-    } else {
-        head.rsplit_once(' ').map_or(head.as_str(), |(w, _)| w)
-    };
-    format!("{}…", kept.trim_end_matches([' ', ',', ';', ':', '.', '-']))
+    let mut kept = &words[..max];
+    if words[max].0 != ' '
+        && let Some(i) = kept.iter().rposition(|c| c.0 == ' ')
+    {
+        kept = &kept[..i];
+    }
+    let end = kept
+        .iter()
+        .rposition(|c| ![' ', ',', ';', ':', '.', '-'].contains(&c.0))
+        .map_or(0, |i| i + 1);
+    let mut out = kept[..end].to_vec();
+    out.push(('…', 0));
+    out
 }
 
 /// `8 February 2021` for a time in milliseconds since the epoch (UTC).
-fn date(ms: i64) -> String {
+pub(crate) fn date(ms: i64) -> String {
     const MONTHS: [&str; 12] = [
         "January",
         "February",
@@ -250,6 +302,7 @@ mod tests {
 
     #[test]
     fn ver1_a_summary_is_cut_at_a_word_boundary() {
+        let cut = summary_html;
         assert_eq!(cut("  a  short\n text ", 160), "a short text");
         let long = "word ".repeat(60);
         let s = cut(&long, 160);
@@ -260,5 +313,27 @@ mod tests {
         assert_eq!(cut("alpha beta gamma", 10), "alpha beta…");
         // one long word has no boundary to back up to
         assert_eq!(cut("abcdefghij", 4), "abcd…");
+    }
+
+    /// Ruling final-round1: a card's summary keeps a code span code, escaped, and counts only
+    /// the characters a reader sees.
+    #[test]
+    fn sr6_a_summary_keeps_code_spans() {
+        use crate::inline::{CODE_CLOSE as C, CODE_ESC as E, CODE_OPEN as O};
+        let coded = format!("Open {O}a<b>.json{C} first.");
+        assert_eq!(
+            summary_html(&coded, 160),
+            "Open <code>a&lt;b&gt;.json</code> first."
+        );
+        // the marks are not counted; a cut inside a span ends the span
+        assert_eq!(
+            summary_html(&format!("Run {O}make  all now{C} today"), 13),
+            "Run <code>make all</code>…"
+        );
+        // two neighbouring spans stay two elements; an escaped mark is authored text
+        assert_eq!(
+            summary_html(&format!("{O}a{C}{O}b{C} {E}{O}"), 160),
+            format!("<code>a</code><code>b</code> {O}")
+        );
     }
 }

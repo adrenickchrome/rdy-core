@@ -124,6 +124,15 @@ fn spec_target(op: &str) -> Option<String> {
         None => (op, false),
     };
     let target = match base {
+        "diff_since" => {
+            "no spec target: the block and word diff since the tier's tag (recorded; render builds it)"
+        }
+        "site_versions_page" => {
+            "no spec target: the live versions page with every open view and proposal counted, cold (recorded)"
+        }
+        "site_versions_page_warm" => {
+            "no spec target: the versions page after one view commit, one view recounted (recorded)"
+        }
         "write_batch_200" => {
             "no spec target: one write of 200 creates, one durable flush (recorded; the < 5 ms write budget is for one op)"
         }
@@ -3065,11 +3074,69 @@ fn tier_dump(
     }));
 }
 
+/// `diff_since`: the block and word diff from the tier's tag to canon, as the page of the changes
+/// since the tag reads it (`render` builds it among its pages). The tag's landing is found outside
+/// the timer. Only the 10k tier is tagged (F3).
+fn tier_diff_since(out: &mut Vec<Measure>, r: &Rdy, tag: &str, runs: usize) {
+    let from = r
+        .read()
+        .resolve_scope(&format!("tag:{tag}"))
+        .expect("the tag's scope");
+    out.push(measure("diff_since", runs, |_| {
+        let d = r.read().diff(&from, &Scope::Canon).expect("diff");
+        std::hint::black_box(d);
+    }));
+}
+
+/// `site_versions_page` and `site_versions_page_warm`: the live versions page with every open view
+/// and proposal counted. Cold has no cache. Warm keeps the counts by what each reads (the scope,
+/// its head and its base, as the site's cache does), fills them with one build outside the timer,
+/// and times each build after one commit into `view`, so one view is recounted. Run after the
+/// view ops, so the tier's open views are all counted.
+fn tier_versions_page(out: &mut Vec<Measure>, r: &mut Rdy, view: &str, runs: usize) {
+    out.push(measure("site_versions_page", runs, |_| {
+        let st = r.read();
+        let b =
+            rdy_render::menu::build_versions(&st, &mut |s| rdy_render::menu::docs_changed(&st, s))
+                .expect("versions page");
+        std::hint::black_box(b);
+    }));
+    let mut cache: BTreeMap<String, usize> = BTreeMap::new();
+    let build = |r: &Rdy, cache: &mut BTreeMap<String, usize>| {
+        let st = r.read();
+        let b = rdy_render::menu::build_versions(&st, &mut |s| {
+            let key = match s {
+                Scope::View(n) => format!(
+                    "{s:?}|{:?}|{:?}",
+                    st.view_head(n).map(|h| h.head),
+                    st.effective_base(n)
+                ),
+                _ => format!("{s:?}"),
+            };
+            if let Some(n) = cache.get(&key) {
+                return Ok(*n);
+            }
+            let n = rdy_render::menu::docs_changed(&st, s)?;
+            cache.insert(key, n);
+            Ok(n)
+        })
+        .expect("versions page");
+        std::hint::black_box(b);
+    };
+    build(r, &mut cache);
+    out.push(measure_timed("site_versions_page_warm", runs, |i| {
+        doc_write(r, view, &format!("vp-{i}"));
+        let s = Instant::now();
+        build(r, &mut cache);
+        s.elapsed()
+    }));
+}
+
 /// `site_build_live`: the live site's full build of canon, from one state (compare with
 /// `render`, which writes the same pages to disk).
 fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
     out.push(measure(&format!("site_build_live{sfx}"), runs, |_| {
-        rdy_render::live::build_live(&r.read(), &Scope::Canon).expect("build_live");
+        rdy_render::live::build_live(&r.read(), &Scope::Canon, "/").expect("build_live");
     }));
 }
 
@@ -3081,7 +3148,7 @@ fn await_reload(rt: &tokio::runtime::Runtime, sub: &mut Subscription) {
             loop {
                 match sub.rx.recv().await {
                     Some(LiveEvent::Reload) => return,
-                    Some(LiveEvent::Label(_)) => {}
+                    Some(LiveEvent::Label { .. }) => {}
                     None => panic!("the page's stream ended before its Reload"),
                 }
             }
@@ -3122,7 +3189,7 @@ fn edit_claim_on_writer(
 
 /// What `LiveSite::refresh` does after a build, as the public functions give it: the diff of the
 /// two builds, then to each stream (one per page of `pages`) a `Reload` when its page changed,
-/// else the new label when the label changed, else nothing. A full queue drops the event, as the
+/// else the new label and header when either changed, else nothing. A full queue drops the event, as the
 /// site drops the stream. Returns how many events were sent.
 fn fan_out(
     old: &rdy_render::live::LiveBuild,
@@ -3136,7 +3203,10 @@ fn fan_out(
         let event = if change.reload.contains(page) {
             Some(LiveEvent::Reload)
         } else {
-            change.label.clone().map(LiveEvent::Label)
+            change.label.clone().map(|text| LiveEvent::Label {
+                text,
+                html: new.header.clone(),
+            })
         };
         if let Some(event) = event
             && tx.try_send(event).is_ok()
@@ -3440,6 +3510,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_code(&mut out, &r, &fx, dir.path());
     tier_wc(&mut out, &r, dir.path());
     tier_render(&mut out, &r, dir.path(), "", 5);
+    tier_diff_since(&mut out, &r, "v0.1.0", 5);
     tier_site_build(&mut out, &r, "", 5);
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
@@ -3494,6 +3565,7 @@ pub fn run_workload() -> Vec<Measure> {
     // timer, not by the first timed write (plan M2e2)
     r.reconcile_transitions().expect("reconcile");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_versions_page(&mut out, &mut r, "vb", 5);
     tier_invariants(&mut out, &r, TYPICAL_RUNS.read);
     // after the view ops (the view it leaves behind would move the ops before it), before the
     // in-flight ops (which close it and add 1k in-flight changes)
@@ -4790,6 +4862,43 @@ mod tests {
         }
         // final review M11 (minors item 26): the timed writes are `runs.write`, as PERF.md says
         assert_eq!(ops[1].runs, runs.write);
+    }
+
+    /// The site review ops run end to end on a small tree: landed, tagged, landed again, with two
+    /// open views. Each op has a reported target and no spec ceiling.
+    #[test]
+    fn srperf1_the_site_review_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7372_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        r.tag(&approver(), "v0.1.0", None, None).expect("tag");
+        doc_write(&mut r, "after", "after-tag");
+        land(&mut r, "after").expect("land after the tag");
+        doc_write(&mut r, "ra", "ra-doc");
+        doc_write(&mut r, "rb", "rb-doc");
+        let mut out = vec![];
+        tier_diff_since(&mut out, &r, "v0.1.0", 2);
+        tier_versions_page(&mut out, &mut r, "ra", 2);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "diff_since",
+                "site_versions_page",
+                "site_versions_page_warm"
+            ]
+        );
+        for m in &out {
+            assert!(m.median_ms >= 0.0, "{m:?}");
+            assert!(m.runs >= 2, "{m:?}");
+            assert!(spec_target(&m.op).is_some(), "{} has no target", m.op);
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
+        }
     }
 
     /// The dump ops run end to end on a small tree: the project is landed and closed, as in the

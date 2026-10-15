@@ -8,7 +8,7 @@ use crate::site::RATIONALE;
 use rdy_engine::{Compare, CompareEntry, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Block, BlockId, decision, tree};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// The word a changed block, doc or folder carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -76,6 +76,8 @@ pub struct Review {
     docs: HashMap<BlockId, DocChange>,
     removed: HashMap<BlockId, Vec<Removed>>,
     removed_pages: Vec<Block>,
+    /// The changed blocks (O2); see [`Review::changed_blocks`].
+    changed: BTreeSet<BlockId>,
 }
 
 impl Review {
@@ -106,6 +108,104 @@ impl Review {
     pub fn removed_pages(&self) -> &[Block] {
         &self.removed_pages
     }
+
+    /// The blocks a review render changes (O2, closed; the task-5 ruling), as the review chip,
+    /// the text label and the change summary count them. Each block counts once, when it is any
+    /// of: (a) a visible non-tree block marked Edited or New; (b) a visible non-tree block under a
+    /// New doc; (c) a block of a removed line (the removed block and its removed visible
+    /// descendants); (d) a visible non-tree block under a removed page; (e) a doc or folder that
+    /// the review render adds or removes, each one (a folder's docs too), or whose own place
+    /// (its parent, or its position among the siblings both sides hold under the same parent)
+    /// or own field a reader sees (`title`, `name`, `description`) changed.
+    /// Decisions, rationale, pins-only changes and a new order key at the same place never
+    /// count.
+    pub fn changed_blocks(&self) -> u32 {
+        u32::try_from(self.changed.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The blocks [`Review::changed_blocks`] counts, by id: the change summary shows exactly
+    /// these (sr6), so the chip's count and the summary's entries agree.
+    pub(crate) fn changed_set(&self) -> &BTreeSet<BlockId> {
+        &self.changed
+    }
+}
+
+/// The fields of a doc or folder that a reader sees: a change in one counts the page (O2 (e)).
+const PAGE_FIELDS: [&str; 3] = ["title", "name", "description"];
+
+/// The blocks [`Review::changed_blocks`] counts, worked out once from the compare and both sides.
+fn count_changed(
+    rv: &Review,
+    cmp: &Compare,
+    dm: &Materialized,
+    bm: &Materialized,
+    moved_in_place: &HashSet<BlockId>,
+) -> BTreeSet<BlockId> {
+    let mut counted: BTreeSet<&BlockId> = BTreeSet::new();
+    let content = |b: &Block| visible(b) && !tree::is_tree_type(&b.block_type);
+    // (a) the marked blocks (only visible ones carry a mark)
+    for id in rv.marks.keys() {
+        if dm
+            .get(id)
+            .is_some_and(|b| !tree::is_tree_type(&b.block_type))
+        {
+            counted.insert(id);
+        }
+    }
+    // (b) the content of each New doc
+    for (id, mark) in &rv.marks {
+        if *mark == Mark::New && dm.get(id).is_some_and(|b| b.block_type == tree::DOC) {
+            counted.extend(
+                reading_order(dm, id)
+                    .into_iter()
+                    .filter(|(b, _)| content(b))
+                    .map(|(b, _)| &b.id),
+            );
+        }
+    }
+    // (c) the blocks of the removed lines
+    for lines in rv.removed.values() {
+        counted.extend(lines.iter().flat_map(|l| l.blocks.iter().map(|b| &b.id)));
+    }
+    // (d) the content of each removed page
+    for page in &rv.removed_pages {
+        counted.extend(
+            reading_order(bm, &page.id)
+                .into_iter()
+                .filter(|(b, _)| content(b))
+                .map(|(b, _)| &b.id),
+        );
+    }
+    // (e) the docs and folders added, removed or moved, and those whose own field a reader sees
+    // changed. A move to another parent is in `moved`; a new place under the same parent is in
+    // `moved_in_place`. The name `order` in `fields` is never read: it is the order key or a
+    // custom field, and neither alone moves a page (the task-5 ruling, Task 4's rule 1).
+    let tree_entry = |e: &&CompareEntry| tree::is_tree_type(&e.block_type);
+    let pages: Vec<BlockId> = cmp
+        .added
+        .iter()
+        .chain(&cmp.deleted)
+        .chain(&cmp.moved)
+        .filter(tree_entry)
+        .chain(
+            cmp.changed
+                .iter()
+                .filter(tree_entry)
+                .filter(|e| e.fields.iter().any(|f| PAGE_FIELDS.contains(&f.as_str()))),
+        )
+        .filter_map(|e| BlockId::parse(&e.id).ok())
+        .chain(
+            moved_in_place
+                .iter()
+                .filter(|id| {
+                    dm.get(id)
+                        .is_some_and(|b| tree::is_tree_type(&b.block_type))
+                })
+                .cloned(),
+        )
+        .collect();
+    counted.extend(pages.iter());
+    counted.into_iter().cloned().collect()
 }
 
 /// The scope a draft is read against: canon at the landing the view is based on, or canon itself
@@ -144,6 +244,67 @@ pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError>
     Ok(Some(review(&cmp, &dm, &bm)))
 }
 
+/// The changes from scope `from` to scope `to`, read as a review reads a view against its base:
+/// the change summary of the landings since a tag reads it (sr6), so it counts by the same rule.
+pub fn between(rdy: &ReadState, from: &Scope, to: &Scope) -> Result<Review, RdyError> {
+    let cmp = rdy.compare(to, from)?;
+    let (dm, bm) = (rdy.materialized(to)?, rdy.materialized(from)?);
+    Ok(review(&cmp, &dm, &bm))
+}
+
+/// What a scope changes, as its change rows read it: the review against its base, else, for a
+/// proposal version made on the empty project that no scope names, the review against that empty
+/// project ([`unreviewed`]). The menu's count, the home page's list and the change summary all
+/// read their rows from it (O12), so they agree. Review marks on the pages read only [`build`].
+pub(crate) fn listed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError> {
+    match build(rdy, scope)? {
+        Some(rv) => Ok(Some(rv)),
+        None => unreviewed(rdy, scope),
+    }
+}
+
+/// The count of [`Review::changed_blocks`] for a proposal version that has no base here: one
+/// made before the first landing, read once canon has landed. It was made on the empty project,
+/// so it is counted against that: every block it holds is added. Its page shows no marks
+/// ([`base_of`]), but it still names the version and its count. Any other scope gives none.
+pub fn unreviewed_changed_blocks(rdy: &ReadState, scope: &Scope) -> Result<Option<u32>, RdyError> {
+    Ok(unreviewed(rdy, scope)?.map(|rv| rv.changed_blocks()))
+}
+
+/// The review behind [`unreviewed_changed_blocks`]: the proposal version against the empty
+/// project. Its change summary lists every block it holds as new (sr6).
+pub(crate) fn unreviewed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError> {
+    let Scope::Proposal(p) = scope else {
+        return Ok(None);
+    };
+    if rdy.proposal_base(p)?.is_some() || rdy.canon_head().is_none() {
+        return Ok(None);
+    }
+    let dm = rdy.materialized(scope)?;
+    let empty = Materialized::default();
+    let cmp = Compare {
+        a: String::new(),
+        b: String::new(),
+        added: dm
+            .iter()
+            .map(|b| CompareEntry {
+                id: b.id.to_string(),
+                block_type: b.block_type.clone(),
+                path: None,
+                fields: vec![],
+                from_parent: None,
+                to_parent: None,
+                conflict: None,
+            })
+            .collect(),
+        deleted: vec![],
+        changed: vec![],
+        moved: vec![],
+        conflicted: vec![],
+    };
+    Ok(Some(review(&cmp, &dm, &empty)))
+}
+
 /// On the page: neither a decision nor its rationale.
 fn visible(b: &Block) -> bool {
     b.block_type != decision::DECISION && b.block_type != RATIONALE
@@ -155,12 +316,66 @@ fn ids(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {
 
 /// The changed entries a reader can see: an entry whose `fields` is empty differs only in its
 /// pins (compare never lists pins), so it carries no Edited mark (orchestrator ruling,
-/// DX4 final review).
-fn seen_changes(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {
-    entries
-        .iter()
-        .filter(|e| !e.fields.is_empty())
-        .filter_map(|e| BlockId::parse(&e.id).ok())
+/// DX4 final review). The name `order` stands for the order key or a custom field: it is seen
+/// only when the custom field differs or the block took a new place among its siblings
+/// (`moved_in_place`); a new order key at the same place is not seen (the task-5 ruling).
+fn seen_changes<'a>(
+    entries: &'a [CompareEntry],
+    dm: &'a Materialized,
+    bm: &'a Materialized,
+    moved_in_place: &'a HashSet<BlockId>,
+) -> impl Iterator<Item = BlockId> + 'a {
+    entries.iter().filter_map(move |e| {
+        let id = BlockId::parse(&e.id).ok()?;
+        let custom_order = || {
+            let field = |m: &Materialized| m.get(&id).and_then(|b| b.fields.get("order").cloned());
+            field(dm) != field(bm)
+        };
+        let seen = e.fields.iter().any(|f| f != "order")
+            || (e.fields.iter().any(|f| f == "order")
+                && (moved_in_place.contains(&id) || custom_order()));
+        seen.then_some(id)
+    })
+}
+
+/// The blocks under the same parent on both sides that took a new place among their siblings
+/// (Task 4's rule 1: movement is decided only from the structural place). A block moved in place
+/// when both are true: its order key differs, and its index among the siblings both sides hold
+/// under that parent differs. A new key at the same place (an append of the already-last block,
+/// a rebalance) is no move; nor is a block that its siblings move around while it keeps its
+/// key; nor are added or removed siblings. Each touched parent's children are walked once per
+/// side.
+fn reordered(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> HashSet<BlockId> {
+    let mut places: HashMap<Option<BlockId>, HashMap<BlockId, (usize, usize)>> = HashMap::new();
+    let mut out = HashSet::new();
+    for id in ids(&cmp.changed) {
+        let (Some(new), Some(old)) = (dm.get(&id), bm.get(&id)) else {
+            continue;
+        };
+        if new.parent != old.parent || new.order == old.order {
+            continue;
+        }
+        let at = places.entry(new.parent.clone()).or_insert_with(|| {
+            let parent = new.parent.as_ref();
+            let (was, now) = (bm.children(parent), dm.children(parent));
+            let in_now: HashSet<&BlockId> = now.iter().map(|b| &b.id).collect();
+            let in_was: HashSet<&BlockId> = was.iter().map(|b| &b.id).collect();
+            let mut at: HashMap<BlockId, (usize, usize)> = HashMap::new();
+            for (i, b) in was.iter().filter(|b| in_now.contains(&b.id)).enumerate() {
+                at.insert(b.id.clone(), (i, 0));
+            }
+            for (i, b) in now.iter().filter(|b| in_was.contains(&b.id)).enumerate() {
+                if let Some(slot) = at.get_mut(&b.id) {
+                    slot.1 = i;
+                }
+            }
+            at
+        });
+        if at.get(&id).is_some_and(|(a, b)| a != b) {
+            out.insert(id);
+        }
+    }
+    out
 }
 
 fn doc_id<'m>(m: &'m Materialized, id: &BlockId) -> Option<&'m BlockId> {
@@ -179,7 +394,8 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
         .filter(|(b, _)| b.block_type == tree::DOC)
         .map(|(b, _)| &b.id)
         .collect();
-    let edited: Vec<(&Block, Mark)> = seen_changes(&cmp.changed)
+    let moved_in_place = reordered(cmp, dm, bm);
+    let edited: Vec<(&Block, Mark)> = seen_changes(&cmp.changed, dm, bm, &moved_in_place)
         .chain(ids(&cmp.moved))
         .filter_map(|id| dm.get(&id))
         .map(|b| (b, Mark::Edited))
@@ -273,6 +489,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
             .removed = lines.len();
     }
     rv.removed_pages = removed_pages(cmp, bm);
+    rv.changed = count_changed(&rv, cmp, dm, bm, &moved_in_place);
     rv
 }
 
@@ -394,7 +611,23 @@ mod tests {
     #[test]
     fn rv1_a_pins_only_change_is_not_edited() {
         let e = [entry("p-AAAAA", &[]), entry("p-BBBBB", &["body"])];
-        let seen: Vec<String> = seen_changes(&e).map(|b| b.to_string()).collect();
+        let none = Materialized::default();
+        let seen: Vec<String> = seen_changes(&e, &none, &none, &HashSet::new())
+            .map(|b| b.to_string())
+            .collect();
+        assert_eq!(seen, vec!["p-BBBBB".to_string()]);
+    }
+
+    /// The task-5 ruling: `order` alone is seen only for a new place among the siblings (or a
+    /// custom field that differs, which needs both sides' blocks).
+    #[test]
+    fn sr5_an_order_key_alone_is_seen_only_for_a_new_place() {
+        let e = [entry("p-AAAAA", &["order"]), entry("p-BBBBB", &["order"])];
+        let none = Materialized::default();
+        let moved: HashSet<BlockId> = [BlockId::parse("p-BBBBB").unwrap()].into();
+        let seen: Vec<String> = seen_changes(&e, &none, &none, &moved)
+            .map(|b| b.to_string())
+            .collect();
         assert_eq!(seen, vec!["p-BBBBB".to_string()]);
     }
 }

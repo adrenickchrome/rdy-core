@@ -27,6 +27,12 @@ fn rv1_a_draft_page_offers_show_changes_hidden_until_script_and_canon_and_tags_d
     assert!(draft.len() >= 4, "{}", draft.len());
     for (p, h) in &draft {
         assert_eq!(h.matches(BUTTON).count(), 1, "{p}");
+        // the button leaves the header's tools for the review bar under the header (sr7)
+        let bar = h.find("<div class=\"review-bar\">").expect(p);
+        assert!(h.find(BUTTON).unwrap() > bar, "{p}");
+        let tools =
+            &h[h.find("<div class=\"head-tools\">").expect(p)..h.find("</header>").unwrap()];
+        assert!(!tools.contains("show-changes"), "{p}");
     }
     let app = std::fs::read_to_string(out.path().join("assets/app.js")).unwrap();
     assert!(app.contains("show-changes") && app.contains("rdy-changes"));
@@ -37,13 +43,18 @@ fn rv1_a_draft_page_offers_show_changes_hidden_until_script_and_canon_and_tags_d
         let out = tempfile::tempdir().unwrap();
         rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
         for (p, h) in layout_pages(out.path()) {
+            // the summary of the landings since the tag words each change it lists (sr6)
+            if p.ends_with("changes-since.html") {
+                continue;
+            }
             for gone in [
                 "show-changes",
                 "has-chg",
                 "chg-label",
                 "chg-removed",
                 "nav-removed",
-                "Changes in this draft",
+                "Changes in this view",
+                "Changes in this proposal",
             ] {
                 assert!(!h.contains(gone), "{scope:?} {p} holds {gone}");
             }
@@ -104,82 +115,6 @@ fn rv1_the_stylesheet_hides_markers_only_when_show_changes_is_off() {
 fn review_css() -> rdy_qa::site::Css {
     let (_d, _r, _ids, out) = review_site(&Scope::View(REVIEW_VIEW.into()));
     parse_css(&std::fs::read_to_string(out.path().join("assets/site.css")).unwrap())
-}
-
-#[test]
-fn rv1_at_phone_width_show_changes_sits_on_the_version_row_and_row_one_keeps_the_brand() {
-    let css = review_css();
-    let at = |sel: &str, prop: &str, w: u32| cascaded(&css, sel, prop, w);
-    let tools = ".head:has(#show-changes) .head-tools";
-    for w in [360, 480, 900] {
-        // the tools stop being one box, so the button can leave the first row
-        assert_eq!(
-            at(tools, "display", w).as_deref(),
-            Some("contents"),
-            "width {w}"
-        );
-        assert_eq!(
-            at("#show-changes", "grid-row", w).as_deref(),
-            Some("2"),
-            "width {w}"
-        );
-        assert_eq!(
-            at("#show-changes", "justify-self", w).as_deref(),
-            Some("end"),
-            "width {w}"
-        );
-        for first in [
-            ".head:has(#show-changes) .theme",
-            ".head:has(#show-changes) #menu",
-        ] {
-            assert_eq!(
-                at(first, "grid-row", w).as_deref(),
-                Some("1"),
-                "{first} width {w}"
-            );
-        }
-        // the pill shares row 2 and leaves the button its width and a gap
-        assert_eq!(
-            at(".version", "grid-row", w).as_deref(),
-            Some("2"),
-            "width {w}"
-        );
-        assert_eq!(
-            at("#show-changes", "width", w).as_deref(),
-            Some("7.5rem"),
-            "width {w}"
-        );
-        assert_eq!(
-            at(
-                ".head:has(#show-changes:not([hidden])) .version",
-                "max-width",
-                w
-            )
-            .as_deref(),
-            Some("calc(100% - 8rem)"),
-            "width {w}"
-        );
-        // the brand keeps the flexible first column of row 1
-        assert_eq!(
-            at(".brand", "grid-row", w).as_deref(),
-            Some("1"),
-            "width {w}"
-        );
-        assert_eq!(
-            at(".brand", "grid-column", w).as_deref(),
-            Some("1"),
-            "width {w}"
-        );
-        assert!(
-            at(".head:has(#show-changes)", "grid-template-columns", w)
-                .is_some_and(|c| c.starts_with("minmax(0, 1fr)")),
-            "width {w}"
-        );
-    }
-    for w in [901, 1280] {
-        assert_eq!(at(tools, "display", w), None, "width {w}");
-        assert_eq!(at("#show-changes", "grid-row", w), None, "width {w}");
-    }
 }
 
 #[test]

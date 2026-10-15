@@ -241,7 +241,12 @@ fn ls6_a_landing_reaches_the_open_page_and_no_other() {
     on_writer(&sh, |r| {
         r.tag(&approver(), "v1.0.0", None, None).unwrap();
     });
-    let label = Some(("label".to_string(), "{\"text\":\"v1.0.0\"}".to_string()));
+    // the new label and the new header (sr5): the pill opens the menu on the live site
+    let label = Some((
+        "label".to_string(),
+        "{\"text\":\"v1.0.0\",\"html\":\"<a class=\\\"pill\\\" href=\\\"/~versions/\\\" data-menu aria-haspopup=\\\"dialog\\\" aria-expanded=\\\"false\\\"><span class=\\\"pill-text\\\">v1.0.0</span></a>\"}"
+            .to_string(),
+    ));
     // had the landing sent Beta anything, that would come first: one stream keeps its order
     assert_eq!(beta.next_event(T), label);
     assert_eq!(alpha.next_event(T), label);

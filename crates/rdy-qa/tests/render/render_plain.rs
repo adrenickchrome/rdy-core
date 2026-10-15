@@ -233,13 +233,15 @@ fn direct1_content_after_a_section_stays_in_stored_order() {
 }
 
 /// A folder's description is spans: home card, search entry and `llms.txt` read it as plain words.
+/// The home card keeps a code span code, as the folder's page does (ruling final-round1).
 #[test]
 fn md1_a_folder_description_is_plain_on_the_home_card_in_search_and_in_llms_txt() {
     let (_d, mut r, ids) = spec();
     let out = render(&mut r);
     let want = "Rules on guards in brief, per the docs, Guard and the guard rule.";
     let home = html(out.path(), "index.html");
-    assert!(home.contains(want), "home card: {want}");
+    let card = "Rules on guards in <code>brief</code>, per the docs, Guard and the guard rule.";
+    assert!(home.contains(card), "home card: {card}\n{home}");
     let idx = read_json(&out.path().join("search-index.json"));
     let f = idx["entries"]
         .as_array()

@@ -89,6 +89,49 @@ pub fn plain_refs(
     form: Form,
     label: &dyn Fn(&RefSpan) -> String,
 ) -> String {
+    plain_refs_in(text, mode, form, label, false)
+}
+
+/// Opens a code span in the text of [`plain_refs_coded`].
+pub(crate) const CODE_OPEN: char = '\u{E000}';
+/// Closes a code span in the text of [`plain_refs_coded`].
+pub(crate) const CODE_CLOSE: char = '\u{E001}';
+/// In the text of [`plain_refs_coded`], the next character is authored text, not a mark.
+pub(crate) const CODE_ESC: char = '\u{E002}';
+
+/// `t` as authored text in the coded form ([`plain_refs_coded`]): each of the three mark
+/// characters it holds is kept, after [`CODE_ESC`], so a reader of the coded text gets it back.
+pub(crate) fn code_escape(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    for c in t.chars() {
+        if matches!(c, CODE_OPEN | CODE_CLOSE | CODE_ESC) {
+            out.push(CODE_ESC);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// As [`plain_refs`], but each code span's text stands between [`CODE_OPEN`] and [`CODE_CLOSE`]:
+/// a word diff reads it so that a code span stays code (the task-6 ruling). The encoding is
+/// reversible: an authored mark character (and [`CODE_ESC`]) is written after [`CODE_ESC`]
+/// ([`code_escape`]), so no authored character is lost and only a code span writes a bare mark.
+pub(crate) fn plain_refs_coded(
+    text: &str,
+    mode: RefMode,
+    form: Form,
+    label: &dyn Fn(&RefSpan) -> String,
+) -> String {
+    plain_refs_in(text, mode, form, label, true)
+}
+
+fn plain_refs_in(
+    text: &str,
+    mode: RefMode,
+    form: Form,
+    label: &dyn Fn(&RefSpan) -> String,
+    coded: bool,
+) -> String {
     let words = |t: &str, label_form: bool| {
         let (toks, refs) = tokens(t, mode);
         let nodes = if label_form {
@@ -97,7 +140,7 @@ pub fn plain_refs(
             parse_spans(&toks, false)
         };
         let mut out = String::new();
-        render_plain(&nodes, &refs, label, &mut out);
+        render_plain(&nodes, &refs, label, coded, &mut out);
         out
     };
     match form {
@@ -709,20 +752,36 @@ fn render_plain(
     nodes: &[Node],
     refs: &[RefSpan],
     label: &dyn Fn(&RefSpan) -> String,
+    coded: bool,
     out: &mut String,
 ) {
+    // with `coded`, only a code span writes a bare mark: authored text is escaped
+    let push = |out: &mut String, t: &str| {
+        if coded {
+            out.push_str(&code_escape(t));
+        } else {
+            out.push_str(t);
+        }
+    };
     for n in nodes {
         match n {
-            Node::Text(t) => out.push_str(t),
+            Node::Text(t) => push(out, t),
             Node::Ref(k) => {
                 let span = &refs[*k];
                 match &span.display {
-                    Some(d) => out.push_str(d),
-                    None => out.push_str(&label(span)),
+                    Some(d) => push(out, d),
+                    None => push(out, &label(span)),
                 }
             }
-            Node::Code(c) | Node::Strong(c) | Node::Em(c) => render_plain(c, refs, label, out),
-            Node::Link { children, .. } => render_plain(children, refs, label, out),
+            Node::Code(c) if coded => {
+                out.push(CODE_OPEN);
+                render_plain(c, refs, label, coded, out);
+                out.push(CODE_CLOSE);
+            }
+            Node::Code(c) | Node::Strong(c) | Node::Em(c) => {
+                render_plain(c, refs, label, coded, out)
+            }
+            Node::Link { children, .. } => render_plain(children, refs, label, coded, out),
         }
     }
 }

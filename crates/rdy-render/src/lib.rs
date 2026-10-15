@@ -1,4 +1,5 @@
 mod assets;
+mod changes;
 pub mod disagree;
 mod highlight;
 mod home;
@@ -6,6 +7,7 @@ mod html;
 pub mod inline;
 pub mod live;
 mod llms;
+pub mod menu;
 mod nav;
 mod page;
 pub mod review;
@@ -56,12 +58,30 @@ struct LabelText(String);
 
 impl minijinja::value::Object for LabelText {}
 
-/// The page being rendered on this thread, and where the label went in it. A page renders into
-/// it ([`render_page`]), so the formatter knows how many bytes come before the label.
+/// The header's version markup (the pill and its chips), as the `header` filter marks it in a
+/// template (`{{ header | header }}`): the formatter writes it as it is (it is built escaped,
+/// `version::header_html`) and records the bytes it took in the page.
+#[derive(Debug)]
+struct HeaderHtml(String);
+
+impl minijinja::value::Object for HeaderHtml {}
+
+/// What a recorded range of a page holds: the version label's text, or the header's markup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotKind {
+    Label,
+    Header,
+}
+
+/// A recorded range of a file and what it holds.
+pub type Slot = (SlotKind, std::ops::Range<usize>);
+
+/// The page being rendered on this thread, and where the slots went in it. A page renders into
+/// it ([`render_page`]), so the formatter knows how many bytes come before a slot.
 #[derive(Default)]
 struct PageOut {
     bytes: Vec<u8>,
-    label_at: Vec<std::ops::Range<usize>>,
+    label_at: Vec<Slot>,
 }
 
 thread_local! {
@@ -87,12 +107,13 @@ impl std::io::Write for PageSink {
     }
 }
 
-/// Renders a page template: its bytes, and the byte ranges where it wrote the version label.
+/// Renders a page template: its bytes, and the byte ranges where it wrote the version label and
+/// the header, in order.
 fn render_page<S: Serialize>(
     env: &minijinja::Environment<'static>,
     name: &str,
     ctx: S,
-) -> Result<(Vec<u8>, Vec<std::ops::Range<usize>>), RdyError> {
+) -> Result<(Vec<u8>, Vec<Slot>), RdyError> {
     let t = env.get_template(name).map_err(tpl)?;
     PAGE_OUT.set(Some(PageOut::default()));
     let rendered = t.render_captured_to(ctx, PageSink).map(drop);
@@ -105,10 +126,44 @@ fn write_failure() -> minijinja::Error {
     minijinja::Error::new(minijinja::ErrorKind::WriteFailure, "cannot write the page")
 }
 
-/// Writes the version label (a [`LabelText`]) into the page [`render_page`] is rendering, and
-/// records the bytes it took. The label must go straight into the page: written into a captured
-/// block (a macro call, `{% set %}`, `{% filter %}`), its place would be unknown, so that is an
-/// error. An empty label is an error too.
+/// Writes a slot's `text` (already in its final form) into the page [`render_page`] is
+/// rendering, and records the bytes it took. A slot must go straight into the page: written into
+/// a captured block (a macro call, `{% set %}`, `{% filter %}`), its place would be unknown, so
+/// that is an error. An empty slot is an error too.
+fn write_slot(
+    out: &mut minijinja::Output,
+    kind: SlotKind,
+    text: &str,
+) -> Result<(), minijinja::Error> {
+    let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
+    let start = len();
+    out.write_str(text).map_err(|_| write_failure())?;
+    // an empty slot takes no bytes, so the check below could not tell a captured block from
+    // the page: it is refused (`version::text_label` and `version::header_html` never give one)
+    match (start, len()) {
+        (Some(start), Some(end)) if !text.is_empty() && end - start == text.len() => {
+            PAGE_OUT.with_borrow_mut(|o| {
+                if let Some(o) = o {
+                    o.label_at.push((kind, start..end));
+                }
+            });
+            Ok(())
+        }
+        _ => Err(minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            match kind {
+                SlotKind::Label => {
+                    "the version label is written only straight into a page that render_page renders"
+                }
+                SlotKind::Header => {
+                    "the version header is written only straight into a page that render_page renders"
+                }
+            },
+        )),
+    }
+}
+
+/// Writes the version label (a [`LabelText`]): escaped in an HTML template.
 fn write_label(
     out: &mut minijinja::Output,
     state: &minijinja::State,
@@ -118,30 +173,12 @@ fn write_label(
         minijinja::AutoEscape::Html => escape(&label.0),
         _ => label.0.clone(),
     };
-    let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
-    let start = len();
-    out.write_str(&text).map_err(|_| write_failure())?;
-    // an empty label takes no bytes, so the check below could not tell a captured block from
-    // the page: it is refused (`version::label` never gives one)
-    match (start, len()) {
-        (Some(start), Some(end)) if !text.is_empty() && end - start == text.len() => {
-            PAGE_OUT.with_borrow_mut(|o| {
-                if let Some(o) = o {
-                    o.label_at.push(start..end);
-                }
-            });
-            Ok(())
-        }
-        _ => Err(minijinja::Error::new(
-            minijinja::ErrorKind::InvalidOperation,
-            "the version label is written only straight into a page that render_page renders",
-        )),
-    }
+    write_slot(out, SlotKind::Label, &text)
 }
 
 /// Writes a value into a template: text is HTML-escaped as `html::escape` does, so that a slash
 /// in a path stays a slash (minijinja's own escape turns it into `&#x2f;`); the version label
-/// goes through [`write_label`].
+/// goes through [`write_label`], the header's markup through [`write_slot`] as it is.
 fn format_value(
     out: &mut minijinja::Output,
     state: &minijinja::State,
@@ -149,6 +186,9 @@ fn format_value(
 ) -> Result<(), minijinja::Error> {
     if let Some(label) = value.downcast_object_ref::<LabelText>() {
         return write_label(out, state, label);
+    }
+    if let Some(header) = value.downcast_object_ref::<HeaderHtml>() {
+        return write_slot(out, SlotKind::Header, &header.0);
     }
     if matches!(state.auto_escape(), minijinja::AutoEscape::Html)
         && !value.is_safe()
@@ -165,6 +205,9 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
     env.add_filter("label", |text: String| {
         minijinja::Value::from_object(LabelText(text))
     });
+    env.add_filter("header", |html: String| {
+        minijinja::Value::from_object(HeaderHtml(html))
+    });
     macro_rules! templates {
         ($($name:literal),* $(,)?) => {
             $(env
@@ -180,7 +223,9 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "glossary.html",
         "questions.html",
         "disagreements.html",
+        "changes.html",
         "redirect.html",
+        "versions.html",
         "partials/nav.html",
         "partials/toc.html",
         "partials/pager.html",
@@ -189,6 +234,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/tools.html",
         "partials/why.html",
         "partials/version.html",
+        "partials/review_bar.html",
         "partials/colophon.html",
         "partials/change.html",
         "partials/removed.html",
@@ -205,6 +251,7 @@ fn template_of(kind: &str) -> &'static str {
         "glossary" => "glossary.html",
         "questions" => "questions.html",
         "disagreements" => "disagreements.html",
+        "changes" => "changes.html",
         _ => "redirect.html",
     }
 }
@@ -470,27 +517,35 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
 }
 
 /// Which site a build is for: `rdy render --out` (static), or the live site `rdy serve` serves,
-/// whose noscript sentence also names live updates (ledger O9). Both write the same label.
+/// whose noscript sentence also names live updates (ledger O9). Both write the same label. The
+/// header's links differ (RULING F4): a static page links to the home page's Versions list and to
+/// the change pages by its relative root; a live page links to `/~versions/` (the pill opens the
+/// menu) and to the change pages under `root`, the scope's absolute path (`/`, `/~view/<enc>/`,
+/// `/~proposal/<ref>/` or `/~tag/<name>/`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
+pub enum Mode<'a> {
     Static,
-    Live,
+    Live { root: &'a str },
 }
 
 /// A built site: every file by its site-relative path (`index.html`, `go/p-AAAAA.html`,
 /// `assets/site.css`, `search-index.json`, `llms.txt`), with its bytes.
 pub struct SiteFiles {
     pub files: BTreeMap<String, Vec<u8>>,
-    /// The version label's text, as the build wrote it.
+    /// The version label's text (the colophon and the llms files), as the build wrote it.
     pub label: String,
-    /// Where the build wrote the label: for each file, the byte ranges, in order. Only the HTML
-    /// pages (the version pill and the colophon; never a permalink page under `go/`), `llms.txt`
-    /// and `llms-full.txt` (the head line) have ranges; a file with none has no entry. The build
-    /// records each range as it writes the label and never searches its output for it. The live
-    /// site's filler puts a new label into exactly these ranges (escaped in a page, on one line
-    /// in the llms files, as the build writes it there), last range first, and touches nothing else: a doc can hold the label's text
-    /// or any other character.
-    pub label_at: BTreeMap<String, Vec<std::ops::Range<usize>>>,
+    /// The header's version markup (the pill and its chips) as a live build writes it on every
+    /// page; empty in a static build, whose pages write it by their relative root.
+    pub header: String,
+    /// Where the build wrote the label and the header: for each file, the byte ranges with what
+    /// each holds, in order. Only the HTML pages (the header, then the colophon's label; never a
+    /// permalink page under `go/`), `llms.txt` and `llms-full.txt` (the head line's label) have
+    /// ranges; a file with none has no entry. The build records each range as it writes it and
+    /// never searches its output for it. The live site's filler puts a new label and header into
+    /// exactly these ranges (the label escaped in a page and on one line in the llms files, as
+    /// the build writes it there), last range first, and touches nothing else: a doc can hold the
+    /// label's text or any other character.
+    pub label_at: BTreeMap<String, Vec<Slot>>,
     pub summary: RenderSummary,
 }
 
@@ -499,6 +554,16 @@ const GLOSSARY_DOC_DROPPED: &str = "the top-level doc named glossary has no page
 
 /// The same warning when no term is defined anywhere, so the site has no glossary page either.
 const GLOSSARY_DOC_DROPPED_NO_TERMS: &str = "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it.";
+
+/// The render's warning when a top-level doc owns `changes.html` (O1, O9).
+const CHANGES_DOC_KEPT: &str = "the top-level doc named changes has the page changes.html: the change summary of this view or proposal is left out. Rename the doc to publish it.";
+
+/// The render's warning when a top-level doc owns `changes-since.html` (O1).
+fn since_doc_kept(tag: &str) -> String {
+    format!(
+        "the top-level doc named changes-since has the page changes-since.html: the summary of changes since {tag} is left out. Rename the doc to publish it."
+    )
+}
 
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
@@ -531,7 +596,107 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     let env = env()?;
     let mut site = Site::new(&m, &pack, &site_name);
     site.set_disagreements(disagree::list(rdy, scope)?);
-    let review = review::build(rdy, scope)?;
+    // what the scope changes: its chip, its change summary, the home page's list and the
+    // menu's count all read it (O12). A proposal version with no base here (made on the empty
+    // project, read once canon has landed) still names itself and counts against that empty base
+    let listed = review::listed(rdy, scope)?;
+    // the review marks on the pages read only a base a scope names: that proposal version's
+    // pages show none (the task-8 ruling)
+    let base = review::base_of(rdy, scope);
+    let review = listed.as_ref().filter(|_| base.is_some());
+    let blocks = listed.as_ref().map(|rv| rv.changed_blocks());
+    let reviewed = match blocks {
+        Some(blocks) => reviewed_of(rdy, scope, blocks)?,
+        None => None,
+    };
+    let header = version::header(&position, reviewed.as_ref());
+    let mut summary = RenderSummary {
+        pages: 0,
+        assets: 0,
+        redirects: 0,
+        warnings: vec![],
+    };
+
+    // the change summary of a review render (sr6): against its base, or, for a proposal version
+    // made on the empty project that no scope names, against that empty project. A top-level
+    // doc that owns its path leaves out only the page (and its chip's link): the review pages
+    // keep each edited block's inline diff.
+    let mut changes_summary: Option<changes::Summary> = None;
+    let mut inline_diffs: BTreeMap<rdy_model::BlockId, String> = BTreeMap::new();
+    if let (Some(r), Some(rv)) = (&reviewed, listed.as_ref()) {
+        let (diff, from) = match &base {
+            Some(b) => (Some(rdy.diff(b, scope)?), rdy.materialized(b)?),
+            None => (None, Default::default()),
+        };
+        let sides = changes::Sides {
+            from: &from,
+            to: &m,
+            text: &site,
+        };
+        let (s, inline) = changes::summary(
+            &site,
+            rdy_engine::site_scope::CHANGES_PAGE,
+            rv,
+            diff.as_ref(),
+            &sides,
+            &changes::Of::Review(r.kind),
+        );
+        if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::CHANGES_PAGE) {
+            summary.warnings.push(CHANGES_DOC_KEPT.into());
+        } else {
+            changes_summary = Some(s);
+        }
+        // only a page with review marks shows an edited block's diff
+        if review.is_some() {
+            inline_diffs = inline;
+        }
+    }
+    // the summary of the landings since the tag (sr6): from the tag to the state the position
+    // counts to (canon, a view's or proposal's base, or the as-of landing)
+    let since_of = match (&position.version, position.landings_since) {
+        (Some(v), n) if n > 0 => {
+            let to = match scope {
+                Scope::Canon => Some(Scope::Canon),
+                Scope::View(_) | Scope::Proposal(_) => review::base_of(rdy, scope),
+                Scope::At(h) => Some(Scope::At(*h)),
+                Scope::Inflight => None,
+            };
+            let tag = v.landing.parse::<Hash>().ok().map(Scope::At);
+            tag.zip(to).map(|(tag, to)| (v.name.clone(), n, tag, to))
+        }
+        _ => None,
+    };
+    let mut since_summary: Option<changes::Summary> = None;
+    if let Some((name, landings, tag, to)) = since_of {
+        if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::SINCE_PAGE) {
+            summary.warnings.push(since_doc_kept(&name));
+        } else {
+            let rv = review::between(rdy, &tag, &to)?;
+            let diff = rdy.diff(&tag, &to)?;
+            let from = rdy.materialized(&tag)?;
+            // both sides read against the `to` side's site (O4)
+            let to_m = (to != *scope).then(|| rdy.materialized(&to)).transpose()?;
+            let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
+            let sides = changes::Sides {
+                from: &from,
+                to: to_m.as_deref().unwrap_or(&m),
+                text: to_site.as_ref().unwrap_or(&site),
+            };
+            let (s, _) = changes::summary(
+                &site,
+                rdy_engine::site_scope::SINCE_PAGE,
+                &rv,
+                Some(&diff),
+                &sides,
+                &changes::Of::Since {
+                    tag: name,
+                    landings,
+                },
+            );
+            since_summary = Some(s);
+        }
+    }
+
     let sh = page::Shared {
         site: &site,
         m: &m,
@@ -543,15 +708,16 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         versions: &versions,
         landed_ms: &landed_ms,
         blobs: &blobs,
-        review: review.as_ref(),
+        review,
+        listed: listed.as_ref(),
+        reviewed: reviewed.clone(),
+        header,
+        headers: Default::default(),
         used_blobs: Default::default(),
         mode,
-    };
-    let mut summary = RenderSummary {
-        pages: 0,
-        assets: 0,
-        redirects: 0,
-        warnings: vec![],
+        inline_diffs,
+        changes_page: changes_summary.is_some(),
+        since_page: since_summary.is_some(),
     };
     if site.glossary_doc_dropped {
         summary.warnings.push(if site.terms.is_empty() {
@@ -593,9 +759,23 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
         Ok((ctx.page_url.clone(), html, at))
     })?;
-    summary.pages = pages.len();
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut label_at: BTreeMap<String, Vec<std::ops::Range<usize>>> = BTreeMap::new();
+    let mut label_at: BTreeMap<String, Vec<Slot>> = BTreeMap::new();
+    // the change summaries: pages of the site, kept out of the navigation, the search index,
+    // the llms files and the permalinks (sr6)
+    let mut extra = vec![];
+    if let Some(c) = &changes_summary {
+        extra.push(page::build(&sh, page::Kind::Changes(c)));
+    }
+    if let Some(c) = &since_summary {
+        extra.push(page::build(&sh, page::Kind::ChangesSince(c)));
+    }
+    let mut pages = pages;
+    for ctx in &extra {
+        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
+        pages.push((ctx.page_url.clone(), html, at));
+    }
+    summary.pages = pages.len();
     for (path, html, at) in pages {
         if !at.is_empty() {
             label_at.insert(path.clone(), at);
@@ -637,7 +817,11 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         summary.redirects += 1;
     }
 
-    let label = version::label(&position);
+    let label = version::text_label(&position, reviewed.as_ref());
+    let header = match mode {
+        Mode::Live { .. } => sh.header_html(""),
+        Mode::Static => String::new(),
+    };
     files.insert(
         "search-index.json".into(),
         search::bytes(&index, &site_name),
@@ -645,10 +829,10 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     let (llms, at) =
         llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
     files.insert("llms.txt".into(), llms);
-    label_at.insert("llms.txt".into(), vec![at]);
+    label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
     let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
     files.insert("llms-full.txt".into(), llms);
-    label_at.insert("llms-full.txt".into(), vec![at]);
+    label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
     for (path, bytes) in assets::files(has_mermaid) {
         files.insert(path.into(), bytes);
     }
@@ -674,8 +858,39 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     Ok(SiteFiles {
         files,
         label: label.text,
+        header,
         label_at,
         summary,
+    })
+}
+
+/// What a review render shows (D-BMX8P): a view's name and owner, or a proposal version's title
+/// and author, with the `blocks` it changes (`Review::changed_blocks`). None for any other scope.
+fn reviewed_of(
+    rdy: &ReadState,
+    scope: &Scope,
+    blocks: u32,
+) -> Result<Option<version::Reviewed>, RdyError> {
+    Ok(match scope {
+        Scope::View(name) => Some(version::Reviewed {
+            kind: version::ReviewedKind::View,
+            name: name.clone(),
+            author: rdy
+                .view_head(name)
+                .and_then(|h| h.owner.as_ref())
+                .map(|o| o.actor.clone()),
+            blocks,
+        }),
+        Scope::Proposal(v) => {
+            let p = rdy.proposal_version(v)?;
+            Some(version::Reviewed {
+                kind: version::ReviewedKind::Proposal,
+                name: p.title,
+                author: Some(p.provenance.actor),
+                blocks,
+            })
+        }
+        Scope::Canon | Scope::At(_) | Scope::Inflight => None,
     })
 }
 
@@ -947,7 +1162,28 @@ mod label_tests {
             String::from_utf8(bytes).unwrap(),
             "<p>x&lt;y</p><i>x&lt;y</i>\u{E002}x&lt;y"
         );
-        assert_eq!(at, vec![3..9, 16..22]);
+        assert_eq!(at, vec![(SlotKind::Label, 3..9), (SlotKind::Label, 16..22)]);
+    }
+
+    #[test]
+    fn sr5_a_page_records_where_it_wrote_the_header_unescaped() {
+        let env = env_with("<p>{{ h | header }}</p>{{ a | label }}");
+        let ctx = serde_json::json!({"h": "<a href=\"x\">v1</a>", "a": "x<y"});
+        let (bytes, at) = render_page(&env, "t.html", ctx).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "<p><a href=\"x\">v1</a></p>x&lt;y"
+        );
+        assert_eq!(
+            at,
+            vec![(SlotKind::Header, 3..21), (SlotKind::Label, 25..31)]
+        );
+        let env = env_with("{% set x %}{{ h | header }}{% endset %}{{ x }}");
+        let e = render_page(&env, "t.html", serde_json::json!({"h": "<a></a>"})).unwrap_err();
+        assert!(e.message.contains("version header"), "{e}");
+        let env = env_with("<p>{% set x %}{{ h | header }}{% endset %}</p>{{ x }}");
+        let e = render_page(&env, "t.html", serde_json::json!({"h": ""})).unwrap_err();
+        assert!(e.message.contains("version header"), "{e}");
     }
 
     #[test]

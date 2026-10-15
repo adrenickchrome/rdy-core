@@ -51,10 +51,10 @@ fn rv1_the_home_page_lists_the_drafts_changed_docs_with_plain_counts() {
         .map(|r| r.text)
         .collect::<Vec<_>>()
         .join(" | ");
-    let list = "Changes in this draft | Intro | 2\u{a0}edited \u{b7} 1\u{a0}new \u{b7} 1\u{a0}removed | Fresh | New | Old guide | Removed";
+    let list = "Changes in this view | Intro | 2\u{a0}edited \u{b7} 1\u{a0}new \u{b7} 1\u{a0}removed | Fresh | New | Old guide | Removed";
     assert!(joined.contains(list), "{joined}");
     assert!(joined.find(list).unwrap() < joined.find("Contents").unwrap());
-    assert!(h.contains("<section class=\"chg\"><h2 id=\"draft-changes\">Changes in this draft</h2><ul class=\"changes\">"));
+    assert!(h.contains("<section class=\"chg\"><h2 id=\"review-changes\">Changes in this view</h2><ul class=\"changes\">"));
     assert!(h.contains("<span class=\"changes-gone\">Old guide</span>"));
 }
 
@@ -98,13 +98,18 @@ fn rv1_a_draft_with_nothing_a_reader_sees_changed_shows_no_marker() {
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::View("decided".into()), out.path()).unwrap();
     for p in pages(out.path()) {
+        // the summary of the landings since the tag shows those landings' changes (sr6), and
+        // the change summary of the view is the page the heading names (sr6, sr7)
+        if p.ends_with("changes-since.html") || p.ends_with("changes.html") {
+            continue;
+        }
         let h = std::fs::read_to_string(&p).unwrap();
         for m in [
             "has-chg",
             "chg-label",
             "chg-removed",
             "nav-removed",
-            "Changes in this draft",
+            "Changes in this view",
         ] {
             assert!(!h.contains(m), "{} holds {m}", p.display());
         }

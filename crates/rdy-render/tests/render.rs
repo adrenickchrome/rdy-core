@@ -483,8 +483,9 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
     r.invalidate();
     let out = tempfile::tempdir().unwrap();
     let s = render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
-    // index + one page per folder down to one past the limit
-    assert_eq!(s.pages, 1 + tree::MAX_FOLDER_DEPTH + 1, "{s:?}");
+    // index + one page per folder down to one past the limit + the view's change summary (sr6)
+    assert!(out.path().join("changes.html").is_file());
+    assert_eq!(s.pages, 1 + tree::MAX_FOLDER_DEPTH + 1 + 1, "{s:?}");
 }
 
 #[test]

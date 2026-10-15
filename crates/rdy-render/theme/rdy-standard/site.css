@@ -36,6 +36,7 @@
   --font-text: 'Onest', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'Geist Mono', 'SF Mono', Menlo, Consolas, monospace;
   --measure: 44rem; --radius: 10px;
+  --head-h: 3.75rem; --bar-h: 3.25rem;
   --pair-body: var(--ink) var(--bg) text;
   --pair-soft: var(--ink-soft) var(--bg) text;
   --pair-faint: var(--ink-faint) var(--bg) text;
@@ -91,18 +92,26 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .brand { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 0.98rem; white-space: nowrap; min-width: 0; max-width: 24rem; }
 .brand svg { width: 22px; height: 22px; flex: none; }
 .brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.version { grid-column: 2; grid-row: 1; justify-self: start; font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; }
+.version { grid-column: 2; grid-row: 1; justify-self: start; white-space: nowrap; min-width: 0; max-width: 100%; }
+/* a long tag: the pill gives way and cuts its text (the 40 px rule below sets its floor on a phone) */
+.pill { font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; text-decoration: none; flex: 0 1 auto; min-width: 0; }
+.pill-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.15rem 0.5rem; white-space: nowrap; text-decoration: none; flex: none; }
+.chip-since { color: var(--ink-soft); background: var(--surface-2); }
+.chip-review { color: var(--accent-ink); background: var(--accent-soft); }
 .head .search-wrap { grid-column: 3; grid-row: 1; }
 .head-tools { grid-column: 4; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: 0.75rem; }
 .theme { display: inline-flex; background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 2px; }
 .theme button { font-size: 0.78rem; font-weight: 500; padding: 0.2rem 0.6rem; border-radius: 6px; color: var(--ink-soft); }
 .theme button[aria-checked="true"] { background: var(--bg); color: var(--ink); box-shadow: var(--shadow-sm); }
+/* the drawer's own group: the header's is hidden on a phone and this one shows (O7); above 900px only the header's shows */
+.theme-drawer { display: none; margin: 0 0 1.5rem; }
 #menu { display: none; font-size: 0.85rem; font-weight: 500; border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.3rem 0.7rem; background: var(--surface); }
 
 /* frame */
 .app { display: grid; grid-template-columns: 16rem minmax(0, 1fr) 14rem; gap: 2.5rem; max-width: 90rem; margin: 0 auto; padding: 0 1.25rem; min-height: 100vh; }
-.sidenav { position: sticky; top: 3.6rem; align-self: start; max-height: calc(100vh - 3.6rem); overflow-y: auto; padding: 1.5rem 0 2rem; }
-.index { position: sticky; top: 3.6rem; align-self: start; max-height: calc(100vh - 3.6rem); overflow-y: auto; padding: 5.3rem 0 2rem; }
+.sidenav { position: sticky; top: var(--head-h); align-self: start; max-height: calc(100vh - var(--head-h)); overflow-y: auto; padding: 1.5rem 0 2rem; }
+.index { position: sticky; top: var(--head-h); align-self: start; max-height: calc(100vh - var(--head-h)); overflow-y: auto; padding: 5.3rem 0 2rem; }
 .fold-summary { display: none; list-style: none; cursor: pointer; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); }
 .fold-summary::-webkit-details-marker { display: none; }
 .fold-summary::after { content: ''; display: inline-block; width: 0.45rem; height: 0.45rem; margin-left: 0.5rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-0.12rem) rotate(45deg); }
@@ -157,14 +166,17 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 }
 
 /* below 900px: one column, the pages follow the content, the drawer replaces the column; the
-   header has three rows: the brand and the tools, the version pill, the search */
+   header has two rows: the brand, the version pill with its chips and the Menu button, then the
+   search (D-42YMF); the brand gives way first, and the version menu opens under row one */
 @media (max-width: 900px) {
-  .head { grid-template-columns: minmax(0, 1fr) auto; padding: 0.55rem 16px; gap: 0.4rem 0.5rem; }
+  .head { grid-template-columns: minmax(0, 1fr) auto auto; padding: 0.55rem 16px; gap: 0.4rem 0.5rem; }
   .brand { grid-column: 1; grid-row: 1; font-size: 0.9rem; max-width: none; }
-  .head-tools { grid-column: 2; grid-row: 1; gap: 0.4rem; }
-  .version { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
-  .head .search-wrap { grid-column: 1 / -1; grid-row: 3; max-width: none; }
+  .version { grid-column: 2; grid-row: 1; justify-self: end; }
+  .head-tools { grid-column: 3; grid-row: 1; gap: 0.4rem; }
+  .head .search-wrap { grid-column: 1 / -1; grid-row: 2; max-width: none; }
   .theme button { padding: 0.15rem 0.45rem; font-size: 0.74rem; }
+  .head .theme { display: none; }
+  .theme-drawer { display: inline-flex; margin: 1.25rem 0 0; }
   [id] { scroll-margin-top: 9.4rem; }
   #menu:not([hidden]) { display: inline-flex; align-items: center; justify-content: center; }
   .app { grid-template-columns: minmax(0, 1fr); padding: 0 16px; gap: 0; }
@@ -175,8 +187,9 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
   .app.nav-open .sidenav .fold-summary { display: none; }
   .nav-open #scrim { display: block; position: fixed; inset: 0; background: var(--scrim); z-index: 45; }
   /* every control a thumb has to hit is at least 40 by 40 */
-  .head a, .head button, .head summary, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button { min-height: 40px; min-width: 40px; }
-  .head button, .tools button, .code-head button { display: inline-flex; align-items: center; justify-content: center; }
+  .head a, .head button, .head summary, .pill, .chip, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button, #show-changes, #show-diff, .theme-drawer button, .vmenu a { min-height: 40px; min-width: 40px; }
+  .head button, .tools button, .code-head button, #show-changes, #show-diff, .theme-drawer button { display: inline-flex; align-items: center; justify-content: center; }
+  .vmenu a { display: inline-flex; align-items: center; }
   .sidenav a { display: flex; align-items: center; }
   /* the disagreements page: its links (a plain div.callout is that page's entry) and Show all */
   details.more-links summary { min-height: 40px; min-width: 40px; line-height: 40px; }
@@ -343,11 +356,30 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /pager == */
 
 /* == version == */
-/* the pill is never cut: it sizes to its text (head section), and wraps on its own row on a phone */
-.version { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+/* the pill and its chips are one line that never wraps: they size to their text, and a pill
+   too long for the row cuts its text (head section); on a phone they sit on the header's first row,
+   between the brand and the Menu button */
+.version { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 0.35rem; }
+.pill, .chip { display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; }
 .version .lock { width: 12px; height: 12px; flex: none; }
 .version .snapshot { font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
 .colophon { margin: 0; }
+/* the version menu (Task 8's markup): a panel under the pill, placed in the grid cell of the pill (a start and an end line, so the
+   cell is its containing block); at 900px and below it spans the header's width, the header's padding giving the 16px gutters */
+.vmenu-pop { position: absolute; z-index: 40; grid-column: 2 / 3; grid-row: 1 / 2; top: 100%; left: 0; width: max-content; min-width: 14rem; max-width: min(28rem, calc(100vw - 32px)); max-height: 70vh; overflow-y: auto; box-sizing: border-box; margin-top: 0.35rem; padding: 0.5rem 0.9rem 0.75rem; background: var(--bg); color: var(--ink); border: 1px solid var(--line-ui); border-radius: var(--radius); box-shadow: var(--shadow); font-size: 0.9rem; line-height: 1.45; }
+/* a list heading is a small label: none of the page h2's rule and strip above it, and none above the first */
+.vmenu h2 { margin: 0.6rem 0 0.25rem; padding-top: 0; border-top: 0; font-size: 0.74rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-soft); }
+.vmenu section:first-child h2 { margin-top: 0; }
+.vmenu-list { list-style: none; margin: 0; padding: 0; }
+/* the link and its words are flex items: words that wrap keep their own line height, not the 40 px link's */
+.vmenu-list li { margin: 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 0.4rem; }
+.vmenu-meta { min-width: 0; }
+.vmenu a { display: inline-block; padding: 0.15rem 0; }
+.vmenu a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.vmenu-meta, .vmenu-none { color: var(--ink-soft); font-size: 0.82rem; }
+@media (max-width: 900px) {
+  .vmenu-pop { grid-column: 1 / -1; grid-row: 1 / 2; left: 0; right: 0; width: auto; max-width: none; }
+}
 /* == /version == */
 
 /* == review == */
@@ -367,27 +399,61 @@ details.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-we
 .changes li { margin: 0 0 0.35rem; overflow-wrap: anywhere; }
 .changes .chg-label { margin-inline: 0.4rem; }
 .changes .changes-count { margin-inline-start: 0.4rem; }
-#show-changes { font-size: 0.78rem; font-weight: 600; color: var(--ink); background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.25rem 0.7rem; white-space: nowrap; }
+/* the review bar (sr7): under the header on a view or proposal page, it names what is reviewed
+   and holds the Show changes and Show diff toggles at its end. Above 900px it is one sticky row,
+   the title on the left (two lines at most) and the toggles on the right; at 900px and below the
+   title is one line that truncates and the toggles sit on the next row. */
+.review-bar { position: sticky; top: var(--head-h); z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 1rem; height: var(--bar-h); padding: 0.4rem 1.25rem; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.review-title { margin: 0; min-width: 0; font-size: 0.88rem; font-weight: 500; line-height: 1.3; color: var(--ink); overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.review-toggles { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+#show-changes, #show-diff { font-size: 0.78rem; font-weight: 600; color: var(--ink); background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.25rem 0.7rem; white-space: nowrap; }
 /* the author rule `.head button { display: inline-flex }` at phone width would otherwise beat [hidden] */
-#show-changes[hidden] { display: none; }
-#show-changes[aria-pressed="false"] { font-weight: 400; color: var(--ink-soft); background: var(--bg); border-style: dashed; }
-/* above 900px every bar, the Removed line's too, sits in the left gutter and the text column does not move */
+#show-changes[hidden], #show-diff[hidden] { display: none; }
+#show-changes[aria-pressed="false"], #show-diff[aria-pressed="false"] { font-weight: 400; color: var(--ink-soft); background: var(--bg); border-style: dashed; }
+/* Show diff while the changes are hidden: unpressed and unavailable (it stays focusable) */
+#show-diff[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+/* Show diff shows an edited block's diff in place of its text. With changes hidden the diff is
+   hidden too (it is a `.chg`), so the text stays. */
+:root[data-diff="shown"] .has-chg.chg-edited > .block-text { display: none; }
+:root[data-changes="hidden"] .has-chg.chg-edited > .block-text { display: block; }
+/* above 900px every bar, the Removed line's too, sits in the left gutter and the text column does not move;
+   the sticky bar pushes the sticky columns and anchors down by its own height */
 @media (min-width: 901px) {
   .has-chg, details.chg-removed { margin-inline-start: calc(-3px - 0.75rem); }
+  .review-bar ~ .app .sidenav, .review-bar ~ .app .index { top: calc(var(--head-h) + var(--bar-h)); max-height: calc(100vh - var(--head-h) - var(--bar-h)); }
+  :root:has(.review-bar) [id] { scroll-margin-top: calc(5.2rem + var(--bar-h)); }
 }
-/* at 900px and below, a draft's header keeps the brand, the theme and the menu on row 1 and puts
-   Show changes at the end of row 2, the version pill's row, the pill leaving it room; the taller
-   header pushes anchors further down; with changes hidden, a changed block keeps no indent */
+/* at 900px and below the bar is not sticky: the title is one line, the toggles are on the next row,
+   at the start; with changes hidden, a changed block keeps no indent */
 @media (max-width: 900px) {
-  .head:has(#show-changes) { grid-template-columns: minmax(0, 1fr) auto auto; }
-  .head:has(#show-changes) .head-tools { display: contents; }
-  .head:has(#show-changes) .theme { grid-column: 2; grid-row: 1; }
-  .head:has(#show-changes) #menu { grid-column: 3; grid-row: 1; }
-  #show-changes { grid-column: 1 / -1; grid-row: 2; justify-self: end; width: 7.5rem; }
-  .head:has(#show-changes:not([hidden])) .version { max-width: calc(100% - 8rem); }
-  :root:has(#show-changes:not([hidden])) [id] { scroll-margin-top: 11rem; }
+  .review-bar { position: static; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 0.25rem; height: auto; padding: 0.4rem 16px; }
+  .review-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .review-toggles { justify-content: flex-start; flex-wrap: wrap; }
   :root[data-changes="hidden"] .has-chg { padding-inline-start: 0; border-inline-start-width: 0; }
 }
 :root[data-changes="hidden"] .chg { display: none; }
 :root[data-changes="hidden"] .has-chg { border-inline-start-color: transparent; }
+/* the word diff (RULING F6): a removed word is struck through and an added word underlined, each
+   with a word that only a screen reader reads; colour only repeats them */
+del { text-decoration: line-through; text-decoration-thickness: 1px; color: var(--ink-soft); }
+ins { text-decoration: underline; text-decoration-thickness: 2px; text-decoration-color: var(--success); text-underline-offset: 0.15em; }
+.sr-word { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* a removed word and the word that replaces it never touch: a gap between them, outside the text */
+del + ins, ins + del { margin-inline-start: 0.3em; }
+.chg-diff { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Show diff: the diff in place of a block's text keeps that text's spacing (a paragraph's, a code block's) */
+.chg-diff-inline > p.chg-diff { margin: 0 0 0.95rem; }
+.chg-diff-inline > pre.chg-diff { margin: 1.1rem 0; }
+/* a type change, in words, before the text's diff */
+.chg-type { margin: 0 0 0.25rem; font-size: 0.85rem; color: var(--ink-soft); overflow-wrap: anywhere; }
+/* an entry of a change summary: its word, where it is, a link to it in place, then its diff */
+.chg-entry { margin: 0 0 1rem; padding-inline-start: 0.75rem; border-inline-start: 3px solid var(--line-ui); }
+.chg-entry-edited { border-inline-start-color: var(--accent); }
+.chg-entry-new { border-inline-start-color: var(--success); }
+.chg-entry .chg-entry-head { margin: 0 0 0.25rem; font-size: 0.85rem; color: var(--ink-soft); overflow-wrap: anywhere; }
+.chg-entry .chg-label { margin-inline-end: 0.4rem; }
+.chg-entry .chg-in-place { margin-inline-start: 0.4rem; }
+@media (max-width: 900px) {
+  .chg-entry .chg-in-place { display: inline-flex; align-items: center; min-height: 40px; }
+}
 /* == /review == */

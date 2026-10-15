@@ -11,9 +11,15 @@
 //! request asks for it (pages build on demand).
 //!
 //! After a build, each open page of the scope gets `Reload` when its bytes changed (or it is
-//! gone), else `Label` when only the version label changed, else nothing; the pages of other
-//! scopes get nothing (the founder addition of 2026-10-12). An event is best effort: a full or
-//! closed queue drops the stream, and the page's revision repairs it when it reconnects.
+//! gone), else `Label` when only the version label or the header changed, else nothing; the
+//! pages of other scopes get nothing (the founder addition of 2026-10-12). An event is best
+//! effort: a full or closed queue drops the stream, and the page's revision repairs it when it
+//! reconnects.
+//!
+//! The versions page (`/~versions/`, D-2F29G, RULING F5) is one more scope here, with its own key
+//! (`rdy_render::menu::menu_key`) and its own build: a view commit rebuilds it and never canon.
+//! The number of docs each view or proposal version changes is cached by what it reads, so one
+//! view commit recounts one view.
 use crate::daemon::log;
 use crate::shared::Shared;
 use crate::site::guard::ScopeRef;
@@ -21,6 +27,8 @@ use crate::writer::panic_text;
 use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::Hash;
 use rdy_render::live::{LiveBuild, build_live, diff, inputs_key};
+use rdy_render::menu::{build_versions, docs_changed, menu_key};
+use rdy_render::review;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,13 +50,21 @@ pub const MAX_SCOPES: usize = 8;
 /// wake lost while the worker starts waits at most this long.
 const WORKER_TICK: Duration = Duration::from_secs(1);
 
+/// The doc counts the site keeps for the versions page; past this, the cache clears.
+pub const MAX_COUNTS: usize = 256;
+
+/// What counts the docs a view or proposal version changes: `rdy_render::menu::docs_changed`, or
+/// a test's hook ([`LiveSite::set_docs_changed`]).
+pub type DocsChanged = Box<dyn Fn(&ReadState, &Scope) -> Result<usize, RdyError> + Send + Sync>;
+
 /// What a stream sends an open page: the closed set of the site's events.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveEvent {
     /// The page's bytes changed, or the page is gone: load it again.
     Reload,
-    /// Only the version label changed: this is its new text.
-    Label(String),
+    /// Only the version label or the header changed: the new label text (the colophon) and the
+    /// new header markup (the pill and its chips).
+    Label { text: String, html: String },
 }
 
 /// The site has as many open streams as it keeps ([`MAX_STREAMS`]).
@@ -56,12 +72,18 @@ pub enum LiveEvent {
 pub struct SiteBusy;
 
 /// The scope `scope` names, read from `st`. A view must exist; `P-x` reads as the proposal's
-/// latest version each time.
+/// latest version each time; a tag must exist. The versions page is not a read scope.
 pub fn resolve(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyError> {
     match scope {
         ScopeRef::Canon => Ok(Scope::Canon),
         ScopeRef::View(name) => st.resolve_read_scope(&format!("view:{name}"), None),
         ScopeRef::Proposal(r) => st.resolve_scope(&format!("proposal:{r}")),
+        ScopeRef::Tag(name) => st.resolve_scope(&format!("tag:{name}")),
+        ScopeRef::Versions => Err(RdyError::new(
+            rdy_engine::E_BAD_INPUT,
+            "the versions page is not a read scope",
+            "read canon, a version, a view or a proposal version",
+        )),
     }
 }
 
@@ -85,7 +107,10 @@ impl Stream {
         if b.revs.get(&self.page) != Some(&self.rev) {
             Some(LiveEvent::Reload)
         } else if b.label_rev != self.label_rev {
-            Some(LiveEvent::Label(b.label.clone()))
+            Some(LiveEvent::Label {
+                text: b.label.clone(),
+                html: b.header.clone(),
+            })
         } else {
             None
         }
@@ -178,6 +203,55 @@ pub struct LiveSite {
     /// Shared with each [`Subscription`], which removes its stream when dropped.
     inner: Arc<Mutex<Inner>>,
     builds: AtomicU64,
+    /// The docs each view or proposal version changes, for the versions page: keyed by the scope
+    /// and what its count reads (see [`count_key`]). At most [`MAX_COUNTS`] entries.
+    counts: Mutex<BTreeMap<(ScopeRef, Hash), usize>>,
+    /// Test hook: counts in place of `rdy_render::menu::docs_changed`.
+    docs_changed: Mutex<Option<DocsChanged>>,
+}
+
+/// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
+/// generation `generation`: the scope, and the hash of what its review reads. A view's count reads
+/// its head op and its effective base; a proposal version's reads the version. Each also reads the
+/// base its review compares against ([`review::base_of`]): canon at a landing, canon at its head
+/// (so canon's head is an input: a pinned view made before the first landing has no base and is
+/// read against canon), or none. The pack decides which docs have a page. Any other scope has no
+/// count to cache.
+fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef, Hash)> {
+    let mut k = generation.to_le_bytes().to_vec();
+    let at = |k: &mut Vec<u8>, h: Option<Hash>| match h {
+        Some(h) => {
+            k.push(1);
+            k.extend_from_slice(&h.0);
+        }
+        None => k.push(0),
+    };
+    let r = match scope {
+        Scope::View(name) => {
+            at(&mut k, st.view_head(name).map(|h| h.head));
+            at(&mut k, st.effective_base(name));
+            ScopeRef::View(name.clone())
+        }
+        Scope::Proposal(v) => {
+            at(&mut k, Some(*v));
+            ScopeRef::Proposal(v.to_string())
+        }
+        _ => return None,
+    };
+    match review::base_of(st, scope) {
+        Some(Scope::At(h)) => {
+            k.push(1);
+            k.extend_from_slice(&h.0);
+        }
+        Some(Scope::Canon) => {
+            k.push(2);
+            at(&mut k, st.canon_head());
+        }
+        // a base is canon or canon at a landing; nothing else to tell apart
+        Some(_) => k.push(3),
+        None => k.push(0),
+    }
+    Some((r, Hash::of(&k)))
 }
 
 /// An open page's stream. Dropping it removes the stream.
@@ -209,7 +283,43 @@ impl LiveSite {
             building: Mutex::new(()),
             inner: Arc::new(Mutex::new(Inner::default())),
             builds: AtomicU64::new(0),
+            counts: Mutex::new(BTreeMap::new()),
+            docs_changed: Mutex::new(None),
         })
+    }
+
+    /// Test hook: counts the docs a view or proposal version changes with `f` from now on.
+    #[doc(hidden)]
+    pub fn set_docs_changed(&self, f: DocsChanged) {
+        *lock(&self.docs_changed) = Some(f);
+    }
+
+    /// The docs `scope` changes, from the cache when what it reads is unchanged.
+    fn docs_changed(
+        &self,
+        st: &ReadState,
+        scope: &Scope,
+        generation: u64,
+    ) -> Result<usize, RdyError> {
+        let key = count_key(st, scope, generation);
+        if let Some(n) = key
+            .as_ref()
+            .and_then(|k| lock(&self.counts).get(k).copied())
+        {
+            return Ok(n);
+        }
+        let n = match &*lock(&self.docs_changed) {
+            Some(f) => f(st, scope)?,
+            None => docs_changed(st, scope)?,
+        };
+        if let Some(key) = key {
+            let mut counts = lock(&self.counts);
+            if counts.len() >= MAX_COUNTS {
+                counts.clear();
+            }
+            counts.insert(key, n);
+        }
+        Ok(n)
     }
 
     /// A publish happened: counts it and wakes the worker. Called by the writer after each
@@ -259,12 +369,22 @@ impl LiveSite {
         // generation with a newer state only builds once more, to the same pages)
         let generation = sh.pack_gen.load(Ordering::SeqCst);
         let st = sh.state.load_full();
-        let resolved = resolve(&st, scope)?;
-        let key = inputs_key(&st, &resolved, generation)?;
+        // the versions page is not a read scope: it has its own key and its own build
+        let (resolved, key) = match scope {
+            ScopeRef::Versions => (None, menu_key(&st, generation)),
+            _ => {
+                let resolved = resolve(&st, scope)?;
+                let key = inputs_key(&st, &resolved, generation)?;
+                (Some(resolved), key)
+            }
+        };
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.key == Some(key)) {
             return Ok((b, false));
         }
-        let new = Arc::new(build_live(&st, &resolved)?);
+        let new = Arc::new(match &resolved {
+            Some(resolved) => build_live(&st, resolved, &format!("/{}", scope.path_prefix()))?,
+            None => build_versions(&st, &mut |s| self.docs_changed(&st, s, generation))?,
+        });
         self.builds.fetch_add(1, Ordering::SeqCst);
         let mut inner = lock(&self.inner);
         let s = inner.touch(scope);
@@ -282,7 +402,10 @@ impl LiveSite {
                     if change.reload.contains(&stream.page) {
                         Some(LiveEvent::Reload)
                     } else {
-                        change.label.clone().map(LiveEvent::Label)
+                        change.label.clone().map(|text| LiveEvent::Label {
+                            text,
+                            html: new.header.clone(),
+                        })
                     }
                 }
                 // no build to diff, or the stream opened with no comparison: compared with
@@ -565,7 +688,7 @@ mod tests {
         let out = sh.writer.reload().unwrap();
         assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
         let served = sh.site.refresh(&sh, &C).unwrap();
-        let fresh = build_live(&sh.state.load_full(), &Scope::Canon).unwrap();
+        let fresh = build_live(&sh.state.load_full(), &Scope::Canon, "/").unwrap();
         assert_ne!(
             before.revs, fresh.revs,
             "the pack change moves canon's pages"

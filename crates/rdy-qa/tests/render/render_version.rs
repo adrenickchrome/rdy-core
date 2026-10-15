@@ -16,8 +16,10 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
         if h.contains("redirect") {
             continue;
         }
+        // the pill shows only the version; no tag, no landings chip (F3)
         assert!(
-            h.contains("data-rdy-version><span data-rdy-label>unversioned</span></span>"),
+            h.contains("data-rdy-version><a class=\"pill\" href=\"")
+                && h.contains("<span class=\"pill-text\">unversioned</span></a></span>"),
             "{}",
             p.display()
         );
@@ -32,7 +34,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
     let out = render(&mut r, &Scope::Canon);
     let home = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
-        home.contains("data-rdy-version><span data-rdy-label>v0.1.0</span></span>")
+        home.contains("data-rdy-version><a class=\"pill\" href=\"index.html#versions\"><span class=\"pill-text\">v0.1.0</span></a></span>")
             && home.contains("<dt>v0.1.0 <span class=\"meta\">(current)</span></dt>")
             && home.contains(" · first cut</dd>"),
         "{home}"
@@ -47,17 +49,21 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
     .unwrap();
     let out = render(&mut r, &Scope::View("work".into()));
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    // a review render: the pill shows only the tag, the accent chip counts the changed blocks
+    // (the doc's title: one), and the colophon keeps the text label (D-BMX8P, O9)
     assert!(
-        h.contains("data-rdy-version><span data-rdy-label>v0.1.0 · draft: work, 1 pending change</span></span>"),
+        h.contains("<span class=\"pill-text\">v0.1.0</span></a> <a class=\"chip chip-review\" href=\"changes.html\" title=\"1 change, not landed\" aria-label=\"1 change, not landed\">+1</a></span>")
+            && h.contains("Tiny, <span data-rdy-label>v0.1.0 · view: work, 1 change, not landed</span>."),
         "{h}"
     );
     let p = r.propose(&writer(), "work", "rename").unwrap();
     r.land(&approver(), &p.id).unwrap();
     let out = render(&mut r, &Scope::Canon);
+    let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
-        std::fs::read_to_string(out.path().join("index.html"))
-            .unwrap()
-            .contains("data-rdy-version><span data-rdy-label>v0.1.0, 1 change since</span></span>")
+        h.contains("<span class=\"pill-text\">v0.1.0</span></a> <a class=\"chip chip-since\" href=\"changes-since.html\" title=\"1 landing since v0.1.0\" aria-label=\"1 landing since v0.1.0\">+1</a></span>")
+            && h.contains("Tiny, <span data-rdy-label>v0.1.0, 1 update since</span>."),
+        "{h}"
     );
     let v: rdy_model::Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();
     let out = render(&mut r, &Scope::At(v));
@@ -65,7 +71,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
     assert!(
         h.contains("class=\"version frozen\"")
             && h.contains(
-                "<span data-rdy-label>v0.1.0</span> <span class=\"snapshot\">snapshot</span></span>"
+                "<span class=\"pill-text\">v0.1.0</span> <span class=\"snapshot\">snapshot</span></a></span>"
             )
             && h.contains("A snapshot of Tiny at <span data-rdy-label>v0.1.0</span>."),
         "{h}"
@@ -92,11 +98,11 @@ fn ver1_an_unversioned_project_reads_unversioned_everywhere() {
     rdy_render::render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
-        h.contains("data-rdy-version><span data-rdy-label>unversioned · draft: work, 1 pending change</span></span>"),
+        h.contains("data-rdy-version><a class=\"pill\" href=\"index.html#versions\"><span class=\"pill-text\">unversioned</span></a> <a class=\"chip chip-review\" href=\"changes.html\" title=\"1 change, not landed\" aria-label=\"1 change, not landed\">+1</a></span>"),
         "{h}"
     );
     assert!(
-        h.contains("<p class=\"colophon\">Tiny, <span data-rdy-label>unversioned · draft: work, 1 pending change</span>.</p>")
+        h.contains("<p class=\"colophon\">Tiny, <span data-rdy-label>unversioned · view: work, 1 change, not landed</span>.</p>")
     );
     assert!(!out.path().join("assets/js").exists() && !h.contains("glossary.html"));
 }
@@ -126,10 +132,10 @@ fn ver1_the_home_page_has_cards_for_top_level_entries_and_no_decisions() {
 }
 
 /// FF-C: the pill shows at every width, so a frozen snapshot is marked at the top of a phone page
-/// too; below 900px it has the header's second row to itself (Task 5's narrow head grid keeps the
-/// brand and the tools on the first).
+/// too (C7); below 900px it and its chips sit on the header's first row, between the brand and the
+/// Menu button (sr7, D-42YMF), on one line that never wraps.
 #[test]
-fn ver1_the_pill_shows_at_every_width_and_has_its_own_row_on_a_phone() {
+fn ver1_the_pill_shows_at_every_width_and_sits_on_row_one_on_a_phone() {
     let (_d, _r, _ids, out) = site_canon();
     let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
     let css = rdy_qa::site::parse_css(&text);
@@ -140,8 +146,16 @@ fn ver1_the_pill_shows_at_every_width_and_has_its_own_row_on_a_phone() {
             Some("inline-flex"),
             "width {w}"
         );
+        assert_eq!(at("flex-wrap", w).as_deref(), Some("nowrap"), "width {w}");
+        for el in [".pill", ".chip"] {
+            assert_eq!(
+                rdy_qa::site::cascaded(&css, el, "display", w).as_deref(),
+                Some("inline-flex"),
+                "{el} at width {w}"
+            );
+        }
     }
     for w in [320, 375, 600, 900] {
-        assert_eq!(at("grid-row", w).as_deref(), Some("2"), "width {w}");
+        assert_eq!(at("grid-row", w).as_deref(), Some("1"), "width {w}");
     }
 }

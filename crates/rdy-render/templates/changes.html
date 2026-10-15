@@ -1,0 +1,10 @@
+{% extends "layout.html" %}
+{% block content %}
+{% set c = body.changes %}
+<article class="page" data-rdy="content"><header class="page-head"><h1>{{ c.heading }}</h1><p class="lede">{{ c.sentence }}</p></header>
+{% if c.rows %}<ul class="changes">{% for r in c.rows %}<li><a href="#{{ r.anchor }}">{{ r.title }}</a>{% if r.counts %} <span class="changes-count">{{ r.counts }}</span>{% else %} <span class="chg-label chg-{{ r.mark }}">{{ r.word }}</span>{% endif %}</li>{% endfor %}</ul>
+{% endif %}{% for g in c.groups %}<section class="chg-doc"><h2 id="{{ g.anchor }}">{% if g.href %}<a href="{{ g.href }}">{{ g.title }}</a>{% else %}{{ g.title }}{% endif %}</h2>
+{% for e in g.entries %}<article class="chg-entry chg-entry-{{ e.mark }}" data-rdy-block="{{ e.id }}"><p class="chg-entry-head"><span class="chg-label chg-{{ e.mark }}">{{ e.word }}</span> <span class="chg-where">{{ e.place }}</span>{% if e.href %} <a class="chg-in-place" href="{{ e.href }}">Read it in place</a>{% endif %}</p>{{ e.diff_html|safe }}</article>
+{% endfor %}</section>
+{% endfor %}</article>
+{% endblock %}

@@ -41,11 +41,37 @@ fn ls7_rdy_site_scope() {
     let (ok, v) = s.json(&["--json", "new", "doc", "ops", "--view", "editing"]);
     assert!(ok, "{v}");
     let text = stdout(&s.rdy(&["site", "--scope", "editing"]));
+    let first = text.lines().next().unwrap();
     assert!(
-        text.starts_with("http://127.0.0.1:") && text.ends_with("/~view/editing/\n"),
+        first.starts_with("http://127.0.0.1:") && first.ends_with("/~view/editing/"),
         "{text:?}"
     );
-    assert_eq!(text.lines().count(), 1, "{text:?}");
+    // a view has a second line, its change summary (sr2)
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+}
+
+#[test]
+fn sr2_rdy_site_prints_the_changes_line() {
+    let s = Served::new();
+    let (ok, v) = s.json(&["--json", "new", "doc", "ops", "--view", "editing"]);
+    assert!(ok, "{v}");
+    let text = stdout(&s.rdy(&["site", "--scope", "view:editing"]));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text:?}");
+    assert!(lines[0].ends_with("/~view/editing/"), "{text:?}");
+    let want = format!("changes: {}changes.html", lines[0]);
+    assert_eq!(lines[1], want, "{text:?}");
+    // JSON carries the field as the reply has it
+    let (ok, v) = s.json(&["--json", "site", "--scope", "view:editing"]);
+    assert!(ok, "{v}");
+    assert_eq!(
+        format!("changes: {}", v["changes"].as_str().unwrap()),
+        want,
+        "{v}"
+    );
+    // canon of a project with no version: one line, as before
+    let canon = stdout(&s.rdy(&["site"]));
+    assert_eq!(canon.lines().count(), 1, "{canon:?}");
 }
 
 #[test]
@@ -84,4 +110,46 @@ fn ls7_rdy_site_in_lan_mode_prints_the_lan_link_and_warns() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["lan_url"], lines[1], "{v}");
     assert_eq!(v["warning"]["code"], "W_SITE_LAN", "{v}");
+}
+
+/// Fix round 1: `changes:` is the second line, before the LAN URL.
+#[test]
+fn sr2_rdy_site_prints_changes_before_the_lan_link() {
+    let dir = short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(
+        dir.path().join(".rdy/local.yaml"),
+        "serve:\n  site_lan: true\n",
+    )
+    .unwrap();
+    let (_cfg, env) = human_env("human:qa");
+    let h = Hosted::start_for_binary(dir, Some(LanOverride::Addr(Ipv4Addr::LOCALHOST)));
+    let out = human_command(
+        h.dir.path(),
+        &env,
+        &["--json", "new", "doc", "ops", "--view", "editing"],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = human_command(h.dir.path(), &env, &["site", "--scope", "view:editing"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text:?}");
+    assert!(lines[0].ends_with("/~view/editing/"), "{text:?}");
+    assert_eq!(
+        lines[1],
+        format!("changes: {}changes.html", lines[0]),
+        "{text:?}"
+    );
+    assert_eq!(
+        lines[2], lines[0],
+        "the LAN stand-in is 127.0.0.1: {text:?}"
+    );
 }

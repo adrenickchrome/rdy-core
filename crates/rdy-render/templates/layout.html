@@ -11,10 +11,9 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="head">
-  <a class="brand" href="{{ root }}index.html"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5" fill="var(--accent)"/><path d="M8 7.5v9M16 7.5v9M8 12h8" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></svg><span class="brand-name">{{ site_name }}</span></a> {% include "partials/version.html" %}
-  {% include "partials/search.html" %}
+  <a class="brand" href="{% block brand_href %}{{ root }}index.html{% endblock %}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5" fill="var(--accent)"/><path d="M8 7.5v9M16 7.5v9M8 12h8" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></svg><span class="brand-name">{{ site_name }}</span></a> {% block head_scope %}{% include "partials/version.html" %}
+  {% include "partials/search.html" %}{% endblock %}
   <div class="head-tools">
-    {% if draft %}<button id="show-changes" type="button" aria-pressed="true" hidden>Show changes</button>{% endif %}
     <div class="theme" role="radiogroup" aria-label="Colour theme">
       <button type="button" role="radio" data-theme-choice="system" aria-checked="true">Auto</button>
       <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>
@@ -23,18 +22,25 @@
     <button id="menu" type="button" aria-expanded="false" aria-controls="sidebar" hidden>Menu</button>
   </div>
 </header>
+{% if review_bar %}{% include "partials/review_bar.html" %}{% endif %}
 <div class="app">
-  <aside class="sidenav" id="sidebar"><details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages">{% include "partials/nav.html" %}</nav></details></aside>
+  <aside class="sidenav" id="sidebar">{% block pages %}<details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages">{% include "partials/nav.html" %}</nav></details>{% endblock %}
+    <div class="theme theme-drawer" role="radiogroup" aria-label="Colour theme">
+      <button type="button" role="radio" data-theme-choice="system" aria-checked="true">Auto</button>
+      <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>
+      <button type="button" role="radio" data-theme-choice="dark" aria-checked="false">Dark</button>
+    </div>
+  </aside>
   <div id="scrim"></div>
   <main class="content" id="main" tabindex="-1">
     <nav class="crumbs" aria-label="Breadcrumb">{% for c in crumbs %}{% if not loop.first %}<span class="crumb-sep" aria-hidden="true"></span>{% endif %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}</nav>
     {% block content %}{% endblock %}
     {% if kind == "doc" and (pager.prev or pager.next) %}<nav class="pager" aria-label="Previous and next">{% include "partials/pager.html" %}</nav>{% endif %}
-    <footer class="foot">{% include "partials/colophon.html" %}</footer>
+    <footer class="foot">{% block foot %}{% include "partials/colophon.html" %}{% endblock %}</footer>
   </main>
-  {% if toc.entries %}<aside class="index"><details class="toc-fold" open><summary class="fold-summary">On this page</summary><nav aria-label="On this page">{% include "partials/toc.html" %}</nav></details></aside>{% endif %}
+  {% if toc and toc.entries %}<aside class="index"><details class="toc-fold" open><summary class="fold-summary">On this page</summary><nav aria-label="On this page">{% include "partials/toc.html" %}</nav></details></aside>{% endif %}
 </div>
-<noscript><p class="noscript">{% if live %}Search and live updates need JavaScript.{% else %}Search needs JavaScript.{% endif %} Everything else on this page works without it.</p></noscript>
+<noscript><p class="noscript">{% block noscript %}{% if live %}Search and live updates need JavaScript.{% else %}Search needs JavaScript.{% endif %}{% endblock %} Everything else on this page works without it.</p></noscript>
 <script src="{{ root }}assets/app.js" defer></script>
 {% if has_mermaid %}<script src="{{ root }}assets/js/mermaid.min.js" defer></script>
 {% endif %}</body>
