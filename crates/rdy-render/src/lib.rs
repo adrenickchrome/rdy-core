@@ -1,4 +1,5 @@
 mod assets;
+mod changes;
 pub mod disagree;
 mod highlight;
 mod home;
@@ -221,6 +222,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "glossary.html",
         "questions.html",
         "disagreements.html",
+        "changes.html",
         "redirect.html",
         "partials/nav.html",
         "partials/toc.html",
@@ -246,6 +248,7 @@ fn template_of(kind: &str) -> &'static str {
         "glossary" => "glossary.html",
         "questions" => "questions.html",
         "disagreements" => "disagreements.html",
+        "changes" => "changes.html",
         _ => "redirect.html",
     }
 }
@@ -549,6 +552,16 @@ const GLOSSARY_DOC_DROPPED: &str = "the top-level doc named glossary has no page
 /// The same warning when no term is defined anywhere, so the site has no glossary page either.
 const GLOSSARY_DOC_DROPPED_NO_TERMS: &str = "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it.";
 
+/// The render's warning when a top-level doc owns `changes.html` (O1, O9).
+const CHANGES_DOC_KEPT: &str = "the top-level doc named changes has the page changes.html: the change summary of this view or proposal is left out. Rename the doc to publish it.";
+
+/// The render's warning when a top-level doc owns `changes-since.html` (O1).
+fn since_doc_kept(tag: &str) -> String {
+    format!(
+        "the top-level doc named changes-since has the page changes-since.html: the summary of changes since {tag} is left out. Rename the doc to publish it."
+    )
+}
+
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
     let position = rdy.version_position(scope)?;
@@ -582,15 +595,102 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     site.set_disagreements(disagree::list(rdy, scope)?);
     let review = review::build(rdy, scope)?;
     // a proposal version with no base here still names itself and counts against its own base
-    let blocks = match &review {
-        Some(rv) => Some(rv.changed_blocks()),
-        None => review::unreviewed_changed_blocks(rdy, scope)?,
+    let unreviewed = match &review {
+        Some(_) => None,
+        None => review::unreviewed(rdy, scope)?,
     };
+    let blocks = review
+        .as_ref()
+        .or(unreviewed.as_ref())
+        .map(|rv| rv.changed_blocks());
     let reviewed = match blocks {
         Some(blocks) => reviewed_of(rdy, scope, blocks)?,
         None => None,
     };
     let header = version::header(&position, reviewed.as_ref());
+    let mut summary = RenderSummary {
+        pages: 0,
+        assets: 0,
+        redirects: 0,
+        warnings: vec![],
+    };
+
+    // the change summary of a review render (sr6): against its base, or, for a proposal version
+    // made on the empty project that no scope names, against that empty project
+    let mut changes_summary: Option<changes::Summary> = None;
+    let mut inline_diffs: BTreeMap<rdy_model::BlockId, String> = BTreeMap::new();
+    if let (Some(r), Some(rv)) = (&reviewed, review.as_ref().or(unreviewed.as_ref())) {
+        if site.page_taken(rdy_engine::site_scope::CHANGES_PAGE) {
+            summary.warnings.push(CHANGES_DOC_KEPT.into());
+        } else {
+            let base = review.as_ref().and_then(|_| review::base_of(rdy, scope));
+            let (diff, from) = match &base {
+                Some(b) => (Some(rdy.diff(b, scope)?), rdy.materialized(b)?),
+                None => (None, Default::default()),
+            };
+            let sides = changes::Sides {
+                from: &from,
+                to: &m,
+                text: &site,
+            };
+            let (s, inline) = changes::summary(
+                &site,
+                rdy_engine::site_scope::CHANGES_PAGE,
+                rv,
+                diff.as_ref(),
+                &sides,
+                &changes::Of::Review(r.kind),
+            );
+            changes_summary = Some(s);
+            // only a page with review marks shows an edited block's diff
+            if review.is_some() {
+                inline_diffs = inline;
+            }
+        }
+    }
+    // the summary of the landings since the tag (sr6): from the tag to the state the position
+    // counts to (canon, a view's or proposal's base, or the as-of landing)
+    let since_of = match (&position.version, position.landings_since) {
+        (Some(v), n) if n > 0 => {
+            let to = match scope {
+                Scope::Canon => Some(Scope::Canon),
+                Scope::View(_) | Scope::Proposal(_) => review::base_of(rdy, scope),
+                Scope::At(h) => Some(Scope::At(*h)),
+                Scope::Inflight => None,
+            };
+            let tag = v.landing.parse::<Hash>().ok().map(Scope::At);
+            tag.zip(to).map(|(tag, to)| (v.name.clone(), tag, to))
+        }
+        _ => None,
+    };
+    let mut since_summary: Option<changes::Summary> = None;
+    if let Some((name, tag, to)) = since_of {
+        if site.page_taken(rdy_engine::site_scope::SINCE_PAGE) {
+            summary.warnings.push(since_doc_kept(&name));
+        } else {
+            let rv = review::between(rdy, &tag, &to)?;
+            let diff = rdy.diff(&tag, &to)?;
+            let from = rdy.materialized(&tag)?;
+            // both sides read against the `to` side's site (O4)
+            let to_m = (to != *scope).then(|| rdy.materialized(&to)).transpose()?;
+            let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
+            let sides = changes::Sides {
+                from: &from,
+                to: to_m.as_deref().unwrap_or(&m),
+                text: to_site.as_ref().unwrap_or(&site),
+            };
+            let (s, _) = changes::summary(
+                &site,
+                rdy_engine::site_scope::SINCE_PAGE,
+                &rv,
+                Some(&diff),
+                &sides,
+                &changes::Of::Since(name),
+            );
+            since_summary = Some(s);
+        }
+    }
+
     let sh = page::Shared {
         site: &site,
         m: &m,
@@ -608,12 +708,9 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         headers: Default::default(),
         used_blobs: Default::default(),
         mode,
-    };
-    let mut summary = RenderSummary {
-        pages: 0,
-        assets: 0,
-        redirects: 0,
-        warnings: vec![],
+        inline_diffs,
+        changes_page: changes_summary.is_some(),
+        since_page: since_summary.is_some(),
     };
     if site.glossary_doc_dropped {
         summary.warnings.push(if site.terms.is_empty() {
@@ -655,9 +752,23 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
         Ok((ctx.page_url.clone(), html, at))
     })?;
-    summary.pages = pages.len();
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut label_at: BTreeMap<String, Vec<Slot>> = BTreeMap::new();
+    // the change summaries: pages of the site, kept out of the navigation, the search index,
+    // the llms files and the permalinks (sr6)
+    let mut extra = vec![];
+    if let Some(c) = &changes_summary {
+        extra.push(page::build(&sh, page::Kind::Changes(c)));
+    }
+    if let Some(c) = &since_summary {
+        extra.push(page::build(&sh, page::Kind::ChangesSince(c)));
+    }
+    let mut pages = pages;
+    for ctx in &extra {
+        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
+        pages.push((ctx.page_url.clone(), html, at));
+    }
+    summary.pages = pages.len();
     for (path, html, at) in pages {
         if !at.is_empty() {
             label_at.insert(path.clone(), at);

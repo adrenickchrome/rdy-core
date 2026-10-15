@@ -633,7 +633,7 @@ impl<'a> Site<'a> {
     }
 
     /// Whether a doc or folder already has the page at `page`.
-    fn page_taken(&self, page: &str) -> bool {
+    pub(crate) fn page_taken(&self, page: &str) -> bool {
         self.page_owner.contains_key(page)
     }
 
@@ -1046,13 +1046,13 @@ const RESERVED_IDS: &[&str] = &[
 ];
 
 /// A fresh per-page `taken` set, holding [`RESERVED_IDS`].
-fn reserved_ids() -> BTreeSet<String> {
+pub(crate) fn reserved_ids() -> BTreeSet<String> {
     RESERVED_IDS.iter().map(|s| s.to_string()).collect()
 }
 
 /// `text` as an anchor not in `taken`, which then holds it: slugged, cut to [`ANCHOR_MAX`],
 /// `part` when nothing is left, `-x` after anything shaped like an id, `-2`, `-3`... on a clash.
-fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
+pub(crate) fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
     let slug = tree::slug(&text);
     let cut: String = slug.chars().take(ANCHOR_MAX).collect();
     let mut base = cut.trim_end_matches(['-', '.']).to_string();

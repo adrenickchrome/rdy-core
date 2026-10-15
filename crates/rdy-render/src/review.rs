@@ -8,7 +8,7 @@ use crate::site::RATIONALE;
 use rdy_engine::{Compare, CompareEntry, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Block, BlockId, decision, tree};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// The word a changed block, doc or folder carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -76,8 +76,8 @@ pub struct Review {
     docs: HashMap<BlockId, DocChange>,
     removed: HashMap<BlockId, Vec<Removed>>,
     removed_pages: Vec<Block>,
-    /// The count of changed blocks (O2); see [`Review::changed_blocks`].
-    changed_blocks: u32,
+    /// The changed blocks (O2); see [`Review::changed_blocks`].
+    changed: BTreeSet<BlockId>,
 }
 
 impl Review {
@@ -120,22 +120,28 @@ impl Review {
     /// Decisions, rationale, pins-only changes and a new order key at the same place never
     /// count.
     pub fn changed_blocks(&self) -> u32 {
-        self.changed_blocks
+        u32::try_from(self.changed.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The blocks [`Review::changed_blocks`] counts, by id: the change summary shows exactly
+    /// these (sr6), so the chip's count and the summary's entries agree.
+    pub(crate) fn changed_set(&self) -> &BTreeSet<BlockId> {
+        &self.changed
     }
 }
 
 /// The fields of a doc or folder that a reader sees: a change in one counts the page (O2 (e)).
 const PAGE_FIELDS: [&str; 3] = ["title", "name", "description"];
 
-/// [`Review::changed_blocks`], worked out once from the compare and both sides.
+/// The blocks [`Review::changed_blocks`] counts, worked out once from the compare and both sides.
 fn count_changed(
     rv: &Review,
     cmp: &Compare,
     dm: &Materialized,
     bm: &Materialized,
     moved_in_place: &HashSet<BlockId>,
-) -> u32 {
-    let mut counted: HashSet<&BlockId> = HashSet::new();
+) -> BTreeSet<BlockId> {
+    let mut counted: BTreeSet<&BlockId> = BTreeSet::new();
     let content = |b: &Block| visible(b) && !tree::is_tree_type(&b.block_type);
     // (a) the marked blocks (only visible ones carry a mark)
     for id in rv.marks.keys() {
@@ -199,7 +205,7 @@ fn count_changed(
         )
         .collect();
     counted.extend(pages.iter());
-    u32::try_from(counted.len()).unwrap_or(u32::MAX)
+    counted.into_iter().cloned().collect()
 }
 
 /// The scope a draft is read against: canon at the landing the view is based on, or canon itself
@@ -238,11 +244,25 @@ pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError>
     Ok(Some(review(&cmp, &dm, &bm)))
 }
 
+/// The changes from scope `from` to scope `to`, read as a review reads a view against its base:
+/// the change summary of the landings since a tag reads it (sr6), so it counts by the same rule.
+pub fn between(rdy: &ReadState, from: &Scope, to: &Scope) -> Result<Review, RdyError> {
+    let cmp = rdy.compare(to, from)?;
+    let (dm, bm) = (rdy.materialized(to)?, rdy.materialized(from)?);
+    Ok(review(&cmp, &dm, &bm))
+}
+
 /// The count of [`Review::changed_blocks`] for a proposal version that has no base here: one
 /// made before the first landing, read once canon has landed. It was made on the empty project,
 /// so it is counted against that: every block it holds is added. Its page shows no marks
 /// ([`base_of`]), but it still names the version and its count. Any other scope gives none.
 pub fn unreviewed_changed_blocks(rdy: &ReadState, scope: &Scope) -> Result<Option<u32>, RdyError> {
+    Ok(unreviewed(rdy, scope)?.map(|rv| rv.changed_blocks()))
+}
+
+/// The review behind [`unreviewed_changed_blocks`]: the proposal version against the empty
+/// project. Its change summary lists every block it holds as new (sr6).
+pub(crate) fn unreviewed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError> {
     let Scope::Proposal(p) = scope else {
         return Ok(None);
     };
@@ -271,7 +291,7 @@ pub fn unreviewed_changed_blocks(rdy: &ReadState, scope: &Scope) -> Result<Optio
         moved: vec![],
         conflicted: vec![],
     };
-    Ok(Some(review(&cmp, &dm, &empty).changed_blocks()))
+    Ok(Some(review(&cmp, &dm, &empty)))
 }
 
 /// On the page: neither a decision nor its rationale.
@@ -458,7 +478,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
             .removed = lines.len();
     }
     rv.removed_pages = removed_pages(cmp, bm);
-    rv.changed_blocks = count_changed(&rv, cmp, dm, bm, &moved_in_place);
+    rv.changed = count_changed(&rv, cmp, dm, bm, &moved_in_place);
     rv
 }
 

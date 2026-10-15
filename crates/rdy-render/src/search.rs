@@ -106,7 +106,7 @@ fn cell(v: &FieldValue, site: &Site) -> String {
 }
 
 /// The text a reader can find in `b` itself (not in its children), with its own whitespace.
-fn own_text(b: &Block, site: &Site) -> String {
+pub(crate) fn own_text(b: &Block, site: &Site) -> String {
     let body = || plain(&b.body, RefMode::for_body(&b.block_type), Form::Body, site);
     let list = |name: &str| match b.fields.get(name) {
         Some(FieldValue::List(l)) => l.clone(),

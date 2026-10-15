@@ -197,6 +197,9 @@ fn doc_page(rel: &str, html: &str) -> bool {
         && !rel.ends_with("index.html")
         && rel != "glossary.html"
         && rel != "questions.html"
+        // the change summaries (sr6)
+        && rel != "changes.html"
+        && rel != "changes-since.html"
 }
 
 /// Runs `check` over every page of the canon site, skipping `go/` pages when `skip_go`.

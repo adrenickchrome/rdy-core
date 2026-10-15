@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{Mode, assets, home, nav, review, search, toc, trail, version};
+use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -41,6 +41,14 @@ pub struct Shared<'a> {
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
     /// A static site, or a live one whose pages carry the label and header slots.
     pub mode: Mode<'a>,
+    /// The word diff of each changed block of a review render, by id: an edited block on its
+    /// page carries it for Show diff (sr6). Empty for canon and tags.
+    pub inline_diffs: BTreeMap<BlockId, String>,
+    /// The build writes `changes.html` (a review render whose path no doc owns); the review
+    /// chip links it only then.
+    pub changes_page: bool,
+    /// The build writes `changes-since.html`; the landings chip links it only then.
+    pub since_page: bool,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -93,6 +101,9 @@ pub struct Item {
     pub ref_: String,
     /// The word the block carries in a draft render; none on canon and tags.
     pub change: Option<review::Mark>,
+    /// For a block marked Edited on a review page: its word diff, which the page holds hidden
+    /// until Show diff turns it on (sr6).
+    pub diff_html: Option<String>,
     /// The removed lines a draft shows just before this block.
     pub removed_before: Vec<RemovedLine>,
 }
@@ -117,6 +128,8 @@ pub struct DocBody {
     pub change: Option<review::Mark>,
     /// The word the lede carries in a draft render.
     pub lede_change: Option<review::Mark>,
+    /// The lede's word diff, when it is marked Edited (sr6).
+    pub lede_diff: Option<String>,
     /// The removed lines a draft shows after the last block.
     pub removed_end: Vec<RemovedLine>,
 }
@@ -235,6 +248,8 @@ pub struct Body {
     pub disagreements: Option<DisagreementsBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect: Option<RedirectBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<changes::Summary>,
 }
 
 /// Everything a template reads.
@@ -246,7 +261,8 @@ pub struct PageContext {
     pub title: String,
     /// Site-relative, with `/` separators.
     pub page_url: String,
-    /// `home`, `folder`, `doc`, `glossary`, `questions`, `disagreements` or `redirect`.
+    /// `home`, `folder`, `doc`, `glossary`, `questions`, `disagreements`, `changes` or
+    /// `redirect`.
     pub kind: &'static str,
     /// The prefix that leads from this page to the site's root (`../` per level).
     pub root: String,
@@ -282,6 +298,10 @@ pub enum Kind<'a> {
     Disagreements,
     /// The permalink page of a block and where it leads.
     Redirect(&'a BlockId, &'a Url),
+    /// The change summary of a review render (`changes.html`).
+    Changes(&'a changes::Summary),
+    /// The summary of the landings since the tag (`changes-since.html`).
+    ChangesSince(&'a changes::Summary),
 }
 
 /// A reader's word for a block's type: the one the eyebrow, the toc and the search use.
@@ -331,8 +351,8 @@ impl Shared<'_> {
             &self.header,
             &version::HeaderLinks {
                 versions: &versions,
-                since: Some(&since),
-                changes: Some(&changes),
+                since: self.since_page.then_some(since.as_str()),
+                changes: self.changes_page.then_some(changes.as_str()),
                 menu,
             },
         );
@@ -519,6 +539,22 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 None,
             )
         }
+        Kind::Changes(c) => (
+            rdy_engine::site_scope::CHANGES_PAGE.into(),
+            "changes",
+            c.heading.clone(),
+            None,
+            vec![],
+            Some(c.heading.as_str()),
+        ),
+        Kind::ChangesSince(c) => (
+            rdy_engine::site_scope::SINCE_PAGE.into(),
+            "changes",
+            c.heading.clone(),
+            None,
+            vec![],
+            Some(c.heading.as_str()),
+        ),
     };
     let mut body = Body::default();
     let mut items = vec![];
@@ -596,6 +632,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             let (_, label, href) = redirect_target(sh, id, url);
             body.redirect = Some(RedirectBody { label, href });
         }
+        Kind::Changes(c) | Kind::ChangesSince(c) => body.changes = Some((*c).clone()),
     }
     // a permalink page is a bare redirect: it shows no navigation and no crumbs, so it builds
     // none (building the site's navigation once per block made a render O(blocks x pages))
@@ -710,6 +747,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
         change: sh.review.and_then(|r| r.mark(&doc.id)),
         lede_change: lede_block.and_then(|l| sh.review.and_then(|r| r.mark(&l.id))),
+        lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],
     };
     let (mut items, mut has_mermaid) = (vec![], false);
@@ -790,6 +828,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             ref_head,
             ref_,
             change: sh.review.and_then(|r| r.mark(&b.id)),
+            diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
         });
     }
@@ -812,6 +851,12 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         }
     }
     (doc_body, items, has_mermaid)
+}
+
+/// The word diff a block marked Edited carries on a review page (sr6); none for any other block.
+fn edited_diff(sh: &Shared, id: &BlockId) -> Option<String> {
+    let edited = sh.review.and_then(|r| r.mark(id)) == Some(review::Mark::Edited);
+    edited.then(|| sh.inline_diffs.get(id).cloned()).flatten()
 }
 
 /// The old text of removed blocks as HTML, written outside the block pipeline: each heading text

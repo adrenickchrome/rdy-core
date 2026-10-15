@@ -98,6 +98,10 @@ fn rv1_a_draft_with_nothing_a_reader_sees_changed_shows_no_marker() {
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::View("decided".into()), out.path()).unwrap();
     for p in pages(out.path()) {
+        // the summary of the landings since the tag shows those landings' changes (sr6)
+        if p.ends_with("changes-since.html") {
+            continue;
+        }
         let h = std::fs::read_to_string(&p).unwrap();
         for m in [
             "has-chg",

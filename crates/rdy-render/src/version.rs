@@ -185,8 +185,6 @@ pub fn review_bar(r: &Reviewed) -> String {
 }
 
 /// The heading of the change summary and of the home page's list (O9).
-// Tasks 7 and 8 call this; until then only the tests do.
-#[allow(dead_code)]
 pub fn changes_heading(kind: ReviewedKind) -> &'static str {
     match kind {
         ReviewedKind::View => "Changes in this view",

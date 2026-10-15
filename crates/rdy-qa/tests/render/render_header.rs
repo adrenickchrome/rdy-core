@@ -267,10 +267,16 @@ fn sr5_a_landing_patches_the_header_and_reloads_only_changed_pages() {
     );
     let d = diff(&before, &after);
     assert!(d.reload.contains(edited[0]), "{:?}", d.reload);
+    // the summary of the landings since the tag lists the new landing's change (sr6)
+    assert!(
+        d.reload.iter().any(|p| p == "changes-since.html"),
+        "{:?}",
+        d.reload
+    );
     for p in &d.reload {
         assert!(
-            p == edited[0] || p == "index.html",
-            "only the edited page and the home page reload: {:?}",
+            p == edited[0] || p == "index.html" || p == "changes-since.html",
+            "only the edited page, the home page and the since summary reload: {:?}",
             d.reload
         );
     }

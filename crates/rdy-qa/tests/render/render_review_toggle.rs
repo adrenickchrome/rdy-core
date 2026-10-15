@@ -37,6 +37,10 @@ fn rv1_a_draft_page_offers_show_changes_hidden_until_script_and_canon_and_tags_d
         let out = tempfile::tempdir().unwrap();
         rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
         for (p, h) in layout_pages(out.path()) {
+            // the summary of the landings since the tag words each change it lists (sr6)
+            if p.ends_with("changes-since.html") {
+                continue;
+            }
             for gone in [
                 "show-changes",
                 "has-chg",

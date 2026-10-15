@@ -5,7 +5,7 @@ use crate::page::SiteFacts;
 use crate::review::{Mark, Review};
 use crate::site::{Site, rel};
 use rdy_engine::{Materialized, VersionInfo};
-use rdy_model::{Block, RefMode, tree};
+use rdy_model::{Block, BlockId, RefMode, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -22,6 +22,9 @@ pub struct Card {
 /// One line of the home page's list of a draft's changes.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChangeRow {
+    /// The doc or removed page the row is about (never written on a page).
+    #[serde(skip)]
+    pub id: BlockId,
     pub title: String,
     /// The page, or none for a removed page (there is nothing to link to).
     pub href: Option<String>,
@@ -130,6 +133,7 @@ pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
             let change = review.doc(id)?;
             let b = site.m.get(id)?;
             Some(ChangeRow {
+                id: id.clone(),
                 title: site.label(b),
                 href: site.page(id).map(|p| rel("index.html", &p)),
                 mark: match change.mark {
@@ -148,6 +152,7 @@ pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
         })
         .collect();
     rows.extend(review.removed_pages().iter().map(|b| ChangeRow {
+        id: b.id.clone(),
         title: site.label(b),
         href: None,
         mark: "removed",
