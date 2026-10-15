@@ -15,6 +15,11 @@
 //! pages of other scopes get nothing (the founder addition of 2026-10-12). An event is best
 //! effort: a full or closed queue drops the stream, and the page's revision repairs it when it
 //! reconnects.
+//!
+//! The versions page (`/~versions/`, D-2F29G, RULING F5) is one more scope here, with its own key
+//! (`rdy_render::menu::menu_key`) and its own build: a view commit rebuilds it and never canon.
+//! The number of docs each view or proposal version changes is cached by what it reads, so one
+//! view commit recounts one view.
 use crate::daemon::log;
 use crate::shared::Shared;
 use crate::site::guard::ScopeRef;
@@ -22,6 +27,7 @@ use crate::writer::panic_text;
 use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::Hash;
 use rdy_render::live::{LiveBuild, build_live, diff, inputs_key};
+use rdy_render::menu::{build_versions, docs_changed, menu_key};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,6 +48,13 @@ pub const MAX_SCOPES: usize = 8;
 /// How often the worker looks whether any `Shared` still lives while no publish wakes it. A
 /// wake lost while the worker starts waits at most this long.
 const WORKER_TICK: Duration = Duration::from_secs(1);
+
+/// The doc counts the site keeps for the versions page; past this, the cache clears.
+pub const MAX_COUNTS: usize = 256;
+
+/// What counts the docs a view or proposal version changes: `rdy_render::menu::docs_changed`, or
+/// a test's hook ([`LiveSite::set_docs_changed`]).
+pub type DocsChanged = Box<dyn Fn(&ReadState, &Scope) -> Result<usize, RdyError> + Send + Sync>;
 
 /// What a stream sends an open page: the closed set of the site's events.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +202,41 @@ pub struct LiveSite {
     /// Shared with each [`Subscription`], which removes its stream when dropped.
     inner: Arc<Mutex<Inner>>,
     builds: AtomicU64,
+    /// The docs each view or proposal version changes, for the versions page: keyed by the scope
+    /// and what its count reads (see [`count_key`]). At most [`MAX_COUNTS`] entries.
+    counts: Mutex<BTreeMap<(ScopeRef, Hash), usize>>,
+    /// Test hook: counts in place of `rdy_render::menu::docs_changed`.
+    docs_changed: Mutex<Option<DocsChanged>>,
+}
+
+/// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
+/// generation `generation`: the scope, and the hash of what its review reads. A view's count reads
+/// its head op and its effective base; a proposal version's reads the version (its base is fixed
+/// in it) and whether canon has landed. The pack decides which docs have a page. Any other scope
+/// has no count to cache.
+fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef, Hash)> {
+    let mut k = generation.to_le_bytes().to_vec();
+    let at = |k: &mut Vec<u8>, h: Option<Hash>| match h {
+        Some(h) => {
+            k.push(1);
+            k.extend_from_slice(&h.0);
+        }
+        None => k.push(0),
+    };
+    let r = match scope {
+        Scope::View(name) => {
+            at(&mut k, st.view_head(name).map(|h| h.head));
+            at(&mut k, st.effective_base(name));
+            ScopeRef::View(name.clone())
+        }
+        Scope::Proposal(v) => {
+            at(&mut k, Some(*v));
+            k.push(u8::from(st.canon_head().is_some()));
+            ScopeRef::Proposal(v.to_string())
+        }
+        _ => return None,
+    };
+    Some((r, Hash::of(&k)))
 }
 
 /// An open page's stream. Dropping it removes the stream.
@@ -220,7 +268,43 @@ impl LiveSite {
             building: Mutex::new(()),
             inner: Arc::new(Mutex::new(Inner::default())),
             builds: AtomicU64::new(0),
+            counts: Mutex::new(BTreeMap::new()),
+            docs_changed: Mutex::new(None),
         })
+    }
+
+    /// Test hook: counts the docs a view or proposal version changes with `f` from now on.
+    #[doc(hidden)]
+    pub fn set_docs_changed(&self, f: DocsChanged) {
+        *lock(&self.docs_changed) = Some(f);
+    }
+
+    /// The docs `scope` changes, from the cache when what it reads is unchanged.
+    fn docs_changed(
+        &self,
+        st: &ReadState,
+        scope: &Scope,
+        generation: u64,
+    ) -> Result<usize, RdyError> {
+        let key = count_key(st, scope, generation);
+        if let Some(n) = key
+            .as_ref()
+            .and_then(|k| lock(&self.counts).get(k).copied())
+        {
+            return Ok(n);
+        }
+        let n = match &*lock(&self.docs_changed) {
+            Some(f) => f(st, scope)?,
+            None => docs_changed(st, scope)?,
+        };
+        if let Some(key) = key {
+            let mut counts = lock(&self.counts);
+            if counts.len() >= MAX_COUNTS {
+                counts.clear();
+            }
+            counts.insert(key, n);
+        }
+        Ok(n)
     }
 
     /// A publish happened: counts it and wakes the worker. Called by the writer after each
@@ -270,16 +354,22 @@ impl LiveSite {
         // generation with a newer state only builds once more, to the same pages)
         let generation = sh.pack_gen.load(Ordering::SeqCst);
         let st = sh.state.load_full();
-        let resolved = resolve(&st, scope)?;
-        let key = inputs_key(&st, &resolved, generation)?;
+        // the versions page is not a read scope: it has its own key and its own build
+        let (resolved, key) = match scope {
+            ScopeRef::Versions => (None, menu_key(&st, generation)),
+            _ => {
+                let resolved = resolve(&st, scope)?;
+                let key = inputs_key(&st, &resolved, generation)?;
+                (Some(resolved), key)
+            }
+        };
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.key == Some(key)) {
             return Ok((b, false));
         }
-        let new = Arc::new(build_live(
-            &st,
-            &resolved,
-            &format!("/{}", scope.path_prefix()),
-        )?);
+        let new = Arc::new(match &resolved {
+            Some(resolved) => build_live(&st, resolved, &format!("/{}", scope.path_prefix()))?,
+            None => build_versions(&st, &mut |s| self.docs_changed(&st, s, generation))?,
+        });
         self.builds.fetch_add(1, Ordering::SeqCst);
         let mut inner = lock(&self.inner);
         let s = inner.touch(scope);

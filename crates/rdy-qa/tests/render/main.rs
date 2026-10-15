@@ -13,6 +13,7 @@ mod render_header;
 mod render_live;
 mod render_llms;
 mod render_markdown;
+mod render_menu;
 mod render_mermaid;
 mod render_nav;
 mod render_no_coverage;

@@ -1,5 +1,5 @@
 //! sr2: the live site's tag route (D-FV6G9, D-BHR1Z F5): a tag serves its frozen site, an
-//! unknown tag is not found, and the versions page waits for the task that builds it.
+//! unknown tag is not found, and the versions page is served.
 use rdy_daemon::site::SiteInfo;
 use rdy_qa::daemon::Hosted;
 use rdy_qa::golden;
@@ -45,11 +45,11 @@ fn sr2_an_unknown_tag_is_not_found() {
     }
 }
 
-/// **Guard.** Task 8 builds the page: it changes this to 200 and edits this test.
+/// Task 8 builds the page (F5): both of its paths serve it.
 #[test]
-fn sr2_the_versions_page_is_not_found_until_built() {
+fn sr8_the_versions_page_is_served() {
     let h = host();
     let url = url(&h);
-    assert_eq!(http::get(&format!("{url}~versions/")).status, 404);
-    assert_eq!(http::get(&format!("{url}~versions/index.html")).status, 404);
+    assert_eq!(http::get(&format!("{url}~versions/")).status, 200);
+    assert_eq!(http::get(&format!("{url}~versions/index.html")).status, 200);
 }

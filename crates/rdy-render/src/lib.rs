@@ -7,6 +7,7 @@ mod html;
 pub mod inline;
 pub mod live;
 mod llms;
+pub mod menu;
 mod nav;
 mod page;
 pub mod review;
@@ -224,6 +225,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "disagreements.html",
         "changes.html",
         "redirect.html",
+        "versions.html",
         "partials/nav.html",
         "partials/toc.html",
         "partials/pager.html",

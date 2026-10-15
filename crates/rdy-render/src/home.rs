@@ -225,7 +225,7 @@ fn cut(text: &str, max: usize) -> String {
 }
 
 /// `8 February 2021` for a time in milliseconds since the epoch (UTC).
-fn date(ms: i64) -> String {
+pub(crate) fn date(ms: i64) -> String {
     const MONTHS: [&str; 12] = [
         "January",
         "February",

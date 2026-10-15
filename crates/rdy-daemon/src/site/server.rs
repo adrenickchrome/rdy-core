@@ -402,8 +402,12 @@ async fn page(ctx: &Ctx, scope: ScopeRef, path: String) -> Response {
         }
         let build = match sh.site.refresh(&sh, &scope) {
             Ok(b) => b,
-            // a scope that does not resolve names no view or proposal: not found
-            Err(_) if resolve(&sh.state.load_full(), &scope).is_err() => {
+            // a scope that does not resolve names no view or proposal: not found (the versions
+            // page never resolves, and a failed build of it is broken, not missing)
+            Err(_)
+                if scope != ScopeRef::Versions
+                    && resolve(&sh.state.load_full(), &scope).is_err() =>
+            {
                 return Err(Refusal::NotFound);
             }
             Err(e) => {
