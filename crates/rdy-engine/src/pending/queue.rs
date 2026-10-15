@@ -7,8 +7,9 @@
 //! card leads with the author's summary (D-4PG9Y), lists the decisions it confirms (`members`),
 //! and gives the computed facts in the closed order of O6: Changes, Decisions, Supersedes,
 //! Reversibility, Consequences (D-NJ2SP), Tensions (D-45RG6, C7), Coverage (D-C6HHV),
-//! Confidence (D-XZXCE), Base and Exceptions. No fact reads an answer, so an answer beside the
-//! batch never moves the batch card.
+//! Confidence (D-XZXCE), Base and Exceptions. Consequences, Coverage and Confidence are worked
+//! out on the canon the version's landing would give, never on its view, which may have moved
+//! on. No fact reads an answer, so an answer beside the batch never moves the batch card.
 //!
 //! # Exceptions (p-FN596, F3; closed)
 //!
@@ -50,9 +51,10 @@
 //! rest.
 use super::card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render};
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};
-use crate::coverage::{confidence_in, coverage_change, lands_unapplied};
+use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError};
 use crate::gate::{ProposalRef, applied_ops, changes_of, landing_readiness, open_proposals};
+use crate::read_state::Built;
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
@@ -114,7 +116,14 @@ impl ReadState {
         let now = now_ms();
         let mut groups: Vec<Group> = vec![];
         let mut not_ready = vec![];
-        for (pref, p) in open_proposals(self)? {
+        let open = open_proposals(self)?;
+        if !open.is_empty() {
+            // canon's coverage and lexicon first: each version's build carries its structural
+            // layer from them, and its coverage its suspects (a read error shows on the facts)
+            let _ = self.scope_rollup(&Scope::Canon);
+            let _ = self.lexicon(&Scope::Canon);
+        }
+        for (pref, p) in open {
             let r = pref.to_string();
             if answered(self, &r, AnswerAct::RejectProposal)? {
                 continue;
@@ -238,7 +247,8 @@ struct Version {
     changes: Vec<Change>,
     /// The blocks the version's changes write.
     touched: BTreeSet<BlockId>,
-    /// The canon that landing the version would give.
+    /// The canon that landing the version would give: its build, and its materialization.
+    built: Built,
     next: Arc<Materialized>,
     /// The proposed decisions, by id.
     decisions: Vec<Decision>,
@@ -261,6 +271,8 @@ impl Version {
         let built = st
             .built(&Scope::Canon)?
             .after(&applied_ops(&changes, &applied), st.pack());
+        // canon's graph and lexicon carry to this build, and canon's structural layer when
+        // it is built (`ReadState::pending` builds it first)
         let g = Arc::clone(built.graph.get_or_init(|| {
             Arc::new(Graph::build_with(
                 built.m.iter(),
@@ -305,6 +317,7 @@ impl Version {
             p,
             changes,
             touched,
+            built,
             next,
             decisions,
             tensions,
@@ -464,6 +477,7 @@ impl Version {
         } else {
             "moved"
         };
+        let candidate = st.candidate_coverage(&self.built, &self.p.changes);
         let fact = |name: &'static str, value: String| Fact { name, value };
         vec![
             fact(
@@ -479,8 +493,14 @@ impl Version {
             fact("Reversibility", self.reversibility()),
             fact("Consequences", worked_out(self.consequences(st))),
             fact("Tensions", tensions),
-            fact("Coverage", worked_out(self.coverage(st))),
-            fact("Confidence", worked_out(self.confidence(st))),
+            fact(
+                "Coverage",
+                worked_out(self.coverage(st, candidate.as_ref())),
+            ),
+            fact(
+                "Confidence",
+                worked_out(self.confidence(candidate.as_ref())),
+            ),
             fact("Base", format!("canon at {base}, {moved}")),
             fact(
                 "Exceptions",
@@ -520,28 +540,35 @@ impl Version {
     /// D-NJ2SP: the consequences of landing the version, computed on its final state.
     fn consequences(&self, st: &ReadState) -> Result<String, RdyError> {
         let c = st.landing_consequences(&self.pref.version, None)?;
-        let cut: usize = c.omitted.values().sum();
-        Ok(format!("{} returned", c.items.len() + cut))
+        Ok(format!("{} returned", c.items.len()))
     }
 
-    /// D-C6HHV: canon's coverage against the version's view's, as the propose reply gives it.
-    fn coverage(&self, st: &ReadState) -> Result<String, RdyError> {
-        let view = Scope::View(self.p.view.clone());
-        let c = coverage_change(st, &Scope::Canon, st, &view, &self.touched)?;
-        Ok(format!("{}% \u{2192} {}%", c.before, c.after))
+    /// D-C6HHV: canon's coverage against that of the canon the version would give
+    /// (`candidate`), as the propose reply gives canon's against the view's. Fix round 1: the
+    /// version's, so a later edit of its view, or a change of the view the version left out,
+    /// does not move it.
+    fn coverage(
+        &self,
+        st: &ReadState,
+        candidate: Result<&CandidateCoverage, &RdyError>,
+    ) -> Result<String, RdyError> {
+        let before = st.scope_rollup(&Scope::Canon)?.score;
+        let after = candidate.map_err(Clone::clone)?.score;
+        Ok(format!("{before}% \u{2192} {after}%"))
     }
 
-    /// D-XZXCE: the confidence of the blocks the version writes, read in its view, with the
-    /// first reason.
-    fn confidence(&self, st: &ReadState) -> Result<String, RdyError> {
-        let view = Scope::View(self.p.view.clone());
-        let issues = st.coverage_issues(&view)?;
-        let m = st.materialized(&view)?;
+    /// D-XZXCE: the confidence of the blocks the version writes, read in the canon the version
+    /// would give (`candidate`; fix round 1), with the first reason.
+    fn confidence(
+        &self,
+        candidate: Result<&CandidateCoverage, &RdyError>,
+    ) -> Result<String, RdyError> {
+        let issues = &candidate.map_err(Clone::clone)?.issues;
         let mut paths = BTreeMap::new();
         for id in &self.touched {
             if let Some(e) = issues.blocks.get(id)
                 && !e.issues.is_empty()
-                && let Some(p) = e.doc.as_ref().and_then(|d| m.path_of(d))
+                && let Some(p) = e.doc.as_ref().and_then(|d| self.next.path_of(d))
             {
                 paths.insert(id.to_string(), p);
             }

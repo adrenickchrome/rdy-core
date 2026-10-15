@@ -15,7 +15,7 @@ use rdy_engine::{
 use rdy_model::{AnswerAct, BlockId, Hash, Op};
 use rdy_qa::fixtures::{approver, version_of, writer};
 use rdy_qa::intake::*;
-use rdy_qa::tensions::{ag, put, upd};
+use rdy_qa::tensions::{ag, created, put, upd};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -433,7 +433,9 @@ fn di5_the_card_facts_come_from_the_store() {
         fact(i, "Coverage"),
         format!("{}% \u{2192} {}%", cov["before"], cov["after"])
     );
-    // D-XZXCE: the confidence of the blocks the version writes, in the version's view
+    // D-XZXCE: the confidence of the blocks the version writes; the view holds exactly the
+    // version here, so its issues are those of the canon the version would give (a view that
+    // moved on: di5_coverage_and_confidence_describe_the_version_not_its_view)
     let touched = written(&st, &b.r#ref);
     let issues = st.coverage_issues(&Scope::View(BATCH_VIEW.into())).unwrap();
     let m = st.materialized(&Scope::View(BATCH_VIEW.into())).unwrap();
@@ -476,6 +478,212 @@ fn di5_the_card_facts_come_from_the_store() {
     assert_eq!(
         fact(item(&q, &b.r#ref), "Base"),
         format!("canon at {}, moved", head.short())
+    );
+}
+
+/// The coverage score of view `view`, as its summary gives it.
+fn view_score(r: &Rdy, view: &str) -> u32 {
+    r.read()
+        .coverage_summary(&Scope::View(view.into()))
+        .unwrap()
+        .score
+}
+
+/// Twenty docs of a type with required sections, none written: they lower a scope's coverage.
+fn twenty_bare_docs() -> serde_json::Value {
+    serde_json::Value::Array(
+        (0..20)
+            .map(|n| {
+                json!({"op": "create", "type": "doc", "fields": {
+                    "name": format!("extra-{n}"), "title": format!("Extra {n}"),
+                    "doc_type": "overview"}})
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn di5_coverage_and_confidence_describe_the_version_not_its_view() {
+    // fix round 1: the facts are worked out on the canon the version would give, so an edit of
+    // its view after the propose moves neither of them
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let spec = rdy_qa::edit_loop::spec_doc(&mut r);
+    let w = put(
+        &mut r,
+        "late",
+        json!([{"op": "create", "type": "claim", "id": "$x", "parent": spec.section.to_string(),
+                "body": "An untied claim."}]),
+    );
+    let x = created(&w, "$x");
+    let p = r
+        .propose_subset(&ag("late"), "late", "late", None, Some("Adds a claim."))
+        .unwrap();
+    let q = pending(&r);
+    let i = item(&q, &p.r#ref);
+    let (coverage, confidence) = (
+        fact(i, "Coverage").to_string(),
+        fact(i, "Confidence").to_string(),
+    );
+    assert!(
+        confidence.starts_with("medium: ") && confidence.ends_with(&format!(" on {x}")),
+        "{confidence}"
+    );
+    let score = view_score(&r, "late");
+    assert!(coverage.ends_with(&format!(" {score}%")), "{coverage}");
+    // the view drops the claim and gains twenty bare docs; the version still holds the claim
+    put(
+        &mut r,
+        "late",
+        json!([{"op": "delete", "id": x.to_string()}]),
+    );
+    put(&mut r, "late", twenty_bare_docs());
+    assert_ne!(view_score(&r, "late"), score, "the view's coverage moved");
+    let q = pending(&r);
+    let i = item(&q, &p.r#ref);
+    assert_eq!(
+        (fact(i, "Coverage"), fact(i, "Confidence")),
+        (coverage.as_str(), confidence.as_str())
+    );
+}
+
+#[test]
+fn di5_a_subset_version_has_its_own_coverage() {
+    // fix round 1: a version of some of a view's changes: its coverage is that of canon with
+    // those changes, not of the whole view
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let spec = rdy_qa::edit_loop::spec_doc(&mut r);
+    let w = put(
+        &mut r,
+        "some",
+        json!([{"op": "create", "type": "claim", "parent": spec.section.to_string(),
+                "body": format!("Builds on {{{{{}}}}}.", spec.a)}]),
+    );
+    // the same change alone in a view of its own: what the version's canon scores
+    r.view_include(&ag("alone"), "alone", std::slice::from_ref(&w.change))
+        .unwrap();
+    let alone = view_score(&r, "alone");
+    put(&mut r, "some", twenty_bare_docs());
+    assert_ne!(
+        view_score(&r, "some"),
+        alone,
+        "the docs lower the view's coverage"
+    );
+    let p = r
+        .propose_subset(
+            &ag("some"),
+            "some",
+            "some",
+            Some(std::slice::from_ref(&w.change)),
+            Some("Adds one claim."),
+        )
+        .unwrap();
+    let canon = r.read().coverage_summary(&Scope::Canon).unwrap().score;
+    let q = pending(&r);
+    assert_eq!(
+        fact(item(&q, &p.r#ref), "Coverage"),
+        format!("{canon}% \u{2192} {alone}%")
+    );
+}
+
+#[test]
+fn di5_the_consequences_fact_counts_only_the_entries_returned() {
+    // fix round 1: past the default budget, the omitted entries are not returned
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let spec = rdy_qa::edit_loop::spec_doc(&mut r);
+    let notes: Vec<serde_json::Value> = (0..300)
+        .map(|n| {
+            json!({"op": "create", "type": "claim", "parent": spec.section.to_string(),
+                   "body": format!("Note {n} builds on {{{{{}}}}}.", spec.a)})
+        })
+        .collect();
+    put(&mut r, "notes", serde_json::Value::Array(notes));
+    rdy_qa::fixtures::land(&mut r, "notes").unwrap();
+    put(&mut r, "reword", upd(&spec.a, "A holds, reworded."));
+    let p = r
+        .propose_subset(&ag("reword"), "reword", "reword", None, Some("Rewords A."))
+        .unwrap();
+    let version: Hash = p.id.parse().unwrap();
+    let c = r.read().landing_consequences(&version, None).unwrap();
+    let cut: usize = c.omitted.values().sum();
+    assert!(cut > 0, "the budget cuts some: {} returned", c.items.len());
+    let q = pending(&r);
+    assert!(q.not_ready.is_empty(), "{:#?}", q.not_ready);
+    assert_eq!(
+        fact(item(&q, &p.r#ref), "Consequences"),
+        format!("{} returned", c.items.len())
+    );
+}
+
+#[test]
+fn di5_a_conflict_does_not_hide_a_blocking_tension() {
+    // fix round 1: a version with a conflict and an independent blocking tension lists both,
+    // each with its fix
+    let (_d, mut r, m) = ready_and_not_ready();
+    let blocking: Vec<String> = r
+        .read()
+        .included("blocking")
+        .iter()
+        .map(Hash::to_string)
+        .collect();
+    r.view_include(&ag("conflict"), "conflict", &blocking)
+        .unwrap();
+    let v2 = r
+        .propose_subset(
+            &ag("conflict"),
+            "conflict",
+            "conflict",
+            None,
+            Some("Rewrites C and builds on A."),
+        )
+        .unwrap();
+    let st = r.read();
+    let pv: Hash = v2.id.parse().unwrap();
+    let p = st.proposal_version(&pv).unwrap();
+    let conflicted: BTreeSet<BlockId> = BTreeSet::from([m.spec.c.clone()]);
+    let (listed, _) = st
+        .proposal_tensions("conflict", &p.changes, &conflicted, 100)
+        .unwrap();
+    let refusing = listed.iter().filter(|t| t.refuses == Some(true)).count();
+    assert!(refusing > 0, "the version carries a refusing tension");
+    let q = pending(&r);
+    let issues = &q
+        .not_ready
+        .iter()
+        .find(|n| n.r#ref == v2.r#ref)
+        .unwrap_or_else(|| panic!("{} not ready: {:#?}", v2.r#ref, q.not_ready))
+        .issues;
+    let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+    assert_eq!(codes, vec![E_CONFLICT_UNRESOLVED, E_BLOCKING_TENSION]);
+    // the conflict as the landing gives it: the landing stops there
+    let e = r.land(&approver(), &v2.r#ref).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            issues[0].code,
+            issues[0].message.as_str(),
+            issues[0].fix.as_str()
+        )
+    );
+    // the blocking tension as the landing words it, with the same fix the blocking view's has
+    let alone = &q
+        .not_ready
+        .iter()
+        .find(|n| n.r#ref == m.blocking.r#ref)
+        .expect("the blocking view's version")
+        .issues[0];
+    assert_eq!(
+        (issues[1].message.as_str(), issues[1].fix.as_str()),
+        (
+            format!(
+                "landing {} would put {refusing} blocking tension(s) into canon",
+                v2.r#ref
+            )
+            .as_str(),
+            alone.fix.as_str()
+        )
     );
 }
 

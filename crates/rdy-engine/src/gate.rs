@@ -587,8 +587,12 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
 /// 2. a blocking tension the landing would put into canon (`tgat1`, `E_BLOCKING_TENSION`);
 /// 3. an error in the canon the landing would give (`E_VALIDATION`, or the merge's refusal).
 ///
-/// A version with a conflict has no merge onto canon, so checks 2 and 3 are not made for it, as
-/// the landing stops at the conflict. A key rdy derives again at the landing (K1) is not a clash.
+/// The landing stops at the first failed check; the queue makes each check it can, so the agent
+/// gets every fix at once (fix round 1). A version with a conflict still gets check 2, less the
+/// tensions whose blocks all carry the conflict (the conflict reports them, as
+/// `proposal_tensions` leaves them out). Check 3 is not made for it: the canon its landing would
+/// give depends on how the conflict is resolved, and the merge onto canon refuses for the same
+/// cause. A key rdy derives again at the landing (K1) is not a clash.
 pub(crate) fn landing_readiness(
     st: &ReadState,
     pref: &ProposalRef,
@@ -602,21 +606,26 @@ pub(crate) fn landing_readiness(
         message: e.message,
         fix: e.fix,
     };
-    let blocking = blocking_conflicts(st, &p.view, &p.changes)?;
-    if !blocking.is_empty() {
-        return Ok(vec![as_issue(unresolved(st, &p.view, &blocking)?)]);
-    }
     let mut out = vec![];
+    let blocking = blocking_conflicts(st, &p.view, &p.changes)?;
+    let conflicted: BTreeSet<BlockId> = blocking.iter().map(|c| c.block.clone()).collect();
+    if !blocking.is_empty() {
+        out.push(as_issue(unresolved(st, &p.view, &blocking)?));
+    }
     let applied = st.landing_order(changes);
     let landing = st.landing_tensions_applied(&p.view, &p.changes, changes, &applied)?;
     let mut cache = crate::tensions::info::InfoCache::default();
     let refusing: Vec<TensionInfo> = st
         .refusing_among(&p.changes, landing)
         .iter()
+        .filter(|t| conflicted.is_empty() || !t.blocks().iter().all(|b| conflicted.contains(b)))
         .map(|t| st.tension_info_with(t, &mut cache))
         .collect();
     if !refusing.is_empty() {
         out.push(as_issue(blocking_tensions(pref, &refusing)));
+    }
+    if !conflicted.is_empty() {
+        return Ok(out);
     }
     match prospective(st, changes, Some(&p.view)) {
         Ok((next, applied)) => {

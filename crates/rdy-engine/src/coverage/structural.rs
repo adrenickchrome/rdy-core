@@ -392,11 +392,17 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
 /// The structural layer of `scope`: [`entry_of`] for every block. A full build: counted by
 /// [`structural_builds`].
 pub(crate) fn structural_of(st: &ReadState, scope: &Scope) -> Result<Structural, RdyError> {
-    STRUCTURAL_BUILDS.with(|c| c.set(c.get() + 1));
     let m = st.materialized(scope)?;
     let g = st.graph(scope)?;
     let lex = st.lexicon(scope)?;
-    let cx = EntryCx::new(&m, &g, &lex, st.pack());
+    Ok(structural_in(&m, &g, &lex, st.pack()))
+}
+
+/// The structural layer of materialization `m`, whose graph is `g` and whose lexicon is `lex`,
+/// built in full (what [`structural_of`] builds for a scope). Counted by [`structural_builds`].
+pub(crate) fn structural_in(m: &Materialized, g: &Graph, lex: &Lexicon, pack: &Pack) -> Structural {
+    STRUCTURAL_BUILDS.with(|c| c.set(c.get() + 1));
+    let cx = EntryCx::new(m, g, lex, pack);
     let mut blocks: BTreeMap<BlockId, BlockEntry> = BTreeMap::new();
     let mut mentions: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
     for b in m.iter() {
@@ -408,13 +414,13 @@ pub(crate) fn structural_of(st: &ReadState, scope: &Scope) -> Result<Structural,
         }
         blocks.insert(b.id.clone(), entry);
     }
-    Ok(Structural {
+    Structural {
         blocks: blocks.into_iter().collect(),
         mentions: mentions
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect::<imbl::OrdSet<BlockId>>()))
             .collect(),
-    })
+    }
 }
 
 /// Test hook: a full structural build of `scope` that ignores the memo.

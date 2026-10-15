@@ -25,7 +25,7 @@ pub use model::{
 pub use onboarding::*;
 pub(crate) use score::page_blocks;
 pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, report_builds, rollup};
-pub(crate) use state::CoverageMemo;
+pub(crate) use state::{CandidateCoverage, CoverageMemo};
 pub use state::{
     CoverageSummary, coverage_error_text, issues_rebuilt_for_tests, local_entries,
     mention_dismissals_visited, rollup_walks, state_layer_builds, suspect_walks,
