@@ -34,7 +34,7 @@
 //! [`card_hash`] hashes the card as [`render`] gives it with [`CARD_MAX_TOKENS`]. It does not
 //! depend on the budget an agent passed.
 
-use super::item::Item;
+use super::item::{ExceptionKind, Item};
 use rdy_model::Hash;
 
 /// The largest budget `rdy_pending` accepts, and the budget `card_hash` hashes at.
@@ -169,15 +169,15 @@ fn lead(item: &Item) -> Vec<String> {
     lines
 }
 
-/// The plain words of an exception kind. A kind outside the closed list shows as it is.
-fn exception_words(kind: &str) -> String {
+/// The plain words of an exception kind. The match is exhaustive: a new kind fails to compile
+/// until its text stands here.
+fn exception_words(kind: ExceptionKind) -> &'static str {
     match kind {
-        "against" => "it goes against an earlier decision".to_string(),
-        "one_way" => "it is one_way".to_string(),
-        "unapplied" => "no content applies it".to_string(),
-        "not_recommended" => "it is not recommended".to_string(),
-        "blocking_tension" => "a blocking tension involves it".to_string(),
-        other => other.to_string(),
+        ExceptionKind::Against => "it goes against an earlier decision",
+        ExceptionKind::OneWay => "it is one_way",
+        ExceptionKind::Unapplied => "no content applies it",
+        ExceptionKind::NotRecommended => "it is not recommended",
+        ExceptionKind::BlockingTension => "a blocking tension involves it",
     }
 }
 
@@ -244,8 +244,10 @@ fn wrap(text: &str, indent: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::item::{Fact, ItemKind, ItemOption, age};
+    use super::super::item::{ExceptionKind, Fact, ItemKind, ItemOption, age};
     use super::*;
+    use crate::error::E_BAD_INPUT;
+    use std::str::FromStr;
 
     const SUMMARY: &str = "Lets a visitor read a shared doc without an account. Adds one decision on access and updates Getting started and Sharing.";
 
@@ -354,7 +356,7 @@ mod tests {
         i.why = "Goes against your decision \"No accounts\". Not recommended without a look."
             .to_string();
         i.batch = Some("P-7f3a@2".to_string());
-        i.exception = Some("against");
+        i.exception = Some(ExceptionKind::Against);
         i.options = vec![
             option(
                 "confirm",
@@ -573,6 +575,59 @@ Options
         let b = render(&batch().clone(), CARD_DEFAULT_TOKENS);
         assert_eq!(a, b);
         assert_eq!(card_hash(&batch()), card_hash(&batch()));
+    }
+
+    #[test]
+    fn di4_every_exception_kind_has_card_text() {
+        assert_eq!(ExceptionKind::ALL.len(), 5);
+        for kind in ExceptionKind::ALL {
+            let mut i = exception();
+            i.exception = Some(kind);
+            let card = render(&i, CARD_DEFAULT_TOKENS);
+            let words = exception_words(kind);
+            assert!(!words.trim().is_empty(), "{kind:?}");
+            assert!(
+                card.contains(&format!("Beside P-7f3a@2, on its own: {words}.")),
+                "{card}"
+            );
+            // The name on the wire parses back to the kind.
+            assert_eq!(ExceptionKind::from_str(kind.name()).unwrap(), kind);
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(kind.name())
+            );
+        }
+        let names: Vec<&str> = ExceptionKind::ALL.iter().map(|k| k.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "against",
+                "one_way",
+                "unapplied",
+                "not_recommended",
+                "blocking_tension"
+            ]
+        );
+    }
+
+    #[test]
+    fn di4_an_unknown_exception_kind_is_refused_at_parse() {
+        let e = ExceptionKind::from_str("sideways").unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(e.message, "unknown exception kind sideways");
+        assert_eq!(
+            e.fix,
+            "use one of: against, one_way, unapplied, not_recommended, blocking_tension"
+        );
+        // The wire (serde) refuses it too, and never makes a kind of it.
+        assert!(serde_json::from_str::<ExceptionKind>("\"sideways\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<ExceptionKind>("\"one_way\"").unwrap(),
+            ExceptionKind::OneWay
+        );
+        // Names are exact: no case folding, no padding.
+        assert!(ExceptionKind::from_str("Against").is_err());
+        assert!(ExceptionKind::from_str(" against").is_err());
     }
 
     #[test]

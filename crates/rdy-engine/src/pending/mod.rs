@@ -12,4 +12,4 @@ pub mod card;
 pub mod item;
 
 pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render};
-pub use item::{Fact, Item, ItemKind, ItemOption, age};
+pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};

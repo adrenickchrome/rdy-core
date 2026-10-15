@@ -1,6 +1,8 @@
 //! The queue item (D-JV6Z8): one shape on every surface.
 
-use serde::Serialize;
+use crate::error::{E_BAD_INPUT, RdyError};
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// What the person is asked to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -25,6 +27,66 @@ impl ItemKind {
             ItemKind::Answer => "answer",
             ItemKind::Resolve => "resolve",
         }
+    }
+}
+
+/// Why a decision stands beside its batch on its own card (D-T5S9A, D-DKJS5). The set is closed:
+/// the card's text for a kind is an exhaustive match, so a new kind fails to compile until its
+/// words exist. A name from outside is parsed once with [`ExceptionKind::from_str`] or serde and
+/// refused there; the card never meets an unknown kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionKind {
+    /// It supersedes or revokes a live decision, or is a side of an open tension with it.
+    Against,
+    /// Its reversibility is `one_way`.
+    OneWay,
+    /// A proposed decision no content applies.
+    Unapplied,
+    /// The proposer does not recommend it.
+    NotRecommended,
+    /// A blocking tension involves it.
+    BlockingTension,
+}
+
+impl ExceptionKind {
+    /// Every kind, in the order the docs list them.
+    pub const ALL: [ExceptionKind; 5] = [
+        ExceptionKind::Against,
+        ExceptionKind::OneWay,
+        ExceptionKind::Unapplied,
+        ExceptionKind::NotRecommended,
+        ExceptionKind::BlockingTension,
+    ];
+
+    /// The name on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExceptionKind::Against => "against",
+            ExceptionKind::OneWay => "one_way",
+            ExceptionKind::Unapplied => "unapplied",
+            ExceptionKind::NotRecommended => "not_recommended",
+            ExceptionKind::BlockingTension => "blocking_tension",
+        }
+    }
+}
+
+impl FromStr for ExceptionKind {
+    type Err = RdyError;
+
+    /// The exact wire name, or `E_BAD_INPUT`.
+    fn from_str(s: &str) -> Result<Self, RdyError> {
+        ExceptionKind::ALL
+            .into_iter()
+            .find(|k| k.name() == s)
+            .ok_or_else(|| {
+                let names: Vec<&str> = ExceptionKind::ALL.iter().map(|k| k.name()).collect();
+                RdyError::new(
+                    E_BAD_INPUT,
+                    format!("unknown exception kind {s}"),
+                    format!("use one of: {}", names.join(", ")),
+                )
+            })
     }
 }
 
@@ -71,9 +133,8 @@ pub struct Item {
     pub age: String,
     /// The batch ref an exception stands beside.
     pub batch: Option<String>,
-    /// The exception kind (`against`, `one_way`, `unapplied`, `not_recommended`,
-    /// `blocking_tension`).
-    pub exception: Option<&'static str>,
+    /// The exception kind, when this item stands beside a batch.
+    pub exception: Option<ExceptionKind>,
     pub card: String,
     pub card_hash: String,
 }
