@@ -11,6 +11,7 @@ mod engine_coverage_carry;
 mod engine_coverage_issues;
 mod engine_coverage_score;
 mod engine_demo_summary;
+mod engine_diff;
 mod engine_entity_search;
 mod engine_events;
 mod engine_graph;

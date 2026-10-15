@@ -11,6 +11,7 @@ pub mod coord_graph;
 pub mod coverage;
 mod decide;
 pub mod did_you_mean;
+pub mod diff;
 pub mod dump;
 pub mod engine;
 mod error;
@@ -63,6 +64,7 @@ pub use brief::{
 };
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
+pub use diff::{Diff, DiffChange, DiffEntry};
 pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
