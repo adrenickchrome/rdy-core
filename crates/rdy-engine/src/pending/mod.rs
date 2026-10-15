@@ -5,12 +5,18 @@
 //! shape ([`item`]) and the card that renders it ([`card`]). It is pure: it formats what the
 //! queue computes and reads no store.
 //!
+//! The queue ([`queue`]) is built from four parts: batches and their exceptions (`queue`), open
+//! questions (`questions`), tensions that need a person (`tensions`) and snoozes (`snooze`).
+//!
 //! The card layout follows cd-W4XVS (one item) and cd-2J1WR (a batch and its exceptions). The
 //! module docs of [`card`] give the layout and the cut rule.
 
 pub mod card;
 pub mod item;
+mod questions;
 pub mod queue;
+mod snooze;
+mod tensions;
 
 pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render};
 pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};

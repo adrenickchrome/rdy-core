@@ -27,7 +27,14 @@
 //! 5. `blocking_tension`: an open blocking tension of the version involves it.
 //!
 //! The version's advised tensions that no one accepted stand beside the batch as one `resolve`
-//! item, ref `advice:P-x@n` (D-WMCFW).
+//! item, ref `advice:P-x@n` (D-WMCFW). [`super::tensions`] builds it, with the `resolve` item of
+//! each blocking tension a person or a reviewer must dismiss (D-562QR).
+//!
+//! # Questions and snoozes
+//!
+//! Each open question in canon that carries authored options is an `answer` item of its own
+//! ([`super::questions`], F7). A snooze hides an item for the chat session it was made in
+//! ([`super::snooze`], F4).
 //!
 //! # Readiness (D-3JZP4; plan "Readiness before M3b"; closed)
 //!
@@ -41,16 +48,20 @@
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
 //! version and everything beside it out of the queue; a `confirm` answer to `<D-id>@<version>`
-//! takes that item out; a `reject_decision` answer makes the batch not ready.
+//! takes that item out; a `reject_decision` answer makes the batch not ready; an `answer_question`
+//! answer to `<Q-id>@<version>` takes the question out (its decision waits for a landing).
 //!
 //! # Order (O5)
 //!
 //! Blocking items first; then batches, each with its items directly after it (the `approve`
-//! item, its exceptions by ref, then its advice); then by `raised_at`, oldest first; then by
-//! ref. At most [`PENDING_ITEMS_MAX`] items are listed, whole batches only; `omitted` counts the
-//! rest.
+//! item, its exceptions by ref, then its advice); then the items that stand alone (questions);
+//! each kind by `raised_at`, oldest first; then by ref. At most [`PENDING_ITEMS_MAX`] items are
+//! listed, whole batches only; `omitted` counts the rest.
 use super::card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render};
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};
+use super::questions::question_items;
+use super::snooze::hide_snoozed;
+use super::tensions::tension_items;
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError};
 use crate::gate::{ProposalRef, applied_ops, changes_of, landing_readiness, open_proposals};
@@ -140,25 +151,45 @@ impl ReadState {
                     items.push(item);
                 }
             }
-            items.extend(v.advice_item(self, now)?);
             groups.push(Group { items });
+        }
+        // the items that stand beside a batch go into its group, after its exceptions; the
+        // others are groups of one
+        let batches: Vec<Item> = groups.iter().map(|g| g.items[0].clone()).collect();
+        let others = tension_items(self, q, &batches)?
+            .into_iter()
+            .chain(question_items(self, q)?);
+        for item in others {
+            let group = item
+                .batch
+                .as_deref()
+                .and_then(|b| groups.iter_mut().find(|g| g.items[0].r#ref == b));
+            match group {
+                Some(g) => g.items.push(item),
+                None => groups.push(Group { items: vec![item] }),
+            }
         }
         groups.sort_by_cached_key(Group::key);
         let max = q.max_tokens.min(CARD_MAX_TOKENS);
         let mut items = vec![];
         let mut omitted = 0;
+        let mut snoozed = 0;
         for g in groups {
-            if omitted > 0 || (!items.is_empty() && items.len() + g.items.len() > PENDING_ITEMS_MAX)
-            {
-                omitted += g.items.len();
+            let (shown, hidden) = hide_snoozed(self, q, g.items);
+            snoozed += hidden;
+            if shown.is_empty() {
                 continue;
             }
-            items.extend(g.items.into_iter().map(|i| finish(i, max)));
+            if omitted > 0 || (!items.is_empty() && items.len() + shown.len() > PENDING_ITEMS_MAX) {
+                omitted += shown.len();
+                continue;
+            }
+            items.extend(shown.into_iter().map(|i| finish(i, max)));
         }
         Ok(Pending {
             items,
             not_ready,
-            snoozed: 0,
+            snoozed,
             omitted,
         })
     }
@@ -185,7 +216,7 @@ pub(crate) fn open_exceptions(st: &ReadState, pref: &ProposalRef) -> Result<Vec<
 }
 
 /// Whether the latest answer to `item` is of act `act`.
-fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<bool, RdyError> {
+pub(super) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<bool, RdyError> {
     Ok(st
         .reader()
         .answer_of(item)?
@@ -236,7 +267,7 @@ impl Decision {
 }
 
 /// A non-blank text field of `b`.
-fn text<'a>(b: &'a Block, name: &str) -> Option<&'a str> {
+pub(super) fn text<'a>(b: &'a Block, name: &str) -> Option<&'a str> {
     b.field_str(name).filter(|s| !s.trim().is_empty())
 }
 
@@ -627,65 +658,12 @@ impl Version {
         out.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
         out
     }
-
-    /// The `resolve` item of the version's advised tensions that no one accepted (D-WMCFW), if
-    /// any.
-    fn advice_item(&self, st: &ReadState, now: i64) -> Result<Option<Item>, RdyError> {
-        let advised = st.advised_of(&self.p.view, &self.p.changes)?;
-        let mut open: Vec<_> = advised.iter().filter(|a| !a.open.record.blocking).collect();
-        if open.is_empty() {
-            return Ok(None);
-        }
-        open.sort_by_key(|a| a.tension.id);
-        let r = self.r#ref();
-        let n = open.len();
-        let title = if n == 1 {
-            "1 tension a reviewer advised to block".to_string()
-        } else {
-            format!("{n} tensions a reviewer advised to block")
-        };
-        let mut it = item(ItemKind::Resolve, &format!("advice:{r}"), &title);
-        it.why = format!("the reviewers advise that these block {r}");
-        it.members = open
-            .iter()
-            .map(|a| {
-                let info = st.tension_info(&a.tension);
-                let finding = info
-                    .judged
-                    .and_then(|j| j.findings.into_iter().next())
-                    .map_or(a.tension.summary.clone(), |f| f.note);
-                format!("{}  {finding}", tension_label(&a.tension.id))
-            })
-            .collect();
-        it.facts = vec![Fact {
-            name: "Advised digest",
-            value: crate::semantic::accept_advice::advised_digest(&advised).unwrap_or_default(),
-        }];
-        it.options = vec![
-            option(
-                "accept",
-                "Accept the advice: they block",
-                "The advised tensions block until a side changes.",
-                Some("the reviewer advised it".to_string()),
-            ),
-            option(
-                "dismiss",
-                "Dismiss with a reason",
-                "Dismisses each advised tension with your reason.",
-                None,
-            ),
-            later(),
-        ];
-        it.batch = Some(r);
-        self.raised(&mut it, now);
-        Ok(Some(it))
-    }
 }
 
 /// The open tensions of version `p`: its landing form and the in-flight forms of its changes,
 /// as `proposal_tensions` gathers them (a kind judged on the net change only in its landing
 /// form), not dismissed, by id.
-fn open_tensions(st: &ReadState, p: &Proposal) -> Result<Vec<Arc<Tension>>, RdyError> {
+pub(super) fn open_tensions(st: &ReadState, p: &Proposal) -> Result<Vec<Arc<Tension>>, RdyError> {
     let net = |t: &Tension| crate::tensions::judged_on_the_net_change(t.kind);
     let landing = st.landing_tensions(&p.view, &p.changes)?;
     let mine = st.tensions_of_changes(&p.changes)?;
@@ -769,7 +747,7 @@ fn fact_name(k: ExceptionKind) -> &'static str {
 }
 
 /// An item of `kind` with no fields beyond its ref and title.
-fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
+pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
     Item {
         r#ref: r#ref.to_string(),
         kind,
@@ -792,7 +770,12 @@ fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
 }
 
 /// One option with one consequence line (O25).
-fn option(id: &str, label: &str, consequence: &str, recommended: Option<String>) -> ItemOption {
+pub(super) fn option(
+    id: &str,
+    label: &str,
+    consequence: &str,
+    recommended: Option<String>,
+) -> ItemOption {
     ItemOption {
         id: id.to_string(),
         label: label.to_string(),
@@ -802,7 +785,7 @@ fn option(id: &str, label: &str, consequence: &str, recommended: Option<String>)
 }
 
 /// The `later` option every item has (F4).
-fn later() -> ItemOption {
+pub(super) fn later() -> ItemOption {
     option(
         "later",
         "Later",
