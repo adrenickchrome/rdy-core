@@ -1329,7 +1329,7 @@ project the later ops open); the copy is removed at the end.
 
 | op | what it times | runs | target |
 |---|---|---|---|
-| `site_build_live` | `rdy_render::live::build_live(&r.read(), &Scope::Canon)` on the tier's project: the whole site built in memory, with each page's revision. Compare with `render`, which writes the same pages to disk | 5 (3 at 50k) | no spec target: the live site's full build (recorded; compare with render) |
+| `site_build_live` | `rdy_render::live::build_live(&r.read(), &Scope::Canon, "/")` on the tier's project: the whole site built in memory, with each page's revision. Compare with `render`, which writes the same pages to disk | 5 (3 at 50k) | no spec target: the live site's full build (recorded; compare with render) |
 | `site_event_after_land` | one subscription on the page of the doc the write edits, then a body edit of that doc written into a fresh view and landed through the writer. The time runs from just before the write to the subscription's `Reload` (the site worker builds and sends it). Each run waits for the worker to settle, outside the timer | `runs.write` | < 1 s p95 at 10k blocks; at 50k, the same budget (proposed, ledger F4; reported until the founder rules) |
 | `site_event_after_view_write` | the same, with the subscription on the view's page and a commit into that view (no landing). Review mode, so the page carries the change marks | `runs.write` | < 1 s p95 at 10k blocks; at 50k, the same budget (proposed, ledger F4; reported until the founder rules) |
 | `site_fanout_32` | the fan-out alone: two builds of canon on either side of a landing that changes one page, made outside the timer, then `rdy_render::live::diff` of the two and one send per stream to 32 bounded queues, with the events the site sends (`Reload` for the changed page, the new label for the others). Built from the public functions, so no hook in the site. A tree of fewer than 32 pages has several streams on a page. The op asserts that the diff is not empty and that the edited page got `Reload` | `runs.view_ops` | no spec target: the fan-out to 32 open pages (recorded) |
@@ -1363,6 +1363,20 @@ No laptop figures are judged here: the first timing of these ops is the Linux be
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## Site review (2026-10-14)
+
+Three ops, for D-W40KZ and D-2F29G. A diff joins every render that has landings since the tag, and the
+versions page counts every open view and proposal. These ops give the per-group checks their own numbers,
+to explain a move in `render`. All three run on the 10k tier only: the 50k tier has no tag, so it has
+no diff since a tag (F3). None is a spec ceiling.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `diff_since` | `r.read().diff(&Scope::At(<the v0.1.0 landing>), &Scope::Canon)` on the tier's project: the block and word diff from the tag to canon, which `render` builds among its pages. Placed right after `render` | 5 | no spec target: the block and word diff since the tier's tag (recorded; render builds it) |
+| `site_versions_page` | `rdy_render::menu::build_versions` with a count of the docs each open view and proposal changes, and no cache. It runs after the view ops, so every open view of the tier is counted | 5 | no spec target: the live versions page with every open view and proposal counted, cold (recorded) |
+| `site_versions_page_warm` | the same build with a cache filled by one build outside the timer, after one commit to one view (outside the timer). Only that view is recounted | 5 | no spec target: the versions page after one view commit, one view recounted (recorded) |
+
 
 ## Dump and load (2026-10-14)
 
