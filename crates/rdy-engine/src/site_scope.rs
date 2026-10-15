@@ -21,6 +21,26 @@ pub const CHANGES_PAGE: &str = "changes.html";
 /// The change summary of canon since its current tag, at the site's root.
 pub const SINCE_PAGE: &str = "changes-since.html";
 
+/// Whether a top-level doc of `m` owns the summary page `page` ([`CHANGES_PAGE`] or
+/// [`SINCE_PAGE`]): a top-level doc's page is `<name>.html`, so a doc named `changes` or
+/// `changes-since` has it. The site then keeps the doc's page and leaves out its summary (O1).
+/// The one rule for both sides: the renderer reads it to leave the summary out, and `rdy_site`
+/// to give a summary link only when the site has the summary.
+pub fn summary_page_taken(m: &crate::Materialized, page: &str) -> bool {
+    debug_assert!(
+        page == CHANGES_PAGE || page == SINCE_PAGE,
+        "a summary page: {page:?}"
+    );
+    let Some(stem) = page.strip_suffix(".html") else {
+        return false;
+    };
+    m.names_under(None).into_iter().any(|(id, name)| {
+        name == stem
+            && m.get(&id)
+                .is_some_and(|b| b.block_type == rdy_model::tree::DOC)
+    })
+}
+
 impl ScopeRef {
     /// The scope as rdy reads it: `canon`, `view:<name>` or `proposal:<ref>`.
     pub fn text(&self) -> String {
@@ -60,14 +80,14 @@ pub fn view_name_ok(name: &str) -> bool {
     !name.is_empty() && !name.contains(':')
 }
 
-/// A tag name as the site reads it: exactly what `parse_version` accepts, with no length cap of
-/// its own (every version rdy stores has a site; ruling task-2). A SemVer name holds only
-/// `0-9 A-Z a-z . -` here (build metadata is refused), never starts with `.` or `-`, and is
-/// never a path step, so it is one path segment as it is. The one bound on its length is
-/// `MAX_VERSION_BYTES`, which `parse_version` enforces; the request head's limit
-/// (`MAX_HEAD_BYTES` in rdy-daemon) is asserted to carry the longest name at compile time.
+/// A tag name as the site reads it: what `parse_version` accepts, of at most
+/// `MAX_VERSION_BYTES` bytes. A SemVer name holds only `0-9 A-Z a-z . -` here (build metadata
+/// is refused), never starts with `.` or `-`, and is never a path step, so it is one path
+/// segment as it is. The bound is the site's single bound (ruling final (3)): a stored tag over
+/// it (only an older release could store one) has no page, and the request head's limit
+/// (`MAX_HEAD_BYTES` in rdy-daemon) is asserted to carry the longest served name at compile time.
 pub fn tag_name_ok(name: &str) -> bool {
-    crate::version::parse_version(name).is_ok()
+    name.len() <= crate::version::MAX_VERSION_BYTES && crate::version::parse_version(name).is_ok()
 }
 
 /// The one spelling of a proposal ref: `P-` and 4 to 64 hex digits (either case), then optionally

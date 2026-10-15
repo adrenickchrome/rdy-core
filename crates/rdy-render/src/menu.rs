@@ -7,7 +7,7 @@
 use crate::live::{LiveBuild, rev};
 use crate::site::Site;
 use crate::{assets, env, home, render_page, review, version};
-use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_scope::{ScopeRef, tag_name_ok};
 use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::Hash;
 use serde::Serialize;
@@ -20,7 +20,9 @@ pub const TITLE: &str = "Versions, proposals and views";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MenuRow {
     pub label: String,
-    pub href: String,
+    /// What the row opens; none for a stored tag whose name is longer than the site serves
+    /// (ruling final (3)): the row is text only.
+    pub href: Option<String>,
     pub meta: Vec<String>,
 }
 
@@ -58,7 +60,7 @@ pub fn menu(
     let canon = version::text_label(&st.version_position(&Scope::Canon)?, None);
     let mut versions = vec![MenuRow {
         label: "Latest".into(),
-        href: "/".into(),
+        href: Some("/".into()),
         meta: vec![canon.text],
     }];
     for v in st.versions()?.iter().rev() {
@@ -71,7 +73,9 @@ pub fn menu(
         let message = v.message.clone().filter(|m| !m.trim().is_empty());
         versions.push(MenuRow {
             label: v.name.clone(),
-            href: format!("/{}", ScopeRef::Tag(v.name.clone()).path_prefix()),
+            // a stored name over the site's bound has no page: the row is text only
+            href: tag_name_ok(&v.name)
+                .then(|| format!("/{}", ScopeRef::Tag(v.name.clone()).path_prefix())),
             meta: when.into_iter().chain(message).collect(),
         });
     }
@@ -83,7 +87,10 @@ pub fn menu(
         let n = docs_changed(&Scope::Proposal(r.version))?;
         proposals.push(MenuRow {
             label: p.title.clone(),
-            href: format!("/{}", ScopeRef::Proposal(r.to_string()).path_prefix()),
+            href: Some(format!(
+                "/{}",
+                ScopeRef::Proposal(r.to_string()).path_prefix()
+            )),
             meta: vec![
                 format!("by {}", version::author_words(&p.provenance.actor)),
                 docs_words(n),
@@ -99,7 +106,7 @@ pub fn menu(
             .map(|o| format!("by {}", version::author_words(&o.actor)));
         let n = docs_changed(&Scope::View(name.clone()))?;
         views.push(MenuRow {
-            href: format!("/{}", ScopeRef::View(name.clone()).path_prefix()),
+            href: Some(format!("/{}", ScopeRef::View(name.clone()).path_prefix())),
             meta: owner.into_iter().chain([docs_words(n)]).collect(),
             label: name,
         });
@@ -112,9 +119,11 @@ pub fn menu(
 }
 
 /// The docs `scope` changes (O12): the rows of the home page's list of changes for that scope,
-/// so the menu, the home page and the change page agree. A scope with no review counts 0.
+/// read from the same review ([`review::listed`]: a proposal version made on the empty project
+/// counts against it), so the menu, the home page and the change page agree. A scope with no
+/// review counts 0.
 pub fn docs_changed(st: &ReadState, scope: &Scope) -> Result<usize, RdyError> {
-    let Some(review) = review::build(st, scope)? else {
+    let Some(review) = review::listed(st, scope)? else {
         return Ok(0);
     };
     let m = st.materialized(scope)?;

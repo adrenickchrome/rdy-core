@@ -725,7 +725,8 @@ mod tests {
                 path: "index.html".into()
             })
         );
-        // the one bound is `parse_version`'s: the longest name routes, one byte more does not
+        // the site's one bound (`tag_name_ok`; ruling final (3)): the longest name routes, one
+        // byte more does not, though a stored tag may be longer
         let max = format!("v1.0.0-{}", "a".repeat(rdy_engine::MAX_VERSION_BYTES - 7));
         assert_eq!(
             g().check(&get(&format!("/~tag/{max}/"), H)),

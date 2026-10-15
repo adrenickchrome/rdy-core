@@ -596,16 +596,15 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     let env = env()?;
     let mut site = Site::new(&m, &pack, &site_name);
     site.set_disagreements(disagree::list(rdy, scope)?);
-    let review = review::build(rdy, scope)?;
-    // a proposal version with no base here still names itself and counts against its own base
-    let unreviewed = match &review {
-        Some(_) => None,
-        None => review::unreviewed(rdy, scope)?,
-    };
-    let blocks = review
-        .as_ref()
-        .or(unreviewed.as_ref())
-        .map(|rv| rv.changed_blocks());
+    // what the scope changes: its chip, its change summary, the home page's list and the
+    // menu's count all read it (O12). A proposal version with no base here (made on the empty
+    // project, read once canon has landed) still names itself and counts against that empty base
+    let listed = review::listed(rdy, scope)?;
+    // the review marks on the pages read only a base a scope names: that proposal version's
+    // pages show none (the task-8 ruling)
+    let base = review::base_of(rdy, scope);
+    let review = listed.as_ref().filter(|_| base.is_some());
+    let blocks = listed.as_ref().map(|rv| rv.changed_blocks());
     let reviewed = match blocks {
         Some(blocks) => reviewed_of(rdy, scope, blocks)?,
         None => None,
@@ -624,8 +623,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     // keep each edited block's inline diff.
     let mut changes_summary: Option<changes::Summary> = None;
     let mut inline_diffs: BTreeMap<rdy_model::BlockId, String> = BTreeMap::new();
-    if let (Some(r), Some(rv)) = (&reviewed, review.as_ref().or(unreviewed.as_ref())) {
-        let base = review.as_ref().and_then(|_| review::base_of(rdy, scope));
+    if let (Some(r), Some(rv)) = (&reviewed, listed.as_ref()) {
         let (diff, from) = match &base {
             Some(b) => (Some(rdy.diff(b, scope)?), rdy.materialized(b)?),
             None => (None, Default::default()),
@@ -643,7 +641,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
             &sides,
             &changes::Of::Review(r.kind),
         );
-        if site.page_taken(rdy_engine::site_scope::CHANGES_PAGE) {
+        if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::CHANGES_PAGE) {
             summary.warnings.push(CHANGES_DOC_KEPT.into());
         } else {
             changes_summary = Some(s);
@@ -670,7 +668,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     };
     let mut since_summary: Option<changes::Summary> = None;
     if let Some((name, tag, to)) = since_of {
-        if site.page_taken(rdy_engine::site_scope::SINCE_PAGE) {
+        if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::SINCE_PAGE) {
             summary.warnings.push(since_doc_kept(&name));
         } else {
             let rv = review::between(rdy, &tag, &to)?;
@@ -707,7 +705,8 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         versions: &versions,
         landed_ms: &landed_ms,
         blobs: &blobs,
-        review: review.as_ref(),
+        review,
+        listed: listed.as_ref(),
         reviewed: reviewed.clone(),
         header,
         headers: Default::default(),

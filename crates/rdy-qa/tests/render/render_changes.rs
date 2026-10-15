@@ -590,6 +590,142 @@ fn sr6_a_proposal_made_before_the_first_landing_lists_every_block_as_new() {
     assert!(!doc.contains("data-diff"), "{doc}");
 }
 
+/// Final review I3 (O12): a proposal version made on the empty project, read after an unrelated
+/// first landing, has one set of rows for the menu's count, the home page's list and its change
+/// summary, read against that empty base. Its doc pages still show no review marks.
+#[test]
+fn sr6_an_initial_proposal_agrees_on_menu_home_and_summary() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    write(
+        &mut r,
+        "w",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "proposed", "title": "Proposed doc", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "parent": "$d", "body": "Before anything lands."}
+        ]),
+    )
+    .unwrap();
+    let p = r.propose(&writer(), "w", "Initial proposal").unwrap();
+    write(
+        &mut r,
+        "x",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "landed", "title": "Landed doc", "doc_type": "overview"}}]),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    let st = r.read();
+    let scope = st.resolve_scope(&format!("proposal:{}", p.id)).unwrap();
+    assert_eq!(
+        rdy_render::review::base_of(&st, &scope),
+        None,
+        "guard: no scope names the empty base"
+    );
+    let site = build_site(&st, &scope, Mode::Static).unwrap();
+    let summary = String::from_utf8_lossy(&site.files["changes.html"]).to_string();
+    let home = String::from_utf8_lossy(&site.files["index.html"]).to_string();
+    let rows = list_rows(&summary);
+    assert_eq!(
+        rows,
+        [("Proposed doc".to_string(), "New".to_string())],
+        "{summary}"
+    );
+    assert!(
+        summary.contains("<p class=\"lede\">2 changes in 1 doc, not landed.</p>"),
+        "{summary}"
+    );
+    assert!(home.contains("Changes in this proposal"), "{home}");
+    assert_eq!(
+        list_rows(&home),
+        rows,
+        "the home page and the summary agree"
+    );
+    // the menu counts the same rows
+    assert_eq!(
+        rdy_render::menu::docs_changed(&st, &scope).unwrap(),
+        rows.len()
+    );
+    let m = rdy_render::menu::menu(&st, &mut |s| rdy_render::menu::docs_changed(&st, s)).unwrap();
+    let row = m
+        .proposals
+        .iter()
+        .find(|row| row.label == "Initial proposal")
+        .expect("the proposal is listed");
+    assert_eq!(row.meta.last().map(String::as_str), Some("1 doc changed"));
+    // the doc pages keep no review marks (the task-8 ruling)
+    let doc = String::from_utf8_lossy(&site.files["proposed.html"]).to_string();
+    assert!(!doc.contains("chg-label"), "{doc}");
+}
+
+/// The review project with the view `retype` written by `ops`, and that view's site.
+fn retyped_site(
+    ops: impl Fn(&ReviewIds) -> serde_json::Value,
+) -> (tempfile::TempDir, Rdy, ReviewIds, tempfile::TempDir) {
+    let (d, mut r, ids) = review_project();
+    write(&mut r, "retype", ops(&ids)).unwrap();
+    let out = rendered(&r, &Scope::View("retype".into()));
+    (d, r, ids, out)
+}
+
+/// Final review I2 (the task-4 ruling, 2): a type change is an update, and the site says it in
+/// words: "Type: prose → note", apart from the text's diff, on the summary and in the inline
+/// diff. A type change counts once, alone or with a move.
+#[test]
+fn sr6_a_type_change_shows_in_words() {
+    let type_line = "<p class=\"chg-type\">Type: prose → note</p>";
+    for (what, ops) in [
+        (
+            "type only",
+            Box::new(
+                |ids: &ReviewIds| json!([{"op": "update", "id": ids.kept.to_string(), "type": "note"}]),
+            ) as Box<dyn Fn(&ReviewIds) -> serde_json::Value>,
+        ),
+        (
+            "type and reorder",
+            Box::new(|ids: &ReviewIds| {
+                json!([{"op": "update", "id": ids.kept.to_string(), "type": "note",
+                        "move_to": {"parent": ids.summary.to_string(), "after": ids.edited.to_string()}}])
+            }),
+        ),
+        (
+            "type and parent move",
+            Box::new(|ids: &ReviewIds| {
+                json!([{"op": "update", "id": ids.kept.to_string(), "type": "note",
+                        "move_to": {"parent": ids.keep_summary.to_string()}}])
+            }),
+        ),
+    ] {
+        let (_d, _r, ids, out) = retyped_site(ops);
+        let page = read(out.path(), "changes.html");
+        let all = entries(&page);
+        assert_eq!(all.len(), 1, "{what}: one change: {page}");
+        assert_eq!(review_chip_count(&page), Some(1), "{what}: counted once");
+        let e = entry_of(&page, &ids.kept.to_string());
+        assert!(e.contains(">Edited</span>"), "{what}: {e}");
+        assert!(e.contains(type_line), "{what}: {e}");
+        // the text did not change: its diff marks nothing
+        assert_eq!(diff_of(e), "Kept as it was.", "{what}");
+        assert!(
+            page.contains("<p class=\"lede\">1 change in "),
+            "{what}: {page}"
+        );
+        // the block's page carries the same words in its inline diff
+        let doc = if what == "type and parent move" {
+            "keep.html"
+        } else {
+            "intro.html"
+        };
+        let h = read(out.path(), doc);
+        let inline = "<div class=\"chg chg-diff-inline\" data-diff hidden>";
+        assert!(
+            h.contains(&format!(
+                "{inline}{type_line}<p class=\"chg-diff\" data-rdy=\"content\">Kept as it was.</p></div>"
+            )),
+            "{what}: {h}"
+        );
+    }
+}
+
 /// The site of `scope` rendered into a new directory.
 fn rendered(r: &Rdy, scope: &Scope) -> tempfile::TempDir {
     let out = tempfile::tempdir().unwrap();

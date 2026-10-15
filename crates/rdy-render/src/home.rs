@@ -107,7 +107,7 @@ pub fn build(
     let current = versions.last().map(|v| &v.name);
     Home {
         description: description.map(String::from),
-        changes: facts.review.map(|r| changes(site, r)).unwrap_or_default(),
+        changes: facts.listed.map(|r| changes(site, r)).unwrap_or_default(),
         cards,
         versions: versions
             .iter()

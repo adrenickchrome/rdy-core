@@ -26,8 +26,14 @@ pub struct Shared<'a> {
     pub landed_ms: &'a BTreeMap<String, i64>,
     /// The figure blobs the store holds, by hash, with their bytes.
     pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
-    /// What a draft changes against the canon it is based on; none for canon and tags.
+    /// What a review render changes against the base a scope names: the pages' review marks
+    /// read it. None for canon and tags, and for a proposal version made on the empty project
+    /// once canon has landed (no scope names its base; the task-8 ruling).
     pub review: Option<&'a review::Review>,
+    /// What a review render changes, as its change rows read it ([`review::listed`]): `review`,
+    /// else that proposal version against the empty project. The home page's list reads it, as
+    /// the change summary and the menu's count do (O12).
+    pub listed: Option<&'a review::Review>,
     /// The view or proposal version a review render shows, and the blocks it changes; none for
     /// canon and tags.
     pub reviewed: Option<version::Reviewed>,
@@ -58,8 +64,11 @@ pub struct SiteFacts<'a> {
     pub has_terms: bool,
     pub has_questions: bool,
     pub has_disagreements: bool,
-    /// What a draft changes against the canon it is based on; none for canon and tags.
+    /// What a review render changes against the base a scope names: the navigation's marks
+    /// read it ([`Shared::review`]).
     pub review: Option<&'a review::Review>,
+    /// The rows of the home page's list of changes read it ([`Shared::listed`], O12).
+    pub listed: Option<&'a review::Review>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -479,6 +488,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_questions,
         has_disagreements: !site.disagreements.is_empty(),
         review: sh.review,
+        listed: sh.listed,
     };
     let (page_url, kind_name, title, current, chain, tail): (
         String,

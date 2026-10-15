@@ -55,14 +55,35 @@ fn info(t: &Tag) -> VersionInfo {
     }
 }
 
-/// The most bytes a version name may hold. The one bound for the name: `parse_version` refuses
-/// a longer name, so `rdy tag` never stores one, and the live site's request head
-/// (`MAX_HEAD_BYTES` in rdy-daemon) is sized to carry the longest name with its page path and
-/// the other request-head bytes (rdy-daemon asserts the fit at compile time).
+/// The most bytes a new version name may hold, and the longest name the live site serves.
+/// Only new writes take this bound (ruling final): `rdy tag` refuses a longer name
+/// ([`new_version_name_ok`]), and the site serves no page for one (`site_scope::tag_name_ok`).
+/// A stored tag reads at any length: an older release could store a longer name, and reads,
+/// fsck, dump and load keep it ([`parse_version`] has no bound). The live site's request head
+/// (`MAX_HEAD_BYTES` in rdy-daemon) is sized to carry the longest served name with its page path
+/// and the other request-head bytes (rdy-daemon asserts the fit at compile time).
 pub const MAX_VERSION_BYTES: usize = 256;
 
-/// Parses a version name: at most [`MAX_VERSION_BYTES`] bytes, one optional leading `v`, then a
-/// SemVer 2.0.0 version without build metadata (SemVer ignores build metadata when ordering, so two versions would share a position).
+/// The bound on a new version name (ruling final (2)): at most [`MAX_VERSION_BYTES`] bytes. A
+/// rule for new writes only: a stored tag never meets it.
+pub fn new_version_name_ok(name: &str) -> Result<(), RdyError> {
+    if name.len() > MAX_VERSION_BYTES {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!(
+                "the version name is {} bytes; a new version name has at most {MAX_VERSION_BYTES}",
+                name.len()
+            ),
+            "use a shorter name",
+        ));
+    }
+    Ok(())
+}
+
+/// Parses a version name: one optional leading `v`, then a SemVer 2.0.0 version without build
+/// metadata (SemVer ignores build metadata when ordering, so two versions would share a position).
+/// It has no length bound: it judges stored tags too, which keep every name the release that
+/// wrote them accepted (ruling final (1)).
 pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
     let bad = |why: String| {
         RdyError::new(
@@ -71,11 +92,6 @@ pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
             "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)",
         )
     };
-    if name.len() > MAX_VERSION_BYTES {
-        return Err(bad(format!(
-            "a version name takes at most {MAX_VERSION_BYTES} bytes"
-        )));
-    }
     let bare = name.strip_prefix('v').unwrap_or(name);
     let v = semver::Version::parse(bare).map_err(|e| bad(e.to_string()))?;
     if !v.build.is_empty() {
@@ -280,6 +296,7 @@ impl Rdy {
                 "a version is a release statement: an approver creates it with rdy tag",
             ));
         }
+        new_version_name_ok(name)?;
         let version = parse_version(name)?;
         let state = self.read();
         let chain: Vec<Hash> = state.landings()?.into_iter().map(|(h, _)| h).collect();
@@ -569,16 +586,25 @@ impl ReadState {
 mod tests {
     use super::*;
 
-    /// Ruling task-2 (1): the one bound for a version name.
+    /// Ruling final: the one bound is for new names and the site; a stored name reads at any
+    /// length.
     #[test]
     fn sr2_a_version_name_has_one_bound() {
         let at = format!("v1.0.0-{}", "a".repeat(MAX_VERSION_BYTES - 7));
         assert_eq!(at.len(), MAX_VERSION_BYTES);
         assert!(parse_version(&at).is_ok());
+        assert!(new_version_name_ok(&at).is_ok());
+        assert!(crate::site_scope::tag_name_ok(&at));
         let over = format!("{at}a");
-        let e = parse_version(&over).unwrap_err();
-        assert_eq!(e.code, E_BAD_TAG_NAME);
-        assert!(e.message.contains("at most 256 bytes"), "{e}");
+        assert!(parse_version(&over).is_ok(), "a stored name has no bound");
+        let e = new_version_name_ok(&over).unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(
+            e.message,
+            "the version name is 257 bytes; a new version name has at most 256"
+        );
+        assert_eq!(e.fix, "use a shorter name");
+        assert!(!crate::site_scope::tag_name_ok(&over));
     }
 
     #[test]

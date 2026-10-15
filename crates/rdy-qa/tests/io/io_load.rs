@@ -669,3 +669,95 @@ fn dl6_a_load_into_a_project_dot_rdy_is_refused() {
         assert_eq!(tree(src.path()), before, "{to:?}");
     }
 }
+
+/// A version name of `n` bytes that `parse_version` reads: `v9.0.0-` and letters.
+fn long_version(n: usize) -> String {
+    let name = format!("v9.0.0-{}", "a".repeat(n - 7));
+    assert_eq!(name.len(), n);
+    name
+}
+
+/// Ruling final (1): a tag that an older release stored keeps its place at any length. The base
+/// release let `rdy tag` store a name of 300 bytes; it is written here with the store API, as
+/// that release wrote it. A dump of it loads, `rdy tags` lists it, fsck is clean, and every
+/// hash is kept.
+#[test]
+fn sr2_a_long_stored_tag_survives_load_and_fsck() {
+    let (src, mut r) = rdy_qa::golden::tiny_with_doc();
+    let name = long_version(300);
+    let landing: rdy_model::Hash = r.read().landings().unwrap()[0].0;
+    let tag = rdy_model::Tag {
+        name: name.clone(),
+        landing,
+        message: Some("a long name".into()),
+        tagged_by: rdy_qa::fixtures::approver().provenance(),
+    };
+    let id = r.store_mut().put_tag(&tag).unwrap();
+    // a write outside the engine is followed by invalidate() (snap1 precondition)
+    r.invalidate();
+    let names = |r: &Rdy| -> Vec<String> {
+        r.read()
+            .versions()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.name)
+            .collect()
+    };
+    assert_eq!(
+        names(&r),
+        std::slice::from_ref(&name),
+        "the source lists the stored tag"
+    );
+    r.fsck().expect("the source is clean");
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    r.read().dump(&file).unwrap();
+    let source_segs = segs(src.path());
+    r.close().unwrap();
+
+    let to = scratch.path().join("new");
+    let s = load(&file, &to).expect("the dump loads");
+    assert_eq!(s.tags, 1, "{s:?}");
+    assert_eq!(
+        segs(&to),
+        source_segs,
+        "every hash is kept: the log, byte for byte"
+    );
+    let r = Rdy::open(&to).unwrap();
+    assert_eq!(names(&r), std::slice::from_ref(&name), "rdy tags lists it");
+    let v = &r.read().versions().unwrap()[0];
+    assert_eq!(v.tag, id.to_string(), "the tag keeps its hash");
+    assert_eq!(v.landing, landing.to_string());
+    assert_eq!(r.store().read_tag(&id).unwrap(), tag);
+    let report = r.fsck().expect("fsck is clean");
+    assert_eq!(report.versions, 1);
+    // it reads as a scope, as any stored version does
+    assert_eq!(
+        r.read().resolve_scope(&format!("tag:{name}")).unwrap(),
+        rdy_engine::Scope::At(landing)
+    );
+    r.close().unwrap();
+}
+
+/// Ruling final (2): a new tag takes a name of at most 256 bytes. The bound is for new writes
+/// only; the longest name is stored.
+#[test]
+fn sr2_a_new_tag_over_256_bytes_is_refused() {
+    let (_d, mut r) = rdy_qa::golden::tiny_with_doc();
+    let approver = rdy_qa::fixtures::approver();
+    for n in [257, 300] {
+        let e = r.tag(&approver, &long_version(n), None, None).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+        assert_eq!(
+            e.message,
+            format!("the version name is {n} bytes; a new version name has at most 256")
+        );
+        assert_eq!(e.fix, "use a shorter name");
+    }
+    assert!(r.read().versions().unwrap().is_empty(), "nothing is stored");
+    let max = long_version(256);
+    r.tag(&approver, &max, None, None)
+        .expect("256 bytes is a new version name");
+    assert_eq!(r.read().versions().unwrap()[0].name, max);
+    r.close().unwrap();
+}

@@ -191,7 +191,7 @@ fn sr2_the_longest_version_has_a_site() {
     let too_long = format!("v1.0.0-{}", "a".repeat(max - 6));
     assert_eq!(too_long.len(), max + 1);
     let err = r.tag(&approver(), &too_long, None, None).unwrap_err();
-    assert_eq!(err.code, "E_BAD_TAG_NAME", "{err:?}");
+    assert_eq!(err.code, "E_BAD_INPUT", "{err:?}");
     let name = format!("v1.0.0-{}", "a".repeat(max - 7));
     assert_eq!(name.len(), max);
     r.tag(&approver(), &name, None, None).unwrap();
@@ -204,6 +204,71 @@ fn sr2_the_longest_version_has_a_site() {
     assert!(url.ends_with(&format!("/~tag/{name}/")), "{v}");
     assert_eq!(page(url).status, 200, "{v}");
     assert_eq!(page(&format!("{url}index.html")).status, 200, "{v}");
+}
+
+/// Ruling final (3): a stored tag over 256 bytes (only an older release could store one) has no
+/// site page. `rdy_site` says so, the guard does not route it, and the versions page lists it as
+/// text with no link; a stored tag of 256 bytes keeps its page.
+#[test]
+fn sr2_a_long_stored_tag_has_no_site_link() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    r.import(&approver(), "import", Path::new(FIXTURE_DIR))
+        .unwrap();
+    land(&mut r, "import").unwrap();
+    let max = format!("v1.0.0-{}", "a".repeat(rdy_engine::MAX_VERSION_BYTES - 7));
+    r.tag(&approver(), &max, None, None).unwrap();
+    // the base release stored this one through `rdy tag`; the store API writes it the same way
+    let long = format!("v2.0.0-{}", "b".repeat(293));
+    assert_eq!(long.len(), 300);
+    let landing: rdy_model::Hash = r.read().landings().unwrap()[0].0;
+    r.store_mut()
+        .put_tag(&rdy_model::Tag {
+            name: long.clone(),
+            landing,
+            message: None,
+            tagged_by: approver().provenance(),
+        })
+        .unwrap();
+    r.invalidate();
+    r.fsck().expect("a stored long tag is not damage");
+    r.close().unwrap();
+
+    let mut c = agent(&s);
+    let bad = c.call("rdy_site", json!({"scope": format!("tag:{long}")}));
+    assert_eq!(bad.code(), Some("E_BAD_INPUT"), "{bad:?}");
+    let Reply::ToolError(e) = bad else {
+        panic!("expected a tool error")
+    };
+    assert_eq!(
+        e["message"], "this version's name is longer than the site serves (256 bytes)",
+        "{e}"
+    );
+    assert_eq!(
+        e["fix"], "open it with rdy show, or read it in the versions list",
+        "{e}"
+    );
+    let canon = c.call("rdy_site", json!({})).ok();
+    let root = canon["url"].as_str().unwrap().to_string();
+    assert_eq!(page(&format!("{root}~tag/{long}/")).status, 404);
+    // the 256-byte tag keeps its page
+    let v = c
+        .call("rdy_site", json!({"scope": format!("tag:{max}")}))
+        .ok();
+    assert_eq!(page(v["url"].as_str().unwrap()).status, 200, "{v}");
+    // the versions page: the long tag as text, the other with its link
+    let menu = page(&format!("{root}~versions/"));
+    assert_eq!(menu.status, 200);
+    let h = String::from_utf8(menu.body).unwrap();
+    assert!(
+        h.contains(&format!("<li><span class=\"vmenu-name\">{long}</span>")),
+        "{h}"
+    );
+    assert!(!h.contains(&format!("~tag/{long}")), "{h}");
+    assert!(
+        h.contains(&format!("<a href=\"/~tag/{max}/\">{max}</a>")),
+        "{h}"
+    );
 }
 
 #[test]
@@ -225,6 +290,73 @@ fn sr2_rdy_site_gives_the_changes_link() {
     assert!(changes.ends_with("/changes-since.html"), "{canon}");
     assert!(!changes.contains('~'), "{canon}");
     assert!(canon.get("lan_changes").is_none(), "{canon}");
+}
+
+/// Final review I4: `changes` (and `lan_changes`) lead only to a summary the site has. A
+/// top-level doc that owns `changes.html` (a view, a proposal version) or `changes-since.html`
+/// (canon) keeps its page, so the reply gives no summary link and keeps the render's warning.
+/// `rdy site` and `rdy_site` give the same reply.
+#[test]
+fn sr2_no_changes_link_to_a_doc_that_owns_the_page() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "fields": {"name": "changes-since", "title": "Authored since guide", "doc_type": "overview"}},
+            {"op": "create", "type": "doc", "fields": {"name": "base", "title": "Base", "doc_type": "overview"}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    write(
+        &mut r,
+        "later",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "later", "title": "Later", "doc_type": "overview"}}]),
+    )
+    .unwrap();
+    land(&mut r, "later").unwrap();
+    write(
+        &mut r,
+        "collision",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "changes", "title": "Authored changes guide", "doc_type": "overview"}}]),
+    )
+    .unwrap();
+    let p = r.propose(&writer(), "collision", "Add a guide").unwrap();
+    r.close().unwrap();
+
+    let kept = "the top-level doc named changes has the page changes.html: the change summary of this view or proposal is left out. Rename the doc to publish it.";
+    let since = "the top-level doc named changes-since has the page changes-since.html: the summary of changes since v1.0.0 is left out. Rename the doc to publish it.";
+    let mut c = agent(&s);
+    for (scope, warning, page_name) in [
+        ("view:collision".to_string(), kept, "changes.html"),
+        (format!("proposal:{}", p.id), kept, "changes.html"),
+        ("canon".to_string(), since, "changes-since.html"),
+    ] {
+        let v = c.call("rdy_site", json!({ "scope": scope })).ok();
+        assert!(v.get("changes").is_none(), "{scope}: {v}");
+        assert!(v.get("lan_changes").is_none(), "{scope}: {v}");
+        let warnings = v["warnings"].as_array().unwrap_or_else(|| panic!("{v}"));
+        assert!(warnings.iter().any(|w| w == warning), "{scope}: {v}");
+        // the authored doc keeps its page at that path
+        let url = v["url"].as_str().unwrap();
+        let h = String::from_utf8(page(&format!("{url}{page_name}")).body).unwrap();
+        assert!(h.contains("<h1>Authored "), "{scope}: {h}");
+        // the CLI twin gives the same reply, and prints no changes line
+        let (ok, cli) = s.json(&["--json", "site", "--scope", &scope]);
+        assert!(ok, "{cli}");
+        assert_eq!(cli, v, "{scope}");
+        let out = s.rdy(&["site", "--scope", &scope]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.contains("changes:"), "{scope}: {text:?}");
+    }
 }
 
 #[test]

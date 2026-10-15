@@ -68,21 +68,24 @@ fn sr8_the_menu_lists_versions_proposals_and_views() {
     let m = menu(&st, &mut |s| docs_changed(&st, s)).unwrap();
 
     assert_eq!(labels(&m.versions), ["Latest", "v1.0.0"]);
-    assert_eq!(m.versions[0].href, "/");
+    assert_eq!(m.versions[0].href.as_deref(), Some("/"));
     assert_eq!(m.versions[0].meta, ["v1.0.0"], "canon's text label");
-    assert_eq!(m.versions[1].href, "/~tag/v1.0.0/");
+    assert_eq!(m.versions[1].href.as_deref(), Some("/~tag/v1.0.0/"));
     assert_eq!(
         m.versions[1].meta,
         ["5 October 2026", "Accepted by the Steering Council"]
     );
 
     assert_eq!(labels(&m.proposals), ["Tighten the tutorial"]);
-    assert_eq!(m.proposals[0].href, format!("/~proposal/{}/", p.r#ref));
+    assert_eq!(
+        m.proposals[0].href,
+        Some(format!("/~proposal/{}/", p.r#ref))
+    );
     assert!(p.r#ref.starts_with("P-") && p.r#ref.ends_with("@1"));
     assert_eq!(m.proposals[0].meta, ["by qa", "1 doc changed"]);
 
     assert_eq!(labels(&m.views), ["editing"]);
-    assert_eq!(m.views[0].href, "/~view/editing/");
+    assert_eq!(m.views[0].href.as_deref(), Some("/~view/editing/"));
     assert_eq!(
         m.views[0].meta,
         ["by design thread (agent)", "1 doc changed"]
@@ -108,7 +111,7 @@ fn sr8_the_menu_lists_versions_proposals_and_views() {
     for row in m.versions.iter().chain(&m.proposals).chain(&m.views) {
         let want = format!(
             "<a href=\"{}\">{}</a> <span class=\"vmenu-meta\">{}</span>",
-            row.href,
+            row.href.as_deref().expect("every row here links"),
             row.label,
             row.meta.join(" · ")
         );

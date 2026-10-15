@@ -433,6 +433,8 @@ del { text-decoration: line-through; text-decoration-thickness: 1px; color: var(
 ins { text-decoration: underline; text-decoration-thickness: 2px; text-decoration-color: var(--success); text-underline-offset: 0.15em; }
 .sr-word { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .chg-diff { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* a type change, in words, before the text's diff */
+.chg-type { margin: 0 0 0.25rem; font-size: 0.85rem; color: var(--ink-soft); overflow-wrap: anywhere; }
 /* an entry of a change summary: its word, where it is, a link to it in place, then its diff */
 .chg-entry { margin: 0 0 1rem; padding-inline-start: 0.75rem; border-inline-start: 3px solid var(--line-ui); }
 .chg-entry-edited { border-inline-start-color: var(--accent); }

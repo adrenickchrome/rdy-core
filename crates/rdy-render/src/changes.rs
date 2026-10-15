@@ -50,6 +50,11 @@
 //!    and keeps each authored one after an escape ([`crate::inline::plain_refs_coded`]). Each
 //!    side's text is read back in order, across the pieces, before any HTML is written: no mark
 //!    reaches a page, and no authored character is lost.
+//! 8. **A type change** (the task-4 ruling, 2) is said in words before the text's diff:
+//!    `<p class="chg-type">Type: prose → note</p>`, from the engine's entry (`type`), or, for a
+//!    block the block diff has no entry for, from the two sides. Each type name reads with `_`
+//!    as a space. It is the block's structure, never a custom field (a field named `type` is
+//!    not read here), and the entry stays one Edited entry, moved or not: it counts once.
 use crate::escape;
 use crate::home::{self, ChangeRow};
 use crate::inline::{CODE_CLOSE, CODE_ESC, CODE_OPEN, Form, code_escape};
@@ -99,7 +104,8 @@ pub struct Entry {
     /// The block in place on its page, when it is in this site.
     pub href: Option<String>,
     /// The word diff: `<p class="chg-diff" data-rdy="content">…</p>`, or for a code block
-    /// `<pre class="code chg-diff" data-rdy="content"><code>…</code></pre>` (rule 6).
+    /// `<pre class="code chg-diff" data-rdy="content"><code>…</code></pre>` (rule 6), after the
+    /// type change in words when the type changed (rule 8).
     pub diff_html: String,
 }
 
@@ -171,8 +177,10 @@ pub fn summary(
     of: &Of,
 ) -> (Summary, BTreeMap<BlockId, String>) {
     let changed = rv.changed_set();
-    // rule 1: the engine's entries that count, in its order, then the counted blocks it lacks
+    // rule 1: the engine's entries that count, in its order, then the counted blocks it lacks;
+    // rule 8: each with its type change, from the engine's entry
     let mut order: Vec<(BlockId, Change)> = vec![];
+    let mut types: BTreeMap<BlockId, (String, String)> = BTreeMap::new();
     let mut have: BTreeSet<&BlockId> = BTreeSet::new();
     for e in diff.map(|d| d.entries.as_slice()).unwrap_or_default() {
         if changed.contains(&e.id) && have.insert(&e.id) {
@@ -181,6 +189,9 @@ pub fn summary(
                 DiffChange::Removed => Change::Removed,
                 DiffChange::Updated | DiffChange::Moved => Change::Edited,
             };
+            if let Some(t) = &e.type_change {
+                types.insert(e.id.clone(), (t.from.clone(), t.to.clone()));
+            }
             order.push((e.id.clone(), change));
         }
     }
@@ -242,7 +253,18 @@ pub fn summary(
     for (id, change) in order {
         let (old, new) = (sides.from.get(&id), sides.to.get(&id));
         let Some(b) = new.or(old) else { continue };
-        let html = block_diff(old, new, sides);
+        // rule 8: the engine's type change, else (no entry for the block) the two sides'
+        let retyped = match (types.get(&id), old, new) {
+            (Some((from, to)), _, _) => Some((from.as_str(), to.as_str())),
+            (None, Some(o), Some(n)) if !have.contains(&id) && o.block_type != n.block_type => {
+                Some((o.block_type.as_str(), n.block_type.as_str()))
+            }
+            _ => None,
+        };
+        let mut html = retyped
+            .map(|(from, to)| type_html(from, to))
+            .unwrap_or_default();
+        html.push_str(&block_diff(old, new, sides));
         inline.insert(id.clone(), html.clone());
         let entry = Entry {
             id: id.to_string(),
@@ -520,6 +542,17 @@ fn wrap_of(b: &Block) -> Wrap {
     } else {
         Wrap::Para
     }
+}
+
+/// A type change in words (rule 8): `<p class="chg-type">Type: prose → note</p>`, each type
+/// name with `_` read as a space.
+fn type_html(from: &str, to: &str) -> String {
+    let words = |t: &str| escape(&t.replace('_', " "));
+    format!(
+        "<p class=\"chg-type\">Type: {} \u{2192} {}</p>",
+        words(from),
+        words(to)
+    )
 }
 
 const DEL_OPEN: &str = "<del><span class=\"sr-word\">removed: </span>";

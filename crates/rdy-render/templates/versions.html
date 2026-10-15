@@ -15,7 +15,7 @@
 <main class="content" id="main" tabindex="-1">
 <h1>{{ title }}</h1>
 <nav class="vmenu" aria-label="{{ title }}">
-{% for s in sections %}<section><h2>{{ s.title }}</h2>{% if s.rows %}<ul class="vmenu-list">{% for r in s.rows %}<li><a href="{{ r.href }}">{{ r.label }}</a>{% if r.meta %} <span class="vmenu-meta">{{ r.meta | join(" · ") }}</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="vmenu-none">None open.</p>{% endif %}</section>
+{% for s in sections %}<section><h2>{{ s.title }}</h2>{% if s.rows %}<ul class="vmenu-list">{% for r in s.rows %}<li>{% if r.href %}<a href="{{ r.href }}">{{ r.label }}</a>{% else %}<span class="vmenu-name">{{ r.label }}</span>{% endif %}{% if r.meta %} <span class="vmenu-meta">{{ r.meta | join(" · ") }}</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="vmenu-none">None open.</p>{% endif %}</section>
 {% endfor %}</nav>
 </main>
 </body>

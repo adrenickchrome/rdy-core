@@ -252,6 +252,17 @@ pub fn between(rdy: &ReadState, from: &Scope, to: &Scope) -> Result<Review, RdyE
     Ok(review(&cmp, &dm, &bm))
 }
 
+/// What a scope changes, as its change rows read it: the review against its base, else, for a
+/// proposal version made on the empty project that no scope names, the review against that empty
+/// project ([`unreviewed`]). The menu's count, the home page's list and the change summary all
+/// read their rows from it (O12), so they agree. Review marks on the pages read only [`build`].
+pub(crate) fn listed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError> {
+    match build(rdy, scope)? {
+        Some(rv) => Ok(Some(rv)),
+        None => unreviewed(rdy, scope),
+    }
+}
+
 /// The count of [`Review::changed_blocks`] for a proposal version that has no base here: one
 /// made before the first landing, read once canon has landed. It was made on the empty project,
 /// so it is counted against that: every block it holds is added. Its page shows no marks
