@@ -41,11 +41,37 @@ fn ls7_rdy_site_scope() {
     let (ok, v) = s.json(&["--json", "new", "doc", "ops", "--view", "editing"]);
     assert!(ok, "{v}");
     let text = stdout(&s.rdy(&["site", "--scope", "editing"]));
+    let first = text.lines().next().unwrap();
     assert!(
-        text.starts_with("http://127.0.0.1:") && text.ends_with("/~view/editing/\n"),
+        first.starts_with("http://127.0.0.1:") && first.ends_with("/~view/editing/"),
         "{text:?}"
     );
-    assert_eq!(text.lines().count(), 1, "{text:?}");
+    // a view has a second line, its change summary (sr2)
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+}
+
+#[test]
+fn sr2_rdy_site_prints_the_changes_line() {
+    let s = Served::new();
+    let (ok, v) = s.json(&["--json", "new", "doc", "ops", "--view", "editing"]);
+    assert!(ok, "{v}");
+    let text = stdout(&s.rdy(&["site", "--scope", "view:editing"]));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text:?}");
+    assert!(lines[0].ends_with("/~view/editing/"), "{text:?}");
+    let want = format!("changes: {}changes.html", lines[0]);
+    assert_eq!(lines[1], want, "{text:?}");
+    // JSON carries the field as the reply has it
+    let (ok, v) = s.json(&["--json", "site", "--scope", "view:editing"]);
+    assert!(ok, "{v}");
+    assert_eq!(
+        format!("changes: {}", v["changes"].as_str().unwrap()),
+        want,
+        "{v}"
+    );
+    // canon of a project with no version: one line, as before
+    let canon = stdout(&s.rdy(&["site"]));
+    assert_eq!(canon.lines().count(), 1, "{canon:?}");
 }
 
 #[test]

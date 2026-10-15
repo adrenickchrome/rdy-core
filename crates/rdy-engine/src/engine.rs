@@ -1,7 +1,7 @@
 //! The one door to a project: reads from the published state, writes through a closure that
 //! runs against `&mut Rdy` on a single writer, in arrival order.
 use crate::semantic::lease::LeaseRegistry;
-use crate::site_scope::{ScopeRef, proposal_ref};
+use crate::site_scope::{CHANGES_PAGE, SINCE_PAGE, ScopeRef, proposal_ref, tag_name_ok};
 use crate::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Scope, W_SITE_LAN};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -72,7 +72,9 @@ pub const SITE_LAN_FIX: &str = "set serve.site_lan to false to keep the site on 
 /// open to the network (or could not be), and the render's `warnings` for the scope's pages (as
 /// `rdy render` gives them; the scope is built first when it has no build). A view or proposal
 /// version opens in review mode. The link and the scope are spelled as the site reads them
-/// ([`ScopeRef`]): one spelling per scope.
+/// ([`ScopeRef`]): one spelling per scope. A tag (`tag:<version>`) opens its frozen site. A view,
+/// a proposal version, or canon with landings since its tag also gets `changes` (and
+/// `lan_changes` beside `lan_url`): the link to the scope's diff summary.
 pub fn site_reply(engine: &dyn Engine, scope: Option<&str>) -> Result<serde_json::Value, RdyError> {
     let link = engine.site()?;
     let text = scope.unwrap_or("canon");
@@ -100,11 +102,30 @@ pub fn site_reply(engine: &dyn Engine, scope: Option<&str>) -> Result<serde_json
             };
             ScopeRef::Proposal(proposal_ref(&spelled).unwrap_or(spelled))
         }
+        // `landing:` reads as `Scope::At` too: tell a tag from it by the scope text
+        Scope::At(_) if text.starts_with("tag:") => {
+            let want = crate::version::parse_version(&text["tag:".len()..])?;
+            // the stored name, so that `tag:1.0.0` and `tag:v1.0.0` give one link
+            let stored = st
+                .version_tags()?
+                .into_iter()
+                .find(|(v, _)| v.cmp_precedence(&want) == std::cmp::Ordering::Equal)
+                .map(|(_, t)| t.name)
+                .filter(|name| tag_name_ok(name));
+            let Some(stored) = stored else {
+                return Err(RdyError::new(
+                    crate::E_BAD_INPUT,
+                    format!("the version {text:?} has no link on the live site"),
+                    "render it with rdy render --scope tag:<version> --out <dir>",
+                ));
+            };
+            ScopeRef::Tag(stored)
+        }
         Scope::At(_) | Scope::Inflight => {
             return Err(RdyError::new(
                 crate::E_BAD_INPUT,
                 format!("the site shows canon, a view or a proposal version, not {text:?}"),
-                "pass canon, a view name, view:<name> or proposal:P-x@n",
+                "pass canon, a version as tag:<version>, a view name, view:<name> or proposal:P-x@n",
             ));
         }
     };
@@ -112,6 +133,22 @@ pub fn site_reply(engine: &dyn Engine, scope: Option<&str>) -> Result<serde_json
     let mut v = serde_json::json!({"url": format!("{}{path}", link.url), "scope": scope.text()});
     if let Some(lan) = &link.lan_url {
         v["lan_url"] = serde_json::json!(format!("{lan}{path}"));
+    }
+    // the link to the scope's diff summary: a view or proposal changes some blocks; canon
+    // changed some since its tag (F7)
+    let changes_page = match &scope {
+        ScopeRef::View(_) | ScopeRef::Proposal(_) => Some(format!("{path}{CHANGES_PAGE}")),
+        ScopeRef::Canon => {
+            let pos = st.version_position(&Scope::Canon)?;
+            (pos.version.is_some() && pos.landings_since > 0).then(|| SINCE_PAGE.to_string())
+        }
+        ScopeRef::Tag(_) | ScopeRef::Versions => None,
+    };
+    if let Some(page) = changes_page {
+        v["changes"] = serde_json::json!(format!("{}{page}", link.url));
+        if let Some(lan) = &link.lan_url {
+            v["lan_changes"] = serde_json::json!(format!("{lan}{page}"));
+        }
     }
     if let Some(w) = &link.warning {
         v["warning"] = serde_json::json!({"code": W_SITE_LAN, "message": w.message, "fix": w.fix});

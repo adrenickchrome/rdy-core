@@ -10,7 +10,7 @@ use serde_json::Value;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SiteParams {
-    /// canon (default), a view name or view:<name>, or proposal:P-x@n (P-x follows its latest version). A view or proposal renders in review mode and updates as it changes.
+    /// canon (default), a version as tag:<version>, a view name or view:<name>, or proposal:P-x@n (P-x follows its latest version). A view or proposal renders in review mode and updates as it changes.
     pub scope: Option<String>,
 }
 

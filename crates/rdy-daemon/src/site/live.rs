@@ -56,12 +56,18 @@ pub enum LiveEvent {
 pub struct SiteBusy;
 
 /// The scope `scope` names, read from `st`. A view must exist; `P-x` reads as the proposal's
-/// latest version each time.
+/// latest version each time; a tag must exist. The versions page is not a read scope.
 pub fn resolve(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyError> {
     match scope {
         ScopeRef::Canon => Ok(Scope::Canon),
         ScopeRef::View(name) => st.resolve_read_scope(&format!("view:{name}"), None),
         ScopeRef::Proposal(r) => st.resolve_scope(&format!("proposal:{r}")),
+        ScopeRef::Tag(name) => st.resolve_scope(&format!("tag:{name}")),
+        ScopeRef::Versions => Err(RdyError::new(
+            rdy_engine::E_BAD_INPUT,
+            "the versions page is not a read scope",
+            "read canon, a version, a view or a proposal version",
+        )),
     }
 }
 

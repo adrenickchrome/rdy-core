@@ -14,7 +14,7 @@ pub struct Guard {
 }
 
 pub use rdy_engine::site_scope::ScopeRef;
-use rdy_engine::site_scope::{proposal_ref, view_name_ok};
+use rdy_engine::site_scope::{proposal_ref, tag_name_ok, view_name_ok};
 
 /// What a request that passes the guard asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -117,6 +117,16 @@ impl Guard {
 /// `/` before decoding).
 fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<Route, Refusal> {
     if segments[0].starts_with(b"~") {
+        // the versions page is one page: `/~versions/` or `/~versions/index.html`, nothing else
+        if segments[0] == b"~versions" {
+            return match &segments[1..] {
+                [last] if last.is_empty() || last == b"index.html" => Ok(Route::Page {
+                    scope: ScopeRef::Versions,
+                    path: "index.html".to_string(),
+                }),
+                _ => Err(Refusal::NotFound),
+            };
+        }
         let [kind, name, rest @ ..] = segments else {
             return Err(Refusal::NotFound);
         };
@@ -128,6 +138,7 @@ fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<R
         let scope = match kind.as_slice() {
             b"~view" if view_name_ok(name) => ScopeRef::View(name.to_string()),
             b"~proposal" => ScopeRef::Proposal(proposal_ref(name).ok_or(Refusal::NotFound)?),
+            b"~tag" if tag_name_ok(name) => ScopeRef::Tag(name.to_string()),
             _ => return Err(Refusal::NotFound),
         };
         let path = page_path(rest).ok_or(Refusal::NotFound)?;
@@ -187,10 +198,15 @@ fn events(query: &str) -> Result<Route, Refusal> {
     })
 }
 
-/// `canon`, `view:<name>` or `proposal:<ref>`.
+/// `canon`, `versions`, `tag:<name>`, `view:<name>` or `proposal:<ref>`.
 fn parse_scope(text: &str) -> Option<ScopeRef> {
-    if text == "canon" {
-        return Some(ScopeRef::Canon);
+    match text {
+        "canon" => return Some(ScopeRef::Canon),
+        "versions" => return Some(ScopeRef::Versions),
+        _ => {}
+    }
+    if let Some(name) = text.strip_prefix("tag:") {
+        return tag_name_ok(name).then(|| ScopeRef::Tag(name.to_string()));
     }
     if let Some(name) = text.strip_prefix("view:") {
         return view_name_ok(name).then(|| ScopeRef::View(name.to_string()));
@@ -515,8 +531,7 @@ mod tests {
         );
         let bad = "/_rdy/events?scope=canon&page=index.html&rev=XYZ&label=ffeeddccbbaa9988";
         assert_eq!(g().check(&get(bad, h)), Err(Refusal::Malformed));
-        let bad_scope =
-            "/_rdy/events?scope=tag:v1&page=index.html&rev=00112233aabbccdd&label=00112233aabbccdd";
+        let bad_scope = "/_rdy/events?scope=tag:.v1&page=index.html&rev=00112233aabbccdd&label=00112233aabbccdd";
         assert_eq!(g().check(&get(bad_scope, h)), Err(Refusal::Malformed));
         let head = req(&format!(
             "HEAD /_rdy/events?scope=canon&page=index.html&rev=00112233aabbccdd&label=00112233aabbccdd HTTP/1.1\nHost: {h}"
@@ -659,6 +674,95 @@ mod tests {
         assert!(
             matches!(events(&q), Ok(Route::Events { scope: ScopeRef::Proposal(r), .. }) if r == "P-abcd@1")
         );
+    }
+
+    fn tag(name: &str, path: &str) -> Route {
+        Route::Page {
+            scope: ScopeRef::Tag(name.into()),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn sr2_the_tag_route_serves_a_tag_scope() {
+        assert_eq!(
+            g().check(&get("/~tag/v1.0.0/index.html", H)),
+            Ok(tag("v1.0.0", "index.html"))
+        );
+        assert_eq!(
+            g().check(&get("/~tag/2.0.0-rc.1/", H)),
+            Ok(tag("2.0.0-rc.1", "index.html"))
+        );
+        assert_eq!(
+            g().check(&get("/~tag/v1.0.0/system/site.html", H)),
+            Ok(tag("v1.0.0", "system/site.html"))
+        );
+        assert_eq!(ScopeRef::Tag("v1.0.0".into()).path_prefix(), "~tag/v1.0.0/");
+        assert_eq!(ScopeRef::Tag("v1.0.0".into()).text(), "tag:v1.0.0");
+        for t in [
+            "/~tag/v1.0.0",
+            "/~tag/.x/index.html",
+            "/~tag/-x/index.html",
+            "/~tag/a%2Fb/index.html",
+            "/~tag/a%3Ab/index.html",
+            "/~tag/%FF/index.html",
+            "/~tag//index.html",
+            &format!("/~tag/{}/index.html", "a".repeat(65)),
+        ] {
+            assert_eq!(g().check(&get(t, H)), Err(Refusal::NotFound), "{t}");
+        }
+        assert!(
+            g().check(&get(&format!("/~tag/{}/", "a".repeat(64)), H))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn sr2_the_versions_route_is_one_page() {
+        let versions = Ok(Route::Page {
+            scope: ScopeRef::Versions,
+            path: "index.html".into(),
+        });
+        assert_eq!(g().check(&get("/~versions/", H)), versions);
+        assert_eq!(g().check(&get("/~versions/index.html", H)), versions);
+        assert_eq!(ScopeRef::Versions.path_prefix(), "~versions/");
+        assert_eq!(ScopeRef::Versions.text(), "versions");
+        for t in [
+            "/~versions",
+            "/~versions/x.html",
+            "/~versions/a/index.html",
+            "/~versions/index.html/",
+        ] {
+            assert_eq!(g().check(&get(t, H)), Err(Refusal::NotFound), "{t}");
+        }
+    }
+
+    #[test]
+    fn sr2_events_read_tag_and_versions_scopes() {
+        let q = format!("scope=tag:v1.0.0&page=index.html&rev={REV}&label={REV}");
+        assert_eq!(
+            events(&q),
+            Ok(Route::Events {
+                scope: ScopeRef::Tag("v1.0.0".into()),
+                page: "index.html".into(),
+                rev: REV.into(),
+                label: REV.into()
+            })
+        );
+        let q = format!("scope=versions&page=index.html&rev={REV}&label={REV}");
+        assert_eq!(
+            events(&q),
+            Ok(Route::Events {
+                scope: ScopeRef::Versions,
+                page: "index.html".into(),
+                rev: REV.into(),
+                label: REV.into()
+            })
+        );
+        for scope in ["tag:", "tag:.x", "tag:a%2Fb", "versions:x"] {
+            let q = format!("scope={scope}&page=index.html&rev={REV}&label={REV}");
+            assert_eq!(events(&q), Err(Refusal::Malformed), "{q}");
+        }
     }
 
     /// Fix round 1: each refusal rule of the brief has an assertion that fails without it.

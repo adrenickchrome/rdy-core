@@ -11,6 +11,32 @@ use serde_json::{Value, json};
 use std::net::Ipv4Addr;
 use std::path::Path;
 
+/// [`golden_served`], with two more landings after the tag `v1.0.0` (canon reads
+/// `v1.0.0 + 2 landings`, as the golden project does).
+fn golden_served_ahead() -> Served {
+    let (s, _, _) = golden_served();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let ids = Ids::new();
+    for (view, id, body) in [
+        ("clarify", &ids.motivation_prose, "Three idioms recur."),
+        (
+            "tighten",
+            &ids.guards_prose,
+            "Patterns say what the subject looks like.",
+        ),
+    ] {
+        write(
+            &mut r,
+            view,
+            json!([{"op": "update", "id": id.to_string(), "body": body}]),
+        )
+        .unwrap();
+        land(&mut r, view).unwrap();
+    }
+    r.close().unwrap();
+    s
+}
+
 /// A served project holding the golden corpus, landed and tagged `v1.0.0`, and a view `editing`
 /// with one unlanded change, proposed once. Returns the project, the proposal and the landing.
 fn golden_served() -> (Served, ProposalInfo, String) {
@@ -105,14 +131,81 @@ fn ls7_rdy_site_for_a_view_and_a_proposal() {
     assert_eq!(bad.code(), Some("E_NOT_FOUND"), "{bad:?}");
     let bad = c.call("rdy_site", json!({"scope": "proposal:P-ffff@9"}));
     assert!(!bad.is_ok(), "{bad:?}");
-    // final review M5: the site shows no version or analysis scope
-    for given in [
-        "tag:v1.0.0".to_string(),
-        format!("landing:{landing}"),
-        "inflight".to_string(),
-    ] {
+    // final review M5: the site shows no landing or analysis scope (a tag has its route, sr2)
+    for given in [format!("landing:{landing}"), "inflight".to_string()] {
         let bad = c.call("rdy_site", json!({ "scope": given }));
         assert_eq!(bad.code(), Some("E_BAD_INPUT"), "{given}: {bad:?}");
+    }
+}
+
+#[test]
+fn sr2_rdy_site_gives_a_tag_link() {
+    let (s, _, _) = golden_served();
+    let mut c = agent(&s);
+    let v = c.call("rdy_site", json!({"scope": "tag:v1.0.0"})).ok();
+    assert_eq!(v["scope"], "tag:v1.0.0", "{v}");
+    let url = v["url"].as_str().unwrap();
+    assert!(url.ends_with("/~tag/v1.0.0/"), "{v}");
+    assert!(v.get("changes").is_none(), "{v}");
+    assert_eq!(page(url).status, 200, "{v}");
+    // the stored name, whichever way the tag is spelled
+    let bare = c.call("rdy_site", json!({"scope": "tag:1.0.0"})).ok();
+    assert_eq!(bare["url"], v["url"], "{bare}");
+    assert_eq!(bare["scope"], "tag:v1.0.0", "{bare}");
+    let none = c.call("rdy_site", json!({"scope": "tag:v9.9.9"}));
+    assert_eq!(none.code(), Some("E_NOT_FOUND"), "{none:?}");
+}
+
+#[test]
+fn sr2_rdy_site_gives_the_changes_link() {
+    let s = golden_served_ahead();
+    let mut c = agent(&s);
+    let v = c.call("rdy_site", json!({"scope": "view:editing"})).ok();
+    let changes = v["changes"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(changes.ends_with("/~view/editing/changes.html"), "{v}");
+    assert_eq!(
+        changes,
+        format!("{}changes.html", v["url"].as_str().unwrap()),
+        "{v}"
+    );
+    let canon = c.call("rdy_site", json!({})).ok();
+    let changes = canon["changes"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{canon}"));
+    assert!(changes.ends_with("/changes-since.html"), "{canon}");
+    assert!(!changes.contains('~'), "{canon}");
+    assert!(canon.get("lan_changes").is_none(), "{canon}");
+}
+
+#[test]
+fn sr2_rdy_site_gives_no_since_link_without_landings_since() {
+    // the tag stands on canon's head: nothing landed since
+    let (s, _, _) = golden_served();
+    let mut c = agent(&s);
+    let canon = c.call("rdy_site", json!({})).ok();
+    assert!(canon.get("changes").is_none(), "{canon}");
+    // no version at all
+    let plain = Served::new();
+    let mut c = agent(&plain);
+    let canon = c.call("rdy_site", json!({})).ok();
+    assert!(canon.get("changes").is_none(), "{canon}");
+}
+
+#[test]
+fn sr2_rdy_site_refuses_a_landing_scope() {
+    let (s, _, landing) = golden_served();
+    let mut c = agent(&s);
+    for given in [format!("landing:{landing}"), "inflight".to_string()] {
+        let bad = c.call("rdy_site", json!({ "scope": given }));
+        assert_eq!(bad.code(), Some("E_BAD_INPUT"), "{given}: {bad:?}");
+        let Reply::ToolError(e) = bad else {
+            panic!("expected a tool error")
+        };
+        assert_eq!(
+            e["fix"],
+            "pass canon, a version as tag:<version>, a view name, view:<name> or proposal:P-x@n",
+            "{e}"
+        );
     }
 }
 
@@ -274,6 +367,11 @@ fn ls7_lan_mode_gives_the_lan_link_and_the_warning() {
         format!("anyone on your network can read these docs at {root}"),
         "{v}"
     );
+    // the diff summary link has a LAN twin
+    let changes = v["changes"].as_str().unwrap_or_else(|| panic!("{v}"));
+    let lan_changes = v["lan_changes"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(changes.ends_with("/~view/editing/changes.html"), "{v}");
+    assert!(lan_changes.ends_with("/~view/editing/changes.html"), "{v}");
     // canon: the LAN link is the bare root
     let canon = c.call("rdy_site", json!({})).ok();
     assert!(
