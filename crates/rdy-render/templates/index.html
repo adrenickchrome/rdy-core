@@ -2,7 +2,7 @@
 {% block content %}
 {% set home = body.home %}
 <header class="page-head"><h1>{{ site_name }}</h1>{% if home.description %}<p class="lede">{{ home.description }}</p>{% endif %}</header>
-{% if home.changes %}<section class="chg"><h2 id="draft-changes">Changes in this draft</h2><ul class="changes">{% for c in home.changes %}<li>{% if c.href %}<a href="{{ c.href }}">{{ c.title }}</a>{% else %}<span class="changes-gone">{{ c.title }}</span>{% endif %}{% if c.counts %} <span class="changes-count">{{ c.counts }}</span>{% else %} <span class="chg-label chg-{{ c.mark }}">{{ c.word }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
+{% if home.changes %}<section class="chg"><h2 id="review-changes">{{ review_heading }}</h2><ul class="changes">{% for c in home.changes %}<li>{% if c.href %}<a href="{{ c.href }}">{{ c.title }}</a>{% else %}<span class="changes-gone">{{ c.title }}</span>{% endif %}{% if c.counts %} <span class="changes-count">{{ c.counts }}</span>{% else %} <span class="chg-label chg-{{ c.mark }}">{{ c.word }}</span>{% endif %}</li>{% endfor %}</ul></section>{% endif %}
 <section><h2 id="contents">Contents</h2><div class="cards">{% for c in home.cards %}<a class="card" href="{{ c.href }}"><strong>{{ c.title }}</strong>{% if c.summary %}<span>{{ c.summary }}</span>{% endif %}</a>{% endfor %}</div></section>
 <section><h2 id="versions">Versions</h2>{% if home.versions %}<dl class="versions">{% for v in home.versions %}<dt>{{ v.name }}{% if v.current %} <span class="meta">(current)</span>{% endif %}</dt><dd>{{ v.when }}{% if v.message %} · {{ v.message }}{% endif %}</dd>{% endfor %}</dl>{% else %}<p>No versions yet.</p>{% endif %}</section>
 {% endblock %}

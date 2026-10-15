@@ -174,8 +174,6 @@ pub fn header_html(h: &Header, links: &HeaderLinks) -> String {
 
 /// The review bar's words (D-BMX8P): `Reviewing view · {name}` or `Reviewing proposal · {title}`,
 /// then ` · by {author}` when the store names one.
-// Tasks 7 and 8 call this; until then only the tests do.
-#[allow(dead_code)]
 pub fn review_bar(r: &Reviewed) -> String {
     let mut text = format!("Reviewing {} · {}", kind_word(r.kind), r.name);
     if let Some(a) = &r.author {
@@ -194,8 +192,6 @@ pub fn changes_heading(kind: ReviewedKind) -> &'static str {
 
 /// An author as people read it (F1): `human:nick` is `nick`, `agent:claude` is `claude (agent)`,
 /// any other text stays as it is, and every `_` shows as a space.
-// Tasks 7 and 8 call this; until then only the tests do.
-#[allow(dead_code)]
 pub fn author_words(actor: &str) -> String {
     let words = if let Some(n) = actor.strip_prefix("human:") {
         n.to_string()

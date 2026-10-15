@@ -79,6 +79,9 @@ chrome	-	+10 more
 chrome	L	Reference
 chrome	L	Glossary
 chrome	L	Open questions
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
 chrome	L	Structural pattern matching
 chrome	L	Open questions
 chrome	L	Open questions

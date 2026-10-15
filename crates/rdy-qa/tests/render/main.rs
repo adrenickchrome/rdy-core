@@ -21,6 +21,7 @@ mod render_plain;
 mod render_presentational;
 mod render_ref;
 mod render_review;
+mod render_review_bar;
 mod render_review_nav;
 mod render_review_page;
 mod render_review_toggle;

@@ -282,8 +282,13 @@ pub struct PageContext {
     pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
-    /// A draft render, which offers Show changes.
-    pub draft: bool,
+    /// A review render with marks, which offers Show changes and Show diff (sr7).
+    pub reviewing: bool,
+    /// The review bar's words (`version::review_bar`); none on canon and tags.
+    pub review_bar: Option<String>,
+    /// The heading of the home page's list of changes (`version::changes_heading`); none on canon
+    /// and tags.
+    pub review_heading: Option<&'static str>,
     /// A page the live site serves: its version label is the slot, and it updates itself.
     pub live: bool,
     pub items: Vec<Item>,
@@ -681,7 +686,12 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_mermaid,
         has_terms,
         has_questions,
-        draft: sh.review.is_some(),
+        reviewing: sh.review.is_some(),
+        review_bar: sh.reviewed.as_ref().map(version::review_bar),
+        review_heading: sh
+            .reviewed
+            .as_ref()
+            .map(|r| version::changes_heading(r.kind)),
         live: matches!(sh.mode, Mode::Live { .. }),
         items,
         body,

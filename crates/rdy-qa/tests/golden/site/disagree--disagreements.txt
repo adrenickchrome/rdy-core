@@ -12,6 +12,9 @@ chrome	L	Spec
 chrome	L	Notes
 chrome	L	Reference
 chrome	L	Where the docs disagree
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
 chrome	L	Retired reference
 chrome	L	Where the docs disagree
 chrome	L	Where the docs disagree

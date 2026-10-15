@@ -234,6 +234,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/tools.html",
         "partials/why.html",
         "partials/version.html",
+        "partials/review_bar.html",
         "partials/colophon.html",
         "partials/change.html",
         "partials/removed.html",

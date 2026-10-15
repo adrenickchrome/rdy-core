@@ -48,9 +48,24 @@
     announce(choice);
   }
 
-  var group = document.querySelector('.theme');
-  if (group) {
+  // Every theme group on the page (the header's and the drawer's) works the same way and keeps
+  // the others marked.
+  var groups = document.querySelectorAll('.theme');
+  if (groups.length) {
     mark(stored());
+    for (var g = 0; g < groups.length; g++) bind(groups[g]);
+    // In the automatic mode the diagrams follow the system theme as it changes.
+    if (window.matchMedia) {
+      var query = window.matchMedia('(prefers-color-scheme: dark)');
+      var follow = function () {
+        if (stored() === 'system') announce('system');
+      };
+      if (query.addEventListener) query.addEventListener('change', follow);
+      else if (query.addListener) query.addListener(follow);
+    }
+  }
+
+  function bind(group) {
     group.addEventListener('click', function (event) {
       var button = event.target.closest && event.target.closest('[data-theme-choice]');
       if (button) choose(button.getAttribute('data-theme-choice'));
@@ -66,15 +81,6 @@
       next.focus();
       choose(next.getAttribute('data-theme-choice'));
     });
-    // In the automatic mode the diagrams follow the system theme as it changes.
-    if (window.matchMedia) {
-      var query = window.matchMedia('(prefers-color-scheme: dark)');
-      var follow = function () {
-        if (stored() === 'system') announce('system');
-      };
-      if (query.addEventListener) query.addEventListener('change', follow);
-      else if (query.addListener) query.addListener(follow);
-    }
   }
 
   // The folds: the navigation and the index are open in the markup, so a page without

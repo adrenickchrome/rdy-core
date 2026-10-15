@@ -175,7 +175,7 @@ fn rv1_llms_and_search_carry_the_drafts_text_without_markers_or_removed_text() {
             "Edited",
             "Removed",
             "Show changes",
-            "Changes in this draft",
+            "Changes in this view",
             "Gone soon",
             "Old guide",
             "Old wording",
