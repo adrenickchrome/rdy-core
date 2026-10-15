@@ -1067,3 +1067,74 @@ fn sr6_authored_private_use_characters_survive_the_diff() {
         "{page}"
     );
 }
+
+/// Fix round 3 (finding 1): the since page's rows are the docs of its counted entries, read
+/// from the two states it compares, never the home page's rows. A folder removed with its docs
+/// Alpha and Beta after the tag keeps a Removed row for each doc, each with its own section that
+/// holds that doc's entries; the folder's own entry is not a doc and gives no row.
+#[test]
+fn sr6_the_since_page_keeps_the_docs_of_a_removed_folder() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area", "title": "Area"}},
+            {"op": "create", "type": "doc", "id": "$a", "parent": "$f", "fields": {"name": "alpha", "title": "Alpha", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "id": "$ap", "parent": "$a", "body": "Alpha text."},
+            {"op": "create", "type": "doc", "id": "$b", "parent": "$f", "fields": {"name": "beta", "title": "Beta", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "id": "$bp", "parent": "$b", "body": "Beta text."},
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "gamma", "title": "Gamma", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "parent": "$g", "body": "Gamma stays."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    let id = |k: &str| made.created[k].clone();
+    write(
+        &mut r,
+        "x",
+        json!([
+            {"op": "delete", "id": id("$ap")},
+            {"op": "delete", "id": id("$bp")},
+            {"op": "delete", "id": id("$a")},
+            {"op": "delete", "id": id("$b")},
+            {"op": "delete", "id": id("$f")}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    let out = rendered(&r, &Scope::Canon);
+    let page = read(out.path(), "changes-since.html");
+    let rows = list_rows(&page);
+    let got: Vec<(&str, &str)> = rows.iter().map(|(t, w)| (t.as_str(), w.as_str())).collect();
+    assert_eq!(got, [("Alpha", "Removed"), ("Beta", "Removed")], "{page}");
+    assert!(
+        page.contains("<p class=\"lede\">5 changes in 2 docs since v1.0.0.</p>"),
+        "{page}"
+    );
+    // each doc's section holds its own entries
+    let section = |h: &str| {
+        let start = page
+            .find(&format!("<h2 id=\"{h}\">"))
+            .unwrap_or_else(|| panic!("{h}: {page}"));
+        let len = page[start..].find("</section>").expect("a section ends");
+        &page[start..start + len]
+    };
+    for (doc, prose) in [("alpha", "$ap"), ("beta", "$bp")] {
+        let s = section(doc);
+        for key in [if doc == "alpha" { "$a" } else { "$b" }, prose] {
+            assert!(
+                s.contains(&format!("data-rdy-block=\"{}\"", id(key))),
+                "{doc} holds {key}: {page}"
+            );
+        }
+    }
+    assert!(
+        !section("alpha").contains(&format!("data-rdy-block=\"{}\"", id("$bp"))),
+        "{page}"
+    );
+    assert_eq!(entries(&page).len(), 5, "{page}");
+}

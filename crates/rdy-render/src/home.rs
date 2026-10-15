@@ -2,7 +2,7 @@
 //! first, in a reader's words (a date and the message, never a hash).
 use crate::inline::Form;
 use crate::page::SiteFacts;
-use crate::review::{Mark, Review};
+use crate::review::{DocChange, Mark, Review};
 use crate::site::{Site, rel};
 use rdy_engine::{Materialized, VersionInfo};
 use rdy_model::{Block, BlockId, RefMode, tree};
@@ -132,34 +132,49 @@ pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
         .filter_map(|id| {
             let change = review.doc(id)?;
             let b = site.m.get(id)?;
-            Some(ChangeRow {
-                id: id.clone(),
-                title: site.label(b),
-                href: site.page(id).map(|p| rel("index.html", &p)),
-                mark: match change.mark {
-                    Mark::Edited => "edited",
-                    Mark::New => "new",
-                },
-                word: change.mark.word(),
-                // each number stays on the line of its word (visual review F4)
-                counts: change.counts().map(|c| {
-                    c.split(" \u{b7} ")
-                        .map(|part| part.replace(' ', "\u{a0}"))
-                        .collect::<Vec<_>>()
-                        .join(" \u{b7} ")
-                }),
-            })
+            Some(doc_row(site, b, change))
         })
         .collect();
-    rows.extend(review.removed_pages().iter().map(|b| ChangeRow {
+    rows.extend(
+        review
+            .removed_pages()
+            .iter()
+            .map(|b| removed_row(b, site.label(b))),
+    );
+    rows
+}
+
+/// The row of doc `b`, which `site` holds, with what the draft changes in it.
+pub(crate) fn doc_row(site: &Site, b: &Block, change: &DocChange) -> ChangeRow {
+    ChangeRow {
         id: b.id.clone(),
         title: site.label(b),
+        href: site.page(&b.id).map(|p| rel("index.html", &p)),
+        mark: match change.mark {
+            Mark::Edited => "edited",
+            Mark::New => "new",
+        },
+        word: change.mark.word(),
+        // each number stays on the line of its word (visual review F4)
+        counts: change.counts().map(|c| {
+            c.split(" \u{b7} ")
+                .map(|part| part.replace(' ', "\u{a0}"))
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ")
+        }),
+    }
+}
+
+/// The row of a removed doc or folder `b`, titled `title`: there is no page to link to.
+pub(crate) fn removed_row(b: &Block, title: String) -> ChangeRow {
+    ChangeRow {
+        id: b.id.clone(),
+        title,
         href: None,
         mark: "removed",
         word: "Removed",
         counts: None,
-    }));
-    rows
+    }
 }
 
 /// The first prose block under `b` (depth first, in order), as plain text: a reference reads as

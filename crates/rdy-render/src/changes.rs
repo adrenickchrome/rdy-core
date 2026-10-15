@@ -16,11 +16,14 @@
 //!    names) is read from the two sides: on both it is Edited, only in `to` New, only in `from`
 //!    Removed. Those follow the others, in `to`'s reading order, then `from`'s.
 //! 2. **The doc list.** For a view or proposal, the rows of the home page's list
-//!    ([`home::changes`], O12). For the since page, the docs of its entries: of the docs the same
-//!    rule finds in the two states it compares (a changed doc as `to` holds it, a removed page
-//!    as `from` held it), each that holds an entry (rule 3), in the order of their first
-//!    entries, so in the block diff's order; a doc links to its page only when the rendered site
-//!    has it. Each row links to its section on this page.
+//!    ([`home::changes`], O12). For the since page, the docs of its entries, read from the two
+//!    states it compares and never from the home page's rows: each doc that holds an entry (in
+//!    `to`, else in `from`), once, in the order of its first entry, so in the block diff's
+//!    order. A doc `to` holds reads as the home page builds its row; a doc only `from` held is
+//!    Removed, titled as `from` held it, so a removed folder keeps a row for each of its docs.
+//!    A folder is not a doc and has no row; its own entry takes a section of its own (rule 3).
+//!    A doc links to its page only when the rendered site has it. Each row links to its
+//!    section on this page.
 //! 3. **The sections.** One per row, in row order. An entry goes in the section of the doc that
 //!    holds it (in `to`, else in `from`) when that doc has a row; else, for a block gone from
 //!    `to`, in the section of the nearest block above it in `from` that has a row (a removed
@@ -50,7 +53,7 @@
 use crate::escape;
 use crate::home::{self, ChangeRow};
 use crate::inline::{CODE_CLOSE, CODE_ESC, CODE_OPEN, Form, code_escape};
-use crate::review::Review;
+use crate::review::{DocChange, Mark, Review};
 use crate::search::own_text_coded;
 use crate::site::{Site, name_as_title, rel, reserved_ids, unique};
 use crate::version::{self, ReviewedKind};
@@ -338,45 +341,45 @@ fn home_group(id: &BlockId, sides: &Sides, group_of: &BTreeMap<BlockId, usize>) 
     None
 }
 
-/// The doc list of the since page (rule 2): of the rows the home page's rule gives for the `to`
-/// side (a removed page titled as `from` held it), those that hold an entry of `order`, in the
-/// order of their first entries (the block diff's order). A doc that only lost a block another
-/// doc now holds has no row: that block's entry is in the doc that holds it. A row links to its
-/// doc's page only when the rendered site `site` has it.
+/// The doc list of the since page (rule 2), from the counted entries and the two states it
+/// compares, never from the home page's rows: each doc that holds an entry of `order` (in `to`,
+/// else in `from`, as [`home_group`] reads it), once, in the order of its first entry (the block
+/// diff's order). A doc `to` holds is a row as the home page builds it (its word, its counts); a
+/// doc only `from` held is a Removed row, titled as `from` held it. So a removed folder keeps a
+/// Removed row for each of its docs. A doc that only lost a block another doc now holds has no
+/// row: that block's entry is in the doc that holds it. A folder is not a doc and has no row. A
+/// row links to its doc's page only when the rendered site `site` has it.
 fn since_rows(
     site: &Site,
     rv: &Review,
     order: &[(BlockId, Change)],
     sides: &Sides,
 ) -> Vec<ChangeRow> {
-    let mut rows = home::changes(sides.text, rv);
-    for r in &mut rows {
-        r.href = site.page(&r.id).map(|p| rel("index.html", &p));
-        if r.mark == "removed"
-            && let Some(b) = sides.from.get(&r.id)
-        {
-            r.title = page_title(b, sides.from, sides.text);
+    let mut rows: Vec<ChangeRow> = vec![];
+    let mut seen: BTreeSet<&BlockId> = BTreeSet::new();
+    for (id, _) in order {
+        let Some(doc) = sides.to.doc_of(id).or_else(|| sides.from.doc_of(id)) else {
+            continue;
+        };
+        if !seen.insert(&doc.id) {
+            continue;
         }
+        let mut row = match sides.to.get(&doc.id).filter(|b| b.block_type == tree::DOC) {
+            Some(b) => {
+                let edited = DocChange {
+                    mark: Mark::Edited,
+                    edited: 0,
+                    new: 0,
+                    removed: 0,
+                };
+                home::doc_row(sides.text, b, rv.doc(&b.id).unwrap_or(&edited))
+            }
+            None => home::removed_row(doc, page_title(doc, sides.from, sides.text)),
+        };
+        row.href = site.page(&doc.id).map(|p| rel("index.html", &p));
+        rows.push(row);
     }
-    let at: BTreeMap<BlockId, usize> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (r.id.clone(), i))
-        .collect();
-    let mut first = vec![usize::MAX; rows.len()];
-    for (k, (id, _)) in order.iter().enumerate() {
-        if let Some(i) = home_group(id, sides, &at) {
-            first[i] = first[i].min(k);
-        }
-    }
-    let mut keyed: Vec<(usize, usize, ChangeRow)> = rows
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| first[*i] != usize::MAX)
-        .map(|(i, r)| (first[i], i, r))
-        .collect();
-    keyed.sort_by_key(|(f, i, _)| (*f, *i));
-    keyed.into_iter().map(|(_, _, r)| r).collect()
+    rows
 }
 
 /// A block as `to` holds it, else as `from` held it, with the side that holds it.
