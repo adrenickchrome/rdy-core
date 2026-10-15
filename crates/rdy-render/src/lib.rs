@@ -662,12 +662,12 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
                 Scope::Inflight => None,
             };
             let tag = v.landing.parse::<Hash>().ok().map(Scope::At);
-            tag.zip(to).map(|(tag, to)| (v.name.clone(), tag, to))
+            tag.zip(to).map(|(tag, to)| (v.name.clone(), n, tag, to))
         }
         _ => None,
     };
     let mut since_summary: Option<changes::Summary> = None;
-    if let Some((name, tag, to)) = since_of {
+    if let Some((name, landings, tag, to)) = since_of {
         if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::SINCE_PAGE) {
             summary.warnings.push(since_doc_kept(&name));
         } else {
@@ -688,7 +688,10 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
                 &rv,
                 Some(&diff),
                 &sides,
-                &changes::Of::Since(name),
+                &changes::Of::Since {
+                    tag: name,
+                    landings,
+                },
             );
             since_summary = Some(s);
         }

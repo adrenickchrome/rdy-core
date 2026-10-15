@@ -62,7 +62,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
         h.contains("<span class=\"pill-text\">v0.1.0</span></a> <a class=\"chip chip-since\" href=\"changes-since.html\" title=\"1 landing since v0.1.0\" aria-label=\"1 landing since v0.1.0\">+1</a></span>")
-            && h.contains("Tiny, <span data-rdy-label>v0.1.0, 1 change since</span>."),
+            && h.contains("Tiny, <span data-rdy-label>v0.1.0, 1 update since</span>."),
         "{h}"
     );
     let v: rdy_model::Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();

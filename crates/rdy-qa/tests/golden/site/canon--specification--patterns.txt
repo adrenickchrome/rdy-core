@@ -908,7 +908,7 @@ chrome	L	Previous
 chrome	L	Overview
 chrome	L	Next
 chrome	L	How a match runs
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since.
 chrome	L	On this page
 chrome	L	On this page
 chrome	L	Summary

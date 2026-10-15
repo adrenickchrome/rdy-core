@@ -140,6 +140,40 @@ fn sr6_a_review_site_has_its_change_summary() {
     assert_eq!(list_rows(&page), list_rows(&read(out.path(), "index.html")));
 }
 
+/// F7 (visual review 2.11; founder card 2026-10-15 "Page explains both"): the since chip and the
+/// footer count landings, and the since page they lead to says how many landings, then the
+/// blocks and docs those landings changed, so the two counts never seem to disagree.
+#[test]
+fn sr17_the_since_page_explains_the_chip_count() {
+    let (_d, _r, _ids, out) = site_canon();
+    let home = read(out.path(), "index.html");
+    let chip = between(&home, "<a class=\"chip chip-since\"", "</a>").expect("the since chip");
+    assert!(chip.ends_with(">+2"), "{chip}");
+    assert!(chip.contains("title=\"2 landings since v1.0.0\""), "{chip}");
+    assert!(
+        home.contains("<span data-rdy-label>v1.0.0, 2 updates since</span>"),
+        "the footer counts the same landings: {home}"
+    );
+    let page = read(out.path(), "changes-since.html");
+    let blocks = entries(&page).len();
+    let docs = list_rows(&page).len();
+    assert!(
+        blocks > 1 && docs >= 1,
+        "guard: {blocks} blocks, {docs} docs"
+    );
+    let docs = if docs == 1 {
+        "1 doc".to_string()
+    } else {
+        format!("{docs} docs")
+    };
+    assert!(
+        page.contains(&format!(
+            "<p class=\"lede\">2 landings since v1.0.0 changed {blocks} blocks in {docs}.</p>"
+        )),
+        "{page}"
+    );
+}
+
 #[test]
 fn sr6_the_since_page_lists_the_changes_since_the_tag() {
     let (_d, r, _ids, out) = site_canon();
@@ -173,7 +207,7 @@ fn sr6_the_since_page_lists_the_changes_since_the_tag() {
     );
     let titles: Vec<String> = list_rows(&page).into_iter().map(|(t, _)| t).collect();
     assert_eq!(titles, docs, "{page}");
-    assert!(page.contains(" since v1.0.0.</p>"), "{page}");
+    assert!(page.contains(" landings since v1.0.0 changed "), "{page}");
 
     let (_d, _r, _ids, out) = site_frozen();
     assert!(
@@ -777,13 +811,14 @@ fn sr6_the_since_page_reads_its_docs_from_the_compared_states() {
     let canon = rendered(&r, &Scope::Canon);
     let canon_page = read(canon.path(), "changes-since.html");
     assert!(
-        canon_page.contains("<p class=\"lede\">1 change in 1 doc since v1.0.0.</p>"),
+        canon_page
+            .contains("<p class=\"lede\">1 landing since v1.0.0 changed 1 block in 1 doc.</p>"),
         "guard: {canon_page}"
     );
     let view = rendered(&r, &Scope::View("w".into()));
     let page = read(view.path(), "changes-since.html");
     assert!(
-        page.contains("<p class=\"lede\">1 change in 1 doc since v1.0.0.</p>"),
+        page.contains("<p class=\"lede\">1 landing since v1.0.0 changed 1 block in 1 doc.</p>"),
         "{page}"
     );
     let titles: Vec<String> = list_rows(&page).into_iter().map(|(t, _)| t).collect();
@@ -1090,7 +1125,7 @@ fn sr6_the_since_page_lists_only_the_docs_of_its_entries() {
     let out = rendered(&r, &Scope::Canon);
     let page = read(out.path(), "changes-since.html");
     assert!(
-        page.contains("<p class=\"lede\">1 change in 1 doc since v1.0.0.</p>"),
+        page.contains("<p class=\"lede\">1 landing since v1.0.0 changed 1 block in 1 doc.</p>"),
         "{page}"
     );
     let titles: Vec<String> = list_rows(&page).into_iter().map(|(t, _)| t).collect();
@@ -1258,7 +1293,7 @@ fn sr6_the_since_page_keeps_the_docs_of_a_removed_folder() {
     let got: Vec<(&str, &str)> = rows.iter().map(|(t, w)| (t.as_str(), w.as_str())).collect();
     assert_eq!(got, [("Alpha", "Removed"), ("Beta", "Removed")], "{page}");
     assert!(
-        page.contains("<p class=\"lede\">5 changes in 2 docs since v1.0.0.</p>"),
+        page.contains("<p class=\"lede\">1 landing since v1.0.0 changed 5 blocks in 2 docs.</p>"),
         "{page}"
     );
     // each doc's section holds its own entries

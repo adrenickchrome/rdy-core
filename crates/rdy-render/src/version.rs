@@ -59,17 +59,18 @@ fn kind_word(kind: ReviewedKind) -> &'static str {
 }
 
 /// The text of the colophon and the llms files (O10): `unversioned`, `v1.2.0`,
-/// `v1.2.0, 3 changes since`, then, for a review render, ` · view: {name}, {n} changes, not
+/// `v1.2.0, 3 updates since` (3 landings, F7), then, for a review render, ` · view: {name}, {n} changes, not
 /// landed` (or `proposal:`), or `, no changes yet` with no changed block. A frozen scope reads
 /// the same and says `frozen` through the flag.
 pub fn text_label(p: &VersionPosition, reviewed: Option<&Reviewed>) -> Label {
     let mut text = match &p.version {
         None => "unversioned".to_string(),
         Some(v) if p.landings_since == 0 => v.name.clone(),
+        // "updates" is the word of landings only (F7); a review says "changes"
         Some(v) => format!(
             "{}, {} since",
             v.name,
-            count(p.landings_since, "change", "changes")
+            count(p.landings_since, "update", "updates")
         ),
     };
     if let Some(r) = reviewed {
@@ -299,7 +300,11 @@ mod sr3 {
         assert_eq!(text_label(&pos(None, 0, false), None).text, "unversioned");
         assert_eq!(
             text_label(&pos(Some("v1.2.0"), 3, false), None).text,
-            "v1.2.0, 3 changes since"
+            "v1.2.0, 3 updates since"
+        );
+        assert_eq!(
+            text_label(&pos(Some("v1.2.0"), 1, false), None).text,
+            "v1.2.0, 1 update since"
         );
         let p = reviewed(ReviewedKind::Proposal, "Guest mode", None, 3);
         assert_eq!(
@@ -309,13 +314,35 @@ mod sr3 {
         let v = reviewed(ReviewedKind::View, "work", None, 1);
         assert_eq!(
             text_label(&pos(Some("v1.2.0"), 3, false), Some(&v)).text,
-            "v1.2.0, 3 changes since · view: work, 1 change, not landed"
+            "v1.2.0, 3 updates since · view: work, 1 change, not landed"
         );
         let none = reviewed(ReviewedKind::View, "work", None, 0);
         assert_eq!(
             text_label(&pos(None, 0, false), Some(&none)).text,
             "unversioned · view: work, no changes yet"
         );
+    }
+
+    /// F7: "updates" is the word of landings only; a view or proposal says "changes".
+    #[test]
+    fn sr17_updates_names_landings_and_never_a_review() {
+        for kind in [ReviewedKind::View, ReviewedKind::Proposal] {
+            let r = reviewed(kind, "work", Some("human:nick"), 2);
+            let p = pos(Some("v1.0.0"), 2, false);
+            let text = text_label(&p, Some(&r)).text;
+            let (version, review) = text.split_once(" · ").expect("two parts");
+            assert_eq!(version, "v1.0.0, 2 updates since");
+            assert!(!review.contains("update"), "{review}");
+            assert!(review.ends_with("2 changes, not landed"), "{review}");
+            let h = header(&p, Some(&r));
+            assert!(!h.review.unwrap().hover.contains("update"));
+            // the chip keeps its words: +N, counting landings
+            let since = h.since.unwrap();
+            assert_eq!(
+                (since.text.as_str(), since.hover.as_str()),
+                ("+2", "2 landings since v1.0.0")
+            );
+        }
     }
 
     #[test]

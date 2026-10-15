@@ -324,7 +324,7 @@ fn site17_the_version_label_uses_site_wording() {
     assert!(
         colophon
             .text
-            .starts_with("Structural pattern matching, v1.0.0, 2 changes since · view: editing, ")
+            .starts_with("Structural pattern matching, v1.0.0, 2 updates since · view: editing, ")
             && colophon.text.ends_with(" changes, not landed."),
         "{}",
         colophon.text

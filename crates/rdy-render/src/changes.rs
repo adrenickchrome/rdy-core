@@ -73,8 +73,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum Of {
     /// A view or a proposal version against its base.
     Review(ReviewedKind),
-    /// The landings since this tag.
-    Since(String),
+    /// The landings since a tag: the tag's name and how many landings (the since chip's count).
+    Since { tag: String, landings: u32 },
 }
 
 /// One row of the doc list.
@@ -165,6 +165,25 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// The since page's sentence (F7): the landings the chip counts, then the blocks and docs they
+/// changed: `3 landings since v1.0.0 changed 4 blocks in 2 docs.`, or with no changed block
+/// `… changed no blocks.`
+fn since_sentence(landings: u32, blocks: usize, docs: usize, tag: &str) -> String {
+    let lead = format!(
+        "{} since {tag} changed",
+        plural(landings as usize, "landing", "landings")
+    );
+    if blocks == 0 {
+        format!("{lead} no blocks.")
+    } else {
+        format!(
+            "{lead} {} in {}.",
+            plural(blocks, "block", "blocks"),
+            plural(docs, "doc", "docs")
+        )
+    }
+}
+
 /// The summary of `rv` for the page `page` of `site`, and the word diff of each entry by block
 /// id (a review page carries an edited block's diff for Show diff). `diff` is the engine's block
 /// diff of the same two sides, when a scope names the `from` side.
@@ -221,7 +240,7 @@ pub fn summary(
     // rule 2: the rows, each with its section's anchor
     let rows: Vec<ChangeRow> = match of {
         Of::Review(_) => home::changes(site, rv),
-        Of::Since(_) => since_rows(site, rv, &order, sides),
+        Of::Since { .. } => since_rows(site, rv, &order, sides),
     };
     let mut taken = reserved_ids();
     let mut groups: Vec<Group> = vec![];
@@ -319,13 +338,9 @@ pub fn summary(
                 )
             },
         ),
-        Of::Since(tag) => (
+        Of::Since { tag, landings } => (
             format!("Changes since {tag}"),
-            format!(
-                "{} in {} since {tag}.",
-                plural(n, "change", "changes"),
-                plural(d, "doc", "docs")
-            ),
+            since_sentence(*landings, n, d, tag),
         ),
     };
     (
@@ -755,6 +770,24 @@ mod tests {
             format!(
                 "<pre class=\"code chg-diff\" data-rdy=\"content\"><code>{DEL}a\u{E000}</del>{INS}a\u{E001}</ins></code></pre>"
             )
+        );
+    }
+
+    /// F7 (visual review, founder card 2026-10-15): the since page names the landings its chip
+    /// counts, then the blocks and docs they changed.
+    #[test]
+    fn sr17_the_since_sentence_counts_landings_then_blocks_and_docs() {
+        assert_eq!(
+            since_sentence(3, 1, 1, "v1.0.0"),
+            "3 landings since v1.0.0 changed 1 block in 1 doc."
+        );
+        assert_eq!(
+            since_sentence(1, 5, 2, "v1.0.0"),
+            "1 landing since v1.0.0 changed 5 blocks in 2 docs."
+        );
+        assert_eq!(
+            since_sentence(2, 0, 0, "v0.4.0"),
+            "2 landings since v0.4.0 changed no blocks."
         );
     }
 

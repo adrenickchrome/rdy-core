@@ -227,7 +227,7 @@ chrome	L	Previous
 chrome	L	The match statement and its patterns
 chrome	L	Next
 chrome	L	The bottom
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since.
 chrome	L	On this page
 chrome	L	On this page
 chrome	L	Evaluation order

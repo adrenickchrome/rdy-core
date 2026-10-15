@@ -334,7 +334,7 @@ fn ls2_a_new_label_goes_only_into_the_recorded_ranges() {
     let mut b = build_live(&r.read(), &Scope::Canon, "/").unwrap();
     assert!(b.label.contains("unversioned"), "guard: {}", b.label);
     let old = b.label.clone();
-    b.label = "v9 <&>, 3 changes since".into();
+    b.label = "v9 <&>, 3 updates since".into();
     let html = String::from_utf8(page(&b, "alpha.html", "canon").unwrap()).unwrap();
     // the colophon holds the label; the header holds the pill and its chips (sr5)
     assert_eq!(html.matches(&escape(&b.label)).count(), 1, "{html}");

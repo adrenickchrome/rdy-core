@@ -163,7 +163,7 @@ fn sr5_the_colophon_and_llms_keep_the_text_label() {
     let (_d, _r, _ids, out) = site_canon();
     assert!(
         read(out.path(), "index.html").contains(
-            "<p class=\"colophon\">Structural pattern matching, <span data-rdy-label>v1.0.0, 2 changes since</span>.</p>"
+            "<p class=\"colophon\">Structural pattern matching, <span data-rdy-label>v1.0.0, 2 updates since</span>.</p>"
         ),
         "{}",
         read(out.path(), "index.html")
@@ -280,7 +280,7 @@ fn sr5_a_landing_patches_the_header_and_reloads_only_changed_pages() {
             d.reload
         );
     }
-    assert_eq!(d.label.as_deref(), Some("v1.0.0, 3 changes since"));
+    assert_eq!(d.label.as_deref(), Some("v1.0.0, 3 updates since"));
     assert!(
         after.header.contains(&since_chip("/", 3, "v1.0.0")),
         "{}",

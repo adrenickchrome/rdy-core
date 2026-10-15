@@ -47,7 +47,7 @@ fn ls1_build_site_is_what_render_writes() {
     for (path, bytes) in &written {
         assert!(built.files[path] == *bytes, "{path} differs");
     }
-    assert_eq!(built.label, "v1.0.0, 2 changes since");
+    assert_eq!(built.label, "v1.0.0, 2 updates since");
     assert_eq!(
         built.header, "",
         "a static build writes its header per page root"
@@ -235,7 +235,7 @@ fn ls1_a_live_build_filled_is_the_static_build() {
         assert!(unlive(path, bytes) == b[path], "{path}");
     }
     // filled with another label, the two builds still agree
-    let other = "v9.9.9 <&> \u{E002}, 1 change since";
+    let other = "v9.9.9 <&> \u{E002}, 1 update since";
     let (a, b) = (fill(&live, other, HEADER), fill(&stat, other, HEADER));
     for (path, bytes) in &a {
         assert!(unlive(path, bytes) == b[path], "{path}");
@@ -281,7 +281,7 @@ fn ls1_a_label_lookalike_in_content_is_never_filled() {
     for (path, bytes) in &a {
         assert!(unlive(path, bytes) == b[path], "{path}");
     }
-    let other = "v2.0.0, 1 change since";
+    let other = "v2.0.0, 1 update since";
     let (a, b) = (fill(&live, other, HEADER), fill(&stat, other, HEADER));
     assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
     for (path, bytes) in &a {

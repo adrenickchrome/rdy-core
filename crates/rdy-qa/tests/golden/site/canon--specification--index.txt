@@ -89,4 +89,4 @@ chrome	-	What each pattern kind matches, what it binds, and what is left undefin
 chrome	-	The match statement and its patterns
 chrome	-	How a match runs
 chrome	-	Depth 0
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since.

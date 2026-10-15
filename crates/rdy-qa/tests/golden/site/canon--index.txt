@@ -106,4 +106,4 @@ chrome	L	Versions
 chrome	L	v1.0.0
 chrome	L	(current)
 chrome	-	<landing date> · Accepted by the Steering Council
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since.

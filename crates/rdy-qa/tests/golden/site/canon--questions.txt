@@ -94,4 +94,4 @@ chrome	L	from Precise semantics for pattern matching › Questions
 chrome	-	Open question:
 chrome	-	Should a class be able to opt into matching itself rather than being taken apart?
 chrome	L	from Precise semantics for pattern matching › Questions
-chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	Structural pattern matching, v1.0.0, 2 updates since.
