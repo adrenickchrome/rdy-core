@@ -2,7 +2,7 @@
 //! reading order of the newer scope, with word pieces for each changed body.
 use std::collections::BTreeSet;
 
-use rdy_engine::diff::{Diff, DiffChange, DiffCounts, DiffEntry};
+use rdy_engine::diff::{Diff, DiffChange, DiffCounts, DiffEntry, FieldChange, FromTo};
 use rdy_engine::worddiff::{Op, Piece};
 use rdy_engine::{Materialized, Rdy, Scope};
 use rdy_model::BlockId;
@@ -229,12 +229,10 @@ fn sr4_an_order_change_alone_is_reordered_only() {
         assert_eq!(moved.to_parent.as_ref(), Some(&ids.summary));
         assert_eq!(e.body, None);
     }
-    let names: Vec<&str> = entry(&diff, &ids.kept)
-        .fields
-        .iter()
-        .map(|f| f.name.as_str())
-        .collect();
-    assert_eq!(names, vec!["order"]);
+    // the order key is structure, not a field (task-4 ruling 1): the move says it
+    for e in &diff.entries {
+        assert!(e.fields.is_empty(), "{}: {:?}", e.id, e.fields);
+    }
     assert_eq!(diff.counts.moved, diff.entries.len());
     assert_eq!(diff.counts.updated, 0);
 }
@@ -319,4 +317,249 @@ fn sr4_the_diff_is_the_same_every_time() {
         serde_json::to_string(&a).unwrap(),
         serde_json::to_string(&b).unwrap()
     );
+}
+
+/// `prose` with four custom string fields, three named like structure (task-4 ruling 1).
+const FIELDS_PACK: &str = "name: f\nversion: '1'\nextends: rdy-standard\nblock_types:\n  prose:\n    prefix: p\n    traits: [informative]\n    body: required\n    fields:\n      links: { kind: str }\n      order: { kind: str }\n      body: { kind: str }\n      normal: { kind: str }\n";
+
+/// A landed doc whose section holds two proses, `a` then `b`, each with every custom field
+/// set to "old", then an entity: (dir, rdy, section, a, b, entity).
+fn fields_project() -> (tempfile::TempDir, Rdy, BlockId, BlockId, BlockId, BlockId) {
+    let (dir, r) = tiny();
+    // the store is locked while a handle is open
+    drop(r);
+    rdy_qa::packs::use_pack(dir.path(), "f", FIELDS_PACK, "name: Fields\n");
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let old = json!({"links": "old", "order": "old", "body": "old", "normal": "old"});
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "f", "title": "F", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+        {"op": "create", "type": "prose", "id": "$a", "parent": "$s", "body": "First.", "fields": old},
+        {"op": "create", "type": "prose", "id": "$b", "parent": "$s", "body": "Second.", "fields": old},
+        {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Thing"}}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = |k: &str| BlockId::parse(&res.created[k]).unwrap();
+    let (s, a, b, e) = (id("$s"), id("$a"), id("$b"), id("$e"));
+    (dir, r, s, a, b, e)
+}
+
+fn old_to_new(name: &str) -> FieldChange {
+    FieldChange {
+        name: name.to_string(),
+        from: Some(json!("old")),
+        to: Some(json!("new")),
+    }
+}
+
+#[test]
+fn sr4_custom_fields_named_like_structure_diff_as_fields() {
+    let (_d, mut r, _s, a, _b, _e) = fields_project();
+    for name in ["links", "order", "body", "normal"] {
+        let view = format!("cf{name}");
+        write(
+            &mut r,
+            &view,
+            json!([{"op": "update", "id": a.to_string(), "fields": {name: "new"}}]),
+        )
+        .unwrap();
+        let view = Scope::View(view);
+        let diff = r.read().diff(&Scope::Canon, &view).unwrap();
+        assert_eq!(entry_ids(&diff), vec![a.clone()], "{name}");
+        let e = entry(&diff, &a);
+        assert_eq!(e.change, DiffChange::Updated, "{name}");
+        assert_eq!(e.fields, vec![old_to_new(name)], "{name}");
+        assert_eq!(e.moved, None, "{name}");
+        assert_eq!(e.body, None, "{name}");
+        assert_eq!(e.links, None, "{name}");
+        assert_eq!(e.type_change, None, "{name}");
+        assert_eq!(
+            diff.counts,
+            DiffCounts {
+                added: 0,
+                removed: 0,
+                updated: 1,
+                moved: 0
+            },
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn sr4_custom_field_and_real_move_together() {
+    let (_d, mut r, s, a, b, thing) = fields_project();
+    // `a` gets a new custom `order` and moves after `b`: a field change and a real reorder;
+    // `b` gets a new custom `links` and a real link
+    write(
+        &mut r,
+        "both",
+        json!([{"op": "update", "id": a.to_string(), "fields": {"order": "new"},
+                "move_to": {"parent": s.to_string(), "after": b.to_string()}},
+               {"op": "update", "id": b.to_string(), "fields": {"links": "new"},
+                "links": {"describes": [{"target": thing.to_string()}]}}]),
+    )
+    .unwrap();
+    let view = Scope::View("both".into());
+    let st = r.read();
+    let diff = st.diff(&Scope::Canon, &view).unwrap();
+    let to = st.materialized(&view).unwrap();
+    assert_eq!(
+        children(&to, &s),
+        vec![b.clone(), a.clone(), thing.clone()],
+        "the move landed"
+    );
+    assert_eq!(entry_ids(&diff), vec![b.clone(), a.clone()]);
+    let e = entry(&diff, &a);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert_eq!(e.fields, vec![old_to_new("order")]);
+    let moved = e.moved.as_ref().expect("the real reorder is reported");
+    assert!(moved.reordered_only);
+    assert_eq!(moved.from_parent.as_ref(), Some(&s));
+    assert_eq!(moved.to_parent.as_ref(), Some(&s));
+    assert_eq!(e.links, None);
+    // the custom `links` is a field; the real link list is the entry's own `links`
+    let e = entry(&diff, &b);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert_eq!(e.fields, vec![old_to_new("links")]);
+    assert_eq!(e.moved, None);
+    let links = e.links.as_ref().expect("the real link change is reported");
+    assert_eq!(links.from, json!({}));
+    assert!(
+        links.to.to_string().contains(&thing.to_string()),
+        "{links:?}"
+    );
+    assert_eq!(
+        diff.counts,
+        DiffCounts {
+            added: 0,
+            removed: 0,
+            updated: 2,
+            moved: 0
+        }
+    );
+}
+
+/// The review project with one more view, `retype`, that writes `ops(ids)`; then its diff from
+/// its base.
+fn retyped(
+    ops: impl Fn(&ReviewIds) -> serde_json::Value,
+) -> (tempfile::TempDir, Rdy, ReviewIds, Diff) {
+    let (d, mut r, ids) = review_project();
+    write(&mut r, "retype", ops(&ids)).unwrap();
+    let view = Scope::View("retype".into());
+    let diff = r.read().diff(&base(&r, &view), &view).unwrap();
+    (d, r, ids, diff)
+}
+
+#[test]
+fn sr4_type_only_change_is_an_update() {
+    let (_d, _r, ids, diff) =
+        retyped(|ids| json!([{"op": "update", "id": ids.kept.to_string(), "type": "note"}]));
+    assert_eq!(entry_ids(&diff), vec![ids.kept.clone()]);
+    let e = entry(&diff, &ids.kept);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert_eq!(e.block_type, "note");
+    assert_eq!(
+        e.type_change,
+        Some(FromTo {
+            from: "prose".to_string(),
+            to: "note".to_string()
+        })
+    );
+    assert_eq!(e.moved, None);
+    assert!(e.fields.is_empty(), "{:?}", e.fields);
+    assert_eq!(e.body, None);
+    // its own member, apart from the fields, so a custom field named `type` cannot collide
+    let json = serde_json::to_value(e).unwrap();
+    assert_eq!(json["type"], json!({"from": "prose", "to": "note"}));
+    assert_eq!(
+        diff.counts,
+        DiffCounts {
+            added: 0,
+            removed: 0,
+            updated: 1,
+            moved: 0
+        }
+    );
+}
+
+#[test]
+fn sr4_type_change_and_reorder() {
+    let (_d, _r, ids, diff) = retyped(|ids| {
+        json!([{"op": "update", "id": ids.kept.to_string(), "type": "note",
+                "move_to": {"parent": ids.summary.to_string(), "after": ids.edited.to_string()}}])
+    });
+    assert_eq!(entry_ids(&diff), vec![ids.kept.clone()]);
+    let e = entry(&diff, &ids.kept);
+    assert_eq!(e.change, DiffChange::Updated);
+    let moved = e.moved.as_ref().expect("the reorder is reported");
+    assert!(moved.reordered_only);
+    assert_eq!(moved.from_parent.as_ref(), Some(&ids.summary));
+    assert_eq!(moved.to_parent.as_ref(), Some(&ids.summary));
+    assert_eq!(
+        e.type_change,
+        Some(FromTo {
+            from: "prose".to_string(),
+            to: "note".to_string()
+        })
+    );
+    assert!(e.fields.is_empty(), "{:?}", e.fields);
+    assert_eq!(
+        diff.counts,
+        DiffCounts {
+            added: 0,
+            removed: 0,
+            updated: 1,
+            moved: 0
+        }
+    );
+}
+
+#[test]
+fn sr4_type_change_and_parent_move() {
+    let (_d, r, ids, diff) = retyped(|ids| {
+        json!([{"op": "update", "id": ids.kept.to_string(), "type": "note",
+                "move_to": {"parent": ids.keep_summary.to_string()}}])
+    });
+    assert_eq!(entry_ids(&diff), vec![ids.kept.clone()]);
+    let e = entry(&diff, &ids.kept);
+    assert_eq!(e.change, DiffChange::Updated);
+    assert_eq!(e.block_type, "note");
+    let moved = e.moved.as_ref().expect("the parent move is reported");
+    assert!(!moved.reordered_only);
+    assert_eq!(moved.from_parent.as_ref(), Some(&ids.summary));
+    assert_eq!(moved.to_parent.as_ref(), Some(&ids.keep_summary));
+    assert_eq!(e.doc.as_ref(), Some(&ids.keep));
+    assert_eq!(
+        e.type_change,
+        Some(FromTo {
+            from: "prose".to_string(),
+            to: "note".to_string()
+        })
+    );
+    assert!(e.fields.is_empty(), "{:?}", e.fields);
+    assert_eq!(e.body, None);
+    assert_eq!(
+        diff.counts,
+        DiffCounts {
+            added: 0,
+            removed: 0,
+            updated: 1,
+            moved: 0
+        }
+    );
+    // the compare reports the type change at its source, as well as the move
+    let st = r.read();
+    let view = Scope::View("retype".into());
+    let cmp = st.compare(&view, &base(&r, &view)).unwrap();
+    let changed: Vec<&rdy_engine::CompareEntry> = cmp
+        .changed
+        .iter()
+        .filter(|c| c.id == ids.kept.to_string())
+        .collect();
+    assert_eq!(changed.len(), 1, "{cmp:?}");
+    assert_eq!(changed[0].fields, vec!["type".to_string()]);
+    assert_eq!(cmp.moved.len(), 1, "{cmp:?}");
 }

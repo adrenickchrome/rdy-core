@@ -8,18 +8,22 @@
 //! The rules (closed):
 //!
 //! 1. **Entries.** One per id in `compare(to, from)`'s `added` (→ [`DiffChange::Added`]),
-//!    `deleted` (→ [`DiffChange::Removed`]), `changed` and `moved`. A changed block whose
-//!    fields are only `order` is [`DiffChange::Moved`] with `reordered_only: true`. A block
-//!    whose parent differs is `Moved` (`reordered_only: false`), or
-//!    [`DiffChange::MovedAndUpdated`] when any other field differs. A block with other changed
-//!    fields is [`DiffChange::Updated`], or `MovedAndUpdated` when `order` is among them
-//!    (`reordered_only: true`). A pins-only change (no field differs) is `Updated` with no
-//!    fields: the engine reports it, and the renderer leaves it out.
+//!    `deleted` (→ [`DiffChange::Removed`]), `changed` and `moved`. For a block on both sides
+//!    (task-4 rulings 1 and 2):
+//!    - its content changed when its body, its links, its type or any custom field differs;
+//!    - its place changed when its parent differs, or, under the same parent, its order key
+//!      (`reordered_only: true`);
+//!    - content changed: [`DiffChange::Updated`], with `moved` set when its place also changed;
+//!    - only its place changed: [`DiffChange::Moved`];
+//!    - neither (a pins-only change): `Updated` with nothing set. The engine reports it, and
+//!      the renderer leaves it out.
 //! 2. **`doc`.** The doc that holds the block: in `to`, or in `from` for a removed block. A doc's
 //!    own entry names itself. A folder has none.
-//! 3. **`fields`.** Each name the compare gives, with the value from each side (`Block.fields`
-//!    as JSON, `links` as the link list, `order` as the key). `body` is not in `fields`: it is
-//!    the `body` pieces.
+//! 3. **`fields`.** The custom fields whose values differ, by name, with the value from each side
+//!    (`Block.fields` as JSON). They are read only from the field map, and structure only from
+//!    the block's own members, so a custom field named `body`, `links`, `order` or `type` is an
+//!    ordinary field. The structure has its own members: `type` and `links` (each `from` and
+//!    `to`), `body` (the pieces) and `moved`.
 //! 4. **`body`.** `worddiff::diff(from.body, to.body, unit)` when the bodies differ, with
 //!    [`Unit::Lines`] for a `code` block, else [`Unit::Words`]. An added block has
 //!    `[Add(body)]` and a removed one `[Del(body)]`, when the body is not empty.
@@ -28,8 +32,8 @@
 //!    in `to`. With none, it goes after every entry of its old parent's subtree in `to` (the
 //!    nearest old ancestor still in `to`; the end when there is none). A removed subtree keeps
 //!    `from`'s order.
-//! 6. **Counts.** `added`, `removed`, `updated` (`Updated` and `MovedAndUpdated`) and `moved`
-//!    (`Moved` and `MovedAndUpdated`).
+//! 6. **Counts.** One per entry, by its change: `added`, `removed`, `updated` and `moved`. An
+//!    `Updated` entry that also moved counts once, under `updated`.
 //!
 //! `path` is the block's own path for a doc or a folder, as the compare gives it. In [`Moved`],
 //! `from_path` and `to_path` say where the block is on each side: its own path for a doc or a
@@ -64,9 +68,17 @@ use crate::{Materialized, Scope};
 pub enum DiffChange {
     Added,
     Removed,
+    /// Its content changed; `moved` says whether its place changed too.
     Updated,
+    /// Only its place changed.
     Moved,
-    MovedAndUpdated,
+}
+
+/// One structural member's value on each side.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FromTo<T> {
+    pub from: T,
+    pub to: T,
 }
 
 /// Where a moved block was and where it is.
@@ -100,8 +112,15 @@ pub struct DiffEntry {
     pub change: DiffChange,
     pub from_version: Option<Hash>,
     pub to_version: Option<Hash>,
+    /// Where the block was and is, when its place changed.
     pub moved: Option<Moved>,
+    /// The block's type on each side, when it changed (`type` in JSON).
+    #[serde(rename = "type")]
+    pub type_change: Option<FromTo<String>>,
+    /// The custom fields that changed (rule 3).
     pub fields: Vec<FieldChange>,
+    /// The block's link list on each side, when it changed.
+    pub links: Option<FromTo<serde_json::Value>>,
     /// The word pieces of the body (rule 4); `None` when the body did not change.
     pub body: Option<Vec<Piece>>,
 }
@@ -157,12 +176,22 @@ fn parse_id(text: &str) -> Result<BlockId, RdyError> {
     })
 }
 
-fn field_value(b: &Block, name: &str) -> Option<serde_json::Value> {
-    match name {
-        "links" => serde_json::to_value(&b.links).ok(),
-        "order" => Some(serde_json::Value::String(b.order.clone())),
-        _ => b.fields.get(name).map(field_json),
-    }
+/// The custom fields whose values differ, by name (rule 3: the field maps only).
+fn changed_fields(old: &Block, new: &Block) -> Vec<FieldChange> {
+    let names: BTreeSet<&String> = old.fields.keys().chain(new.fields.keys()).collect();
+    names
+        .into_iter()
+        .filter(|n| old.fields.get(*n) != new.fields.get(*n))
+        .map(|n| FieldChange {
+            name: n.clone(),
+            from: old.fields.get(n).map(field_json),
+            to: new.fields.get(n).map(field_json),
+        })
+        .collect()
+}
+
+fn links_json(b: &Block) -> serde_json::Value {
+    serde_json::to_value(&b.links).unwrap_or(serde_json::Value::Null)
 }
 
 fn unit_of(b: &Block) -> Unit {
@@ -185,48 +214,32 @@ fn doc_of(m: &Materialized, id: &BlockId) -> Option<BlockId> {
     m.doc_of(id).map(|d| d.id.clone())
 }
 
-/// One entry for a block on both sides; `names` are the compare's field names.
-fn both_sides(
-    from: &Materialized,
-    to: &Materialized,
-    old: &Block,
-    new: &Block,
-    names: &[String],
-) -> DiffEntry {
-    let parent_moved = old.parent != new.parent;
-    let has_order = names.iter().any(|n| n == "order");
-    let others = names.iter().any(|n| n != "order");
-    let (change, reordered_only) = if parent_moved {
-        let change = if names.is_empty() {
-            DiffChange::Moved
-        } else {
-            DiffChange::MovedAndUpdated
-        };
-        (change, Some(false))
-    } else if has_order && !others {
-        (DiffChange::Moved, Some(true))
-    } else if has_order {
-        (DiffChange::MovedAndUpdated, Some(true))
-    } else {
-        (DiffChange::Updated, None)
-    };
-    let moved = reordered_only.map(|reordered_only| Moved {
+/// One entry for a block on both sides (rules 1 to 4, from the blocks' own members).
+fn both_sides(from: &Materialized, to: &Materialized, old: &Block, new: &Block) -> DiffEntry {
+    let fields = changed_fields(old, new);
+    let type_change = (old.block_type != new.block_type).then(|| FromTo {
+        from: old.block_type.clone(),
+        to: new.block_type.clone(),
+    });
+    let links = (old.links != new.links).then(|| FromTo {
+        from: links_json(old),
+        to: links_json(new),
+    });
+    let body = (old.body != new.body).then(|| worddiff::diff(&old.body, &new.body, unit_of(new)));
+    let content = !fields.is_empty() || type_change.is_some() || links.is_some() || body.is_some();
+    let same_parent = old.parent == new.parent;
+    let moved = (!same_parent || old.order != new.order).then(|| Moved {
         from_parent: old.parent.clone(),
         to_parent: new.parent.clone(),
         from_path: from.path_of(&old.id),
         to_path: to.path_of(&new.id),
-        reordered_only,
+        reordered_only: same_parent,
     });
-    let fields = names
-        .iter()
-        .filter(|n| *n != "body")
-        .map(|n| FieldChange {
-            name: n.clone(),
-            from: field_value(old, n),
-            to: field_value(new, n),
-        })
-        .collect();
-    let body = (old.body != new.body).then(|| worddiff::diff(&old.body, &new.body, unit_of(new)));
+    let change = if !content && moved.is_some() {
+        DiffChange::Moved
+    } else {
+        DiffChange::Updated
+    };
     DiffEntry {
         id: new.id.clone(),
         block_type: new.block_type.clone(),
@@ -236,7 +249,9 @@ fn both_sides(
         from_version: Some(old.version_hash()),
         to_version: Some(new.version_hash()),
         moved,
+        type_change,
         fields,
+        links,
         body,
     }
 }
@@ -264,7 +279,9 @@ fn one_side(m: &Materialized, b: &Block, added: bool) -> DiffEntry {
         from_version: if added { None } else { version },
         to_version: if added { version } else { None },
         moved: None,
+        type_change: None,
         fields: vec![],
+        links: None,
         body,
     }
 }
@@ -299,19 +316,12 @@ impl ReadState {
         let cmp = self.compare(to, from)?;
         let (mf, mt) = (self.materialized(from)?, self.materialized(to)?);
 
-        // the compare's field names per id, merged over `changed` and `moved`
-        let mut both: BTreeMap<BlockId, Vec<String>> = BTreeMap::new();
-        for e in cmp.changed.iter().chain(&cmp.moved) {
-            let names = both.entry(parse_id(&e.id)?).or_default();
-            for n in &e.fields {
-                if !names.contains(n) {
-                    names.push(n.clone());
-                }
-            }
-        }
+        // the ids only: each entry reads its blocks' own members (rule 3)
         let ids = |list: &[CompareEntry]| -> Result<BTreeSet<BlockId>, RdyError> {
             list.iter().map(|e| parse_id(&e.id)).collect()
         };
+        let mut both = ids(&cmp.changed)?;
+        both.extend(ids(&cmp.moved)?);
         let added = ids(&cmp.added)?;
         let removed = ids(&cmp.deleted)?;
 
@@ -332,12 +342,12 @@ impl ReadState {
 
         // (place in `to`, before (0) or at (1) that place, `from` index) sorts the entries
         let mut keyed: Vec<((usize, u8, usize), DiffEntry)> = vec![];
-        for (id, names) in &both {
+        for id in &both {
             let (Some(old), Some(new)) = (mf.get(id), mt.get(id)) else {
                 continue;
             };
             let at = to_pos.get(id).map_or(to_order.len(), |p| p.0);
-            keyed.push(((at, 1, 0), both_sides(&mf, &mt, old, new, names)));
+            keyed.push(((at, 1, 0), both_sides(&mf, &mt, old, new)));
         }
         for id in &added {
             if let Some(b) = mt.get(id) {
@@ -362,10 +372,6 @@ impl ReadState {
                 DiffChange::Removed => counts.removed += 1,
                 DiffChange::Updated => counts.updated += 1,
                 DiffChange::Moved => counts.moved += 1,
-                DiffChange::MovedAndUpdated => {
-                    counts.updated += 1;
-                    counts.moved += 1;
-                }
             }
         }
         Ok(Diff { entries, counts })
