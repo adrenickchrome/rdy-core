@@ -1,7 +1,7 @@
 use crate::glob::Glob;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
-use rdy_model::tree;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
+use rdy_model::{decision, tree};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -22,6 +22,9 @@ pub struct Issue {
 
 /// The engine field naming the code a block reflects: a list of path globs, on content block types.
 pub const REFLECTS_FIELD: &str = "reflects";
+
+/// The question field holding the labels of its card's options.
+const QUESTION_OPTIONS: &str = "options";
 
 /// The most path globs one `reflects` field may hold.
 pub const MAX_REFLECTS_GLOBS: usize = 32;
@@ -226,6 +229,19 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
             }
             Some(_) => {}
         }
+    }
+    // A question's options are its card's labels: every entry is a string (FW-I1). Other list
+    // fields hold what their type says and are not checked here.
+    if block.block_type == decision::QUESTION
+        && let Some(FieldValue::List(items)) = block.fields.get(QUESTION_OPTIONS)
+        && items.iter().any(|v| v.as_str().is_none())
+    {
+        out.push(err(
+            block,
+            "E_FIELD_KIND",
+            format!("field {QUESTION_OPTIONS:?} must be a list of strings"),
+            format!("write {QUESTION_OPTIONS} as a list of strings"),
+        ));
     }
     for (name, fd) in &def.fields {
         if fd.required && !block.fields.contains_key(name) {

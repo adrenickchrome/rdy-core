@@ -65,7 +65,7 @@ pub fn card_words_issues(id: &BlockId, block_type: &str, fields: &Fields) -> Vec
     }
     let recommended;
     if question {
-        // Every entry of the list counts, a string or not: a non-string is named, never dropped.
+        // Every entry of the list counts; a non-string entry is refused by the question schema.
         let entries: &[FieldValue] = match fields.get("options") {
             Some(FieldValue::List(items)) => items,
             _ => &[],
@@ -76,13 +76,6 @@ pub fn card_words_issues(id: &BlockId, block_type: &str, fields: &Fields) -> Vec
                 id,
                 format!("{id} has {} options", entries.len()),
                 "give two to four options".to_string(),
-            ));
-        }
-        if options.len() < entries.len() {
-            out.push(warn(
-                id,
-                format!("{id}: options holds an entry that is not a string"),
-                "make every option a string".to_string(),
             ));
         }
         for o in &options {

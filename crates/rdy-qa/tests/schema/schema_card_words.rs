@@ -245,31 +245,41 @@ fn di3_a_question_with_one_option_warns() {
         card_issues(&q.warnings)[0].0,
         format!("{}: options is longer than 60 characters", q.created["$q"])
     );
-    // a non-string entry is counted and named, never dropped
-    let q = question(&mut r, &s, with(json!(["Finance", "Support", 1, 2, 3])));
-    let id = &q.created["$q"];
-    assert_eq!(
-        card_issues(&q.warnings),
-        vec![
-            (
-                format!("{id} has 5 options"),
-                "give two to four options".to_string()
-            ),
-            (
-                format!("{id}: options holds an entry that is not a string"),
-                "make every option a string".to_string()
-            ),
-        ]
+    // a non-string entry is refused by the question's schema, with a valid title and why
+    for options in [
+        json!(["Finance", "Support", 1, 2, 3]),
+        json!(["Finance", 1]),
+    ] {
+        let mut f = json!({"prompt": "Who approves refunds?"});
+        f.as_object_mut()
+            .unwrap()
+            .extend(with(options.clone()).as_object().unwrap().clone());
+        let e = write(
+            &mut r,
+            "work",
+            json!([{"op": "create", "type": "question", "id": "$q", "parent": s, "fields": f}]),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "E_VALIDATION", "{options}: {e:?}");
+        assert_eq!(e.message, "field \"options\" must be a list of strings");
+        assert_eq!(e.fix, "write options as a list of strings");
+        assert!(
+            e.issues.iter().any(|i| i.code == "E_FIELD_KIND"),
+            "{options}: {:?}",
+            e.issues
+        );
+    }
+    // the same list on a decision is not touched by the question rule
+    let dec = decide(
+        &mut r,
+        &s,
+        DecisionInput {
+            title: Some("t".into()),
+            why: Some("w".into()),
+            ..Default::default()
+        },
     );
-    let q = question(&mut r, &s, with(json!(["Finance", 1])));
-    let id = &q.created["$q"];
-    assert_eq!(
-        card_issues(&q.warnings),
-        vec![(
-            format!("{id}: options holds an entry that is not a string"),
-            "make every option a string".to_string()
-        )]
-    );
+    assert!(card_issues(&dec.warnings).is_empty(), "{:?}", dec.warnings);
     // no options at all is not a card-words issue: the question is not a card
     let q = question(&mut r, &s, base);
     assert!(card_issues(&q.warnings).is_empty(), "{:?}", q.warnings);
