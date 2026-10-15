@@ -3,13 +3,14 @@
 //! the events below match here.
 use super::Entry;
 use super::inflight::RunInFlight;
-use crate::gate::{ProposalRef, landed_as, version_number};
+use crate::gate::{ProposalRef, version_number};
 use crate::semantic::candidates::Request;
-use crate::tensions::semantic::pair_of;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
-use rdy_model::{BlockId, Hash, Op, Proposal};
+use rdy_model::{BlockId, Hash, Op, PairItem, Proposal, ReviewSubject, Tracking};
 use rdy_store::inbox::InboxSub;
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// The areas that concern the session: its declared areas, or else the areas of the blocks its
 /// in-flight changes write (D-V4NZX).
@@ -199,13 +200,13 @@ pub fn match_event(
         }
         EventKind::ReviewSubmitted { review, pair, .. } => {
             // the verdict carries advice (read from the stored first version of the pair's
-            // tension, which this review opened), and it waits on the proposal version that met
-            // it first; neither reads whether the advice was answered since, or which version of
-            // the proposal is latest now, so the entry is the same on every read
+            // tension, which this review opened), and it waits on the proposal version that
+            // wrote its items; both are read from records that never change, so landing the
+            // proposal, answering the advice or publishing a later version changes no entry
             if !verdict_carries_advice(st, review, pair)? {
                 return Ok(None);
             }
-            match first_holding(st, pair)? {
+            match first_holding(st, review)? {
                 Some(pref) => entry(
                     "pending_added",
                     vec![review.to_string()],
@@ -232,14 +233,24 @@ fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<
     Ok(first.review == *review && first.advice.is_some())
 }
 
-/// The proposal version that first held the tension of `pair`: over the version chains of the
-/// proposals that have not landed, the oldest version whose landing form lists the pair's tension
-/// (open or dismissed, accepted or not, as `advised_of` finds it but with no status condition);
-/// ties go to the earlier time, then to the smaller version hash. A later version, a dismissal and
-/// an acceptance change none of it, so the same verdict names the same version on every read.
-fn first_holding(st: &ReadState, pair: &Hash) -> Result<Option<ProposalRef>, RdyError> {
+/// The proposal version that holds the pair `review` judged, read from records that never change:
+/// the review's two items (a block at a content) and the ops of the changes of every version of
+/// every proposal, landed or not. A version scores 1 for each item whose block one of its changes
+/// writes (creates or updates) at that content. Each proposal offers its oldest version of the
+/// best score; the proposal with the best score wins, then the one that offered its version last
+/// (the pair completes when the later of its items is written, so an older proposal that wrote the
+/// other item long ago does not take the entry), then the smaller version hash. Whether a proposal
+/// has landed, whether the tension is open, accepted or dismissed, and any later version change
+/// none of it, so the same verdict names the same version on every read. A review of a pair that
+/// no proposal writes gives none.
+fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, RdyError> {
     let reader = st.reader();
-    let mut best: Option<((i64, Hash), ProposalRef)> = None;
+    let ReviewSubject::Pair { items, .. } = reader.review(review)?.subject else {
+        return Ok(None);
+    };
+    let tracking = Arc::clone(reader.tracking());
+    // (score, time, hash) of the best version of one proposal, and its stable id
+    let mut best: Option<(Rank, Hash, Hash)> = None;
     for (key, latest) in reader.refs_with_prefix("proposal/")? {
         let (Some(stable), Ok(latest)) = (
             key.strip_prefix("proposal/")
@@ -248,40 +259,62 @@ fn first_holding(st: &ReadState, pair: &Hash) -> Result<Option<ProposalRef>, Rdy
         ) else {
             continue;
         };
-        if landed_as(st, &reader.proposal(&latest)?)?.is_some() {
-            continue;
-        }
-        // walk the chain from the latest back, keeping the oldest version that holds the pair
-        let mut found: Option<(i64, Hash)> = None;
+        // walk the chain from the latest back; `>=` keeps the oldest of the best score
+        let mut offer: Option<(u32, i64, Hash)> = None;
         let mut cur = Some(latest);
         while let Some(version) = cur {
             let p = reader.proposal(&version)?;
-            if holds_pair(st, &p, pair)? {
-                found = Some((p.provenance.at_ms, version));
+            let score = holds_score(st, &p, &items, &tracking)?;
+            if score > 0 && offer.is_none_or(|(s, _, _)| score >= s) {
+                offer = Some((score, p.provenance.at_ms, version));
             }
             cur = p.prev;
         }
-        let Some(at) = found else { continue };
-        if best.as_ref().is_none_or(|(b, _)| at < *b) {
-            best = Some((
-                at,
-                ProposalRef {
-                    version: at.1,
-                    stable,
-                    n: version_number(st, &at.1)?,
-                },
-            ));
+        let Some((score, at_ms, version)) = offer else {
+            continue;
+        };
+        let rank = (score, at_ms, Reverse(version));
+        if best.as_ref().is_none_or(|(b, _, _)| rank > *b) {
+            best = Some((rank, stable, version));
         }
     }
-    Ok(best.map(|(_, pref)| pref))
+    best.map(|(_, stable, version)| {
+        Ok(ProposalRef {
+            version,
+            stable,
+            n: version_number(st, &version)?,
+        })
+    })
+    .transpose()
 }
 
-/// Whether the landing form of version `p` lists the semantic tension of `pair`.
-fn holds_pair(st: &ReadState, p: &Proposal, pair: &Hash) -> Result<bool, RdyError> {
-    Ok(st
-        .landing_stored_tensions(&p.view, &p.changes)?
-        .iter()
-        .any(|t| pair_of(t) == Some(*pair)))
+/// What ranks a proposal's offered version: its score, the time it was written and, last, the
+/// smaller hash first.
+type Rank = (u32, i64, Reverse<Hash>);
+
+/// How well version `p` holds the items of a pair: the number of items whose block one of its
+/// changes writes (creates or updates) at the item's content. Only the changes' ops are read.
+fn holds_score(
+    st: &ReadState,
+    p: &Proposal,
+    items: &[PairItem],
+    tracking: &Tracking,
+) -> Result<u32, RdyError> {
+    let reader = st.reader();
+    let mut held = vec![false; items.len()];
+    for c in &p.changes {
+        for op in reader.change(c)?.ops {
+            let (Op::Create { block } | Op::Update { block, .. }) = op else {
+                continue;
+            };
+            for (i, item) in items.iter().enumerate() {
+                if item.block == block.id && block.content_hash_with(tracking) == item.content {
+                    held[i] = true;
+                }
+            }
+        }
+    }
+    Ok(held.iter().filter(|h| **h).count() as u32)
 }
 
 /// The line of a `pending_added` entry.

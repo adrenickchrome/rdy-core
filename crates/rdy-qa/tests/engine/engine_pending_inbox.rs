@@ -308,3 +308,24 @@ fn di11_an_advised_entry_keeps_its_proposal_when_a_replacement_is_published() {
         "the entry names the version the verdict met: {first:?}"
     );
 }
+
+#[test]
+fn di11_an_advised_entry_stays_after_the_advice_is_dismissed_and_the_proposal_lands() {
+    let (_dir, mut r, _spec, p, sub, first) = advised_project();
+    let shown = r.read().proposal_show(&p.r#ref).expect("show");
+    let tension = shown.advised[0].tension.clone();
+    let rev = Session::agent("agent:rev".into(), Some("rev".into()), Role::Reviewer).unwrap();
+    r.dismiss_tension(&rev, &tension, "both stand for now")
+        .expect("dismiss");
+    assert_eq!(pending_added(&r, &sub), vec![first.clone()]);
+    // landing the holding proposal changes no record the entry reads: the same cursor, the same entry
+    r.land(&approver(), &p.id).expect("land");
+    assert_eq!(pending_added(&r, &sub), vec![first]);
+}
+
+#[test]
+fn di11_an_advised_entry_stays_after_the_holding_proposal_lands() {
+    let (_dir, mut r, _spec, p, sub, first) = advised_project();
+    r.land(&approver(), &p.id).expect("land");
+    assert_eq!(pending_added(&r, &sub), vec![first]);
+}
