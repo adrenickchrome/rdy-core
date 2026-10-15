@@ -126,6 +126,8 @@ pub struct DocBody {
     pub lede_anchor: Option<String>,
     /// The word the doc's own block carries in a draft render.
     pub change: Option<review::Mark>,
+    /// The word diff of the doc's own block (its title), when it is marked Edited (sr6).
+    pub diff: Option<String>,
     /// The word the lede carries in a draft render.
     pub lede_change: Option<review::Mark>,
     /// The lede's word diff, when it is marked Edited (sr6).
@@ -746,6 +748,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         lede: lede_block.map(|p| inline::spans_html(&p.body, &own)),
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
         change: sh.review.and_then(|r| r.mark(&doc.id)),
+        diff: edited_diff(sh, &doc.id),
         lede_change: lede_block.and_then(|l| sh.review.and_then(|r| r.mark(&l.id))),
         lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],

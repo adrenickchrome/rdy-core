@@ -616,36 +616,38 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     };
 
     // the change summary of a review render (sr6): against its base, or, for a proposal version
-    // made on the empty project that no scope names, against that empty project
+    // made on the empty project that no scope names, against that empty project. A top-level
+    // doc that owns its path leaves out only the page (and its chip's link): the review pages
+    // keep each edited block's inline diff.
     let mut changes_summary: Option<changes::Summary> = None;
     let mut inline_diffs: BTreeMap<rdy_model::BlockId, String> = BTreeMap::new();
     if let (Some(r), Some(rv)) = (&reviewed, review.as_ref().or(unreviewed.as_ref())) {
+        let base = review.as_ref().and_then(|_| review::base_of(rdy, scope));
+        let (diff, from) = match &base {
+            Some(b) => (Some(rdy.diff(b, scope)?), rdy.materialized(b)?),
+            None => (None, Default::default()),
+        };
+        let sides = changes::Sides {
+            from: &from,
+            to: &m,
+            text: &site,
+        };
+        let (s, inline) = changes::summary(
+            &site,
+            rdy_engine::site_scope::CHANGES_PAGE,
+            rv,
+            diff.as_ref(),
+            &sides,
+            &changes::Of::Review(r.kind),
+        );
         if site.page_taken(rdy_engine::site_scope::CHANGES_PAGE) {
             summary.warnings.push(CHANGES_DOC_KEPT.into());
         } else {
-            let base = review.as_ref().and_then(|_| review::base_of(rdy, scope));
-            let (diff, from) = match &base {
-                Some(b) => (Some(rdy.diff(b, scope)?), rdy.materialized(b)?),
-                None => (None, Default::default()),
-            };
-            let sides = changes::Sides {
-                from: &from,
-                to: &m,
-                text: &site,
-            };
-            let (s, inline) = changes::summary(
-                &site,
-                rdy_engine::site_scope::CHANGES_PAGE,
-                rv,
-                diff.as_ref(),
-                &sides,
-                &changes::Of::Review(r.kind),
-            );
             changes_summary = Some(s);
-            // only a page with review marks shows an edited block's diff
-            if review.is_some() {
-                inline_diffs = inline;
-            }
+        }
+        // only a page with review marks shows an edited block's diff
+        if review.is_some() {
+            inline_diffs = inline;
         }
     }
     // the summary of the landings since the tag (sr6): from the tag to the state the position

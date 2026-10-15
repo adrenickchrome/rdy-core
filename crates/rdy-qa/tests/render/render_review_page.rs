@@ -60,7 +60,9 @@ fn rv1_a_draft_page_bars_edited_and_new_blocks_and_marks_the_edited_lede() {
         assert!(b.starts_with("<div class=\"block block-prose\" "), "{b}");
         assert!(!b.contains("chg"), "{b}");
     }
-    assert!(a.contains(&format!("{EDITED}<p class=\"lede has-chg chg-edited\"")));
+    assert!(a.contains(&format!(
+        "{EDITED}<div class=\"lede-block has-chg chg-edited\""
+    )));
     assert!(a.contains("Where to begin.") && !a.contains("Where to start."));
     // the doc's own block did not change: its header carries no marker
     assert!(a.contains("<header class=\"page-head\">"));

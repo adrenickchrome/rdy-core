@@ -89,6 +89,33 @@ pub fn plain_refs(
     form: Form,
     label: &dyn Fn(&RefSpan) -> String,
 ) -> String {
+    plain_refs_in(text, mode, form, label, false)
+}
+
+/// Opens a code span in the text of [`plain_refs_coded`].
+pub(crate) const CODE_OPEN: char = '\u{E000}';
+/// Closes a code span in the text of [`plain_refs_coded`].
+pub(crate) const CODE_CLOSE: char = '\u{E001}';
+
+/// As [`plain_refs`], but each code span's text stands between [`CODE_OPEN`] and [`CODE_CLOSE`]:
+/// a word diff reads it so that a code span stays code (the task-6 ruling). The two marks are
+/// taken out of the authored text and of each reference's words, so they only ever mark a span.
+pub(crate) fn plain_refs_coded(
+    text: &str,
+    mode: RefMode,
+    form: Form,
+    label: &dyn Fn(&RefSpan) -> String,
+) -> String {
+    plain_refs_in(text, mode, form, label, true)
+}
+
+fn plain_refs_in(
+    text: &str,
+    mode: RefMode,
+    form: Form,
+    label: &dyn Fn(&RefSpan) -> String,
+    coded: bool,
+) -> String {
     let words = |t: &str, label_form: bool| {
         let (toks, refs) = tokens(t, mode);
         let nodes = if label_form {
@@ -97,7 +124,7 @@ pub fn plain_refs(
             parse_spans(&toks, false)
         };
         let mut out = String::new();
-        render_plain(&nodes, &refs, label, &mut out);
+        render_plain(&nodes, &refs, label, coded, &mut out);
         out
     };
     match form {
@@ -709,20 +736,36 @@ fn render_plain(
     nodes: &[Node],
     refs: &[RefSpan],
     label: &dyn Fn(&RefSpan) -> String,
+    coded: bool,
     out: &mut String,
 ) {
+    // with `coded`, only a code span writes the two marks
+    let push = |out: &mut String, t: &str| {
+        if coded {
+            out.extend(t.chars().filter(|c| *c != CODE_OPEN && *c != CODE_CLOSE));
+        } else {
+            out.push_str(t);
+        }
+    };
     for n in nodes {
         match n {
-            Node::Text(t) => out.push_str(t),
+            Node::Text(t) => push(out, t),
             Node::Ref(k) => {
                 let span = &refs[*k];
                 match &span.display {
-                    Some(d) => out.push_str(d),
-                    None => out.push_str(&label(span)),
+                    Some(d) => push(out, d),
+                    None => push(out, &label(span)),
                 }
             }
-            Node::Code(c) | Node::Strong(c) | Node::Em(c) => render_plain(c, refs, label, out),
-            Node::Link { children, .. } => render_plain(children, refs, label, out),
+            Node::Code(c) if coded => {
+                out.push(CODE_OPEN);
+                render_plain(c, refs, label, coded, out);
+                out.push(CODE_CLOSE);
+            }
+            Node::Code(c) | Node::Strong(c) | Node::Em(c) => {
+                render_plain(c, refs, label, coded, out)
+            }
+            Node::Link { children, .. } => render_plain(children, refs, label, coded, out),
         }
     }
 }

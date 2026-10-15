@@ -843,6 +843,21 @@ impl<'a> Site<'a> {
         })
     }
 
+    /// As [`Site::plain`], but each code span of `text` stands between the code marks
+    /// ([`inline::plain_refs_coded`]): a word diff keeps a code span code (the task-6 ruling).
+    /// A reference reads as plain words, as on the page.
+    pub(crate) fn plain_coded(
+        &self,
+        text: &str,
+        mode: RefMode,
+        form: Form,
+        unresolved: &dyn Fn(&str) -> String,
+    ) -> String {
+        inline::plain_refs_coded(text, mode, form, &|span| {
+            self.ref_words(span, 0, unresolved)
+        })
+    }
+
     /// The words a reference with no display text reads as: its target's current key when typed
     /// as one and the target has one, else the target's label, or `unresolved(token)` when it
     /// leads nowhere.
@@ -1026,7 +1041,7 @@ fn upper_first(s: &str) -> String {
 
 /// A tree name worded as a title: `-` becomes a space, the first letter is upper-cased, and the
 /// name `untitled-<id>` that a doc without a title gets (the one `id` gives) reads as `Untitled`.
-fn name_as_title(name: &str, id: &BlockId) -> String {
+pub(crate) fn name_as_title(name: &str, id: &BlockId) -> String {
     if name == rdy_model::tree::default_name(None, id) {
         return "Untitled".to_string();
     }
