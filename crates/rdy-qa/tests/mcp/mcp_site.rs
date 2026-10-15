@@ -331,7 +331,9 @@ fn ls_final_a_hidden_glossary_doc_warns_on_the_live_path() {
         String::from_utf8_lossy(&out.stderr)
     );
     // the scope has a diff summary, so `changes:` follows the URL (sr2)
-    let changes = again["changes"].as_str().expect("a view has a changes link");
+    let changes = again["changes"]
+        .as_str()
+        .expect("a view has a changes link");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         format!("{url}\nchanges: {changes}\nwarning: {HIDDEN_GLOSSARY}\n")
