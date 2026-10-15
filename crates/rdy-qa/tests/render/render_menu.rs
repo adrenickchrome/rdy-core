@@ -154,10 +154,13 @@ fn sr8_the_menu_has_no_call_to_action() {
         "needs you",
         "waiting",
         "<form",
-        "<button",
     ] {
         assert!(!html.contains(word), "{word:?} in {html}");
     }
+    // the page's own content has no control: the header's theme and Menu buttons are the site's
+    // chrome (sr12)
+    let main = &html[html.find("<main").unwrap()..html.find("</main>").unwrap()];
+    assert!(!main.contains("<button"), "{main}");
     // D-BMX8P: "draft" is only the lifecycle state, never a view or a proposal
     for run in rdy_qa::site::visible_runs(&html) {
         assert!(
@@ -167,6 +170,76 @@ fn sr8_the_menu_has_no_call_to_action() {
         );
     }
     assert!(!html.to_lowercase().contains("draft"), "{html}");
+}
+
+/// F1 (visual review 2.4, 2.5): `/~versions/` sits in the site's own layout: the header with
+/// the brand, the theme toggle and the Menu button, the frame that gives the side gutters, the
+/// breadcrumb "Home › Versions, proposals and views", a drawer with the page links and the
+/// phone's theme toggle, and the footer. It stays complete without script and read-only.
+#[test]
+fn sr12_the_versions_page_has_the_site_layout() {
+    let (_d, r, _p) = proposed();
+    let html = page_of(&r);
+    let at = |needle: &str| {
+        html.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in {html}"))
+    };
+    // the header: the brand, the theme toggle, the Menu button (shown by script)
+    let head = &html[at("<header class=\"head\">")..at("</header>")];
+    assert!(head.contains("<a class=\"brand\" href=\"/\">"), "{head}");
+    assert!(head.contains("<div class=\"head-tools\">"), "{head}");
+    assert!(
+        head.contains("<div class=\"theme\" role=\"radiogroup\" aria-label=\"Colour theme\">"),
+        "{head}"
+    );
+    assert!(
+        head.contains("<button id=\"menu\" type=\"button\" aria-expanded=\"false\" aria-controls=\"sidebar\" hidden>Menu</button>"),
+        "{head}"
+    );
+    // no version pill, no search: the page belongs to no scope
+    assert!(
+        !head.contains("data-rdy-version") && !head.contains("id=\"search\""),
+        "{head}"
+    );
+    // the frame: the drawer, then the main column with the crumbs, the menu and the footer
+    assert!(at("<div class=\"app\">") < at("<aside class=\"sidenav\" id=\"sidebar\">"));
+    assert!(
+        at("<aside class=\"sidenav\" id=\"sidebar\">") < at("<main class=\"content\" id=\"main\"")
+    );
+    let drawer = &html[at("<aside class=\"sidenav\" id=\"sidebar\">")..at("</aside>")];
+    assert!(
+        drawer.contains(
+            "<div class=\"theme theme-drawer\" role=\"radiogroup\" aria-label=\"Colour theme\">"
+        ),
+        "{drawer}"
+    );
+    assert!(drawer.contains("<nav aria-label=\"Pages\">"), "{drawer}");
+    assert!(drawer.contains("<a href=\"/\">Home</a>"), "{drawer}");
+    assert!(
+        html.contains("<nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"/\">Home</a><span class=\"crumb-sep\" aria-hidden=\"true\"></span><span aria-current=\"page\">Versions, proposals and views</span></nav>"),
+        "{html}"
+    );
+    let main = &html[at("<main class=\"content\" id=\"main\"")..at("</main>")];
+    assert!(main.find("<nav class=\"crumbs\"").unwrap() < main.find("<h1>").unwrap());
+    assert!(main.contains("<nav class=\"vmenu\" aria-label=\"Versions, proposals and views\">"));
+    // the footer names the site and where canon stands, as the Latest row does
+    let st = r.read();
+    let m = menu(&st, &mut |s| docs_changed(&st, s)).unwrap();
+    assert!(
+        main.contains(&format!(
+            "<footer class=\"foot\"><p class=\"colophon\">{}, {}.</p></footer>",
+            st.project_name(),
+            m.versions[0].meta[0]
+        )),
+        "{main}"
+    );
+    // the site's script and stylesheet, from the root; without script the page is whole
+    assert!(
+        html.contains("<script src=\"/assets/app.js\" defer></script>"),
+        "{html}"
+    );
+    assert!(html.contains("<noscript>"), "{html}");
+    assert_eq!(html.matches("<h1>").count(), 1);
 }
 
 #[test]

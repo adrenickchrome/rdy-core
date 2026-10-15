@@ -5,6 +5,7 @@
 //! on it acts or waits on a person (D-X61DT, k-BA85X, k-N0EJF): no approval, no readiness, no
 //! state word, no queue. "Draft" is never said of a view or a proposal (D-BMX8P).
 use crate::live::{LiveBuild, rev};
+use crate::page::Crumb;
 use crate::site::Site;
 use crate::{assets, env, home, render_page, review, version};
 use rdy_engine::site_scope::{ScopeRef, tag_name_ok};
@@ -209,25 +210,51 @@ struct Section<'a> {
     rows: &'a [MenuRow],
 }
 
+/// What the site's layout (`layout.html`) reads, for the versions page: no scope, so no pill, no
+/// search, no review bar and no label slot (F1, visual review).
 #[derive(Serialize)]
 struct Page<'a> {
     site_name: String,
     title: &'static str,
     init_js: &'static str,
+    lang: &'static str,
+    kind: &'static str,
+    root: &'static str,
+    live: bool,
+    crumbs: [Crumb; 2],
+    /// Canon's text label, as the Latest row shows it: the footer's words.
+    latest: String,
     sections: [Section<'a>; 3],
 }
 
-/// The versions page as the live site serves it: one file, `index.html`, with no header slot and
-/// no label. Its revision is the hash of its bytes.
+/// The versions page as the live site serves it: one file, `index.html`, in the site's layout
+/// (the header with the brand, the theme toggle and the Menu button, the breadcrumbs, the drawer
+/// and the footer), with no header slot and no label. Its revision is the hash of its bytes.
 pub fn build_versions(
     st: &ReadState,
     docs_changed: &mut dyn FnMut(&Scope) -> Result<usize, RdyError>,
 ) -> Result<LiveBuild, RdyError> {
     let m = menu(st, docs_changed)?;
+    let latest = m.versions[0].meta.join(" · ");
     let page = Page {
         site_name: st.project_name(),
         title: TITLE,
         init_js: assets::INIT_JS,
+        lang: "en",
+        kind: "versions",
+        root: "/",
+        live: true,
+        crumbs: [
+            Crumb {
+                label: "Home".into(),
+                href: Some("/".into()),
+            },
+            Crumb {
+                label: TITLE.into(),
+                href: None,
+            },
+        ],
+        latest,
         sections: [
             Section {
                 title: "Versions",

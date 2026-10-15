@@ -728,3 +728,202 @@ fn sr7_a_section_named_like_a_review_control_gets_its_own_anchor() {
         assert!(seen >= 2, "{scope:?}: the sections were not rendered");
     }
 }
+
+/// F2 (visual review 2.5): with Show diff on, an edited block keeps its spacing. The diff that
+/// takes the place of the block's text has the margins that text has: a paragraph's under a
+/// paragraph diff, a code block's under a code diff.
+#[test]
+fn sr13_an_inline_diff_keeps_the_blocks_spacing() {
+    let css = review_css();
+    for w in [360, 900, 901, 1280] {
+        let p = cascaded(&css, "p", "margin", w).expect("p has a margin");
+        assert_eq!(
+            cascaded(&css, ".chg-diff-inline > p.chg-diff", "margin", w),
+            Some(p),
+            "width {w}"
+        );
+        let block = cascaded(&css, ".code-block", "margin", w).expect("a code block's margin");
+        assert_eq!(
+            cascaded(&css, ".chg-diff-inline > pre.chg-diff", "margin", w),
+            Some(block),
+            "width {w}"
+        );
+        // the change summary's own diffs stay tight under their entry head
+        assert_eq!(
+            cascaded(&css, ".chg-diff", "margin", w).as_deref(),
+            Some("0"),
+            "width {w}"
+        );
+    }
+}
+
+/// A just-enough DOM for `review.js` with both buttons: the cases click them in turn and read
+/// what Show diff says and shows after each click.
+const DEPENDS_HARNESS: &str = r##"
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+function El(hidden) { this.attrs = {}; this.hidden = hidden; this.listeners = {}; }
+El.prototype.getAttribute = function (n) { return n in this.attrs ? this.attrs[n] : null; };
+El.prototype.setAttribute = function (n, v) { this.attrs[n] = String(v); };
+El.prototype.removeAttribute = function (n) { delete this.attrs[n]; };
+El.prototype.hasAttribute = function (n) { return n in this.attrs; };
+El.prototype.addEventListener = function (t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); };
+El.prototype.click = function () {
+  const self = this;
+  (this.listeners.click || []).forEach((f) => f({ type: 'click', target: self, currentTarget: self }));
+};
+function Store(seed) {
+  const data = Object.assign({}, seed || {});
+  return {
+    getItem: (k) => (k in data ? data[k] : null),
+    setItem: (k, v) => { data[k] = String(v); },
+    removeItem: (k) => { delete data[k]; },
+  };
+}
+function load(storage) {
+  const root = new El(false);
+  const changes = new El(true); changes.attrs['aria-pressed'] = 'true';
+  const diff = new El(true); diff.attrs['aria-pressed'] = 'false';
+  const diffs = [new El(true)];
+  const document = {
+    documentElement: root,
+    getElementById: (id) => (id === 'show-diff' ? diff : id === 'show-changes' ? changes : null),
+    querySelectorAll: (sel) => (sel === '[data-diff]' ? diffs : []),
+    addEventListener: () => {},
+  };
+  new Function('window', 'document', 'sessionStorage', src)({}, document, storage);
+  return { root, changes, diff, diffs };
+}
+const state = (p, s) => ({
+  changes: p.changes.getAttribute('aria-pressed'),
+  pressed: p.diff.getAttribute('aria-pressed'),
+  disabled: p.diff.getAttribute('aria-disabled'),
+  hidden: p.diff.hidden,
+  root: p.root.getAttribute('data-diff'),
+  block: p.diffs[0].hidden,
+  stored: s.getItem('rdy-diff'),
+});
+const out = {};
+const s = Store();
+const p = load(s);
+p.diff.click(); out.diffOn = state(p, s);
+p.changes.click(); out.changesOff = state(p, s);
+p.diff.click(); out.clickWhileOff = state(p, s);
+p.changes.click(); out.changesOn = state(p, s);
+p.changes.click();
+const q = load(s); out.reloadOff = state(q, s);
+q.changes.click(); out.reloadOn = state(q, s);
+const r = load(Store({ 'rdy-changes': 'hidden' }));
+out.offNoDiff = { pressed: r.diff.getAttribute('aria-pressed'), disabled: r.diff.getAttribute('aria-disabled') };
+r.changes.click();
+out.onNoDiff = { pressed: r.diff.getAttribute('aria-pressed'), disabled: r.diff.getAttribute('aria-disabled') };
+console.log(JSON.stringify(out));
+"##;
+
+/// F3 (visual review 2.8): Show diff depends on Show changes. With Show changes off it is shown
+/// unpressed and disabled (`aria-disabled`, still focusable), shows no diff and ignores a click;
+/// its remembered choice comes back when Show changes is on again. No page loads with a pressed
+/// Show diff that shows nothing.
+#[test]
+fn sr14_show_diff_depends_on_show_changes() {
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "sr14_show_diff_depends_on_show_changes",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
+        );
+        return;
+    }
+    let js = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rdy-render/theme/rdy-standard/js/review.js"
+    );
+    let o = std::process::Command::new("node")
+        .args(["-e", DEPENDS_HARNESS, "--", js])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let on = serde_json::json!({"changes": "true", "pressed": "true", "disabled": null, "hidden": false, "root": "shown", "block": false, "stored": "shown"});
+    let off = serde_json::json!({"changes": "false", "pressed": "false", "disabled": "true", "hidden": false, "root": null, "block": true, "stored": "shown"});
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "diffOn": on,
+            "changesOff": off,
+            "clickWhileOff": off,
+            "changesOn": on,
+            "reloadOff": off,
+            "reloadOn": on,
+            "offNoDiff": {"pressed": "false", "disabled": "true"},
+            "onNoDiff": {"pressed": "false", "disabled": null}
+        })
+    );
+}
+
+/// F3: a disabled Show diff looks unpressed and unavailable, and keeps the 40 px target.
+#[test]
+fn sr14_a_disabled_show_diff_looks_unavailable() {
+    let css = review_css();
+    let sel = "#show-diff[aria-disabled=\"true\"]";
+    for w in [360, 1280] {
+        assert_eq!(
+            cascaded(&css, sel, "cursor", w).as_deref(),
+            Some("not-allowed"),
+            "width {w}"
+        );
+        assert!(cascaded(&css, sel, "opacity", w).is_some(), "width {w}");
+        assert_eq!(cascaded(&css, sel, "display", w), None, "width {w}");
+    }
+}
+
+/// F4 (visual review 2.5): a menu row whose words wrap keeps its lines close: the link and its
+/// words are flex items, so a wrapped line of words is not pushed under the 40 px link's line
+/// box; and the first list has no rule or strip above its heading.
+#[test]
+fn sr15_menu_rows_wrap_tight_and_the_first_heading_has_no_rule() {
+    let css = review_css();
+    for w in [360, 900, 1280] {
+        let at = |sel: &str, prop: &str| cascaded(&css, sel, prop, w);
+        assert_eq!(
+            at(".vmenu-list li", "display").as_deref(),
+            Some("flex"),
+            "{w}"
+        );
+        assert_eq!(
+            at(".vmenu-list li", "flex-wrap").as_deref(),
+            Some("wrap"),
+            "{w}"
+        );
+        assert_eq!(
+            at(".vmenu-list li", "align-items").as_deref(),
+            Some("baseline"),
+            "{w}"
+        );
+        assert!(at(".vmenu-list li", "column-gap").is_some(), "{w}");
+        // the global h2 rule gives a rule and padding above every h2
+        assert_eq!(at(".vmenu h2", "padding-top").as_deref(), Some("0"), "{w}");
+        assert_eq!(at(".vmenu h2", "border-top").as_deref(), Some("0"), "{w}");
+        assert_eq!(
+            at(".vmenu section:first-child h2", "margin-top").as_deref(),
+            Some("0"),
+            "{w}"
+        );
+    }
+}
+
+/// F5 (visual review 2.5): a removed word and the word that replaces it have a visible gap; the
+/// diff's text and its screen-reader words do not change.
+#[test]
+fn sr16_a_removed_and_an_added_word_have_a_gap() {
+    let css = review_css();
+    for w in [360, 1280] {
+        for sel in ["del + ins", "ins + del"] {
+            assert_eq!(
+                cascaded(&css, sel, "margin-inline-start", w).as_deref(),
+                Some("0.3em"),
+                "{sel} width {w}"
+            );
+        }
+    }
+}
