@@ -28,11 +28,19 @@ pub struct Shared<'a> {
     pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
     /// What a draft changes against the canon it is based on; none for canon and tags.
     pub review: Option<&'a review::Review>,
+    /// The view or proposal version a review render shows, and the blocks it changes; none for
+    /// canon and tags.
+    pub reviewed: Option<version::Reviewed>,
+    /// The header's words: the pill and its chips.
+    pub header: version::Header,
+    /// The header's markup, rendered once per relative root in a static build, once in a live
+    /// one (see [`Shared::header_html`]).
+    pub headers: RefCell<BTreeMap<String, String>>,
     /// The blobs some page links to, by the site-relative path of their file, filled as pages
     /// are built.
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
-    /// A static site, or a live one whose pages carry the label slot.
-    pub mode: Mode,
+    /// A static site, or a live one whose pages carry the label and header slots.
+    pub mode: Mode<'a>,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -244,7 +252,10 @@ pub struct PageContext {
     pub root: String,
     /// The text of the inline script that sets the theme before the page paints.
     pub init_js: &'static str,
+    /// The text label of the colophon (and the `frozen` flag of the header).
     pub version: version::Label,
+    /// The header's version markup: the pill and its chips (`version::header_html`).
+    pub header: String,
     pub crumbs: Vec<Crumb>,
     pub nav: nav::Nav,
     pub toc: toc::Toc,
@@ -287,6 +298,50 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
+    /// The header's markup for a page at relative root `root` (RULING F4). A static page links
+    /// to the home page's Versions list and to the change pages by its root; a live page links
+    /// to `/~versions/`, whose menu the pill opens, and to the change pages under the scope's
+    /// path, the same on every page. Each distinct markup is rendered once.
+    pub fn header_html(&self, root: &str) -> String {
+        let key = match self.mode {
+            Mode::Static => root,
+            Mode::Live { .. } => "",
+        };
+        if let Some(h) = self.headers.borrow().get(key) {
+            return h.clone();
+        }
+        let (base, versions, menu) = match self.mode {
+            Mode::Static => (
+                root.to_string(),
+                format!("{root}index.html#versions"),
+                false,
+            ),
+            Mode::Live { root } => (
+                root.to_string(),
+                format!(
+                    "/{}",
+                    rdy_engine::site_scope::ScopeRef::Versions.path_prefix()
+                ),
+                true,
+            ),
+        };
+        let since = format!("{base}{}", rdy_engine::site_scope::SINCE_PAGE);
+        let changes = format!("{base}{}", rdy_engine::site_scope::CHANGES_PAGE);
+        let html = version::header_html(
+            &self.header,
+            &version::HeaderLinks {
+                versions: &versions,
+                since: Some(&since),
+                changes: Some(&changes),
+                menu,
+            },
+        );
+        self.headers
+            .borrow_mut()
+            .insert(key.to_string(), html.clone());
+        html
+    }
+
     /// A link from `from` to the block `id`, if the store resolves it; with no href when the
     /// block has no place on the site (it then reads as its label, unlinked).
     fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
@@ -545,14 +600,17 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     // a permalink page is a bare redirect: it shows no navigation and no crumbs, so it builds
     // none (building the site's navigation once per block made a render O(blocks x pages))
     let redirect = kind_name == "redirect";
+    let root = "../".repeat(page_url.matches('/').count());
+    let header = sh.header_html(&root);
     PageContext {
         site_name: sh.site_name.to_string(),
         site_description: sh.description.map(String::from),
         lang: "en",
         title,
-        root: "../".repeat(page_url.matches('/').count()),
+        root,
         init_js: assets::INIT_JS,
-        version: version::label(sh.position),
+        version: version::text_label(sh.position, sh.reviewed.as_ref()),
+        header,
         crumbs: if redirect {
             vec![]
         } else {
@@ -585,7 +643,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_terms,
         has_questions,
         draft: sh.review.is_some(),
-        live: sh.mode == Mode::Live,
+        live: matches!(sh.mode, Mode::Live { .. }),
         items,
         body,
         kind: kind_name,

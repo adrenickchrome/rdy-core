@@ -143,15 +143,22 @@ fn ls5_a_view_commit_reaches_only_that_view() {
     let mut da = sub(&sh, &d(), "alpha.html", &bd);
     let mut db = sub(&sh, &d(), "beta.html", &bd);
     let before = sh.site.builds();
+    // another block of Alpha: the view now changes two blocks (the site counts blocks, C9)
     on_writer(&sh, |r| {
-        edit_second_prose(r, "draft", "Alpha", "Draft two.", false)
+        edit_prose(r, "draft", "Alpha", 0, "Draft two.", false)
     });
     sh.site.refresh(&sh, &C).unwrap();
-    sh.site.refresh(&sh, &d()).unwrap();
+    let after = sh.site.refresh(&sh, &d()).unwrap();
     assert_eq!(da.rx.try_recv(), Ok(LiveEvent::Reload));
     match db.rx.try_recv() {
-        Ok(LiveEvent::Label(text)) => assert!(text.contains("2 pending changes"), "{text}"),
-        other => panic!("the view's other page gets the new label: {other:?}"),
+        Ok(LiveEvent::Label { text, html }) => {
+            assert!(
+                text.ends_with(" · view: draft, 2 changes, not landed"),
+                "{text}"
+            );
+            assert!(html.contains(">+2</a>") && html == after.header, "{html}");
+        }
+        other => panic!("the view's other page gets the new label and header: {other:?}"),
     }
     assert!(
         empty(&mut ca) && empty(&mut cb),
@@ -175,9 +182,20 @@ fn ls5_a_tag_sends_label_not_reload() {
     on_writer(&sh, |r| {
         r.tag(&approver(), "v1.0.0", None, None).unwrap();
     });
-    sh.site.refresh(&sh, &C).unwrap();
-    assert_eq!(alpha.rx.try_recv(), Ok(LiveEvent::Label("v1.0.0".into())));
-    assert_eq!(beta.rx.try_recv(), Ok(LiveEvent::Label("v1.0.0".into())));
+    let after = sh.site.refresh(&sh, &C).unwrap();
+    assert!(
+        after
+            .header
+            .contains("<span class=\"pill-text\">v1.0.0</span>"),
+        "{}",
+        after.header
+    );
+    let label = LiveEvent::Label {
+        text: "v1.0.0".into(),
+        html: after.header.clone(),
+    };
+    assert_eq!(alpha.rx.try_recv(), Ok(label.clone()));
+    assert_eq!(beta.rx.try_recv(), Ok(label));
     assert_eq!(
         home.rx.try_recv(),
         Ok(LiveEvent::Reload),
@@ -231,7 +249,13 @@ fn ls5_a_stale_revision_gets_reload_on_subscribe() {
         .site
         .subscribe(&sh, &C, "alpha.html", &b.revs["alpha.html"], OLD)
         .unwrap();
-    assert_eq!(label.rx.try_recv(), Ok(LiveEvent::Label(b.label.clone())));
+    assert_eq!(
+        label.rx.try_recv(),
+        Ok(LiveEvent::Label {
+            text: b.label.clone(),
+            html: b.header.clone()
+        })
+    );
     let mut gone = sh
         .site
         .subscribe(&sh, &C, "gone.html", OLD, &b.label_rev)

@@ -91,7 +91,11 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .brand { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 0.98rem; white-space: nowrap; min-width: 0; max-width: 24rem; }
 .brand svg { width: 22px; height: 22px; flex: none; }
 .brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.version { grid-column: 2; grid-row: 1; justify-self: start; font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; }
+.version { grid-column: 2; grid-row: 1; justify-self: start; white-space: nowrap; }
+.pill { font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; text-decoration: none; }
+.chip { font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.15rem 0.5rem; white-space: nowrap; text-decoration: none; }
+.chip-since { color: var(--ink-soft); background: var(--surface-2); }
+.chip-review { color: var(--accent-ink); background: var(--accent-soft); }
 .head .search-wrap { grid-column: 3; grid-row: 1; }
 .head-tools { grid-column: 4; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: 0.75rem; }
 .theme { display: inline-flex; background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 2px; }
@@ -157,12 +161,12 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 }
 
 /* below 900px: one column, the pages follow the content, the drawer replaces the column; the
-   header has three rows: the brand and the tools, the version pill, the search */
+   header has three rows: the brand and the tools, the version pill and its chips, the search */
 @media (max-width: 900px) {
   .head { grid-template-columns: minmax(0, 1fr) auto; padding: 0.55rem 16px; gap: 0.4rem 0.5rem; }
   .brand { grid-column: 1; grid-row: 1; font-size: 0.9rem; max-width: none; }
   .head-tools { grid-column: 2; grid-row: 1; gap: 0.4rem; }
-  .version { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
+  .version { grid-column: 1 / -1; grid-row: 2; }
   .head .search-wrap { grid-column: 1 / -1; grid-row: 3; max-width: none; }
   .theme button { padding: 0.15rem 0.45rem; font-size: 0.74rem; }
   [id] { scroll-margin-top: 9.4rem; }
@@ -175,7 +179,7 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
   .app.nav-open .sidenav .fold-summary { display: none; }
   .nav-open #scrim { display: block; position: fixed; inset: 0; background: var(--scrim); z-index: 45; }
   /* every control a thumb has to hit is at least 40 by 40 */
-  .head a, .head button, .head summary, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button { min-height: 40px; min-width: 40px; }
+  .head a, .head button, .head summary, .pill, .chip, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button { min-height: 40px; min-width: 40px; }
   .head button, .tools button, .code-head button { display: inline-flex; align-items: center; justify-content: center; }
   .sidenav a { display: flex; align-items: center; }
   /* the disagreements page: its links (a plain div.callout is that page's entry) and Show all */
@@ -343,8 +347,10 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /pager == */
 
 /* == version == */
-/* the pill is never cut: it sizes to its text (head section), and wraps on its own row on a phone */
-.version { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+/* the pill and its chips are one line that never wraps or cuts: they size to their text (head
+   section), on their own row on a phone */
+.version { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 0.35rem; }
+.pill, .chip { display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; }
 .version .lock { width: 12px; height: 12px; flex: none; }
 .version .snapshot { font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
 .colophon { margin: 0; }

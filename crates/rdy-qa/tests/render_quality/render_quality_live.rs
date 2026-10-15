@@ -55,7 +55,7 @@ impl LiveHost {
     /// new directory at the same paths: only the `.html` pages when `html_only`.
     pub fn fetch(&self, scope: &Scope, prefix: &str, html_only: bool) -> tempfile::TempDir {
         let st: Arc<ReadState> = self.shared().state.load_full();
-        let build = build_live(&st, scope).expect("the live build");
+        let build = build_live(&st, scope, &format!("/{prefix}")).expect("the live build");
         let out = tempfile::tempdir().unwrap();
         for path in build.files.keys() {
             if html_only && !path.ends_with(".html") {

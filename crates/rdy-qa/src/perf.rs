@@ -3069,7 +3069,7 @@ fn tier_dump(
 /// `render`, which writes the same pages to disk).
 fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
     out.push(measure(&format!("site_build_live{sfx}"), runs, |_| {
-        rdy_render::live::build_live(&r.read(), &Scope::Canon).expect("build_live");
+        rdy_render::live::build_live(&r.read(), &Scope::Canon, "/").expect("build_live");
     }));
 }
 
@@ -3081,7 +3081,7 @@ fn await_reload(rt: &tokio::runtime::Runtime, sub: &mut Subscription) {
             loop {
                 match sub.rx.recv().await {
                     Some(LiveEvent::Reload) => return,
-                    Some(LiveEvent::Label(_)) => {}
+                    Some(LiveEvent::Label { .. }) => {}
                     None => panic!("the page's stream ended before its Reload"),
                 }
             }
@@ -3122,7 +3122,7 @@ fn edit_claim_on_writer(
 
 /// What `LiveSite::refresh` does after a build, as the public functions give it: the diff of the
 /// two builds, then to each stream (one per page of `pages`) a `Reload` when its page changed,
-/// else the new label when the label changed, else nothing. A full queue drops the event, as the
+/// else the new label and header when either changed, else nothing. A full queue drops the event, as the
 /// site drops the stream. Returns how many events were sent.
 fn fan_out(
     old: &rdy_render::live::LiveBuild,
@@ -3136,7 +3136,10 @@ fn fan_out(
         let event = if change.reload.contains(page) {
             Some(LiveEvent::Reload)
         } else {
-            change.label.clone().map(LiveEvent::Label)
+            change.label.clone().map(|text| LiveEvent::Label {
+                text,
+                html: new.header.clone(),
+            })
         };
         if let Some(event) = event
             && tx.try_send(event).is_ok()

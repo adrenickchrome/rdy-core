@@ -298,13 +298,36 @@ fn site16_no_underscore_directory_and_no_id_or_hash_page_in_any_url() {
 fn site17_the_version_label_uses_site_wording() {
     let (_d, _r, _ids, out) = golden::site_view();
     let h = golden::html(out.path(), "tutorial/adventure.html");
-    let v = visible_runs(&h)
-        .into_iter()
-        .find(|r| r.path.iter().any(|t| t == "span") && r.label && r.text.starts_with("v1.0.0"))
+    let runs = visible_runs(&h);
+    // the pill shows only the tag, and the chips their counts (D-42YMF); the hover is no text
+    let pill = runs
+        .iter()
+        .find(|r| r.classes.iter().any(|c| c == "pill-text"))
         .expect("version pill");
-    assert_eq!(
-        v.text,
-        "v1.0.0, 2 changes since · draft: editing, 2 pending changes"
+    assert_eq!(pill.text, "v1.0.0");
+    let chip = |class: &str| {
+        runs.iter()
+            .find(|r| r.classes.iter().any(|c| c == class))
+            .map(|r| r.text.as_str())
+    };
+    assert_eq!(chip("chip-since"), Some("+2"));
+    assert!(
+        chip("chip-review").is_some_and(|t| t.starts_with('+')),
+        "{:?}",
+        chip("chip-review")
+    );
+    // the colophon keeps the text label, in the site's words (O9)
+    let colophon = runs
+        .iter()
+        .find(|r| r.classes.iter().any(|c| c == "colophon"))
+        .expect("the colophon");
+    assert!(
+        colophon
+            .text
+            .starts_with("Structural pattern matching, v1.0.0, 2 changes since · view: editing, ")
+            && colophon.text.ends_with(" changes, not landed."),
+        "{}",
+        colophon.text
     );
     assert!(!has_leak(out.path(), "F11", ""));
 }

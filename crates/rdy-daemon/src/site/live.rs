@@ -11,9 +11,10 @@
 //! request asks for it (pages build on demand).
 //!
 //! After a build, each open page of the scope gets `Reload` when its bytes changed (or it is
-//! gone), else `Label` when only the version label changed, else nothing; the pages of other
-//! scopes get nothing (the founder addition of 2026-10-12). An event is best effort: a full or
-//! closed queue drops the stream, and the page's revision repairs it when it reconnects.
+//! gone), else `Label` when only the version label or the header changed, else nothing; the
+//! pages of other scopes get nothing (the founder addition of 2026-10-12). An event is best
+//! effort: a full or closed queue drops the stream, and the page's revision repairs it when it
+//! reconnects.
 use crate::daemon::log;
 use crate::shared::Shared;
 use crate::site::guard::ScopeRef;
@@ -47,8 +48,9 @@ const WORKER_TICK: Duration = Duration::from_secs(1);
 pub enum LiveEvent {
     /// The page's bytes changed, or the page is gone: load it again.
     Reload,
-    /// Only the version label changed: this is its new text.
-    Label(String),
+    /// Only the version label or the header changed: the new label text (the colophon) and the
+    /// new header markup (the pill and its chips).
+    Label { text: String, html: String },
 }
 
 /// The site has as many open streams as it keeps ([`MAX_STREAMS`]).
@@ -91,7 +93,10 @@ impl Stream {
         if b.revs.get(&self.page) != Some(&self.rev) {
             Some(LiveEvent::Reload)
         } else if b.label_rev != self.label_rev {
-            Some(LiveEvent::Label(b.label.clone()))
+            Some(LiveEvent::Label {
+                text: b.label.clone(),
+                html: b.header.clone(),
+            })
         } else {
             None
         }
@@ -270,7 +275,11 @@ impl LiveSite {
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.key == Some(key)) {
             return Ok((b, false));
         }
-        let new = Arc::new(build_live(&st, &resolved)?);
+        let new = Arc::new(build_live(
+            &st,
+            &resolved,
+            &format!("/{}", scope.path_prefix()),
+        )?);
         self.builds.fetch_add(1, Ordering::SeqCst);
         let mut inner = lock(&self.inner);
         let s = inner.touch(scope);
@@ -288,7 +297,10 @@ impl LiveSite {
                     if change.reload.contains(&stream.page) {
                         Some(LiveEvent::Reload)
                     } else {
-                        change.label.clone().map(LiveEvent::Label)
+                        change.label.clone().map(|text| LiveEvent::Label {
+                            text,
+                            html: new.header.clone(),
+                        })
                     }
                 }
                 // no build to diff, or the stream opened with no comparison: compared with
@@ -571,7 +583,7 @@ mod tests {
         let out = sh.writer.reload().unwrap();
         assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
         let served = sh.site.refresh(&sh, &C).unwrap();
-        let fresh = build_live(&sh.state.load_full(), &Scope::Canon).unwrap();
+        let fresh = build_live(&sh.state.load_full(), &Scope::Canon, "/").unwrap();
         assert_ne!(
             before.revs, fresh.revs,
             "the pack change moves canon's pages"

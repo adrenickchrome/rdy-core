@@ -76,6 +76,8 @@ pub struct Review {
     docs: HashMap<BlockId, DocChange>,
     removed: HashMap<BlockId, Vec<Removed>>,
     removed_pages: Vec<Block>,
+    /// The count of changed blocks (O2); see [`Review::changed_blocks`].
+    changed_blocks: u32,
 }
 
 impl Review {
@@ -106,6 +108,71 @@ impl Review {
     pub fn removed_pages(&self) -> &[Block] {
         &self.removed_pages
     }
+
+    /// The blocks a review render changes (O2, closed), as the review chip, the text label and
+    /// the change summary count them. Each block counts once, when it is any of: (a) a visible
+    /// non-tree block marked Edited or New; (b) a visible non-tree block under a New doc; (c) a
+    /// block of a removed line (the removed block and its removed visible descendants); (d) a
+    /// visible non-tree block under a removed page. Then (e) each doc or folder whose own block
+    /// changed in a field a reader sees (`title`, `name`, `description`) counts one. Decisions,
+    /// rationale and pins-only changes never count.
+    pub fn changed_blocks(&self) -> u32 {
+        self.changed_blocks
+    }
+}
+
+/// The fields of a doc or folder that a reader sees: a change in one counts the page (O2 (e)).
+const PAGE_FIELDS: [&str; 3] = ["title", "name", "description"];
+
+/// [`Review::changed_blocks`], worked out once from the compare and both sides.
+fn count_changed(rv: &Review, cmp: &Compare, dm: &Materialized, bm: &Materialized) -> u32 {
+    let mut counted: HashSet<&BlockId> = HashSet::new();
+    let content = |b: &Block| visible(b) && !tree::is_tree_type(&b.block_type);
+    // (a) the marked blocks (only visible ones carry a mark)
+    for id in rv.marks.keys() {
+        if dm
+            .get(id)
+            .is_some_and(|b| !tree::is_tree_type(&b.block_type))
+        {
+            counted.insert(id);
+        }
+    }
+    // (b) the content of each New doc
+    for (id, mark) in &rv.marks {
+        if *mark == Mark::New && dm.get(id).is_some_and(|b| b.block_type == tree::DOC) {
+            counted.extend(
+                reading_order(dm, id)
+                    .into_iter()
+                    .filter(|(b, _)| content(b))
+                    .map(|(b, _)| &b.id),
+            );
+        }
+    }
+    // (c) the blocks of the removed lines
+    for lines in rv.removed.values() {
+        counted.extend(lines.iter().flat_map(|l| l.blocks.iter().map(|b| &b.id)));
+    }
+    // (d) the content of each removed page
+    for page in &rv.removed_pages {
+        counted.extend(
+            reading_order(bm, &page.id)
+                .into_iter()
+                .filter(|(b, _)| content(b))
+                .map(|(b, _)| &b.id),
+        );
+    }
+    // (e) a doc's or folder's own field a reader sees
+    let pages = cmp
+        .changed
+        .iter()
+        .filter(|e| e.fields.iter().any(|f| PAGE_FIELDS.contains(&f.as_str())))
+        .filter_map(|e| BlockId::parse(&e.id).ok())
+        .filter(|id| {
+            dm.get(id)
+                .is_some_and(|b| tree::is_tree_type(&b.block_type))
+        })
+        .count();
+    u32::try_from(counted.len() + pages).unwrap_or(u32::MAX)
 }
 
 /// The scope a draft is read against: canon at the landing the view is based on, or canon itself
@@ -273,6 +340,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
             .removed = lines.len();
     }
     rv.removed_pages = removed_pages(cmp, bm);
+    rv.changed_blocks = count_changed(&rv, cmp, dm, bm);
     rv
 }
 

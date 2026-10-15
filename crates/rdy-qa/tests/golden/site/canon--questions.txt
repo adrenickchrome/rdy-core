@@ -1,7 +1,8 @@
 chrome	-	Open questions · Structural pattern matching
 chrome	-	Skip to content
 chrome	-	Structural pattern matching
-chrome	L	v1.0.0, 2 changes since
+chrome	L	v1.0.0
+chrome	L	+2
 chrome	-	Search these pages
 chrome	-	Auto
 chrome	-	Light

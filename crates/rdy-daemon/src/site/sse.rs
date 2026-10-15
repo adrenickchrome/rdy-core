@@ -32,13 +32,19 @@ pub fn head(now_secs: i64) -> Vec<u8> {
     head.into_bytes()
 }
 
-/// The frame of `event`: `reload` with `{}`, or `label` with its text as a JSON string.
+/// The frame of `event`: `reload` with `{}`, or `label` with its text and the header's markup
+/// as JSON strings, `text` first.
 pub fn frame(event: &LiveEvent) -> Vec<u8> {
     match event {
         LiveEvent::Reload => b"event: reload\ndata: {}\n\n".to_vec(),
-        LiveEvent::Label(text) => {
-            let data = serde_json::json!({ "text": text });
-            format!("event: label\ndata: {data}\n\n").into_bytes()
+        LiveEvent::Label { text, html } => {
+            let json = |s: &str| serde_json::Value::from(s).to_string();
+            format!(
+                "event: label\ndata: {{\"text\":{},\"html\":{}}}\n\n",
+                json(text),
+                json(html)
+            )
+            .into_bytes()
         }
     }
 }
@@ -109,8 +115,24 @@ mod tests {
         );
         assert_eq!(frame(&LiveEvent::Reload), b"event: reload\ndata: {}\n\n");
         assert_eq!(
-            String::from_utf8(frame(&LiveEvent::Label("v1.0.0 \"a\"\nb".into()))).unwrap(),
-            "event: label\ndata: {\"text\":\"v1.0.0 \\\"a\\\"\\nb\"}\n\n"
+            String::from_utf8(frame(&LiveEvent::Label {
+                text: "v1.0.0 \"a\"\nb".into(),
+                html: "<a>\"x\"</a>".into()
+            }))
+            .unwrap(),
+            "event: label\ndata: {\"text\":\"v1.0.0 \\\"a\\\"\\nb\",\"html\":\"<a>\\\"x\\\"</a>\"}\n\n"
+        );
+    }
+
+    #[test]
+    fn sr5_a_label_event_carries_text_and_header() {
+        let event = LiveEvent::Label {
+            text: "v1.0.0".into(),
+            html: "<a class=\"pill\">x</a>".into(),
+        };
+        assert_eq!(
+            String::from_utf8(frame(&event)).unwrap(),
+            "event: label\ndata: {\"text\":\"v1.0.0\",\"html\":\"<a class=\\\"pill\\\">x</a>\"}\n\n"
         );
     }
 }

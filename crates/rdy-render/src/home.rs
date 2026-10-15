@@ -123,7 +123,7 @@ pub fn build(
 }
 
 /// The changed docs of a draft in reading order, then its removed pages.
-fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
+pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
     let mut rows: Vec<ChangeRow> = site
         .tree_pages()
         .filter_map(|id| {

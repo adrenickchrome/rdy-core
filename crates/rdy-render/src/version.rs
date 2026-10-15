@@ -1,6 +1,7 @@
 //! The site's wording of where a page stands among the versions (rule 2.11). The engine's own
 //! label (`VersionPosition.label`, "v1.2.0 + 3 landings") is storage wording and stays with the
 //! CLI and MCP.
+use crate::escape;
 use rdy_engine::VersionPosition;
 use serde::Serialize;
 
@@ -14,36 +15,8 @@ fn count(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// The version pill's text: `unversioned`, `v1.2.0`, `v1.2.0, 3 changes since`, then, for a
-/// view, ` · draft: {view}, {n} pending changes`. A frozen scope reads the same and says
-/// `frozen` through the flag.
-pub fn label(p: &VersionPosition) -> Label {
-    let mut text = match &p.version {
-        None => "unversioned".to_string(),
-        Some(v) if p.landings_since == 0 => v.name.clone(),
-        Some(v) => format!(
-            "{}, {} since",
-            v.name,
-            count(p.landings_since, "change", "changes")
-        ),
-    };
-    if let Some(v) = &p.view {
-        text.push_str(&format!(
-            " · draft: {}, {}",
-            v.name,
-            count(v.unlanded_changes, "pending change", "pending changes")
-        ));
-    }
-    Label {
-        text,
-        frozen: p.frozen,
-    }
-}
-
 /// What a review render shows: a view or a proposal version, and the blocks it changes
 /// (D-BMX8P: "draft" is only the lifecycle state, so the site never says it here).
-// Task 5 (G2) wires the callers; until then only the tests call this.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Reviewed {
     pub kind: ReviewedKind,
@@ -56,8 +29,6 @@ pub struct Reviewed {
 }
 
 /// Whether the review render shows a proposal or a view.
-// Task 5 (G2) wires the callers; until then only the tests call this.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum ReviewedKind {
     Proposal,
@@ -65,8 +36,6 @@ pub enum ReviewedKind {
 }
 
 /// One chip beside the pill. The hover goes only into `title` and `aria-label` (D-ZPAVR).
-// Task 5 (G2) wires the callers; until then only the tests call this.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Chip {
     pub text: String,
@@ -74,8 +43,6 @@ pub struct Chip {
 }
 
 /// The header's words (D-42YMF): the pill, the neutral landings chip and the accent review chip.
-// Task 5 (G2) wires the callers; until then only the tests call this.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Header {
     pub pill: String,
@@ -84,8 +51,6 @@ pub struct Header {
     pub review: Option<Chip>,
 }
 
-// Used by the items above; same note.
-#[allow(dead_code)]
 fn kind_word(kind: ReviewedKind) -> &'static str {
     match kind {
         ReviewedKind::Proposal => "proposal",
@@ -97,8 +62,6 @@ fn kind_word(kind: ReviewedKind) -> &'static str {
 /// `v1.2.0, 3 changes since`, then, for a review render, ` · view: {name}, {n} changes, not
 /// landed` (or `proposal:`), or `, no changes yet` with no changed block. A frozen scope reads
 /// the same and says `frozen` through the flag.
-// Task 5 (G2) wires the callers; until then only the tests call this.
-#[allow(dead_code)]
 pub fn text_label(p: &VersionPosition, reviewed: Option<&Reviewed>) -> Label {
     let mut text = match &p.version {
         None => "unversioned".to_string(),
@@ -125,8 +88,6 @@ pub fn text_label(p: &VersionPosition, reviewed: Option<&Reviewed>) -> Label {
 
 /// The header's pill and chips. The pill shows only the tag. The landings chip needs a tag and
 /// at least one landing since it (F3). The review chip needs a review render with a changed block.
-// Task 5 (G2) wires the callers; until then only the tests call this.
-#[allow(dead_code)]
 pub fn header(p: &VersionPosition, reviewed: Option<&Reviewed>) -> Header {
     let since = match &p.version {
         Some(v) if p.landings_since > 0 => Some(Chip {
@@ -154,9 +115,66 @@ pub fn header(p: &VersionPosition, reviewed: Option<&Reviewed>) -> Header {
     }
 }
 
+/// Where the header's pill and chips lead (RULING F4). A chip whose link is none is a `<span>`.
+/// `menu` marks the pill as the live site's version menu button.
+pub struct HeaderLinks<'a> {
+    pub versions: &'a str,
+    pub since: Option<&'a str>,
+    pub changes: Option<&'a str>,
+    pub menu: bool,
+}
+
+/// The lock a frozen scope's pill shows before its text.
+const LOCK: &str = r#"<svg class="lock" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>"#;
+
+/// One chip: a link when it has one, else a `<span>`; the hover only in `title` and
+/// `aria-label` (D-ZPAVR).
+fn chip_html(chip: &Chip, class: &str, href: Option<&str>) -> String {
+    let (text, hover) = (escape(&chip.text), escape(&chip.hover));
+    match href {
+        Some(href) => format!(
+            "<a class=\"{class}\" href=\"{}\" title=\"{hover}\" aria-label=\"{hover}\">{text}</a>",
+            escape(href)
+        ),
+        None => format!(
+            "<span class=\"{class}\" title=\"{hover}\" aria-label=\"{hover}\">{text}</span>"
+        ),
+    }
+}
+
+/// The header's markup (D-42YMF): the pill, then the landings chip, then the review chip, one
+/// space between them. Every value is escaped.
+pub fn header_html(h: &Header, links: &HeaderLinks) -> String {
+    let mut out = format!("<a class=\"pill\" href=\"{}\"", escape(links.versions));
+    if links.menu {
+        out.push_str(" data-menu aria-haspopup=\"dialog\" aria-expanded=\"false\"");
+    }
+    out.push('>');
+    if h.frozen {
+        out.push_str(LOCK);
+    }
+    out.push_str(&format!(
+        "<span class=\"pill-text\">{}</span>",
+        escape(&h.pill)
+    ));
+    if h.frozen {
+        out.push_str(" <span class=\"snapshot\">snapshot</span>");
+    }
+    out.push_str("</a>");
+    if let Some(c) = &h.since {
+        out.push(' ');
+        out.push_str(&chip_html(c, "chip chip-since", links.since));
+    }
+    if let Some(c) = &h.review {
+        out.push(' ');
+        out.push_str(&chip_html(c, "chip chip-review", links.changes));
+    }
+    out
+}
+
 /// The review bar's words (D-BMX8P): `Reviewing view · {name}` or `Reviewing proposal · {title}`,
 /// then ` · by {author}` when the store names one.
-// Task 5 (G2) wires the callers; until then only the tests call this.
+// Tasks 7 and 8 call this; until then only the tests do.
 #[allow(dead_code)]
 pub fn review_bar(r: &Reviewed) -> String {
     let mut text = format!("Reviewing {} · {}", kind_word(r.kind), r.name);
@@ -167,7 +185,7 @@ pub fn review_bar(r: &Reviewed) -> String {
 }
 
 /// The heading of the change summary and of the home page's list (O9).
-// Task 5 (G2) wires the callers; until then only the tests call this.
+// Tasks 7 and 8 call this; until then only the tests do.
 #[allow(dead_code)]
 pub fn changes_heading(kind: ReviewedKind) -> &'static str {
     match kind {
@@ -178,7 +196,7 @@ pub fn changes_heading(kind: ReviewedKind) -> &'static str {
 
 /// An author as people read it (F1): `human:nick` is `nick`, `agent:claude` is `claude (agent)`,
 /// any other text stays as it is, and every `_` shows as a space.
-// Task 5 (G2) wires the callers; until then only the tests call this.
+// Tasks 7 and 8 call this; until then only the tests do.
 #[allow(dead_code)]
 pub fn author_words(actor: &str) -> String {
     let words = if let Some(n) = actor.strip_prefix("human:") {
@@ -189,73 +207,6 @@ pub fn author_words(actor: &str) -> String {
         actor.to_string()
     };
     words.replace('_', " ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rdy_engine::{VersionRef, ViewPosition};
-
-    fn pos(
-        version: Option<&str>,
-        since: u32,
-        view: Option<(&str, u32)>,
-        frozen: bool,
-    ) -> VersionPosition {
-        VersionPosition {
-            version: version.map(|n| VersionRef {
-                name: n.into(),
-                landing: "0".repeat(64),
-            }),
-            landings_since: since,
-            view: view.map(|(n, c)| ViewPosition {
-                name: n.into(),
-                unlanded_changes: c,
-            }),
-            frozen,
-            label: "storage wording".into(),
-        }
-    }
-
-    #[test]
-    fn ver1_the_label_in_site_wording() {
-        let t = |p: VersionPosition| label(&p).text;
-        assert_eq!(t(pos(None, 0, None, false)), "unversioned");
-        assert_eq!(t(pos(None, 4, None, false)), "unversioned");
-        assert_eq!(t(pos(Some("v1.2.0"), 0, None, false)), "v1.2.0");
-        assert_eq!(
-            t(pos(Some("v1.2.0"), 3, None, false)),
-            "v1.2.0, 3 changes since"
-        );
-        assert_eq!(
-            t(pos(Some("v1.2.0"), 1, None, false)),
-            "v1.2.0, 1 change since"
-        );
-        assert_eq!(
-            t(pos(Some("v1.2.0"), 3, Some(("work", 2)), false)),
-            "v1.2.0, 3 changes since · draft: work, 2 pending changes"
-        );
-        assert_eq!(
-            t(pos(Some("v1.2.0"), 0, Some(("work", 1)), false)),
-            "v1.2.0 · draft: work, 1 pending change"
-        );
-        assert_eq!(
-            t(pos(None, 0, Some(("work", 0)), false)),
-            "unversioned · draft: work, 0 pending changes"
-        );
-    }
-
-    #[test]
-    fn ver1_a_frozen_scope_is_flagged_and_keeps_the_wording() {
-        let l = label(&pos(Some("v1.0.0"), 0, None, true));
-        assert_eq!((l.text.as_str(), l.frozen), ("v1.0.0", true));
-        let l = label(&pos(Some("v1.0.0"), 3, None, true));
-        assert_eq!(
-            (l.text.as_str(), l.frozen),
-            ("v1.0.0, 3 changes since", true)
-        );
-        assert!(!label(&pos(Some("v1.0.0"), 0, None, false)).frozen);
-    }
 }
 
 #[cfg(test)]
