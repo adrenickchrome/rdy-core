@@ -16,10 +16,11 @@
 //!    names) is read from the two sides: on both it is Edited, only in `to` New, only in `from`
 //!    Removed. Those follow the others, in `to`'s reading order, then `from`'s.
 //! 2. **The doc list.** For a view or proposal, the rows of the home page's list
-//!    ([`home::changes`], O12). For the since page, the docs the same rule finds in the two
-//!    states it compares (a changed doc as `to` holds it, a removed page as `from` held it), in
-//!    the order of their first entries, so in the block diff's order; a doc links to its page
-//!    only when the rendered site has it. Each row links to its section on this page.
+//!    ([`home::changes`], O12). For the since page, the docs of its entries: of the docs the same
+//!    rule finds in the two states it compares (a changed doc as `to` holds it, a removed page
+//!    as `from` held it), each that holds an entry (rule 3), in the order of their first
+//!    entries, so in the block diff's order; a doc links to its page only when the rendered site
+//!    has it. Each row links to its section on this page.
 //! 3. **The sections.** One per row, in row order. An entry goes in the section of the doc that
 //!    holds it (in `to`, else in `from`) when that doc has a row; else, for a block gone from
 //!    `to`, in the section of the nearest block above it in `from` that has a row (a removed
@@ -37,11 +38,18 @@
 //! 6. **The element** (the task-6 ruling): a diff keeps its block's kind of text. A `code`
 //!    block's diff is `<pre class="code chg-diff"><code>`, with the language class its page
 //!    uses, and the marks inside it. Any other block's is `<p class="chg-diff">`, where each
-//!    code span stays a `<code>` element, inside the mark that changes it. So the leak scan's
-//!    code exemption holds for a diff as for its page, and no diff text needs another.
+//!    code span stays a `<code>` element, inside the mark that changes it. A block whose kind
+//!    of text changed (a prose made a code block, or the reverse) shows its old text whole as
+//!    removed in its old element, then its new text whole as added in its new element. So the
+//!    leak scan's code exemption holds for a diff as for its page, and no diff text needs
+//!    another.
+//! 7. **The coded text.** The text of rule 4 marks each code span with private-use characters,
+//!    and keeps each authored one after an escape ([`crate::inline::plain_refs_coded`]). Each
+//!    side's text is read back in order, across the pieces, before any HTML is written: no mark
+//!    reaches a page, and no authored character is lost.
 use crate::escape;
 use crate::home::{self, ChangeRow};
-use crate::inline::{CODE_CLOSE, CODE_OPEN, Form};
+use crate::inline::{CODE_CLOSE, CODE_ESC, CODE_OPEN, Form, code_escape};
 use crate::review::Review;
 use crate::search::own_text_coded;
 use crate::site::{Site, name_as_title, rel, reserved_ids, unique};
@@ -233,7 +241,7 @@ pub fn summary(
     for (id, change) in order {
         let (old, new) = (sides.from.get(&id), sides.to.get(&id));
         let Some(b) = new.or(old) else { continue };
-        let html = diff_html(&pieces(old, new, sides), &wrap_of(b));
+        let html = block_diff(old, new, sides);
         inline.insert(id.clone(), html.clone());
         let entry = Entry {
             id: id.to_string(),
@@ -330,10 +338,11 @@ fn home_group(id: &BlockId, sides: &Sides, group_of: &BTreeMap<BlockId, usize>) 
     None
 }
 
-/// The doc list of the since page (rule 2): the rows the home page's rule gives for the `to`
-/// side, a removed page titled as `from` held it, in the order of their first entries in
-/// `order` (the block diff's order; a row with none keeps its place after them). A row links to
-/// its doc's page only when the rendered site `site` has it.
+/// The doc list of the since page (rule 2): of the rows the home page's rule gives for the `to`
+/// side (a removed page titled as `from` held it), those that hold an entry of `order`, in the
+/// order of their first entries (the block diff's order). A doc that only lost a block another
+/// doc now holds has no row: that block's entry is in the doc that holds it. A row links to its
+/// doc's page only when the rendered site `site` has it.
 fn since_rows(
     site: &Site,
     rv: &Review,
@@ -363,6 +372,7 @@ fn since_rows(
     let mut keyed: Vec<(usize, usize, ChangeRow)> = rows
         .into_iter()
         .enumerate()
+        .filter(|(i, _)| first[*i] != usize::MAX)
         .map(|(i, r)| (first[i], i, r))
         .collect();
     keyed.sort_by_key(|(f, i, _)| (*f, *i));
@@ -412,11 +422,13 @@ fn title_of(b: &Block, m: &Materialized, site: &Site, coded: bool) -> String {
     if let Some(t) = field_words(b, "title", site, coded) {
         return t;
     }
-    m.name_of(&b.id)
+    let title = m
+        .name_of(&b.id)
         .or_else(|| b.field_str("name").map(String::from))
         .map(|n| name_as_title(&n, &b.id))
         .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| "Untitled".into())
+        .unwrap_or_else(|| "Untitled".into());
+    if coded { code_escape(&title) } else { title }
 }
 
 /// A doc's or folder's title in plain words: a section's heading on this page.
@@ -452,18 +464,30 @@ fn unit(b: &Block) -> Unit {
     }
 }
 
-/// The word pieces of a block from `old` (in `from`) to `new` (in `to`) (rule 4).
-fn pieces(old: Option<&Block>, new: Option<&Block>, sides: &Sides) -> Vec<Piece> {
+/// The diff of a block from `old` (in `from`) to `new` (in `to`) (rules 4 and 6): a word diff in
+/// the block's element when both sides have the same kind of text, else each side whole in its
+/// own element.
+fn block_diff(old: Option<&Block>, new: Option<&Block>, sides: &Sides) -> String {
     let site = sides.text;
+    let old = old.map(|o| (text(o, sides.from, site), wrap_of(o), o));
+    let new = new.map(|n| (text(n, sides.to, site), wrap_of(n), n));
     match (old, new) {
-        (Some(o), Some(n)) => worddiff::diff(
-            &text(o, sides.from, site),
-            &text(n, sides.to, site),
-            unit(n),
-        ),
-        (None, Some(n)) => worddiff::diff("", &text(n, sides.to, site), unit(n)),
-        (Some(o), None) => worddiff::diff(&text(o, sides.from, site), "", unit(o)),
-        (None, None) => vec![],
+        (Some((ot, ow, _)), Some((nt, nw, n))) if ow.same_kind(&nw) => {
+            diff_html(&worddiff::diff(&ot, &nt, unit(n)), &nw)
+        }
+        (Some((ot, ow, _)), Some((nt, nw, _))) => {
+            let mut out = String::new();
+            if !ot.is_empty() {
+                out.push_str(&diff_html(&worddiff::diff(&ot, "", Unit::Lines), &ow));
+            }
+            if !nt.is_empty() || ot.is_empty() {
+                out.push_str(&diff_html(&worddiff::diff("", &nt, Unit::Lines), &nw));
+            }
+            out
+        }
+        (None, Some((nt, nw, n))) => diff_html(&worddiff::diff("", &nt, unit(n)), &nw),
+        (Some((ot, ow, o)), None) => diff_html(&worddiff::diff(&ot, "", unit(o)), &ow),
+        (None, None) => String::new(),
     }
 }
 
@@ -474,6 +498,16 @@ pub enum Wrap {
     Para,
     /// A code block's `<pre><code>`, with its language, if it has one.
     Code(Option<String>),
+}
+
+impl Wrap {
+    /// Both a paragraph, or both a code block (in any language: the diff takes the new one's).
+    fn same_kind(&self, other: &Wrap) -> bool {
+        matches!(
+            (self, other),
+            (Wrap::Para, Wrap::Para) | (Wrap::Code(_), Wrap::Code(_))
+        )
+    }
 }
 
 /// The element `b`'s diff is written in: `<pre><code>` for a code block, with the language its
@@ -490,7 +524,7 @@ fn wrap_of(b: &Block) -> Wrap {
 const DEL_OPEN: &str = "<del><span class=\"sr-word\">removed: </span>";
 const INS_OPEN: &str = "<ins><span class=\"sr-word\">added: </span>";
 
-/// The pieces as the entry's diff (rules 5 and 6).
+/// The pieces of a coded text (rule 7) as the entry's diff (rules 5 and 6).
 pub fn diff_html(pieces: &[Piece], wrap: &Wrap) -> String {
     let mut out = String::new();
     match wrap {
@@ -502,101 +536,103 @@ pub fn diff_html(pieces: &[Piece], wrap: &Wrap) -> String {
             out.push_str(&format!(
                 "<pre class=\"code chg-diff\" data-rdy=\"content\"><code{class}>"
             ));
-            for p in pieces {
-                let text = escape(&p.text);
-                match p.op {
-                    Op::Same => out.push_str(&text),
-                    Op::Del => out.push_str(&format!("{DEL_OPEN}{text}</del>")),
-                    Op::Add => out.push_str(&format!("{INS_OPEN}{text}</ins>")),
-                }
-            }
+            pieces_html(pieces, &mut out);
             out.push_str("</code></pre>");
         }
         Wrap::Para => {
             out.push_str("<p class=\"chg-diff\" data-rdy=\"content\">");
-            para_pieces(pieces, &mut out);
+            pieces_html(pieces, &mut out);
             out.push_str("</p>");
         }
     }
     out
 }
 
-/// The runs of `text` between the code marks, each with whether it is code. `code` is the state
-/// before `text` and after it.
-fn runs(text: &str, code: &mut bool) -> Vec<(String, bool)> {
-    let mut out: Vec<(String, bool)> = vec![];
-    let mut cur = String::new();
-    for c in text.chars() {
-        if c == CODE_OPEN || c == CODE_CLOSE {
-            if !cur.is_empty() {
-                out.push((std::mem::take(&mut cur), *code));
+/// One character of a side's text as a reader reads it, and the code span it is in: `0` for
+/// none, else the span's number on that side (two neighbouring spans stay two elements).
+type Ch = (char, u32);
+
+/// Reads one side's coded text back (rule 7), in order, across the pieces of a diff.
+#[derive(Default)]
+struct Decoder {
+    /// The last character was [`CODE_ESC`]: the next one is authored text.
+    esc: bool,
+    span: u32,
+    spans: u32,
+}
+
+impl Decoder {
+    fn read(&mut self, text: &str) -> Vec<Ch> {
+        let mut out = vec![];
+        for c in text.chars() {
+            if std::mem::take(&mut self.esc) {
+                out.push((c, self.span));
+                continue;
             }
-            *code = c == CODE_OPEN;
+            match c {
+                CODE_ESC => self.esc = true,
+                CODE_OPEN => {
+                    self.spans += 1;
+                    self.span = self.spans;
+                }
+                CODE_CLOSE => self.span = 0,
+                _ => out.push((c, self.span)),
+            }
+        }
+        out
+    }
+}
+
+/// Characters as runs, escaped, each run of a code span in a `<code>` element.
+fn runs_html(out: &mut String, chars: &[Ch]) {
+    for run in chars.chunk_by(|a, b| a.1 == b.1) {
+        let text: String = run.iter().map(|r| r.0).collect();
+        if run[0].1 == 0 {
+            out.push_str(&escape(&text));
         } else {
-            cur.push(c);
+            out.push_str(&format!("<code>{}</code>", escape(&text)));
         }
     }
-    if !cur.is_empty() {
-        out.push((cur, *code));
-    }
-    out
 }
 
-/// One run, escaped, in a `<code>` element when it is code.
-fn run_html(out: &mut String, text: &str, code: bool) {
-    if code {
-        out.push_str(&format!("<code>{}</code>", escape(text)));
-    } else {
-        out.push_str(&escape(text));
-    }
-}
-
-/// A removed or added run of runs, with its hidden word; nothing when no run has text.
-fn marked(out: &mut String, open: &str, close: &str, runs: &[(String, bool)]) {
-    if runs.is_empty() {
+/// Removed or added characters, with their hidden word; nothing when there are none.
+fn marked(out: &mut String, open: &str, close: &str, chars: &[Ch]) {
+    if chars.is_empty() {
         return;
     }
     out.push_str(open);
-    for (t, code) in runs {
-        run_html(out, t, *code);
-    }
+    runs_html(out, chars);
     out.push_str(close);
 }
 
-/// A paragraph diff's pieces (rule 6). The old text (`Same` and `Del`) and the new text (`Same`
-/// and `Add`) each carry the code marks of their own code spans, so each side keeps whether it
-/// is in a code span. A `Same` run that is code on one side only is shown as removed in the old
-/// form and added in the new, so a change between code and plain words is never hidden.
-fn para_pieces(pieces: &[Piece], out: &mut String) {
-    let (mut old_code, mut new_code) = (false, false);
+/// A diff's pieces (rules 6 and 7). The old text (`Same` and `Del`) and the new text (`Same` and
+/// `Add`) are each read back on their own, so each side keeps its code spans and its authored
+/// characters. A `Same` run that is code on one side only is shown as removed in the old form
+/// and added in the new, so a change between code and plain words is never hidden; and a `Same`
+/// piece the two sides read differently is shown whole as removed, then added.
+fn pieces_html(pieces: &[Piece], out: &mut String) {
+    let (mut old, mut new) = (Decoder::default(), Decoder::default());
     for p in pieces {
         match p.op {
-            Op::Del => marked(out, DEL_OPEN, "</del>", &runs(&p.text, &mut old_code)),
-            Op::Add => marked(out, INS_OPEN, "</ins>", &runs(&p.text, &mut new_code)),
+            Op::Del => marked(out, DEL_OPEN, "</del>", &old.read(&p.text)),
+            Op::Add => marked(out, INS_OPEN, "</ins>", &new.read(&p.text)),
             Op::Same => {
-                let mut cur = String::new();
-                let flush = |out: &mut String, cur: &mut String, old: bool, new: bool| {
-                    if cur.is_empty() {
-                        return;
-                    }
-                    let t = std::mem::take(cur);
-                    if old == new {
-                        run_html(out, &t, old);
+                let (o, n) = (old.read(&p.text), new.read(&p.text));
+                if !o.iter().map(|r| r.0).eq(n.iter().map(|r| r.0)) {
+                    marked(out, DEL_OPEN, "</del>", &o);
+                    marked(out, INS_OPEN, "</ins>", &n);
+                    continue;
+                }
+                let both: Vec<(Ch, Ch)> = o.into_iter().zip(n).collect();
+                for run in both.chunk_by(|a, b| a.0.1 == b.0.1 && a.1.1 == b.1.1) {
+                    let (o, n): (Vec<Ch>, Vec<Ch>) = run.iter().copied().unzip();
+                    if (o[0].1 == 0) == (n[0].1 == 0) {
+                        runs_html(out, &o);
                     } else {
-                        marked(out, DEL_OPEN, "</del>", &[(t.clone(), old)]);
-                        marked(out, INS_OPEN, "</ins>", &[(t, new)]);
-                    }
-                };
-                for c in p.text.chars() {
-                    if c == CODE_OPEN || c == CODE_CLOSE {
-                        flush(out, &mut cur, old_code, new_code);
-                        old_code = c == CODE_OPEN;
-                        new_code = old_code;
-                    } else {
-                        cur.push(c);
+                        marked(out, DEL_OPEN, "</del>", &o);
+                        marked(out, INS_OPEN, "</ins>", &n);
                     }
                 }
-                flush(out, &mut cur, old_code, new_code);
             }
         }
     }
@@ -637,6 +673,63 @@ mod tests {
         assert_eq!(
             diff_html(&[], &Wrap::Para),
             "<p class=\"chg-diff\" data-rdy=\"content\"></p>"
+        );
+    }
+
+    const DEL: &str = DEL_OPEN;
+    const INS: &str = INS_OPEN;
+
+    fn coded(t: &str) -> String {
+        crate::inline::plain_refs_coded(t, RefMode::Strict, Form::Spans, &|_| String::new())
+    }
+
+    fn para(old: &str, new: &str) -> String {
+        let html = diff_html(
+            &worddiff::diff(&coded(old), &coded(new), Unit::Words),
+            &Wrap::Para,
+        );
+        html.strip_prefix("<p class=\"chg-diff\" data-rdy=\"content\">")
+            .and_then(|h| h.strip_suffix("</p>"))
+            .expect("a paragraph")
+            .to_string()
+    }
+
+    /// Fix round 2 (finding 3): an authored mark character inside a code span is read back as
+    /// text in that span; the escape character itself is read back too.
+    #[test]
+    fn sr6_authored_mark_characters_are_read_back() {
+        assert_eq!(
+            para("x `a\u{E000}b` y", "x `a\u{E001}b` y"),
+            format!(
+                "x <code>a</code>{DEL}<code>\u{E000}</code></del>{INS}<code>\u{E001}</code></ins><code>b</code> y"
+            )
+        );
+        assert_eq!(
+            para("a\u{E002}b", "a\u{E002}c"),
+            format!("a\u{E002}{DEL}b</del>{INS}c</ins>")
+        );
+        let code = diff_html(
+            &worddiff::diff(
+                &code_escape("a\u{E000}"),
+                &code_escape("a\u{E001}"),
+                Unit::Lines,
+            ),
+            &Wrap::Code(None),
+        );
+        assert_eq!(
+            code,
+            format!(
+                "<pre class=\"code chg-diff\" data-rdy=\"content\"><code>{DEL}a\u{E000}</del>{INS}a\u{E001}</ins></code></pre>"
+            )
+        );
+    }
+
+    /// Text that leaves a code span shows as removed in code and added as plain words.
+    #[test]
+    fn sr6_a_word_out_of_its_code_span_is_marked() {
+        assert_eq!(
+            para("Run `make` now.", "Run make now."),
+            format!("Run {DEL}<code>make</code></del>{INS}make</ins> now.")
         );
     }
 }

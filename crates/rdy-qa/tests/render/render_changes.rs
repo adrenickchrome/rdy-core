@@ -906,3 +906,164 @@ fn sr6_inline_code_in_prose_stays_code() {
         .collect();
     assert!(leaks.is_empty(), "{leaks:#?}");
 }
+
+/// Fix round 2 (finding 1): the since page lists the docs of its counted entries only. A prose
+/// block moved from Alpha to Beta after the tag is one entry, in Beta: Alpha, which only lost
+/// it, gets no row and no section.
+#[test]
+fn sr6_the_since_page_lists_only_the_docs_of_its_entries() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "alpha", "title": "Alpha", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "id": "$ap", "parent": "$a", "body": "Moving text."},
+            {"op": "create", "type": "prose", "parent": "$a", "body": "Alpha stays."},
+            {"op": "create", "type": "doc", "id": "$b", "fields": {"name": "beta", "title": "Beta", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "parent": "$b", "body": "Beta stays."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    let id = |k: &str| made.created[k].clone();
+    write(
+        &mut r,
+        "x",
+        json!([{"op": "move", "id": id("$ap"), "parent": id("$b")}]),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    let st = r.read();
+    let landing: rdy_model::Hash = st.versions().unwrap()[0].landing.parse().unwrap();
+    let diff = st.diff(&Scope::At(landing), &Scope::Canon).unwrap();
+    let ids: Vec<String> = diff.entries.iter().map(|e| e.id.to_string()).collect();
+    assert_eq!(ids, [id("$ap")], "guard: one entry, the moved prose");
+    let out = rendered(&r, &Scope::Canon);
+    let page = read(out.path(), "changes-since.html");
+    assert!(
+        page.contains("<p class=\"lede\">1 change in 1 doc since v1.0.0.</p>"),
+        "{page}"
+    );
+    let titles: Vec<String> = list_rows(&page).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(titles, ["Beta"], "{page}");
+    assert!(!page.contains("<h2 id=\"alpha\">"), "{page}");
+    assert_eq!(entries(&page).len(), 1, "{page}");
+}
+
+/// Fix round 2 (finding 2): a prose turned into a code block shows its old text removed as
+/// prose, its code span still a `<code>` element and no code mark left in it, then its new
+/// text added in the code block's `<pre><code>`.
+#[test]
+fn sr6_prose_turned_into_code_keeps_each_side_its_kind() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "Run `make` now."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let p = made.created["$p"].clone();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": p, "type": "code", "fields": {"lang": "sh"}, "body": "make all"}]),
+    )
+    .unwrap();
+    let out = rendered(&r, &Scope::View("w".into()));
+    let page = read(out.path(), "changes.html");
+    let e = entry_of(&page, &p);
+    assert!(
+        e.contains(&format!(
+            "<p class=\"chg-diff\" data-rdy=\"content\">{DEL}Run <code>make</code> now.</del></p><pre class=\"code chg-diff\" data-rdy=\"content\"><code class=\"language-sh\">{INS}make all</ins></code></pre>"
+        )),
+        "{e}"
+    );
+    assert!(!e.contains(['\u{E000}', '\u{E001}', '\u{E002}']), "{e}");
+    let leaks = unhidden_leaks(out.path());
+    let leaks: Vec<&String> = leaks
+        .iter()
+        .filter(|l| l.starts_with("changes.html "))
+        .collect();
+    assert!(leaks.is_empty(), "{leaks:#?}");
+}
+
+/// Fix round 2 (finding 2): a code block turned into prose shows its old text removed in its
+/// `<pre><code>`, with its language, then the new prose added, its code span a `<code>`.
+#[test]
+fn sr6_code_turned_into_prose_keeps_each_side_its_kind() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "overview"}},
+            {"op": "create", "type": "code", "id": "$c", "parent": "$d", "fields": {"lang": "rust"}, "body": "read(x);"}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let c = made.created["$c"].clone();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": c, "type": "prose", "unset": ["lang"], "body": "Call `read` once."}]),
+    )
+    .unwrap();
+    let out = rendered(&r, &Scope::View("w".into()));
+    let page = read(out.path(), "changes.html");
+    let e = entry_of(&page, &c);
+    assert!(
+        e.contains(&format!(
+            "<pre class=\"code chg-diff\" data-rdy=\"content\"><code class=\"language-rust\">{DEL}read(x);</del></code></pre><p class=\"chg-diff\" data-rdy=\"content\">{INS}Call <code>read</code> once.</ins></p>"
+        )),
+        "{e}"
+    );
+    let leaks = unhidden_leaks(out.path());
+    let leaks: Vec<&String> = leaks
+        .iter()
+        .filter(|l| l.starts_with("changes.html "))
+        .collect();
+    assert!(leaks.is_empty(), "{leaks:#?}");
+}
+
+/// Fix round 2 (finding 3): the characters the diff marks code spans with stay readable when
+/// they are authored. An edit from `A\u{E000}Z` to `A\u{E001}Z` shows the one removed and the
+/// other added.
+#[test]
+fn sr6_authored_private_use_characters_survive_the_diff() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "overview"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "A\u{E000}Z"}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let p = made.created["$p"].clone();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": p, "body": "A\u{E001}Z"}]),
+    )
+    .unwrap();
+    let out = rendered(&r, &Scope::View("w".into()));
+    let page = read(out.path(), "changes.html");
+    assert_eq!(
+        diff_of(entry_of(&page, &p)),
+        format!("A{DEL}\u{E000}</del>{INS}\u{E001}</ins>Z"),
+        "{page}"
+    );
+}

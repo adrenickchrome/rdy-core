@@ -1,6 +1,6 @@
 //! The search index: `search-index.json`, one entry per doc, section, term, question and folder,
 //! read by the client in `theme/rdy-standard/js/search.js`.
-use crate::inline::Form;
+use crate::inline::{Form, code_escape};
 use crate::page::PageContext;
 use crate::site::Site;
 use rdy_engine::Materialized;
@@ -109,6 +109,15 @@ impl Read<'_, '_> {
         }
     }
 
+    /// Text read as it is, with no Markdown: in the coded form, escaped ([`code_escape`]).
+    fn raw(&self, text: &str) -> String {
+        if self.coded {
+            code_escape(text)
+        } else {
+            text.to_string()
+        }
+    }
+
     fn field(&self, b: &Block, name: &str) -> String {
         let form = match name {
             "statement" | "prompt" => Form::Spans,
@@ -133,7 +142,8 @@ pub(crate) fn own_text(b: &Block, site: &Site) -> String {
 }
 
 /// As [`own_text`], with each code span of the block's spans between the code marks
-/// ([`crate::inline::plain_refs_coded`]): the word diff of a change summary reads it (sr6).
+/// ([`crate::inline::plain_refs_coded`]) and every authored character kept, escaped where it
+/// is a mark character ([`code_escape`]): the word diff of a change summary reads it (sr6).
 pub(crate) fn own_text_coded(b: &Block, site: &Site) -> String {
     own_text_in(b, Read { site, coded: true })
 }
@@ -151,14 +161,14 @@ fn own_text_in(b: &Block, r: Read) -> String {
             format!("{}: {}", r.field(b, "name"), body())
         }
         "value" => {
-            let v = entity::value_text(b).unwrap_or_default();
+            let v = r.raw(&entity::value_text(b).unwrap_or_default());
             format!("{}: {v} {}", r.field(b, "name"), body())
                 .trim_end()
                 .to_string()
         }
         "question" => r.field(b, "prompt"),
         "diagram" | "figure" => r.field(b, "alt"),
-        "code" => b.body.clone(),
+        "code" => r.raw(&b.body),
         "table" => {
             let rows = list("rows").into_iter().map(|row| match row {
                 FieldValue::List(cells) => cells

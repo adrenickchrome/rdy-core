@@ -96,10 +96,26 @@ pub fn plain_refs(
 pub(crate) const CODE_OPEN: char = '\u{E000}';
 /// Closes a code span in the text of [`plain_refs_coded`].
 pub(crate) const CODE_CLOSE: char = '\u{E001}';
+/// In the text of [`plain_refs_coded`], the next character is authored text, not a mark.
+pub(crate) const CODE_ESC: char = '\u{E002}';
+
+/// `t` as authored text in the coded form ([`plain_refs_coded`]): each of the three mark
+/// characters it holds is kept, after [`CODE_ESC`], so a reader of the coded text gets it back.
+pub(crate) fn code_escape(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    for c in t.chars() {
+        if matches!(c, CODE_OPEN | CODE_CLOSE | CODE_ESC) {
+            out.push(CODE_ESC);
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// As [`plain_refs`], but each code span's text stands between [`CODE_OPEN`] and [`CODE_CLOSE`]:
-/// a word diff reads it so that a code span stays code (the task-6 ruling). The two marks are
-/// taken out of the authored text and of each reference's words, so they only ever mark a span.
+/// a word diff reads it so that a code span stays code (the task-6 ruling). The encoding is
+/// reversible: an authored mark character (and [`CODE_ESC`]) is written after [`CODE_ESC`]
+/// ([`code_escape`]), so no authored character is lost and only a code span writes a bare mark.
 pub(crate) fn plain_refs_coded(
     text: &str,
     mode: RefMode,
@@ -739,10 +755,10 @@ fn render_plain(
     coded: bool,
     out: &mut String,
 ) {
-    // with `coded`, only a code span writes the two marks
+    // with `coded`, only a code span writes a bare mark: authored text is escaped
     let push = |out: &mut String, t: &str| {
         if coded {
-            out.extend(t.chars().filter(|c| *c != CODE_OPEN && *c != CODE_CLOSE));
+            out.push_str(&code_escape(t));
         } else {
             out.push_str(t);
         }
