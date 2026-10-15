@@ -192,3 +192,74 @@ fn sr8_the_versions_page_is_never_a_read_scope() {
     assert_eq!(e.message, "no view \"versions\"", "{e:?}");
     assert!(resolve(&sh.state.load_full(), &V).is_err());
 }
+
+/// The meta of the row that links to `href` on the versions page `page`.
+fn row_meta<'a>(page: &'a str, href: &str) -> &'a str {
+    let at = page
+        .find(&format!("<a href=\"{href}\">"))
+        .unwrap_or_else(|| panic!("no row for {href} in {page}"));
+    let row = &page[at..];
+    let row = &row[..row.find("</li>").expect("the row ends")];
+    let meta = &row[row
+        .find("class=\"vmenu-meta\">")
+        .expect("the row has a meta")
+        + 19..];
+    &meta[..meta.find("</span>").expect("the meta ends")]
+}
+
+/// Writes doc `title` with one prose block into `view`, on the daemon's writer, and lands it
+/// when `land_it`.
+fn add_doc(sh: &Arc<Shared>, view: &'static str, title: &'static str, land_it: bool) {
+    write_typed(&*sh.engine(), move |r| {
+        rdy_qa::golden::write(r, view, json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": title.to_lowercase(), "title": title, "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}},
+            {"op": "create", "type": "prose", "parent": "$s", "body": format!("{title} first.")}
+        ]))?;
+        if land_it {
+            land(r, view)?;
+        }
+        Ok(Value::Null)
+    })
+    .unwrap();
+}
+
+/// A pinned view made before the first landing has no base: its review reads against canon, so
+/// each landing moves its count, and the menu's cached count moves with it (O12).
+#[test]
+fn sr8_a_pinned_view_from_before_the_first_landing_counts_against_each_canon() {
+    let (dir, mut r) = tiny();
+    r.view_create(&rdy_qa::fixtures::writer(), "editing", None, true)
+        .unwrap();
+    drop(r);
+    let h = Hosted::start_in(dir);
+    let sh = shared(&h);
+    add_doc(&sh, "editing", "Alpha", false);
+    let editing = Scope::View("editing".into());
+    let words = |n: usize| {
+        if n == 1 {
+            "1 doc changed".to_string()
+        } else {
+            format!("{n} docs changed")
+        }
+    };
+    let mut seen = Vec::new();
+    for landed in [None, Some(("first", "Beta")), Some(("second", "Gamma"))] {
+        if let Some((view, title)) = landed {
+            add_doc(&sh, view, title, true);
+        }
+        let st = sh.state.load_full();
+        assert_eq!(st.effective_base("editing"), None, "the view stays pinned");
+        let fresh = rdy_render::menu::docs_changed(&st, &editing).unwrap();
+        let page = sh.site.refresh(&sh, &V).unwrap();
+        let page = String::from_utf8_lossy(&page.files["index.html"]).into_owned();
+        let meta = row_meta(&page, "/~view/editing/");
+        assert!(
+            meta.ends_with(&words(fresh)),
+            "after the {} landing the menu counts {fresh}: {meta}",
+            landed.map_or("no", |(v, _)| v)
+        );
+        seen.push(fresh);
+    }
+    assert_eq!(seen, [1, 2, 3], "each landing moves the fresh count");
+}

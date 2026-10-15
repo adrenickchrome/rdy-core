@@ -4,9 +4,11 @@
   var PAGE = "/~versions/index.html";
   var LABEL = "Versions, proposals and views";
   if (!window.fetch || !window.DOMParser) return;
-  // the open menu: its pill, its popover once loaded, its stream and the stream's URL
+  // the open menu: its pill, its popover once loaded, its stream and the stream's URL, and the
+  // number of its latest load (a load that a newer one replaced changes nothing)
   var open = null;
 
+  // the pill in the header now: a label event (live.js) rewrites the version slot and the pill in it
   function pill() {
     return document.querySelector(".pill[data-menu]");
   }
@@ -45,31 +47,67 @@
     });
   }
 
-  // loads the menu again in place; a failure keeps what it shows
+  // the menu o, if it is still open and `n` is its latest load
+  function current(o, n) {
+    return open === o && o.n === n;
+  }
+
+  // marks the pill now in the header as the open menu's; false when there is none
+  function claim(o) {
+    var p = pill();
+    if (!p) return false;
+    o.pill = p;
+    p.setAttribute("aria-expanded", "true");
+    return true;
+  }
+
+  // closes menu o and follows its pill's link to the full page: the menu did not load, or has
+  // no pill to show under
+  function follow(o) {
+    var p = pill() || o.pill;
+    stopStream();
+    open = null;
+    if (o.pop && o.pop.parentNode) o.pop.parentNode.removeChild(o.pop);
+    o.pill.setAttribute("aria-expanded", "false");
+    p.setAttribute("aria-expanded", "false");
+    window.location.href = p.getAttribute("href");
+  }
+
+  // loads the menu again in place, with the stream of what it shows; a failure follows the link
   function refresh() {
     var o = open;
+    if (!o || !o.pop) return;
+    var n = ++o.n;
     stopStream();
     load().then(function (got) {
-      if (open !== o || !o.pop) return;
+      if (!current(o, n)) return;
+      // the popover stays where it is; a new pill says the menu is open
+      claim(o);
       o.pop.replaceChild(got.nav, o.pop.firstChild);
       o.events = got.events;
       stream();
-    }, function () {});
+    }, function () {
+      if (current(o, n)) follow(o);
+    });
   }
 
   function show(p) {
-    var o = { pill: p, pop: null, es: null, events: null };
+    var o = { pill: p, pop: null, es: null, events: null, n: 0 };
     open = o;
     p.setAttribute("aria-expanded", "true");
     load().then(function (got) {
-      if (open !== o) return;
+      if (!current(o, 0)) return;
+      if (!claim(o)) {
+        follow(o);
+        return;
+      }
       var pop = document.createElement("div");
       pop.className = "vmenu-pop";
       pop.setAttribute("role", "dialog");
       pop.setAttribute("aria-label", LABEL);
       pop.appendChild(got.nav);
       // beside the header's version slot, which a label event rewrites
-      var at = p.closest("[data-rdy-version]") || p;
+      var at = o.pill.closest("[data-rdy-version]") || o.pill;
       at.parentNode.insertBefore(pop, at.nextSibling);
       o.pop = pop;
       o.events = got.events;
@@ -77,10 +115,7 @@
       if (first) first.focus();
       stream();
     }, function () {
-      if (open !== o) return;
-      open = null;
-      p.setAttribute("aria-expanded", "false");
-      window.location.href = p.getAttribute("href");
+      if (current(o, 0)) follow(o);
     });
   }
 

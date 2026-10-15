@@ -242,8 +242,9 @@ fn sr8_the_key_moves_with_what_the_menu_shows() {
 }
 
 /// A just-enough DOM for `menu.js`: a header with the pill, stub `fetch`, `DOMParser` and
-/// `EventSource`, and a log of what the script fetched, streamed and followed.
-const MENU_HARNESS: &str = r##"
+/// `EventSource`, and a log of what the script fetched, streamed and followed. With `defer`, each
+/// fetch waits in `log.pending` until the case completes it (`ok(rev)`) or fails it (`fail()`).
+const MENU_DOM: &str = r##"
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
 let doc = null;
@@ -282,7 +283,7 @@ function menuPage(n) {
         h('a', { href: '/' }), h('a', { href: '/~tag/v1.0.0/' }), h('a', { href: '/~view/editing/?' + n })))));
 }
 function setup(opts) {
-  const log = { fetched: [], streams: [], followed: null };
+  const log = { fetched: [], streams: [], followed: null, pending: [] };
   const pillAttrs = { class: 'pill', href: '/~versions/' };
   if (opts.menu) Object.assign(pillAttrs, { 'data-menu': '', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' });
   const pill = h('a', pillAttrs, h('span', { class: 'pill-text' }));
@@ -302,7 +303,13 @@ function setup(opts) {
   const window = {
     listeners: {},
     addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
-    fetch: (url) => { log.fetched.push(url); served += 1; const n = served; return opts.fail ? Promise.reject(new Error('down')) : Promise.resolve({ ok: true, text: () => Promise.resolve('page ' + n) }); },
+    fetch: (url) => {
+      log.fetched.push(url);
+      if (opts.defer) return new Promise((res, rej) => log.pending.push({
+        ok: (n) => res({ ok: true, text: () => Promise.resolve('page ' + n) }),
+        fail: () => rej(new Error('down')),
+      }));
+      served += 1; const n = served; return opts.fail ? Promise.reject(new Error('down')) : Promise.resolve({ ok: true, text: () => Promise.resolve('page ' + n) }); },
     DOMParser: function () { this.parseFromString = (text) => menuPage(text.split(' ')[1]); },
     EventSource: function (url) { const es = this; es.url = url; es.closed = false; es.listeners = {}; es.addEventListener = (t, f) => { (es.listeners[t] = es.listeners[t] || []).push(f); }; es.close = () => { es.closed = true; }; log.streams.push(es); },
     location: { set href(v) { log.followed = v; }, get href() { return 'http://127.0.0.1/'; } },
@@ -312,25 +319,38 @@ function setup(opts) {
   const click = (target) => { let prevented = false; fire(target, 'click', { button: 0, preventDefault() { prevented = true; } }); return prevented; };
   const key = (k) => fire(body, 'keydown', { key: k, preventDefault() {} });
   const pop = () => header.querySelector('.vmenu-pop');
+  // a label event (live.js) rewrites the version slot: a new pill, or none
+  const relabel = (withPill) => {
+    version.children.slice().forEach((c) => version.removeChild(c));
+    if (withPill) version.appendChild(h('a', Object.assign({}, pillAttrs, { 'aria-expanded': 'false' }), h('span', { class: 'pill-text' })));
+  };
+  const visibility = (v) => { document.visibilityState = v; (document.listeners.visibilitychange || []).forEach((f) => f({})); };
   const state = () => {
     const p = pop();
+    const cur = version.querySelector('.pill') || pill;
     return {
-      expanded: pill.getAttribute('aria-expanded'),
+      expanded: cur.getAttribute('aria-expanded'),
+      replaced: cur !== pill,
+      old_expanded: pill.getAttribute('aria-expanded'),
       open: !!p,
       role: p && p.getAttribute('role'),
       label: p && p.getAttribute('aria-label'),
       links: p ? p.querySelectorAll('a').map((a) => a.getAttribute('href')) : [],
       menus: p ? p.querySelectorAll('nav').length : 0,
       after_version: !!p && version.nextSibling === p,
-      focus: document.activeElement === pill ? 'pill' : (document.activeElement ? document.activeElement.getAttribute('href') : null),
+      focus: document.activeElement === cur ? 'pill' : document.activeElement === pill ? 'old pill' : (document.activeElement ? document.activeElement.getAttribute('href') : null),
       fetched: log.fetched.slice(),
       streams: log.streams.map((s) => ({ url: s.url, closed: s.closed })),
       followed: log.followed,
     };
   };
-  return { pill, other, header, document, log, click, key, state };
+  return { pill, other, header, document, log, click, key, state, relabel, visibility };
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
+"##;
+
+/// The open, close and fallback cases, after [`MENU_DOM`].
+const MENU_CASES: &str = r##"
 (async () => {
   const out = {};
   // a click opens the dialog with the fetched links; a reload event fetches again
@@ -387,7 +407,7 @@ fn sr8_the_menu_script_opens_and_closes_the_popover() {
         "/../rdy-render/theme/rdy-standard/js/menu.js"
     );
     let o = std::process::Command::new("node")
-        .args(["-e", MENU_HARNESS, "--", js])
+        .args(["-e", &format!("{MENU_DOM}{MENU_CASES}"), "--", js])
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
@@ -401,7 +421,8 @@ fn sr8_the_menu_script_opens_and_closes_the_popover() {
     assert_eq!(
         v["opened"],
         json!({
-            "expanded": "true", "open": true, "role": "dialog", "label": label,
+            "expanded": "true", "replaced": false, "old_expanded": "true",
+            "open": true, "role": "dialog", "label": label,
             "links": ["/", "/~tag/v1.0.0/", "/~view/editing/?1"], "menus": 1,
             "after_version": true, "focus": "/", "fetched": [page],
             "streams": [{"url": s1, "closed": false}], "followed": null
@@ -454,4 +475,135 @@ fn sr8_the_menu_script_opens_and_closes_the_popover() {
     assert_eq!(v["plain_prevented"], false, "{v}");
     assert_eq!(v["plain"]["fetched"], json!([]), "{v}");
     assert_eq!(v["plain"]["open"], false, "{v}");
+}
+
+/// The races, after [`MENU_DOM`]: a refresh that fails, two refreshes that complete in reverse
+/// order, and a label event that replaces the pill while the menu loads.
+const MENU_RACES: &str = r##"
+(async () => {
+  const out = { errors: [] };
+  process.on('unhandledRejection', (e) => out.errors.push(String((e && e.message) || e)));
+  const reload = (t, i) => t.log.streams[i].listeners.reload.forEach((f) => f({}));
+  // a refresh that fails after the menu opened follows the link and leaves no stream open
+  const a = setup({ menu: true, defer: true });
+  a.click(a.pill); a.log.pending[0].ok(1); await tick();
+  reload(a, 0);
+  a.log.pending[1].fail(); await tick();
+  out.refresh_failed = a.state();
+  // two refreshes that complete in reverse order: the menu shows the newer, with its stream
+  const b = setup({ menu: true, defer: true });
+  b.click(b.pill); b.log.pending[0].ok(1); await tick();
+  reload(b, 0);
+  b.visibility('hidden'); b.visibility('visible');
+  b.log.pending[2].ok(3); await tick();
+  b.log.pending[1].ok(2); await tick();
+  out.reversed = b.state();
+  // an older refresh that fails after a newer one loaded changes nothing
+  const c = setup({ menu: true, defer: true });
+  c.click(c.pill); c.log.pending[0].ok(1); await tick();
+  reload(c, 0);
+  c.visibility('hidden'); c.visibility('visible');
+  c.log.pending[2].ok(3); await tick();
+  c.log.pending[1].fail(); await tick();
+  out.stale_failed = c.state();
+  // a label event replaces the pill while the menu loads: the menu opens beside the new pill
+  const d = setup({ menu: true, defer: true });
+  d.click(d.pill);
+  d.relabel(true);
+  d.log.pending[0].ok(1); await tick();
+  out.relabeled = d.state();
+  d.key('Escape');
+  out.relabeled_closed = d.state();
+  // a label event leaves no pill while the menu loads: the click follows the link
+  const e = setup({ menu: true, defer: true });
+  e.click(e.pill);
+  e.relabel(false);
+  e.log.pending[0].ok(1); await tick();
+  out.no_pill = e.state();
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e); process.exit(1); });
+"##;
+
+#[test]
+fn sr8_the_menu_script_survives_failed_refreshes_overlaps_and_a_new_pill() {
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "sr8_the_menu_script_survives_failed_refreshes_overlaps_and_a_new_pill",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
+        );
+        return;
+    }
+    let js = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rdy-render/theme/rdy-standard/js/menu.js"
+    );
+    let o = std::process::Command::new("node")
+        .args(["-e", &format!("{MENU_DOM}{MENU_RACES}"), "--", js])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let s = |n: u32| format!("/_rdy/events?scope=versions&page=index.html&rev={n}");
+    let links = |n: u32| json!(["/", "/~tag/v1.0.0/", format!("/~view/editing/?{n}")]);
+    assert_eq!(v["errors"], json!([]), "no callback throws: {v}");
+
+    let f = &v["refresh_failed"];
+    assert_eq!(
+        f["followed"], "/~versions/",
+        "a failed refresh follows the link: {v}"
+    );
+    assert_eq!(f["open"], false, "{v}");
+    assert_eq!(f["expanded"], "false", "{v}");
+    assert_eq!(
+        f["streams"],
+        json!([{"url": s(1), "closed": true}]),
+        "no stream stays open: {v}"
+    );
+
+    let r = &v["reversed"];
+    assert_eq!(r["links"], links(3), "the newer menu stays: {v}");
+    assert_eq!(
+        r["streams"],
+        json!([{"url": s(1), "closed": true}, {"url": s(3), "closed": false}]),
+        "one stream, at the shown menu's revision: {v}"
+    );
+    assert_eq!(r["followed"], json!(null), "{v}");
+
+    let c = &v["stale_failed"];
+    assert_eq!(c["links"], links(3), "{v}");
+    assert_eq!(c["open"], true, "{v}");
+    assert_eq!(
+        c["followed"],
+        json!(null),
+        "an older failure is ignored: {v}"
+    );
+    assert_eq!(
+        c["streams"],
+        json!([{"url": s(1), "closed": true}, {"url": s(3), "closed": false}]),
+        "{v}"
+    );
+
+    let d = &v["relabeled"];
+    assert_eq!(d["replaced"], true, "{v}");
+    assert_eq!(d["open"], true, "the menu opens: {v}");
+    assert_eq!(d["after_version"], true, "beside the version slot: {v}");
+    assert_eq!(d["links"], links(1), "{v}");
+    assert_eq!(d["expanded"], "true", "the new pill says it is open: {v}");
+    assert_eq!(d["focus"], "/", "{v}");
+    assert_eq!(d["streams"], json!([{"url": s(1), "closed": false}]), "{v}");
+    assert_eq!(d["followed"], json!(null), "{v}");
+    let dc = &v["relabeled_closed"];
+    assert_eq!(dc["open"], false, "{v}");
+    assert_eq!(dc["expanded"], "false", "{v}");
+    assert_eq!(dc["focus"], "pill", "focus returns to the new pill: {v}");
+    assert_eq!(dc["streams"][0]["closed"], true, "{v}");
+
+    let e = &v["no_pill"];
+    assert_eq!(
+        e["followed"], "/~versions/",
+        "with no pill to open under, the click follows the link: {v}"
+    );
+    assert_eq!(e["open"], false, "{v}");
+    assert_eq!(e["streams"], json!([]), "{v}");
 }

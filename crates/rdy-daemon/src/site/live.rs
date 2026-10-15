@@ -28,6 +28,7 @@ use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::Hash;
 use rdy_render::live::{LiveBuild, build_live, diff, inputs_key};
 use rdy_render::menu::{build_versions, docs_changed, menu_key};
+use rdy_render::review;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -211,9 +212,11 @@ pub struct LiveSite {
 
 /// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
 /// generation `generation`: the scope, and the hash of what its review reads. A view's count reads
-/// its head op and its effective base; a proposal version's reads the version (its base is fixed
-/// in it) and whether canon has landed. The pack decides which docs have a page. Any other scope
-/// has no count to cache.
+/// its head op and its effective base; a proposal version's reads the version. Each also reads the
+/// base its review compares against ([`review::base_of`]): canon at a landing, canon at its head
+/// (so canon's head is an input: a pinned view made before the first landing has no base and is
+/// read against canon), or none. The pack decides which docs have a page. Any other scope has no
+/// count to cache.
 fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef, Hash)> {
     let mut k = generation.to_le_bytes().to_vec();
     let at = |k: &mut Vec<u8>, h: Option<Hash>| match h {
@@ -231,11 +234,23 @@ fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef
         }
         Scope::Proposal(v) => {
             at(&mut k, Some(*v));
-            k.push(u8::from(st.canon_head().is_some()));
             ScopeRef::Proposal(v.to_string())
         }
         _ => return None,
     };
+    match review::base_of(st, scope) {
+        Some(Scope::At(h)) => {
+            k.push(1);
+            k.extend_from_slice(&h.0);
+        }
+        Some(Scope::Canon) => {
+            k.push(2);
+            at(&mut k, st.canon_head());
+        }
+        // a base is canon or canon at a landing; nothing else to tell apart
+        Some(_) => k.push(3),
+        None => k.push(0),
+    }
     Some((r, Hash::of(&k)))
 }
 
