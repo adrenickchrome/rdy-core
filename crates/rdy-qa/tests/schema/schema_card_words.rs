@@ -245,6 +245,31 @@ fn di3_a_question_with_one_option_warns() {
         card_issues(&q.warnings)[0].0,
         format!("{}: options is longer than 60 characters", q.created["$q"])
     );
+    // a non-string entry is counted and named, never dropped
+    let q = question(&mut r, &s, with(json!(["Finance", "Support", 1, 2, 3])));
+    let id = &q.created["$q"];
+    assert_eq!(
+        card_issues(&q.warnings),
+        vec![
+            (
+                format!("{id} has 5 options"),
+                "give two to four options".to_string()
+            ),
+            (
+                format!("{id}: options holds an entry that is not a string"),
+                "make every option a string".to_string()
+            ),
+        ]
+    );
+    let q = question(&mut r, &s, with(json!(["Finance", 1])));
+    let id = &q.created["$q"];
+    assert_eq!(
+        card_issues(&q.warnings),
+        vec![(
+            format!("{id}: options holds an entry that is not a string"),
+            "make every option a string".to_string()
+        )]
+    );
     // no options at all is not a card-words issue: the question is not a card
     let q = question(&mut r, &s, base);
     assert!(card_issues(&q.warnings).is_empty(), "{:?}", q.warnings);
@@ -269,6 +294,51 @@ fn di3_recommended_must_be_an_option() {
     );
     let q = question(&mut r, &s, f("Finance"));
     assert!(card_issues(&q.warnings).is_empty(), "{:?}", q.warnings);
+}
+
+#[test]
+fn di3_a_blank_recommendation_is_still_a_recommendation() {
+    let (_d, mut r) = project();
+    let s = section(&mut r);
+    for blank in ["", "   "] {
+        let q = question(
+            &mut r,
+            &s,
+            json!({"title": "Who approves?", "why": "Refunds wait on it.",
+                "options": ["Finance", "Support"], "recommended": blank}),
+        );
+        let id = &q.created["$q"];
+        assert_eq!(
+            card_issues(&q.warnings),
+            vec![
+                (
+                    format!("{id} recommends an option it does not list"),
+                    "set recommended to one of the options".to_string()
+                ),
+                (
+                    format!("{id} recommends without a reason"),
+                    "add recommend_reason in one line".to_string()
+                ),
+            ],
+            "{blank:?}"
+        );
+        // a blank reason still counts as missing; with a real one only the membership warns
+        let q = question(
+            &mut r,
+            &s,
+            json!({"title": "Who approves?", "why": "Refunds wait on it.",
+                "options": ["Finance", "Support"], "recommended": blank,
+                "recommend_reason": "Finance owns the ledger."}),
+        );
+        assert_eq!(
+            card_issues(&q.warnings),
+            vec![(
+                format!("{} recommends an option it does not list", q.created["$q"]),
+                "set recommended to one of the options".to_string()
+            )],
+            "{blank:?}"
+        );
+    }
 }
 
 #[test]

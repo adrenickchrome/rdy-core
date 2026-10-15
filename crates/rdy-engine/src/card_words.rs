@@ -65,21 +65,31 @@ pub fn card_words_issues(id: &BlockId, block_type: &str, fields: &Fields) -> Vec
     }
     let recommended;
     if question {
-        let options: Vec<&str> = match fields.get("options") {
-            Some(FieldValue::List(items)) => items.iter().filter_map(FieldValue::as_str).collect(),
-            _ => vec![],
+        // Every entry of the list counts, a string or not: a non-string is named, never dropped.
+        let entries: &[FieldValue] = match fields.get("options") {
+            Some(FieldValue::List(items)) => items,
+            _ => &[],
         };
-        if fields.contains_key("options") && !(2..=4).contains(&options.len()) {
+        let options: Vec<&str> = entries.iter().filter_map(FieldValue::as_str).collect();
+        if fields.contains_key("options") && !(2..=4).contains(&entries.len()) {
             out.push(warn(
                 id,
-                format!("{id} has {} options", options.len()),
+                format!("{id} has {} options", entries.len()),
                 "give two to four options".to_string(),
+            ));
+        }
+        if options.len() < entries.len() {
+            out.push(warn(
+                id,
+                format!("{id}: options holds an entry that is not a string"),
+                "make every option a string".to_string(),
             ));
         }
         for o in &options {
             too_long(id, "options", o, LABEL_MAX, &mut out);
         }
-        recommended = text(fields, "recommended");
+        // A stored recommendation, even a blank one, is a recommendation.
+        recommended = fields.get("recommended").and_then(FieldValue::as_str);
         if let Some(r) = recommended
             && !options.contains(&r)
         {
@@ -90,7 +100,7 @@ pub fn card_words_issues(id: &BlockId, block_type: &str, fields: &Fields) -> Vec
             ));
         }
     } else {
-        recommended = text(fields, "recommend");
+        recommended = fields.get("recommend").and_then(FieldValue::as_str);
     }
     match text(fields, "recommend_reason") {
         None if recommended.is_some() => out.push(warn(
