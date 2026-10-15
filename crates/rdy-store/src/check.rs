@@ -4,7 +4,8 @@
 //! the version chains of intents and alternative sets and the links that name them (cfmt1), and
 //! the dismissal refs and the reviews they name (rvw1), and the mention review refs and the
 //! reviews they name (cc1), and the values of the inbox refs (ib1), and the fold of the
-//! TRANSITION records against the open-move tables (ib14).
+//! TRANSITION records against the open-move tables (ib14), and the ANSWER records and the
+//! `answer/` and `pending/` refs (di1).
 use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
@@ -45,6 +46,9 @@ pub struct StoreCheck {
     pub inboxes: usize,
     /// The TRANSITION records, folded in log order into the open tensions and suspects.
     pub transitions: usize,
+    /// The ANSWER records, each keeping the answer rules; the `answer/` and `pending/` refs each
+    /// name an answer of their own item and family (`crate::answer`).
+    pub answers: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -139,6 +143,7 @@ impl StoreReader {
         let tensions = self.check_semantic()?;
         let inboxes = self.check_inboxes()?;
         let transitions = self.check_transitions()?;
+        let answers = self.check_answers()?;
         Ok(StoreCheck {
             views,
             view_ops,
@@ -151,6 +156,7 @@ impl StoreReader {
             tensions,
             inboxes,
             transitions,
+            answers,
         })
     }
 

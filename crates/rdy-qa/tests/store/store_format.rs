@@ -476,7 +476,7 @@ fn hd2_an_index_without_the_format_ref_is_rebuilt_at_open() {
 
 #[test]
 fn dl2_a_store_of_an_older_dumpable_format_says_dump_and_load() {
-    // no store reaches this case at this release (10 is current); the next bump does
+    // a store of format 10 reaches this case at this release (11 is current)
     let next = STORE_FORMAT + 1;
     // final-round1 ruling 2: the fix names the format found, not "the rdy that wrote this store"
     // (rdy 0.2.0 wrote format 10 and has no rdy dump)

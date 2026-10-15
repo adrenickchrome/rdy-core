@@ -1418,7 +1418,9 @@ impl Store {
     /// and nothing rewrites it (FW-CH7). A `mention/` ref is refused: only `put_mention_review`
     /// writes one, with its review (FW-CV4). A `pair/` or `semantic/` ref is refused: only
     /// `put_verdict` and `put_tension_versions` write them, with their objects (plan M2e1). An
-    /// `inbox/` ref is refused: only `put_inbox` writes one, after its checks (plan M2e2).
+    /// `inbox/` ref is refused: only `put_inbox` writes one, after its checks (plan M2e2). An
+    /// `answer/` or `pending/` ref is refused: only `put_answer` writes one, with its answer
+    /// (plan Decision intake).
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
         if let Some((name, _)) = refs
             .iter()
@@ -1458,6 +1460,14 @@ impl Store {
         {
             return Err(StoreError::Decode(format!(
                 "ref {name:?} is an inbox: only put_inbox writes one"
+            )));
+        }
+        if let Some((name, _)) = refs.iter().find(|(name, _)| {
+            name.starts_with(crate::answer::ANSWER_REF)
+                || name.starts_with(crate::answer::PENDING_REF)
+        }) {
+            return Err(StoreError::Decode(format!(
+                "ref {name:?} is an answer: only put_answer writes one"
             )));
         }
         let items = self.ref_items(refs);

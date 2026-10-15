@@ -258,30 +258,3 @@ fn dl8_the_v1_fixture_spans_segments_and_holds_a_batch_past_the_limit() {
         "a batch passes the limit of {max} bytes"
     );
 }
-
-#[test]
-fn dl8_the_v1_fixture_redumps_record_for_record_while_the_store_format_is_10() {
-    // Only true while the store format is 10. A plan that changes the store format deletes this
-    // one test, with a note in its report: its load then appends the upgrade batch, so a redump
-    // has another header and one more batch. It edits no other dl8_ test:
-    // dl8_the_v1_fixture_loads_with_every_hash compares over the fixture's own log range and
-    // allows exactly that batch past it. The header's `rdy` text names the writer's version, so
-    // the comparison leaves it out.
-    assert_eq!(rdy_store::format::STORE_FORMAT, 10, "see the comment above");
-    let to = tempfile::tempdir().unwrap();
-    let dir = to.path().join("p");
-    load(&fixture("v1-s10.rdydump"), &dir).unwrap();
-    let again = to.path().join("again.rdydump");
-    let r = Rdy::open(&dir).unwrap();
-    r.read().dump(&again).unwrap();
-    r.close().unwrap();
-    let items = |p: &std::path::Path| {
-        let (mut rd, f, h) = DumpReader::open(std::fs::File::open(p).unwrap()).unwrap();
-        let mut v = vec![];
-        while let Some(i) = rd.next().unwrap() {
-            v.push(i);
-        }
-        (f, h.store_format, h.log_end, v)
-    };
-    assert!(items(&again) == items(&fixture("v1-s10.rdydump")));
-}

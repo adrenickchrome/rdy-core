@@ -325,3 +325,103 @@ fn eff1_a_decision_takes_effect_when_recorded_unless_it_says_otherwise() {
     };
     assert_eq!(decision::effective_from(&claim), None);
 }
+
+/// The encoding of `full_answer()`, pinned when the ANSWER kind was added (store format 11).
+const ANSWER_HEX: &str = concat!(
+    "09502d4141414141403103010672656a656374010652656a6563740307436f6e6669726d0652656a656374054c",
+    "6174657201bccd670673e993991bd31a5245563902bcea170b4f6e4646c8a5b2623b4c26f0010538661423236a",
+    "5d8df6286a8633369e2a03c5f90d48eded333222dbee8cdbdd0a68756d616e3a6e69636b00038080e682b96601",
+    "0b6167656e743a72656c6179010572756e2d3901106e6f2c206e6f742074686174206f6e6506736573732d310001010109746f6f206561726c79",
+);
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A fixed answer with every field set.
+fn full_answer() -> Answer {
+    Answer {
+        item: "P-AAAAA@1".into(),
+        act: AnswerAct::RejectDecision,
+        option: Some("reject".into()),
+        label: Some("Reject".into()),
+        options: vec!["Confirm".into(), "Reject".into(), "Later".into()],
+        card_hash: Some(Hash::of(b"card")),
+        targets: vec![Hash::of(b"t")],
+        person: Provenance {
+            actor: "human:nick".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 1_760_000_000_000,
+        },
+        relayed_by: Some(relay()),
+        relay_evidence: Some(RelayEvidence {
+            quoted: "no, not that one".into(),
+            session_ref: "sess-1".into(),
+            question: None,
+        }),
+        evidence_kind: Some(EvidenceKind::Card),
+        note: Some("too early".into()),
+    }
+}
+
+/// D-F0904 and O1: an answer's encoding is its fields in declaration order, each act has a fixed
+/// variant index, and the bytes of one fixed answer are pinned.
+#[test]
+fn di1_an_answer_encodes_field_by_field() {
+    let acts = [
+        AnswerAct::RejectProposal,
+        AnswerAct::Later,
+        AnswerAct::Confirm,
+        AnswerAct::RejectDecision,
+        AnswerAct::AnswerQuestion,
+        AnswerAct::Dismiss,
+        AnswerAct::Tag,
+        AnswerAct::ViewOwn,
+        AnswerAct::CloseStale,
+        AnswerAct::Propose,
+    ];
+    for (i, a) in acts.iter().enumerate() {
+        assert_eq!(enc(a), vec![i as u8], "{a:?}");
+    }
+    assert_eq!(
+        acts.map(AnswerAct::as_str),
+        [
+            "reject_proposal",
+            "later",
+            "confirm",
+            "reject_decision",
+            "answer_question",
+            "dismiss",
+            "tag",
+            "view_own",
+            "close_stale",
+            "propose",
+        ]
+    );
+    let a = full_answer();
+    let fields = enc(&(
+        &a.item,
+        a.act,
+        &a.option,
+        &a.label,
+        &a.options,
+        a.card_hash,
+        &a.targets,
+        &a.person,
+        &a.relayed_by,
+        &a.relay_evidence,
+        a.evidence_kind,
+        &a.note,
+    ));
+    let bytes = enc(&a);
+    assert_eq!(bytes, fields, "the fields in declaration order");
+    assert_eq!(hex(&bytes), ANSWER_HEX, "the pinned bytes");
+    assert_eq!(
+        a.id(),
+        Hash::of(&bytes),
+        "the id is the hash of the encoding"
+    );
+    let back: Answer = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(back, a);
+}
