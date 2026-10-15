@@ -94,6 +94,13 @@ impl Block {
     /// equals [`Block::content_hash`] byte for byte.
     pub fn content_hash_with(&self, t: &Tracking) -> Hash {
         let tracking = t.fields(&self.block_type);
+        self.content_hash_ignoring(|k| tracking.is_some_and(|f| f.contains(k)))
+    }
+
+    /// [`Block::content_hash`] that also leaves out every field `ignored` names. With the
+    /// tracking fields of the block's type it equals [`Block::content_hash_with`]; a reader that
+    /// needs the hash a block had under a tracking it no longer knows tries other sets.
+    pub fn content_hash_ignoring(&self, ignored: impl Fn(&str) -> bool) -> Hash {
         let content = Content {
             id: &self.id,
             block_type: &self.block_type,
@@ -103,7 +110,7 @@ impl Block {
                 .fields
                 .iter()
                 .filter(|(k, _)| !DERIVED_FIELDS.contains(&k.as_str()))
-                .filter(|(k, _)| !tracking.is_some_and(|f| f.contains(k.as_str())))
+                .filter(|(k, _)| !ignored(k.as_str()))
                 .collect(),
             body: &self.body,
             links: &self.links,

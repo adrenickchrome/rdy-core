@@ -329,3 +329,163 @@ fn di11_an_advised_entry_stays_after_the_holding_proposal_lands() {
     r.land(&approver(), &p.id).expect("land");
     assert_eq!(pending_added(&r, &sub), vec![first]);
 }
+
+// ---- fix round 3: the holder is read from the records written before the review ----
+
+#[test]
+fn di11_advice_on_an_unproposed_claim_and_a_landed_canon_claim_names_no_proposal() {
+    // the canon claim was written by the proposal that landed the spec; that proposal never held
+    // the pair, so the advice waits on no version and gives no entry
+    let (_dir, mut r) = project();
+    let spec = spec_doc(&mut r);
+    let u = created(
+        &put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$u", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec."}]),
+        ),
+        "$u",
+    );
+    let sub = watcher_at_head(&r);
+    verdict_on(
+        &mut r,
+        &rdy_engine::Scope::Inflight,
+        &u,
+        &spec.c,
+        "agent:r",
+        true,
+    );
+    assert_eq!(pending_added(&r, &sub), vec![]);
+}
+
+/// A pack whose claims carry a field `note`, tracked or not.
+fn note_pack(tracked: bool) -> String {
+    format!(
+        "name: trk\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  claim:\n    prefix: c\n    traits: [normative, describes]\n    body: required\n    fields:\n      note: {{ kind: str }}\n{}",
+        if tracked {
+            "    tracking: [note]\n"
+        } else {
+            ""
+        }
+    )
+}
+
+/// A project on the `trk` pack (claims carry `note`; tracked or not) with an open proposal whose
+/// view holds the claim `$q` (note `n1`), a subscription at the head of the log, and a verdict
+/// that advises blocking on `$q` and the spec's claim: the one entry the verdict gave.
+fn noted_project(
+    tracked: bool,
+) -> (
+    tempfile::TempDir,
+    Rdy,
+    rdy_qa::edit_loop::Spec,
+    rdy_engine::ProposalInfo,
+    InboxSub,
+    (Vec<String>, String),
+) {
+    let (dir, r) = project();
+    drop(r);
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(tracked)).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let spec = spec_doc(&mut r);
+    let q = created(
+        &put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec.", "fields": {"note": "n1"}}]),
+        ),
+        "$q",
+    );
+    let p = r
+        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    let sub = watcher_at_head(&r);
+    verdict_on(
+        &mut r,
+        &rdy_engine::Scope::Inflight,
+        &q,
+        &spec.c,
+        "agent:r",
+        true,
+    );
+    let mut entries = pending_added(&r, &sub);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let first = entries.remove(0);
+    assert_eq!(
+        first.1,
+        format!("{} waits for an answer; read rdy_pending", p.r#ref)
+    );
+    (dir, r, spec, p, sub, first)
+}
+
+/// The entry of the review (`first`'s ids) among `sub`'s `pending_added` entries.
+fn entry_of(r: &Rdy, sub: &InboxSub, first: &(Vec<String>, String)) -> Vec<(Vec<String>, String)> {
+    pending_added(r, sub)
+        .into_iter()
+        .filter(|e| e.0 == first.0)
+        .collect()
+}
+
+#[test]
+fn di11_a_later_competing_proposal_does_not_rename_the_entry() {
+    let (_dir, mut r, spec, _p, sub, first) = noted_project(true);
+    // a second view rewrites only the tracked field of the canon claim, so it writes the canon
+    // item at the very content the verdict judged, and it is proposed after the verdict
+    put(
+        &mut r,
+        "v2",
+        json!([{"op": "update", "id": spec.c.to_string(), "fields": {"note": "other"}}]),
+    );
+    let p2 = r
+        .propose_subset(&ag("v2"), "v2", "Notes", None, None)
+        .unwrap();
+    assert!(
+        pending_added(&r, &sub)
+            .iter()
+            .any(|e| e.0 == [p2.id.clone()]),
+        "the later proposal has its own entry"
+    );
+    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
+}
+
+#[test]
+fn di11_a_higher_scoring_replacement_does_not_rename_the_entry() {
+    let (_dir, mut r, spec, _p, sub, first) = noted_project(true);
+    // the replacement version also writes the canon claim at the judged content: it would hold
+    // both items, but it was written after the verdict
+    put(
+        &mut r,
+        "v1",
+        json!([{"op": "update", "id": spec.c.to_string(), "fields": {"note": "other"}}]),
+    );
+    let p2 = r
+        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    assert_eq!(p2.version, 2, "{p2:?}");
+    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
+}
+
+#[test]
+fn di11_an_entry_survives_a_pack_change_that_starts_tracking_a_field() {
+    let (dir, mut r, _spec, _p, sub, first) = noted_project(false);
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(true)).unwrap();
+    assert!(matches!(
+        r.reload_pack().unwrap(),
+        rdy_engine::ReloadOutcome::Reloaded
+    ));
+    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
+}
+
+#[test]
+fn di11_an_entry_survives_a_pack_change_that_stops_tracking_a_field() {
+    let (dir, mut r, _spec, _p, sub, first) = noted_project(true);
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
+    assert!(matches!(
+        r.reload_pack().unwrap(),
+        rdy_engine::ReloadOutcome::Reloaded
+    ));
+    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
+}

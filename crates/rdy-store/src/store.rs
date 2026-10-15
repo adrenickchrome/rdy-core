@@ -1644,6 +1644,12 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some())
     }
 
+    /// Where the object of `kind` with hash `h` is first written in the log: an index lookup that
+    /// reads no frame. Locations order the log, so two records compare by when they were written.
+    pub fn location_of(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
+        self.index().typed(kind, h)
+    }
+
     /// Object frames read so far by `get_raw` and `get_kind`.
     #[doc(hidden)]
     pub fn frames_read(&self) -> u64 {

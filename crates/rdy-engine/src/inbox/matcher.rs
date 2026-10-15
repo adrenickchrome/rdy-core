@@ -6,8 +6,11 @@ use super::inflight::RunInFlight;
 use crate::gate::{ProposalRef, version_number};
 use crate::semantic::candidates::Request;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
-use rdy_model::{BlockId, Hash, Op, PairItem, Proposal, ReviewSubject, Tracking};
+use rdy_model::block::DERIVED_FIELDS;
+use rdy_model::{Block, BlockId, Hash, Op, PairItem, Proposal, ReviewSubject, Tracking};
 use rdy_store::inbox::InboxSub;
+use rdy_store::kinds;
+use rdy_store::segment::Location;
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -200,9 +203,10 @@ pub fn match_event(
         }
         EventKind::ReviewSubmitted { review, pair, .. } => {
             // the verdict carries advice (read from the stored first version of the pair's
-            // tension, which this review opened), and it waits on the proposal version that
-            // wrote its items; both are read from records that never change, so landing the
-            // proposal, answering the advice or publishing a later version changes no entry
+            // tension, which this review opened), and it waits on the proposal version that held
+            // its items when it was written; both are read from records that never change and
+            // from the log before the review, so landing the proposal, answering the advice,
+            // publishing a later version or another proposal, or a pack change alters no entry
             if !verdict_carries_advice(st, review, pair)? {
                 return Ok(None);
             }
@@ -233,24 +237,27 @@ fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<
     Ok(first.review == *review && first.advice.is_some())
 }
 
-/// The proposal version that holds the pair `review` judged, read from records that never change:
-/// the review's two items (a block at a content) and the ops of the changes of every version of
-/// every proposal, landed or not. A version scores 1 for each item whose block one of its changes
-/// writes (creates or updates) at that content. Each proposal offers its oldest version of the
-/// best score; the proposal with the best score wins, then the one that offered its version last
-/// (the pair completes when the later of its items is written, so an older proposal that wrote the
-/// other item long ago does not take the entry), then the smaller version hash. Whether a proposal
-/// has landed, whether the tension is open, accepted or dismissed, and any later version change
-/// none of it, so the same verdict names the same version on every read. A review of a pair that
-/// no proposal writes gives none.
+/// The proposal version that held the pair `review` judged when the review was written, read from
+/// records that never change and bounded by the review's own place in the log: a proposal counts
+/// only through its latest version written before the review, and only if none of its changes had
+/// landed before the review. A version holds the pair for each item whose block one of its changes
+/// writes (creates or updates) at the item's content, compared by [`same_content`]. The proposal
+/// with the most items held wins, then the one whose version was written last (the pair completes
+/// when the later of its items is written), then the smaller version hash. A proposal published,
+/// replaced or landed after the review, a tension answered and a pack change after the review
+/// change none of it, so the same verdict names the same version on every read. A review of a
+/// pair that no proposal waiting at that time writes (an item in a view that was never proposed,
+/// the other in canon) gives none.
 fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, RdyError> {
     let reader = st.reader();
     let ReviewSubject::Pair { items, .. } = reader.review(review)?.subject else {
         return Ok(None);
     };
+    let Some(bound) = reader.location_of(kinds::REVIEW, review)? else {
+        return Ok(None);
+    };
     let tracking = Arc::clone(reader.tracking());
-    // (score, time, hash) of the best version of one proposal, and its stable id
-    let mut best: Option<(Rank, Hash, Hash)> = None;
+    let mut best: Option<(Rank, Hash)> = None;
     for (key, latest) in reader.refs_with_prefix("proposal/")? {
         let (Some(stable), Ok(latest)) = (
             key.strip_prefix("proposal/")
@@ -259,26 +266,35 @@ fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, R
         ) else {
             continue;
         };
-        // walk the chain from the latest back; `>=` keeps the oldest of the best score
-        let mut offer: Option<(u32, i64, Hash)> = None;
+        // the latest version written before the review
         let mut cur = Some(latest);
+        let mut asof: Option<(Hash, Location, Proposal)> = None;
         while let Some(version) = cur {
             let p = reader.proposal(&version)?;
-            let score = holds_score(st, &p, &items, &tracking)?;
-            if score > 0 && offer.is_none_or(|(s, _, _)| score >= s) {
-                offer = Some((score, p.provenance.at_ms, version));
+            match reader.location_of(kinds::PROPOSAL, &version)? {
+                Some(at) if at < bound => {
+                    asof = Some((version, at, p));
+                    break;
+                }
+                _ => cur = p.prev,
             }
-            cur = p.prev;
         }
-        let Some((score, at_ms, version)) = offer else {
+        let Some((version, at, p)) = asof else {
             continue;
         };
-        let rank = (score, at_ms, Reverse(version));
-        if best.as_ref().is_none_or(|(b, _, _)| rank > *b) {
-            best = Some((rank, stable, version));
+        if landed_before(st, &p, bound)? {
+            continue;
+        }
+        let score = holds_score(st, &p, &items, &tracking)?;
+        if score == 0 {
+            continue;
+        }
+        let rank = (score, at, Reverse(version));
+        if best.as_ref().is_none_or(|(b, _)| rank > *b) {
+            best = Some((rank, stable));
         }
     }
-    best.map(|(_, stable, version)| {
+    best.map(|((_, _, Reverse(version)), stable)| {
         Ok(ProposalRef {
             version,
             stable,
@@ -288,12 +304,27 @@ fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, R
     .transpose()
 }
 
-/// What ranks a proposal's offered version: its score, the time it was written and, last, the
-/// smaller hash first.
-type Rank = (u32, i64, Reverse<Hash>);
+/// What ranks a proposal's version: the items it holds, where it was written in the log and, last,
+/// the smaller hash first.
+type Rank = (u32, Location, Reverse<Hash>);
 
-/// How well version `p` holds the items of a pair: the number of items whose block one of its
-/// changes writes (creates or updates) at the item's content. Only the changes' ops are read.
+/// Whether a change of `p` had landed before `bound` in the log.
+fn landed_before(st: &ReadState, p: &Proposal, bound: Location) -> Result<bool, RdyError> {
+    let reader = st.reader();
+    for c in &p.changes {
+        if let Some(landing) = reader.landing_of(c)?
+            && reader
+                .location_of(kinds::LANDING, &landing)?
+                .is_some_and(|at| at < bound)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// How many items of a pair version `p` holds: the items whose block one of its changes writes
+/// (creates or updates) at the item's content. Only the changes' ops are read.
 fn holds_score(
     st: &ReadState,
     p: &Proposal,
@@ -308,13 +339,50 @@ fn holds_score(
                 continue;
             };
             for (i, item) in items.iter().enumerate() {
-                if item.block == block.id && block.content_hash_with(tracking) == item.content {
+                if item.block == block.id && same_content(&block, item, tracking) {
                     held[i] = true;
                 }
             }
         }
     }
     Ok(held.iter().filter(|h| **h).count() as u32)
+}
+
+/// The most fields of one block whose every subset `same_content` tries.
+const MAX_SUBSET_FIELDS: usize = 12;
+
+/// Whether `block` has the content `item` names. The tracking in force when the verdict was
+/// written is not stored, and a pack change moves what the content hash leaves out, so the hash
+/// under the tracking now is not enough: the block also matches if it hashes to the item's content
+/// with any set of its own fields left out (the tracking fields of its type are among them).
+/// A block with more than [`MAX_SUBSET_FIELDS`] fields tries the empty set, each single field and
+/// all of them.
+fn same_content(block: &Block, item: &PairItem, tracking: &Tracking) -> bool {
+    if block.content_hash_with(tracking) == item.content {
+        return true;
+    }
+    let names: Vec<&str> = block
+        .fields
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !DERIVED_FIELDS.contains(k))
+        .collect();
+    let leaves = |mask: u64| {
+        block.content_hash_ignoring(|k| {
+            names
+                .iter()
+                .position(|n| *n == k)
+                .is_some_and(|i| mask >> i & 1 == 1)
+        }) == item.content
+    };
+    if names.len() <= MAX_SUBSET_FIELDS {
+        return (0..1u64 << names.len()).any(leaves);
+    }
+    let all = (1u64 << names.len().min(63)) - 1;
+    std::iter::once(0)
+        .chain((0..names.len().min(63)).map(|i| 1u64 << i))
+        .chain(std::iter::once(all))
+        .any(leaves)
 }
 
 /// The line of a `pending_added` entry.
