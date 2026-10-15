@@ -111,3 +111,45 @@ fn ls7_rdy_site_in_lan_mode_prints_the_lan_link_and_warns() {
     assert_eq!(v["lan_url"], lines[1], "{v}");
     assert_eq!(v["warning"]["code"], "W_SITE_LAN", "{v}");
 }
+
+/// Fix round 1: `changes:` is the second line, before the LAN URL.
+#[test]
+fn sr2_rdy_site_prints_changes_before_the_lan_link() {
+    let dir = short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(
+        dir.path().join(".rdy/local.yaml"),
+        "serve:\n  site_lan: true\n",
+    )
+    .unwrap();
+    let (_cfg, env) = human_env("human:qa");
+    let h = Hosted::start_for_binary(dir, Some(LanOverride::Addr(Ipv4Addr::LOCALHOST)));
+    let out = human_command(
+        h.dir.path(),
+        &env,
+        &["--json", "new", "doc", "ops", "--view", "editing"],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = human_command(h.dir.path(), &env, &["site", "--scope", "view:editing"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text:?}");
+    assert!(lines[0].ends_with("/~view/editing/"), "{text:?}");
+    assert_eq!(
+        lines[1],
+        format!("changes: {}changes.html", lines[0]),
+        "{text:?}"
+    );
+    assert_eq!(
+        lines[2], lines[0],
+        "the LAN stand-in is 127.0.0.1: {text:?}"
+    );
+}

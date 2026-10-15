@@ -156,6 +156,28 @@ fn sr2_rdy_site_gives_a_tag_link() {
     assert_eq!(none.code(), Some("E_NOT_FOUND"), "{none:?}");
 }
 
+/// Ruling task-2 (1): the tag route accepts what `parse_version` accepts, so a stored version
+/// longer than 64 bytes still has a site.
+#[test]
+fn sr2_a_long_valid_version_has_a_site() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    r.import(&approver(), "import", Path::new(FIXTURE_DIR))
+        .unwrap();
+    land(&mut r, "import").unwrap();
+    let name = format!("v1.0.0-{}", "a".repeat(58));
+    assert_eq!(name.len(), 65);
+    r.tag(&approver(), &name, None, None).unwrap();
+    r.close().unwrap();
+    let mut c = agent(&s);
+    let v = c
+        .call("rdy_site", json!({"scope": format!("tag:{name}")}))
+        .ok();
+    let url = v["url"].as_str().unwrap();
+    assert!(url.ends_with(&format!("/~tag/{name}/")), "{v}");
+    assert_eq!(page(url).status, 200, "{v}");
+}
+
 #[test]
 fn sr2_rdy_site_gives_the_changes_link() {
     let s = golden_served_ahead();

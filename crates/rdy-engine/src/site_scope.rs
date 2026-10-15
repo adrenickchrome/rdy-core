@@ -40,9 +40,15 @@ impl ScopeRef {
             ScopeRef::View(name) => format!("~view/{}/", percent_encode(name)),
             // the one spelling holds only `P`, `-`, hex digits and `@`: safe in a path as it is
             ScopeRef::Proposal(r) => format!("~proposal/{r}/"),
-            // the name holds only `A-Z a-z 0-9 . -` and does not start with `.` (`tag_name_ok`):
-            // safe in a path as it is, and never a step (`.` or `..`)
-            ScopeRef::Tag(name) => format!("~tag/{name}/"),
+            // a version name holds only `0-9 A-Z a-z . -`, each valid as it is in a path segment,
+            // and is never a step (`.` or `..`): written literally (ruling task-2)
+            ScopeRef::Tag(name) => {
+                debug_assert!(
+                    tag_name_ok(name),
+                    "a tag path holds a version name: {name:?}"
+                );
+                format!("~tag/{name}/")
+            }
             ScopeRef::Versions => "~versions/".to_string(),
         }
     }
@@ -54,14 +60,13 @@ pub fn view_name_ok(name: &str) -> bool {
     !name.is_empty() && !name.contains(':')
 }
 
-/// A tag name as the site reads it: 1 to 64 bytes from `A-Z a-z 0-9 . -`, not starting with `.`
-/// or `-`. Every version name that `parse_version` accepts fits.
+/// A tag name as the site reads it: exactly what `parse_version` accepts, with no length cap of
+/// its own (every version rdy stores has a site; ruling task-2). A SemVer name holds only
+/// `0-9 A-Z a-z . -` here (build metadata is refused), never starts with `.` or `-`, and is
+/// never a path step, so it is one path segment as it is. The request head's own limit
+/// (`MAX_HEAD_BYTES`) bounds the whole path.
 pub fn tag_name_ok(name: &str) -> bool {
-    (1..=64).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
-        && !name.starts_with(['.', '-'])
+    crate::version::parse_version(name).is_ok()
 }
 
 /// The one spelling of a proposal ref: `P-` and 4 to 64 hex digits (either case), then optionally

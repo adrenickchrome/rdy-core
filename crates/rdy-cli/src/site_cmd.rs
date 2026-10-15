@@ -39,16 +39,16 @@ pub(crate) struct SiteArgs {
 }
 
 /// `rdy site`: the link to the live docs site, the CLI twin of `rdy_site`. The URL alone on one
-/// line, then the LAN URL when the site is open to the network, then `changes: <url>` when the
-/// scope has a diff summary, then the render's warnings for the scope's pages as `rdy render` prints them. The LAN warning and its fix go to stderr.
+/// line, then `changes: <url>` when the scope has a diff summary, then the LAN URL when the site is
+/// open to the network, then the render's warnings for the scope's pages as `rdy render` prints them. The LAN warning and its fix go to stderr.
 pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply> {
     let v = call(env, "site_url", json!({"scope": a.scope}))?;
     let mut lines = vec![text(&v["url"]).to_string()];
-    if !v["lan_url"].is_null() {
-        lines.push(text(&v["lan_url"]).to_string());
-    }
     if !v["changes"].is_null() {
         lines.push(format!("changes: {}", text(&v["changes"])));
+    }
+    if !v["lan_url"].is_null() {
+        lines.push(text(&v["lan_url"]).to_string());
     }
     if !v["warning"].is_null() {
         eprintln!(

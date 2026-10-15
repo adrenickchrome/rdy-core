@@ -707,13 +707,55 @@ mod tests {
             "/~tag/a%3Ab/index.html",
             "/~tag/%FF/index.html",
             "/~tag//index.html",
-            &format!("/~tag/{}/index.html", "a".repeat(65)),
+            // not versions: `parse_version` refuses them
+            "/~tag/a/index.html",
+            "/~tag/v1.0/index.html",
+            "/~tag/v1.0.0+build.5/index.html",
+            "/~tag/v1.0.0-/index.html",
         ] {
             assert_eq!(g().check(&get(t, H)), Err(Refusal::NotFound), "{t}");
         }
-        assert!(
-            g().check(&get(&format!("/~tag/{}/", "a".repeat(64)), H))
-                .is_ok()
+        // no length cap beyond what the request head allows: a long valid version has a route
+        let long = format!("v1.0.0-{}", "a".repeat(58));
+        assert_eq!(long.len(), 65);
+        assert_eq!(
+            g().check(&get(&format!("/~tag/{long}/"), H)),
+            Ok(Route::Page {
+                scope: ScopeRef::Tag(long),
+                path: "index.html".into()
+            })
+        );
+    }
+
+    /// Ruling task-2 (2): a tag name goes into the path as it is, and the guard maps the path
+    /// back to the name, in its encoded spelling too. (`v1.0.0+build.5` is not a version:
+    /// `parse_version` refuses build metadata, so no tag holds it and the route refuses it.)
+    #[test]
+    fn sr2_tag_urls_are_literal_and_round_trip() {
+        for name in ["v1.2.3", "v1.0.0-rc.1", "2.0.0-alpha.1-x"] {
+            let scope = ScopeRef::Tag(name.into());
+            let prefix = scope.path_prefix();
+            assert_eq!(prefix, format!("~tag/{name}/"));
+            assert_eq!(
+                g().check(&get(&format!("/{prefix}"), H)),
+                Ok(Route::Page {
+                    scope: scope.clone(),
+                    path: "index.html".into()
+                }),
+                "{name}"
+            );
+        }
+        // an encoded spelling of the same name resolves to it
+        assert_eq!(
+            g().check(&get("/~tag/v1%2E0%2E0-rc%2E1/index.html", H)),
+            Ok(Route::Page {
+                scope: ScopeRef::Tag("v1.0.0-rc.1".into()),
+                path: "index.html".into()
+            })
+        );
+        assert_eq!(
+            g().check(&get("/~tag/v1.0.0+build.5/", H)),
+            Err(Refusal::NotFound)
         );
     }
 

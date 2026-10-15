@@ -1,7 +1,7 @@
 //! The one door to a project: reads from the published state, writes through a closure that
 //! runs against `&mut Rdy` on a single writer, in arrival order.
 use crate::semantic::lease::LeaseRegistry;
-use crate::site_scope::{CHANGES_PAGE, SINCE_PAGE, ScopeRef, proposal_ref, tag_name_ok};
+use crate::site_scope::{CHANGES_PAGE, SINCE_PAGE, ScopeRef, proposal_ref};
 use crate::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Scope, W_SITE_LAN};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -110,13 +110,14 @@ pub fn site_reply(engine: &dyn Engine, scope: Option<&str>) -> Result<serde_json
                 .version_tags()?
                 .into_iter()
                 .find(|(v, _)| v.cmp_precedence(&want) == std::cmp::Ordering::Equal)
-                .map(|(_, t)| t.name)
-                .filter(|name| tag_name_ok(name));
+                .map(|(_, t)| t.name);
+            // every stored version is a version name, so it has a link (ruling task-2); the scope
+            // resolved, so the tag exists unless it was removed since
             let Some(stored) = stored else {
                 return Err(RdyError::new(
                     crate::E_BAD_INPUT,
-                    format!("the version {text:?} has no link on the live site"),
-                    "render it with rdy render --scope tag:<version> --out <dir>",
+                    format!("no version matches {text:?}"),
+                    "pass a version that exists as tag:<version>",
                 ));
             };
             ScopeRef::Tag(stored)
