@@ -483,6 +483,162 @@ fn sr5_a_removed_folder_counts_the_folder_and_its_docs() {
     );
 }
 
+/// Two landed root docs, `First` then `Last`: (dir, rdy, first, last).
+fn two_root_docs() -> (tempfile::TempDir, rdy_engine::Rdy, String, String) {
+    let (d, mut r) = tiny();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "first", "title": "First", "doc_type": "overview"}},
+            {"op": "create", "type": "doc", "id": "$b", "fields": {"name": "last", "title": "Last", "doc_type": "overview"}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let (a, b) = (made.created["$a"].clone(), made.created["$b"].clone());
+    (d, r, a, b)
+}
+
+/// The root docs of `scope`, in order, and `id`'s order key there.
+fn roots_and_key(r: &rdy_engine::Rdy, scope: &Scope, id: &str) -> (Vec<String>, String) {
+    let m = r.read().materialized(scope).unwrap();
+    let roots = m.children(None).iter().map(|b| b.id.to_string()).collect();
+    let key = m
+        .get(&rdy_model::BlockId::parse(id).unwrap())
+        .unwrap()
+        .order
+        .clone();
+    (roots, key)
+}
+
+/// The ruling on task 5 (Task 4's rule): a doc counts as moved only when its own structural
+/// place changed. The already-last doc appended to its own parent gets a new order key and keeps
+/// its place: no change, no chip, no mark.
+#[test]
+fn sr5_a_doc_given_a_new_key_at_the_same_place_is_no_change() {
+    let _clock = fixture_clock();
+    let (_d, mut r, a, b) = two_root_docs();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "move", "id": b, "parent": null}]),
+    )
+    .unwrap();
+    let scope = Scope::View("w".into());
+    let (canon_roots, old_key) = roots_and_key(&r, &Scope::Canon, &b);
+    let (view_roots, new_key) = roots_and_key(&r, &scope, &b);
+    assert_ne!(old_key, new_key, "guard: the append gives a new order key");
+    assert_eq!(canon_roots, view_roots, "guard: the place is the same");
+    assert_eq!(view_roots, vec![a.clone(), b.clone()], "guard");
+    let st = r.read();
+    let rv = rdy_render::review::build(&st, &scope)
+        .unwrap()
+        .expect("a view has a review");
+    assert_eq!(rv.changed_blocks(), 0);
+    let id = rdy_model::BlockId::parse(&b).unwrap();
+    assert_eq!(rv.page_mark(&id), None, "no mark on the doc");
+    let site = build_site(&st, &scope, Mode::Static).unwrap();
+    assert!(
+        site.label.ends_with(" · view: w, no changes yet"),
+        "{}",
+        site.label
+    );
+    let home = String::from_utf8_lossy(&site.files["index.html"]).to_string();
+    assert!(
+        !header_of(&home).contains("chip-review"),
+        "{}",
+        header_of(&home)
+    );
+}
+
+/// The ruling on task 5 (Task 4's rule 1): a custom field named `order` is an ordinary field. A
+/// doc whose custom `order` alone changes has not moved, and a doc counts only for its place or
+/// a field a reader sees (`title`, `name`, `description`).
+#[test]
+fn sr5_a_custom_order_field_on_a_doc_is_no_move() {
+    const PACK: &str = "name: o\nversion: '1'\nextends: rdy-standard\nblock_types:\n  doc:\n    prefix: d\n    traits: [structural]\n    body: forbidden\n    fields:\n      order: { kind: str }\n    children: [section, prose]\n";
+    let _clock = fixture_clock();
+    let (d, r) = tiny();
+    // the store is locked while a handle is open
+    drop(r);
+    rdy_qa::packs::use_pack(d.path(), "o", PACK, "name: Ordered\n");
+    let mut r = rdy_engine::Rdy::open(d.path()).unwrap();
+    let made = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "only", "title": "Only", "doc_type": "overview", "order": "old"}}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let doc = made.created["$d"].clone();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": doc, "fields": {"order": "new"}}]),
+    )
+    .unwrap();
+    let scope = Scope::View("w".into());
+    let (canon_roots, old_key) = roots_and_key(&r, &Scope::Canon, &doc);
+    let (view_roots, new_key) = roots_and_key(&r, &scope, &doc);
+    assert_eq!(
+        (canon_roots, old_key),
+        (view_roots, new_key),
+        "guard: no structural change"
+    );
+    let st = r.read();
+    let rv = rdy_render::review::build(&st, &scope)
+        .unwrap()
+        .expect("a view has a review");
+    assert_eq!(rv.changed_blocks(), 0);
+    let site = build_site(&st, &scope, Mode::Static).unwrap();
+    assert!(
+        site.label.ends_with(" · view: w, no changes yet"),
+        "{}",
+        site.label
+    );
+}
+
+/// The ruling on task 5: a doc that really moves among its siblings counts one. The doc moved in
+/// front counts; the doc it passes keeps its key and its place among the others, so it does not.
+#[test]
+fn sr5_a_reordered_doc_counts_one() {
+    let _clock = fixture_clock();
+    let (_d, mut r, a, b) = two_root_docs();
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "move", "id": b, "parent": null, "before": a}]),
+    )
+    .unwrap();
+    let scope = Scope::View("w".into());
+    let (view_roots, _) = roots_and_key(&r, &scope, &b);
+    assert_eq!(view_roots, vec![b.clone(), a.clone()], "guard: the reorder");
+    let st = r.read();
+    let rv = rdy_render::review::build(&st, &scope)
+        .unwrap()
+        .expect("a view has a review");
+    assert_eq!(rv.changed_blocks(), 1);
+    let id = |s: &str| rdy_model::BlockId::parse(s).unwrap();
+    assert_eq!(
+        rv.page_mark(&id(&b)),
+        Some(rdy_render::review::Mark::Edited)
+    );
+    assert_eq!(rv.page_mark(&id(&a)), None, "the passed doc did not move");
+    let site = build_site(&st, &scope, Mode::Static).unwrap();
+    assert!(
+        site.label.ends_with(" · view: w, 1 change, not landed"),
+        "{}",
+        site.label
+    );
+    let home = String::from_utf8_lossy(&site.files["index.html"]).to_string();
+    assert!(
+        header_of(&home).ends_with(&review_chip("", 1)),
+        "{}",
+        header_of(&home)
+    );
+}
+
 /// A proposal version made before the first landing is based on the empty project. After an
 /// unrelated first landing no scope names that base, and the page shows no review marks (the
 /// task-8 ruling), but the version keeps its name and its count: its blocks are counted against
