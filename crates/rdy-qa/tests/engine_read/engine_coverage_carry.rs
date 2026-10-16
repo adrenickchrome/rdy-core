@@ -136,6 +136,9 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
                                 "fields": {"statement": "Fixture rule", "status": "proposed"}}]),
                     )
                     .unwrap();
+                    r.read().coverage_issues(&v).unwrap();
+                    same(&r, &v);
+                    same_issues(&r, &v);
                     ids = block_ids(&r, &v, |b| {
                         b.block_type == "decision" && b.field_str("status") == Some("proposed")
                     });
@@ -153,6 +156,9 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
                                 "fields": {"title": "Fixture"}}]),
                     )
                     .unwrap();
+                    r.read().coverage_issues(&v).unwrap();
+                    same(&r, &v);
+                    same_issues(&r, &v);
                     ids = childless_sections(&r, &v);
                 }
                 json!([{"op": "delete", "id": ids[0].to_string()}])
