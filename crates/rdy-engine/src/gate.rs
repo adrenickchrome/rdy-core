@@ -4,7 +4,7 @@ use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
 use crate::pending::Item;
-use crate::pending::queue::open_exceptions;
+use crate::pending::queue::approval_holds;
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
@@ -591,10 +591,12 @@ pub(crate) fn open_proposal_of_view(
 }
 
 /// Every open proposal at its latest version: each `open/<view>` ref whose latest version has
-/// not landed, sorted by the ref's text (`P-<stable short>@<n>`).
+/// not landed, sorted by the ref's text (`P-<stable short>@<n>`). It reads the store's open
+/// proposal refs only, never the empty ref each landed view leaves (final review fix round 1,
+/// R5), so its cost follows the open proposals, not the project's history.
 pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposal)>, RdyError> {
     let mut open = vec![];
-    for (_, b) in st.reader().refs_with_prefix("open/")? {
+    for (_, b) in st.reader().open_proposal_refs()? {
         if b.len() != 32 {
             continue;
         }
@@ -2360,16 +2362,23 @@ impl Rdy {
             return Err(blocking_tensions(&pref, &refusing));
         }
         // F2 (D-DKJS5, D-T5S9A): every approval path waits until each exception of the version
-        // has a confirm answer. Only a proposed decision can be an exception, so a version that
-        // writes no decision skips the read.
+        // has a confirm answer. F1: a decision whose current version the person rejected never
+        // lands, exception or not (final review fix round 1, R1), with the issue readiness gives.
+        // Only a proposed decision can be an exception or rejected, so a version that writes no
+        // decision skips the read.
         let decides = changes.iter().flat_map(|c| &c.ops).any(|op| {
             matches!(op, Op::Create { block } | Op::Update { block, .. }
                 if block.block_type == decision::DECISION)
         });
         if decides {
-            let open = open_exceptions(&st, &pref)?;
-            if !open.is_empty() {
-                return Err(exceptions_open(&pref, &p, &open));
+            let holds = approval_holds(&st, &pref)?;
+            if !holds.open.is_empty() {
+                return Err(exceptions_open(&pref, &p, &holds.open));
+            }
+            if let Some(first) = holds.rejected.first() {
+                let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+                e.issues = holds.rejected;
+                return Err(e);
             }
         }
 

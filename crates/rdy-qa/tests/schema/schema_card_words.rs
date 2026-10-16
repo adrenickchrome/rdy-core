@@ -4,7 +4,7 @@
 use rdy_engine::engine::Local;
 use rdy_engine::{DecisionInput, Rdy, Scope};
 use rdy_mcp::tools::*;
-use rdy_model::BlockId;
+use rdy_model::{BlockId, FieldValue};
 use rdy_qa::fixtures::*;
 use serde_json::{Value, json};
 
@@ -269,17 +269,31 @@ fn di3_a_question_with_one_option_warns() {
             e.issues
         );
     }
-    // the same list on a decision is not touched by the question rule
-    let dec = decide(
+    // the same kind of list on a decision is not touched by the question rule (final review fix
+    // round 1, R4): a proposed decision written through the generic write keeps a mixed-type
+    // list of options as written
+    let mixed = json!(["Finance", 7, true]);
+    let dec = write(
         &mut r,
-        &s,
-        DecisionInput {
-            title: Some("t".into()),
-            why: Some("w".into()),
-            ..Default::default()
-        },
-    );
+        "work",
+        json!([{"op": "create", "type": "decision", "id": "$dec", "parent": s, "fields": {
+            "statement": "Balances live in one store", "status": "proposed",
+            "title": "t", "why": "w", "options": mixed}}]),
+    )
+    .unwrap_or_else(|e| panic!("a decision's options are not the question's: {e:?}"));
     assert!(card_issues(&dec.warnings).is_empty(), "{:?}", dec.warnings);
+    let id = BlockId::parse(&dec.created["$dec"]).unwrap();
+    let b = r.read().block(&Scope::View("work".into()), &id).unwrap();
+    assert_eq!(b.field_str("status"), Some("proposed"));
+    assert_eq!(
+        b.fields.get("options"),
+        Some(&FieldValue::List(vec![
+            FieldValue::Str("Finance".into()),
+            FieldValue::Int(7),
+            FieldValue::Bool(true),
+        ])),
+        "the options keep their values and kinds"
+    );
     // no options at all is not a card-words issue: the question is not a card
     let q = question(&mut r, &s, base);
     assert!(card_issues(&q.warnings).is_empty(), "{:?}", q.warnings);

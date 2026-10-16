@@ -860,3 +860,65 @@ fn di5_a_rejected_decision_makes_the_batch_not_ready() {
         )]
     );
 }
+
+/// Final review fix round 1 (R5): the queue reads only the open proposals, not every view that
+/// ever proposed. A landing leaves its view's `open/` ref empty, and the store keeps it (the
+/// dump lists it), so landed views pile up. With the same open work, a queue read and an answer
+/// read the same number of refs however many views landed before.
+#[test]
+fn di5_the_queue_reads_only_the_open_proposals_however_many_views_landed() {
+    let mut reads = vec![];
+    for landed in [0usize, 4, 8] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let spec = rdy_qa::edit_loop::spec_doc(&mut r);
+        for k in 0..landed {
+            let view = format!("done-{k}");
+            put(
+                &mut r,
+                &view,
+                json!([{"op": "create", "type": "claim", "parent": spec.section.to_string(),
+                        "body": format!("A claim of {view}.")}]),
+            );
+            rdy_qa::fixtures::land(&mut r, &view).expect("land");
+        }
+        // the same open work every time: one decision, proposed with a summary
+        decide_in(&mut r, "open", decision(&spec, "Keep C", "Keep C"));
+        let pref = r
+            .propose_subset(&ag("open"), "open", "open", None, Some("Keeps C."))
+            .unwrap()
+            .r#ref;
+        let all = r.read().reader().refs_with_prefix("open/").unwrap();
+        // spec_doc's own view lands too
+        assert!(all.len() > landed, "{all:?}");
+        assert_eq!(
+            all.iter().filter(|(_, v)| !v.is_empty()).count(),
+            1,
+            "the landed views keep empty refs: {all:?}"
+        );
+        let st = r.read();
+        let before = st.reader().refs_read();
+        let q = pending(&r);
+        assert_eq!(q.items[0].r#ref, pref);
+        let queue = st.reader().refs_read() - before;
+        drop(st);
+        let before = r.read().reader().refs_read();
+        r.answer(
+            &approver(),
+            PERSON,
+            rdy_engine::answer::AnswerRequest {
+                r#ref: pref.clone(),
+                option: "reject".into(),
+                ..Default::default()
+            },
+        )
+        .expect("the person rejects the proposal");
+        let answer = r.read().reader().refs_read() - before;
+        reads.push((landed, queue, answer));
+    }
+    let (_, queue, answer) = reads[0];
+    assert!(
+        reads.iter().all(|&(_, q, a)| (q, a) == (queue, answer)),
+        "refs read by a queue read and an answer, by landed views: {reads:?}"
+    );
+}

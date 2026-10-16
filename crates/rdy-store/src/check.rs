@@ -86,8 +86,8 @@ impl StoreReader {
     /// Checks the view chains, their heads and index entries, canon's landings (relay and evidence
     /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
     /// view's included set, the version chains of intents and alternative sets, the links that
-    /// name them, the dismissal, mention review and verdict refs, the semantic tension chains, and
-    /// the inbox refs; the first failure found is a `StoreError::Decode`.
+    /// name them, the dismissal, mention review and verdict refs, the semantic tension chains, the
+    /// inbox refs and the open-proposal table; the first failure found is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -102,6 +102,17 @@ impl StoreReader {
             conflicts_recorded += c.conflicts;
             sets.push((name.to_string(), head, c.included));
             views += 1;
+        }
+        // the open-proposal table holds exactly the `open/` refs that name a proposal (R5)
+        let named: Vec<(String, Vec<u8>)> = self
+            .refs_with_prefix("open/")?
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        if named != self.open_proposal_refs()? {
+            return Err(bad(
+                "the open proposal table differs from the open refs; run rdy reindex".to_string(),
+            ));
         }
         let landings = self.landings()?;
         let mut landed_changes = 0;

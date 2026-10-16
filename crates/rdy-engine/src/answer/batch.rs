@@ -15,10 +15,11 @@
 //! # The exception check (F2)
 //!
 //! An approval is refused with `E_EXCEPTION_OPEN` while an exception of the version has no
-//! `confirm` answer bound to its decision's current version (`open_exceptions`). The refusal
+//! `confirm` answer bound to its decision's current version (`approval_holds`). The refusal
 //! names each one and carries its card in `corrected.exceptions` (O21). `land_with` holds the
 //! check for every approval path (Task 17), so an answer's approval gets it there, and nothing
-//! is written.
+//! is written. A decision the person rejected never lands, exception or not (F1): `land_with`
+//! refuses it with the issue the queue's readiness gives.
 use super::{AnswerInfo, Bound};
 use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
 use crate::gate::LandOptions;

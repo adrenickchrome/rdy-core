@@ -2,7 +2,7 @@
 //! state, never stored (D-NMGD2). Each failed check is a coverage issue that names its block,
 //! its dimension and the fix (D-XQVM1).
 mod carry;
-mod change;
+pub(crate) mod change;
 mod confidence;
 mod kinds;
 mod model;

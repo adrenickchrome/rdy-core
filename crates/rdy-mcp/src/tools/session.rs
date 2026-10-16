@@ -130,12 +130,10 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
         person,
         ..PendingQuery::default()
     };
-    match read.pending(&query) {
-        Ok(q) => {
-            out["pending"] = json!({
-                "items": q.items.len() + q.omitted,
-                "blocking": q.items.iter().filter(|i| i.blocking).count(),
-            });
+    // final review fix round 1 (R6): both counts are of the whole queue, past its cap too
+    match read.pending_counts(&query) {
+        Ok(c) => {
+            out["pending"] = json!({"items": c.items, "blocking": c.blocking});
         }
         Err(e) => {
             out["pending"] = json!({"items": 0, "blocking": 0});

@@ -13,8 +13,10 @@
 //! # Binding (closed)
 //!
 //! The ref is an item ref of the closed grammar of O3 ([`is_item_ref`]), or `E_BAD_INPUT`. The
-//! item must be in the person's queue now, read with no session, so a snooze does not hide it
-//! from an answer.
+//! item must be in the person's queue now, read with no session and before the cap of
+//! [`crate::pending::queue::PENDING_ITEMS_MAX`] items, so neither a snooze nor the cap hides it
+//! from an answer (final review fix round 1, R2: a card a snooze brings into the first page is
+//! answered as shown).
 //! - A proposal ref that is no longer its proposal's latest version: `E_PROPOSAL_MOVED`, with the
 //!   text of an approval of a moved version.
 //! - Any other ref that is not in the queue (its version moved, it was answered, it landed, or
@@ -46,7 +48,8 @@ pub mod resolve;
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, E_PROPOSAL_MOVED, RdyError};
 use crate::gate::{LandInfo, latest_version, moved, resolve_in};
 use crate::pending::PendingQuery;
-use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption, Pending};
+use crate::pending::queue::Eligible;
+use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
 use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
 use crate::{Rdy, ReadState, Session};
@@ -265,12 +268,13 @@ fn bind(
             "pass an item ref as rdy_pending gives it: P-<id>@<n>, <D-id>@<version>, <Q-id>@<version>, advice:P-<id>@<n> or a tension id",
         ));
     }
-    let q = st.pending(&PendingQuery {
+    let q = st.eligible(&PendingQuery {
         person: person.to_string(),
         session_ref: None,
         max_tokens: CARD_MAX_TOKENS,
     })?;
-    let Some(first) = q.items.iter().find(|i| i.r#ref == r) else {
+    let cards = q.items_of(r);
+    let Some(first) = cards.first() else {
         return Err(gone(st, &q, r)?);
     };
     let card_hash = match shown {
@@ -293,7 +297,7 @@ fn bind(
     // the card of ref r with the hash shown: a decision version beside two batches has two
     let item = match card_hash.map(|h| h.to_string()) {
         None => first,
-        Some(h) => match q.items.iter().find(|i| i.r#ref == r && i.card_hash == h) {
+        Some(h) => match cards.iter().find(|i| i.card_hash == h) {
             Some(item) => item,
             None => {
                 let code = if first.kind == ItemKind::Approve {
@@ -364,7 +368,7 @@ pub fn is_item_ref(r: &str) -> bool {
 /// The refusal of `r`, which is not in the queue `q`: a proposal version that is not its
 /// latest is `E_PROPOSAL_MOVED`; anything else is `E_ITEM_MOVED`. Either carries the fresh card
 /// when the queue has one, and a batch that is not ready lists its issues.
-fn gone(st: &ReadState, q: &Pending, r: &str) -> Result<RdyError, RdyError> {
+fn gone(st: &ReadState, q: &Eligible, r: &str) -> Result<RdyError, RdyError> {
     let mut e = None;
     if is_proposal_ref(r) {
         let pref = resolve_in(st, r)?;
@@ -379,19 +383,19 @@ fn gone(st: &ReadState, q: &Pending, r: &str) -> Result<RdyError, RdyError> {
         e.issues.clone_from(&n.issues);
     }
     Ok(match fresh(q, r) {
-        Some(i) => e.with_corrected(card_of(i)),
+        Some(i) => e.with_corrected(card_of(&i)),
         None => e,
     })
 }
 
 /// The item of the queue that stands where `r` stood: the same proposal, decision or question,
 /// at another version (the ref up to its `@`).
-fn fresh<'a>(q: &'a Pending, r: &str) -> Option<&'a Item> {
+fn fresh(q: &Eligible, r: &str) -> Option<Item> {
     let key = match r.rfind('@') {
         Some(at) => r[..=at].to_string(),
         None => format!("{r}@"),
     };
-    q.items.iter().find(|i| i.r#ref.starts_with(&key))
+    q.first_with_prefix(&key)
 }
 
 fn changed(code: &'static str, r: &str) -> RdyError {

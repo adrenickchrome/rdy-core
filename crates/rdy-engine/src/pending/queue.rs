@@ -48,8 +48,10 @@
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
 //! version and everything beside it out of the queue; a `confirm` answer to `<D-id>@<version>`
-//! takes that item out; a `reject_decision` answer makes the batch not ready; an `answer_question`
-//! answer to `<Q-id>@<version>` takes the question out (its decision waits for a landing).
+//! takes that item out; a `reject_decision` answer makes the batch not ready, and the landing
+//! refuses it too, whether the decision is an exception now or not ([`approval_holds`]); an
+//! `answer_question` answer to `<Q-id>@<version>` takes the question out (its decision waits for
+//! a landing).
 //!
 //! # Order (O5)
 //!
@@ -62,9 +64,10 @@ use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};
 use super::questions::question_items;
 use super::snooze::hide_snoozed;
 use super::tensions::tension_items;
+use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError};
-use crate::gate::{ProposalRef, applied_ops, changes_of, landing_readiness, open_proposals};
+use crate::gate::{ProposalRef, changes_of, landing_readiness, open_proposals};
 use crate::read_state::Built;
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
@@ -120,10 +123,90 @@ pub struct NotReady {
     pub issues: Vec<Issue>,
 }
 
+/// How many items wait for a person: every item the queue holds, past [`PENDING_ITEMS_MAX`]
+/// too, less those a snooze hides (final review fix round 1, R6: the session's summary counts
+/// the queue, not its first page).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PendingCounts {
+    pub items: usize,
+    pub blocking: usize,
+}
+
+/// The queue before a snooze or the cap: every item in order, in its groups, and the versions
+/// that are not ready. Its cards are not rendered yet ([`finish`]).
+pub(crate) struct Eligible {
+    groups: Vec<Group>,
+    pub not_ready: Vec<NotReady>,
+}
+
+impl Eligible {
+    /// Each item of ref `r`, its card whole (a decision version beside two batches has two).
+    /// Final review fix round 1 (R2): the answer binds here, so neither the cap nor a snooze
+    /// hides an item from it.
+    pub(crate) fn items_of(&self, r: &str) -> Vec<Item> {
+        self.items()
+            .filter(|i| i.r#ref == r)
+            .map(|i| finish(i.clone(), CARD_MAX_TOKENS))
+            .collect()
+    }
+
+    /// The first item whose ref starts with `key`, its card whole.
+    pub(crate) fn first_with_prefix(&self, key: &str) -> Option<Item> {
+        self.items()
+            .find(|i| i.r#ref.starts_with(key))
+            .map(|i| finish(i.clone(), CARD_MAX_TOKENS))
+    }
+
+    fn items(&self) -> impl Iterator<Item = &Item> {
+        self.groups.iter().flat_map(|g| &g.items)
+    }
+}
+
 impl ReadState {
     /// The needs-you queue of this state for `q` (see the module docs). A pure read: it writes
     /// nothing, and one state and one query give one queue.
     pub fn pending(&self, q: &PendingQuery) -> Result<Pending, RdyError> {
+        let e = self.eligible(q)?;
+        let max = q.max_tokens.min(CARD_MAX_TOKENS);
+        let mut items = vec![];
+        let mut omitted = 0;
+        let mut snoozed = 0;
+        for g in e.groups {
+            let (shown, hidden) = hide_snoozed(self, q, g.items);
+            snoozed += hidden;
+            if shown.is_empty() {
+                continue;
+            }
+            if omitted > 0 || (!items.is_empty() && items.len() + shown.len() > PENDING_ITEMS_MAX) {
+                omitted += shown.len();
+                continue;
+            }
+            items.extend(shown.into_iter().map(|i| finish(i, max)));
+        }
+        Ok(Pending {
+            items,
+            not_ready: e.not_ready,
+            snoozed,
+            omitted,
+        })
+    }
+
+    /// How many items of the queue for `q` wait, and how many of them block: the whole queue,
+    /// past the cap too, less what a snooze hides ([`PendingCounts`]). It renders no card.
+    pub fn pending_counts(&self, q: &PendingQuery) -> Result<PendingCounts, RdyError> {
+        let e = self.eligible(q)?;
+        let mut c = PendingCounts::default();
+        for g in e.groups {
+            let (shown, _) = hide_snoozed(self, q, g.items);
+            c.items += shown.len();
+            c.blocking += shown.iter().filter(|i| i.blocking).count();
+        }
+        Ok(c)
+    }
+
+    /// Every item of the queue for `q`, in order and in its groups, before a snooze or the cap
+    /// ([`Eligible`]). The open proposals are read once, and the tension items share them.
+    pub(crate) fn eligible(&self, q: &PendingQuery) -> Result<Eligible, RdyError> {
         let now = now_ms();
         let mut groups: Vec<Group> = vec![];
         let mut not_ready = vec![];
@@ -134,12 +217,12 @@ impl ReadState {
             let _ = self.scope_rollup(&Scope::Canon);
             let _ = self.lexicon(&Scope::Canon);
         }
-        for (pref, p) in open {
+        for (pref, p) in &open {
             let r = pref.to_string();
             if answered(self, &r, AnswerAct::RejectProposal)? {
                 continue;
             }
-            let v = Version::read(self, pref, p)?;
+            let v = Version::read(self, *pref, p.clone())?;
             let issues = v.readiness(self)?;
             if !issues.is_empty() {
                 not_ready.push(NotReady { r#ref: r, issues });
@@ -156,7 +239,7 @@ impl ReadState {
         // the items that stand beside a batch go into its group, after its exceptions; the
         // others are groups of one
         let batches: Vec<Item> = groups.iter().map(|g| g.items[0].clone()).collect();
-        let others = tension_items(self, q, &batches)?
+        let others = tension_items(self, &open, &batches)?
             .into_iter()
             .chain(question_items(self, q)?);
         for item in others {
@@ -170,45 +253,39 @@ impl ReadState {
             }
         }
         groups.sort_by_cached_key(Group::key);
-        let max = q.max_tokens.min(CARD_MAX_TOKENS);
-        let mut items = vec![];
-        let mut omitted = 0;
-        let mut snoozed = 0;
-        for g in groups {
-            let (shown, hidden) = hide_snoozed(self, q, g.items);
-            snoozed += hidden;
-            if shown.is_empty() {
-                continue;
-            }
-            if omitted > 0 || (!items.is_empty() && items.len() + shown.len() > PENDING_ITEMS_MAX) {
-                omitted += shown.len();
-                continue;
-            }
-            items.extend(shown.into_iter().map(|i| finish(i, max)));
-        }
-        Ok(Pending {
-            items,
-            not_ready,
-            snoozed,
-            omitted,
-        })
+        Ok(Eligible { groups, not_ready })
     }
 }
 
-/// The exception items of version `pref` that have no `confirm` answer bound to the decision's
-/// current version (F2): a rejected decision's item is among them. Each card is cut to
-/// [`CARD_DEFAULT_TOKENS`]. It does not ask whether the version is ready; the landing asks that
-/// itself. The F2 check of the answer's approve path (Task 7) and of `land_with` (Task 17) call it.
-pub(crate) fn open_exceptions(st: &ReadState, pref: &ProposalRef) -> Result<Vec<Item>, RdyError> {
+/// What holds version `pref` back from landing (F1, F2), read once for the landing.
+pub(crate) struct Holds {
+    /// The exception items that have no `confirm` answer bound to the decision's current
+    /// version (F2): a rejected decision's item is among them while it is an exception. Each card
+    /// is cut to [`CARD_DEFAULT_TOKENS`].
+    pub open: Vec<Item>,
+    /// One issue for each proposed decision of the version whose current version the person
+    /// rejected (F1), whether it is an exception now or not: the issue readiness gives (final
+    /// review fix round 1, R1: a rejected decision that stops being an exception, say once
+    /// content applies it, still never lands).
+    pub rejected: Vec<Issue>,
+}
+
+/// What holds version `pref` back from landing ([`Holds`]). It does not ask whether the version
+/// is ready otherwise; the landing asks that itself. `land_with` calls it (Task 17), so every
+/// approval path waits.
+pub(crate) fn approval_holds(st: &ReadState, pref: &ProposalRef) -> Result<Holds, RdyError> {
     let p = st.reader().proposal(&pref.version)?;
     let v = Version::read(st, *pref, p)?;
-    let mut out = vec![];
+    let mut open = vec![];
     for item in v.exception_items(now_ms()) {
         if !answered(st, &item.r#ref, AnswerAct::Confirm)? {
-            out.push(finish(item, CARD_DEFAULT_TOKENS));
+            open.push(finish(item, CARD_DEFAULT_TOKENS));
         }
     }
-    Ok(out)
+    Ok(Holds {
+        open,
+        rejected: v.rejected(st)?,
+    })
 }
 
 /// Whether the latest answer to `item` is of act `act`.
@@ -294,10 +371,7 @@ impl Version {
         let tensions = open_tensions(st, &p)?;
         // canon's graph first, so the prospective canon carries it instead of building another
         let canon_g = st.graph(&Scope::Canon)?;
-        let applied = st.landing_order(&changes);
-        let built = st
-            .built(&Scope::Canon)?
-            .after(&applied_ops(&changes, &applied), st.pack());
+        let built = candidate_build(st, &changes)?;
         // canon's graph and lexicon carry to this build, and canon's structural layer when
         // it is built (`ReadState::pending` builds it first)
         let g = Arc::clone(built.graph.get_or_init(|| {
@@ -370,6 +444,14 @@ impl Version {
                         .into(),
             });
         }
+        issues.extend(self.rejected(st)?);
+        Ok(issues)
+    }
+
+    /// F1: one issue for each proposed decision whose current version has a `reject_decision`
+    /// answer, exception or not. Readiness and the landing ([`approval_holds`]) share it.
+    fn rejected(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
+        let mut issues = vec![];
         for d in &self.decisions {
             if answered(st, &d.r#ref, AnswerAct::RejectDecision)? {
                 let id = &d.block.id;
@@ -571,17 +653,21 @@ impl Version {
     }
 
     /// D-C6HHV: canon's coverage against that of the canon the version would give
-    /// (`candidate`), as the propose reply gives canon's against the view's. Fix round 1: the
-    /// version's, so a later edit of its view, or a change of the view the version left out,
-    /// does not move it.
+    /// (`candidate`). Fix round 1: the version's, so a later edit of its view, or a change of
+    /// the view the version left out, does not move it. Ruling final: the propose reply gives
+    /// the same numbers, from the same function ([`candidate_change`]).
     fn coverage(
         &self,
         st: &ReadState,
         candidate: Result<&CandidateCoverage, &RdyError>,
     ) -> Result<String, RdyError> {
-        let before = st.scope_rollup(&Scope::Canon)?.score;
-        let after = candidate.map_err(Clone::clone)?.score;
-        Ok(format!("{before}% \u{2192} {after}%"))
+        let c = candidate_change(
+            st,
+            &self.built,
+            candidate.map_err(Clone::clone)?,
+            &self.touched,
+        )?;
+        Ok(format!("{}% \u{2192} {}%", c.before, c.after))
     }
 
     /// D-XZXCE: the confidence of the blocks the version writes, read in the canon the version
@@ -883,7 +969,7 @@ mod tests {
             .propose_subset(&writer(), "work", "work", None, Some("Adds C."))
             .unwrap();
         let pref = r.resolve_proposal(&p.r#ref).unwrap();
-        let open = open_exceptions(&r.read(), &pref).unwrap();
+        let open = approval_holds(&r.read(), &pref).unwrap().open;
         assert_eq!(open.len(), 1, "{open:#?}");
         let ex = &open[0];
         assert!(ex.r#ref.starts_with(&format!("{one_way}@")), "{}", ex.r#ref);
@@ -900,10 +986,12 @@ mod tests {
         };
         // a confirm of the decision's current version closes it
         let r = reopened(r, &answer(&ex.r#ref, AnswerAct::Confirm));
-        assert!(open_exceptions(&r.read(), &pref).unwrap().is_empty());
+        assert!(approval_holds(&r.read(), &pref).unwrap().open.is_empty());
         // a later reject opens it again: a rejected decision has no confirm (F1, F2)
         let r = reopened(r, &answer(&ex.r#ref, AnswerAct::RejectDecision));
-        let open = open_exceptions(&r.read(), &pref).unwrap();
+        let holds = approval_holds(&r.read(), &pref).unwrap();
+        let open = holds.open;
+        assert_eq!(holds.rejected.len(), 1, "{:#?}", holds.rejected);
         assert_eq!(
             open.iter().map(|i| i.r#ref.as_str()).collect::<Vec<_>>(),
             vec![ex.r#ref.as_str()]

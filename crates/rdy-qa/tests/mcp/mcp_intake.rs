@@ -7,8 +7,11 @@ use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
 use rdy_engine::{Rdy, RdyError};
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_pending, rdy_session};
 use rdy_model::{AnswerAct, EvidenceKind};
+use rdy_qa::edit_loop::spec_doc;
+use rdy_qa::fixtures::land;
 use rdy_qa::intake::*;
 use rdy_qa::mcp::{McpClient, Reply};
+use rdy_qa::tensions::{ag, put, upd};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -452,4 +455,139 @@ fn di12_every_tool_is_in_one_family() {
     for tool in ["rdy_pending", "rdy_answer"] {
         assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
     }
+}
+
+/// The spec doc in canon, then `n` open questions with authored options landed under its
+/// section: the project, with its person, and an agent state on it.
+fn with_questions(n: usize) -> (tempfile::TempDir, McpState) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let spec = spec_doc(&mut r);
+    let ops: Vec<Value> = (0..n)
+        .map(|k| {
+            json!({"op": "create", "type": "question", "parent": spec.section.to_string(),
+            "fields": {
+                "prompt": format!("Who approves refunds of kind {k}?"),
+                "title": format!("Refunds of kind {k}"),
+                "options": ["Finance", "Support lead"],
+            }})
+        })
+        .collect();
+    put(&mut r, "qs", Value::Array(ops));
+    land(&mut r, "qs").expect("land the questions");
+    person_is_qa(dir.path());
+    (dir, agent_state(r))
+}
+
+/// The refs of the items of a `rdy_pending` reply.
+fn refs_of(v: &Value) -> Vec<String> {
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["ref"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Final review fix round 1 (R2): a card that a snooze brings onto the first page of the queue
+/// is answered as shown. The answer binds to the whole queue, not to its first page: with 51
+/// questions, Later on the first brings the 51st onto the page of that chat session, and its
+/// answer, with the card hash and the session it was shown in, is recorded.
+#[test]
+fn di12_a_card_a_snooze_brings_onto_the_page_is_answered_as_shown() {
+    let (_d, mut st) = with_questions(51);
+    let session = json!({"session_ref": "cap-chat"});
+    let first = pending_json(&mut st, session.clone());
+    assert_eq!(refs_of(&first).len(), 50, "{first}");
+    assert_eq!(first["omitted"], 1, "{first}");
+    let top = first["items"][0].clone();
+    let later = answer(
+        &mut st,
+        json!({"ref": top["ref"], "option": "later", "card_hash": top["card_hash"],
+            "evidence": "Later.", "question": "Shall we do this one later?",
+            "session_ref": "cap-chat"}),
+    )
+    .unwrap();
+    assert_eq!(later["act"], "later", "{later}");
+    let page = pending_json(&mut st, session);
+    assert_eq!(
+        (&page["snoozed"], &page["omitted"]),
+        (&json!(1), &json!(0)),
+        "{page}"
+    );
+    let shown = refs_of(&first);
+    let new = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| !shown.contains(&i["ref"].as_str().unwrap().to_string()))
+        .expect("the card the snooze brought onto the page")
+        .clone();
+    let info = answer(
+        &mut st,
+        json!({"ref": new["ref"], "option": "o1", "card_hash": new["card_hash"],
+            "evidence": "Finance.", "question": "Who approves these refunds?",
+            "session_ref": "cap-chat"}),
+    )
+    .unwrap_or_else(|e| panic!("answered as shown: {e}"));
+    assert_eq!(
+        (&info["act"], &info["ref"]),
+        (&json!("answer_question"), &new["ref"]),
+        "{info}"
+    );
+    // the binding still checks the card: the same item with another hash is moved
+    let rest = pending_json(&mut st, json!({"session_ref": "cap-chat"}));
+    let last = rest["items"].as_array().unwrap().last().unwrap().clone();
+    let e = answer(
+        &mut st,
+        json!({"ref": last["ref"], "option": "o1", "card_hash": "0".repeat(64),
+            "evidence": "Finance.", "question": "Who approves these refunds?",
+            "session_ref": "cap-chat"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_ITEM_MOVED, "{e}");
+    assert_eq!(
+        e.corrected.as_ref().unwrap()["card_hash"],
+        last["card_hash"]
+    );
+}
+
+/// Final review fix round 1 (R6): the session's summary counts every item of the queue and every
+/// blocking item, past the cap of 50 too. 52 claims cite claim A, an edit of A lands, and the
+/// claims are proposed: 52 blocking tensions, each a blocking item.
+#[test]
+fn di12_the_session_counts_every_blocking_item_past_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let spec = spec_doc(&mut r);
+    let ops: Vec<Value> = (0..52)
+        .map(|k| {
+            json!({"op": "create", "type": "claim", "parent": spec.section.to_string(),
+                "body": format!("Claim {k} builds on {{{{{}}}}}.", spec.a)})
+        })
+        .collect();
+    put(&mut r, "cites", Value::Array(ops));
+    put(&mut r, "edit-a", upd(&spec.a, "A changed."));
+    land(&mut r, "edit-a").expect("land edit-a");
+    r.propose_subset(
+        &ag("cites"),
+        "cites",
+        "cites",
+        None,
+        Some("Adds claims on A."),
+    )
+    .expect("propose");
+    person_is_qa(dir.path());
+    let mut st = agent_state(r);
+    let q = pending_json(&mut st, json!({}));
+    let shown = q["items"].as_array().unwrap();
+    assert_eq!(shown.len(), 50, "{q}");
+    assert!(shown.iter().all(|i| i["blocking"] == true), "{q}");
+    assert_eq!(q["omitted"], 2, "{q}");
+    let v = rdy_session(
+        &mut st,
+        p(json!({"actor": "agent:relay", "run": "r1", "role": "writer"})),
+    )
+    .unwrap();
+    assert_eq!(v["pending"], json!({"items": 52, "blocking": 52}), "{v}");
 }

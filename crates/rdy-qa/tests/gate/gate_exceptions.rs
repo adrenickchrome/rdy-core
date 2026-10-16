@@ -2,18 +2,19 @@
 //! exceptions. `land_with` refuses with `E_EXCEPTION_OPEN` while an exception of the version has
 //! no `confirm` answer, so `rdy approve`, a relayed approval, `rdy_answer` and
 //! `rdy answer --all-recommended` all wait. Every earlier refusal keeps its code and comes first.
+use rdy_engine::answer::AnswerRequest;
 use rdy_engine::engine::Local;
-use rdy_engine::pending::{CARD_MAX_TOKENS, Item, ItemKind, PendingQuery};
+use rdy_engine::pending::{CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, PendingQuery};
 use rdy_engine::{
-    DecisionInput, E_CONFLICT_UNRESOLVED, E_EXCEPTION_OPEN, E_PROPOSAL_MOVED, LandOptions, Rdy,
-    RdyError, Scope,
+    DecisionInput, E_CONFLICT_UNRESOLVED, E_EXCEPTION_OPEN, E_PROPOSAL_MOVED, E_VALIDATION,
+    LandOptions, Rdy, RdyError, Scope,
 };
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_pending, rdy_session};
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::{approver, land};
 use rdy_qa::intake::*;
-use rdy_qa::tensions::{ag, put, upd};
+use rdy_qa::tensions::{ag, cite, put, upd};
 use rdy_store::segment::Location;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -376,4 +377,97 @@ fn di17_a_version_with_no_summary_is_told_to_propose_again_with_one() {
     confirm_exceptions(&mut r, &approver(), &pref);
     r.land_with(&approver(), &pref, LandOptions::default())
         .expect("lands once the exception is confirmed");
+}
+
+/// Final review fix round 1 (R1; D-DKJS5 F1): a decision the person rejected never lands while
+/// it is the same version, even once it is no longer an exception. Here the view applies an
+/// unapplied decision the person rejected and proposes again without changing it: the version is
+/// not ready, and the landing refuses with the same issue the queue gives (one rule for both),
+/// on every approval path. Once the author revises the decision, the version lands as before.
+#[test]
+fn di17_a_rejected_decision_never_lands_once_it_stops_being_an_exception() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
+    let spec = spec_doc(&mut r);
+    let d = decide_in(&mut r, GUEST, unapplied(&spec, "Guests see a banner"));
+    let first = propose(&mut r, GUEST);
+    let ex = exceptions_of(&r, &first);
+    assert_eq!(ex.len(), 1, "{ex:#?}");
+    assert_eq!(ex[0].exception, Some(ExceptionKind::Unapplied));
+    let reject = |r: &mut Rdy, item: &str| {
+        r.answer(
+            &approver(),
+            PERSON,
+            AnswerRequest {
+                r#ref: item.into(),
+                option: "reject".into(),
+                ..AnswerRequest::default()
+            },
+        )
+        .expect("the person rejects the decision")
+    };
+    assert_eq!(reject(&mut r, &ex[0].r#ref).act, "reject_decision");
+    // the view applies the decision, unchanged, and proposes again: no exception is left
+    put(&mut r, GUEST, cite(&spec.section, &d));
+    let second = propose(&mut r, GUEST);
+    assert_ne!(second, first);
+    assert!(exceptions_of(&r, &second).is_empty());
+    let q = pending(&r);
+    assert!(q.items.iter().all(|i| i.r#ref != second), "{:#?}", q.items);
+    let nr = q
+        .not_ready
+        .iter()
+        .find(|n| n.r#ref == second)
+        .expect("the version is not ready");
+    assert_eq!(nr.issues.len(), 1, "{:#?}", nr.issues);
+    assert_eq!(
+        nr.issues[0].message,
+        format!("{d} was rejected; drop or revise it, then propose again")
+    );
+    // a local approval refuses with the queue's issue, and writes nothing
+    let before = log_end(&r);
+    let e = r
+        .land_with(&approver(), &second, LandOptions::default())
+        .unwrap_err();
+    assert_eq!(e.code, E_VALIDATION, "{e}");
+    assert_eq!(e.message, nr.issues[0].message, "{e}");
+    assert_eq!(e.fix, nr.issues[0].fix, "{e}");
+    assert_eq!(e.issues, nr.issues, "{e}");
+    assert_eq!(log_end(&r), before, "a refused landing writes nothing");
+    // so does the relayed approval through rdy_answer: the version is no item
+    let mut st = agent_state(r);
+    let published = st.engine.read().seq();
+    let e = rdy_answer(
+        &mut st,
+        serde_json::from_value(json!({
+            "ref": second, "option": "approve", "card_hash": "0".repeat(64),
+            "evidence": "Yes, land it.", "question": "Shall I land it?", "session_ref": "chat-7",
+        }))
+        .unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(e.issues, nr.issues, "{e}");
+    assert_eq!(st.engine.read().seq(), published, "nothing is written");
+    let canon = st.engine.read().materialized(&Scope::Canon).unwrap();
+    assert!(
+        canon.get(&d).is_none(),
+        "the rejected decision is not in canon"
+    );
+    drop(canon);
+    drop(st);
+    // the author revises the decision: its new version is no longer rejected, and it lands
+    let mut r = Rdy::open(dir.path()).unwrap();
+    put(
+        &mut r,
+        GUEST,
+        json!([{"op": "update", "id": d.to_string(),
+                "fields": {"statement": "Guests see a small banner"}}]),
+    );
+    let third = propose(&mut r, GUEST);
+    confirm_exceptions(&mut r, &approver(), &third);
+    r.land_with(&approver(), &third, LandOptions::default())
+        .expect("the revised decision lands");
+    let canon = r.read().materialized(&Scope::Canon).unwrap();
+    assert_eq!(canon.get(&d).unwrap().field_str("status"), Some("accepted"));
 }

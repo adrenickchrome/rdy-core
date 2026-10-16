@@ -27,10 +27,10 @@
 //! A version that is not ready is still searched: the person's dismissal may be what makes it
 //! ready.
 use super::item::{Fact, Item, ItemKind};
-use super::queue::{PendingQuery, answered, item, later, open_tensions, option};
+use super::queue::{answered, item, later, open_tensions, option};
 use crate::ReadState;
 use crate::error::RdyError;
-use crate::gate::open_proposals;
+use crate::gate::ProposalRef;
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionSeverity, tension_label};
 use rdy_model::{AnswerAct, Proposal};
@@ -39,13 +39,13 @@ use std::sync::Arc;
 
 /// The `resolve` items of the queue: the advice item of each batch in `batches` (the ready
 /// `approve` items), then the item of each blocking tension. An advice item names its batch in
-/// `batch`, and copies who raised the batch and when.
+/// `batch`, and copies who raised the batch and when. `open` is the open proposals the queue read ([`crate::gate::open_proposals`]), shared so
+/// the queue reads them once.
 pub(crate) fn tension_items(
     st: &ReadState,
-    _q: &PendingQuery,
+    open: &[(ProposalRef, Proposal)],
     batches: &[Item],
 ) -> Result<Vec<Item>, RdyError> {
-    let open = open_proposals(st)?;
     let now = now_ms();
     let mut out = vec![];
     for batch in batches {
@@ -57,7 +57,7 @@ pub(crate) fn tension_items(
         };
         out.extend(advice_item(st, batch, p)?);
     }
-    out.extend(blocking_items(st, &open, now)?);
+    out.extend(blocking_items(st, open, now)?);
     Ok(out)
 }
 
@@ -127,7 +127,7 @@ struct Blocking {
 /// tension-id order.
 fn blocking_items(
     st: &ReadState,
-    open: &[(crate::gate::ProposalRef, Proposal)],
+    open: &[(ProposalRef, Proposal)],
     now: i64,
 ) -> Result<Vec<Item>, RdyError> {
     let mut found: BTreeMap<rdy_model::Hash, Blocking> = BTreeMap::new();

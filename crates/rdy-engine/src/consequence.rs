@@ -1270,9 +1270,11 @@ pub fn propose_and_report(
     Ok(v)
 }
 
-/// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against its
-/// view's and the pages its changes touch, read from the stored version after the write, off
-/// the writer (as a write's is). A read error leaves `coverage` out and sets `coverage_error`
+/// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against the
+/// proposal candidate's (canon with exactly the version's changes; ruling final, FW-CV2
+/// D-XZXCE) and the pages its changes touch, read from the stored version after the write, off
+/// the writer (as a write's is). The batch card's Coverage fact is worked out by the same
+/// function (`ReadState::proposal_coverage`), so a subset proposal's reply and card agree. A read error leaves `coverage` out and sets `coverage_error`
 /// (an earlier text is kept, also when the read works: the unapplied-decision pass sets one
 /// that does not stop coverage): the proposal stands. When the propose could not read the
 /// tensions (`tensions_error`), coverage cannot be worked out either: the reply is left as is.
@@ -1293,20 +1295,7 @@ fn attach_proposal_coverage(engine: &dyn Engine, v: &mut serde_json::Value) {
             )
         })
         .and_then(|id| Ok(st.reader().proposal(&id)?))
-        .and_then(|p| {
-            let touched: BTreeSet<BlockId> = changes_of(&st, &p.changes)?
-                .iter()
-                .flat_map(|c| &c.ops)
-                .map(|o| o.block_id().clone())
-                .collect();
-            coverage_change(
-                &st,
-                &Scope::Canon,
-                &st,
-                &Scope::View(p.view.clone()),
-                &touched,
-            )
-        });
+        .and_then(|p| st.proposal_coverage(&p));
     match read {
         Ok(c) => {
             v["coverage"] = serde_json::to_value(&c)

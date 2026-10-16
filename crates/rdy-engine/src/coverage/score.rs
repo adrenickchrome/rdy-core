@@ -67,6 +67,27 @@ pub struct CoverageReport {
     pub similar_kinds: Vec<Vec<String>>,
 }
 
+/// The rollup of each of `docs` that has blocks in `m`, scored by `issues`: what
+/// `ReadState::doc_rollups` gives a scope, and the coverage change gives a candidate canon.
+pub(crate) fn rollups_of(
+    pack: &Pack,
+    m: &crate::Materialized,
+    issues: &CoverageIssues,
+    docs: &BTreeSet<&BlockId>,
+) -> BTreeMap<BlockId, Rollup> {
+    let mut out = BTreeMap::new();
+    for d in docs {
+        let entries: Vec<&BlockEntry> = page_blocks(m, d)
+            .iter()
+            .filter_map(|id| issues.blocks.get(id))
+            .collect();
+        if !entries.is_empty() {
+            out.insert((*d).clone(), rollup(pack, entries.into_iter()));
+        }
+    }
+    out
+}
+
 /// The blocks of page `doc` in `m`: the doc and the blocks under it, not crossing into a doc
 /// under it (a doc under a doc is its own page).
 pub(crate) fn page_blocks(m: &crate::Materialized, doc: &BlockId) -> Vec<BlockId> {
@@ -231,17 +252,7 @@ impl ReadState {
     ) -> Result<BTreeMap<BlockId, Rollup>, RdyError> {
         let issues = self.coverage_issues(scope)?;
         let m = self.materialized(scope)?;
-        let mut out = BTreeMap::new();
-        for d in docs {
-            let entries: Vec<&BlockEntry> = page_blocks(&m, d)
-                .iter()
-                .filter_map(|id| issues.blocks.get(id))
-                .collect();
-            if !entries.is_empty() {
-                out.insert((*d).clone(), rollup(&self.pack, entries.into_iter()));
-            }
-        }
-        Ok(out)
+        Ok(rollups_of(&self.pack, &m, &issues, docs))
     }
 
     /// The coverage report of `scope`, or of the docs at or under `path`. Pages come lowest
