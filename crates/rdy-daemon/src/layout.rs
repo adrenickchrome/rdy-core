@@ -4,13 +4,11 @@
 
 use crate::lock::open_no_follow;
 use crate::socket::{MAX_SOCKET_PATH, own_uid};
+use crate::sys;
 use rdy_model::Hash;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,51 +26,9 @@ pub const SHORT_SOCKET_ROOT: &str = "/tmp";
 
 /// Which project a daemon serves: the filesystem identity (`st_dev`, `st_ino`) of the project's
 /// `.rdy` directory, from `lstat`. Every spelling of one project gives one identity; a copy or a
-/// restore gives another. Written `{dev}:{ino}`, in the socket record and in the hello.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProjectId {
-    pub dev: u64,
-    pub ino: u64,
-}
-
-impl fmt::Display for ProjectId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.dev, self.ino)
-    }
-}
-
-impl std::str::FromStr for ProjectId {
-    type Err = String;
-
-    /// `{dev}:{ino}`, two decimal numbers.
-    fn from_str(s: &str) -> Result<Self, String> {
-        let bad = || format!("{s:?} is not a project identity (dev:ino)");
-        let (dev, ino) = s.split_once(':').ok_or_else(bad)?;
-        let number = |n: &str| {
-            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(bad());
-            }
-            n.parse::<u64>().map_err(|_| bad())
-        };
-        Ok(ProjectId {
-            dev: number(dev)?,
-            ino: number(ino)?,
-        })
-    }
-}
-
-impl serde::Serialize for ProjectId {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ProjectId {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(d)?;
-        text.parse().map_err(serde::de::Error::custom)
-    }
-}
+/// restore gives another. Written `{dev}:{ino}`, in the socket record and in the hello. It is the
+/// store's `FileId` (D-R7N9J).
+pub type ProjectId = rdy_store::fileid::FileId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunDir(PathBuf);
@@ -115,18 +71,14 @@ impl RunDir {
         if long.as_os_str().len() <= MAX_SOCKET_PATH {
             return (long, false);
         }
-        let hash = Hash::of(root.as_os_str().as_bytes()).short();
+        let hash = Hash::of(sys::path_bytes(&root)).short();
         (short_dir(own_uid()).join(format!("{hash}.sock")), true)
     }
 
     /// The project's identity: `lstat` of its `.rdy` (the run dir's parent), never followed.
     pub fn project_id(&self) -> io::Result<ProjectId> {
         // `<root>/.rdy/run` always has its `.rdy` as parent
-        let m = fs::symlink_metadata(self.0.parent().unwrap_or(Path::new(".rdy")))?;
-        Ok(ProjectId {
-            dev: m.dev(),
-            ino: m.ino(),
-        })
+        ProjectId::lstat(self.0.parent().unwrap_or(Path::new(".rdy")))
     }
 
     /// The project root, canonical (`canonical_root`): what a daemon names as the project it
@@ -191,7 +143,7 @@ impl RunDir {
             && socket.len() <= MAX_SOCKET_PATH
             && !socket.contains(&0);
         let project = project.parse::<ProjectId>().ok()?;
-        well_formed.then(|| (PathBuf::from(OsStr::from_bytes(socket)), project))
+        well_formed.then(|| (sys::path_from_bytes(socket), project))
     }
 
     pub fn start_lock(&self) -> PathBuf {
@@ -267,7 +219,7 @@ impl RunDir {
                 .0
                 .join(format!("{GITIGNORE_FILE}.tmp-{}-{n}", std::process::id()));
             match open_no_follow(
-                OpenOptions::new().write(true).create_new(true).mode(0o600),
+                sys::private_file(OpenOptions::new().write(true).create_new(true)),
                 &temp,
             ) {
                 Ok(f) => return Ok((temp, f)),
@@ -284,8 +236,8 @@ impl RunDir {
         let path = &self.0;
         match fs::symlink_metadata(path) {
             Ok(m) if m.is_dir() => {
-                if m.permissions().mode() & 0o777 != 0o700 {
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                if !sys::is_private_dir(&m) {
+                    sys::make_private_dir(path)?;
                 }
                 Ok(())
             }
@@ -294,7 +246,7 @@ impl RunDir {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                match fs::DirBuilder::new().mode(0o700).create(path) {
+                match sys::create_private_dir(path) {
                     Ok(()) => {}
                     // another process made it first: check what it made
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -305,7 +257,7 @@ impl RunDir {
                     Err(e) => return Err(e),
                 }
                 // the umask may have narrowed the mode; set it exactly
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                sys::make_private_dir(path)
             }
             Err(e) => Err(e),
         }
@@ -385,7 +337,7 @@ fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
     let m = match fs::symlink_metadata(dir) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            match fs::DirBuilder::new().mode(0o700).create(dir) {
+            match sys::create_private_dir(dir) {
                 Ok(()) => {}
                 // another process made it first: check what it made
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -395,12 +347,12 @@ fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
         }
         Err(e) => return Err(failed(e)),
     };
-    if !m.is_dir() || m.uid() != uid {
+    if !m.is_dir() || sys::owner(&m) != uid {
         return Err(io::Error::other(NotPrivateDir(dir.to_path_buf())));
     }
     // the umask may have narrowed a new directory's mode, and an old one may be open to others
-    if m.mode() & 0o777 != 0o700 {
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(failed)?;
+    if !sys::is_private_dir(&m) {
+        sys::make_private_dir(dir).map_err(failed)?;
     }
     Ok(())
 }
@@ -420,15 +372,13 @@ fn not_a_dir(path: &Path) -> io::Error {
 
 /// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
 fn no_hard_links(e: &io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(n) if n == libc::EPERM || n == libc::ENOTSUP || n == libc::EOPNOTSUPP
-    )
+    sys::no_hard_links(e)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     fn names_in(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
@@ -650,5 +600,29 @@ mod tests {
             fs::write(run.socket_record(), &record).unwrap();
             assert_eq!(run.recorded_socket(), want.map(PathBuf::from), "{record:?}");
         }
+    }
+
+    /// FW-XP1 (D-1RXEA, D-R7N9J): the project identity is the store's `FileId` of `.rdy`.
+    #[test]
+    fn ps8_project_id_is_the_store_file_id() -> io::Result<()> {
+        let d = tempfile::tempdir()?;
+        let run = RunDir::of_project(d.path());
+        run.ensure_dir()?;
+        let id: rdy_store::fileid::FileId = run.project_id()?;
+        assert_eq!(
+            id,
+            rdy_store::fileid::FileId::lstat(&d.path().join(".rdy"))?
+        );
+        Ok(())
+    }
+
+    /// Guard: the identity's text and its parse error stay as they are on the wire.
+    #[test]
+    fn ps8_the_identity_text_is_unchanged() {
+        assert_eq!(ProjectId { dev: 1, ino: 2 }.to_string(), "1:2");
+        assert_eq!(
+            "x".parse::<ProjectId>(),
+            Err(r#""x" is not a project identity (dev:ino)"#.to_string())
+        );
     }
 }

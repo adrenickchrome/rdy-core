@@ -8,6 +8,7 @@ use crate::layout::{ProjectId, RunDir};
 use crate::session::{Proto, SessionInfo, Sessions};
 use crate::socket;
 use crate::sys;
+use rdy_store::fileid::FileId;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -480,7 +481,7 @@ struct Files {
     removed: bool,
     socket: Option<PathBuf>,
     /// The bound socket's file identity (`dev`, `ino`), from `lstat` right after the bind.
-    socket_id: Option<(u64, u64)>,
+    socket_id: Option<FileId>,
 }
 
 impl RunFiles {
@@ -489,11 +490,8 @@ impl RunFiles {
     }
 
     fn bound(&self, socket: PathBuf) {
-        use std::os::unix::fs::MetadataExt;
         let mut files = self.lock();
-        files.socket_id = std::fs::symlink_metadata(&socket)
-            .ok()
-            .map(|m| (m.dev(), m.ino()));
+        files.socket_id = FileId::lstat(&socket).ok();
         files.socket = Some(socket);
     }
 
@@ -502,7 +500,6 @@ impl RunFiles {
     /// names this daemon's socket and `project`; the pid file only while it names `pid`; the
     /// socket only while it is the file this daemon bound.
     fn remove_if_ours(&self, run: &RunDir, project: ProjectId, pid: u32) {
-        use std::os::unix::fs::MetadataExt;
         let mut files = self.lock();
         if files.removed {
             return;
@@ -512,9 +509,7 @@ impl RunFiles {
         if run.record_names(&socket, project) {
             remove_if_present(&run.socket_record());
         }
-        let bound = std::fs::symlink_metadata(&socket)
-            .ok()
-            .map(|m| (m.dev(), m.ino()));
+        let bound = FileId::lstat(&socket).ok();
         if bound.is_some() && bound == files.socket_id {
             remove_if_present(&socket);
         }
@@ -584,14 +579,8 @@ impl ProjectCheck {
     /// Whether `<root>/.rdy` (from `lstat`) is no longer `project`, the `.rdy` this daemon bound
     /// with: gone, or another directory (a restore, a copy moved into place).
     fn gone(&self, project: ProjectId) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::symlink_metadata(self.root.join(".rdy")) {
-            Ok(m) => {
-                ProjectId {
-                    dev: m.dev(),
-                    ino: m.ino(),
-                } != project
-            }
+        match FileId::lstat(&self.root.join(".rdy")) {
+            Ok(id) => id != project,
             Err(_) => true,
         }
     }
