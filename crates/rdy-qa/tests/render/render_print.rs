@@ -1,9 +1,10 @@
 //! ec3 (D-WQSAY, D-EVRNM, D-X61DT): the print model. One model of exactly what a reader sees on
 //! the site (the words on the page, nothing a reader cannot see) feeds every print format.
 use rdy_engine::{Rdy, Scope};
+use rdy_model::Hash;
 use rdy_qa::golden::*;
 use rdy_render::print::{self, Href, PBlock, PageKind, Print, PrintDoc, Run};
-use rdy_render::{Mode, build_site};
+use rdy_render::{Mode, SiteFiles, build_site};
 use serde_json::json;
 
 fn canon(r: &Rdy) -> Print {
@@ -497,9 +498,7 @@ fn ec3_a_view_scope_prints_without_review_marks() {
 #[test]
 fn ec3_inflight_is_refused() {
     let (_d, r, _ids) = project();
-    let e = print::build(&r.read(), &Scope::Inflight)
-        .err()
-        .expect("refused");
+    let e = print::build(&r.read(), &Scope::Inflight).expect_err("refused");
     let want = rdy_engine::refuse_inflight_export(&Scope::Inflight).unwrap_err();
     assert_eq!(
         (e.code, e.message, e.fix),
@@ -514,30 +513,266 @@ fn ec3_two_builds_of_one_state_are_equal() {
     assert_eq!(view(&r), view(&r));
 }
 
-/// Guard: building a print leaves the site's bytes as they were.
+/// The site's bytes, as one digest: every file (its path and bytes), the label, the header,
+/// where the label and header sit, the warnings and the counts.
+fn site_digest(s: &SiteFiles) -> String {
+    let mut buf: Vec<u8> = vec![];
+    let mut put = |b: &[u8]| {
+        buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
+        buf.extend_from_slice(b);
+    };
+    for (path, bytes) in &s.files {
+        put(path.as_bytes());
+        put(bytes);
+    }
+    put(s.label.as_bytes());
+    put(s.header.as_bytes());
+    put(format!("{:?}", s.label_at).as_bytes());
+    put(format!("{:?}", s.summary.warnings).as_bytes());
+    put(format!(
+        "{} {} {}",
+        s.summary.pages, s.summary.assets, s.summary.redirects
+    )
+    .as_bytes());
+    rdy_model::Hash::of(&buf).to_string()
+}
+
+/// The view `reserved`: top-level docs named `changes`, `changes-since` and `glossary`, the
+/// three names the site keeps for its own pages.
+fn reserved(r: &mut Rdy) -> Scope {
+    write(
+        r,
+        "reserved",
+        json!([
+            {"op": "create", "type": "doc", "fields": {"name": "changes", "title": "Release notes", "doc_type": "overview"}},
+            {"op": "create", "type": "doc", "fields": {"name": "changes-since", "title": "Since notes", "doc_type": "overview"}},
+            {"op": "create", "type": "doc", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}}
+        ]),
+    )
+    .expect("docs with the site's reserved names");
+    Scope::View("reserved".into())
+}
+
+/// Guard (fix round 1, finding 3): the site's bytes equal the bytes the site build gave before
+/// the print model's refactor (BASE d29bb4c, with ids seeded with 7). The digests were taken
+/// from `build_site` at BASE, twice, before this commit's code existed; they are the oracle. A
+/// change to the site's pages moves them: take them again from the build before that change.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
+    const BASE: [(&str, &str); 3] = [
+        (
+            "canon",
+            "1665d37856db4fe98d68a6a562895383dee549ee29b69247e0dc9a053b1512e8",
+        ),
+        (
+            "view:editing",
+            "589c14a5faee35f64ea205d8d515d369313de6763cd8ddaefe33709253e96a6f",
+        ),
+        (
+            "view:reserved",
+            "b0f083548092b39be5621a015cf8ea88101712d92c04f1977a64d1e42dcf2802",
+        ),
+    ];
+    // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
+    rdy_model::seed_ids_for_tests(7);
+    let (_d, mut r, _ids) = project();
+    let mut got = vec![];
+    for (name, scope) in [
+        ("canon", Scope::Canon),
+        ("view:editing", Scope::View("editing".into())),
+    ] {
+        let site = build_site(&r.read(), &scope, Mode::Static).unwrap();
+        got.push((name, site_digest(&site)));
+    }
+    // the reserved names: the site's warnings and the pages it leaves out
+    let scope = reserved(&mut r);
+    rdy_model::unseed_ids_for_tests();
+    let site = build_site(&r.read(), &scope, Mode::Static).unwrap();
+    assert_eq!(
+        site.summary.warnings.len(),
+        3,
+        "{:?}",
+        site.summary.warnings
+    );
+    got.push(("view:reserved", site_digest(&site)));
+    let got: Vec<(&str, &str)> = got.iter().map(|(n, d)| (*n, d.as_str())).collect();
+    assert_eq!(got, BASE);
+}
+
+/// Building a print leaves the site's bytes as they were.
+#[test]
+fn ec3_a_print_leaves_the_site_build_as_it_was() {
     let (_d, r, _ids) = project();
     for scope in [Scope::Canon, Scope::View("editing".into())] {
         let before = build_site(&r.read(), &scope, Mode::Static).unwrap();
         print::build(&r.read(), &scope).unwrap();
         let after = build_site(&r.read(), &scope, Mode::Static).unwrap();
-        assert!(before.files == after.files, "{scope:?}: the same files");
-        assert_eq!(before.label, after.label);
-        assert_eq!(before.header, after.header);
-        assert_eq!(before.label_at, after.label_at);
-        assert_eq!(before.summary.warnings, after.summary.warnings);
-        assert_eq!(
-            (
-                before.summary.pages,
-                before.summary.assets,
-                before.summary.redirects
-            ),
-            (
-                after.summary.pages,
-                after.summary.assets,
-                after.summary.redirects
-            )
-        );
+        assert_eq!(site_digest(&before), site_digest(&after), "{scope:?}");
     }
+}
+
+/// Fix round 1 (finding 4): the print keeps the site build's warnings for its scope, and prints
+/// no change summary page.
+#[test]
+fn ec3_print_keeps_the_site_builds_warnings() {
+    let (_d, mut r, _ids) = project();
+    let scope = reserved(&mut r);
+    for scope in [Scope::Canon, scope] {
+        let site = build_site(&r.read(), &scope, Mode::Static).unwrap();
+        let p = print::build(&r.read(), &scope).unwrap();
+        assert_eq!(p.warnings, site.summary.warnings, "{scope:?}");
+        if scope != Scope::Canon {
+            assert_eq!(p.warnings.len(), 3, "guard: {:?}", p.warnings);
+        }
+        // a doc named like a summary page prints as that doc
+        for page in ["changes.html", "changes-since.html"] {
+            for d in p.docs.iter().filter(|d| d.page == page) {
+                assert!(matches!(d.kind, PageKind::Doc), "{page}");
+                assert!(["Release notes", "Since notes"].contains(&d.title.as_str()));
+            }
+        }
+        assert!(p.docs.iter().all(|d| d.title != "Our words"), "{scope:?}");
+    }
+}
+
+/// Fix round 1 (finding 1): a figure the print leaves out (beneath a doc the site gives no page)
+/// does not change the file or the media type of a printed figure that shows the same blob.
+#[test]
+fn ec3_a_figure_the_print_leaves_out_changes_no_printed_blob() {
+    let (_d, mut r, ids) = project();
+    let blob = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .get(&ids.image_figure)
+        .unwrap()
+        .field_str("blob")
+        .unwrap()
+        .to_string();
+    write(
+        &mut r,
+        "blob-alias",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Pictures"}},
+            {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "application/octet-stream", "alt": "The same bytes"}}
+        ]),
+    )
+    .expect("a figure beneath a doc with no page");
+    let scope = Scope::View("blob-alias".into());
+    let site = build_site(&r.read(), &scope, Mode::Static).unwrap();
+    assert!(
+        !site.files.contains_key(&format!("assets/{blob}.bin")),
+        "guard: the site leaves the figure out"
+    );
+    let p = print::build(&r.read(), &scope).unwrap();
+    let h: Hash = blob.parse().unwrap();
+    let printed = &p.blobs[&h];
+    assert_eq!(
+        (printed.media_type.as_str(), printed.file.as_str()),
+        ("image/png", format!("assets/{blob}.png").as_str())
+    );
+    // every blob of the print is a file of the site, with its bytes
+    for (h, b) in &p.blobs {
+        assert_eq!(site.files.get(&b.file), Some(&b.bytes), "{h}");
+    }
+}
+
+/// Every page link of the print leads to a page it holds and, with an anchor, to an anchor a
+/// block of that page has.
+fn assert_links_resolve(p: &Print) {
+    let anchors: std::collections::BTreeMap<&str, Vec<&str>> = p
+        .docs
+        .iter()
+        .map(|d| {
+            let mut blocks = vec![];
+            all_blocks(&d.blocks, &mut blocks);
+            let a = blocks
+                .into_iter()
+                .filter_map(|b| match b {
+                    PBlock::Heading { anchor, .. }
+                    | PBlock::Para { anchor, .. }
+                    | PBlock::Table { anchor, .. }
+                    | PBlock::Code { anchor, .. }
+                    | PBlock::Figure { anchor, .. }
+                    | PBlock::Callout { anchor, .. } => anchor.as_deref(),
+                    PBlock::List { .. } => None,
+                })
+                .collect();
+            (d.page.as_str(), a)
+        })
+        .collect();
+    let mut with_anchor = 0;
+    for d in &p.docs {
+        let mut runs = vec![];
+        runs_of(&d.blocks, &mut runs);
+        for r in runs {
+            if let Some(Href::Page { page, anchor }) = &r.link {
+                let on = anchors
+                    .get(page.as_str())
+                    .unwrap_or_else(|| panic!("{page} from {}", d.page));
+                if let Some(a) = anchor {
+                    assert!(on.contains(&a.as_str()), "{page}#{a} from {}", d.page);
+                    with_anchor += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        with_anchor > 10,
+        "the corpus links to anchors: {with_anchor}"
+    );
+}
+
+/// Fix round 1 (finding 2): an authored link to a block's id (which the site's page holds as the
+/// block's id anchor) goes to the anchor the print gives that block.
+#[test]
+fn ec3_a_link_to_a_block_id_goes_to_its_printed_anchor() {
+    let (_d, mut r, ids) = project();
+    let guards = ids.guards_section.to_string();
+    write(
+        &mut r,
+        "xref",
+        json!([{"op": "create", "type": "prose", "parent": guards,
+            "body": format!("[Read guards](#{guards})")}]),
+    )
+    .expect("a link to a block id");
+    land(&mut r, "xref").expect("land it");
+    let site = build_site(&r.read(), &Scope::Canon, Mode::Static).unwrap();
+    let html = String::from_utf8(site.files["specification/patterns.html"].clone()).unwrap();
+    assert!(
+        html.contains(&format!("href=\"#{guards}\"")) && html.contains(&format!("id=\"{guards}\"")),
+        "guard: the site's link works through the block's id anchor"
+    );
+    let p = canon(&r);
+    let spec = p
+        .docs
+        .iter()
+        .find(|d| d.id == ids.spec_doc.to_string())
+        .unwrap();
+    let anchor = spec
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            PBlock::Heading { anchor, runs, .. } if text(runs) == "Guards" => anchor.clone(),
+            _ => None,
+        })
+        .expect("the section's heading has its anchor");
+    let link = spec
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            PBlock::Para { runs, .. } if text(runs) == "Read guards" => runs[0].link.clone(),
+            _ => None,
+        })
+        .expect("the new paragraph");
+    assert_eq!(
+        link,
+        Href::Page {
+            page: spec.page.clone(),
+            anchor: Some(anchor),
+        }
+    );
+    assert_links_resolve(&p);
+    assert_links_resolve(&view(&r));
 }

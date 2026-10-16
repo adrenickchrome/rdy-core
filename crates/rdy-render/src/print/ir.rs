@@ -11,6 +11,7 @@
 use super::{Href, PBlock, Run};
 use crate::llms::{attr, decode, unseen};
 use rdy_model::Hash;
+use std::collections::BTreeSet;
 
 /// A node of the renderer's HTML: text (decoded), or an element with its start tag's text (its
 /// name, then its attributes) and its children.
@@ -746,12 +747,19 @@ pub fn from_html(html: &str, page: &str) -> Vec<PBlock> {
 /// Every link of `blocks` to a page `printed` does not hold becomes plain text (a permalink,
 /// the home page, a page the print leaves out).
 pub fn unlink(blocks: &mut [PBlock], printed: &dyn Fn(&str) -> bool) {
+    map_links(blocks, &|h| match h {
+        Href::Page { page, .. } if !printed(page) => None,
+        h => Some(h.clone()),
+    });
+}
+
+/// Every link of `blocks` leads where `to` says: a new target, or none (its words stay, as
+/// plain text).
+pub(crate) fn map_links(blocks: &mut [PBlock], to: &dyn Fn(&Href) -> Option<Href>) {
     let fix = |runs: &mut Vec<Run>| {
         for r in runs.iter_mut() {
-            if let Some(Href::Page { page, .. }) = &r.link
-                && !printed(page)
-            {
-                r.link = None;
+            if let Some(h) = &r.link {
+                r.link = to(h);
             }
         }
         *runs = tidy(std::mem::take(runs));
@@ -761,7 +769,7 @@ pub fn unlink(blocks: &mut [PBlock], printed: &dyn Fn(&str) -> bool) {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => fix(runs),
             PBlock::List { items, .. } => {
                 for item in items {
-                    unlink(item, printed);
+                    map_links(item, to);
                 }
             }
             PBlock::Table { head, rows, .. } => {
@@ -770,9 +778,31 @@ pub fn unlink(blocks: &mut [PBlock], printed: &dyn Fn(&str) -> bool) {
                 }
             }
             PBlock::Figure { caption, .. } => fix(caption),
-            PBlock::Callout { blocks, .. } => unlink(blocks, printed),
+            PBlock::Callout { blocks, .. } => map_links(blocks, to),
             PBlock::Code { .. } => {}
         }
+    }
+}
+
+/// The anchors of `blocks` and the blocks inside them.
+pub(crate) fn anchors(blocks: &[PBlock], out: &mut BTreeSet<String>) {
+    for b in blocks {
+        let anchor = match b {
+            PBlock::Heading { anchor, .. }
+            | PBlock::Para { anchor, .. }
+            | PBlock::Table { anchor, .. }
+            | PBlock::Code { anchor, .. }
+            | PBlock::Figure { anchor, .. } => anchor,
+            PBlock::Callout { anchor, blocks, .. } => {
+                anchors(blocks, out);
+                anchor
+            }
+            PBlock::List { items, .. } => {
+                items.iter().for_each(|i| anchors(i, out));
+                continue;
+            }
+        };
+        out.extend(anchor.clone());
     }
 }
 

@@ -645,6 +645,53 @@ fn glossary_warning(site: &Site) -> Option<&'static str> {
         })
 }
 
+/// The summary of the landings since the tag a scope counts from (sr6): the tag's name, how many
+/// landings, the tag's scope, and the state the position counts to (canon, a view's or
+/// proposal's base, or the as-of landing). None when the scope counts no landing since a tag.
+fn since_of(
+    rdy: &ReadState,
+    scope: &Scope,
+    position: &rdy_engine::VersionPosition,
+) -> Option<(String, u32, Scope, Scope)> {
+    match (&position.version, position.landings_since) {
+        (Some(v), n) if n > 0 => {
+            let to = match scope {
+                Scope::Canon => Some(Scope::Canon),
+                Scope::View(_) | Scope::Proposal(_) => review::base_of(rdy, scope),
+                Scope::At(h) => Some(Scope::At(*h)),
+                Scope::Inflight => None,
+            };
+            let tag = v.landing.parse::<Hash>().ok().map(Scope::At);
+            tag.zip(to).map(|(tag, to)| (v.name.clone(), n, tag, to))
+        }
+        _ => None,
+    }
+}
+
+/// The site build's warnings for a scope, in order: the change summary a top-level doc named
+/// `changes` keeps out (`reviewed`: the scope has one), the summary since `since` (the tag's
+/// name) a doc named `changes-since` keeps out, then the glossary's. The site and the print give
+/// the same warnings.
+fn scope_warnings(
+    m: &rdy_engine::Materialized,
+    site: &Site,
+    reviewed: bool,
+    since: Option<&str>,
+) -> Vec<String> {
+    use rdy_engine::site_scope::{CHANGES_PAGE, SINCE_PAGE, summary_page_taken};
+    let mut warnings = vec![];
+    if reviewed && summary_page_taken(m, CHANGES_PAGE) {
+        warnings.push(CHANGES_DOC_KEPT.into());
+    }
+    if let Some(tag) = since
+        && summary_page_taken(m, SINCE_PAGE)
+    {
+        warnings.push(since_doc_kept(tag));
+    }
+    warnings.extend(glossary_warning(site).map(String::from));
+    warnings
+}
+
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
     read_scope(rdy, scope, |read| build_site_from(rdy, scope, mode, read))
@@ -684,11 +731,17 @@ fn build_site_from(
         None => None,
     };
     let header = version::header(&position, reviewed.as_ref());
+    let since_of = since_of(rdy, scope, &position);
     let mut summary = RenderSummary {
         pages: 0,
         assets: 0,
         redirects: 0,
-        warnings: vec![],
+        warnings: scope_warnings(
+            m,
+            &site,
+            reviewed.is_some() && listed.is_some(),
+            since_of.as_ref().map(|(name, ..)| name.as_str()),
+        ),
     };
 
     // the change summary of a review render (sr6): against its base, or, for a proposal version
@@ -715,9 +768,8 @@ fn build_site_from(
             &sides,
             &changes::Of::Review(r.kind),
         );
-        if rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::CHANGES_PAGE) {
-            summary.warnings.push(CHANGES_DOC_KEPT.into());
-        } else {
+        // a top-level doc that owns the page keeps it (`scope_warnings` says so)
+        if !rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::CHANGES_PAGE) {
             changes_summary = Some(s);
         }
         // only a page with review marks shows an edited block's diff
@@ -726,49 +778,34 @@ fn build_site_from(
         }
     }
     // the summary of the landings since the tag (sr6): from the tag to the state the position
-    // counts to (canon, a view's or proposal's base, or the as-of landing)
-    let since_of = match (&position.version, position.landings_since) {
-        (Some(v), n) if n > 0 => {
-            let to = match scope {
-                Scope::Canon => Some(Scope::Canon),
-                Scope::View(_) | Scope::Proposal(_) => review::base_of(rdy, scope),
-                Scope::At(h) => Some(Scope::At(*h)),
-                Scope::Inflight => None,
-            };
-            let tag = v.landing.parse::<Hash>().ok().map(Scope::At);
-            tag.zip(to).map(|(tag, to)| (v.name.clone(), n, tag, to))
-        }
-        _ => None,
-    };
+    // counts to; a top-level doc that owns the page keeps it (`scope_warnings` says so)
     let mut since_summary: Option<changes::Summary> = None;
-    if let Some((name, landings, tag, to)) = since_of {
-        if rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::SINCE_PAGE) {
-            summary.warnings.push(since_doc_kept(&name));
-        } else {
-            let rv = review::between(rdy, &tag, &to)?;
-            let diff = rdy.diff(&tag, &to)?;
-            let from = rdy.materialized(&tag)?;
-            // both sides read against the `to` side's site (O4)
-            let to_m = (to != *scope).then(|| rdy.materialized(&to)).transpose()?;
-            let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
-            let sides = changes::Sides {
-                from: &from,
-                to: to_m.as_deref().unwrap_or(m),
-                text: to_site.as_ref().unwrap_or(&site),
-            };
-            let (s, _) = changes::summary(
-                &site,
-                rdy_engine::site_scope::SINCE_PAGE,
-                &rv,
-                Some(&diff),
-                &sides,
-                &changes::Of::Since {
-                    tag: name,
-                    landings,
-                },
-            );
-            since_summary = Some(s);
-        }
+    if let Some((name, landings, tag, to)) = since_of
+        && !rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::SINCE_PAGE)
+    {
+        let rv = review::between(rdy, &tag, &to)?;
+        let diff = rdy.diff(&tag, &to)?;
+        let from = rdy.materialized(&tag)?;
+        // both sides read against the `to` side's site (O4)
+        let to_m = (to != *scope).then(|| rdy.materialized(&to)).transpose()?;
+        let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
+        let sides = changes::Sides {
+            from: &from,
+            to: to_m.as_deref().unwrap_or(m),
+            text: to_site.as_ref().unwrap_or(&site),
+        };
+        let (s, _) = changes::summary(
+            &site,
+            rdy_engine::site_scope::SINCE_PAGE,
+            &rv,
+            Some(&diff),
+            &sides,
+            &changes::Of::Since {
+                tag: name,
+                landings,
+            },
+        );
+        since_summary = Some(s);
     }
 
     let sh = page::Shared {
@@ -793,9 +830,6 @@ fn build_site_from(
         changes_page: changes_summary.is_some(),
         since_page: since_summary.is_some(),
     };
-    summary
-        .warnings
-        .extend(glossary_warning(&site).map(String::from));
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
     let mut kinds = vec![page::Kind::Home];
@@ -911,10 +945,10 @@ fn build_site_from(
     let used = sh.used_blobs.take();
     drop(sh);
     let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
-    for h in used.values() {
+    for (h, _) in used.values() {
         *uses.entry(h).or_default() += 1;
     }
-    for (path, h) in &used {
+    for (path, (h, _)) in &used {
         let left = uses.get_mut(h).expect("counted above");
         *left -= 1;
         let bytes = if *left == 0 {

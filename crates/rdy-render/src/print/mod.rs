@@ -10,7 +10,7 @@
 pub mod ir;
 
 use crate::page::{self, Kind, PageContext};
-use crate::{Mode, ScopeRead, assets, env, read_scope, review, tpl, version};
+use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
 use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use serde::Serialize;
@@ -216,31 +216,29 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
     };
 
     // the pages in the order a reader meets them in the tree, then the glossary
-    let tree: Vec<&BlockId> = site.tree_pages().collect();
-    let mut pages: Vec<(PageKind, String, PageContext)> = tree
-        .into_iter()
+    let mut kinds: Vec<(PageKind, String, Kind)> = site
+        .tree_pages()
         .map(|id| {
             if m.get(id).is_some_and(|b| b.block_type == tree::FOLDER) {
-                (
-                    PageKind::Folder,
-                    id.to_string(),
-                    page::build(&sh, Kind::Folder(id)),
-                )
+                (PageKind::Folder, id.to_string(), Kind::Folder(id))
             } else {
-                (
-                    PageKind::Doc,
-                    id.to_string(),
-                    page::build(&sh, Kind::Doc(id)),
-                )
+                (PageKind::Doc, id.to_string(), Kind::Doc(id))
             }
         })
         .collect();
     if !site.terms.is_empty() {
-        pages.push((
-            PageKind::Glossary,
-            String::new(),
-            page::build(&sh, Kind::Glossary),
-        ));
+        kinds.push((PageKind::Glossary, String::new(), Kind::Glossary));
+    }
+    // each blob's file and media type as the first printed page that shows it names them: a
+    // figure the print leaves out names none
+    let mut assets: BTreeMap<Hash, (String, String)> = BTreeMap::new();
+    let mut pages: Vec<(PageKind, String, PageContext)> = vec![];
+    for (kind, id, k) in kinds {
+        let ctx = page::build(&sh, k);
+        for (file, (h, media_type)) in sh.used_blobs.take() {
+            assets.entry(h).or_insert((file, media_type));
+        }
+        pages.push((kind, id, ctx));
     }
     let env = env()?;
     let mut docs = vec![];
@@ -294,39 +292,63 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
             blocks,
         });
     }
-    // a link to a page the print leaves out reads as its words
-    let printed: BTreeSet<&str> = pages.iter().map(|(_, _, c)| c.page_url.as_str()).collect();
+    // a link leads to a page of the print and an anchor a block of that page has: a link to a
+    // page the print leaves out reads as its words; a block's id (the site's id anchor) reads as
+    // the anchor the print gives that block; an anchor no printed block has is dropped
+    let mut on_page: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for d in &docs {
+        ir::anchors(&d.blocks, on_page.entry(d.page.clone()).or_default());
+    }
+    let to = |h: &Href| -> Option<Href> {
+        let Href::Page { page, anchor } = h else {
+            return Some(h.clone());
+        };
+        let on = on_page.get(page)?;
+        let anchor = anchor.as_deref().and_then(|a| {
+            let a = match a.parse::<BlockId>() {
+                Ok(id) if m.get(&id).is_some() => {
+                    site.url_of(&id).filter(|u| u.page == *page)?.anchor?
+                }
+                _ => a.to_string(),
+            };
+            on.contains(&a).then_some(a)
+        });
+        Some(Href::Page {
+            page: page.clone(),
+            anchor,
+        })
+    };
     for d in &mut docs {
-        ir::unlink(&mut d.blocks, &|p| printed.contains(p));
+        ir::map_links(&mut d.blocks, &to);
     }
 
     // the files of the figures the pages show
-    let media: BTreeMap<Hash, &str> = m
-        .iter()
-        .filter(|b| b.block_type == "figure")
-        .filter_map(|b| {
-            let h = b.field_str("blob")?.parse().ok()?;
-            Some((h, b.field_str("media_type").unwrap_or("")))
-        })
-        .collect();
     let mut figures = BTreeSet::new();
     for d in &docs {
         figure_blobs(&d.blocks, &mut figures);
     }
     let mut print_blobs = BTreeMap::new();
     for h in figures {
-        let (Some(bytes), Some(media_type)) = (blobs.get(&h), media.get(&h)) else {
+        let (Some(bytes), Some((file, media_type))) = (blobs.get(&h), assets.remove(&h)) else {
             continue;
         };
         print_blobs.insert(
             h,
             Blob {
-                media_type: media_type.to_string(),
+                media_type,
                 bytes: bytes.clone(),
-                file: assets::blob_path(&h.to_string(), media_type),
+                file,
             },
         );
     }
+    // the site build's warnings: a summary page a doc keeps, and the glossary's
+    let since = crate::since_of(rdy, scope, &position);
+    let warnings = crate::scope_warnings(
+        m,
+        &site,
+        reviewed.is_some() && listed.is_some(),
+        since.as_ref().map(|(name, ..)| name.as_str()),
+    );
 
     Ok(Print {
         title: site_name.clone(),
@@ -335,10 +357,7 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
         scope: scope_text(rdy, scope)?,
         docs,
         blobs: print_blobs,
-        warnings: crate::glossary_warning(&site)
-            .map(String::from)
-            .into_iter()
-            .collect(),
+        warnings,
     })
 }
 

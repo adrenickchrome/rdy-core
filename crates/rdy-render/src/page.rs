@@ -42,9 +42,9 @@ pub struct Shared<'a> {
     /// The header's markup, rendered once per relative root in a static build, once in a live
     /// one (see [`Shared::header_html`]).
     pub headers: RefCell<BTreeMap<String, String>>,
-    /// The blobs some page links to, by the site-relative path of their file, filled as pages
-    /// are built.
-    pub used_blobs: RefCell<BTreeMap<String, Hash>>,
+    /// The blobs some page links to, by the site-relative path of their file, with the media
+    /// type of the first block that named that file, filled as pages are built.
+    pub used_blobs: RefCell<BTreeMap<String, (Hash, String)>>,
     /// A static site, or a live one whose pages carry the label and header slots.
     pub mode: Mode<'a>,
     /// The word diff of each changed block of a review render, by id: an edited block on its
@@ -806,7 +806,9 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         let present = |h: &Hash| sh.blobs.contains_key(h);
         let asset_href = |h: &Hash, media: &str| {
             let path = assets::blob_path(&h.to_string(), media);
-            used.borrow_mut().insert(path.clone(), *h);
+            used.borrow_mut()
+                .entry(path.clone())
+                .or_insert_with(|| (*h, media.to_string()));
             rel(page, &path)
         };
         let blob_len = |h: &Hash| sh.blobs.get(h).map(|b| b.len() as u64);
@@ -894,7 +896,9 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
     let present = |h: &Hash| sh.blobs.contains_key(h);
     let asset_href = |h: &Hash, media: &str| {
         let path = assets::blob_path(&h.to_string(), media);
-        used.borrow_mut().insert(path.clone(), *h);
+        used.borrow_mut()
+            .entry(path.clone())
+            .or_insert_with(|| (*h, media.to_string()));
         rel(page, &path)
     };
     let blob_len = |h: &Hash| sh.blobs.get(h).map(|b| b.len() as u64);
