@@ -384,6 +384,49 @@ impl StoreReader {
         }
     }
 
+    /// Whether view `name`'s chain took a close after the log took object `object` (D-K0SS1): an
+    /// op of the chain from `head` back, written after `object`, whose effect is
+    /// `ResolvedOp::Close` (a `Close`, or an `Undo` that closes again). The walk goes back from
+    /// `head` and stops at the first op the log holds before `object`. It reads no clock.
+    /// `object` must be indexed (`NotFound`); an op the index lacks is a broken chain.
+    pub fn closed_after(&self, name: &str, head: &Hash, object: &Hash) -> Result<bool, StoreError> {
+        let mark = self
+            .index()
+            .object(object)?
+            .ok_or(StoreError::NotFound(*object))?;
+        let mut resolver = Resolver::new(self, name);
+        let mut cur = *head;
+        loop {
+            let at = self
+                .index()
+                .typed(kinds::VIEW_OP, &cur)?
+                .ok_or_else(|| broken(name, &cur, "the op is missing"))?;
+            if at < mark {
+                return Ok(false);
+            }
+            let op = self.view_op(&cur)?;
+            if op.view != name {
+                return Err(broken(
+                    name,
+                    &cur,
+                    format!("the op belongs to view {:?}", op.view),
+                ));
+            }
+            let closes = match op.op {
+                ViewOpKind::Close { .. } => true,
+                ViewOpKind::Undo { .. } => resolver.resolve(&cur, 0)? == ResolvedOp::Close,
+                _ => false,
+            };
+            if closes {
+                return Ok(true);
+            }
+            match op.prev {
+                Some(prev) => cur = prev,
+                None => return Ok(false),
+            }
+        }
+    }
+
     /// The changes view `name` includes at op `head`: the walk back to a checkpoint, then the
     /// ops after it applied. With `cached`, the walk also stops at the cached head, and the
     /// answer becomes the cached set; without it, the cache is neither read nor written.

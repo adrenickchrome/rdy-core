@@ -1319,3 +1319,29 @@ fn msw20_a_losers_own_refine_of_the_choice_decision_does_not_release_it() {
     assert!(e.message.contains(&dec), "{}", e.message);
     assert!(!canon_bodies(&r).iter().any(|x| x == "B2"));
 }
+
+/// D-K0SS1: the landing that chooses a member closes the losing members, and withdraws their
+/// versions the same way.
+#[test]
+fn vw1_a_losing_members_version_reads_withdrawn_after_the_choosing_landing() {
+    let (_d, mut r) = project();
+    let set = setup(&mut r);
+    let pa = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    let pb = r
+        .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
+        .unwrap();
+    r.land(&approver(), &pa.id).unwrap();
+    let s = r.read().proposal_show(&pb.r#ref).unwrap();
+    assert_eq!(s.state, "withdrawn");
+    assert_eq!(s.blocking, vec!["withdrawn (view b closed)".to_string()]);
+    assert!(
+        r.read()
+            .open_proposals()
+            .unwrap()
+            .iter()
+            .all(|(pref, _)| pref.to_string() != pb.r#ref),
+        "pb leaves the open proposals"
+    );
+}

@@ -241,3 +241,104 @@ fn pshow1_an_approved_version_with_a_decision_reads_landed_like_the_gate_and_the
     let e = r.land_report(&approver(), &p1.r#ref).unwrap_err();
     assert_eq!(e.code, E_ALREADY_LANDED, "{e}");
 }
+
+/// A landed seed doc, then view "v" with one claim, proposed once by `writer()` (as
+/// `two_versions` writes "work"). Returns the seed's section for a later claim.
+fn proposed_in_v() -> (tempfile::TempDir, Rdy, String, ProposalInfo) {
+    let (d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(&mut r, "v", claim(&section, "a")).unwrap();
+    let p = r.propose(&writer(), "v", "first", None).unwrap();
+    (d, r, section, p)
+}
+
+fn state_of(r: &Rdy, pref: &str) -> String {
+    r.read().proposal_show(pref).unwrap().state
+}
+
+fn open_refs(r: &Rdy) -> Vec<String> {
+    r.read()
+        .open_proposals()
+        .unwrap()
+        .iter()
+        .map(|(pref, _)| pref.to_string())
+        .collect()
+}
+
+/// D-K0SS1: closing a view withdraws its open proposal; the record stays readable.
+#[test]
+fn vw1_closing_a_view_withdraws_its_latest_version() {
+    let (_d, mut r, _section, p) = proposed_in_v();
+    r.view_close(&writer(), &["v".into()], "done").unwrap();
+    let s = r.read().proposal_show(&p.r#ref).unwrap();
+    assert_eq!(s.state, "withdrawn");
+    assert_eq!(s.blocking, vec!["withdrawn (view v closed)".to_string()]);
+    assert!(s.conflicts.is_empty(), "{s:?}");
+    assert_eq!(s.landing, None);
+    assert!(r.read().open_proposals().unwrap().is_empty());
+    // the record is kept: the version reads by its id too
+    let by_id = r.read().proposal_show(&p.id).unwrap();
+    assert_eq!(
+        (by_id.r#ref.as_str(), by_id.state.as_str()),
+        (p.r#ref.as_str(), "withdrawn")
+    );
+}
+
+/// The op at view `view`'s head.
+fn head_op(r: &Rdy, view: &str) -> String {
+    r.read().view_head(view).unwrap().head.to_string()
+}
+
+/// D-K0SS1: an undo of the close reopens the view, never the version; the next propose writes
+/// the next version of the same proposal, and that version is open.
+#[test]
+fn vw1_an_undo_of_the_close_reopens_the_view_but_not_the_version() {
+    let (_d, mut r, section, p1) = proposed_in_v();
+    r.view_close(&writer(), &["v".into()], "done").unwrap();
+    let close = head_op(&r, "v");
+    let u = r.undo(&writer(), "v", Some(&close), false).unwrap();
+    assert!(u.reopened, "{u:?}");
+    assert!(!r.read().view_head("v").unwrap().closed);
+    assert_eq!(state_of(&r, &p1.r#ref), "withdrawn");
+    assert!(open_refs(&r).is_empty(), "{:?}", open_refs(&r));
+    write(&mut r, "v", claim(&section, "b")).unwrap();
+    let p2 = r.propose(&writer(), "v", "second", None).unwrap();
+    assert!(p2.r#ref.ends_with("@2"), "{}", p2.r#ref);
+    assert_eq!(stable_of(&p2), stable_of(&p1));
+    assert_eq!(state_of(&r, &p2.r#ref), "open");
+    assert_eq!(state_of(&r, &p1.r#ref), "superseded");
+    assert_eq!(open_refs(&r), vec![p2.r#ref.clone()]);
+}
+
+/// D-K0SS1: an undo of the reopen closes the view again (an `Undo` whose effect is a close), so
+/// it withdraws the version proposed in between; undoing that undo reopens the view only.
+#[test]
+fn vw1_a_close_by_an_undo_of_the_reopen_withdraws_the_version() {
+    let (_d, mut r, section, _p1) = proposed_in_v();
+    r.view_close(&writer(), &["v".into()], "done").unwrap();
+    let close = head_op(&r, "v");
+    let reopen = r.undo(&writer(), "v", Some(&close), false).unwrap();
+    assert!(reopen.reopened, "{reopen:?}");
+    write(&mut r, "v", claim(&section, "b")).unwrap();
+    let p2 = r.propose(&writer(), "v", "second", None).unwrap();
+    assert_eq!(state_of(&r, &p2.r#ref), "open");
+    let again = r.undo(&writer(), "v", Some(&reopen.op), false).unwrap();
+    assert!(again.closed, "{again:?}");
+    assert!(r.read().view_head("v").unwrap().closed);
+    assert_eq!(state_of(&r, &p2.r#ref), "withdrawn");
+    let open_again = r.undo(&writer(), "v", Some(&again.op), false).unwrap();
+    assert!(open_again.reopened, "{open_again:?}");
+    assert!(!r.read().view_head("v").unwrap().closed);
+    assert_eq!(state_of(&r, &p2.r#ref), "withdrawn");
+    assert!(open_refs(&r).is_empty(), "{:?}", open_refs(&r));
+}
+
+/// Guard (D-K0SS1 precedence): a landed version stays landed after its view closes.
+#[test]
+fn vw1_a_landed_version_stays_landed_after_its_view_closes() {
+    let (_d, mut r, _section, p) = proposed_in_v();
+    r.land(&approver(), &p.id).unwrap();
+    r.view_close(&writer(), &["v".into()], "done").unwrap();
+    assert_eq!(state_of(&r, &p.r#ref), "landed");
+}
