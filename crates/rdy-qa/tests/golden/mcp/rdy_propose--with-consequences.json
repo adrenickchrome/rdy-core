@@ -11,7 +11,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "update",
-      "id": "cq-0f99c0c5c9ccc8ee",
+      "id": "cq-218600e3ca742e61",
       "kind": "suspect"
     }
   ],
@@ -27,16 +27,16 @@
       }
     ]
   },
-  "id": "7c392ad83dc39722fc5c323da994464da23aac8a527500e15dad607240c0c219",
-  "ref": "P-7c392ad83dc3@1",
-  "stable": "7c392ad83dc39722fc5c323da994464da23aac8a527500e15dad607240c0c219",
+  "id": "f695bc47dabb28fae568b98728c12f51455c0476f75afae0e71d7f7627acd095",
+  "ref": "P-f695bc47dabb@1",
+  "stable": "f695bc47dabb28fae568b98728c12f51455c0476f75afae0e71d7f7627acd095",
   "summary": "Rewords A and C.",
   "tensions": [
     {
       "blocks": [
         "c-CFPE0"
       ],
-      "id": "tn-f2898ccc6c39",
+      "id": "tn-b49aae56c812",
       "kind": "unjustified_change",
       "overridden": true,
       "refuses": true,
@@ -50,9 +50,9 @@
               "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
             }
           ],
-          "change": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
+          "change": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
           "run": "b",
-          "side": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
+          "side": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
           "views": [
             "a",
             "b"
@@ -60,14 +60,14 @@
         }
       ],
       "status": "open",
-      "summary": "change 86ee8c14d973 edits stable normative block c-CFPE0 without a justification",
-      "tension": "f2898ccc6c396a0d8686f2e81f057e1704cbf4b16006621e30715ea0b2ceade3"
+      "summary": "change eea05d815351 edits stable normative block c-CFPE0 without a justification",
+      "tension": "b49aae56c812ef03919d52da228643a7bfe4c8aa7627e1d0004abc4ecdfe2bb8"
     },
     {
       "blocks": [
         "c-ZCQ17"
       ],
-      "id": "tn-ff64999cdbc0",
+      "id": "tn-f4ed9226d133",
       "kind": "unjustified_change",
       "overridden": true,
       "refuses": true,
@@ -81,9 +81,9 @@
               "version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
             }
           ],
-          "change": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
+          "change": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
           "run": "b",
-          "side": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
+          "side": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
           "views": [
             "a",
             "b"
@@ -91,8 +91,8 @@
         }
       ],
       "status": "open",
-      "summary": "change 86ee8c14d973 edits stable normative block c-ZCQ17 without a justification",
-      "tension": "ff64999cdbc042f0460beac3200f9312307d08493401f82b418cccd219b3c797"
+      "summary": "change eea05d815351 edits stable normative block c-ZCQ17 without a justification",
+      "tension": "f4ed9226d1334ba0df15d6a33f14cbb886a0af58ff79fcfdf174dfdf80108982"
     },
     {
       "blocks": [
@@ -101,33 +101,17 @@
       "dismissal": {
         "actor": "agent:r",
         "at": "2025-10-09T08:53:20Z",
-        "at_ms": 1760000000053,
+        "at_ms": 1760000000061,
         "reason": "checked: b's wording is the newer one",
-        "review": "79bba996d0fe03f12e02b91377690de868be0d49d5b553d550e1995db7e1d809",
+        "review": "9e834b7013a7d5e1528468fc13075f62713479e0394e6e02deda155f7b93a7c1",
         "role": "reviewer",
         "run": "r"
       },
-      "id": "tn-249e604a5986",
+      "id": "tn-b8fad1db8c41",
       "kind": "edit_collision",
       "refuses": false,
       "severity": "blocking",
       "sides": [
-        {
-          "actor": "agent:b",
-          "blocks": [
-            {
-              "block": "c-CFPE0",
-              "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
-            }
-          ],
-          "change": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
-          "run": "b",
-          "side": "86ee8c14d973306d7be61f78723ee72be712d0b9970b723e3438356b6b5a6d54",
-          "views": [
-            "a",
-            "b"
-          ]
-        },
         {
           "actor": "agent:a",
           "blocks": [
@@ -136,18 +120,34 @@
               "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
             }
           ],
-          "change": "a320dfcc976e9fb0eca004e8f193a3a8fed86ca9f9ef9cdd09c125184e246d81",
+          "change": "16f7e2997563b88963ece523bcf555903a7c3e9e3964b05be49a34b38e04e083",
           "run": "a",
-          "side": "a320dfcc976e9fb0eca004e8f193a3a8fed86ca9f9ef9cdd09c125184e246d81",
+          "side": "16f7e2997563b88963ece523bcf555903a7c3e9e3964b05be49a34b38e04e083",
           "views": [
             "a",
             "a-fork"
+          ]
+        },
+        {
+          "actor": "agent:b",
+          "blocks": [
+            {
+              "block": "c-CFPE0",
+              "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
+            }
+          ],
+          "change": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "run": "b",
+          "side": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "views": [
+            "a",
+            "b"
           ]
         }
       ],
       "status": "dismissed",
       "summary": "two changes edit c-CFPE0 from one base",
-      "tension": "249e604a59862096f1fe8222ec12ded178cf6804376be8b5527b71c2dfac966d"
+      "tension": "b8fad1db8c41f56b8a31e76467ba15b1aff45935ed6b33da41cea75437c90d59"
     }
   ],
   "title": "Fix A and C",
