@@ -2,13 +2,10 @@
 
 use crate::layout::{ProjectId, RunDir};
 use crate::lock::open_no_follow;
+use crate::sys;
 use std::fs;
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use tokio::net::{UnixListener, UnixStream};
 
 /// The longest socket path `bind` accepts, in bytes: `sun_path` is 104 bytes on macOS,
 /// one of which is the terminating NUL. A project whose `.rdy/run/rdy.sock` is longer gets the
@@ -43,7 +40,7 @@ pub fn check_socket_path(run: &RunDir) -> io::Result<()> {
 /// socket's path.
 ///
 /// Call only while holding the store lock (§3.1); a client never calls this.
-pub async fn bind(run: &RunDir) -> io::Result<(UnixListener, PathBuf, ProjectId)> {
+pub async fn bind(run: &RunDir) -> io::Result<(sys::Listener, PathBuf, ProjectId)> {
     run.ensure()?;
     check_socket_path(run)?;
     let project = run.project_id()?;
@@ -54,14 +51,14 @@ pub async fn bind(run: &RunDir) -> io::Result<(UnixListener, PathBuf, ProjectId)
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(named(e)),
     }
-    let listener = UnixListener::bind(&path).map_err(named)?;
+    let listener = sys::bind(&path).map_err(named)?;
     let mut pid_written = false;
-    let done = fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+    let done = sys::make_private_path(&path)
         .map_err(named)
         .and_then(|()| write_pid_file(run))
         .and_then(|()| {
             pid_written = true;
-            let mut record = path.as_os_str().as_bytes().to_vec();
+            let mut record = sys::path_bytes(&path).to_vec();
             record.push(b'\n');
             record.extend_from_slice(format!("{project}\n").as_bytes());
             write_run_file(&run.socket_record(), &record)
@@ -95,64 +92,59 @@ fn write_run_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     ));
     // never through a symlink: a planted `<name>.tmp` link must not get its target written
     let mut f = open_no_follow(
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600),
+        sys::private_file(
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+        ),
         &tmp,
     )?;
     // a leftover tmp file keeps its old mode through open; set it exactly
-    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    sys::make_private_file(&f)?;
     f.write_all(bytes)?;
     drop(f);
     fs::rename(&tmp, target)
 }
 
-/// The effective uid of the process at the other end of `stream`.
-#[allow(unsafe_code)]
-pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    let fd = stream.as_raw_fd();
-    #[cfg(target_os = "linux")]
-    {
-        let mut cred = libc::ucred {
-            pid: 0,
-            uid: 0,
-            gid: 0,
-        };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        // SAFETY: `fd` is a live socket owned by `stream`; `cred` and `len` are valid for writes
-        // and `len` holds the size of `cred`.
-        let rc = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                (&mut cred as *mut libc::ucred).cast(),
-                &mut len,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(cred.uid)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut uid: libc::uid_t = 0;
-        let mut gid: libc::gid_t = 0;
-        // SAFETY: `fd` is a live socket owned by `stream`; `uid` and `gid` are valid for writes.
-        let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(uid)
-    }
+/// The effective uid of the process at the other end of `stream` (`sys::peer_uid`).
+pub fn peer_uid(stream: &sys::Stream) -> io::Result<u32> {
+    sys::peer_uid(stream)
 }
 
-/// This process's effective uid.
-#[allow(unsafe_code)]
+/// This process's effective uid (`sys::own_uid`).
 pub fn own_uid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
+    sys::own_uid()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind;
+    use crate::layout::RunDir;
+    use crate::sys::path_bytes;
+    use rdy_store::fileid::FileId;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn ps7_the_socket_record_is_the_path_bytes_then_the_identity() {
+        // under /tmp, so `.rdy/run/rdy.sock` stays short on macOS
+        let d = tempfile::Builder::new()
+            .prefix("rdy-ps7")
+            .tempdir_in("/tmp")
+            .unwrap();
+        fs::create_dir(d.path().join(".rdy")).unwrap();
+        let run = RunDir::of_project(d.path());
+        let (listener, socket, project) = bind(&run).await.unwrap();
+        let id = FileId::lstat(&d.path().join(".rdy")).unwrap();
+        let mut want = path_bytes(&socket).to_vec();
+        want.push(b'\n');
+        want.extend_from_slice(format!("{}:{}\n", id.dev, id.ino).as_bytes());
+        assert_eq!(fs::read(run.socket_record()).unwrap(), want);
+        assert_eq!(project.to_string(), format!("{}:{}", id.dev, id.ino));
+        assert_eq!(socket, run.socket());
+        let mode = fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the socket's mode");
+        drop(listener);
+    }
 }

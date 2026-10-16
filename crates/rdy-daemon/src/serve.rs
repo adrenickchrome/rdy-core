@@ -494,12 +494,12 @@ impl Handler for ServeHandler {
     fn mcp(
         &self,
         session: SessionInfo,
-        stream: tokio::net::UnixStream,
+        stream: crate::handler::McpStream,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let engine = self.shared.engine();
         let hub = Arc::clone(&self.shared.hub);
         Box::pin(async move {
-            let (r, w) = stream.into_split();
+            let (r, w) = tokio::io::split(stream);
             if let Err(e) = rdy_mcp::server::serve_on(engine, session.id.0, hub, r, w).await {
                 log(&format!(
                     "mcp session {} ended with an error: {e}",

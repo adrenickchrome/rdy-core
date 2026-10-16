@@ -7,13 +7,13 @@ use crate::hello::{HelloReply, read_hello};
 use crate::layout::{ProjectId, RunDir};
 use crate::session::{Proto, SessionInfo, Sessions};
 use crate::socket;
+use crate::sys;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
@@ -258,7 +258,7 @@ pub struct Daemon {
     /// `info.connections` plus the holds, so `run` can watch the sum reach 0 (the idle timer).
     keepers: Keepers,
     files: RunFiles,
-    listener: Option<UnixListener>,
+    listener: Option<sys::Listener>,
     /// The project check; it holds the identity of the project's `.rdy` from the bind on, and
     /// hellos from another project are refused.
     check: Arc<ProjectCheck>,
@@ -347,7 +347,7 @@ impl Daemon {
         ));
         let ctx = Arc::new(Conn {
             version: self.config.version.clone(),
-            expected_uid: self.config.expected_uid.unwrap_or_else(socket::own_uid),
+            expected_uid: self.config.expected_uid.unwrap_or_else(sys::own_uid),
             handler: Arc::clone(&self.handler),
             info: self.info.clone(),
             readiness: self.readiness.clone(),
@@ -696,7 +696,7 @@ async fn write_reply<W: AsyncWrite + Unpin>(w: &mut W, reply: &HelloReply) -> io
 /// Writes a final reply and closes. Bytes the client already sent are read off first: closing a
 /// Unix socket with unread input makes Linux report ECONNRESET to the peer, which could hide the
 /// reply it is about to read.
-async fn close_after_reply(mut stream: UnixStream, reply: &HelloReply) {
+async fn close_after_reply(mut stream: sys::Stream, reply: &HelloReply) {
     if write_reply(&mut stream, reply).await.is_err() {
         return;
     }
@@ -718,9 +718,9 @@ impl Conn {
         self.check.check()
     }
 
-    async fn serve(self: Arc<Self>, mut stream: UnixStream, mut end: ConnEnd) {
+    async fn serve(self: Arc<Self>, mut stream: sys::Stream, mut end: ConnEnd) {
         // (a) the peer check
-        let peer_uid = match socket::peer_uid(&stream) {
+        let peer_uid = match sys::peer_uid(&stream) {
             Ok(uid) => uid,
             Err(e) => {
                 log(&format!("could not read a connection's peer uid: {e}"));
@@ -843,7 +843,8 @@ impl Conn {
             Proto::Mcp => {
                 let id = session.id;
                 // spawned so a panic in the handler's future surfaces as a JoinError here
-                let mut task = AbortOnDrop(tokio::spawn(self.handler.mcp(session, stream)));
+                let mut task =
+                    AbortOnDrop(tokio::spawn(self.handler.mcp(session, Box::new(stream))));
                 // on a stop the session's future is dropped (`task`'s drop aborts it), which
                 // closes the stream under it
                 tokio::select! {
@@ -866,7 +867,7 @@ impl Conn {
     /// reply (`reloading the pack`) and keeps waiting. False on a stop or a write error.
     async fn start_session(
         &self,
-        stream: &mut UnixStream,
+        stream: &mut sys::Stream,
         session: &SessionInfo,
         stop: &mut watch::Receiver<bool>,
     ) -> bool {
@@ -898,7 +899,7 @@ impl Conn {
     /// Writes `starting` replies until ready (true), or returns false on a stop or a write
     /// error. Ready is sent by the caller; `starting` replies are at least
     /// `PROGRESS_MIN_INTERVAL` apart and carry the latest progress.
-    async fn wait_ready(&self, stream: &mut UnixStream) -> bool {
+    async fn wait_ready(&self, stream: &mut sys::Stream) -> bool {
         let mut status = self.readiness.subscribe();
         let mut stop = self.info.stop.subscribe();
         if *stop.borrow_and_update() {

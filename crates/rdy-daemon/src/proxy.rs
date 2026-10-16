@@ -172,7 +172,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Guarded<W> {
 /// (or an error either side). Each complete line it forwarded is shown to `inflight`; `midline`
 /// is true while the last byte forwarded is not a newline.
 async fn socket_to_stdout(
-    mut sock_r: tokio::net::unix::OwnedReadHalf,
+    mut sock_r: crate::sys::ReadHalf,
     inflight: Arc<Mutex<InFlight>>,
     midline: Arc<AtomicBool>,
 ) {
@@ -243,7 +243,7 @@ pub async fn run_stdio(project: PathBuf, version: String, start_timeout: Duratio
             return 1;
         }
     };
-    let (sock_r, sock_w) = client.into_stream().into_split();
+    let (sock_r, sock_w) = crate::sys::split(client.into_stream());
     let inflight = Arc::new(Mutex::new(InFlight::new()));
     let midline = Arc::new(AtomicBool::new(false));
     // stdin to the socket; the task's value is true when a socket write failed (the daemon is

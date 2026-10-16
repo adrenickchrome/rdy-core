@@ -4,7 +4,6 @@
 use crate::layout::RunDir;
 use rdy_model::Hash;
 use std::net::{Ipv4Addr, UdpSocket};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// The first port of the range a derived port falls in (the dynamic range, 49152 to 65535).
@@ -18,7 +17,7 @@ const SPAN: u16 = 16384;
 /// (D-YMWEM), so every spelling of one project gives one port, as it gives one socket.
 pub fn derived_port(root: &Path) -> u16 {
     let canonical = RunDir::of_project(root).root();
-    let h = Hash::of(canonical.as_os_str().as_bytes()).0;
+    let h = Hash::of(crate::sys::path_bytes(&canonical)).0;
     PORT_LOW + u16::from_le_bytes([h[0], h[1]]) % SPAN
 }
 

@@ -20,7 +20,7 @@ pub use daemon::{
 pub use error::{
     E_BAD_INPUT, E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, E_LIMIT, E_NO_SESSION, ErrorReply,
 };
-pub use handler::Handler;
+pub use handler::{DuplexStream, Handler, McpStream};
 pub use hello::{HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, PROTO_VERSION, read_hello};
 pub use layout::{LOG_FILE, PID_FILE, ProjectId, RUN_DIR, RunDir, SOCKET_FILE, START_LOCK_FILE};
 pub use session::{Proto, SessionId, SessionInfo, Sessions};

@@ -8,13 +8,13 @@ use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
 use crate::socket::MAX_SOCKET_PATH;
 use crate::spawn::Spawned;
+use crate::sys;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// How long `connect_or_start` waits for a daemon to become ready, by default.
 pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -181,7 +181,7 @@ fn store_lock_held(lock: &std::path::Path) -> bool {
 
 /// Reads one hello reply, one byte at a time up to and including its newline, so nothing past
 /// it is consumed (an MCP stream is handed on as it stands).
-async fn read_hello_reply(stream: &mut UnixStream) -> io::Result<HelloReply> {
+async fn read_hello_reply(stream: &mut sys::Stream) -> io::Result<HelloReply> {
     let mut line = Vec::with_capacity(128);
     loop {
         let b = stream.read_u8().await?;
@@ -207,7 +207,7 @@ async fn read_hello_reply(stream: &mut UnixStream) -> io::Result<HelloReply> {
 /// A connection past its hello: a session of the daemon.
 #[derive(Debug)]
 pub struct Client {
-    stream: BufReader<UnixStream>,
+    stream: BufReader<sys::Stream>,
     session: SessionId,
     version: String,
     next_id: u64,
@@ -218,7 +218,7 @@ pub struct Client {
 }
 
 impl Client {
-    fn new(stream: UnixStream, session: SessionId, version: String) -> Client {
+    fn new(stream: sys::Stream, session: SessionId, version: String) -> Client {
         Client {
             stream: BufReader::new(stream),
             session,
@@ -318,7 +318,7 @@ impl Client {
     /// `ctl` (as an MCP client does) or after `ctl` replies only (`ctl` never pipelines): then
     /// nothing past the last reply has been read off the stream. Bytes read past it would be lost
     /// with the buffer; debug builds assert there are none.
-    pub fn into_stream(self) -> UnixStream {
+    pub fn into_stream(self) -> sys::Stream {
         debug_assert!(
             self.stream.buffer().is_empty(),
             "into_stream would drop {} bytes read past the last ctl reply",
@@ -334,7 +334,7 @@ impl Client {
 /// A connection the daemon answered `starting`: it is not ready yet.
 #[derive(Debug)]
 pub struct Pending {
-    stream: UnixStream,
+    stream: sys::Stream,
     run: RunDir,
     progress: String,
 }
@@ -422,7 +422,7 @@ pub enum Attempt {
 /// socket), sends `hello` and reads the first reply (within `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
 /// path that is a symlink, and a peer that is not of our own uid (neither hears the hello).
 pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
-    connect_expecting_uid(run, hello, crate::socket::own_uid()).await
+    connect_expecting_uid(run, hello, sys::own_uid()).await
 }
 
 /// Test hook: `connect`, taking the peer to be ours only when it runs as `uid`.
@@ -437,7 +437,7 @@ pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Att
 /// What one hello exchange found: the connection, the daemon's first reply, the socket path the
 /// connection went to, and the pid of the process at its other end, when the system gives it.
 struct Found {
-    stream: UnixStream,
+    stream: sys::Stream,
     reply: HelloReply,
     socket: PathBuf,
     pid: Option<u32>,
@@ -471,20 +471,16 @@ async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<F
             path.display()
         )));
     }
-    let mut stream = UnixStream::connect(path).await?;
+    let mut stream = sys::connect(path).await?;
     // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
-    let peer = crate::socket::peer_uid(&stream)?;
+    let peer = sys::peer_uid(&stream)?;
     if peer != uid {
         return Err(io::Error::other(format!(
             "the socket's peer is uid {peer}, not ours"
         )));
     }
     // read before the hello, from the connection that gets the reply
-    let pid = stream
-        .peer_cred()
-        .ok()
-        .and_then(|c| c.pid())
-        .and_then(|p| u32::try_from(p).ok());
+    let pid = sys::peer_pid(&stream);
     let mut line = serde_json::to_vec(hello).map_err(io::Error::other)?;
     line.push(b'\n');
     stream.write_all(&line).await?;
@@ -506,7 +502,7 @@ async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<F
 }
 
 /// What a first hello reply means.
-fn attempt(run: &RunDir, stream: UnixStream, reply: HelloReply) -> Attempt {
+fn attempt(run: &RunDir, stream: sys::Stream, reply: HelloReply) -> Attempt {
     match reply {
         HelloReply::Ready { version, session } => {
             Attempt::Ready(Client::new(stream, session, version))
@@ -559,7 +555,7 @@ pub async fn request_stop(
     hello: &Hello,
     start_timeout: Duration,
 ) -> Result<Option<StopRequest>, ErrorReply> {
-    let Ok(found) = exchange_hello(run, hello, crate::socket::own_uid()).await else {
+    let Ok(found) = exchange_hello(run, hello, sys::own_uid()).await else {
         return Ok(None);
     };
     if let HelloReply::Refused { error } = &found.reply
@@ -652,8 +648,8 @@ pub fn live_daemon(project: &Path) -> Option<u32> {
 }
 
 /// The pid of the process at the other end of a connection to `socket`, read as
-/// `exchange_hello_at` reads it: the peer's uid with `socket::peer_uid` (it must be ours), then
-/// the pid with tokio's `peer_cred`, `p > 1`. The connection runs on a thread of its own with a
+/// `exchange_hello_at` reads it: the peer's uid with `sys::peer_uid` (it must be ours), then
+/// the pid with `sys::peer_pid`, `p > 1`. The connection runs on a thread of its own with a
 /// current-thread runtime: `live_daemon`'s caller may have no runtime (`rdy load`), or may be in
 /// one (`rdy_load` on a blocking thread), where `block_on` would panic.
 fn peer_pid(socket: &Path) -> Option<u32> {
@@ -664,12 +660,11 @@ fn peer_pid(socket: &Path) -> Option<u32> {
                 .build()
                 .ok()?;
             rt.block_on(async {
-                let stream = UnixStream::connect(socket).await.ok()?;
-                if crate::socket::peer_uid(&stream).ok()? != crate::socket::own_uid() {
+                let stream = sys::connect(socket).await.ok()?;
+                if sys::peer_uid(&stream).ok()? != sys::own_uid() {
                     return None;
                 }
-                let pid = stream.peer_cred().ok()?.pid()?;
-                u32::try_from(pid).ok().filter(|&p| p > 1)
+                sys::peer_pid(&stream).filter(|&p| p > 1)
             })
         })
         .join()
@@ -961,7 +956,7 @@ impl Start<'_> {
         // waiting cannot help. Neither can waiting on a daemon that has exited.
         let mut attempt_no = 0u32;
         loop {
-            let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
+            let reached = match exchange_hello(run, &hello, sys::own_uid()).await {
                 Ok(Found {
                     reply: HelloReply::Exiting { version: theirs },
                     ..

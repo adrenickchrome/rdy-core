@@ -197,7 +197,7 @@ async fn hello1_an_mcp_hello_hands_the_stream_to_the_handler_with_pipelined_byte
         fn mcp(
             &self,
             s: SessionInfo,
-            stream: UnixStream,
+            stream: McpStream,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             let tx = self.0.lock().unwrap().take().unwrap();
             Box::pin(async move {
