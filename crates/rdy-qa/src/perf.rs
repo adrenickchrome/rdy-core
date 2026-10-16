@@ -2080,7 +2080,9 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
             };
             let builds = rdy_engine::tensions::set::full_builds();
             let s = Instant::now();
-            let info: AcceptInfo = r.accept_advice(&human, req).expect("an acceptance");
+            let info: AcceptInfo = r
+                .accept_advice(&human, &human.actor, req)
+                .expect("an acceptance");
             let after = r.read();
             after.tensions().expect("tensions");
             let took = s.elapsed();

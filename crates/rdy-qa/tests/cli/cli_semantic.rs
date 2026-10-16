@@ -112,7 +112,7 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // FR1 (finding 4): the relay's texts are capped as the engine caps them
+    // di8 (C5, D-67ZN7): a person accepts plainly and never names a relayer
     let long = format!("agent:{}", "w".repeat(251));
     let out = s.rdy(&[
         "resolve",
@@ -127,8 +127,9 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
     ]);
     assert!(
         !out.status.success()
-            && String::from_utf8_lossy(&out.stderr)
-                .contains("relayed_by takes at most 256 characters"),
+            && String::from_utf8_lossy(&out.stderr).contains(
+                "a person answers as themselves; only the relaying agent records a relay"
+            ),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

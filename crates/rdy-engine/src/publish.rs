@@ -372,7 +372,13 @@ impl Rdy {
         // the dismissals: re-read by a full publish, one added by a dismissal, else carried
         let dismissals = match &delta {
             Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
-            Delta::Dismissed { vkey, review } => Arc::new(prev.dismissals.update(*vkey, *review)),
+            Delta::Dismissed { reviews } => {
+                let mut map = (*prev.dismissals).clone();
+                for (vkey, review) in reviews {
+                    map.insert(*vkey, *review);
+                }
+                Arc::new(map)
+            }
             _ => Arc::clone(&prev.dismissals),
         };
         // the dismissed mentions: re-read by a full publish (only the pairs whose latest review

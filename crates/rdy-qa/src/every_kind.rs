@@ -288,7 +288,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
             session_ref: Some("chat-1".into()),
             ..Default::default()
         };
-        let a = r.accept_advice(&ag("relay"), req).unwrap();
+        let a = r.accept_advice(&ag("relay"), "human:qa", req).unwrap();
         assert_eq!(a.accepted.len(), 1, "the advice is accepted");
     });
     // a rebase that records a conflict: rb edits k1, the person lands another edit of k1

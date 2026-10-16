@@ -407,6 +407,7 @@ fn di6_an_accepted_advice_leaves_its_blocking_tension_as_an_item() {
     assert!(find(&queue(&r, None), &advice).is_some());
     r.accept_advice(
         &writer(),
+        "human:qa",
         rdy_engine::tensions::api::AcceptRequest {
             proposal: b.r#ref.clone(),
             advised_digest: b.report["advised_digest"].as_str().unwrap().into(),

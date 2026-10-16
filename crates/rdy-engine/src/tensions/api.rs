@@ -3,6 +3,7 @@
 //! for views. A listing reads one snapshot; a dismissal runs on the writer.
 use super::info::InfoCache;
 use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus};
+use crate::answer::relay::RelayInput;
 use crate::brief::BRIEF_DEFAULT_TOKENS;
 use crate::engine::{Engine, write_typed};
 use crate::error::*;
@@ -18,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// `rdy_schema`'s paragraph on tensions.
-pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference, value_disagreement, restatement_drift, semantic. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition, deprecated reference (from content that is not itself deprecated), value disagreement, restatement drift and a semantic tension stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. A duplicate_definition is one tension per group: every block that defines one name, or every normative block with one text, is a member. An unjustified_change is one tension per block that a view changes: a stable normative block with no implements or editorial on any change of the view that writes it. Its sides are the view's latest changes on the block; creating a decision, or editing one still proposed, never counts. A proposal and its landing judge the proposal's net change, and a listing scoped to a view judges the view's net change. A value_disagreement is one tension per pair of a block and a value it describes (by a reference, a describes link or an affects link) and states a different number in the value's unit: the value needs a unit and a decimal, a stated number counts when the unit text follows it directly or after one space, and there are no unit aliases and no conversion. It blocks in stable content and is advisory in draft. A restatement_drift is one tension per edit of a block and another block that restated the edited text: both are normative or informative, not decisions, with bodies of 8 words or more; the old text and the other block share at least drift_threshold percent of their three-word runs (a pack setting under coverage, default 60), and the edit removes a shared run. A view's edits of the block count as one edit, from the text the view started from. A view that edits both blocks raises none between them. In canon it stays open until the other block is edited, however often the edited block changes again. It is advisory by default. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one, and a semantic one a reviewer advised to block, needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes; for a duplicate_definition, also until the group's membership changes (a member added, edited away or removed). A semantic tension comes from a reviewer's tension verdict on a candidate pair (rdy_review_next, rdy_review_submit). It is advisory. The reviewer may advise that it should block (severity blocking, with a reason); the advice gates nothing. A person accepts the advice once for the advised tensions of a proposal version, and an agent relays that answer: rdy_resolve {accept: {proposal: P-x@n, advised_digest, evidence, question?, session_ref?, tensions?}}. advised_digest is the one rdy_propose or rdy_read P-x@n gave with the advised tensions the person was shown; when that set has changed since, the acceptance is refused (E_PROPOSAL_MOVED). The acceptance binds to the pair's two texts: every tension on the same two texts blocks, in any view or proposal, and the reply lists each one with its view. An accepted tension blocks until a side's content changes. A semantic tension resolves only when a side's text changes; a repin does not resolve it.";
+pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference, value_disagreement, restatement_drift, semantic. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition, deprecated reference (from content that is not itself deprecated), value disagreement, restatement drift and a semantic tension stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. A duplicate_definition is one tension per group: every block that defines one name, or every normative block with one text, is a member. An unjustified_change is one tension per block that a view changes: a stable normative block with no implements or editorial on any change of the view that writes it. Its sides are the view's latest changes on the block; creating a decision, or editing one still proposed, never counts. A proposal and its landing judge the proposal's net change, and a listing scoped to a view judges the view's net change. A value_disagreement is one tension per pair of a block and a value it describes (by a reference, a describes link or an affects link) and states a different number in the value's unit: the value needs a unit and a decimal, a stated number counts when the unit text follows it directly or after one space, and there are no unit aliases and no conversion. It blocks in stable content and is advisory in draft. A restatement_drift is one tension per edit of a block and another block that restated the edited text: both are normative or informative, not decisions, with bodies of 8 words or more; the old text and the other block share at least drift_threshold percent of their three-word runs (a pack setting under coverage, default 60), and the edit removes a shared run. A view's edits of the block count as one edit, from the text the view started from. A view that edits both blocks raises none between them. In canon it stays open until the other block is edited, however often the edited block changes again. It is advisory by default. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one, and a semantic one a reviewer advised to block, needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). An agent relays a person's dismissal with their words: rdy_resolve {tension, dismiss: {reason, evidence, question?, session_ref?}}. It runs as the person, so these rules judge the person, and an answer record holds the relay. A dismissal stays with the tension (status dismissed) until a side's content changes; for a duplicate_definition, also until the group's membership changes (a member added, edited away or removed). A semantic tension comes from a reviewer's tension verdict on a candidate pair (rdy_review_next, rdy_review_submit). It is advisory. The reviewer may advise that it should block (severity blocking, with a reason); the advice gates nothing. A person accepts the advice once for the advised tensions of a proposal version, and an agent relays that answer: rdy_resolve {accept: {proposal: P-x@n, advised_digest, evidence, question?, session_ref?, tensions?}}. advised_digest is the one rdy_propose or rdy_read P-x@n gave with the advised tensions the person was shown; when that set has changed since, the acceptance is refused (E_PROPOSAL_MOVED). The acceptance binds to the pair's two texts: every tension on the same two texts blocks, in any view or proposal, and the reply lists each one with its view. An accepted tension blocks until a side's content changes. A semantic tension resolves only when a side's text changes; a repin does not resolve it.";
 
 /// One tensions request: which tensions to list. Every filter given must match.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -74,11 +75,34 @@ pub struct MentionRequest {
     pub entity: String,
 }
 
-/// Why a tension needs no action.
+/// Why a tension needs no action. A dismissal of a tension may carry the person's words, when an
+/// agent relays them (D-562QR, FW-B9): it then runs as the person. A mention review takes no
+/// relay.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DismissRequest {
     pub reason: String,
+    /// The person's words, quoted, when an agent relays them.
+    pub evidence: Option<String>,
+    /// The question the person was asked.
+    pub question: Option<String>,
+    /// Where the person said it (default: `mcp` over MCP, `cli` at the command line).
+    pub session_ref: Option<String>,
+    /// The agent that relays the dismissal at the command line, as `actor[/run]`.
+    pub relayed_by: Option<String>,
+}
+
+impl DismissRequest {
+    /// The relay this dismissal carries (empty for a dismissal in the session's own right).
+    fn relay(&self) -> RelayInput {
+        RelayInput {
+            relayed_by: self.relayed_by.clone(),
+            evidence: self.evidence.clone(),
+            question: self.question.clone(),
+            session_ref: self.session_ref.clone(),
+            kind: None,
+        }
+    }
 }
 
 /// A person's answer to the advice on the semantic tensions of one exact proposal version
@@ -571,9 +595,12 @@ pub fn run_tensions(
 /// change. A mention is dismissed or restored with a reason: `{block, entity, verdict, review,
 /// status}`. An acceptance of the advice on a proposal version's semantic tensions goes alone:
 /// `{proposal, accepted: [{id, was, version}], severity}`.
+/// Runs `req` for session `s`. `person` is the project's human actor, from the caller (O18): a
+/// relayed acceptance or dismissal records them as the actor.
 pub fn run_resolve(
     engine: &dyn Engine,
     s: &Session,
+    person: &str,
     req: ResolveRequest,
 ) -> Result<Value, RdyError> {
     let ResolveRequest {
@@ -596,8 +623,8 @@ pub fn run_resolve(
                 "pass accept: {proposal, evidence, …} with nothing else",
             ));
         }
-        let s = s.clone();
-        return write_typed(engine, move |r| r.accept_advice(&s, a));
+        let (s, person) = (s.clone(), person.to_string());
+        return write_typed(engine, move |r| r.accept_advice(&s, &person, a));
     }
     match (tension, mention) {
         (Some(tension), None) => {
@@ -627,8 +654,10 @@ pub fn run_resolve(
                     &format!("{hint} with dismiss: {{reason}}"),
                 ));
             };
-            let s = s.clone();
-            write_typed(engine, move |r| r.dismiss_tension(&s, &tension, &d.reason))
+            let (s, person) = (s.clone(), person.to_string());
+            write_typed(engine, move |r| {
+                r.dismiss_tension_as(&s, &person, &tension, &d.reason, &d.relay())
+            })
         }
         (None, Some(m)) => {
             let (verdict, d) = match (dismiss, restore) {
@@ -641,6 +670,12 @@ pub fn run_resolve(
                     ));
                 }
             };
+            if d.relay() != RelayInput::default() {
+                return Err(bad(
+                    "a mention review takes no relay".to_string(),
+                    "drop evidence, question, session_ref and relayed_by",
+                ));
+            }
             let s = s.clone();
             write_typed(engine, move |r| {
                 let view = s.default_view();

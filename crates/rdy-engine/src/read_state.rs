@@ -50,9 +50,10 @@ pub enum Delta {
     Coord { closed: Vec<String> },
     /// A tag was written.
     Tags,
-    /// Review `review` dismissed the tensions of vkey `vkey`: every cell is carried, and the
-    /// tension set too (a dismissal is state on a still-computed tension, FW-CH7).
-    Dismissed { vkey: Hash, review: Hash },
+    /// Each `(vkey, review)` of `reviews`: review `review` dismissed the tensions of vkey `vkey`,
+    /// in one batch. Every cell is carried, and the tension set too (a dismissal is state on a
+    /// still-computed tension, FW-CH7).
+    Dismissed { reviews: Vec<(Hash, Hash)> },
     /// Review `review` set the mention of `entity` in `block` to dismissed (`dismissed`) or back
     /// to open: every cell is carried, as `Dismissed` carries them (no view content changed).
     MentionReviewed {

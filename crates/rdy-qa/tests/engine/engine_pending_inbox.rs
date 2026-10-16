@@ -260,7 +260,9 @@ fn di11_an_advised_entry_stays_after_the_advice_is_accepted() {
         session_ref: Some("chat-1".into()),
         ..Default::default()
     };
-    let a = r.accept_advice(&ag("relay"), req).expect("accept");
+    let a = r
+        .accept_advice(&ag("relay"), "human:qa", req)
+        .expect("accept");
     assert_eq!(a.accepted.len(), 1, "{a:?}");
     // the same cursor reads the same entry: the verdict carried the advice when it was submitted
     assert_eq!(pending_added(&r, &sub), vec![first]);

@@ -417,6 +417,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "resolve" => run_resolve(
             cx.engine,
             cx.session,
+            cx.human,
             parse(
                 op,
                 args,

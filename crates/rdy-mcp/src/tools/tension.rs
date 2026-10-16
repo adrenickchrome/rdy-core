@@ -90,6 +90,26 @@ pub struct MentionParams {
 pub struct DismissParams {
     /// Why the tension needs no action, in a few words (at most 2000 characters).
     pub reason: String,
+    /// The person's words, quoted, when you relay their dismissal of a tension: it then runs as
+    /// the person. Leave out to dismiss as yourself.
+    pub evidence: Option<String>,
+    /// The question the person was asked (needs evidence).
+    pub question: Option<String>,
+    /// Where the person said it, e.g. the chat session (needs evidence; default: mcp).
+    pub session_ref: Option<String>,
+}
+
+impl DismissParams {
+    /// The engine's request: over MCP the session is the relay, so there is no `relayed_by`.
+    fn request(self) -> DismissRequest {
+        DismissRequest {
+            reason: self.reason,
+            evidence: self.evidence,
+            question: self.question,
+            session_ref: self.session_ref,
+            relayed_by: None,
+        }
+    }
 }
 
 /// `rdy_tensions`: lists tensions, filtered, for the session.
@@ -114,21 +134,24 @@ pub fn rdy_tensions(st: &mut McpState, p: TensionsParams) -> Result<Value, RdyEr
 }
 
 /// `rdy_resolve`: dismisses a tension, or dismisses or restores a passing mention, with a reason
-/// (a review); or relays a person's acceptance of the advice on a proposal's semantic tensions
-/// (the session is the relay, so there is no `relayed_by`).
+/// (a review); or relays a person's acceptance of the advice on a proposal's semantic tensions,
+/// or their dismissal of a tension (the session is the relay, so there is no `relayed_by`). The
+/// person is the project's human actor (O18).
 pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyError> {
     let s = session(st)?;
+    let person = human_actor_for_env(&st.engine.root());
     run_resolve(
         &*st.engine,
         &s,
+        &person,
         ResolveRequest {
             tension: p.tension,
             mention: p.mention.map(|m| MentionRequest {
                 block: m.block,
                 entity: m.entity,
             }),
-            dismiss: p.dismiss.map(|d| DismissRequest { reason: d.reason }),
-            restore: p.restore.map(|d| DismissRequest { reason: d.reason }),
+            dismiss: p.dismiss.map(DismissParams::request),
+            restore: p.restore.map(DismissParams::request),
             scope: p.scope,
             accept: p.accept.map(|a| AcceptRequest {
                 proposal: a.proposal,

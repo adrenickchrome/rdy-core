@@ -32,10 +32,15 @@
 //!
 //! # Acts
 //!
-//! The batch acts are in [`batch`]. An approval lands through `land_with` and writes no
-//! `ANSWER`; every other act writes one `ANSWER` record in a batch of its own.
+//! The batch acts, and Later on any item, are in [`batch`]. An approval lands through `land_with`
+//! and writes no `ANSWER`; every other batch act writes one `ANSWER` record in a batch of its
+//! own. The answer to a question is in [`question`]: a proposed decision, then its `ANSWER`. The
+//! answers to tensions are in [`resolve`]: an acceptance writes semantic tension versions and no
+//! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch.
 pub mod batch;
+pub mod question;
 pub mod relay;
+pub mod resolve;
 
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, E_PROPOSAL_MOVED, RdyError};
 use crate::gate::{LandInfo, latest_version, moved, resolve_in};
@@ -69,11 +74,12 @@ pub struct AnswerRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct AnswerInfo {
     pub r#ref: String,
-    /// `approve` for a landing, else the act of the `ANSWER` record (`reject_proposal`, `later`,
-    /// `confirm`, `reject_decision`).
+    /// `approve` for a landing, `accept` for an acceptance of advice, else the act of the
+    /// `ANSWER` record (`reject_proposal`, `later`, `confirm`, `reject_decision`,
+    /// `answer_question`, `dismiss`).
     pub act: String,
     pub option: String,
-    /// The chosen option's label, from rdy's own card.
+    /// The chosen option's label, from rdy's own card; for a free answer (`o0`), the note.
     pub label: String,
     /// `local`, or `relayed` when an agent relayed the person's words.
     pub assurance: &'static str,
@@ -102,11 +108,13 @@ enum Pick<'a> {
     Recommended,
 }
 
-/// The session an answer runs as, its relay and its evidence kind.
-struct Answerer {
-    who: Session,
-    relay: Option<Relay>,
-    kind: Option<EvidenceKind>,
+/// The session an answer runs as, its relay and its evidence kind, and the session that gave
+/// the answer (the relaying agent's, or the person's own).
+pub(crate) struct Answerer {
+    pub who: Session,
+    pub relay: Option<Relay>,
+    pub kind: Option<EvidenceKind>,
+    pub from: Session,
 }
 
 impl Rdy {
@@ -180,7 +188,13 @@ impl Rdy {
         note: Option<String>,
     ) -> Result<AnswerInfo, RdyError> {
         let bound = bind(&self.read(), person, r, shown, by.relay.is_some(), pick)?;
-        batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
+        match (bound.item.kind, bound.option.id.as_str()) {
+            (_, "later") | (ItemKind::Approve | ItemKind::Confirm, _) => {
+                batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
+            }
+            (ItemKind::Answer, _) => question::act(self, by, person, bound, note),
+            (ItemKind::Resolve, _) => resolve::act(self, by, bound, note),
+        }
     }
 }
 
@@ -201,7 +215,12 @@ fn answerer(s: &Session, person: &str, r: &RelayInput) -> Result<Answerer, RdyEr
             ));
         }
     };
-    Ok(Answerer { who, relay, kind })
+    Ok(Answerer {
+        who,
+        relay,
+        kind,
+        from: s.clone(),
+    })
 }
 
 /// The note, trimmed: none when blank, refused past [`MAX_QUOTE`] characters.
@@ -276,14 +295,21 @@ fn bind(
         },
     };
     let option = match pick {
-        Pick::Id(id) => item.options.iter().find(|o| o.id == id).ok_or_else(|| {
-            let ids: Vec<&str> = item.options.iter().map(|o| o.id.as_str()).collect();
-            RdyError::new(
-                E_BAD_INPUT,
-                format!("{id} is not an option of {r}"),
-                format!("answer with one of: {}", ids.join(", ")),
-            )
-        })?,
+        // a free answer to a question: the person's own words, in the note
+        Pick::Id(id) if id == question::FREE && item.kind == ItemKind::Answer => question::free(),
+        Pick::Id(id) => item
+            .options
+            .iter()
+            .find(|o| o.id == id)
+            .ok_or_else(|| {
+                let ids: Vec<&str> = item.options.iter().map(|o| o.id.as_str()).collect();
+                RdyError::new(
+                    E_BAD_INPUT,
+                    format!("{id} is not an option of {r}"),
+                    format!("answer with one of: {}", ids.join(", ")),
+                )
+            })?
+            .clone(),
         Pick::Recommended => item
             .options
             .iter()
@@ -294,11 +320,12 @@ fn bind(
                     format!("{r} has no recommended option"),
                     "answer it on its own",
                 )
-            })?,
+            })?
+            .clone(),
     };
     Ok(Bound {
         item: item.clone(),
-        option: option.clone(),
+        option,
         card_hash,
     })
 }
@@ -362,6 +389,36 @@ fn changed(code: &'static str, r: &str) -> RdyError {
         format!("{r} changed since it was shown"),
         "show the person the fresh card and ask again",
     )
+}
+
+/// The labels the card shows, in order.
+pub(crate) fn labels(i: &Item) -> Vec<String> {
+    i.options.iter().map(|o| o.label.clone()).collect()
+}
+
+/// `local`, or `relayed` with a relay.
+pub(crate) fn assurance(relay: &Option<Relay>) -> &'static str {
+    if relay.is_some() { "relayed" } else { "local" }
+}
+
+/// Writes the answer `a` in a batch of its own and publishes it (`Delta::Seq`, O14).
+pub(crate) fn put_alone(r: &mut Rdy, a: &rdy_model::Answer) -> Result<Hash, RdyError> {
+    // a refusal means rdy built an answer the store's rules reject: a bug, not bad input
+    let h = r.store_mut().put_answer(a).map_err(internal)?;
+    r.publish(crate::Delta::Seq)?;
+    Ok(h)
+}
+
+/// A store error as the answer reports it: a refusal is a bug in rdy.
+pub(crate) fn internal(e: rdy_store::StoreError) -> RdyError {
+    match e {
+        rdy_store::StoreError::Refused(message) => RdyError::new(
+            crate::error::E_INTERNAL,
+            message,
+            "report this as a bug in rdy",
+        ),
+        e => e.into(),
+    }
 }
 
 /// An item's card as a refusal carries it (O21).

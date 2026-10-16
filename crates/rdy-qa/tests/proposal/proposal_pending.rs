@@ -396,6 +396,7 @@ fn di5_advised_tensions_stand_beside_the_batch_as_one_item() {
     // an accepted advice blocks: the version is no longer ready, and nothing of it is an item
     r.accept_advice(
         &writer(),
+        "human:qa",
         AcceptRequest {
             proposal: b.r#ref.clone(),
             advised_digest: b.report["advised_digest"].as_str().unwrap().into(),

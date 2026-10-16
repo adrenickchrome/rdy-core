@@ -68,6 +68,7 @@ fn judge(r: &mut Rdy, advise: bool) {
 fn accept(r: &mut Rdy, p: &ProposalInfo) {
     r.accept_advice(
         &writer(),
+        "human:qa",
         AcceptRequest {
             proposal: p.r#ref.clone(),
             advised_digest: p.advised_digest.clone().expect("advised digest"),

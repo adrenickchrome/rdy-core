@@ -94,7 +94,9 @@ fn direct(p: &ProposalInfo) -> AcceptRequest {
 #[test]
 fn se8_an_agent_accepts_only_by_relaying_a_persons_words() {
     let (_d, mut r, _s, tn, p) = judged(true);
-    let e = r.accept_advice(&ag("w"), direct(&p)).unwrap_err();
+    let e = r
+        .accept_advice(&ag("w"), "human:qa", direct(&p))
+        .unwrap_err();
     assert_eq!(
         (e.code, e.message.as_str()),
         (
@@ -102,15 +104,21 @@ fn se8_an_agent_accepts_only_by_relaying_a_persons_words() {
             "an agent accepts advice only by relaying a person's words"
         )
     );
+    // di8 (D-67ZN7): at the command line the agent names itself; any other relayer is refused
     let mut by = chat(&p);
-    by.relayed_by = Some("agent:w".into());
-    assert_eq!(r.accept_advice(&ag("w"), by).unwrap_err().code, E_BAD_INPUT);
+    by.relayed_by = Some("agent:other".into());
+    assert_eq!(
+        r.accept_advice(&ag("w"), "human:qa", by)
+            .unwrap_err()
+            .message,
+        "agent:w relays only as itself, not as agent:other"
+    );
     assert_eq!(
         one(&r, TensionKind::Semantic).severity,
         TensionSeverity::Advisory,
         "nothing written"
     );
-    let a = r.accept_advice(&ag("w"), chat(&p)).unwrap();
+    let a = r.accept_advice(&ag("w"), "human:qa", chat(&p)).unwrap();
     assert_eq!(a.accepted.len(), 1);
     assert_eq!(
         (a.accepted[0].was.as_str(), a.severity),
@@ -127,8 +135,12 @@ fn se8_an_agent_accepts_only_by_relaying_a_persons_words() {
         ("agent:r", Some("it contradicts the gate rule"))
     );
     assert_eq!(j.findings[0].note, "B and C cannot both hold");
+    // di8 (D-67ZN7): the person accepted; the agent relayed as itself
     let acc = j.accepted.unwrap();
-    assert_eq!(acc.actor, "agent:w");
+    assert_eq!(
+        (acc.actor.as_str(), acc.relayed_by.as_deref()),
+        ("human:qa", Some("agent:w/w"))
+    );
     assert_eq!(
         (acc.evidence.as_deref(), acc.session_ref.as_deref()),
         (Some("yes, accept the advice"), Some("chat-7"))
@@ -140,17 +152,22 @@ fn se8_a_person_at_the_cli_accepts_without_a_relay() {
     let (_d, mut r, _s, _tn, p) = judged(true);
     let mut half = direct(&p);
     half.evidence = Some("yes".into());
+    // di8 (C5): a human session's acceptance is plain; it never carries a relay
     assert_eq!(
-        r.accept_advice(&writer(), half).unwrap_err().message,
-        "relayed_by and evidence go together"
+        r.accept_advice(&writer(), "human:qa", half)
+            .unwrap_err()
+            .message,
+        "a person answers as themselves; only the relaying agent records a relay"
     );
     let mut q = direct(&p);
     q.question = Some("Accept?".into());
     assert_eq!(
-        r.accept_advice(&writer(), q).unwrap_err().message,
+        r.accept_advice(&writer(), "human:qa", q)
+            .unwrap_err()
+            .message,
         "question needs evidence"
     );
-    r.accept_advice(&writer(), direct(&p)).unwrap();
+    r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     let t = one(&r, TensionKind::Semantic);
     let acc = r.read().tension_info(&t).judged.unwrap().accepted.unwrap();
     assert_eq!((acc.actor.as_str(), acc.evidence), ("human:qa", None));
@@ -159,14 +176,16 @@ fn se8_a_person_at_the_cli_accepts_without_a_relay() {
 #[test]
 fn se8_only_advised_tensions_of_the_named_version_are_accepted() {
     let (_d, mut r, s, tn, p) = judged(false);
-    let e = r.accept_advice(&writer(), direct(&p)).unwrap_err();
+    let e = r
+        .accept_advice(&writer(), "human:qa", direct(&p))
+        .unwrap_err();
     assert_eq!(
         e.message,
         format!("{} has no advised semantic tension to accept", p.r#ref)
     );
     let mut named = direct(&p);
     named.tensions = vec![tn.clone()];
-    let e = r.accept_advice(&writer(), named).unwrap_err();
+    let e = r.accept_advice(&writer(), "human:qa", named).unwrap_err();
     assert_eq!(
         e.message,
         format!("{tn} is not an advised semantic tension of {}", p.r#ref)
@@ -175,6 +194,7 @@ fn se8_only_advised_tensions_of_the_named_version_are_accepted() {
     let e = r
         .accept_advice(
             &writer(),
+            "human:qa",
             AcceptRequest {
                 proposal: stable,
                 ..direct(&p)
@@ -188,7 +208,9 @@ fn se8_only_advised_tensions_of_the_named_version_are_accepted() {
     put(&mut r, "a", upd(&s.a, "A changed."));
     r.propose(&writer(), "a", "a").unwrap();
     assert_eq!(
-        r.accept_advice(&writer(), direct(&p)).unwrap_err().code,
+        r.accept_advice(&writer(), "human:qa", direct(&p))
+            .unwrap_err()
+            .code,
         E_PROPOSAL_MOVED
     );
 }
@@ -196,16 +218,20 @@ fn se8_only_advised_tensions_of_the_named_version_are_accepted() {
 #[test]
 fn se8_accepted_and_dismissed_tensions_are_not_accepted_again() {
     let (_d, mut r, _s, _tn, p) = judged(true);
-    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     let id = a.accepted[0].id.clone();
     let mut again = direct(&p);
     again.tensions = vec![id.clone()];
     assert_eq!(
-        r.accept_advice(&writer(), again).unwrap_err().message,
+        r.accept_advice(&writer(), "human:qa", again)
+            .unwrap_err()
+            .message,
         format!("{id} is accepted already")
     );
     // FR1 finding 5: a retry of a committed acceptance says so
-    let e = r.accept_advice(&writer(), direct(&p)).unwrap_err();
+    let e = r
+        .accept_advice(&writer(), "human:qa", direct(&p))
+        .unwrap_err();
     assert_eq!(
         e.message,
         format!("{}: the advice is accepted already", p.r#ref)
@@ -216,7 +242,9 @@ fn se8_accepted_and_dismissed_tensions_are_not_accepted_again() {
     let pat = Session::human("human:pat".into(), Role::Writer);
     r2.dismiss_tension(&pat, &tn2, "they agree after all")
         .unwrap();
-    let e = r2.accept_advice(&writer(), direct(&p2)).unwrap_err();
+    let e = r2
+        .accept_advice(&writer(), "human:qa", direct(&p2))
+        .unwrap_err();
     assert_eq!(
         e.message,
         format!("{} has no advised semantic tension to accept", p2.r#ref)
@@ -226,7 +254,7 @@ fn se8_accepted_and_dismissed_tensions_are_not_accepted_again() {
 #[test]
 fn se8_the_acceptance_holds_until_a_side_changes() {
     let (_d, mut r, s, _tn, p) = judged(true);
-    r.accept_advice(&writer(), direct(&p)).unwrap();
+    r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     put(&mut r, "a", upd(&s.c, "C agrees now."));
     assert!(of_kind(&r, TensionKind::Semantic).is_empty());
 }
@@ -234,7 +262,7 @@ fn se8_the_acceptance_holds_until_a_side_changes() {
 #[test]
 fn se8_a_reviewer_of_another_actor_may_dismiss_an_accepted_tension() {
     let (_d, mut r, _s, _tn, p) = judged(true);
-    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     let rv = Session::agent("agent:z".into(), Some("z".into()), Role::Reviewer).unwrap();
     r.dismiss_tension(&rv, &a.accepted[0].id, "checked: they do agree")
         .unwrap();
@@ -271,7 +299,9 @@ fn se8_propose_and_show_carry_the_advice() {
 fn se8_rdy_resolve_relays_an_acceptance_from_chat() {
     use rdy_mcp::params::parse_params;
     use rdy_mcp::tools::{McpState, ResolveParams, rdy_resolve, rdy_session};
-    let (_d, r, _s, tn, p) = judged(true);
+    let (d, r, _s, tn, p) = judged(true);
+    // di8 (O18): MCP reads the person from the project's local config
+    std::fs::write(d.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
     let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(
         &mut st,
@@ -340,12 +370,13 @@ fn se8_rdy_resolve_relays_an_acceptance_from_chat() {
             acc.relayed_by
         ),
         (
-            "agent:w",
+            "human:qa",
             Some("yes, block it"),
             Some("Block on it?"),
             Some("mcp"),
-            None
-        )
+            Some("agent:w/w".to_string())
+        ),
+        "di8 (D-67ZN7): the person accepted; the agent relayed as itself"
     );
 }
 
@@ -357,7 +388,9 @@ fn se8_a_verdict_recorded_after_the_propose_makes_the_acceptance_refuse() {
     let (_d, mut r, s, tn, p) = judged(true);
     assert!(p.advised_digest.is_some());
     verdict_on(&mut r, &Scope::Inflight, &s.a, &s.c, "agent:q", true);
-    let e = r.accept_advice(&writer(), direct(&p)).unwrap_err();
+    let e = r
+        .accept_advice(&writer(), "human:qa", direct(&p))
+        .unwrap_err();
     assert_eq!(
         (e.code, e.message.clone(), e.fix.clone()),
         (
@@ -375,7 +408,9 @@ fn se8_a_verdict_recorded_after_the_propose_makes_the_acceptance_refuse() {
     let mut named = direct(&p);
     named.tensions = vec![tn];
     assert_eq!(
-        r.accept_advice(&writer(), named).unwrap_err().code,
+        r.accept_advice(&writer(), "human:qa", named)
+            .unwrap_err()
+            .code,
         E_PROPOSAL_MOVED
     );
     assert!(
@@ -390,6 +425,7 @@ fn se8_a_verdict_recorded_after_the_propose_makes_the_acceptance_refuse() {
     let a = r
         .accept_advice(
             &writer(),
+            "human:qa",
             AcceptRequest {
                 advised_digest: show.advised_digest.clone().unwrap(),
                 ..direct(&p)
@@ -431,7 +467,7 @@ fn se8_past_the_proposal_cut_the_digest_covers_every_advised_tension() {
     let show = r.read().proposal_show(&p.r#ref).unwrap();
     assert_eq!(show.advised.len(), 55);
     assert_eq!(show.advised_digest, p.advised_digest);
-    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     assert_eq!(a.accepted.len(), 55);
 }
 
@@ -454,7 +490,7 @@ fn se8_an_acceptance_binds_to_the_two_texts_in_every_view() {
     );
     assert_eq!(of_kind(&r, TensionKind::Semantic).len(), 2);
     let p = r.propose(&writer(), "a", "a").unwrap();
-    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     assert_eq!(a.accepted.len(), 1);
     let rows: Vec<(&str, Option<&str>)> = a
         .now_blocking
@@ -479,13 +515,15 @@ fn se8_an_acceptance_binds_to_the_two_texts_in_every_view() {
     );
 }
 
-/// FR1 (finding 4): session_ref and relayed_by take at most 256 characters, as a view name does.
+/// FR1 (finding 4): session_ref takes at most 256 characters, as a view name does. di8
+/// (D-67ZN7): relayed_by is the relaying agent itself, so no length rule is left for it: any
+/// other text is refused, and a person names no relayer.
 #[test]
-fn se8_session_ref_and_relayed_by_take_at_most_256_characters() {
+fn se8_session_ref_takes_at_most_256_characters_and_relayed_by_is_the_agent() {
     let (_d, mut r, _s, _tn, p) = judged(true);
     let mut long = chat(&p);
     long.session_ref = Some("s".repeat(257));
-    let e = r.accept_advice(&ag("w"), long).unwrap_err();
+    let e = r.accept_advice(&ag("w"), "human:qa", long).unwrap_err();
     assert_eq!(
         (e.code, e.message.as_str(), e.fix.as_str()),
         (
@@ -494,22 +532,29 @@ fn se8_session_ref_and_relayed_by_take_at_most_256_characters() {
             "use a short session id, not the conversation"
         )
     );
+    let long_by = format!("agent:{}", "w".repeat(251));
+    let mut by = chat(&p);
+    by.relayed_by = Some(long_by.clone());
+    let e = r.accept_advice(&ag("w"), "human:qa", by).unwrap_err();
+    assert_eq!(
+        (e.code, e.message),
+        (
+            E_PERMISSION,
+            format!("agent:w relays only as itself, not as {long_by}")
+        )
+    );
     let mut by = direct(&p);
     by.evidence = Some("yes".into());
-    by.relayed_by = Some(format!("agent:{}", "w".repeat(251)));
-    let e = r.accept_advice(&writer(), by).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str()),
-        (E_BAD_INPUT, "relayed_by takes at most 256 characters")
-    );
+    by.relayed_by = Some("agent:w".into());
+    let e = r.accept_advice(&writer(), "human:qa", by).unwrap_err();
+    assert_eq!(e.code, E_PERMISSION, "a person names no relayer: {e}");
     let mut ok = chat(&p);
     ok.session_ref = Some("s".repeat(256));
-    r.accept_advice(&ag("w"), ok).unwrap();
+    r.accept_advice(&ag("w"), "human:qa", ok).unwrap();
     let (_d2, mut r2, _s2, _tn2, p2) = judged(true);
-    let mut by = direct(&p2);
-    by.evidence = Some("yes".into());
-    by.relayed_by = Some(format!("agent:{}", "w".repeat(250)));
-    r2.accept_advice(&writer(), by).unwrap();
+    let mut by = chat(&p2);
+    by.relayed_by = Some("agent:w/w".into());
+    r2.accept_advice(&ag("w"), "human:qa", by).unwrap();
 }
 
 /// FR1 (finding 5): an acceptance changes the tension's id (the severity is in it). A retry of a
@@ -520,8 +565,9 @@ fn se8_a_retry_after_an_acceptance_says_it_is_accepted_already() {
     let (_d, mut r, _s, tn, p) = judged(true);
     let mut named = direct(&p);
     named.tensions = vec![tn.clone()];
-    r.accept_advice(&writer(), named.clone()).unwrap();
-    let e = r.accept_advice(&writer(), named).unwrap_err();
+    r.accept_advice(&writer(), "human:qa", named.clone())
+        .unwrap();
+    let e = r.accept_advice(&writer(), "human:qa", named).unwrap_err();
     assert_eq!(
         (e.code, e.message.clone(), e.fix.as_str()),
         (
@@ -530,7 +576,9 @@ fn se8_a_retry_after_an_acceptance_says_it_is_accepted_already() {
             "leave it out"
         )
     );
-    let e = r.accept_advice(&writer(), direct(&p)).unwrap_err();
+    let e = r
+        .accept_advice(&writer(), "human:qa", direct(&p))
+        .unwrap_err();
     assert_eq!(
         e.message,
         format!("{}: the advice is accepted already", p.r#ref)
@@ -608,7 +656,7 @@ fn se8_advice_stays_on_the_card_while_another_view_edits_the_canon_side() {
     );
     let show = r.read().proposal_show(&p.r#ref).unwrap();
     assert_eq!(show.advised.len(), 1);
-    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     assert_eq!(a.accepted.len(), 1);
     assert_eq!(
         land(&mut r, "a").unwrap_err().code,
@@ -624,7 +672,7 @@ fn se8_an_acceptance_links_the_advisory_and_the_blocking_tension_in_its_events()
     use rdy_engine::EventKind;
     let (_d, mut r, _s, tn, p) = judged(true);
     let rx = r.subscribe();
-    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     let kinds: Vec<_> = rx.try_iter().map(|e| e.kind.clone()).collect();
     let was = kinds
         .iter()
@@ -656,6 +704,7 @@ fn se8_rdy_resolve_without_dismiss_names_what_resolves_the_kind() {
     let err = run_resolve(
         &e,
         &writer(),
+        "human:qa",
         ResolveRequest {
             tension: Some(tn),
             ..Default::default()
