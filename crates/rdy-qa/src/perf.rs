@@ -2999,7 +2999,8 @@ fn tier_edit_loop(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, 
 
 /// The code index: a full rebuild over a 2,000-commit, 400-file synthetic history whose commits
 /// cite the fixture's claims, and a briefing of one file against the warm index. The project's
-/// config is put back afterwards, so later ops see it unchanged. Typical tier only.
+/// config and `.rdy/local.yaml` are put back afterwards, so later ops see them unchanged. Typical
+/// tier only.
 fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Path) {
     use rdy_engine::code_index::{build, code_repos};
     // setup, untimed: the history, the link, the warm index
@@ -3014,6 +3015,8 @@ fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Pa
     let g = crate::git_repo::GitRepo::synthetic(2000, 400, &cite);
     let config = r.root().join(".rdy.yaml");
     let saved = std::fs::read(&config).expect("read the project config");
+    let local = r.root().join(".rdy").join("local.yaml");
+    let saved_local = std::fs::read(&local).ok();
     g.link(r.root());
     let repo = code_repos(r.root()).expect("code_repos")[0].clone();
     r.read()
@@ -3030,6 +3033,10 @@ fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Pa
         assert!(b.briefing.covers > 0);
     }));
     std::fs::write(&config, saved).expect("restore the project config");
+    match saved_local {
+        Some(bytes) => std::fs::write(&local, bytes).expect("restore .rdy/local.yaml"),
+        None => std::fs::remove_file(&local).expect("remove the linked .rdy/local.yaml"),
+    }
 }
 
 /// The working copy: the whole of canon projected as files (`wc_project_typical`), and the plan

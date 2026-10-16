@@ -216,7 +216,13 @@ fn prov1_code_dependents_spans_every_linked_repo() {
     let s = spec_doc(&mut r);
     let (one, two) = (GitRepo::new(), GitRepo::new());
     let (one_text, two_text) = (one.configured(), two.configured());
-    link_repos(r.root(), &[one_text.as_str(), two_text.as_str()]);
+    link_repos(
+        r.root(),
+        &[
+            (one_text.as_str(), one.path().to_str().unwrap()),
+            (two_text.as_str(), two.path().to_str().unwrap()),
+        ],
+    );
     let d = s.decision.to_string();
     one.write("src/x.rs", "x\n");
     one.commit(&format!("feat: x\n\nImplements: {d}"));

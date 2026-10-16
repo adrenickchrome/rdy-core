@@ -5,5 +5,6 @@ mod code_brief;
 mod code_cli;
 mod code_index;
 mod code_mcp;
+mod code_paths;
 mod code_provisional;
 mod code_reflects;

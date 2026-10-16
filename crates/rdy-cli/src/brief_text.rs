@@ -353,7 +353,7 @@ pub fn code_text(v: &Value) -> String {
         .collect();
     let mut out = if repos.is_empty() {
         format!(
-            "code {} (no code repo linked: set code_repos in .rdy.yaml)\n",
+            "code {} (no code repo linked: set code_repos in .rdy.yaml and code_paths in .rdy/local.yaml)\n",
             s(c, "path")
         )
     } else {
@@ -735,7 +735,7 @@ mod tests {
             "provisional": false, "rework": false}});
         assert_eq!(
             code_text(&none),
-            "code x.rs (no code repo linked: set code_repos in .rdy.yaml)\nimplements:\n  (none)\nreflects:\n  (none)\n"
+            "code x.rs (no code repo linked: set code_repos in .rdy.yaml and code_paths in .rdy/local.yaml)\nimplements:\n  (none)\nreflects:\n  (none)\n"
         );
     }
 

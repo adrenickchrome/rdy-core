@@ -94,26 +94,40 @@ fn cidx1_code_repos_reads_the_project_config() {
     assert!(code_repos(d.path()).unwrap().is_empty(), "no key: no repos");
     let inner = GitRepo::at(&d.path().join("app"));
     let outer = GitRepo::new();
-    let outer_text = outer.configured();
-    link_repos(d.path(), &["app", outer_text.as_str(), "app"]);
+    let (outer_name, outer_path) = (outer.configured(), outer.path().to_string_lossy());
+    link_repos(
+        d.path(),
+        &[
+            ("app", "app"),
+            (outer_name.as_str(), outer_path.as_ref()),
+            ("app", "app"),
+        ],
+    );
     let repos = code_repos(d.path()).unwrap();
     assert_eq!(repos.len(), 2, "a repeated repo counts once: {repos:?}");
     assert_eq!(repos[0].configured, "app");
     assert_eq!(repos[0].root, std::fs::canonicalize(inner.path()).unwrap());
-    assert_eq!(repos[1].configured, outer_text);
+    assert_eq!(repos[1].configured, outer_name);
     assert_eq!(repos[1].root, std::fs::canonicalize(outer.path()).unwrap());
 }
 
 #[test]
 fn cidx1_a_bad_code_repos_entry_is_e_config() {
-    for (yaml, needle) in [
-        ("code_repos: app\n", "list"),
-        ("code_repos: [1]\n", "list"),
-        ("code_repos: [\"\"]\n", "list"),
-        ("code_repos: [missing]\n", "no such directory"),
+    for (yaml, local, needle) in [
+        ("code_repos: app\n", "", "list"),
+        ("code_repos: [1]\n", "", "list"),
+        ("code_repos: [\"\"]\n", "", "list"),
+        (
+            "code_repos: [missing]\n",
+            "code_paths:\n  missing: missing\n",
+            "no such directory",
+        ),
     ] {
         let (d, _r) = project();
         append_config(d.path(), yaml);
+        let local_file = d.path().join(".rdy/local.yaml");
+        let kept = std::fs::read_to_string(&local_file).unwrap_or_default();
+        std::fs::write(&local_file, kept + local).unwrap();
         let e = code_repos(d.path()).unwrap_err();
         assert_eq!(e.code, "E_CONFIG", "{yaml}");
         assert!(e.message.contains(needle), "{yaml}: {}", e.message);
@@ -127,7 +141,7 @@ fn cidx1_a_linked_path_that_is_not_a_repository_top_is_e_config() {
     std::fs::create_dir_all(d.path().join("plain")).unwrap();
     let g = GitRepo::at(&d.path().join("app"));
     std::fs::create_dir_all(g.path().join("sub")).unwrap();
-    link_repos(d.path(), &["plain", "app/sub"]);
+    link_repos(d.path(), &[("plain", "plain"), ("sub", "app/sub")]);
     let repos = code_repos(d.path()).unwrap();
     let e = index_of(&repos[0]).unwrap_err();
     assert_eq!(e.code, "E_CONFIG");

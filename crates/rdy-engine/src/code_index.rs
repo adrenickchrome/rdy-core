@@ -1,8 +1,9 @@
 //! The code index (cidx1, FW-C1): which commits of a linked code repository cite which blocks,
 //! read from their `Implements:` trailers and keyed by the files those commits touched.
 //!
-//! It is derived from git and never stored: a project lists its code checkouts under
-//! `code_repos` in `.rdy.yaml`, and the index is rebuilt from `git log` whenever the
+//! It is derived from git and never stored: a project names its code repos under `code_repos` in
+//! `.rdy.yaml`, each person gives their checkout paths under `code_paths` in `.rdy/local.yaml` or
+//! the user config (FW-X5), and the index is rebuilt from `git log` whenever the
 //! checkout's HEAD moves (cached per process while it stays). Core only reads git: it runs
 //! `git rev-parse`, `git log` and `git ls-tree`, always through [`git_command`] (FW-C2). Counts
 //! are reported as they are; nothing here ranks or cuts (FW-C6).
@@ -12,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-/// The `.rdy.yaml` key listing the linked code checkouts.
+/// The `.rdy.yaml` key naming the linked code repos; each one's checkout path is under
+/// `code_paths` in `.rdy/local.yaml` or the user config (FW-X5).
 pub const CODE_REPOS_KEY: &str = "code_repos";
 /// At most this many linked code checkouts.
 pub const MAX_CODE_REPOS: usize = 16;
@@ -37,66 +39,55 @@ pub const GIT_ENV_REMOVED: &[&str] = &[
     "GIT_CONFIG_COUNT",
 ];
 
-const FIX_TOP: &str = "point code_repos at a git checkout's top folder";
+const FIX_TOP: &str = "point code_paths at a git checkout's top folder";
 const STDERR_SHOWN: usize = 400;
 
 /// A linked code checkout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeRepo {
-    /// The entry as written in `code_repos`.
+    /// Its name, as `code_repos` lists it.
     pub configured: String,
     /// Its canonical path.
     pub root: PathBuf,
 }
 
-/// The project's linked code checkouts, in config order, each canonical root once. No key, a
-/// null value and an empty list all link none.
+/// The project's linked code checkouts, in `code_repos` order, each canonical root once, with the
+/// user config of the environment. No key, a null value and an empty list all link none.
 pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
-    let file = crate::config_levels::PROJECT_FILE;
-    let text = std::fs::read_to_string(project.join(file))
-        .map_err(|e| RdyError::new(E_IO, e.to_string(), "check file permissions"))?;
-    let cfg: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
-        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), format!("fix {file}")))?;
-    let entries = match cfg.get(CODE_REPOS_KEY) {
-        None | Some(serde_yaml_ng::Value::Null) => return Ok(vec![]),
-        Some(v) => v,
-    };
-    let bad = || {
-        RdyError::new(
-            E_CONFIG,
-            format!(
-                "{CODE_REPOS_KEY} must be a list of paths to git checkouts (at most {MAX_CODE_REPOS})"
-            ),
-            format!(
-                "fix code_repos in {}, e.g. code_repos: [../app]",
-                crate::config_levels::PROJECT_FILE
-            ),
-        )
-    };
-    let seq = entries.as_sequence().ok_or_else(bad)?;
-    if seq.len() > MAX_CODE_REPOS {
-        return Err(bad());
-    }
-    let mut repos: Vec<CodeRepo> = Vec::with_capacity(seq.len());
-    for entry in seq {
-        let configured = match entry.as_str() {
-            Some(s) if !s.is_empty() => s,
-            _ => return Err(bad()),
-        };
+    code_repos_with(
+        project,
+        crate::config_levels::user_file_from_env().as_deref(),
+    )
+}
+
+/// [`code_repos`] with the user config at `user_file`. The names and paths come from
+/// [`linked_repos`](crate::config_levels::linked_repos); its warnings reach the config warnings,
+/// not this list. Each path must be a directory (O10).
+pub fn code_repos_with(
+    project: &Path,
+    user_file: Option<&Path>,
+) -> Result<Vec<CodeRepo>, RdyError> {
+    let (linked, _warnings) = crate::config_levels::linked_repos(project, user_file)?;
+    let mut repos: Vec<CodeRepo> = Vec::with_capacity(linked.len());
+    for l in linked {
         let missing = || {
             RdyError::new(
                 E_CONFIG,
-                format!("code repo {configured}: no such directory"),
+                format!(
+                    "code repo {}: no such directory {}",
+                    l.name,
+                    l.path.display()
+                ),
                 FIX_TOP,
             )
         };
-        let root = std::fs::canonicalize(project.join(configured)).map_err(|_| missing())?;
+        let root = std::fs::canonicalize(&l.path).map_err(|_| missing())?;
         if !root.is_dir() {
             return Err(missing());
         }
         if repos.iter().all(|r| r.root != root) {
             repos.push(CodeRepo {
-                configured: configured.to_string(),
+                configured: l.name,
                 root,
             });
         }
@@ -395,7 +386,7 @@ fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
                 repo.configured,
                 top.display()
             ),
-            format!("set code_repos to {}", top.display()),
+            format!("set code_paths.{} to {}", repo.configured, top.display()),
         ));
     }
     if is_partial_clone(repo)? {
