@@ -1,4 +1,5 @@
 #![cfg(unix)]
+// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! Export trees: symbolic links (sym1).
 use rdy_engine::check_path;
 use rdy_qa::fixtures::*;

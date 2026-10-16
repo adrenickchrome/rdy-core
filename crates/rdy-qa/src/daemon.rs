@@ -1,5 +1,6 @@
 //! Gate helpers for the `daemon` area: an echo daemon run in a child process (the test binary
 //! re-executed with `RDY_DAEMON_CHILD`), a spawner that starts it, and client options for it.
+use crate::platform;
 use rdy_daemon::site::LanOverride;
 use rdy_daemon::{
     Attempt, Client, CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, ExitReason,
@@ -10,14 +11,11 @@ use rdy_engine::Rdy;
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::net::UnixStream;
 
 /// The child's project root; unset in a normal test run.
 const ENV_CHILD: &str = "RDY_DAEMON_CHILD";
@@ -41,7 +39,7 @@ const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// A directory short enough for a socket path under it: `/tmp/rdyd…` (macOS `sun_path` is 104
 /// bytes and its `temp_dir()` is already about 50).
 pub fn short_tempdir() -> tempfile::TempDir {
-    short_tempdir_in(Path::new("/tmp"))
+    short_tempdir_in(platform::short_tmp_root())
 }
 
 /// `short_tempdir`, under `parent` (itself short: the swarm's `/tmp/rdysw-<pid>`).
@@ -170,18 +168,14 @@ impl ChildSpawner {
         }
         let project = project_of(run)?;
         run.ensure()?;
-        let log = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(run.log_file())?;
+        let log = platform::open_private_log(&run.log_file())?;
         let mut cmd = Command::new(std::env::current_exe()?);
         cmd.args([self.test_fn.as_str(), "--exact", "--nocapture"])
             .current_dir(&project)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .process_group(0);
+            .stderr(Stdio::from(log));
+        platform::own_process_group(&mut cmd);
         // nothing from the parent's environment steers the child; only what we set here
         for (k, _) in std::env::vars_os() {
             if k.as_encoded_bytes().starts_with(b"RDY_DAEMON_") {
@@ -372,7 +366,7 @@ impl Hosted {
     }
 
     /// An `mcp` connection past `ready`.
-    pub async fn mcp_stream(&self) -> UnixStream {
+    pub async fn mcp_stream(&self) -> rdy_daemon::sys::Stream {
         self.connect(Proto::Mcp).await.into_stream()
     }
 
@@ -409,7 +403,6 @@ impl Drop for Hosted {
 pub struct Served {
     pub dir: tempfile::TempDir,
     /// Holds the user config `env` points at.
-    #[allow(dead_code)]
     cfg: tempfile::TempDir,
     env: Vec<(String, String)>,
 }
@@ -436,18 +429,7 @@ const KILL_WAIT: Duration = Duration::from_secs(30);
 /// Whether process `pid` has exited: `ps` lists no such process, or lists a zombie (killed, not
 /// yet reaped by its parent).
 pub fn exited(pid: u32) -> bool {
-    match Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(o) => {
-            let stat = String::from_utf8_lossy(&o.stdout);
-            let stat = stat.trim();
-            !o.status.success() || stat.is_empty() || stat.starts_with('Z')
-        }
-        Err(e) => panic!("cannot run ps: {e}"),
-    }
+    platform::process_exited(pid)
 }
 
 impl Served {
@@ -475,6 +457,11 @@ impl Served {
         io::Write::write_all(&mut file, b"serve:\n  idle_timeout: 60\n")
             .expect("append the serve section");
         Served { dir, cfg, env }
+    }
+
+    /// The user config the served commands read (`$XDG_CONFIG_HOME/rdy/config.yaml`).
+    pub fn user_config(&self) -> PathBuf {
+        self.cfg.path().join("rdy/config.yaml")
     }
 
     /// The command `rdy --project <dir> <args>` in the project, as the human (`human_command`).
@@ -557,12 +544,7 @@ impl Served {
     /// The pid in `.rdy/run/daemon.pid`, if it parses and that process is alive.
     pub fn daemon_pid(&self) -> Option<u32> {
         let pid = self.pid_file()?;
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-            .then_some(pid)
+        platform::process_running(pid).then_some(pid)
     }
 
     fn pid_file(&self) -> Option<u32> {
@@ -577,11 +559,7 @@ impl Served {
     /// (`wait_killed`). Callable from inside a tokio runtime.
     pub fn kill9(&self) {
         let pid = self.pid_file().expect("a daemon pid file");
-        let status = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .expect("run kill");
-        assert!(status.success(), "kill -9 {pid} failed");
+        platform::kill_hard(pid);
         self.wait_killed(pid);
     }
 

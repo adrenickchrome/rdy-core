@@ -11,9 +11,9 @@ use crate::wc::state::{
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
+use rdy_store::fileid::FileId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 /// What a checkout did.
@@ -168,14 +168,14 @@ pub(crate) fn blocking_ancestor(root: &Path, rel: &Path) -> Option<PathBuf> {
         .and_then(|d| d.strip_prefix(root).ok().map(Path::to_path_buf))
 }
 
-/// The file's identity on disk (device and inode), for a regular file not behind a link.
-pub(crate) fn identity(root: &Path, rel: &str) -> Option<(u64, u64)> {
+/// The file's identity on disk, for a regular file not behind a link.
+pub(crate) fn identity(root: &Path, rel: &str) -> Option<FileId> {
     let p = inside(rel).ok()?;
     if behind_link(root, p) {
         return None;
     }
     let m = fs::symlink_metadata(root.join(p)).ok()?;
-    m.file_type().is_file().then(|| (m.dev(), m.ino()))
+    m.file_type().is_file().then(|| FileId::of(&m))
 }
 
 /// Whether writing `rel` would overwrite something checkout does not track: one of its
@@ -186,7 +186,7 @@ fn occupied(
     root: &Path,
     rel: &str,
     tracked: &BTreeMap<String, BlockId>,
-    dropped: &BTreeSet<(u64, u64)>,
+    dropped: &BTreeSet<FileId>,
 ) -> Result<bool, RdyError> {
     let p = inside(rel)?;
     if behind_link(root, p) {
@@ -195,7 +195,7 @@ fn occupied(
     Ok(match fs::symlink_metadata(root.join(p)) {
         Err(_) => false,
         Ok(_) if tracked.contains_key(rel) => false,
-        Ok(m) => !(m.file_type().is_file() && dropped.contains(&(m.dev(), m.ino()))),
+        Ok(m) => !(m.file_type().is_file() && dropped.contains(&FileId::of(&m))),
     })
 }
 
@@ -221,7 +221,7 @@ fn fix_case(dir: &Path) -> Result<(), RdyError> {
         }
         if name.to_string_lossy().to_lowercase() == lower
             && e.metadata()
-                .is_ok_and(|m| m.dev() == meta.dev() && m.ino() == meta.ino())
+                .is_ok_and(|m| FileId::of(&m) == FileId::of(&meta))
         {
             stored = Some(name);
         }
@@ -454,7 +454,7 @@ pub fn checkout(
 ) -> Result<CheckoutSummary, RdyError> {
     let root = &place.root;
     let projected: BTreeSet<&str> = proj.files.iter().map(|f| f.path.as_str()).collect();
-    let dropped: BTreeSet<(u64, u64)> = st
+    let dropped: BTreeSet<FileId> = st
         .base
         .files
         .keys()
@@ -628,7 +628,7 @@ pub fn changed_since_staged(
     committed: &BTreeSet<String>,
 ) -> Vec<String> {
     let root = &place.root;
-    let copies: BTreeSet<(u64, u64)> = committed
+    let copies: BTreeSet<FileId> = committed
         .iter()
         .filter(|rel| !st.stage.deleted.contains(*rel))
         .filter_map(|rel| identity(root, rel))
@@ -641,7 +641,7 @@ pub fn changed_since_staged(
             if st.stage.deleted.contains(*rel) {
                 reachable
                     && fs::symlink_metadata(root.join(p)).is_ok_and(|m| {
-                        !(m.file_type().is_file() && copies.contains(&(m.dev(), m.ino())))
+                        !(m.file_type().is_file() && copies.contains(&FileId::of(&m)))
                     })
             } else {
                 let disk = reachable.then(|| regular_bytes(&root.join(p))).flatten();
@@ -718,7 +718,7 @@ fn replaceable(place: &Place, st: &WcState, rel: &str, text: Option<&str>) -> bo
         return true;
     }
     // only when its own copies differ: the tracked paths that are this same file
-    let same = (meta.dev(), meta.ino());
+    let same = FileId::of(&meta);
     st.base
         .files
         .keys()
@@ -747,8 +747,8 @@ fn drop_tracked(
     place: &Place,
     st: &WcState,
     rel: &str,
-    keep: &BTreeSet<(u64, u64)>,
-    keep_base: &BTreeSet<(u64, u64)>,
+    keep: &BTreeSet<FileId>,
+    keep_base: &BTreeSet<FileId>,
     out: &mut WriteBack,
 ) -> Result<bool, RdyError> {
     let Ok(p) = inside(rel) else {
@@ -906,8 +906,8 @@ pub fn apply_writeback(
         .filter(|f| blocked.contains(f.path.as_str()))
         .map(|f| f.id.as_str())
         .collect();
-    let mut keep: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let mut keep_base: BTreeSet<(u64, u64)> = BTreeSet::new();
+    let mut keep: BTreeSet<FileId> = BTreeSet::new();
+    let mut keep_base: BTreeSet<FileId> = BTreeSet::new();
     let mut copies: Vec<(&str, &str)> = vec![];
     for f in proj
         .files
@@ -1002,6 +1002,29 @@ pub fn apply_writeback(
 mod tests {
     use super::*;
     use crate::wc::project::ProjectedFile;
+
+    #[test]
+    fn ps3_identity_is_the_file_id_of_a_tracked_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.yaml"), "x\n").unwrap();
+        assert_eq!(
+            identity(d.path(), "a.yaml"),
+            Some(rdy_store::fileid::FileId::lstat(&d.path().join("a.yaml")).unwrap())
+        );
+    }
+
+    /// Guard: a path behind a link has no identity.
+    #[cfg(unix)]
+    #[test]
+    fn ps3_identity_is_none_behind_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("a.yaml"), "x\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.path().join("guides")).unwrap();
+        assert_eq!(identity(d.path(), "guides/a.yaml"), None);
+        std::os::unix::fs::symlink(outside.path().join("a.yaml"), d.path().join("b.yaml")).unwrap();
+        assert_eq!(identity(d.path(), "b.yaml"), None);
+    }
 
     #[test]
     fn mfb5_a_state_copy_is_synced_and_never_written_through_a_link() {

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! Rendering into an existing site (ren1).
 use rdy_engine::*;
 use rdy_qa::fixtures::*;

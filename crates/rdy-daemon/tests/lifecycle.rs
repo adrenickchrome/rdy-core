@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! Idle shutdown, stop and drain (life1).
 mod common;
 use common::*;

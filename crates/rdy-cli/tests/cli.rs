@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 use serde_json::Value;
 use std::process::Command;
 

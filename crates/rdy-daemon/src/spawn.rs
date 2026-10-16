@@ -4,10 +4,9 @@
 use crate::layout::RunDir;
 use crate::lock::open_no_follow;
 use crate::socket::check_socket_path;
-use std::fs::{self, OpenOptions};
+use crate::sys;
+use std::fs::OpenOptions;
 use std::io;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -22,18 +21,17 @@ use std::sync::{Arc, Mutex};
 /// created, rather than spawning a daemon that would only die at its bind. A relative `project`
 /// is made absolute against the caller's working directory too: the child runs in the project,
 /// where the relative path would name `<project>/<project>`.
-#[allow(unsafe_code)]
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
     let run = run.absolute()?;
     check_socket_path(&run)?;
     let project = std::path::absolute(project)?;
     run.ensure()?;
     let log = open_no_follow(
-        OpenOptions::new().append(true).create(true).mode(0o600),
+        sys::private_file(OpenOptions::new().append(true).create(true)),
         &run.log_file(),
     )?;
     // a file left by an older run keeps its mode through open; set it exactly
-    log.set_permissions(fs::Permissions::from_mode(0o600))?;
+    sys::make_private_file(&log)?;
     let (out, err) = (log.try_clone()?, log.try_clone()?);
     let mut cmd = Command::new(rdy_bin);
     cmd.arg("serve")
@@ -45,18 +43,8 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
-    // A new session, made in the child before its exec. `process_group(0)` alone would make the
-    // child a process-group leader, and a group leader's `setsid` fails with EPERM, so the
-    // daemon's own `detach` could never leave our session.
-    // SAFETY: the closure calls only `setsid`, which is async-signal-safe, and allocates nothing.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    // a new session, so the daemon's own `detach` can leave ours
+    sys::new_session_on_spawn(&mut cmd);
     for (k, _) in std::env::vars_os() {
         if k.as_encoded_bytes().starts_with(b"RDY_") {
             cmd.env_remove(k);
@@ -87,10 +75,7 @@ pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
             // an error here means the child cannot be waited on; it then never reports an exit,
             // as with a child that runs
             if let Ok(status) = child.wait() {
-                let c = status
-                    .code()
-                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(sys::exit_code(status));
             }
         })?;
     Ok(Spawned {
@@ -99,71 +84,32 @@ pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
 }
 
 /// Whether a process `pid` exists (`kill(pid, 0)`; a process of another user counts).
-#[allow(unsafe_code)]
 pub fn process_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 sends nothing; `kill` only checks that the process exists.
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    sys::alive(pid)
 }
 
 /// Sends `SIGTERM` to `pid`, which `rdy serve` takes as `rdy serve --stop`. `Ok(true)` when it
 /// was sent, `Ok(false)` when the process is gone (`ESRCH`). A `pid` of 1 or less is refused:
 /// never init, and never a process group (`kill(0, ..)` and negative pids).
-#[allow(unsafe_code)]
 pub fn terminate(pid: u32) -> io::Result<bool> {
-    if pid <= 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("refusing to signal process {pid}"),
-        ));
-    }
-    let pid = libc::pid_t::try_from(pid)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("bad pid {pid}")))?;
-    // SAFETY: `kill` takes two integers and touches no memory of ours; `pid` is above 1, so it
-    // names one process.
-    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-        return Ok(true);
-    }
-    let e = io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::ESRCH) {
-        Ok(false)
-    } else {
-        Err(e)
-    }
+    sys::terminate(pid)
 }
 
 /// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process
 /// group (a child of `serve_command` already leads its own session), and is `Ok`. Called by
 /// `rdy serve --detach` after its argument parsing and before it opens the store.
-#[allow(unsafe_code)]
 pub fn detach() -> io::Result<()> {
-    // SAFETY: `setsid` takes no arguments and touches no memory of ours.
-    if unsafe { libc::setsid() } == -1 {
-        let e = io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::EPERM) {
-            return Err(e);
-        }
-    }
-    Ok(())
+    sys::detach()
 }
 
 /// The caller's process group id (`getpgid(0)`), for the tests.
 #[doc(hidden)]
-#[allow(unsafe_code)]
 pub fn own_pgid() -> i32 {
-    // SAFETY: `getpgid(0)` asks about the caller and touches no memory of ours.
-    unsafe { libc::getpgid(0) }
+    sys::own_pgid()
 }
 
 /// The caller's session id (`getsid(0)`), for the tests.
 #[doc(hidden)]
-#[allow(unsafe_code)]
 pub fn own_sid() -> i32 {
-    // SAFETY: `getsid(0)` asks about the caller and touches no memory of ours.
-    unsafe { libc::getsid(0) }
+    sys::own_sid()
 }

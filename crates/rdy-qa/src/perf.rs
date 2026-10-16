@@ -2999,7 +2999,8 @@ fn tier_edit_loop(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, 
 
 /// The code index: a full rebuild over a 2,000-commit, 400-file synthetic history whose commits
 /// cite the fixture's claims, and a briefing of one file against the warm index. The project's
-/// config is put back afterwards, so later ops see it unchanged. Typical tier only.
+/// config and `.rdy/local.yaml` are put back afterwards, so later ops see them unchanged. Typical
+/// tier only.
 fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Path) {
     use rdy_engine::code_index::{build, code_repos};
     // setup, untimed: the history, the link, the warm index
@@ -3014,6 +3015,8 @@ fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Pa
     let g = crate::git_repo::GitRepo::synthetic(2000, 400, &cite);
     let config = r.root().join(".rdy.yaml");
     let saved = std::fs::read(&config).expect("read the project config");
+    let local = r.root().join(".rdy").join("local.yaml");
+    let saved_local = std::fs::read(&local).ok();
     g.link(r.root());
     let repo = code_repos(r.root()).expect("code_repos")[0].clone();
     r.read()
@@ -3030,6 +3033,10 @@ fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Pa
         assert!(b.briefing.covers > 0);
     }));
     std::fs::write(&config, saved).expect("restore the project config");
+    match saved_local {
+        Some(bytes) => std::fs::write(&local, bytes).expect("restore .rdy/local.yaml"),
+        None => std::fs::remove_file(&local).expect("remove the linked .rdy/local.yaml"),
+    }
 }
 
 /// The working copy: the whole of canon projected as files (`wc_project_typical`), and the plan
@@ -3963,8 +3970,8 @@ fn daemon_clients_ops(
 
 /// One JSON-RPC line out, and the reply with `id` back (other lines are skipped).
 async fn mcp_call(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
-    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    w: &mut rdy_daemon::sys::WriteHalf,
+    r: &mut tokio::io::BufReader<rdy_daemon::sys::ReadHalf>,
     id: u64,
     tool: &str,
     args: serde_json::Value,
@@ -3974,7 +3981,7 @@ async fn mcp_call(
 }
 
 async fn mcp_send(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut rdy_daemon::sys::WriteHalf,
     id: u64,
     tool: &str,
     args: serde_json::Value,
@@ -3987,7 +3994,7 @@ async fn mcp_send(
 }
 
 async fn mcp_reply(
-    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    r: &mut tokio::io::BufReader<rdy_daemon::sys::ReadHalf>,
     id: u64,
 ) -> serde_json::Value {
     use tokio::io::AsyncBufReadExt;
@@ -4138,7 +4145,7 @@ fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
     .expect("big doc");
     // a symlink loop under docs/
     let link = export("bound-link");
-    std::os::unix::fs::symlink(link.join("docs"), link.join("docs/loop")).expect("symlink");
+    crate::platform::symlink(&link.join("docs"), &link.join("docs/loop")).expect("symlink");
     let pack = PackSet::with_builtin()
         .resolve("rdy-standard")
         .expect("rdy-standard");

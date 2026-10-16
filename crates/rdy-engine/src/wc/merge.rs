@@ -20,6 +20,7 @@ use crate::wc::state::{
 };
 use rdy_model::{Block, BlockId};
 use rdy_schema::{Pack, STORE_ONLY_FIELDS, Severity};
+use rdy_store::fileid::FileId;
 use rdy_store::fsutil::write_durable;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
@@ -1055,7 +1056,7 @@ pub fn plan_update(
     // rule 5: nothing rdy does not track is overwritten. A file a head leaves (moved away, or
     // deleted) may be taken by another, so `leaving` is every such file, the paths another
     // head takes included.
-    let leaving: BTreeSet<(u64, u64)> = removes.iter().filter_map(|p| identity(root, p)).collect();
+    let leaving: BTreeSet<FileId> = removes.iter().filter_map(|p| identity(root, p)).collect();
     for p in writes.keys() {
         removes.remove(p);
     }
@@ -1349,7 +1350,7 @@ fn apply_files(root: &Path, plan: &UpdatePlan) -> Result<(), RdyError> {
     for (p, text) in &plan.writes {
         replace_at(root, p, text, Some(&mut cases))?;
     }
-    let written: BTreeSet<(u64, u64)> = plan
+    let written: BTreeSet<FileId> = plan
         .writes
         .iter()
         .filter_map(|(p, _)| identity(root, p))

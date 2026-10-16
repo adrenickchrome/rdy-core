@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcup1: rdy update brings in the view's changes made elsewhere, keeps local edits, merges disjoint
 //! ones, writes conflicts beside the file as .theirs.yaml, handles a folder renamed on both sides,
 //! and resolution goes through rdy add (spec §12.4, D-WY79P).

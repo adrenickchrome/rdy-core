@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! cbrief1: rdy_brief on a code path: the blocks the file's commits implement, the blocks whose
 //! reflects globs match it, and a briefing over them.
 use rdy_engine::code_brief::*;

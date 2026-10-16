@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it reads the signal that ended a child. FW-XP1 Phase 4 ports it.
 //! Crash consistency of one flush per write (kill1, roll1). This test binary re-runs itself as a
 //! child (`crash_child`) that makes acknowledged writes and is aborted at a chosen point of a later
 //! one; the parent reopens the store and checks it recovered every acknowledged write, with the

@@ -172,10 +172,7 @@ fn mfb1_code_repos_and_decisions_home_are_read_from_rdy_yaml() {
     std::fs::write(d.path().join(PROJECT_FILE), t).unwrap();
     let e = code_index::code_repos(d.path()).expect_err("a wrong type");
     assert_eq!(e.code, E_CONFIG);
-    assert_eq!(
-        e.fix,
-        "fix code_repos in .rdy.yaml, e.g. code_repos: [../app]"
-    );
+    assert_eq!(e.fix, "fix code_repos in .rdy.yaml, e.g. code_repos: [app]");
 }
 
 /// guard: dot entries were never docs; this pins it for the files the move puts at the root.

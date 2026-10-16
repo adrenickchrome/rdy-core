@@ -3,9 +3,12 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct GitRepo {
     dir: PathBuf,
+    /// The name `link` gives it in `code_repos`.
+    name: String,
     _tmp: Option<tempfile::TempDir>,
 }
 
@@ -25,13 +28,43 @@ pub fn append_config(project: &Path, text: &str) {
         .expect("append to the project config");
 }
 
-/// Appends `code_repos:` listing `paths` (each a quoted YAML string) to the project's config.
-pub fn link_repos(project: &Path, paths: &[&str]) {
-    let mut text = String::from("code_repos:\n");
-    for p in paths {
-        text.push_str(&format!("  - {}\n", serde_json::to_string(p).unwrap()));
+/// Links `repos`, each a (name, checkout path) pair: appends `code_repos:` with the names to the
+/// project's `.rdy.yaml` and `code_paths:` with the paths to its `.rdy/local.yaml` (created when
+/// missing). A name listed again gets no second `code_paths` entry. Each text is a quoted YAML
+/// string.
+pub fn link_repos(project: &Path, repos: &[(&str, &str)]) {
+    let quoted = |t: &str| serde_json::to_string(t).unwrap();
+    let mut names = String::from("code_repos:\n");
+    let mut paths = String::from("code_paths:\n");
+    let mut seen: Vec<&str> = Vec::new();
+    for (name, path) in repos {
+        names.push_str(&format!("  - {}\n", quoted(name)));
+        if !seen.contains(name) {
+            seen.push(name);
+            paths.push_str(&format!("  {}: {}\n", quoted(name), quoted(path)));
+        }
     }
-    append_config(project, &text);
+    append_config(project, &names);
+    let local = project.join(".rdy").join("local.yaml");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&local)
+        .expect("open the project's .rdy/local.yaml");
+    f.write_all(paths.as_bytes())
+        .expect("append to the project's .rdy/local.yaml");
+}
+
+/// The numbers of the `repo-<n>` names, one per repository whose folder name is not a repo name.
+static NEXT_NAME: AtomicUsize = AtomicUsize::new(1);
+
+/// The name `GitRepo` links `dir` under: the folder's name when it is a repo name, else
+/// `repo-<n>`.
+fn name_of(dir: &Path) -> String {
+    match dir.file_name().and_then(|n| n.to_str()) {
+        Some(n) if rdy_engine::config_levels::is_repo_name(n) => n.to_string(),
+        _ => format!("repo-{}", NEXT_NAME.fetch_add(1, Ordering::Relaxed)),
+    }
 }
 
 impl GitRepo {
@@ -40,6 +73,7 @@ impl GitRepo {
         let tmp = tempfile::tempdir().expect("tempdir");
         let g = GitRepo {
             dir: tmp.path().to_path_buf(),
+            name: name_of(tmp.path()),
             _tmp: Some(tmp),
         };
         g.run(&["init", "-q", "--initial-branch=main"]);
@@ -112,6 +146,7 @@ impl GitRepo {
         std::fs::create_dir_all(dir).expect("mkdir");
         let g = GitRepo {
             dir: dir.to_path_buf(),
+            name: name_of(dir),
             _tmp: None,
         };
         g.run(&["init", "-q", "--initial-branch=main"]);
@@ -122,9 +157,9 @@ impl GitRepo {
         &self.dir
     }
 
-    /// This repository's path as `link` writes it into `code_repos`.
+    /// This repository's name as `link` writes it into `code_repos`.
     pub fn configured(&self) -> String {
-        self.dir.to_string_lossy().into_owned()
+        self.name.clone()
     }
 
     fn git(&self) -> Command {
@@ -190,9 +225,11 @@ impl GitRepo {
         self.run(&["rev-parse", "HEAD"])
     }
 
-    /// Appends `code_repos: [<this repository>]` to the project's `.rdy.yaml`.
+    /// Links this repository: its name to `code_repos` in the project's `.rdy.yaml`, its path to
+    /// `code_paths` in the project's `.rdy/local.yaml`.
     pub fn link(&self, project: &Path) {
-        link_repos(project, &[&self.configured()]);
+        let path = self.dir.to_string_lossy();
+        link_repos(project, &[(self.name.as_str(), path.as_ref())]);
     }
 }
 

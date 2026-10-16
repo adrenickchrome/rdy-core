@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes, makes symlinks and reads sessions. FW-XP1 Phase 4 ports it.
 //! The spawn command and detach (spawn1).
 mod common;
 use common::*;

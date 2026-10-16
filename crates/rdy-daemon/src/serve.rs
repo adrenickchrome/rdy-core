@@ -9,6 +9,7 @@ use crate::ops::{OpContext, dispatch};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
 use crate::site::{self, LanOverride, SiteServer};
+use crate::sys;
 use crate::writer::panic_text;
 use rdy_engine::{E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
 use rdy_engine::{classify, human_actor_for_env};
@@ -253,27 +254,22 @@ pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
 /// `rdy-serve` thread).
 struct StopSignals {
     rt: tokio::runtime::Runtime,
-    int: tokio::signal::unix::Signal,
-    term: tokio::signal::unix::Signal,
+    signals: sys::StopSignals,
 }
 
 impl StopSignals {
     /// `None` (logged) if the handlers cannot be installed: the daemon then runs without them,
     /// and `rdy serve --stop` still stops it cleanly.
     fn install() -> Option<StopSignals> {
-        use tokio::signal::unix::{SignalKind, signal};
         let installed = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .and_then(|rt| {
-                let (int, term) = {
+                let signals = {
                     let _g = rt.enter();
-                    (
-                        signal(SignalKind::interrupt())?,
-                        signal(SignalKind::terminate())?,
-                    )
+                    sys::StopSignals::install()?
                 };
-                Ok(StopSignals { rt, int, term })
+                Ok(StopSignals { rt, signals })
             });
         match installed {
             Ok(s) => Some(s),
@@ -288,25 +284,15 @@ impl StopSignals {
 
     /// Waits on a thread of its own (`rdy-signals`, alive until the process exits).
     fn stop_on_signal(self, handle: DaemonHandle) {
-        let StopSignals {
-            rt,
-            mut int,
-            mut term,
-        } = self;
+        let StopSignals { rt, mut signals } = self;
         let spawned = std::thread::Builder::new()
             .name("rdy-signals".into())
             .spawn(move || {
                 rt.block_on(async move {
-                    let name = tokio::select! {
-                        _ = int.recv() => "SIGINT",
-                        _ = term.recv() => "SIGTERM",
-                    };
+                    let name = signals.recv().await;
                     log(&format!("{name}: stopping"));
                     handle.stop();
-                    let name = tokio::select! {
-                        _ = int.recv() => "SIGINT",
-                        _ = term.recv() => "SIGTERM",
-                    };
+                    let name = signals.recv().await;
                     log(&format!("{name} again: exiting without draining"));
                     std::process::exit(130);
                 })
@@ -494,12 +480,12 @@ impl Handler for ServeHandler {
     fn mcp(
         &self,
         session: SessionInfo,
-        stream: tokio::net::UnixStream,
+        stream: crate::handler::McpStream,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let engine = self.shared.engine();
         let hub = Arc::clone(&self.shared.hub);
         Box::pin(async move {
-            let (r, w) = stream.into_split();
+            let (r, w) = tokio::io::split(stream);
             if let Err(e) = rdy_mcp::server::serve_on(engine, session.id.0, hub, r, w).await {
                 log(&format!(
                     "mcp session {} ended with an error: {e}",

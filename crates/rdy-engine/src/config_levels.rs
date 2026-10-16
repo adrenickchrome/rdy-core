@@ -10,6 +10,12 @@
 //! stay off. Founder ruling (config typos warn): every config mistake is a warning, never
 //! `E_CONFIG`, and the project opens. Only a wrong value type on a known key in a file that
 //! allows it is `E_CONFIG`.
+//!
+//! One key merges name by name, not file by file: `code_paths` (FW-X5, F1). `code_repos` in
+//! `.rdy.yaml` names the linked code repos; each name's checkout path is its `code_paths` entry in
+//! `.rdy/local.yaml`, else its entry in the user config ([`linked_repos`]). So `code_paths` has
+//! one origin per entry that applies (`code_paths.<name>`, from the file that supplied it), and
+//! `merged` holds those entries as one mapping.
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
@@ -251,6 +257,12 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         default: None,
     },
     KeyRule {
+        key: CODE_PATHS_KEY,
+        levels: PERSON,
+        ty: Ty::Any,
+        default: None,
+    },
+    KeyRule {
         key: "coverage.target",
         levels: PROJECT_ONLY,
         ty: Ty::Percent,
@@ -334,9 +346,12 @@ impl Origin {
 #[derive(Clone, Debug)]
 pub struct Effective {
     /// One entry per key of [`KEY_LEVELS`] that has a value, in table order, defaults included.
+    /// `code_paths` instead has one entry per entry that applies (F1): key `code_paths.<name>`,
+    /// the path as written, and the level and file that supplied it, sorted by name.
     pub origins: Vec<Origin>,
     /// What `Config` is read from: the project file's keys as they are, each key of the table
     /// replaced by its winning value (a default is not written in; the accessors have it).
+    /// `code_paths` is the by-name merge: every entry that applies, as written.
     pub merged: Mapping,
     /// One `W_CONFIG_UNKNOWN` per key outside the table, in file precedence order.
     pub warnings: Vec<Issue>,
@@ -1015,8 +1030,37 @@ fn build(
         .find(|(l, _)| *l == Level::Project)
         .map(|(_, m)| m.clone())
         .unwrap_or_default();
+    // O15: from the mappings parsed above, never a second read; a wrong type adds no warning
+    // and no `code_paths` row here (the code briefing reports it)
+    let map_of = |level: Level| files.iter().find(|(l, _)| *l == level).map(|(_, m)| m);
+    let code = linked_core(
+        project,
+        map_of(Level::Project),
+        map_of(Level::Local),
+        map_of(Level::User),
+        user_file,
+    );
     let mut origins = Vec::new();
     for rule in KEY_LEVELS {
+        if rule.key == CODE_PATHS_KEY {
+            if let Ok((linked, _)) = &code {
+                let rows = code_path_origins(project, linked, map_of, user_file);
+                if !rows.is_empty() {
+                    let entries: Mapping = rows
+                        .iter()
+                        .map(|o| {
+                            (
+                                Value::from(&o.key[CODE_PATHS_KEY.len() + 1..]),
+                                o.value.clone(),
+                            )
+                        })
+                        .collect();
+                    set_path(&mut merged, CODE_PATHS_KEY, Value::Mapping(entries));
+                }
+                origins.extend(rows);
+            }
+            continue;
+        }
         let found = files
             .iter()
             .find_map(|(level, map)| get_path(map, rule.key).map(|v| (*level, v.clone())));
@@ -1047,11 +1091,259 @@ fn build(
         }
     }
     warnings.extend(lan_address_warning(&merged));
+    if let Ok((_, code)) = code {
+        warnings.extend(code);
+    }
     Ok(Effective {
         origins,
         merged,
         warnings,
     })
+}
+
+/// One origin per linked repo (F1), sorted by name: key `code_paths.<name>`, the path as its file
+/// writes it, and the level and file that supplied it.
+fn code_path_origins<'a>(
+    project: &Path,
+    linked: &[LinkedRepo],
+    map_of: impl Fn(Level) -> Option<&'a Mapping>,
+    user_file: Option<&Path>,
+) -> Vec<Origin> {
+    let mut rows: Vec<Origin> = linked
+        .iter()
+        .filter_map(|l| {
+            let value = map_of(l.level)?
+                .get(CODE_PATHS_KEY)?
+                .as_mapping()?
+                .get(l.name.as_str())?
+                .clone();
+            Some(Origin {
+                key: format!("{CODE_PATHS_KEY}.{}", l.name),
+                value,
+                level: l.level,
+                file: path_of(project, l.level, user_file),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
+    rows
+}
+
+/// The key of `.rdy/local.yaml` and the user config that maps each code repo's name to the path
+/// of its checkout (FW-X5).
+pub const CODE_PATHS_KEY: &str = "code_paths";
+
+/// Whether `s` is a code repo's name: `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (O11).
+pub fn is_repo_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    match b.split_first() {
+        Some((first, rest)) => {
+            first.is_ascii_alphanumeric()
+                && rest.len() <= 63
+                && rest
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+        }
+        None => false,
+    }
+}
+
+/// A linked repo before its checks: its name, its path made absolute (not canonical), and the
+/// level that gave the path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkedRepo {
+    pub name: String,
+    pub path: PathBuf,
+    pub level: Level,
+}
+
+/// The names of `code_repos` (`.rdy.yaml`), each with its path from `code_paths`: the local
+/// entry, else the user entry (F1). The warnings are the closed list of [`linked_core`].
+/// `E_CONFIG` only for a wrong YAML type: `code_repos` not a list, more than 16 entries, an entry
+/// that is not a non-empty string; `code_paths` not a mapping, or an entry whose value is not a
+/// string. A file that does not parse is `E_CONFIG` too, as in [`effective`]. A missing
+/// `.rdy.yaml` is [`missing_project`]'s error.
+pub fn linked_repos(
+    project: &Path,
+    user_file: Option<&Path>,
+) -> Result<(Vec<LinkedRepo>, Vec<Issue>), RdyError> {
+    let read = |level: Level| match path_of(project, level, user_file) {
+        Some(path) => read_file(&path, &file_name(level, user_file)),
+        None => Ok(None),
+    };
+    // `.rdy.yaml` is mandatory: missing, it is the missing-project error, never no repos (an
+    // engine already open reads it again here); the local and user files stay optional
+    let project_map = read(Level::Project)?.ok_or_else(|| missing_project(project))?;
+    let local = read(Level::Local)?;
+    let user = read(Level::User)?;
+    linked_core(
+        project,
+        Some(&project_map),
+        local.as_ref(),
+        user.as_ref(),
+        user_file,
+    )
+}
+
+/// The entries of `code_repos` in the project file, as written; no key and a null value are none.
+fn repo_entries(project_map: Option<&Mapping>) -> Result<Vec<&str>, RdyError> {
+    use crate::code_index::{CODE_REPOS_KEY, MAX_CODE_REPOS};
+    let bad = || {
+        RdyError::new(
+            E_CONFIG,
+            format!("{CODE_REPOS_KEY} must be a list of repo names (at most {MAX_CODE_REPOS})"),
+            format!("fix {CODE_REPOS_KEY} in {PROJECT_FILE}, e.g. {CODE_REPOS_KEY}: [app]"),
+        )
+    };
+    let value = match project_map.and_then(|m| m.get(CODE_REPOS_KEY)) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(v) => v,
+    };
+    let seq = value.as_sequence().ok_or_else(bad)?;
+    if seq.len() > MAX_CODE_REPOS {
+        return Err(bad());
+    }
+    seq.iter()
+        .map(|e| e.as_str().filter(|s| !s.is_empty()).ok_or_else(bad))
+        .collect()
+}
+
+/// The entries of `code_paths` in the file of `level`, in file order; no key is none. A value that
+/// is not a mapping (a null included) is a wrong type, as a key or an entry's value that is not a
+/// string is.
+fn path_entries<'a>(
+    map: Option<&'a Mapping>,
+    level: Level,
+    user_file: Option<&Path>,
+) -> Result<Vec<(&'a str, &'a str)>, RdyError> {
+    let bad = || {
+        RdyError::new(
+            E_CONFIG,
+            "code_paths must map repo names to paths",
+            format!(
+                "fix {CODE_PATHS_KEY} in {}, e.g. {CODE_PATHS_KEY}: {{app: ../app}}",
+                file_name(level, user_file)
+            ),
+        )
+    };
+    let Some(value) = map.and_then(|m| m.get(CODE_PATHS_KEY)) else {
+        return Ok(Vec::new());
+    };
+    let entries = value.as_mapping().ok_or_else(bad)?;
+    entries
+        .iter()
+        .map(|(k, v)| match (k.as_str(), v.as_str()) {
+            (Some(name), Some(path)) => Ok((name, path)),
+            _ => Err(bad()),
+        })
+        .collect()
+}
+
+/// [`linked_repos`] over parsed mappings: `linked_repos` reads the files, `build` passes the
+/// mappings it already parsed (O15). The warnings, each `W_CONFIG_UNKNOWN`, are a closed list:
+/// 1. an entry of `code_repos` that is not a name ([`is_repo_name`]; F2);
+/// 2. a name listed again (once per name);
+/// 3. a name with no `code_paths` entry at either level;
+/// 4. a `code_paths` entry whose name `code_repos` does not list;
+/// 5. a user config entry whose path is not absolute (rdy ignores it, and the name has no path
+///    from that level).
+///
+/// Warnings 1 to 3 come in `code_repos` order, then 4 for `.rdy/local.yaml`, then 4 and 5 for the
+/// user config, each in file order. A local path that is relative starts at the project root.
+fn linked_core(
+    project: &Path,
+    project_map: Option<&Mapping>,
+    local: Option<&Mapping>,
+    user: Option<&Mapping>,
+    user_file: Option<&Path>,
+) -> Result<(Vec<LinkedRepo>, Vec<Issue>), RdyError> {
+    let entries = repo_entries(project_map)?;
+    let local_paths = path_entries(local, Level::Local, user_file)?;
+    let user_paths = path_entries(user, Level::User, user_file)?;
+    let mut warnings = Vec::new();
+    let mut listed: Vec<&str> = Vec::new();
+    let mut repeated: Vec<&str> = Vec::new();
+    let mut linked = Vec::new();
+    for entry in entries {
+        if !is_repo_name(entry) {
+            warnings.push(config_warning(
+                format!("code_repos entry {entry} is not a repo name, so rdy ignores it"),
+                format!(
+                    "name the repo in code_repos and give its path under {CODE_PATHS_KEY} in \
+                     {LOCAL_FILE}"
+                ),
+            ));
+            continue;
+        }
+        if listed.contains(&entry) {
+            if !repeated.contains(&entry) {
+                repeated.push(entry);
+                warnings.push(config_warning(
+                    format!("code_repos lists {entry} twice; rdy uses it once"),
+                    format!("remove the second {entry} from code_repos in {PROJECT_FILE}"),
+                ));
+            }
+            continue;
+        }
+        listed.push(entry);
+        let in_local = local_paths.iter().find(|(n, _)| *n == entry);
+        let in_user = user_paths.iter().find(|(n, _)| *n == entry);
+        match (in_local, in_user) {
+            (Some((_, path)), _) => {
+                let joined = project.join(path);
+                linked.push(LinkedRepo {
+                    name: entry.to_string(),
+                    path: std::path::absolute(&joined).unwrap_or(joined),
+                    level: Level::Local,
+                });
+            }
+            (None, Some((_, path))) if Path::new(path).is_absolute() => {
+                linked.push(LinkedRepo {
+                    name: entry.to_string(),
+                    path: PathBuf::from(path),
+                    level: Level::User,
+                });
+            }
+            // a relative user path: warning 5, in the user config's pass below
+            (None, Some(_)) => {}
+            (None, None) => warnings.push(config_warning(
+                format!("code repo {entry} has no checkout path, so rdy skips it"),
+                format!(
+                    "add {CODE_PATHS_KEY}: {{{entry}: <path to its checkout>}} to {LOCAL_FILE} or \
+                     the user config"
+                ),
+            )),
+        }
+    }
+    let unlisted = |name: &str| {
+        config_warning(
+            format!(
+                "{CODE_PATHS_KEY} names {name}, which code_repos does not list, so rdy ignores it"
+            ),
+            format!(
+                "add {name} to code_repos in {PROJECT_FILE}, or remove it from {CODE_PATHS_KEY}"
+            ),
+        )
+    };
+    for (name, _) in &local_paths {
+        if !listed.contains(name) {
+            warnings.push(unlisted(name));
+        }
+    }
+    for (name, path) in &user_paths {
+        if !listed.contains(name) {
+            warnings.push(unlisted(name));
+        } else if !Path::new(path).is_absolute() {
+            warnings.push(config_warning(
+                format!(
+                    "{CODE_PATHS_KEY}.{name} in {} is not an absolute path, so rdy ignores it",
+                    file_name(Level::User, user_file)
+                ),
+                format!("give an absolute path there, or set it in {LOCAL_FILE}"),
+            ));
+        }
+    }
+    Ok((linked, warnings))
 }
 
 /// The `actor` a file names: a non-empty string, else nothing (a file that does not read or

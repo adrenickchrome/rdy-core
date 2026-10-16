@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! ctl2, the read half: each op reads one snapshot; paths resolve against the session cwd;
 //! status reports the open and quarantine files; errors carry the M1 shape.
 use rdy_daemon::{ErrorReply, OPS, OpContext, clean_quarantine, dispatch, quarantine};

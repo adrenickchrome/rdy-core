@@ -6,6 +6,16 @@ use crate::session::SessionInfo;
 use std::future::Future;
 use std::pin::Pin;
 
+/// A byte stream an MCP session runs on: the daemon's socket today, any transport later.
+pub trait DuplexStream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static
+{
+}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static> DuplexStream for T {}
+
+/// The stream `Handler::mcp` takes.
+pub type McpStream = Box<dyn DuplexStream>;
+
 pub trait Handler: Send + Sync + 'static {
     /// One ctl request. Called on the blocking pool, one at a time per session, in request order.
     fn ctl(
@@ -18,7 +28,7 @@ pub trait Handler: Send + Sync + 'static {
     fn mcp(
         &self,
         session: SessionInfo,
-        stream: tokio::net::UnixStream,
+        stream: McpStream,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         drop((session, stream));
         Box::pin(async {})
@@ -39,4 +49,55 @@ pub trait Handler: Send + Sync + 'static {
     /// The session's connection has closed. Called exactly once per session, after it is removed
     /// from the table.
     fn session_ended(&self, _session: &SessionInfo) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{Proto, SessionId};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Echoes the first line it reads back on the same stream.
+    struct EchoLine;
+
+    impl Handler for EchoLine {
+        fn ctl(&self, _: &SessionInfo, _: CtlRequest) -> Result<serde_json::Value, ErrorReply> {
+            unreachable!()
+        }
+
+        fn mcp(
+            &self,
+            _session: SessionInfo,
+            stream: McpStream,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(async move {
+                let mut r = BufReader::new(stream);
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                r.get_mut().write_all(line.as_bytes()).await.unwrap();
+                r.get_mut().flush().await.unwrap();
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn ps7_the_mcp_hook_takes_any_duplex_stream() {
+        let (a, b) = tokio::io::duplex(1024);
+        let session = SessionInfo {
+            id: SessionId(1),
+            proto: Proto::Mcp,
+            version: "1".into(),
+            cwd: "/".into(),
+            peer_uid: 0,
+            connected_at_ms: 0,
+        };
+        let h = EchoLine;
+        let task = tokio::spawn(h.mcp(session, Box::new(a)));
+        let mut b = BufReader::new(b);
+        b.get_mut().write_all(b"one line\n").await.unwrap();
+        let mut echo = String::new();
+        b.read_line(&mut echo).await.unwrap();
+        assert_eq!(echo, "one line\n");
+        task.await.unwrap();
+    }
 }
