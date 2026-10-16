@@ -730,10 +730,10 @@ fn markers(s: &Store) -> Vec<(Location, Vec<u8>)> {
 
 /// Writes `frame` at `loc` of the log of the store at `dir`, in place.
 fn write_at(dir: &std::path::Path, loc: Location, frame: &[u8]) {
-    use std::os::unix::fs::FileExt;
+    use rdy_store::pio::write_all_at;
     let path = rdy_store::segment::seg_path(&dir.join("segments"), loc.segment);
     let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    f.write_all_at(frame, loc.offset).unwrap();
+    write_all_at(&f, frame, loc.offset).unwrap();
 }
 
 fn decode_text(e: StoreError) -> String {

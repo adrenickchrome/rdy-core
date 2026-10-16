@@ -1,11 +1,11 @@
 use crate::fsutil::sync_dir;
 use crate::kinds::{self, BatchCommit};
+use crate::pio;
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -137,7 +137,7 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
         return Ok(None);
     };
     let mut header = [0u8; HEADER as usize];
-    f.read_exact_at(&mut header, offset)?;
+    pio::read_exact_at(f, &mut header, offset)?;
     let len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
     if payload_start
         .checked_add(len)
@@ -148,7 +148,7 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     let kind = header[4];
     let hash = Hash(header[5..37].try_into().unwrap());
     let mut payload = vec![0u8; len as usize];
-    f.read_exact_at(&mut payload, payload_start)?;
+    pio::read_exact_at(f, &mut payload, payload_start)?;
     count_hashed(payload.len());
     if Hash::of(&payload) != hash {
         return Ok(None);
@@ -173,7 +173,7 @@ fn unsealed(seg: u32) -> io::Error {
 fn ends_at_marker(f: &File, file_len: u64) -> io::Result<bool> {
     let tail = file_len.min(HEADER + MARKER_MAX);
     let mut buf = vec![0u8; tail as usize];
-    f.read_exact_at(&mut buf, file_len - tail)?;
+    pio::read_exact_at(f, &mut buf, file_len - tail)?;
     let header = HEADER as usize;
     for pos in 0..buf.len().saturating_sub(header - 1) {
         let rest = &buf[pos..];
@@ -335,7 +335,7 @@ fn read_frame_at(f: &File, loc: Location) -> io::Result<(u8, Hash, Vec<u8>, u64)
 /// starts after `offset`. A genuine torn tail never has one.
 fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
     let mut buf = vec![0u8; (file_len - offset) as usize];
-    f.read_exact_at(&mut buf, offset)?;
+    pio::read_exact_at(f, &mut buf, offset)?;
     let h = HEADER as usize;
     for pos in 1..buf.len() {
         if pos + h > buf.len() {
@@ -360,7 +360,7 @@ fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
 /// Returns the path it wrote.
 fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<PathBuf> {
     let mut buf = vec![0u8; (file_len - offset) as usize];
-    f.read_exact_at(&mut buf, offset)?;
+    pio::read_exact_at(f, &mut buf, offset)?;
     let base = format!(
         "{}.torn-{offset}",
         seg.file_name().unwrap().to_string_lossy()
@@ -379,7 +379,7 @@ fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> i
             Err(e) => return Err(e),
         }
     };
-    q.write_all_at(&buf, 0)?;
+    pio::write_all_at(&q, &buf, 0)?;
     q.sync_all()?;
     sync_dir(dir)?;
     Ok(path)
@@ -476,14 +476,14 @@ fn tail_frame(f: &File, offset: u64, bound: u64, memo: &mut TailMemo) -> io::Res
         return Ok(Step::PastBound);
     };
     let mut header = [0u8; HEADER as usize];
-    f.read_exact_at(&mut header, offset)?;
+    pio::read_exact_at(f, &mut header, offset)?;
     let len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
     let Some(end) = payload_start.checked_add(len).filter(|end| *end <= bound) else {
         return Ok(Step::PastBound);
     };
     let hash = Hash(header[5..37].try_into().unwrap());
     let mut payload = vec![0u8; len as usize];
-    f.read_exact_at(&mut payload, payload_start)?;
+    pio::read_exact_at(f, &mut payload, payload_start)?;
     count_hashed(payload.len());
     let found = (Hash::of(&payload) == hash).then_some((header[4], hash, end));
     memo.frames.insert(offset, found);
@@ -550,7 +550,7 @@ fn acknowledged_batch_follows(
     file_len: u64,
 ) -> io::Result<bool> {
     let mut buf = vec![0u8; (file_len - stop) as usize];
-    f.read_exact_at(&mut buf, stop)?;
+    pio::read_exact_at(f, &mut buf, stop)?;
     let h = HEADER as usize;
     let mut memo = TailMemo::default();
     for pos in 0..buf.len() {
@@ -918,11 +918,10 @@ impl SegmentLog {
         buf.extend_from_slice(&hash.0);
         buf.extend_from_slice(payload);
         if let Some(n) = self.fail_partial.take() {
-            self.writer
-                .write_all_at(&buf[..n.min(buf.len())], self.len)?;
+            pio::write_all_at(&self.writer, &buf[..n.min(buf.len())], self.len)?;
             return Err(io::Error::other("injected partial append"));
         }
-        self.writer.write_all_at(&buf, self.len)?;
+        pio::write_all_at(&self.writer, &buf, self.len)?;
         let loc = Location {
             segment: self.current(),
             offset: self.len,

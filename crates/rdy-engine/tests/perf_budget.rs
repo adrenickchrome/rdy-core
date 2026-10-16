@@ -2,9 +2,9 @@
 //! Uses 100k blocks (spec 11). Ignored by default because generating the project takes a while.
 use rdy_engine::{Rdy, Scope, Session, WriteRequest, testkit};
 use rdy_model::{Block, BlockId, Op, Role};
+use rdy_store::pio::write_all_at;
 use serde_json::json;
 use std::io::Write;
-use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ fn flush_p99() -> Duration {
     let mut runs = vec![];
     for _ in 0..50 {
         let t = Instant::now();
-        f.write_all_at(&buf, 0).unwrap();
+        write_all_at(&f, &buf, 0).unwrap();
         f.sync_data().unwrap();
         runs.push(t.elapsed());
     }

@@ -12,6 +12,7 @@ pub mod kinds;
 mod land;
 pub mod layout;
 pub mod merge;
+pub mod pio;
 pub mod review;
 pub mod segment;
 mod store;
