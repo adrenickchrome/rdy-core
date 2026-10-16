@@ -6,6 +6,15 @@ Agents should never change the accepted design blind. rdy computes. Agents write
 
 Documentation and the decisions behind it are stored as typed blocks in an append-only, content-addressed store. Agents read and write through MCP tools, with a briefing before they edit accepted content; people read the rendered site and approve proposals into canon. Local-first, deterministic, model-free, and built in Rust.
 
+## Platforms
+
+| Platform | Status |
+|---|---|
+| macOS (arm64) | Supported. The fast gate (`cargo qa --skip-perf --require-all`) passes. |
+| Linux (x86_64, aarch64) | Supported. The fast gate passes on x86_64; aarch64 builds and runs its tests (one timing-bound test is being fixed). Perf baselines are Linux only. |
+| Windows | Not supported yet: `rdy-store` and the daemon use Unix-only APIs, so the workspace does not compile. `rdy-model`, `rdy-schema` and `rdy-graph` build. Windows support is planned after M3. |
+| Other Unix (the BSDs, illumos) | Untested. |
+
 ## Quick start
 
 ```bash
