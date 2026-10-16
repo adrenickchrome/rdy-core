@@ -445,3 +445,65 @@ fn ec7_two_exports_are_the_same_bytes() {
     print::single::write_single_html(&view(&r), &d2).unwrap();
     assert_eq!(std::fs::read(&c).unwrap(), std::fs::read(&d2).unwrap());
 }
+
+/// What `dir` holds, sorted: a refused export leaves no destination and no partial file.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// O29: a file in the project's `.rdy` directory can break the store, so `out` there is refused.
+fn assert_inside_rdy(p: &Print, out: &std::path::Path, watched: &[&std::path::Path]) {
+    let before: Vec<Vec<String>> = watched.iter().map(|d| names_in(d)).collect();
+    let e = print::single::write_single_html(p, out).expect_err("inside .rdy");
+    assert_eq!(e.code, E_BAD_INPUT, "{}", e.message);
+    assert_eq!(
+        e.message,
+        format!("{} is inside the project .rdy directory", out.display())
+    );
+    assert_eq!(e.fix, "export to a path outside .rdy");
+    assert!(
+        std::fs::symlink_metadata(out).is_err(),
+        "no destination file"
+    );
+    let after: Vec<Vec<String>> = watched.iter().map(|d| names_in(d)).collect();
+    assert_eq!(before, after, "no partial file is left");
+}
+
+#[test]
+fn ec7_an_out_inside_the_project_rdy_directory_is_refused() {
+    let (d, r, _ids) = project();
+    let p = canon(&r);
+    let rdy = d.path().join(".rdy");
+    let sub = rdy.join("packs");
+    std::fs::create_dir_all(&sub).unwrap();
+    // a direct descendant, and one deeper
+    assert_inside_rdy(&p, &rdy.join("export.html"), &[&rdy, &sub]);
+    assert_inside_rdy(&p, &sub.join("export.yaml"), &[&rdy, &sub]);
+    // an `out` named `.rdy`, in a directory outside it, would also be the store's name
+    let outside = tempfile::tempdir().unwrap();
+    assert_inside_rdy(&p, &outside.path().join(".rdy"), &[outside.path()]);
+    // a path that reaches `.rdy` through `..`
+    let other = d.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    assert_inside_rdy(
+        &p,
+        &other.join("..").join(".rdy").join("alias.html"),
+        &[&rdy, &sub],
+    );
+}
+
+#[test]
+fn ec7_a_symlink_into_the_project_rdy_directory_is_refused() {
+    let (d, r, _ids) = project();
+    let p = canon(&r);
+    let rdy = d.path().join(".rdy");
+    let outside = tempfile::tempdir().unwrap();
+    let link = outside.path().join("store");
+    rdy_qa::platform::symlink(&rdy, &link).unwrap();
+    assert_inside_rdy(&p, &link.join("export.html"), &[&rdy]);
+}

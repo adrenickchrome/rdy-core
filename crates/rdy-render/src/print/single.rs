@@ -10,16 +10,18 @@
 //! so no two ids clash. An internal link is `#<page id>` or `#<page id>:<anchor>`. No block id
 //! is in the file (O4).
 use super::{Href, PBlock, PageKind, Print, PrintDoc, PrintSummary, Run};
-use rdy_engine::{RdyError, dump::place_file};
+use rdy_engine::{E_BAD_INPUT, E_IO, RdyError, dump::place_file};
 use std::fmt::Write as _;
 use std::path::Path;
 
 /// The sheet of the file, after the fonts.
 const PRINT_CSS: &str = include_str!("../../theme/rdy-standard/print.css");
 
-/// Writes the print as one HTML file at `out`. `out` must not exist; the file is placed whole or
-/// not at all (`rdy_engine::dump::place_file`).
+/// Writes the print as one HTML file at `out`. O29's path rules come first: the directory of
+/// `out` must exist and must not be the project's `.rdy` directory or inside it. `out` must not
+/// exist; the file is placed whole or not at all (`rdy_engine::dump::place_file`).
 pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError> {
+    check_path(out)?;
     let bytes = single_html(p);
     let n = place_file(out, &bytes, "rdy export")?;
     let count = |k: PageKind| p.docs.iter().filter(|d| d.kind == k).count();
@@ -33,6 +35,34 @@ pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError
         bytes: n,
         warnings: p.warnings.clone(),
     })
+}
+
+/// O29's path rules for a file: the parent of `out` exists (`E_BAD_INPUT`), and neither it nor
+/// `out` is in a `.rdy` directory. A file in `.rdy` can break the store. The check reads the
+/// resolved path, so a symlink or `..` does not pass.
+fn check_path(out: &Path) -> Result<(), RdyError> {
+    let dir = out
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !dir.exists() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{} does not exist", dir.display()),
+            "create the directory first, or pick another path",
+        ));
+    }
+    let resolved = std::fs::canonicalize(dir)
+        .map_err(|e| RdyError::new(E_IO, format!("{}: {e}", dir.display()), "check the path"))?;
+    let in_rdy = |s: &std::ffi::OsStr| s == ".rdy";
+    if resolved.iter().any(in_rdy) || out.file_name().is_some_and(in_rdy) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{} is inside the project .rdy directory", out.display()),
+            "export to a path outside .rdy",
+        ));
+    }
+    Ok(())
 }
 
 /// The bytes of the file. The same print gives the same bytes.
