@@ -6,8 +6,6 @@
 use std::fmt;
 use std::fs::File;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 /// Written `{dev}:{ino}`, two decimal numbers: the socket record and the hello carry this text
@@ -21,10 +19,8 @@ pub struct FileId {
 impl FileId {
     /// The identity in `meta`: what `lstat` or `fstat` read, whichever made it.
     pub fn of(meta: &std::fs::Metadata) -> FileId {
-        FileId {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        }
+        let (dev, ino) = os::dev_ino(meta);
+        FileId { dev, ino }
     }
 
     /// From `lstat`: a link is never followed.
@@ -92,21 +88,50 @@ pub struct ChangeStamp {
 /// The inode and the change time in `meta`, at full precision. A `ctime` that does not fit is
 /// `UNIX_EPOCH`.
 pub fn change_stamp(meta: &std::fs::Metadata) -> ChangeStamp {
-    let ctime = u64::try_from(meta.ctime()).map_or(std::time::UNIX_EPOCH, |s| {
-        std::time::UNIX_EPOCH + std::time::Duration::new(s, meta.ctime_nsec() as u32)
+    let (ino, ctime_s, ctime_nsec) = os::ino_ctime(meta);
+    let ctime = u64::try_from(ctime_s).map_or(std::time::UNIX_EPOCH, |s| {
+        std::time::UNIX_EPOCH + std::time::Duration::new(s, ctime_nsec as u32)
     });
-    ChangeStamp {
-        ino: meta.ino(),
-        ctime,
+    ChangeStamp { ino, ctime }
+}
+
+/// The platform fields this module reads. Only this module names a platform's metadata.
+#[cfg(unix)]
+mod os {
+    use std::os::unix::fs::MetadataExt;
+
+    /// `st_dev` and `st_ino`.
+    pub(super) fn dev_ino(meta: &std::fs::Metadata) -> (u64, u64) {
+        (meta.dev(), meta.ino())
+    }
+
+    /// `st_ino`, and `st_ctime` in seconds and nanoseconds.
+    pub(super) fn ino_ctime(meta: &std::fs::Metadata) -> (u64, i64, i64) {
+        (meta.ino(), meta.ctime(), meta.ctime_nsec())
     }
 }
 
 #[cfg(not(unix))]
 compile_error!("rdy_store::fileid has no implementation for this platform yet (FW-XP1 Phase 4)");
 
-#[cfg(test)]
+/// No implementation (O1): the `compile_error!` above stops the build, and these signatures
+/// keep it the only error. They never run and give no identity.
+#[cfg(not(unix))]
+mod os {
+    pub(super) fn dev_ino(_: &std::fs::Metadata) -> (u64, u64) {
+        unreachable!("rdy_store::fileid has no implementation for this platform yet")
+    }
+
+    pub(super) fn ino_ctime(_: &std::fs::Metadata) -> (u64, i64, i64) {
+        unreachable!("rdy_store::fileid has no implementation for this platform yet")
+    }
+}
+
+/// Unix only: the tests read `st_dev`, `st_ino` and `st_ctime` and make symbolic links.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn ps2_the_text_form_is_dev_colon_ino_and_parses_back() {
