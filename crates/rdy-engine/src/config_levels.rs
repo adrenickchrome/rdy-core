@@ -1161,7 +1161,8 @@ pub struct LinkedRepo {
 /// entry, else the user entry (F1). The warnings are the closed list of [`linked_core`].
 /// `E_CONFIG` only for a wrong YAML type: `code_repos` not a list, more than 16 entries, an entry
 /// that is not a non-empty string; `code_paths` not a mapping, or an entry whose value is not a
-/// string. A file that does not parse is `E_CONFIG` too, as in [`effective`].
+/// string. A file that does not parse is `E_CONFIG` too, as in [`effective`]. A missing
+/// `.rdy.yaml` is [`missing_project`]'s error.
 pub fn linked_repos(
     project: &Path,
     user_file: Option<&Path>,
@@ -1170,12 +1171,14 @@ pub fn linked_repos(
         Some(path) => read_file(&path, &file_name(level, user_file)),
         None => Ok(None),
     };
-    let project_map = read(Level::Project)?;
+    // `.rdy.yaml` is mandatory: missing, it is the missing-project error, never no repos (an
+    // engine already open reads it again here); the local and user files stay optional
+    let project_map = read(Level::Project)?.ok_or_else(|| missing_project(project))?;
     let local = read(Level::Local)?;
     let user = read(Level::User)?;
     linked_core(
         project,
-        project_map.as_ref(),
+        Some(&project_map),
         local.as_ref(),
         user.as_ref(),
         user_file,

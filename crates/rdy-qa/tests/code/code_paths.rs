@@ -594,3 +594,47 @@ fn ps5_a_code_briefing_names_its_repos() {
         .unwrap();
     assert_eq!(cb.code.repos, vec!["app".to_string()]);
 }
+
+/// `.rdy.yaml` is mandatory (final review, fix round 1): in an engine that is already open, a
+/// missing project config is the missing-project error, never a briefing that silently links no
+/// repo. Restored, the repo comes back. `.rdy/local.yaml` and the user config stay optional.
+#[test]
+fn ps5_a_missing_project_config_is_an_error_in_an_open_engine() {
+    let (d, r) = project();
+    let g = GitRepo::at(&d.path().join("checkouts").join("app"));
+    g.write("src/a.rs", "a\n");
+    g.commit("feat: a");
+    g.link(r.root());
+    let brief = || r.read().brief_code(&Scope::Canon, "src/a.rs", None, None);
+    assert_eq!(brief().unwrap().code.repos, vec!["app".to_string()]);
+
+    let config = d.path().join(PROJECT_FILE);
+    let aside = d.path().join("rdy.yaml.aside");
+    std::fs::rename(&config, &aside).unwrap();
+    let want = missing_project(d.path());
+    let e = brief().expect_err("a missing .rdy.yaml is an error, not a briefing with no repos");
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (want.code, want.message.as_str(), want.fix.as_str())
+    );
+    assert_eq!(e.code, "E_NO_PROJECT", "{e}");
+    let e = linked_repos(d.path(), None).unwrap_err();
+    assert_eq!((e.code, e.message), (want.code, want.message));
+
+    std::fs::rename(&aside, &config).unwrap();
+    assert_eq!(brief().unwrap().code.repos, vec!["app".to_string()]);
+
+    // the optional files: no local file and a user config path with no file link no repo,
+    // with the no-path warning, and no error
+    std::fs::remove_file(d.path().join(LOCAL_FILE)).unwrap();
+    let u = tempfile::tempdir().unwrap();
+    let absent_user = u.path().join("config.yaml");
+    let (linked, warnings) = linked_repos(d.path(), Some(&absent_user)).unwrap();
+    assert!(linked.is_empty(), "{linked:?}");
+    assert_eq!(texts(&warnings), vec![no_path("app")]);
+    assert!(
+        code_repos_with(d.path(), Some(&absent_user))
+            .unwrap()
+            .is_empty()
+    );
+}

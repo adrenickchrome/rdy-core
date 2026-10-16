@@ -53,3 +53,26 @@ fn cmcp1_code_path_with_ids_is_e_bad_input() {
     let bad = c.call("rdy_brief", json!({"code_path": "../a.rs"}));
     assert_eq!(bad.code(), Some("E_BAD_INPUT"), "{bad:?}");
 }
+
+/// `.rdy.yaml` is mandatory in a session that is already open (final review, fix round 1): a code
+/// briefing with it missing is an error, never a successful briefing with no repos; restored,
+/// the repo comes back.
+#[test]
+fn cmcp1_a_missing_project_config_is_an_error_in_an_open_session() {
+    let (s, _sp, g) = served_with_code();
+    let mut c = McpClient::start_proxy(&s);
+    let r = c.call("rdy_session", json!({"actor": "agent:m", "role": "writer"}));
+    assert!(r.code().is_none(), "{:?}", r.ok());
+    let b = c.call("rdy_brief", json!({"code_path": "src/a.rs"})).ok();
+    assert_eq!(b["code"]["repos"], json!([g.configured()]), "{b}");
+
+    let config = s.dir.path().join(".rdy.yaml");
+    let aside = s.dir.path().join("rdy.yaml.aside");
+    std::fs::rename(&config, &aside).unwrap();
+    let e = c.call("rdy_brief", json!({"code_path": "src/a.rs"}));
+    assert_eq!(e.code(), Some("E_NO_PROJECT"), "{e:?}");
+
+    std::fs::rename(&aside, &config).unwrap();
+    let b = c.call("rdy_brief", json!({"code_path": "src/a.rs"})).ok();
+    assert_eq!(b["code"]["repos"], json!([g.configured()]), "{b}");
+}
