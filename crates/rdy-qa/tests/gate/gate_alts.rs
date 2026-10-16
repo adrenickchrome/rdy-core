@@ -139,7 +139,7 @@ fn altg1_land_rechecks_the_set_at_approval() {
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
     assert_eq!(
-        e.code, E_ALT_MEMBER,
+        e.code, E_VIEW_CLOSED,
         "the set was chosen between propose and approve"
     );
     // a view that joins a set after proposing must propose again
@@ -168,7 +168,7 @@ fn altg1_land_rechecks_the_set_at_approval() {
         .propose_with(&writer(), "late2", "q", None, None, Some(&pick(&u, "q")))
         .unwrap();
     r.alt_abandon(&writer(), &u, "no").unwrap();
-    assert_eq!(r.land(&approver(), &p2.id).unwrap_err().code, E_ALT_MEMBER);
+    assert_eq!(r.land(&approver(), &p2.id).unwrap_err().code, E_VIEW_CLOSED);
 }
 
 /// Canon with a seeded section; view a creates claim `alt A` and view b creates claim `alt B`,
@@ -211,10 +211,10 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
         .unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
-    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
-    assert!(
-        e.message
-            .contains("is chosen; this proposal can no longer land"),
+    assert_eq!(e.code, E_VIEW_CLOSED, "{}", e.message);
+    assert_eq!(
+        e.message,
+        format!("{} was withdrawn when view \"b\" closed", pb.r#ref),
         "{}",
         e.message
     );
@@ -243,10 +243,10 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_the_set_is_abandoned() 
         .id;
     r.alt_abandon(&writer(), &set, "neither").unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
-    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
-    assert!(
-        e.message
-            .contains("is abandoned; this proposal can no longer land"),
+    assert_eq!(e.code, E_VIEW_CLOSED, "{}", e.message);
+    assert_eq!(
+        e.message,
+        format!("{} was withdrawn when view \"b\" closed", pb.r#ref),
         "{}",
         e.message
     );
@@ -1318,4 +1318,138 @@ fn msw20_a_losers_own_refine_of_the_choice_decision_does_not_release_it() {
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert!(e.message.contains(&dec), "{}", e.message);
     assert!(!canon_bodies(&r).iter().any(|x| x == "B2"));
+}
+
+/// D-K0SS1: the landing that chooses a member closes the losing members, and withdraws their
+/// versions the same way.
+#[test]
+fn vw1_a_losing_members_version_reads_withdrawn_after_the_choosing_landing() {
+    let (_d, mut r) = project();
+    let set = setup(&mut r);
+    let pa = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    let pb = r
+        .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
+        .unwrap();
+    r.land(&approver(), &pa.id).unwrap();
+    let s = r.read().proposal_show(&pb.r#ref).unwrap();
+    assert_eq!(s.state, "withdrawn");
+    assert_eq!(s.blocking, vec!["withdrawn (view b closed)".to_string()]);
+    assert!(
+        r.read()
+            .open_proposals()
+            .unwrap()
+            .iter()
+            .all(|(pref, _)| pref.to_string() != pb.r#ref),
+        "pb leaves the open proposals"
+    );
+}
+
+/// Canon with one section; members a ("alt A") and b ("alt B") each wrote a claim before set
+/// T {x: a, y: b} was written through the store, and view d is a fork of a. With `alias`, a
+/// blob chunk with the set version's bytes was written before both claims. Returns the set's
+/// stable id and a's change.
+fn set_after_a_blob(alias: bool) -> (tempfile::TempDir, Rdy, Hash, Hash) {
+    use rdy_model::{AltMember, AltSet, AltStatus, Provenance, Role};
+    use rdy_store::Store;
+    let (d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    r.close().unwrap();
+    let store = d.path().join(".rdy/store");
+    let set = AltSet {
+        stable: None,
+        prev: None,
+        title: "T".into(),
+        question: None,
+        members: vec![
+            AltMember {
+                label: "x".into(),
+                view: "a".into(),
+            },
+            AltMember {
+                label: "y".into(),
+                view: "b".into(),
+            },
+        ],
+        status: AltStatus::Open,
+        provenance: Provenance {
+            actor: "agent:w".into(),
+            run: Some("r".into()),
+            role: Role::Writer,
+            at_ms: 7,
+        },
+    };
+    let bytes = postcard::to_allocvec(&set).unwrap();
+    if alias {
+        let mut s = Store::open(&store).unwrap();
+        s.put_blob(&bytes).unwrap();
+    }
+    let mut r = Rdy::open(d.path()).unwrap();
+    let a = claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    r.close().unwrap();
+    let mut s = Store::open(&store).unwrap();
+    let stable = s.put_alt_set(&set).unwrap();
+    assert_eq!(
+        stable,
+        Hash::of(&bytes),
+        "the blob chunk holds the set's bytes"
+    );
+    drop(s);
+    let mut r = Rdy::open(d.path()).unwrap();
+    r.view_fork(&writer(), "a", "d").unwrap();
+    (d, r, stable, a.parse().unwrap())
+}
+
+/// The member set `stable` binds change `a` to, and the refusal of a's change proposed and
+/// landed from view d, which is no member and names no choice.
+fn a_from_d(r: &mut Rdy, stable: &Hash, a: &Hash) -> (Option<String>, &'static str) {
+    let bound = r.read().coord_heads().alt_binds[stable]
+        .bound
+        .get(a)
+        .cloned();
+    let e = r
+        .propose(&writer(), "d", "d", None)
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert!(!canon_bodies(r).iter().any(|b| b == "alt A"));
+    (bound, e.code)
+}
+
+/// Guard (final fix round 1, the control of the next test): a's change, written before the
+/// set, is bound to a, so it does not land from view d.
+#[test]
+fn msw20_a_members_pre_set_change_from_a_fork_is_refused() {
+    let (_d, mut r, stable, a) = set_after_a_blob(false);
+    assert_eq!(
+        a_from_d(&mut r, &stable, &a),
+        (Some("a".into()), E_ALT_MEMBER)
+    );
+}
+
+/// Final fix round 1 (F2): a member's holdings at a set version are read at the version's
+/// `ALT_SET` frame, never at an earlier blob chunk with its bytes. a's change is bound to a and
+/// does not land from view d: as written, after a reindex, and after a dump and a load.
+#[test]
+fn msw20_a_blob_with_a_set_versions_bytes_does_not_move_its_members_holdings() {
+    let (d, mut r, stable, a) = set_after_a_blob(true);
+    let want = (Some("a".to_string()), E_ALT_MEMBER);
+    assert_eq!(a_from_d(&mut r, &stable, &a), want, "as written");
+    r.reindex().unwrap();
+    assert_eq!(a_from_d(&mut r, &stable, &a), want, "after a reindex");
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    drop(d);
+    let to = scratch.path().join("loaded");
+    rdy_engine::load::load(&file, &to).unwrap();
+    let mut r = Rdy::open(&to).unwrap();
+    assert_eq!(
+        a_from_d(&mut r, &stable, &a),
+        want,
+        "after a dump and a load"
+    );
 }

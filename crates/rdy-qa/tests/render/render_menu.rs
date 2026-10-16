@@ -143,6 +143,19 @@ fn sr8_an_empty_list_says_none_open() {
     assert_eq!(html.matches("<ul class=\"vmenu-list\">").count(), 1);
 }
 
+/// D-K0SS1: closing a view withdraws its proposal, which leaves the version menu; the key moves.
+#[test]
+fn vw1_a_closed_views_proposal_leaves_the_version_menu() {
+    let (_d, mut r, _p) = proposed();
+    let before = menu_key(&r.read(), 0);
+    r.view_close(&writer(), &["editing".into()], "done")
+        .unwrap();
+    let st = r.read();
+    let m = menu(&st, &mut |s| docs_changed(&st, s)).unwrap();
+    assert!(m.proposals.is_empty(), "{:?}", labels(&m.proposals));
+    assert_ne!(menu_key(&st, 0), before);
+}
+
 #[test]
 fn sr8_the_menu_has_no_call_to_action() {
     let (_d, r, _p) = proposed();

@@ -4,7 +4,7 @@
 
 use crate::gate::{
     RelayedByRow, blocking_conflicts, changes_of, landed_as, latest_version, resolve_in,
-    version_number,
+    version_number, withdrawn,
 };
 use crate::semantic::accept_advice::advised_digest;
 use crate::session::rfc3339;
@@ -59,6 +59,7 @@ pub struct ProposalShow {
     /// Canon's head when this version was written.
     pub canon_at: Option<String>,
     /// `landed` if any of its changes landed, else `superseded` if a newer version exists, else
+    /// `withdrawn` if its view closed after it was written or is closed now (D-K0SS1), else
     /// `open`.
     pub state: String,
     /// The landing that carried this version, when `state` is `landed`.
@@ -148,6 +149,8 @@ impl ReadState {
             ("landed", Some(l))
         } else if pref.version != latest {
             ("superseded", None)
+        } else if withdrawn(self, &pref.version, &p)? {
+            ("withdrawn", None)
         } else {
             ("open", None)
         };
@@ -179,6 +182,9 @@ impl ReadState {
         }
         if let Some(l) = &landing {
             blocking.push(format!("landed in {}", l.short()));
+        }
+        if state == "withdrawn" {
+            blocking.push(format!("withdrawn (view {} closed)", p.view));
         }
         if !conflicts.is_empty() {
             blocking.push(format!(
@@ -281,6 +287,10 @@ pub fn proposal_text(v: &Value) -> String {
     ));
     match v["state"].as_str().unwrap_or("") {
         "landed" => out.push_str(&format!("state: landed in {}\n", first12(&v["landing"]))),
+        "withdrawn" => out.push_str(&format!(
+            "state: withdrawn (view {} closed)\n",
+            s(&v["view"])
+        )),
         state => out.push_str(&format!("state: {state}\n")),
     }
     let changes = v["changes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -420,6 +430,34 @@ mod tests {
             t.ends_with("approve with: rdy approve P-111111111111@2\n"),
             "{t}"
         );
+    }
+
+    /// D-K0SS1: a version whose view closed reads `withdrawn (view <name> closed)`, says so on
+    /// its blocking line, and offers no approve command.
+    #[test]
+    fn vw1_proposal_text_shows_a_withdrawn_version_and_no_approve_line() {
+        let h = |c: char| c.to_string().repeat(64);
+        let v = json!({
+            "ref": "P-111111111111@2", "id": h('2'), "stable": h('1'), "version": 2,
+            "title": "Pins", "summary": "Pins record content.", "view": "v",
+            "proposed_by": {"actor": "agent:a", "run": "r1"}, "proposed_at": "2026-10-06T10:00:00Z",
+            "canon_at": null, "state": "withdrawn", "landing": null,
+            "changes": [
+                {"change": h('3'), "message": "pin content", "blocks": 2},
+                {"change": h('4'), "message": "", "blocks": 1}
+            ],
+            "blocks": 3,
+            "conflicts": [],
+            "blocking": ["withdrawn (view v closed)"],
+            "versions": [
+                {"ref": "P-111111111111@1", "id": h('1'), "latest": false, "landed": false},
+                {"ref": "P-111111111111@2", "id": h('2'), "latest": true, "landed": false}
+            ]
+        });
+        let t = proposal_text(&v);
+        assert!(t.contains("state: withdrawn (view v closed)\n"), "{t}");
+        assert!(t.ends_with("blocking: withdrawn (view v closed)\n"), "{t}");
+        assert!(!t.contains("approve with:"), "{t}");
     }
 
     /// D-WMCFW: `rdy show P-x@n` names each advised tension after the blocking line, marks an

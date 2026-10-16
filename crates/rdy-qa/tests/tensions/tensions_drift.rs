@@ -608,3 +608,164 @@ fn cc7_kept_canon_steps_equal_a_fresh_read_through_a_revert() {
     let fresh = rdy_engine::Rdy::open(d.path()).expect("open");
     assert_eq!(canon_drifts(&fresh), warm, "a fresh handle reads the same");
 }
+
+/// POST-LAUNCH 43 (Task 4): the clock values the `vw4_` tests pin before every landing, so each
+/// landing of a scenario is stamped in the same millisecond. The canon form orders landings by
+/// their place in the log, so every value gives the same answer.
+const VW4_CLOCKS: [i64; 16] = [
+    0,
+    1,
+    1_000,
+    86_400_000,
+    1_760_000_000_000,
+    1_760_000_000_001,
+    1_760_000_007_919,
+    1_760_000_104_729,
+    1_791_190_800_000,
+    1_791_190_812_345,
+    1_800_000_000_000,
+    1_900_000_000_000,
+    2_000_000_000_000,
+    2_000_000_000_003,
+    2_100_000_000_000,
+    4_000_000_000_000,
+];
+
+/// Lands `view` with this thread's clock pinned at `t` for the landing.
+fn land_at(r: &mut rdy_engine::Rdy, view: &str, t: i64) {
+    let _clock = rdy_engine::pin_clock(t);
+    land(r, view).unwrap();
+}
+
+/// `world`, with the seed landed at `t`.
+fn world_at(
+    t: i64,
+) -> (
+    tempfile::TempDir,
+    rdy_engine::Rdy,
+    rdy_model::BlockId,
+    rdy_model::BlockId,
+) {
+    let (d, mut r) = project();
+    let w = put(&mut r, "seed", seed_ops());
+    land_at(&mut r, "seed", t);
+    (d, r, created(&w, "$x"), created(&w, "$y"))
+}
+
+/// POST-LAUNCH 43: `cc7_a_later_landing_that_edits_x_keeps_the_canon_drift` with every landing
+/// in one millisecond. The landings keep their log order, so the drift stays.
+#[test]
+fn vw4_a_later_landing_in_the_same_millisecond_keeps_the_canon_drift() {
+    for t in VW4_CLOCKS {
+        let (_d, mut r, x, y) = world_at(t);
+        put(&mut r, "a", upd(&x, EDITED));
+        land_at(&mut r, "a", t);
+        assert_eq!(drifts_between(&r, &x, &y), 1, "landed (clock {t})");
+        put(
+            &mut r,
+            "b",
+            upd(&x, &format!("{EDITED} Owners may silence it.")),
+        );
+        land_at(&mut r, "b", t);
+        assert_eq!(drifts_between(&r, &x, &y), 1, "x moved on (clock {t})");
+        let tension = one_involving(&r, TensionKind::RestatementDrift, &x);
+        assert!(tension.blocks().contains(&y), "clock {t}");
+        assert!(
+            has_canon(&tension) && change_sides(&tension).is_empty(),
+            "clock {t}: {tension:#?}"
+        );
+    }
+}
+
+/// POST-LAUNCH 43: `cc7_a_younger_x_drifts_from_its_first_text_in_canon` with every landing in
+/// one millisecond.
+#[test]
+fn vw4_a_younger_x_in_the_same_millisecond_drifts_from_its_first_text() {
+    for t in VW4_CLOCKS {
+        let (_d, mut r) = project();
+        let w = put(
+            &mut r,
+            "seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$y", "parent": "$e", "body": format!("In short: {SAID}")}
+            ]),
+        );
+        land_at(&mut r, "seed", t);
+        let (e, y) = (created(&w, "$e"), created(&w, "$y"));
+        let w = put(
+            &mut r,
+            "later",
+            json!([{"op": "create", "type": "prose", "id": "$x", "parent": e.to_string(), "body": SAID}]),
+        );
+        land_at(&mut r, "later", t);
+        let x = created(&w, "$x");
+        assert!(
+            of_kind(&r, TensionKind::RestatementDrift).is_empty(),
+            "clock {t}"
+        );
+        put(&mut r, "a", upd(&x, EDITED));
+        land_at(&mut r, "a", t);
+        assert_eq!(drifts_between(&r, &x, &y), 1, "first edit (clock {t})");
+        put(
+            &mut r,
+            "b",
+            upd(&x, &format!("{EDITED} Owners may silence it.")),
+        );
+        land_at(&mut r, "b", t);
+        assert_eq!(drifts_between(&r, &x, &y), 1, "second edit (clock {t})");
+    }
+}
+
+/// POST-LAUNCH 43: `cc7_kept_canon_steps_equal_a_fresh_read_through_a_revert` with every landing
+/// in one millisecond: the warm read and a fresh handle both hold the drift.
+#[test]
+fn vw4_kept_canon_steps_equal_a_fresh_read_through_a_revert_in_one_millisecond() {
+    const A: &str = "Every job retries for five seconds and then reports a failure to the owner.";
+    const B: &str = "Every job retries for ten seconds and then reports a failure to the owner.";
+    const C: &str = "Each task waits a minute before the scheduler service starts it again later.";
+    for t in VW4_CLOCKS {
+        let (d, mut r) = project();
+        let w = put(
+            &mut r,
+            "seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$x", "parent": "$d", "body": A},
+                {"op": "create", "type": "prose", "id": "$z", "parent": "$d",
+                 "body": "The weekly report lists every open incident with its owner and its status."}
+            ]),
+        );
+        land_at(&mut r, "seed", t);
+        let x = created(&w, "$x");
+        let doc = w.created["$d"].clone();
+        let step = |r: &mut rdy_engine::Rdy, view: &str, ops: serde_json::Value| {
+            put(r, view, ops);
+            land_at(r, view, t);
+            canon_drifts(r);
+        };
+        canon_drifts(&r);
+        step(&mut r, "b", upd(&x, B));
+        step(
+            &mut r,
+            "y",
+            json!([{"op": "create", "type": "prose", "parent": doc, "body": format!("In short: {B}")}]),
+        );
+        step(&mut r, "back", upd(&x, A));
+        step(&mut r, "c", upd(&x, C));
+        let warm = canon_drifts(&r);
+        assert_eq!(
+            warm.len(),
+            1,
+            "x changed the text y restates (clock {t}): {warm:?}"
+        );
+        assert!(warm[0].contains(&x), "clock {t}");
+        drop(r);
+        let fresh = rdy_engine::Rdy::open(d.path()).expect("open");
+        assert_eq!(
+            canon_drifts(&fresh),
+            warm,
+            "a fresh handle reads the same (clock {t})"
+        );
+    }
+}

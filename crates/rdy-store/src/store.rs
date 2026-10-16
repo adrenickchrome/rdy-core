@@ -1642,6 +1642,16 @@ impl StoreReader {
         self.get_named(kinds::LANDING, "landing", h)
     }
 
+    /// Where the log holds landing `h`: an index lookup that reads no frame. A landing is written
+    /// after the landing it follows (its `prev`), and dump, load and reindex keep the log order,
+    /// so these order canon's landings as the chain does. Two landings never share one; the
+    /// clock plays no part.
+    pub fn landing_location(&self, h: &Hash) -> Result<Location, StoreError> {
+        self.index()
+            .typed(kinds::LANDING, h)?
+            .ok_or(StoreError::NotFound(*h))
+    }
+
     /// Whether an object of `kind` with hash `h` is stored: an index lookup that reads no frame.
     pub fn has_kind(&self, kind: u8, h: &Hash) -> Result<bool, StoreError> {
         Ok(self.index().typed(kind, h)?.is_some())

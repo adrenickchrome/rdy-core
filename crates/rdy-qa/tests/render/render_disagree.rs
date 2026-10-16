@@ -184,6 +184,76 @@ fn sg9_a_drifted_restatement_lists_the_restating_page_first() {
     assert!(list[0][1].starts_with("Jobs"), "the edited page: {page}");
 }
 
+/// POST-LAUNCH 47 (Task 4): `sg9_a_drifted_restatement_lists_the_restating_page_first` with both
+/// landings stamped in one millisecond, for each of 16 clock values. The edit lands after the
+/// seed in the log, so the drift is listed whatever the clock reads.
+#[test]
+fn vw4_a_drifted_restatement_in_one_millisecond_lists_the_restating_page_first() {
+    const SAID: &str =
+        "Every job retries for five seconds and then reports a failure to the owner.";
+    const CLOCKS: [i64; 16] = [
+        0,
+        1,
+        1_000,
+        86_400_000,
+        1_760_000_000_000,
+        1_760_000_000_001,
+        1_760_000_007_919,
+        1_760_000_104_729,
+        1_791_190_800_000,
+        1_791_190_812_345,
+        1_800_000_000_000,
+        1_900_000_000_000,
+        2_000_000_000_000,
+        2_000_000_000_003,
+        2_100_000_000_000,
+        4_000_000_000_000,
+    ];
+    let land_at = |r: &mut Rdy, view: &str, t: i64| {
+        let _clock = rdy_engine::pin_clock(t);
+        land(r, view).unwrap();
+    };
+    for t in CLOCKS {
+        let (_d, mut r) = project();
+        let w = put(
+            &mut r,
+            "seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$x", "parent": "$d", "body": SAID},
+                {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$y", "parent": "$e", "body": format!("In short: {SAID}")}
+            ]),
+        );
+        land_at(&mut r, "seed", t);
+        put(
+            &mut r,
+            "edit",
+            upd(
+                &created(&w, "$x"),
+                "Every job retries for ten seconds and then reports a failure to the owner.",
+            ),
+        );
+        land_at(&mut r, "edit", t);
+        let out = render(&r, &Scope::Canon);
+        let page = read(out.path(), "disagreements.html");
+        assert!(
+            page.contains("This page restates a point that has since changed."),
+            "clock {t}: {page}"
+        );
+        let list = entries(&page);
+        assert_eq!(list.len(), 1, "clock {t}: {page}");
+        assert!(
+            list[0][0].starts_with("Ops"),
+            "the restating page (clock {t}): {page}"
+        );
+        assert!(
+            list[0][1].starts_with("Jobs"),
+            "the edited page (clock {t}): {page}"
+        );
+    }
+}
+
 #[test]
 fn sg9_no_disagreement_no_page() {
     let (_d, mut r) = project();

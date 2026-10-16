@@ -10,7 +10,7 @@ use rdy_model::{ActorRun, Answer, AnswerAct, BlockId, EvidenceKind, RelayEvidenc
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::{land, version_of, write, writer};
 use rdy_qa::intake::*;
-use rdy_qa::tensions::{created, open, put, upd};
+use rdy_qa::tensions::{ag, created, open, put, upd};
 use rdy_render::render_site;
 use serde_json::json;
 use std::path::Path;
@@ -395,6 +395,42 @@ fn di6_a_blocking_tension_that_no_open_proposal_holds_is_no_item() {
     // a premise shift whose decision no open proposal carries
     let (_d, r, _b) = batch_project();
     let q = queue(&r, None);
+    assert!(q.items.iter().all(|i| !i.blocking), "{:?}", refs(&q));
+}
+
+/// D-K0SS1: closing the batch's view withdraws its version: its card, its confirm items and
+/// the resolve items of its blocking tensions leave the queue.
+#[test]
+fn vw1_closing_the_batch_view_takes_its_card_and_blocking_items_out_of_the_queue() {
+    let (_d, mut r, b, labels) = blocking_on_the_batch();
+    let q = queue(&r, None);
+    assert!(
+        find(&q, &b.r#ref).is_some() || q.not_ready.iter().any(|n| n.r#ref == b.r#ref),
+        "{:?} {:#?}",
+        refs(&q),
+        q.not_ready
+    );
+    for l in &labels {
+        assert!(find(&q, l).is_some(), "{l} in {:?}", refs(&q));
+    }
+    r.view_close(&ag(BATCH_VIEW), &[BATCH_VIEW.into()], "done")
+        .unwrap();
+    let q = queue(&r, None);
+    assert!(
+        q.items
+            .iter()
+            .all(|i| i.r#ref != b.r#ref && i.batch.as_deref() != Some(b.r#ref.as_str())),
+        "{:?}",
+        refs(&q)
+    );
+    assert!(
+        q.not_ready.iter().all(|n| n.r#ref != b.r#ref),
+        "{:#?}",
+        q.not_ready
+    );
+    for l in &labels {
+        assert!(find(&q, l).is_none(), "{l} in {:?}", refs(&q));
+    }
     assert!(q.items.iter().all(|i| !i.blocking), "{:?}", refs(&q));
 }
 

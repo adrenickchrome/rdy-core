@@ -41,20 +41,7 @@ fn serve1_a_ctl_session_must_open_with_the_session_op() {
     let h = Hosted::new();
     let rt = Hosted::rt();
     rt.block_on(async {
-        let hello = Hello {
-            rdy: PROTO_VERSION,
-            version: "t".into(),
-            proto: Proto::Ctl,
-            cwd: h.dir.path().into(),
-            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&h.dir.path()))
-                .project_id()
-                .expect("the project's .rdy"),
-        };
-        let rdy_daemon::Attempt::Ready(mut c) =
-            connect(&RunDir::of_project(h.dir.path()), &hello).await
-        else {
-            panic!("not ready")
-        };
+        let mut c = h.connect(Proto::Ctl).await;
         let e = c.ctl("status", json!({})).await.unwrap_err();
         assert_eq!(e.code, E_NO_SESSION);
         let v = c
@@ -403,20 +390,7 @@ fn hd3_the_session_op_gets_a_did_you_mean_for_a_misspelt_key() {
     let h = Hosted::new();
     let rt = Hosted::rt();
     rt.block_on(async {
-        let hello = Hello {
-            rdy: PROTO_VERSION,
-            version: "t".into(),
-            proto: Proto::Ctl,
-            cwd: h.dir.path().into(),
-            project: rdy_daemon::RunDir::of_project(std::path::Path::new(&h.dir.path()))
-                .project_id()
-                .expect("the project's .rdy"),
-        };
-        let rdy_daemon::Attempt::Ready(mut c) =
-            connect(&RunDir::of_project(h.dir.path()), &hello).await
-        else {
-            panic!("not ready")
-        };
+        let mut c = h.connect(Proto::Ctl).await;
         // the first request after the hello: {"id":1,"op":"session","args":{"actr":"agent:x"}}
         let e = c
             .ctl("session", json!({"actr": "agent:x"}))

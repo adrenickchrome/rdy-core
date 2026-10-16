@@ -7,6 +7,7 @@ use rdy_model::{
     Role,
 };
 use rdy_store::StoreReader;
+use rdy_store::segment::Location;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -130,13 +131,14 @@ fn justification(j: &Justification) -> JustificationInfo {
     }
 }
 
-/// One version of a canon block (restatement drift, FW-CH2): the version, the landing
-/// (`at_ms`, landing id) that carried it (`None` when unknown), and the version before it
-/// (`None` after a create).
+/// One version of a canon block (restatement drift, FW-CH2): the version, where the log holds
+/// the landing that carried it (`None` when its change has not landed), and the version before
+/// it (`None` after a create). Landings compare by their place in the log, which is the canon
+/// chain's order, never by the approver's clock (POST-LAUNCH 43).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionStep {
     pub version: Hash,
-    pub landed_at: Option<(i64, String)>,
+    pub landed_at: Option<Location>,
     pub base: Option<Hash>,
 }
 
@@ -226,16 +228,20 @@ impl<'a> Memo<'a> {
         Ok(ch)
     }
 
+    /// The landing that carried change `c`, when it landed.
+    fn landing_id(&mut self, c: &Hash) -> Result<Option<Hash>, RdyError> {
+        if let Some(h) = self.landed.get(c) {
+            return Ok(*h);
+        }
+        let h = self.reader.landing_of(c)?;
+        self.landed.insert(*c, h);
+        Ok(h)
+    }
+
     fn landing(&mut self, c: &Hash) -> Result<Option<LandingRef>, RdyError> {
-        let h = match self.landed.get(c) {
-            Some(h) => *h,
-            None => {
-                let h = self.reader.landing_of(c)?;
-                self.landed.insert(*c, h);
-                h
-            }
+        let Some(h) = self.landing_id(c)? else {
+            return Ok(None);
         };
-        let Some(h) = h else { return Ok(None) };
         if let Some(l) = self.landings.get(&h) {
             return Ok(Some(l.clone()));
         }
@@ -300,9 +306,13 @@ impl<'a> Memo<'a> {
         Ok((entry, prev))
     }
 
-    /// The (`at_ms`, landing id) of the landing that carried change `c`, when it landed.
-    fn landed_at(&mut self, c: &Hash) -> Result<Option<(i64, String)>, RdyError> {
-        Ok(self.landing(c)?.map(|l| (l.at_ms, l.id)))
+    /// Where the log holds the landing that carried change `c`, when it landed: canon's order,
+    /// never the clock (POST-LAUNCH 43).
+    fn landed_at(&mut self, c: &Hash) -> Result<Option<Location>, RdyError> {
+        let Some(h) = self.landing_id(c)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.reader.landing_location(&h)?))
     }
 
     /// The step for `version` of `id` and the change that wrote it there, never one in `used`

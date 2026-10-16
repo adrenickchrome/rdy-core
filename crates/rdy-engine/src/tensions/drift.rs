@@ -28,6 +28,7 @@ use super::{DetectCx, DetectScope, Detector, Found, TensionKind, Write};
 use crate::RdyError;
 use rdy_model::{Block, BlockId, Hash, decision};
 use rdy_schema::{Pack, Trait};
+use rdy_store::segment::Location;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -41,8 +42,9 @@ const SUBSTRING_FILTER_MAX: usize = 32;
 /// This kind's detector.
 pub struct RestatementDrift;
 
-/// A landing's (`at_ms`, landing id); `None` sorts before every landing.
-type LandedAt = Option<(i64, String)>;
+/// Where the log holds a landing: canon's order, never the clock (POST-LAUNCH 43); `None`
+/// sorts before every landing.
+type LandedAt = Option<Location>;
 
 /// A body as drift reads it: its word count and its shingles, sorted, each once.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -701,12 +703,12 @@ impl RestatementDrift {
             let s = steps.current(&b.id)?;
             let (c, step) = (s.0, &s.1);
             if text_of_len(&b.body) >= DRIFT_MIN_WORDS {
-                landings.push(step.landed_at.clone());
+                landings.push(step.landed_at);
             }
             if let Some(base) = step.base {
-                edited.push((b.id.clone(), c, step.landed_at.clone(), base));
+                edited.push((b.id.clone(), c, step.landed_at, base));
             }
-            newest.insert(b.id.clone(), step.landed_at.clone());
+            newest.insert(b.id.clone(), step.landed_at);
         }
         landings.sort();
         // no y can be older than the oldest landing among them

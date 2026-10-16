@@ -571,9 +571,41 @@ pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, Rd
     Ok(None)
 }
 
+/// Whether proposal version `version` (`p`) is withdrawn (D-K0SS1): its view is closed now, or
+/// the view was closed when the log took the version's `PROPOSAL` frame (a record from before
+/// R2), or the view's chain took a close after that frame (`closed_after`, from the head this
+/// state holds). An undo of the close reopens the view, never the version. The caller
+/// has checked that the version is its proposal's latest and has not landed. A view with no head
+/// in the state is not closed, and its versions are not withdrawn.
+pub(crate) fn withdrawn(st: &ReadState, version: &Hash, p: &Proposal) -> Result<bool, RdyError> {
+    let Some(head) = st.view_head(&p.view) else {
+        return Ok(false);
+    };
+    if head.closed {
+        return Ok(true);
+    }
+    Ok(st
+        .reader()
+        .closed_after(&p.view, &head.head, rdy_store::kinds::PROPOSAL, version)?)
+}
+
+/// The refusal of an approval, a landing or an advice acceptance of version `pref`, which a close
+/// of view `view` withdrew (D-K0SS1).
+pub(crate) fn withdrawn_error(pref: &ProposalRef, view: &str) -> RdyError {
+    RdyError::new(
+        E_VIEW_CLOSED,
+        format!("{pref} was withdrawn when view {view:?} closed"),
+        format!(
+            "reopen the view with rdy undo --view {view} <close op> (rdy view show {view} lists the ops), then propose again"
+        ),
+    )
+}
+
 /// The latest version of view `view`'s open proposal, read from its one `open/<view>` ref; `None`
-/// when the view has none or its latest version has landed. It reads no other proposal and counts
-/// no versions, so its cost does not grow with the proposals of other views or with history.
+/// when the view has none, or its latest version has landed or is withdrawn (D-K0SS1: after an
+/// undo of the close, the old version does not carry the view's changes). It reads no other
+/// proposal and counts no versions, so its cost does not grow with the proposals of other views
+/// or with history.
 pub(crate) fn open_proposal_of_view(
     st: &ReadState,
     view: &str,
@@ -587,13 +619,17 @@ pub(crate) fn open_proposal_of_view(
     let stable = ref_hash(&b, "an open ref")?;
     let latest = latest_version(st, &stable)?;
     let p = st.reader().proposal(&latest)?;
-    Ok(landed_as(st, &p)?.is_none().then_some(p))
+    if landed_as(st, &p)?.is_some() || withdrawn(st, &latest, &p)? {
+        return Ok(None);
+    }
+    Ok(Some(p))
 }
 
 /// Every open proposal at its latest version: each `open/<view>` ref whose latest version has
-/// not landed, sorted by the ref's text (`P-<stable short>@<n>`). It reads the store's open
-/// proposal refs only, never the empty ref each landed view leaves (final review fix round 1,
-/// R5), so its cost follows the open proposals, not the project's history.
+/// not landed and is not withdrawn (D-K0SS1), sorted by the ref's text (`P-<stable short>@<n>`).
+/// It reads the store's open proposal refs only, never the empty ref each landed view leaves
+/// (final review fix round 1, R5), so its cost follows the open proposals, not the project's
+/// history.
 pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposal)>, RdyError> {
     let mut open = vec![];
     for (_, b) in st.reader().open_proposal_refs()? {
@@ -603,7 +639,7 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
         let stable = ref_hash(&b, "an open ref")?;
         let latest = latest_version(st, &stable)?;
         let p = st.reader().proposal(&latest)?;
-        if landed_as(st, &p)?.is_some() {
+        if landed_as(st, &p)?.is_some() || withdrawn(st, &latest, &p)? {
             continue;
         }
         let pref = ProposalRef {
@@ -1841,6 +1877,10 @@ impl Rdy {
         }
         let st = self.read();
         crate::views::check_view_op(&st, s, view, Action::Propose)?;
+        // D-K0SS1 (R2): a closed view takes no proposal
+        if st.view_head(view).is_some_and(|h| h.closed) {
+            return Err(rdy_store::StoreError::ViewClosed(view.to_string()).into());
+        }
         let alternative = proposed_alt(&st, view, alternative)?;
         let included = st.included(view);
         if included.is_empty() {
@@ -2327,6 +2367,11 @@ impl Rdy {
         let latest = latest_version(&st, &pref.stable)?;
         if latest != pid {
             return Err(moved(&st, &pref, &latest, &p.view)?);
+        }
+        // D-K0SS1: a close of the version's view withdrew it; a losing member's version meets
+        // this before the alternative checks (R1)
+        if withdrawn(&st, &pid, &p)? {
+            return Err(withdrawn_error(&pref, &p.view));
         }
         // altg1: the set is re-checked at approval, before the base check, so a set an earlier
         // landing chose is reported as such

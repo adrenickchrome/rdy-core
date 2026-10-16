@@ -45,7 +45,9 @@ pub const E_LIMIT: &str = "E_LIMIT";
 pub const E_KEY_CLASH: &str = "E_KEY_CLASH";
 /// A view of that name exists.
 pub const E_VIEW_EXISTS: &str = "E_VIEW_EXISTS";
-/// The view is closed: it takes no commit, include or exclude.
+/// The view is closed: it takes no commit, include, exclude, undo (but the undo of its close)
+/// or propose; or an approval, a landing or an advice acceptance names a proposal version that a
+/// close of its view withdrew (D-K0SS1).
 pub const E_VIEW_CLOSED: &str = "E_VIEW_CLOSED";
 /// The proposal version named is not its latest.
 pub const E_PROPOSAL_MOVED: &str = "E_PROPOSAL_MOVED";
