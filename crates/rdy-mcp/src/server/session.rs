@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, ScopeParams, SessionParams, TagsParams};
+use crate::tools::{self, ScopeParams, SessionParams, TagParams, TagsParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = session_router, vis = "pub(crate)")]
@@ -26,5 +26,12 @@ impl RdyServer {
     )]
     async fn rdy_tags(&self, Parameters(p): Parameters<TagsParams>) -> CallToolResult {
         self.run("rdy_tags", p, tools::rdy_tags).await
+    }
+
+    #[tool(
+        description = "Name a landing (default: canon's head) as a version, e.g. v1.2.0, on the person's word. A tag is the person's act: ask them, then pass their words as evidence and your question. The tag records the person, and an answer records your relay. Every tag rule holds: the version is new and above the current one."
+    )]
+    async fn rdy_tag(&self, Parameters(p): Parameters<TagParams>) -> CallToolResult {
+        self.run("rdy_tag", p, tools::rdy_tag).await
     }
 }

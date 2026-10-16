@@ -102,8 +102,8 @@ pub use session::{
 };
 pub use tree_io::Diagnostic;
 pub use version::{
-    AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, VersionInfo, VersionPosition, VersionRef, ViewPosition,
-    parse_version,
+    AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, TagInfo, VersionInfo, VersionPosition, VersionRef,
+    ViewPosition, parse_version,
 };
 pub use view_query::{
     ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, ViewDetail, ViewSummary,

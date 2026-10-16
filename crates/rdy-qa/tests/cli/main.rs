@@ -26,5 +26,6 @@ mod cli_site;
 mod cli_state;
 mod cli_status_views;
 mod cli_suspects;
+mod cli_tag_relay;
 mod cli_tensions;
 mod cli_views;

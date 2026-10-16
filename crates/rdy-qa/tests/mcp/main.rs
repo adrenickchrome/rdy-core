@@ -34,6 +34,7 @@ mod mcp_search;
 mod mcp_search_brief;
 mod mcp_site;
 mod mcp_state;
+mod mcp_tag_relay;
 mod mcp_tensions;
 mod mcp_view_brief;
 mod mcp_views;

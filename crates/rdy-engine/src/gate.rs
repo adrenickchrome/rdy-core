@@ -1,4 +1,5 @@
 use crate::alt::{AltPick, alt_label};
+use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
 use crate::session::rfc3339;
@@ -9,8 +10,8 @@ use crate::views::{
 };
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{
-    AltChoice, AltSet, AltStatus, ApprovalEvidence, Block, BlockId, Change, ChangeLinks,
-    EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
+    ActorRun, AltChoice, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence, Block, BlockId,
+    Change, ChangeLinks, EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
 };
 use rdy_schema::{Issue, Severity, validate_block, validate_prefix};
 use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
@@ -88,6 +89,12 @@ pub struct ProposalInfo {
     /// after the write, off the writer, and joins the reply in `propose_and_report`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_error: Option<String>,
+    /// The agent that relayed the person's proposal of their own view (`propose_as`, O32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<ActorRun>,
+    /// The hash of the `ANSWER` that holds that relay, written with the version (O14).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -1724,6 +1731,76 @@ impl Rdy {
         summary: Option<&str>,
         alternative: Option<&AltPick>,
     ) -> Result<ProposalInfo, RdyError> {
+        self.propose_relayed(s, view, title, changes, summary, alternative, None)
+    }
+
+    /// `propose_with` on the person's word (O32, C3, D-KQ4CA), under the relay table
+    /// (`answer::relay::relayed`, D-HA7YZ). `person` is the project's human actor, from the
+    /// caller (O18); `implicit` is true over MCP, where the session is the relay. The cases,
+    /// closed:
+    /// - a human session with no relay: `propose_with` as the session;
+    /// - a relay of a view the person owns, or of the person's default `work`: `propose_with` as
+    ///   the person (the version's `provenance`), and an `ANSWER` (act `propose`, item
+    ///   `propose:<view>`, `targets` the version, evidence `text`) in the version's batch (O14);
+    /// - a relay of any other view: today's ownership rule for the session (`check_view_op`),
+    ///   and a view the session may propose itself is refused (a relay proposes the person's
+    ///   view only);
+    /// - any other case is the table's refusal, in the answer's words (O19).
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_as(
+        &mut self,
+        s: &Session,
+        person: &str,
+        relay: &RelayInput,
+        implicit: bool,
+        view: &str,
+        title: &str,
+        changes: Option<&[String]>,
+        summary: Option<&str>,
+        alternative: Option<&AltPick>,
+    ) -> Result<ProposalInfo, RdyError> {
+        let (who, relay) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
+        let Some(relay) = relay else {
+            return self.propose_with(s, view, title, changes, summary, alternative);
+        };
+        let st = self.read();
+        let persons = view == "work"
+            || st
+                .view_head(view)
+                .and_then(|h| h.owner.as_ref())
+                .is_some_and(|o| o.actor == person);
+        if !persons {
+            crate::views::check_view_op(&st, s, view, Action::Propose)?;
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("view {view:?} is not the person's: a relay proposes only their view"),
+                "drop the relay to propose your own view",
+            ));
+        }
+        drop(st);
+        self.propose_relayed(
+            &who,
+            view,
+            title,
+            changes,
+            summary,
+            alternative,
+            Some(relay),
+        )
+    }
+
+    /// `propose_with` as `s`, with the person's relay when `s` is the person (`propose_as`).
+    #[allow(clippy::too_many_arguments)]
+    fn propose_relayed(
+        &mut self,
+        s: &Session,
+        view: &str,
+        title: &str,
+        changes: Option<&[String]>,
+        summary: Option<&str>,
+        alternative: Option<&AltPick>,
+        relay: Option<Relay>,
+    ) -> Result<ProposalInfo, RdyError> {
         if !s.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -1950,28 +2027,48 @@ impl Rdy {
             set: alt_label(&a.set),
             member: a.member.clone(),
         });
-        let (id, stable, n) = match open {
-            Some((stable, latest)) => {
-                let id = self.store.propose_next(
-                    &latest,
-                    ids,
-                    title,
-                    summary,
-                    s.provenance(),
-                    alternative,
-                )?;
-                (id, stable, version_number(&st, &latest)? + 1)
+        let by = s.provenance();
+        // the relay's ANSWER: the person proposes, the agent relays (O32); the store sets targets
+        let answer = relay.as_ref().map(|r| Answer {
+            item: format!("propose:{view}"),
+            act: AnswerAct::Propose,
+            option: None,
+            label: None,
+            options: vec![],
+            card_hash: None,
+            targets: vec![],
+            person: by.clone(),
+            relayed_by: Some(r.by.clone()),
+            relay_evidence: Some(r.evidence.clone()),
+            evidence_kind: Some(EvidenceKind::Text),
+            note: None,
+        });
+        let (id, stable, n, answer) = match (open, answer) {
+            (Some((stable, latest)), None) => {
+                let id = self
+                    .store
+                    .propose_next(&latest, ids, title, summary, by, alternative)?;
+                (id, stable, version_number(&st, &latest)? + 1, None)
             }
-            None => {
-                let id = self.store.propose_changes(
-                    view,
-                    title,
-                    summary,
-                    s.provenance(),
-                    ids,
-                    alternative,
-                )?;
-                (id, id, 1)
+            (Some((stable, latest)), Some(a)) => {
+                let (id, a) = self
+                    .store
+                    .propose_next_answered(&latest, ids, title, summary, by, alternative, a)
+                    .map_err(crate::version::answer_write_error)?;
+                (id, stable, version_number(&st, &latest)? + 1, Some(a))
+            }
+            (None, None) => {
+                let id = self
+                    .store
+                    .propose_changes(view, title, summary, by, ids, alternative)?;
+                (id, id, 1, None)
+            }
+            (None, Some(a)) => {
+                let (id, a) = self
+                    .store
+                    .propose_changes_answered(view, title, summary, by, ids, alternative, a)
+                    .map_err(crate::version::answer_write_error)?;
+                (id, id, 1, Some(a))
             }
         };
         let stored = self.store.proposal(&id)?;
@@ -2042,6 +2139,8 @@ impl Rdy {
             keys,
             tensions_error,
             coverage_error,
+            relayed_by: relay.map(|r| r.by),
+            answer: answer.map(|a| a.to_string()),
         })
     }
 

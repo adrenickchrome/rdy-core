@@ -2,11 +2,11 @@ use crate::error::StoreError;
 use crate::kinds;
 use crate::land::LandRequest;
 use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
-use crate::store::encode;
+use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
 use rdy_model::{
-    AltChoice, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
+    AltChoice, Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
     StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
@@ -615,19 +615,28 @@ impl Store {
         changes: Vec<Hash>,
         alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
-        let p = Proposal {
-            stable: None,
-            prev: None,
-            title: title.to_string(),
-            view: view.to_string(),
-            changes,
-            alternative,
-            provenance: by,
-            canon_at: self.canon_head()?,
-            summary: clean_summary(summary),
-        };
+        let p = self.first_of(view, title, summary, by, changes, alternative)?;
         let id = Hash::of(&encode(&p));
         self.write_version(&p, id)
+    }
+
+    /// `propose_changes`, with the answer `a` that holds the person's relay in the same batch
+    /// (O14, D-KQ4CA): the proposal's checks, then its frames, then `a` with `targets` set to the
+    /// new version. Returns the version's id and the answer's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_changes_answered(
+        &mut self,
+        view: &str,
+        title: &str,
+        summary: Option<&str>,
+        by: Provenance,
+        changes: Vec<Hash>,
+        alternative: Option<AltChoice>,
+        a: Answer,
+    ) -> Result<(Hash, Hash), StoreError> {
+        let p = self.first_of(view, title, summary, by, changes, alternative)?;
+        let id = Hash::of(&encode(&p));
+        self.write_version_answered(&p, id, a)
     }
 
     /// Writes the next version of proposal `prev`: its changes followed by `add`, with `stable`
@@ -636,7 +645,8 @@ impl Store {
     pub fn propose_version(&mut self, prev: &Hash, add: &[Hash]) -> Result<Hash, StoreError> {
         let mut p = self.proposal(prev)?;
         p.changes.extend_from_slice(add);
-        self.next_version(prev, p)
+        let (next, stable) = self.linked_next(prev, p)?;
+        self.write_version(&next, stable)
     }
 
     /// Writes the next version of proposal `prev` with `changes`, `title`, `by` and
@@ -652,21 +662,78 @@ impl Store {
         by: Provenance,
         alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
+        let p = self.next_of(prev, changes, title, summary, by, alternative)?;
+        let (next, stable) = self.linked_next(prev, p)?;
+        self.write_version(&next, stable)
+    }
+
+    /// `propose_next`, with the answer `a` that holds the person's relay in the same batch (O14,
+    /// D-KQ4CA): the version's checks, then its frames, then `a` with `targets` set to the new
+    /// version. Returns the version's id and the answer's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_next_answered(
+        &mut self,
+        prev: &Hash,
+        changes: Vec<Hash>,
+        title: &str,
+        summary: Option<&str>,
+        by: Provenance,
+        alternative: Option<AltChoice>,
+        a: Answer,
+    ) -> Result<(Hash, Hash), StoreError> {
+        let p = self.next_of(prev, changes, title, summary, by, alternative)?;
+        let (next, stable) = self.linked_next(prev, p)?;
+        self.write_version_answered(&next, stable, a)
+    }
+
+    /// A new proposal's first version, as `propose_changes` builds it.
+    fn first_of(
+        &self,
+        view: &str,
+        title: &str,
+        summary: Option<&str>,
+        by: Provenance,
+        changes: Vec<Hash>,
+        alternative: Option<AltChoice>,
+    ) -> Result<Proposal, StoreError> {
+        Ok(Proposal {
+            stable: None,
+            prev: None,
+            title: title.to_string(),
+            view: view.to_string(),
+            changes,
+            alternative,
+            provenance: by,
+            canon_at: self.canon_head()?,
+            summary: clean_summary(summary),
+        })
+    }
+
+    /// The version after `prev` as `propose_next` builds it, before `linked_next` links it.
+    fn next_of(
+        &self,
+        prev: &Hash,
+        changes: Vec<Hash>,
+        title: &str,
+        summary: Option<&str>,
+        by: Provenance,
+        alternative: Option<AltChoice>,
+    ) -> Result<Proposal, StoreError> {
         let before = self.proposal(prev)?;
-        let p = Proposal {
+        Ok(Proposal {
             changes,
             title: title.to_string(),
             provenance: by,
             alternative,
             summary: clean_summary(summary).or_else(|| before.summary.clone()),
             ..before
-        };
-        self.next_version(prev, p)
+        })
     }
 
-    /// Writes `p` as the version after `prev`: `stable` the first version's id, `prev` the
-    /// version it follows, `canon_at` canon's head now.
-    fn next_version(&mut self, prev: &Hash, p: Proposal) -> Result<Hash, StoreError> {
+    /// `p` as the version after `prev`, and its stable id: `stable` the first version's id,
+    /// `prev` the version it follows, `canon_at` canon's head now. Only the latest version has a
+    /// next one (`ProposalMoved`).
+    fn linked_next(&self, prev: &Hash, p: Proposal) -> Result<(Proposal, Hash), StoreError> {
         let stable = p.stable.unwrap_or(*prev);
         // only the latest version has a next one: a next of a superseded version would branch
         // the chain and move the ref (as `land_atomic` checks)
@@ -687,13 +754,36 @@ impl Store {
             canon_at: self.canon_head()?,
             ..p
         };
-        self.write_version(&next, stable)
+        Ok((next, stable))
     }
 
     /// Writes proposal version `p` with the refs `proposal/<stable>` = its id and
     /// `open/<p.view>` = `stable`, in one write. Returns its id. A version with no changes is
     /// refused (`EmptyProposal`): it would land as an empty landing, as often as it is approved.
     fn write_version(&mut self, p: &Proposal, stable: Hash) -> Result<Hash, StoreError> {
+        let (id, items) = self.version_items(p, stable)?;
+        self.write(items)?;
+        Ok(id)
+    }
+
+    /// `write_version`, with the answer `a` (its `targets` the version) at the end of the same
+    /// write (O14). Returns the version's id and the answer's.
+    fn write_version_answered(
+        &mut self,
+        p: &Proposal,
+        stable: Hash,
+        a: Answer,
+    ) -> Result<(Hash, Hash), StoreError> {
+        let (id, items) = self.version_items(p, stable)?;
+        let a = Answer {
+            targets: vec![id],
+            ..a
+        };
+        Ok((id, self.put_answer_with(&a, items)?))
+    }
+
+    /// The version's id and the frames `write_version` writes; `EmptyProposal` for no changes.
+    fn version_items(&self, p: &Proposal, stable: Hash) -> Result<(Hash, Frames), StoreError> {
         if p.changes.is_empty() {
             return Err(StoreError::EmptyProposal(p.view.clone()));
         }
@@ -704,8 +794,7 @@ impl Store {
             (proposal_ref(&stable), id.0.to_vec()),
             (open_ref(&p.view), stable.0.to_vec()),
         ]));
-        self.write(items)?;
-        Ok(id)
+        Ok((id, items))
     }
 
     /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change, no
@@ -728,12 +817,30 @@ impl Store {
     ///
     /// Writes `tag` and the ref `tag/<name>` → its hash in one atomic write.
     pub fn put_tag(&mut self, tag: &Tag) -> Result<Hash, StoreError> {
+        let (id, items) = self.tag_items(tag);
+        self.write(items)?;
+        Ok(id)
+    }
+
+    /// `put_tag`, with the answer `a` that holds the person's relay in the same write (O14,
+    /// D-DGCH7): the tag and its ref, then `a` with `targets` set to the tag, and its ref. The
+    /// tag is encoded as `put_tag` encodes it (D-F0904). Returns the tag's id and the answer's.
+    pub fn put_tag_answered(&mut self, tag: &Tag, a: Answer) -> Result<(Hash, Hash), StoreError> {
+        let (id, items) = self.tag_items(tag);
+        let a = Answer {
+            targets: vec![id],
+            ..a
+        };
+        Ok((id, self.put_answer_with(&a, items)?))
+    }
+
+    /// The tag's id and the frames `put_tag` writes: the tag, then `tag/<name>` → its id.
+    fn tag_items(&self, tag: &Tag) -> (Hash, Frames) {
         let bytes = postcard::to_allocvec(tag).expect("encode tag");
         let id = Hash::of(&bytes);
         let mut items = vec![(kinds::TAG, bytes)];
         items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
-        self.write(items)?;
-        Ok(id)
+        (id, items)
     }
 }
 

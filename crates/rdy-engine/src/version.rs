@@ -1,7 +1,9 @@
 //! Versions (addendum A): immutable SemVer tags on canon's landings, created only by an approver.
+use crate::answer::relay::{RelayInput, relayed};
 use crate::error::*;
 use crate::{Rdy, ReadState, Scope, Session};
-use rdy_model::{Hash, LandingRecord, Tag};
+use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Role, Tag};
+use rdy_store::StoreError;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -42,6 +44,17 @@ pub struct VersionInfo {
     pub message: Option<String>,
     pub tagged_by: String,
     pub at_ms: i64,
+}
+
+/// What `Rdy::tag_as` wrote: the version, and for a relayed tag the agent that relayed it and
+/// the `ANSWER` that holds the relay (D-DGCH7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TagInfo {
+    #[serde(flatten)]
+    pub version: VersionInfo,
+    pub relayed_by: Option<ActorRun>,
+    /// The `ANSWER` record's hash.
+    pub answer: Option<String>,
 }
 
 fn info(t: &Tag) -> VersionInfo {
@@ -289,6 +302,80 @@ impl Rdy {
         landing: Option<&str>,
         message: Option<String>,
     ) -> Result<VersionInfo, RdyError> {
+        let tag = self.new_tag(s, name, landing, message)?;
+        self.store.put_tag(&tag)?;
+        self.publish(crate::Delta::Tags)?;
+        Ok(info(&tag))
+    }
+
+    /// `tag` under the relay table (`answer::relay::relayed`, D-HA7YZ, D-KQ4CA). `person` is the
+    /// project's human actor, from the caller (O18); `implicit` is true over MCP, where the
+    /// session is the relay.
+    /// - A human session with no relay tags as itself, as `tag` does: no `ANSWER`.
+    /// - A relayed tag runs as the person: `tagged_by` is the person, and every rule of `tag`
+    ///   holds. The `TAG` is encoded as before (D-F0904); an `ANSWER` (act `tag`, item
+    ///   `tag:<name>`, `targets` the tag, evidence `text`) holds the relay. Both are one batch
+    ///   (O14, D-DGCH7).
+    /// - Any other case is the table's refusal, in the answer's words (O19).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tag_as(
+        &mut self,
+        s: &Session,
+        person: &str,
+        relay: &RelayInput,
+        implicit: bool,
+        name: &str,
+        landing: Option<&str>,
+        message: Option<String>,
+    ) -> Result<TagInfo, RdyError> {
+        let (who, relay) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
+        let Some(relay) = relay else {
+            let s = Session {
+                role: Role::Approver,
+                ..s.clone()
+            };
+            return Ok(TagInfo {
+                version: self.tag(&s, name, landing, message)?,
+                relayed_by: None,
+                answer: None,
+            });
+        };
+        let tag = self.new_tag(&who, name, landing, message)?;
+        let a = Answer {
+            item: format!("tag:{}", tag.name),
+            act: AnswerAct::Tag,
+            option: None,
+            label: None,
+            options: vec![],
+            card_hash: None,
+            targets: vec![],
+            person: tag.tagged_by.clone(),
+            relayed_by: Some(relay.by.clone()),
+            relay_evidence: Some(relay.evidence),
+            evidence_kind: Some(EvidenceKind::Text),
+            note: None,
+        };
+        let (_, answer) = self
+            .store
+            .put_tag_answered(&tag, a)
+            .map_err(answer_write_error)?;
+        self.publish(crate::Delta::Tags)?;
+        Ok(TagInfo {
+            version: info(&tag),
+            relayed_by: Some(relay.by),
+            answer: Some(answer.to_string()),
+        })
+    }
+
+    /// The tag `s` would write as version `name` on `landing` (default: canon's head), after
+    /// every rule of `tag`.
+    fn new_tag(
+        &self,
+        s: &Session,
+        name: &str,
+        landing: Option<&str>,
+        message: Option<String>,
+    ) -> Result<Tag, RdyError> {
         if !s.role.can_land() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -352,15 +439,23 @@ impl Rdy {
                 _ => return Err(refuse("names an earlier landing than the current version")),
             }
         }
-        let tag = Tag {
+        Ok(Tag {
             name: name.to_string(),
             landing: target,
             message,
             tagged_by: s.provenance(),
-        };
-        self.store.put_tag(&tag)?;
-        self.publish(crate::Delta::Tags)?;
-        Ok(info(&tag))
+        })
+    }
+}
+
+/// A store error from a write with an `ANSWER`. A refusal means rdy built an answer the store's
+/// rules reject: a bug, not bad input.
+pub(crate) fn answer_write_error(e: StoreError) -> RdyError {
+    match e {
+        StoreError::Refused(message) => {
+            RdyError::new(E_INTERNAL, message, "report this as a bug in rdy")
+        }
+        e => e.into(),
     }
 }
 
