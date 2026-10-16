@@ -489,3 +489,115 @@ fn di11_an_entry_survives_a_pack_change_that_stops_tracking_a_field() {
     ));
     assert_eq!(entry_of(&r, &sub, &first), vec![first]);
 }
+
+// ---- fix round 4: the holder is read under the tracking in force, not under any omission ----
+
+const WIDE_FIELDS: usize = 13;
+
+/// A pack whose claims carry thirteen fields `f01` to `f13`; `tracked` of them are tracking.
+fn wide_pack(tracked: &[&str]) -> String {
+    let mut s = String::from(
+        "name: wide\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  claim:\n    prefix: c\n    traits: [normative, describes]\n    body: required\n    fields:\n",
+    );
+    for i in 1..=WIDE_FIELDS {
+        s.push_str(&format!("      f{i:02}: {{ kind: str }}\n"));
+    }
+    if !tracked.is_empty() {
+        s.push_str(&format!("    tracking: [{}]\n", tracked.join(", ")));
+    }
+    s
+}
+
+#[test]
+fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_wide_block() {
+    // thirteen fields, two of them tracking when the verdict was written; the pack then stops
+    // tracking both. The content hash under the tracking now differs, and the entry stays.
+    let (dir, r) = project();
+    drop(r);
+    std::fs::write(
+        dir.path().join(".rdy/packs/wide.yaml"),
+        wide_pack(&["f03", "f07"]),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: wide\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let spec = spec_doc(&mut r);
+    let fields: serde_json::Map<String, serde_json::Value> = (1..=WIDE_FIELDS)
+        .map(|i| (format!("f{i:02}"), json!(format!("v{i}"))))
+        .collect();
+    let q = created(
+        &put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec.", "fields": fields}]),
+        ),
+        "$q",
+    );
+    let p = r
+        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    let sub = watcher_at_head(&r);
+    verdict_on(
+        &mut r,
+        &rdy_engine::Scope::Inflight,
+        &q,
+        &spec.c,
+        "agent:r",
+        true,
+    );
+    let first = {
+        let mut e = pending_added(&r, &sub);
+        assert_eq!(e.len(), 1, "{e:?}");
+        e.remove(0)
+    };
+    assert_eq!(
+        first.1,
+        format!("{} waits for an answer; read rdy_pending", p.r#ref)
+    );
+    std::fs::write(dir.path().join(".rdy/packs/wide.yaml"), wide_pack(&[])).unwrap();
+    assert!(matches!(
+        r.reload_pack().unwrap(),
+        rdy_engine::ReloadOutcome::Reloaded
+    ));
+    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
+}
+
+#[test]
+fn di11_an_unproposed_removal_of_an_ordinary_field_names_no_proposal() {
+    // `note` is never a tracking field. The proposal wrote the claim with `note`; the view then
+    // unset it and nobody proposed that. The verdict judges the claim without `note`, which no
+    // proposal wrote, so no proposal holds the pair and the verdict gives no entry.
+    let (dir, r) = project();
+    drop(r);
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let spec = spec_doc(&mut r);
+    let q = created(
+        &put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec.", "fields": {"note": "n1"}}]),
+        ),
+        "$q",
+    );
+    r.propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    put(
+        &mut r,
+        "v1",
+        json!([{"op": "update", "id": q.to_string(), "unset": ["note"]}]),
+    );
+    let sub = watcher_at_head(&r);
+    verdict_on(
+        &mut r,
+        &rdy_engine::Scope::Inflight,
+        &q,
+        &spec.c,
+        "agent:r",
+        true,
+    );
+    assert_eq!(pending_added(&r, &sub), vec![]);
+}

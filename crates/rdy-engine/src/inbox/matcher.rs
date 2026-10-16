@@ -339,7 +339,7 @@ fn holds_score(
                 continue;
             };
             for (i, item) in items.iter().enumerate() {
-                if item.block == block.id && same_content(&block, item, tracking) {
+                if item.block == block.id && same_content(st, &block, item, tracking) {
                     held[i] = true;
                 }
             }
@@ -348,18 +348,28 @@ fn holds_score(
     Ok(held.iter().filter(|h| **h).count() as u32)
 }
 
-/// The most fields of one block whose every subset `same_content` tries.
-const MAX_SUBSET_FIELDS: usize = 12;
+/// The most non-derived fields of one block whose every subset `same_content` tries.
+const MAX_SUBSET_FIELDS: usize = 16;
 
-/// Whether `block` has the content `item` names. The tracking in force when the verdict was
-/// written is not stored, and a pack change moves what the content hash leaves out, so the hash
-/// under the tracking now is not enough: the block also matches if it hashes to the item's content
-/// with any set of its own fields left out (the tracking fields of its type are among them).
-/// A block with more than [`MAX_SUBSET_FIELDS`] fields tries the empty set, each single field and
-/// all of them.
-fn same_content(block: &Block, item: &PairItem, tracking: &Tracking) -> bool {
+/// Whether `block` has the content `item` names.
+///
+/// The tracking in force when the verdict was written is not stored, and a pack change moves what
+/// the content hash leaves out. So the answer has three steps.
+/// 1. The block matches if it hashes to the item's content under the tracking now.
+/// 2. If a block of the item's id that is in the project now (in flight or in canon) hashes to
+///    that content under the tracking now, the tracking now is the tracking the verdict used, and
+///    step 1 was exact: the block does not match. This is the evidence that stops a field that was
+///    never tracking from being left out (a field unset after the proposal, and not proposed).
+/// 3. Otherwise no block still shows the judged content under the tracking now, so a pack change
+///    moved the tracking. The block matches if it hashes to the item's content with some set of
+///    its own fields left out: exactly the tracking fields of the old pack. A block with more than
+///    [`MAX_SUBSET_FIELDS`] fields has no such match.
+fn same_content(st: &ReadState, block: &Block, item: &PairItem, tracking: &Tracking) -> bool {
     if block.content_hash_with(tracking) == item.content {
         return true;
+    }
+    if shows_content_now(st, item, tracking) {
+        return false;
     }
     let names: Vec<&str> = block
         .fields
@@ -367,22 +377,28 @@ fn same_content(block: &Block, item: &PairItem, tracking: &Tracking) -> bool {
         .map(String::as_str)
         .filter(|k| !DERIVED_FIELDS.contains(k))
         .collect();
-    let leaves = |mask: u64| {
+    if names.len() > MAX_SUBSET_FIELDS {
+        return false;
+    }
+    (0..1u64 << names.len()).any(|mask| {
         block.content_hash_ignoring(|k| {
             names
                 .iter()
                 .position(|n| *n == k)
                 .is_some_and(|i| mask >> i & 1 == 1)
         }) == item.content
-    };
-    if names.len() <= MAX_SUBSET_FIELDS {
-        return (0..1u64 << names.len()).any(leaves);
-    }
-    let all = (1u64 << names.len().min(63)) - 1;
-    std::iter::once(0)
-        .chain((0..names.len().min(63)).map(|i| 1u64 << i))
-        .chain(std::iter::once(all))
-        .any(leaves)
+    })
+}
+
+/// Whether the block of `item` in flight or in canon hashes to the item's content under
+/// `tracking`.
+fn shows_content_now(st: &ReadState, item: &PairItem, tracking: &Tracking) -> bool {
+    [Scope::Inflight, Scope::Canon].iter().any(|scope| {
+        st.materialized(scope).is_ok_and(|m| {
+            m.get(&item.block)
+                .is_some_and(|b| b.content_hash_with(tracking) == item.content)
+        })
+    })
 }
 
 /// The line of a `pending_added` entry.
