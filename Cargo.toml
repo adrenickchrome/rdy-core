@@ -40,6 +40,7 @@ libc = "0.2.190"
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"
+ttf-parser = "0.25"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
