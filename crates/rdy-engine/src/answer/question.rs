@@ -21,7 +21,8 @@
 //! - The view holds the version of the question the person answered. The card shows canon's
 //!   version (the ref's version short); a view that rewrote the question, or whose base is
 //!   older, holds another one, and landing the view would close a question the person never saw.
-//!   `E_ITEM_MOVED`, and nothing is written. A view that does not exist yet starts from canon.
+//!   `E_ITEM_MOVED`, with the card in `corrected` (O21), and nothing is written. A view that
+//!   does not exist yet starts from canon.
 //! - A decision under stable content cites a briefing (bwr1), as any write there does: the
 //!   answer's `brief`. Without one, or with a stale one, the refusal's fix names the retry:
 //!   brief the blocks the refusal names, then answer again with the token.
@@ -31,7 +32,7 @@
 //! The decision's commit already names the relay in `attested_by`. Its `ANSWER` (act
 //! `answer_question`, `targets` = the decision's change) follows in a batch of its own. A crash
 //! between them leaves the question open, so the agent asks again.
-use super::{AnswerInfo, Answerer, Bound, assurance, labels, put_alone};
+use super::{AnswerInfo, Answerer, Bound, assurance, card_of, labels, put_alone};
 use crate::brief::{E_BRIEF_REQUIRED, E_BRIEF_STALE};
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, RdyError};
 use crate::pending::ItemOption;
@@ -109,7 +110,8 @@ pub(crate) fn act(
                 format!(
                     "land or drop view {view}'s edit of {qid}, or rebase the view, then show the person the card again"
                 ),
-            ));
+            )
+            .with_corrected(card_of(&b.item)));
         }
     }
     let given = match st.decisions_home() {

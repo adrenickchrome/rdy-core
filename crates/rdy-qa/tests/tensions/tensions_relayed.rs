@@ -354,6 +354,12 @@ fn di8_an_answer_is_refused_while_the_view_holds_another_version_of_the_question
         E_ITEM_MOVED,
         &format!("{q} in view {view} is not the version the person answered ({it})"),
     );
+    // the refusal carries the card the person was shown (O21), so no re-fetch is needed
+    assert_eq!(
+        e.corrected,
+        Some(json!({"ref": card.r#ref, "card_hash": card.card_hash, "card": card.card})),
+        "corrected holds ref, card_hash and card"
+    );
     assert!(answer_of(&r, &it).is_none(), "nothing written");
     assert!(
         answering(&r, &view, &q).is_empty(),
