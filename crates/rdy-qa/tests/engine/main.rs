@@ -15,6 +15,7 @@ mod engine_gate_state;
 mod engine_keys;
 mod engine_keys_assign;
 mod engine_merge;
+mod engine_pending_inbox;
 mod engine_pins;
 mod engine_port;
 mod engine_priv;

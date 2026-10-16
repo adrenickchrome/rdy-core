@@ -16,16 +16,22 @@
 //! in the review queue (one walk, `text_authors`). A read-time intent overlap is never
 //! dismissed: its intent resolves it.
 //!
+//! A relayed dismissal (D-562QR, FW-B9) runs as the person whose words an agent relays: the
+//! review records the person, so the rules above judge the person, and an `ANSWER` in the same
+//! batch holds the relay (`dismiss_tension_as`; the needs-you queue's `resolve` answers use
+//! `dismiss_answered`).
+//!
 //! A dismissal binds to the vkey, which covers the severity: one made while a tension was
 //! advisory does not hold once it is blocking, and the blocking tension needs its own review.
 use super::set::{ambiguous, matching, no_tension, tension_hex};
 use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
+use crate::answer::relay::{RelayInput, RelayRefusal, relayed};
 use crate::error::*;
 use crate::gate::open_proposals;
 use crate::session::now_ms;
 use crate::{Delta, Rdy, RdyError, ReadState, Session};
+use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Review, ReviewSubject, Role, Verdict};
 use rdy_model::{Block, BlockId, Hash};
-use rdy_model::{Review, ReviewSubject, Role, Verdict};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -43,6 +49,12 @@ pub struct DismissInfo {
     pub severity: TensionSeverity,
     pub review: String,
     pub status: String,
+    /// The `ANSWER` that holds the person's relay, for a relayed dismissal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// The agent that relayed the person's words, for a relayed dismissal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<ActorRun>,
 }
 
 impl ReadState {
@@ -213,19 +225,10 @@ impl ReadState {
     }
 }
 
-impl Rdy {
-    /// Dismisses tension `tension` with `reason`: writes the review and the `dismiss/<vkey>` ref,
-    /// and publishes the dismissal. Checks, in order: the session may write; the reason is 1 to
-    /// [`MAX_REASON`] characters after trimming; the tension resolves; it is not dismissed yet;
-    /// a blocking tension, and a semantic tension a reviewer advised to block (final ruling 1),
-    /// needs the reviewer role or a human session, of an actor that wrote none of its items (see
-    /// `authors`).
-    pub fn dismiss_tension(
-        &mut self,
-        s: &Session,
-        tension: &str,
-        reason: &str,
-    ) -> Result<DismissInfo, RdyError> {
+impl ReadState {
+    /// The checks of a dismissal by `s`, before any tension is read: the session may write, and
+    /// the reason is 1 to [`MAX_REASON`] characters after trimming. Returns the trimmed reason.
+    fn dismissal_reason<'a>(s: &Session, reason: &'a str) -> Result<&'a str, RdyError> {
         if !s.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -241,12 +244,18 @@ impl Rdy {
                 "say in a few words why the tension needs no action",
             ));
         }
-        let st = self.read();
-        let t = st.resolve_tension(tension, now_ms())?;
+        Ok(reason)
+    }
+
+    /// The review that dismisses `t` for `s` with `reason` (already checked), after the checks of
+    /// one tension: it is not dismissed yet; a blocking tension, and a semantic tension a
+    /// reviewer advised to block (final ruling 1), needs the reviewer role or a human session, of
+    /// an actor that wrote none of its items (see `authors`).
+    fn dismissal_of(&self, s: &Session, t: &Tension, reason: &str) -> Result<Review, RdyError> {
         let label = tension_label(&t.id);
-        if let TensionStatus::Dismissed(review) = st.tension_status(&t) {
+        if let TensionStatus::Dismissed(review) = self.tension_status(t) {
             // an unreadable review still answers that the tension is dismissed
-            let by = st
+            let by = self
                 .reader()
                 .review(&review)
                 .map_or_else(|_| "unknown actor".to_string(), |r| r.provenance.actor);
@@ -261,8 +270,8 @@ impl Rdy {
         }
         // final ruling 1 (D-PRT67 refined, D-WMCFW, D-QGEE3): a tension a reviewer advised to
         // block is dismissed only as a blocking one is, so the advice reaches the person's card
-        let advised = super::semantic::pair_of(&t)
-            .and_then(|k| st.semantic().tension(&k))
+        let advised = super::semantic::pair_of(t)
+            .and_then(|k| self.semantic().tension(&k))
             .is_some_and(|o| o.record.advice.is_some());
         if t.severity == TensionSeverity::Blocking || advised {
             if s.role != Role::Reviewer && !s.is_human() {
@@ -277,7 +286,7 @@ impl Rdy {
                     "start a session with role reviewer, or ask a human",
                 ));
             }
-            for (side, actor) in st.authors(&t, &label)? {
+            for (side, actor) in self.authors(t, &label)? {
                 if actor == s.actor {
                     return Err(RdyError::new(
                         E_SELF_REVIEW,
@@ -291,7 +300,7 @@ impl Rdy {
                 }
             }
         }
-        let review = Review {
+        Ok(Review {
             subject: ReviewSubject::Tension {
                 id: t.id,
                 vkey: t.vkey,
@@ -305,21 +314,147 @@ impl Rdy {
             reason: reason.to_string(),
             findings: vec![],
             provenance: s.provenance(),
-        };
+        })
+    }
+}
+
+fn dismissed(t: &Tension, review: Hash) -> DismissInfo {
+    DismissInfo {
+        id: tension_label(&t.id),
+        tension: t.id.to_string(),
+        kind: t.kind,
+        severity: t.severity,
+        review: review.to_string(),
+        status: "dismissed".to_string(),
+        answer: None,
+        relayed_by: None,
+    }
+}
+
+impl Rdy {
+    /// Dismisses tension `tension` with `reason`: writes the review and the `dismiss/<vkey>` ref,
+    /// and publishes the dismissal. Checks, in order: the session may write; the reason is 1 to
+    /// [`MAX_REASON`] characters after trimming; the tension resolves; it is not dismissed yet;
+    /// a blocking tension, and a semantic tension a reviewer advised to block (final ruling 1),
+    /// needs the reviewer role or a human session, of an actor that wrote none of its items (see
+    /// `authors`).
+    pub fn dismiss_tension(
+        &mut self,
+        s: &Session,
+        tension: &str,
+        reason: &str,
+    ) -> Result<DismissInfo, RdyError> {
+        let reason = ReadState::dismissal_reason(s, reason)?;
+        let st = self.read();
+        let t = st.resolve_tension(tension, now_ms())?;
+        let review = st.dismissal_of(s, &t, reason)?;
         drop(st);
         let id = self.store_mut().put_dismissal(&review)?;
         self.publish(Delta::Dismissed {
-            vkey: t.vkey,
-            review: id,
+            reviews: vec![(t.vkey, id)],
         })?;
-        Ok(DismissInfo {
-            id: label,
-            tension: t.id.to_string(),
-            kind: t.kind,
-            severity: t.severity,
-            review: id.to_string(),
-            status: "dismissed".to_string(),
-        })
+        Ok(dismissed(&t, id))
+    }
+
+    /// A dismissal of tension `tension` with `reason`, relayed from the person `person` (D-562QR,
+    /// FW-B9): the relay table ([`relayed`]) decides who dismisses.
+    /// - No `evidence` and no `relayed_by`: today's rule, as `s` itself
+    ///   ([`Rdy::dismiss_tension`]); a `question` or `session_ref` with them is refused (the
+    ///   table's case 5).
+    /// - Otherwise the table: a human session that names a relay is refused; an agent session
+    ///   needs the person's words, and names no `relayed_by` over MCP (`implicit` when it names
+    ///   none) or its own actor at the command line. The dismissal then runs as the person, so
+    ///   the reviewer-or-human rule and the self-review rule judge the person, and one batch
+    ///   holds the review and an `ANSWER` (act `dismiss`, evidence `text`) that holds the relay.
+    pub fn dismiss_tension_as(
+        &mut self,
+        s: &Session,
+        person: &str,
+        tension: &str,
+        reason: &str,
+        relay: &RelayInput,
+    ) -> Result<DismissInfo, RdyError> {
+        if relay.evidence.is_none() && relay.relayed_by.is_none() {
+            for (field, given) in [
+                ("question", relay.question.is_some()),
+                ("session_ref", relay.session_ref.is_some()),
+            ] {
+                if given {
+                    return Err(RelayRefusal::NeedsEvidence { field }.error());
+                }
+            }
+            return self.dismiss_tension(s, tension, reason);
+        }
+        let implicit = !s.is_human() && relay.relayed_by.is_none();
+        let (who, by) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
+        let Some(by) = by else {
+            return self.dismiss_tension(s, tension, reason);
+        };
+        let t = self.read().resolve_tension(tension, now_ms())?;
+        let a = Answer {
+            item: tension_label(&t.id),
+            act: AnswerAct::Dismiss,
+            option: None,
+            label: None,
+            options: vec![],
+            card_hash: None,
+            targets: vec![],
+            person: who.provenance(),
+            relayed_by: Some(by.by.clone()),
+            relay_evidence: Some(by.evidence.clone()),
+            evidence_kind: Some(EvidenceKind::Text),
+            note: Some(reason.trim().to_string()),
+        };
+        let (mut infos, answer) = self.dismiss_answered(&who, &[t], reason, a)?;
+        let mut info = infos.remove(0);
+        info.answer = Some(answer.to_string());
+        info.relayed_by = Some(by.by);
+        Ok(info)
+    }
+
+    /// Dismisses each of `tensions` as `who` with `reason` (checked), and writes the answer `a`
+    /// in the same batch (`Store::put_dismissals_answered`, O14): its `targets` are the reviews.
+    /// Every tension passes the checks of one dismissal before anything is written. A dismissal
+    /// binds to a vkey (FW-CH7), and two tensions can share one (two changes that write the same
+    /// content): such tensions get one review, the first in the given order, so the batch writes
+    /// one review a vkey. Returns one row a tension, and the answer's id.
+    pub(crate) fn dismiss_answered(
+        &mut self,
+        who: &Session,
+        tensions: &[Arc<Tension>],
+        reason: &str,
+        a: Answer,
+    ) -> Result<(Vec<DismissInfo>, Hash), RdyError> {
+        let reason = ReadState::dismissal_reason(who, reason)?;
+        let st = self.read();
+        let all = tensions
+            .iter()
+            .map(|t| st.dismissal_of(who, t, reason))
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(st);
+        let mut seen = BTreeSet::new();
+        let reviews: Vec<Review> = all
+            .into_iter()
+            .zip(tensions)
+            .filter(|(_, t)| seen.insert(t.vkey))
+            .map(|(r, _)| r)
+            .collect();
+        let (ids, answer) = self
+            .store_mut()
+            .put_dismissals_answered(&reviews, a)
+            .map_err(crate::answer::internal)?;
+        let written: Vec<(Hash, Hash)> = reviews
+            .iter()
+            .filter_map(Review::vkey)
+            .zip(ids.iter().copied())
+            .collect();
+        let by_vkey: BTreeMap<Hash, Hash> = written.iter().copied().collect();
+        self.publish(Delta::Dismissed { reviews: written })?;
+        let infos = tensions
+            .iter()
+            .map(|t| dismissed(t, by_vkey[&t.vkey]))
+            .collect();
+        Ok((infos, answer))
     }
 }
 

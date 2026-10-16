@@ -1,3 +1,4 @@
+pub mod answer;
 mod check;
 pub mod coord;
 pub mod dump;
@@ -17,6 +18,7 @@ mod store;
 pub mod transition;
 pub mod view;
 
+pub use answer::{ANSWER_REF, PENDING_REF, answer_ref, snooze_ref};
 pub use check::StoreCheck;
 pub use error::StoreError;
 #[doc(hidden)]

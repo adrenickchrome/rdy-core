@@ -3,6 +3,7 @@ use rdy_engine::alt::*;
 use rdy_engine::*;
 use rdy_model::Hash;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, confirm_before_landing};
 use serde_json::json;
 
 fn m(label: &str, view: &str) -> AltMemberInput {
@@ -44,7 +45,7 @@ fn setup(r: &mut Rdy) -> String {
 fn altg1_a_member_must_name_its_choice() {
     let (_d, mut r) = project();
     setup(&mut r);
-    let e = r.propose(&writer(), "a", "x").unwrap_err();
+    let e = r.propose(&writer(), "a", "x", None).unwrap_err();
     assert_eq!(e.code, E_ALT_UNCHOSEN);
     assert!(e.fix.contains("alternatives"), "{}", e.fix);
 }
@@ -154,7 +155,7 @@ fn altg1_land_rechecks_the_set_at_approval() {
         json!([{"op": "create", "type": "doc", "fields": {"title": "M", "doc_type": "page"}}]),
     )
     .unwrap();
-    let pl = r.propose(&writer(), "late", "late").unwrap();
+    let pl = r.propose(&writer(), "late", "late", None).unwrap();
     r.alt_create(&writer(), "U", None, &[m("p", "late"), m("q", "late2")])
         .unwrap();
     assert_eq!(
@@ -196,7 +197,7 @@ fn canon_bodies(r: &Rdy) -> Vec<String> {
 fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chosen() {
     let (_d, mut r) = project();
     let section = two_claims(&mut r);
-    let pb = r.propose(&writer(), "b", "b early").unwrap();
+    let pb = r.propose(&writer(), "b", "b early", None).unwrap();
     let set = r
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
@@ -227,7 +228,7 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
         json!([{"op": "create", "type": "claim", "parent": section, "body": "after"}]),
     )
     .unwrap();
-    let later = r.propose(&writer(), "a", "after").unwrap();
+    let later = r.propose(&writer(), "a", "after", None).unwrap();
     r.land(&approver(), &later.id).unwrap();
 }
 
@@ -235,7 +236,7 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
 fn altg1_a_proposal_from_before_the_set_cannot_land_once_the_set_is_abandoned() {
     let (_d, mut r) = project();
     two_claims(&mut r);
-    let pb = r.propose(&writer(), "b", "b early").unwrap();
+    let pb = r.propose(&writer(), "b", "b early", None).unwrap();
     let set = r
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
@@ -271,7 +272,7 @@ fn altg1_a_members_change_lands_only_from_its_own_view_with_its_pick() {
     // included into a view outside the set, it cannot be proposed from there
     r.view_include(&writer(), "d", std::slice::from_ref(&b2))
         .unwrap();
-    let e = r.propose(&writer(), "d", "d").unwrap_err();
+    let e = r.propose(&writer(), "d", "d", None).unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
     assert!(
         e.message.contains("member y's alternative"),
@@ -309,7 +310,7 @@ fn altg1_a_reopened_member_view_the_set_did_not_choose_cannot_propose() {
     assert!(r.read().view_head("b").unwrap().closed);
     let u = r.undo(&writer(), "b", None, false).unwrap();
     assert!(u.reopened);
-    let e = r.propose(&writer(), "b", "b again").unwrap_err();
+    let e = r.propose(&writer(), "b", "b again", None).unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
     assert!(
         e.message.contains("view b is its member y"),
@@ -426,7 +427,7 @@ fn msw2_a_members_change_from_before_the_set_cannot_land_from_a_non_member_view(
     r.view_include(&writer(), "d", std::slice::from_ref(&early_b))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -505,7 +506,7 @@ fn msw2_a_change_linked_to_a_set_that_dropped_its_member_binds_to_the_members_op
     r.view_include(&writer(), "d", std::slice::from_ref(&h))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -547,7 +548,7 @@ fn msw2_a_pre_set_change_only_another_member_holds_is_that_members_alternative()
     r.view_include(&writer(), "d", std::slice::from_ref(&w))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -586,7 +587,7 @@ fn msw2_a_pre_set_change_a_non_member_wrote_binds_to_the_one_member_that_holds_i
     r.view_include(&writer(), "d", std::slice::from_ref(&z))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -625,7 +626,7 @@ fn msw2_a_pre_set_change_stays_bound_after_its_writer_leaves_the_set() {
     r.view_include(&writer(), "d", std::slice::from_ref(&p))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -664,8 +665,16 @@ fn chosen_a(r: &mut Rdy) -> (String, String, String, String, String) {
         .created["$decision"]
         .clone();
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
+    confirm_before_landing(r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     (set, section, b, b2, dec)
 }
@@ -692,7 +701,7 @@ fn msw20_a_pre_set_change_stays_bound_when_another_member_includes_it_later() {
     r.view_include(&writer(), "d", std::slice::from_ref(&g))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -722,7 +731,7 @@ fn msw20_a_change_a_member_includes_after_the_set_was_created_is_not_bound() {
         .unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d").unwrap();
+    let p = r.propose(&writer(), "d", "d", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
@@ -740,7 +749,7 @@ fn msw20_common_ground_at_creation_stays_common_when_a_member_excludes_it() {
         .unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&g))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d").unwrap();
+    let p = r.propose(&writer(), "d", "d", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "ground G"));
 }
@@ -763,7 +772,7 @@ fn msw20_a_member_added_later_is_bound_to_what_it_held_when_it_joined() {
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
@@ -792,7 +801,7 @@ fn msw20_removing_a_member_releases_its_bindings() {
     r.alt_remove(&writer(), &set, "z").unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d").unwrap();
+    let p = r.propose(&writer(), "d", "d", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
@@ -849,7 +858,7 @@ fn msw20_a_losing_members_pre_set_change_is_refused_from_a_non_member_view() {
     let (set, _section, b, _b2, dec) = chosen_a(&mut r);
     r.view_include(&writer(), "d", std::slice::from_ref(&b))
         .unwrap();
-    let e = r.propose(&writer(), "d", "d").unwrap_err();
+    let e = r.propose(&writer(), "d", "d", None).unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert_eq!(
         e.message,
@@ -871,7 +880,7 @@ fn msw20_a_losing_members_linked_change_is_refused_from_the_chosen_members_view(
     let (_set, _section, _b, b2, _dec) = chosen_a(&mut r);
     r.view_include(&writer(), "a", std::slice::from_ref(&b2))
         .unwrap();
-    let e = r.propose(&writer(), "a", "a again").unwrap_err();
+    let e = r.propose(&writer(), "a", "a again", None).unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert!(e.message.contains("member y"), "{}", e.message);
     assert!(!canon_bodies(&r).iter().any(|x| x == "B2"));
@@ -896,7 +905,8 @@ fn msw20_a_losing_members_change_lands_with_a_decision_that_refines_or_supersede
         } else {
             r.decide(&writer(), "d", next).unwrap();
         }
-        let p = r.propose(&writer(), "d", "d").unwrap();
+        let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
+        confirm_before_landing(&mut r, &approver(), &p);
         r.land(&approver(), &p.id).unwrap();
         let bodies = canon_bodies(&r);
         assert!(
@@ -921,7 +931,7 @@ fn msw20_an_abandoned_set_binds_nothing() {
     let b2 = claim_in(&mut r, "b", &section, "B2");
     r.alt_abandon(&writer(), &set, "neither").unwrap();
     r.view_include(&writer(), "d", &[b, b2]).unwrap();
-    let p = r.propose(&writer(), "d", "d").unwrap();
+    let p = r.propose(&writer(), "d", "d", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     let bodies = canon_bodies(&r);
     assert!(
@@ -948,7 +958,7 @@ fn msw20_a_choice_with_no_decision_releases_a_losers_change_only_with_a_new_deci
     let landing = r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&b))
         .unwrap();
-    let e = r.propose(&writer(), "d", "d").unwrap_err();
+    let e = r.propose(&writer(), "d", "d", None).unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert_eq!(
         e.message,
@@ -972,7 +982,8 @@ fn msw20_a_choice_with_no_decision_releases_a_losers_change_only_with_a_new_deci
         },
     )
     .unwrap();
-    let p = r.propose(&writer(), "d", "d").unwrap();
+    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|x| x == "alt B"));
 }
@@ -1008,7 +1019,7 @@ fn msw20_reindex_and_reopen_reproduce_the_same_bindings() {
     r.view_include(&writer(), "d", std::slice::from_ref(&g))
         .unwrap();
     assert_eq!(
-        r.propose(&writer(), "d", "d").unwrap_err().code,
+        r.propose(&writer(), "d", "d", None).unwrap_err().code,
         E_ALT_MEMBER
     );
 }
@@ -1024,7 +1035,7 @@ fn msw20_alt_remove_on_a_chosen_set_is_refused_so_losers_stay_bound() {
     assert_eq!(e.message, format!("{set} is chosen"));
     r.view_include(&writer(), "d", std::slice::from_ref(&b))
         .unwrap();
-    let e = r.propose(&writer(), "d", "d").unwrap_err();
+    let e = r.propose(&writer(), "d", "d", None).unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert!(e.message.contains("member y"), "{}", e.message);
 }
@@ -1061,7 +1072,7 @@ fn msw20_a_losers_own_decision_does_not_release_it_when_the_choice_recorded_none
     r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", &[b, use_b]).unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
@@ -1138,7 +1149,7 @@ block_types:
     )
     .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
@@ -1202,7 +1213,7 @@ fn msw20_an_unrelated_decision_does_not_release_a_losers_change() {
     )
     .unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
@@ -1233,7 +1244,7 @@ fn msw20_two_holders_when_a_member_joins_make_common_ground() {
         .unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d").unwrap();
+    let p = r.propose(&writer(), "d", "d", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
@@ -1281,19 +1292,27 @@ fn msw20_a_losers_own_refine_of_the_choice_decision_does_not_release_it() {
         .unwrap()
         .change;
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     // control: B2 alone is refused
     r.view_include(&writer(), "e", std::slice::from_ref(&b2))
         .unwrap();
     assert_eq!(
-        r.propose(&writer(), "e", "e").unwrap_err().code,
+        r.propose(&writer(), "e", "e", None).unwrap_err().code,
         E_ALT_CHOSEN
     );
     r.view_include(&writer(), "d", &[b2, refine]).unwrap();
     let e = r
-        .propose(&writer(), "d", "d")
+        .propose(&writer(), "d", "d", None)
         .and_then(|p| r.land(&approver(), &p.id))
         .unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);

@@ -31,7 +31,7 @@ fn write_and_report_json(e: &Local, view: &str, ops: Value) -> Value {
 /// `propose_and_report` of view `view`.
 fn propose_json(e: &Local, view: &str) -> Value {
     let name = view.to_string();
-    propose_and_report(e, None, move |r| r.propose(&writer(), &name, &name)).unwrap()
+    propose_and_report(e, None, move |r| r.propose(&writer(), &name, &name, None)).unwrap()
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn cc16_the_proposal_coverage_is_read_after_the_write() {
         json!([{"op": "update", "id": c["$c1"], "body": "The Ledger is append-only.", "links": {"describes": [{"target": c["$t"]}]}}]),
         j_typo(),
     );
-    let info = r.propose(&writer(), "fix", "fix").unwrap();
+    let info = r.propose(&writer(), "fix", "fix", None).unwrap();
     let on_writer = serde_json::to_value(&info).unwrap();
     assert!(on_writer.get("coverage").is_none(), "{on_writer:#}");
     let e = Local::new(r);
@@ -232,4 +232,118 @@ fn cc16_the_proposal_coverage_is_read_after_the_write() {
         "{p:#}"
     );
     assert!(p["coverage"]["pages"].is_array(), "{p:#}");
+}
+
+/// The batch card of version `pref` as the person's queue shows it, and its Coverage fact.
+fn card_coverage(e: &Local, pref: &str) -> String {
+    let q = e
+        .read()
+        .pending(&rdy_engine::pending::PendingQuery {
+            person: "human:qa".into(),
+            session_ref: None,
+            max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    let card = q
+        .items
+        .iter()
+        .find(|i| i.r#ref == pref)
+        .unwrap_or_else(|| panic!("the card of {pref}: {q:#?}"));
+    card.facts
+        .iter()
+        .find(|f| f.name == "Coverage")
+        .expect("the Coverage fact")
+        .value
+        .clone()
+}
+
+/// The reply's coverage as the card writes it: `<before>% → <after>%`.
+fn reply_coverage(p: &Value) -> String {
+    let c = &p["coverage"];
+    format!(
+        "{}% \u{2192} {}%",
+        c["before"].as_u64().expect("before"),
+        c["after"].as_u64().expect("after")
+    )
+}
+
+/// View `v` adds one claim to the ops doc in one change, then 20 bare docs in another: the
+/// claim's change.
+fn claim_and_bare_docs(r: &mut Rdy, c: &BTreeMap<String, String>, v: &str) -> String {
+    let claim = put_j(
+        r,
+        v,
+        json!([{"op": "create", "type": "claim", "parent": c["$s"],
+                "body": "Balances are read from the Ledger.",
+                "links": {"describes": [{"target": c["$t"]}]}}]),
+        None,
+    );
+    let docs: Vec<Value> = (0..20)
+        .map(|k| {
+            json!({"op": "create", "type": "doc", "fields": {"name": format!("bare-{k}"),
+                "title": format!("Bare {k}"), "doc_type": "overview"}})
+        })
+        .collect();
+    put_j(r, v, Value::Array(docs), None);
+    claim.change
+}
+
+/// Ruling final (FW-CV2 D-XZXCE, FW-G7c D-4PG9Y): the propose reply's coverage is the proposal
+/// candidate's (canon with exactly the version's changes), worked out by the function the card
+/// uses, so a subset proposal's reply and its card give the same numbers. The view's own
+/// coverage, with the 20 bare docs the subset leaves out, is not the reply's.
+#[test]
+fn di_final_subset_proposal_reply_matches_its_card() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let claim = claim_and_bare_docs(&mut r, &c, "sub");
+    let view_after = r
+        .read()
+        .scope_rollup(&rdy_engine::Scope::View("sub".into()))
+        .unwrap()
+        .score;
+    let e = Local::new(r);
+    let p = propose_and_report(&e, None, move |r| {
+        r.propose_subset(
+            &writer(),
+            "sub",
+            "sub",
+            Some(&[claim]),
+            Some("Adds a claim on the Ledger."),
+        )
+    })
+    .unwrap();
+    assert_eq!(p["changes"], 1, "{p:#}");
+    let pref = p["ref"].as_str().expect("the ref").to_string();
+    assert_eq!(reply_coverage(&p), card_coverage(&e, &pref), "{p:#}");
+    assert_ne!(
+        p["coverage"]["after"].as_u64(),
+        Some(u64::from(view_after)),
+        "the view's bare docs are not in the proposal: {p:#}"
+    );
+    // the touched page's score is the candidate's too
+    assert_eq!(p["coverage"]["pages"][0]["path"], "ops", "{p:#}");
+    assert!(p.get("view_coverage").is_none(), "{p:#}");
+}
+
+/// The same for a full proposal: the reply's coverage and the card's agree.
+#[test]
+fn di_final_full_proposal_reply_matches_its_card() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    claim_and_bare_docs(&mut r, &c, "full");
+    let e = Local::new(r);
+    let p = propose_and_report(&e, None, move |r| {
+        r.propose_subset(
+            &writer(),
+            "full",
+            "full",
+            None,
+            Some("Adds a claim and 20 docs."),
+        )
+    })
+    .unwrap();
+    assert_eq!(p["changes"], 2, "{p:#}");
+    let pref = p["ref"].as_str().expect("the ref").to_string();
+    assert_eq!(reply_coverage(&p), card_coverage(&e, &pref), "{p:#}");
 }

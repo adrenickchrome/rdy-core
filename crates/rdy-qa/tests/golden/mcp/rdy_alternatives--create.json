@@ -9,7 +9,7 @@
       "actor": "agent:a",
       "run": "a"
     },
-    "id": "as-3aa9c7204c77",
+    "id": "as-a7904abf33fc",
     "members": [
       {
         "changes": 1,
@@ -34,9 +34,9 @@
     ],
     "prev": null,
     "question": null,
-    "set": "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede",
+    "set": "a7904abf33fc521ac831f01491376fb3ca264690d188fd4faf5c8194d12d8f11",
     "status": "open",
     "title": "Fee wording",
-    "version": "3aa9c7204c7737a9d227fe2c152c9bcd6f820e5b08c19d67a7d71e481760cede"
+    "version": "a7904abf33fc521ac831f01491376fb3ca264690d188fd4faf5c8194d12d8f11"
   }
 }

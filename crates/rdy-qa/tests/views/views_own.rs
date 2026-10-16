@@ -219,7 +219,7 @@ fn own1_an_agent_proposes_only_a_view_it_owns() {
         json!([{"op": "create", "type": "claim", "parent": section, "body": "x"}]),
     )
     .unwrap();
-    let e = r.propose(&b, "a", "t").unwrap_err();
+    let e = r.propose(&b, "a", "t", None).unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     assert!(
         e.fix.contains("include its changes into your own view"),
@@ -233,15 +233,15 @@ fn own1_an_agent_proposes_only_a_view_it_owns() {
         )
         .unwrap();
     r.invalidate();
-    let e = r.propose(&b, "a", "t").unwrap_err();
+    let e = r.propose(&b, "a", "t", None).unwrap_err();
     assert_eq!(
         e.code, E_VIEW_OWNER,
         "a commit claims an unowned view, a proposal does not: {e}"
     );
     r.view_own(&writer(), "a", Some("agent:a/r1")).unwrap();
-    assert_eq!(r.propose(&a, "a", "t").unwrap().version, 1);
+    assert_eq!(r.propose(&a, "a", "t", None).unwrap().version, 1);
     assert_eq!(
-        r.propose(&writer(), "a", "t").unwrap().version,
+        r.propose(&writer(), "a", "t", None).unwrap().version,
         2,
         "the human proposes any view"
     );
@@ -303,7 +303,7 @@ fn own1_work_is_the_humans_view() {
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     let e = r.view_close(&a, &["work".into()], "x").unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
-    let e = r.propose(&a, "work", "t").unwrap_err();
+    let e = r.propose(&a, "work", "t", None).unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     // Even an agent-owned (legacy) or unowned `work` stays the human's.
     r.view_own(&writer(), "work", Some("agent:a/r1")).unwrap();
@@ -324,9 +324,16 @@ fn own1_work_is_the_humans_view() {
         json!({"op": "fork", "from": "r1", "name": "work"}),
     ] {
         if v["op"] == "fork" {
-            run_view(&e, &a, "r1", req(json!({"op": "create", "name": "r1"}))).unwrap();
+            run_view(
+                &e,
+                &a,
+                "human:qa",
+                "r1",
+                req(json!({"op": "create", "name": "r1"})),
+            )
+            .unwrap();
         }
-        let err = run_view(&e, &a, "r1", req(v)).unwrap_err();
+        let err = run_view(&e, &a, "human:qa", "r1", req(v)).unwrap_err();
         assert_eq!(err.code, E_VIEW_OWNER, "{err}");
         assert!(e.read().view_head("work").is_none(), "nothing was created");
     }

@@ -255,7 +255,7 @@ fn undo1_undo_never_brings_back_or_removes_landed_work() {
     let a = as_agent("agent:a", "r1");
     write_as(&mut r, &a, "a", claim(&section, "x")).unwrap();
     let commit = head(&r, "a");
-    let p = r.propose(&a, "a", "x").unwrap();
+    let p = r.propose(&a, "a", "x", None).unwrap();
     r.land_report(&approver(), &p.r#ref).unwrap();
     let e = r.undo(&a, "a", Some(&commit), false).unwrap_err();
     assert_eq!(e.code, E_UNDO_LANDING, "{e}");

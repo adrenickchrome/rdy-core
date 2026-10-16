@@ -13,7 +13,7 @@ use rdy_qa::tensions::*;
 use std::collections::BTreeSet;
 
 fn propose(r: &mut Rdy, view: &str) -> ProposalInfo {
-    r.propose(&writer(), view, view).unwrap()
+    r.propose(&writer(), view, view, None).unwrap()
 }
 fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
     r.land(&approver(), &p.id)
@@ -68,6 +68,7 @@ fn judge(r: &mut Rdy, advise: bool) {
 fn accept(r: &mut Rdy, p: &ProposalInfo) {
     r.accept_advice(
         &writer(),
+        "human:qa",
         AcceptRequest {
             proposal: p.r#ref.clone(),
             advised_digest: p.advised_digest.clone().expect("advised digest"),

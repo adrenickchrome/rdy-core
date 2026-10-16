@@ -35,6 +35,9 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         E_SITE,
         W_SITE_LAN,
         E_DUMP,
+        E_EXCEPTION_OPEN,
+        E_ITEM_MOVED,
+        rdy_engine::card_words::W_CARD_WORDS,
     ] {
         let (when, fix) = row(code);
         assert!(!when.is_empty() && !fix.is_empty(), "{code}");

@@ -20,16 +20,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Whether a batch of `frames` can move the open tensions or the suspects (the closed list):
-/// every frame kind except `BLOB_CHUNK`, `BLOB_MANIFEST`, `TAG`, `INTENT`, and a `REF_UPDATE`
-/// whose name starts with `inbox/` or `intent/`. A ref update that cannot be read counts as one
-/// that moves.
+/// every frame kind except `BLOB_CHUNK`, `BLOB_MANIFEST`, `TAG`, `INTENT`, `ANSWER`, and a
+/// `REF_UPDATE` whose name starts with `inbox/`, `intent/`, `answer/` or `pending/` (O15). A ref
+/// update that cannot be read counts as one that moves.
 pub(crate) fn can_move(reader: &StoreReader, frames: &[(u8, Hash)]) -> bool {
     frames.iter().any(|(kind, h)| match *kind {
-        kinds::BLOB_CHUNK | kinds::BLOB_MANIFEST | kinds::TAG | kinds::INTENT => false,
+        kinds::BLOB_CHUNK | kinds::BLOB_MANIFEST | kinds::TAG | kinds::INTENT | kinds::ANSWER => {
+            false
+        }
         kinds::REF_UPDATE => reader
             .get_typed::<kinds::RefUpdate>(kinds::REF_UPDATE, h)
             .map_or(true, |r| {
-                !(r.name.starts_with("inbox/") || r.name.starts_with("intent/"))
+                !(r.name.starts_with("inbox/")
+                    || r.name.starts_with("intent/")
+                    || r.name.starts_with(rdy_store::ANSWER_REF)
+                    || r.name.starts_with(rdy_store::PENDING_REF))
             }),
         _ => true,
     })
@@ -558,4 +563,52 @@ fn at_ms(reader: &StoreReader, next: &ReadState, frames: &[(u8, Hash)]) -> i64 {
         .ok()
         .and_then(|e| e.last().map(|e| e.at_ms))
         .unwrap_or_else(crate::now_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_move;
+    use rdy_model::Hash;
+    use rdy_store::kinds::{self, RefUpdate};
+    use rdy_store::segment::Location;
+    use rdy_store::{Store, answer_ref, snooze_ref};
+
+    fn ref_update(s: &mut Store, name: &str) -> Hash {
+        let at = Location {
+            segment: 0,
+            offset: 0,
+        };
+        let r = RefUpdate {
+            name: name.into(),
+            value: vec![1],
+            at,
+        };
+        s.put(kinds::REF_UPDATE, &r).unwrap()
+    }
+
+    /// O15: an `ANSWER` frame and the `answer/` and `pending/` ref updates move nothing; a batch
+    /// with another frame still moves by that frame.
+    #[test]
+    fn di1_an_answer_alone_moves_no_tension() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::create(&d.path().join("s")).unwrap();
+        let answer = s.write(vec![(kinds::ANSWER, vec![0])]).unwrap()[0];
+        let a = ref_update(&mut s, &answer_ref("P-AAAAA@1"));
+        let p = ref_update(&mut s, &snooze_ref("human:nick", "P-AAAAA@1"));
+        let view = ref_update(&mut s, "view/work");
+        let reader = s.reader();
+        let alone = [
+            (kinds::ANSWER, answer),
+            (kinds::REF_UPDATE, a),
+            (kinds::REF_UPDATE, p),
+        ];
+        assert!(!can_move(&reader, &alone));
+        assert!(!can_move(&reader, &alone[..1]));
+        let mut with_view = alone.to_vec();
+        with_view.push((kinds::REF_UPDATE, view));
+        assert!(can_move(&reader, &with_view), "a view ref still moves");
+        let mut with_review = alone.to_vec();
+        with_review.push((kinds::REVIEW, Hash::of(b"r")));
+        assert!(can_move(&reader, &with_review), "a review still moves");
+    }
 }

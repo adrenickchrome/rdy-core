@@ -28,7 +28,7 @@ fn proposed() -> (tempfile::TempDir, Rdy, ProposalInfo) {
     r.view_own(&writer(), "editing", Some("agent:design_thread"))
         .unwrap();
     let p = r
-        .propose(&writer(), "editing", "Tighten the tutorial")
+        .propose(&writer(), "editing", "Tighten the tutorial", None)
         .unwrap();
     (dir, r, p)
 }
@@ -278,7 +278,7 @@ fn sr8_the_key_moves_with_what_the_menu_shows() {
     .unwrap();
     let k3 = key(&r);
     assert_ne!(k3, k2, "a new view with a change moves the key");
-    r.propose(&writer(), "other", "Guards").unwrap();
+    r.propose(&writer(), "other", "Guards", None).unwrap();
     let k4 = key(&r);
     assert_ne!(k4, k3, "a new proposal moves the key");
 

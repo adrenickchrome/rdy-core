@@ -1,4 +1,5 @@
-//! A person's acceptance of a reviewer's advice (D-WMCFW, D-2K8Q5): one answer for the advised semantic tensions of one proposal version, relayed from chat with the person's words (FW-B9, FW-UX1) or given at the CLI. An accepted tension blocks until a side's content changes.
+//! A person's acceptance of a reviewer's advice (D-WMCFW, D-2K8Q5): one answer for the advised semantic tensions of one proposal version, given plainly by a human session or relayed by an agent as itself with the person's words (FW-B9, FW-UX1, D-67ZN7). An accepted tension blocks until a side's content changes.
+use crate::answer::relay::{RelayInput, RelayRefusal, relayed};
 use crate::error::{E_BAD_INPUT, E_PERMISSION, E_PROPOSAL_MOVED, RdyError};
 use crate::gate::{ProposalRef, landed_as, latest_version, open_proposals, resolve_in};
 use crate::proposal_show::is_proposal_ref;
@@ -9,15 +10,11 @@ use crate::tensions::{
     SideRef, Tension, TensionSeverity, TensionStatus, tension_id, tension_label,
 };
 use crate::{Rdy, ReadState, Session};
-use rdy_model::{ActorRun, Hash, RelayEvidence, SemanticTension};
+use rdy_model::{Hash, SemanticTension};
+use rdy_store::Relay;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-
-/// The most characters `evidence` or `question` takes, after trimming.
-const MAX_QUOTE: usize = 2000;
-/// The most characters `session_ref` or `relayed_by` takes, as a view name.
-const MAX_NAME: usize = crate::write::MAX_VIEW_NAME;
 
 /// What an acceptance wrote: the proposal version, one row per accepted tension, and the
 /// severity the tensions now have.
@@ -115,115 +112,36 @@ fn bad(message: String, fix: &str) -> RdyError {
     RdyError::new(E_BAD_INPUT, message, fix)
 }
 
-/// The relay `req` records, checked (FW-B9, FW-UX1): the person's words, the question and the
-/// session, and the agent that relays them at the command line. An agent session accepts only
-/// by relaying the person's words; a human session accepts in their own right, or relays with
-/// `relayed_by` and `evidence` together.
+/// Who accepts and the relay `req` records (FW-B9, FW-UX1, D-67ZN7), by the relay table
+/// ([`relayed`]): a human session accepts plainly, as itself, and names no relay (C5); an agent
+/// session accepts only by relaying the person's words, as itself: over MCP the session is the
+/// relay (no `relayed_by`, `implicit` when it names none), at the command line `relayed_by` is
+/// its own actor or `actor/run`. A relayed acceptance runs as the person `person`. The table's
+/// refusals keep the acceptance's own text for an agent with no words.
 fn relay_of(
     s: &Session,
+    person: &str,
     req: &AcceptRequest,
-) -> Result<(Option<RelayEvidence>, Option<ActorRun>), RdyError> {
-    let evidence = req
-        .evidence
-        .as_deref()
-        .map(str::trim)
-        .filter(|e| !e.is_empty());
-    if !s.is_human() {
-        if evidence.is_none() {
-            return Err(RdyError::new(
-                E_PERMISSION,
-                "an agent accepts advice only by relaying a person's words",
-                "ask the person, then pass evidence (their words, quoted), question and session_ref",
-            ));
-        }
-        if req.relayed_by.is_some() {
-            return Err(bad(
-                "relayed_by names the agent relaying at the command line; over MCP the session is the relay".to_string(),
-                "drop relayed_by",
-            ));
-        }
-    } else if req.relayed_by.is_some() != evidence.is_some() {
-        return Err(bad(
-            "relayed_by and evidence go together".to_string(),
-            "pass both (--relayed-by and --evidence) or neither",
-        ));
-    }
-    for (field, given) in [
-        ("question", req.question.is_some()),
-        ("session_ref", req.session_ref.is_some()),
-    ] {
-        if given && evidence.is_none() {
-            return Err(bad(
-                format!("{field} needs evidence"),
-                &format!("pass evidence with it, or drop {field}"),
-            ));
-        }
-    }
-    let question = req
-        .question
-        .as_deref()
-        .map(str::trim)
-        .filter(|q| !q.is_empty());
-    if [evidence, question]
-        .iter()
-        .flatten()
-        .any(|t| t.chars().count() > MAX_QUOTE)
-    {
-        return Err(bad(
-            format!("evidence and question take at most {MAX_QUOTE} characters each"),
-            "quote the person's answer, not the whole conversation",
-        ));
-    }
-    let session_ref = req
-        .session_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty());
-    if session_ref.is_some_and(|r| r.chars().count() > MAX_NAME) {
-        return Err(bad(
-            format!("session_ref takes at most {MAX_NAME} characters"),
-            "use a short session id, not the conversation",
-        ));
-    }
-    let by = req.relayed_by.as_deref().map(actor_run).transpose()?;
-    let relay = evidence.map(|quoted| {
-        let default = if s.is_human() { "cli" } else { "mcp" };
-        let session_ref = session_ref.unwrap_or(default);
-        RelayEvidence {
-            quoted: quoted.to_string(),
-            session_ref: session_ref.to_string(),
-            question: question.map(str::to_string),
-        }
-    });
-    Ok((relay, by))
-}
-
-/// `actor[/run]`, with `rdy approve --relayed-by`'s checks and texts, at most `MAX_NAME`
-/// characters.
-fn actor_run(text: &str) -> Result<ActorRun, RdyError> {
-    if text.trim().chars().count() > MAX_NAME {
-        return Err(bad(
-            format!("relayed_by takes at most {MAX_NAME} characters"),
-            "name the relaying agent, e.g. --relayed-by agent:name",
-        ));
-    }
-    let (actor, run) = match text.split_once('/') {
-        Some((actor, run)) => (actor.to_string(), Some(run.to_string())),
-        None => (text.to_string(), None),
+) -> Result<(Session, Option<Relay>), RdyError> {
+    let input = RelayInput {
+        relayed_by: req.relayed_by.clone(),
+        evidence: req.evidence.clone(),
+        question: req.question.clone(),
+        session_ref: req.session_ref.clone(),
+        kind: None,
     };
-    if actor.trim().is_empty() {
-        return Err(bad(
-            "relayed_by needs an actor".to_string(),
-            "name the relaying agent, e.g. --relayed-by agent:name",
-        ));
+    let implicit = !s.is_human() && req.relayed_by.is_none();
+    match relayed(s, person, &input, implicit) {
+        // a human session's acceptance is plain: the session's own actor
+        Ok((_, None)) => Ok((s.clone(), None)),
+        Ok((who, Some(relay))) => Ok((who, Some(relay))),
+        Err(RelayRefusal::NoEvidence) => Err(RdyError::new(
+            E_PERMISSION,
+            "an agent accepts advice only by relaying a person's words",
+            "ask the person, then pass evidence (their words, quoted), question and session_ref",
+        )),
+        Err(refusal) => Err(refusal.error()),
     }
-    if run.as_deref().is_some_and(|r| r.trim().is_empty()) {
-        return Err(bad(
-            "relayed_by has an empty run".to_string(),
-            "name the run after '/', e.g. --relayed-by agent:name/run-7, or drop the '/'",
-        ));
-    }
-    Ok(ActorRun { actor, run })
 }
 
 /// The exact proposal version `text` names, open and latest, with its view and changes.
@@ -311,15 +229,32 @@ fn chosen<'a>(
 impl Rdy {
     /// Accepts the reviewers' advice to block on the advised semantic tensions of the exact
     /// proposal version `req.proposal` names (all of them, or those `req.tensions` names), as
-    /// one answer from a person: given by a human session, or relayed with the person's words.
-    /// Writes one acceptance version per pair, in one batch. No role is needed: the person's
-    /// words are the authority.
+    /// one answer from a person: given plainly by a human session, or relayed by an agent with
+    /// the person's words (`relay_of`; `person` is the project's human actor, from the caller,
+    /// O18). Writes one acceptance version per pair, in one batch. No role is needed: the
+    /// person's words are the authority.
     pub fn accept_advice(
         &mut self,
         s: &Session,
+        person: &str,
         req: AcceptRequest,
     ) -> Result<AcceptInfo, RdyError> {
-        let (relay, relayed_by) = relay_of(s, &req)?;
+        let (who, relay) = relay_of(s, person, &req)?;
+        self.accept_as(&who, relay, req)
+    }
+
+    /// [`Rdy::accept_advice`] once the relay table has run: `who` accepts, and `relay` is the
+    /// relay the versions record. The relay fields of `req` are not read.
+    pub(crate) fn accept_as(
+        &mut self,
+        who: &Session,
+        relay: Option<Relay>,
+        req: AcceptRequest,
+    ) -> Result<AcceptInfo, RdyError> {
+        let (relay, relayed_by) = match relay {
+            Some(r) => (Some(r.evidence), Some(r.by)),
+            None => (None, None),
+        };
         let st = self.read();
         let (pref, view, changes) = open_version(&st, &req.proposal)?;
         let advised = st.advised_of(&view, &changes)?;
@@ -334,7 +269,7 @@ impl Rdy {
             ));
         }
         let chosen = chosen(&advised, &req.tensions, &pref)?;
-        let provenance = s.provenance();
+        let provenance = who.provenance();
         let mut keys = BTreeSet::new();
         let versions: Vec<SemanticTension> = chosen
             .iter()

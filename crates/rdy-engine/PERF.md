@@ -1398,3 +1398,29 @@ No laptop figures are judged here: the first timing of these ops is the Linux be
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+
+## Decision intake (2026-10-15)
+
+Two ops, reported with no target (D-JV6Z8, O33). Both run on both tiers (`pending_50k` and
+`answer_later_50k` on the large one), right after the view ops. Two proposals with a summary are
+made first, outside the timer, so the queue holds cards beside the proposals the view ops left
+open. Neither is a spec ceiling.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `pending` | `ReadState::pending` for the project's person, with no chat session and a card budget of 2,000 tokens: the needs-you queue with every open proposal carded | 10 (5 at 50k) | no spec target: the needs-you queue with every open proposal carded (reported) |
+| `answer_later` | `Rdy::answer` of the first item with option `later`, relayed by an agent session with the person's words: one `ANSWER` record in a batch of its own | 10 (5 at 50k) | no spec target: one relayed snooze, one ANSWER record (reported) |
+
+What each cost grows with:
+
+- `pending` grows with the number of open proposals, because each version is carded; with the
+  decisions of each proposal, because the card lists each one and checks each for an exception; and
+  with the advised tensions on each proposal, which the card shows beside its exceptions.
+- `answer_later` grows with the same queue: it reads the queue to bind the answer to the item and its
+  card hash, then writes one record and does one durable flush. It also reads the queue once more
+  to name the next item.
+
+No laptop figures are judged here, and `qa-baseline.json` is not changed (O33).
+
+Deep gate (bench): <orchestrator fills in>

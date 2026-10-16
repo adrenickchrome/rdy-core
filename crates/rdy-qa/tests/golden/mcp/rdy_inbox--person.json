@@ -1,28 +1,49 @@
 {
-  "cursor": "0.28484.0",
+  "cursor": "0.28524.0",
   "entries": [
     {
       "event": "intent_posted",
       "ids": [
-        "1dbfab05bde70505575625b604ee928366e05863499ae88607ca66aaa7f5328b"
+        "d692fef2ce304eb005188fb75c5466976cbade10294d08cfda82610ca41ddbd2"
       ],
-      "line": "agent:a posted intent 1dbfab05bde7 on area payments"
+      "line": "agent:a posted intent d692fef2ce30 on area payments"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "8cc5740f88a2ad0f8e2d8737b5c6ffe70e7270dbe187f35ab852f38689d7e679",
-        "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b"
+        "4d7e0f80f071f5b1aca6b1febd59a8672019f8815601a9a0cc9f8fab61ac6fe1",
+        "83ba27e3ddaee326007325825e47ac60e5fd97ee34a8ec6e38ad15adf62ef449"
       ],
-      "line": "tension 8cc5740f88a2 opened on your change 21742964d864 (edit_collision, blocking): a side changed (change cd27496480bd)"
+      "line": "tension 4d7e0f80f071 opened on your change 83ba27e3ddae (edit_collision, blocking): a side changed (change 72071317f7da)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "085104e59c78bd30c01c2144fe0c80fd1efa6e54eb0ecb99da117d5ae9e8368e",
-        "21742964d8642746a689b277aa274383bf18f3c775631b904ba3c79a6d1bd58b"
+        "e56f7d2de60599e809a096b169353db5e8cbe10e9764487aacaa87a8f4f9b5f1",
+        "83ba27e3ddaee326007325825e47ac60e5fd97ee34a8ec6e38ad15adf62ef449"
       ],
-      "line": "tension 085104e59c78 opened on your change 21742964d864 (edit_collision, blocking): a side changed (change 5b2c3a7ea72c)"
+      "line": "tension e56f7d2de605 opened on your change 83ba27e3ddae (edit_collision, blocking): a side changed (change a8e743187816)"
+    },
+    {
+      "event": "pending_added",
+      "ids": [
+        "00faa4143b8653b05d20297aba2c4899d0cc9465e02631dfc8bfc0cfd4a808c8"
+      ],
+      "line": "P-00faa4143b86@1 waits for an answer; read rdy_pending"
+    },
+    {
+      "event": "pending_added",
+      "ids": [
+        "df4cbfd7472f4dd5da285c5f0a2683d36a31aae9b28b511b335f9403d218d0a2"
+      ],
+      "line": "new advice waits for an answer; read rdy_pending"
+    },
+    {
+      "event": "pending_added",
+      "ids": [
+        "fcd39a375b6ed575b7f71fc87e8676c73f007da97141e788d767a26c1c2ca18e"
+      ],
+      "line": "P-00faa4143b86@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false,

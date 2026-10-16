@@ -291,12 +291,16 @@ impl Sim<'_> {
 
     fn land(&mut self, slot: u8, c: &Cmd) -> Result<(), TestCaseError> {
         let view = self.view(slot);
-        let res = match self.r.propose(&writer(), &view, &view) {
+        // F2: a version that writes a decision carries a summary, and the person confirms its
+        // exceptions before the landing
+        let summary = rdy_qa::intake::summary_for(&self.r, &view);
+        let res = match self.r.propose(&writer(), &view, &view, summary) {
             // an empty view has nothing to propose: not a conflict
             Err(e) if e.code == E_BAD_INPUT => return Ok(()),
             Err(e) => Err(e),
             Ok(p) => {
                 let warned = p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED");
+                rdy_qa::intake::confirm_before_landing(&mut self.r, &approver(), &p);
                 self.r.land_report(&approver(), &p.id).map(|l| {
                     (
                         warned || l.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),

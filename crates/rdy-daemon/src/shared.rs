@@ -334,7 +334,7 @@ mod tests {
             )
             .unwrap();
         }
-        let p = r.propose(&writer, "p", "P").unwrap();
+        let p = r.propose(&writer, "p", "P", None).unwrap();
         let canonical = p.r#ref.clone();
         let (stable, _) = canonical.split_once('@').unwrap();
         let upper = format!("P-{}", stable[2..].to_ascii_uppercase());

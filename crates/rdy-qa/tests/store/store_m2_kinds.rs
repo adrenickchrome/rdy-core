@@ -127,7 +127,7 @@ fn dl3_the_every_kind_project_holds_every_kind_and_ref_family() {
     let dir = rdy_qa::every_kind::project();
     let r = Rdy::open(dir.path()).unwrap();
     let f = rdy_qa::every_kind::facts(&r);
-    for k in rdy_qa::every_kind::V1_KINDS {
+    for k in rdy_qa::every_kind::V11_KINDS {
         assert!(
             f["objects"][k.to_string()].as_u64().unwrap_or(0) >= 1,
             "no frame of kind {k}: {f}"

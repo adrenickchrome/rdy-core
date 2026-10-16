@@ -962,6 +962,10 @@ fn report<T: Serialize + 'static>(
     };
     let states = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
     let before = states.as_ref().map(|s| &*s.0);
+    // FW-PC1: a nudge, never a refusal; absent unless the count is reached under cadence `changes`
+    if v.is_object() && propose_due(&engine.read(), view) {
+        v["propose_due"] = true.into();
+    }
     // the write's changes: an import lists one per author in `changes` (oldest first, the last
     // is `change`); every other write has the one `change`
     let change = v
@@ -1010,6 +1014,29 @@ fn report<T: Serialize + 'static>(
     }
     attach_related(&mut v, engine, view, &changes);
     Ok(v)
+}
+
+/// FW-PC1 (D-0GGW9): whether a proposal is due for `view`. Only under cadence `changes`: the
+/// view's included changes that its open proposal does not carry (its latest version, read from
+/// the view's own open ref; every change when it has none) number at least `propose.changes`. A
+/// state that cannot be read says no: the nudge never fails a write. No other proposal is read
+/// and no version is counted.
+fn propose_due(st: &ReadState, view: &str) -> bool {
+    if st.propose_cadence() != crate::ProposeCadence::Changes {
+        return false;
+    }
+    let Ok(open) = crate::gate::open_proposal_of_view(st, view) else {
+        return false;
+    };
+    let carried: BTreeSet<Hash> = open
+        .map(|p| p.changes.into_iter().collect())
+        .unwrap_or_default();
+    let waiting = st
+        .included(view)
+        .iter()
+        .filter(|c| !carried.contains(*c))
+        .count();
+    waiting >= st.propose_changes() as usize
 }
 
 /// cc16 (FW-CH3): `coverage: {before, after, pages}`, the change `changes` made to the coverage
@@ -1243,9 +1270,11 @@ pub fn propose_and_report(
     Ok(v)
 }
 
-/// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against its
-/// view's and the pages its changes touch, read from the stored version after the write, off
-/// the writer (as a write's is). A read error leaves `coverage` out and sets `coverage_error`
+/// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against the
+/// proposal candidate's (canon with exactly the version's changes; ruling final, FW-CV2
+/// D-XZXCE) and the pages its changes touch, read from the stored version after the write, off
+/// the writer (as a write's is). The batch card's Coverage fact is worked out by the same
+/// function (`ReadState::proposal_coverage`), so a subset proposal's reply and card agree. A read error leaves `coverage` out and sets `coverage_error`
 /// (an earlier text is kept, also when the read works: the unapplied-decision pass sets one
 /// that does not stop coverage): the proposal stands. When the propose could not read the
 /// tensions (`tensions_error`), coverage cannot be worked out either: the reply is left as is.
@@ -1266,20 +1295,7 @@ fn attach_proposal_coverage(engine: &dyn Engine, v: &mut serde_json::Value) {
             )
         })
         .and_then(|id| Ok(st.reader().proposal(&id)?))
-        .and_then(|p| {
-            let touched: BTreeSet<BlockId> = changes_of(&st, &p.changes)?
-                .iter()
-                .flat_map(|c| &c.ops)
-                .map(|o| o.block_id().clone())
-                .collect();
-            coverage_change(
-                &st,
-                &Scope::Canon,
-                &st,
-                &Scope::View(p.view.clone()),
-                &touched,
-            )
-        });
+        .and_then(|p| st.proposal_coverage(&p));
     match read {
         Ok(c) => {
             v["coverage"] = serde_json::to_value(&c)
@@ -1303,6 +1319,25 @@ pub fn land_and_report(
     let mut v = write_typed(engine, f)?;
     report_landing(engine, &mut v, "version", None);
     Ok(v)
+}
+
+/// Attaches the landing consequences to the landing of an answer's reply, which is an
+/// `AnswerInfo` or a list of them: for each one with a `landing`, the consequences of the
+/// version it landed, as `land_and_report` attaches them to an approval. Other answers stay as
+/// they are.
+pub fn report_answer_landings(engine: &dyn Engine, v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Array(done) => {
+            for one in done {
+                report_answer_landings(engine, one);
+            }
+        }
+        _ => {
+            if let Some(landing) = v.get_mut("landing").filter(|l| l.is_object()) {
+                report_landing(engine, landing, "version", None);
+            }
+        }
+    }
 }
 
 /// Attaches the landing consequences of the version hash in `v[key]`.
@@ -1355,7 +1390,7 @@ mod tests {
             },
         )
         .unwrap();
-        let info = r.propose(&s, "work", "work").unwrap();
+        let info = r.propose(&s, "work", "work", None).unwrap();
         let v = serde_json::to_value(&info).unwrap();
         (dir, Local::new(r), v)
     }

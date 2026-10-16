@@ -34,7 +34,7 @@ fn doc(r: &mut Rdy, view: &str, name: &str) -> String {
 }
 
 fn land(r: &mut Rdy, view: &str) -> rdy_model::Hash {
-    let p = r.propose(&writer(), view, "p").unwrap();
+    let p = r.propose(&writer(), view, "p", None).unwrap();
     r.land(
         &Session {
             actor: "h".into(),

@@ -240,9 +240,9 @@ fn msw21_another_views_unjustified_change_is_not_cleared_by_this_views_justifica
             .filter(|t| t.kind == TensionKind::UnjustifiedChange)
             .count()
     };
-    let pb = r.propose(&writer(), "b", "b").unwrap();
+    let pb = r.propose(&writer(), "b", "b", None).unwrap();
     assert_eq!(unjustified(&pb), 0, "{:?}", pb.tensions);
-    let pa = r.propose(&writer(), "a", "a").unwrap();
+    let pa = r.propose(&writer(), "a", "a", None).unwrap();
     assert_eq!(unjustified(&pa), 1, "{:?}", pa.tensions);
 }
 

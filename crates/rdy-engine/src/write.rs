@@ -2688,6 +2688,16 @@ impl Rdy {
             warnings.extend(skeleton_gaps(&self.pack, doc, &titles));
         }
         warnings.extend(brief_warnings);
+        // FW-I1: the authored words of each decision or question this write touched
+        for t in &touched {
+            if let Some(b) = m.get(t) {
+                warnings.extend(crate::card_words::card_words_issues(
+                    &b.id,
+                    &b.block_type,
+                    &b.fields,
+                ));
+            }
+        }
         Ok(WriteResult {
             change: id.to_string(),
             created,

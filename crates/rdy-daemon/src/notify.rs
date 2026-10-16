@@ -460,7 +460,7 @@ mod tests {
                 Some("overview"),
                 Some("T"),
             )?;
-            let p = r.propose(&human(Role::Writer), "work", "t")?;
+            let p = r.propose(&human(Role::Writer), "work", "t", None)?;
             r.land(&human(Role::Approver), &p.id)?;
             Ok(serde_json::Value::Null)
         }))
@@ -483,7 +483,7 @@ mod tests {
                 },
             )?;
             if land {
-                let p = r.propose(&human(Role::Writer), &view, "t")?;
+                let p = r.propose(&human(Role::Writer), &view, "t", None)?;
                 r.land(&human(Role::Approver), &p.id)?;
             }
             Ok(serde_json::to_value(w).unwrap())

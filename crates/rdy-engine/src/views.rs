@@ -19,7 +19,7 @@ use std::sync::Arc;
 mod own;
 mod undo;
 
-pub use own::StaleClose;
+pub use own::{OwnInfo, StaleClose};
 pub use undo::{CloseResult, UndoResult};
 pub(crate) use undo::{kind_name, net_undone};
 

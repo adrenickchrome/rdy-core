@@ -55,7 +55,14 @@ fn setup() -> (tempfile::TempDir, Local, Spec, String) {
 fn vcq1_including_a_change_lists_the_referrer_of_the_block_it_moves() {
     let (_d, e, s, cb) = setup();
     let a = as_agent("agent:a", "r1");
-    let v = run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
+    let v = run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
     let b = find(&v, &s.b, "suspect");
     let a_id = s.a.to_string();
     assert_eq!(b["follow_up"], "update");
@@ -75,8 +82,22 @@ fn vcq1_including_a_change_lists_the_referrer_of_the_block_it_moves() {
 fn vcq1_excluding_it_again_lists_the_referrer_as_a_dependent() {
     let (_d, e, s, cb) = setup();
     let a = as_agent("agent:a", "r1");
-    run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
-    let v = run_view(&e, &a, "r1", req(json!({"op": "exclude", "changes": [cb]}))).unwrap();
+    run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
+    let v = run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "exclude", "changes": [cb]})),
+    )
+    .unwrap();
     let b = find(&v, &s.b, "dependent");
     assert_eq!(b["follow_up"], "update");
     assert_eq!(
@@ -90,7 +111,14 @@ fn vcq1_an_include_that_collides_lists_a_conflict_to_resolve() {
     let (_d, e, s, cb) = setup();
     let a = as_agent("agent:a", "r1");
     write_in(&e, &a, "r1", upd(&s.a, "A, by a."));
-    let v = run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
+    let v = run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
     let c = find(&v, &s.a, "conflict");
     assert_eq!(c["follow_up"], "resolve");
     assert_eq!(c["fix"], CONFLICT_FIX);
@@ -111,8 +139,15 @@ fn vcq1_an_include_that_collides_lists_a_conflict_to_resolve() {
 fn vcq1_undoing_an_include_reports_with_the_undo_op_as_the_batch() {
     let (_d, e, s, cb) = setup();
     let a = as_agent("agent:a", "r1");
-    run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
-    let v = run_view(&e, &a, "r1", req(json!({"op": "undo"}))).unwrap();
+    run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
+    let v = run_view(&e, &a, "human:qa", "r1", req(json!({"op": "undo"}))).unwrap();
     assert_eq!(v["kind"], "include", "{v}");
     let b = find(&v, &s.b, "dependent");
     assert_eq!(b["id"], consequence_id(&hash(&v["op"]), "dependent", &s.b));
@@ -130,7 +165,14 @@ fn vcq1_a_resolution_write_lists_its_consequences_and_no_conflict_entry() {
         .unwrap()
         .to_string();
     write_in(&e, &a, "r1", upd(&s.a, "A, by a."));
-    run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
+    run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
     let v = write_in(
         &e,
         &a,
@@ -177,14 +219,29 @@ fn vcq1_a_dependent_the_view_already_wrote_is_marked_already_written() {
 fn vcq1_an_include_with_nothing_new_has_empty_consequences_and_reads_have_none() {
     let (_d, e, _s, cb) = setup();
     let a = as_agent("agent:a", "r1");
-    run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
-    let again = run_view(&e, &a, "r1", req(json!({"op": "include", "changes": [cb]}))).unwrap();
+    run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
+    let again = run_view(
+        &e,
+        &a,
+        "human:qa",
+        "r1",
+        req(json!({"op": "include", "changes": [cb]})),
+    )
+    .unwrap();
     assert_eq!(again["consequences"], json!([]));
-    let show = run_view(&e, &a, "r1", req(json!({"op": "show"}))).unwrap();
+    let show = run_view(&e, &a, "human:qa", "r1", req(json!({"op": "show"}))).unwrap();
     assert!(show.get("consequences").is_none());
     let fork = run_view(
         &e,
         &a,
+        "human:qa",
         "r1",
         req(json!({"op": "fork", "from": "r1", "name": "r1-copy"})),
     )
@@ -207,6 +264,7 @@ fn vcq1_max_tokens_cuts_view_op_consequences_with_counts() {
     let v = run_view(
         &e,
         &a,
+        "human:qa",
         "r1",
         req(json!({"op": "include", "changes": [cb], "max_tokens": 1})),
     )

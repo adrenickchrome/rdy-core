@@ -11,7 +11,7 @@ use serde_json::Value;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewParams {
-    /// create, fork, include, exclude, compare, list, show, close, undo (own is the human's: E_PERMISSION here).
+    /// create, fork, include, exclude, compare, list, show, close, own, undo. own and close with stale are a person's acts: relay their words with evidence.
     pub op: String,
     /// create and fork: the new view's name; close, own and show: the view.
     pub name: Option<String>,
@@ -45,6 +45,12 @@ pub struct ViewParams {
     pub none: Option<bool>,
     /// undo: the op to undo (default: your newest undoable op on the view).
     pub target: Option<String>,
+    /// own and close with stale: the person's words, quoted. Without them an agent session is refused (E_PERMISSION).
+    pub evidence: Option<String>,
+    /// own and close with stale: the question the person answered.
+    pub question: Option<String>,
+    /// own and close with stale: the chat session the person spoke in (default mcp).
+    pub session_ref: Option<String>,
     /// compare, list and show: cut the answer to about this many tokens; include, exclude and undo: the budget of the consequences.
     pub max_tokens: Option<usize>,
 }
@@ -60,12 +66,13 @@ pub struct LogParams {
 }
 
 /// `rdy_schema`'s paragraph on views.
-pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?}, undo {view?, target?, cascade?}; own is the human's (E_PERMISSION from an MCP session). Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want; rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
+pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {view, owner?, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}; own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want; rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
 
 /// `rdy_view`: builds the request field by field and runs it for the session.
 pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
+    let person = human_actor_for_env(&st.engine.root());
     let max_tokens = p.max_tokens;
     let req = ViewRequest {
         op: p.op,
@@ -86,9 +93,13 @@ pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
         none: p.none,
         target: p.target,
         max_tokens: p.max_tokens,
+        evidence: p.evidence,
+        question: p.question,
+        session_ref: p.session_ref,
+        relayed_by: None,
     };
     let op = req.op.clone();
-    let mut v = run_view(&*st.engine, &s, &st.view, req)?;
+    let mut v = run_view(&*st.engine, &s, &person, &st.view, req)?;
     match op.as_str() {
         "list" => {
             let max = max_tokens.unwrap_or(4000);

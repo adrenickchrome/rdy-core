@@ -10,7 +10,10 @@ pub const BLOB_CHUNK: u8 = 6;
 pub const BLOB_MANIFEST: u8 = 7;
 pub const REF_UPDATE: u8 = 8;
 pub const TAG: u8 = 9;
-// Codes 10-12 are unassigned.
+/// An answer (`rdy_model::Answer`; plan Decision intake): refs `answer/<item>` and
+/// `pending/<person>/<item>` name the latest one (`crate::answer`).
+pub const ANSWER: u8 = 10;
+// Codes 11-12 are unassigned.
 /// One op of a view's chain (`crate::view::ViewOp`).
 pub const VIEW_OP: u8 = 13;
 /// Ends every write batch: names the batch's first frame, its frame count and a digest of the

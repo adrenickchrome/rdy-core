@@ -3,14 +3,16 @@
 //! op parses and checks its role here, then runs its engine call as one `Engine::write`
 //! closure on the writer. Relative paths in args resolve against the session's working
 //! directory.
+use rdy_engine::answer::relay::{RelayInput, RelayRefusal, relayed};
 use rdy_engine::engine::Engine;
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::tensions::api::{TensionsRequest, run_resolve, run_tensions};
 use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Scope, Session, alt, intent, view_api,
+    E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Relay, Scope, Session, alt, intent,
+    view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
-use rdy_model::{ActorRun, Role};
+use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ use std::path::{Path, PathBuf};
 mod brief;
 mod dump;
 mod edit;
+mod intake;
 mod land;
 mod project;
 mod read;
@@ -29,6 +32,7 @@ mod wc;
 use brief::brief;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_folder};
+use intake::{answer, pending};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
@@ -89,6 +93,8 @@ pub const OPS: &[&str] = &[
     "coverage",
     "inbox",
     "site_url",
+    "pending",
+    "answer",
 ];
 
 #[derive(Deserialize)]
@@ -132,60 +138,102 @@ pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
     }
 }
 
-/// The session an approval runs as, and the agent that relays it (D-HA7YZ). The cases:
-/// - a human session with no `relayed_by`: the human, as an approver; no relay;
-/// - a human session with `relayed_by`: refused (`E_PERMISSION`);
+/// The session an approval runs as, and the agent that relays it (D-HA7YZ). It runs the relay
+/// table (`answer::relay::relayed`, at the command line: not implicit) and words its refusals
+/// in the approval's own texts (O19):
+/// - a human session with no relay flags: the human, as an approver; no relay;
+/// - a human session with `relayed_by`: refused (`E_PERMISSION`); with evidence alone: refused
+///   (`E_BAD_INPUT`, the pairing);
 /// - an agent session with no `relayed_by`: refused (`E_PERMISSION`);
 /// - an agent session with `relayed_by` but no evidence: refused (`E_BAD_INPUT`, the pairing);
+///   with blank evidence, the landing's own refusal of an empty quote (`E_BAD_INPUT`);
 /// - an agent session whose `relayed_by` is exactly its actor, or its `actor/run` when it has a
-///   run: the human actor (`cx.human`, run `cli`) as the approver, relayed by the session's
-///   actor and run (taken from the session, never parsed from the flag);
+///   run: the human actor (`cx.human`) as the approver, relayed by the session's actor and run
+///   (taken from the session, never parsed from the flag);
 /// - an agent session whose `relayed_by` is anything else: refused (`E_PERMISSION`), with a fix
-///   that names the session's actor, a spelling this check accepts.
+///   that names the session's actor, a spelling this check accepts;
+/// - a human session with `session_ref` or `question` and no relay: refused (`E_BAD_INPUT`,
+///   `<field> needs relayed_by`), `session_ref` named first;
+/// - a quote or a question longer than the table allows, or a `session_ref` longer than a view
+///   name: the table's refusal (`E_BAD_INPUT`).
+///
+/// The whole relay (`relayed_by`, `evidence`, `question`, `session_ref`) goes through the table.
+/// The relayer it returns is the one the landing records.
 pub(crate) fn relay_approver(
     cx: &OpContext,
-    relayed_by: Option<&str>,
-    has_evidence: bool,
-) -> Result<(Session, Option<ActorRun>), RdyError> {
+    input: &RelayInput,
+) -> Result<(Session, Option<Relay>), RdyError> {
     let s = cx.session;
-    let by = match (s.is_human(), relayed_by) {
-        (true, None) => return Ok((approver(s)?, None)),
-        (true, Some(_)) => return Err(RdyError::new(E_PERMISSION, HUMAN_RELAY, HUMAN_RELAY_FIX)),
-        (false, None) => {
-            return Err(RdyError::new(
-                E_PERMISSION,
-                AGENT_NOT_RELAYING,
-                AGENT_NOT_RELAYING_FIX,
-            ));
-        }
-        (false, Some(by)) => by,
-    };
-    if !has_evidence {
-        return Err(RdyError::new(E_BAD_INPUT, RELAY_PAIR, RELAY_PAIR_FIX));
+    match relayed(s, cx.human, input, false) {
+        // a human approves as the session's own actor, as before the table
+        Ok((_, None)) => Ok((approver(s)?, None)),
+        Ok((who, Some(relay))) => Ok((who, Some(relay))),
+        Err(refusal) => Err(approval_refusal(s, input, refusal)),
     }
-    // the flag is compared whole with the session's own spellings, never split: an agent
-    // actor may contain '/', so splitting would misread `agent:a/b` as actor `agent:a`, run `b`
+}
+
+/// A refusal of the relay table in the approval's own texts and codes.
+fn approval_refusal(s: &Session, input: &RelayInput, refusal: RelayRefusal) -> RdyError {
+    let relayed_by = input.relayed_by.as_deref();
+    let evidence = input.evidence.as_deref();
+    let pair = || RdyError::new(E_BAD_INPUT, RELAY_PAIR, RELAY_PAIR_FIX);
+    let not_relaying = || RdyError::new(E_PERMISSION, AGENT_NOT_RELAYING, AGENT_NOT_RELAYING_FIX);
+    match refusal {
+        RelayRefusal::HumanRelays if relayed_by.is_some() => {
+            RdyError::new(E_PERMISSION, HUMAN_RELAY, HUMAN_RELAY_FIX)
+        }
+        RelayRefusal::HumanRelays => pair(),
+        RelayRefusal::NoEvidence => match (relayed_by, evidence) {
+            (None, _) => not_relaying(),
+            (Some(_), None) => pair(),
+            // the flag names the relayer before the quote is read
+            (Some(by), Some(_)) => match not_itself(s, by) {
+                Some(e) => e,
+                None => RdyError::new(
+                    E_BAD_INPUT,
+                    "the evidence quote is empty",
+                    "quote the human's words with --evidence",
+                ),
+            },
+        },
+        RelayRefusal::NoRelayedBy | RelayRefusal::RelayedByOverMcp => not_relaying(),
+        RelayRefusal::NotItself { by, .. } => not_itself(s, &by).unwrap_or_else(pair),
+        // a person's session_ref or question with no relay: named in the approval's order
+        RelayRefusal::NeedsEvidence { .. } if relayed_by.is_none() && evidence.is_none() => {
+            let field = if input.session_ref.is_some() {
+                "session_ref"
+            } else {
+                "question"
+            };
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{field} needs relayed_by"),
+                format!("pass relayed_by and evidence with it, or drop {field}"),
+            )
+        }
+        RelayRefusal::NeedsEvidence { .. } => pair(),
+        r @ (RelayRefusal::TooLong | RelayRefusal::SessionRefTooLong) => r.error(),
+    }
+}
+
+/// The refusal of a `relayed_by` that is not the session's actor or `actor/run`, if it is not.
+/// The flag is compared whole with the session's own spellings, never split: an agent actor may
+/// contain '/', so splitting would misread `agent:a/b` as actor `agent:a`, run `b`.
+fn not_itself(s: &Session, by: &str) -> Option<RdyError> {
     let me = match &s.run {
         Some(r) => format!("{}/{r}", s.actor),
         None => s.actor.clone(),
     };
-    if by != s.actor && by != me {
-        return Err(RdyError::new(
+    (by != s.actor && by != me).then(|| {
+        RdyError::new(
             E_PERMISSION,
             format!("{me} relays only as itself, not as {by}"),
             format!(
                 "pass --relayed-by {} with the person's words in --evidence",
                 s.actor
             ),
-        ));
-    }
-    Ok((
-        Session::human(cx.human.to_string(), Role::Approver),
-        Some(ActorRun {
-            actor: s.actor.clone(),
-            run: s.run.clone(),
-        }),
-    ))
+        )
+    })
 }
 
 /// Why half a relay is refused.
@@ -303,7 +351,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         ),
         "propose" => propose(
             cx,
-            parse(op, args, "{title, view?, summary?, max_tokens?}")?,
+            parse(
+                op,
+                args,
+                "{title, view?, summary?, max_tokens?, alternatives?, relayed_by?, evidence?, question?, session_ref?}",
+            )?,
         ),
         "approve" => approve(
             cx,
@@ -313,7 +365,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{proposal, relayed_by?, evidence?, question?, session_ref?, strict?}",
             )?,
         ),
-        "tag" => tag(cx, parse(op, args, "{version, landing?, message?}")?),
+        "tag" => tag(
+            cx,
+            parse(
+                op,
+                args,
+                "{version, landing?, message?, relayed_by?, evidence?, question?, session_ref?}",
+            )?,
+        ),
         "import" => import(cx, parse(op, args, "{dir, view}")?),
         "reindex" => {
             parse::<NoArgs>(op, args, "{}")?;
@@ -323,11 +382,12 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "view" => view_api::run_view(
             cx.engine,
             cx.session,
+            cx.human,
             &cx.session.default_view(),
             parse(
                 op,
                 args,
-                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?}",
+                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}",
             )?,
         ),
         "wc_view" => wc_view(cx, parse(op, args, "{view?, ids?, blobs_dir?}")?),
@@ -373,6 +433,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "resolve" => run_resolve(
             cx.engine,
             cx.session,
+            cx.human,
             parse(
                 op,
                 args,
@@ -387,6 +448,15 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             run_inbox(cx.engine, cx.session, req)
         }
         "site_url" => site_url(cx, parse(op, args, "{scope?}")?),
+        "pending" => pending(cx, parse(op, args, "{max_tokens?, session_ref?}")?),
+        "answer" => answer(
+            cx,
+            parse(
+                op,
+                args,
+                "{ref?, option?, card_hash?, note?, brief?, relayed_by?, evidence?, question?, session_ref?, kind?, all_recommended?}",
+            )?,
+        ),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

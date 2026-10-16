@@ -1,6 +1,7 @@
 //! rdy_propose: a proposal for a change.
 
 use super::*;
+use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::consequence::propose_and_report;
 use rdy_engine::*;
 use schemars::JsonSchema;
@@ -20,6 +21,20 @@ pub struct ProposeParams {
     pub max_tokens: Option<usize>,
     /// A proposal from a member view of an alternative set (rdy_alternatives) names the set and the view's own member: {set, chosen}. Landing it chooses that member and closes the others.
     pub alternatives: Option<crate::alt_tools::AltPickParams>,
+    /// Propose the person's own view (one they own, or "work") on their word: {evidence, question?, session_ref?}. The proposal records the person, and an answer records your relay.
+    pub relay: Option<RelayParams>,
+}
+
+/// The person's words that ask for a proposal of their view.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelayParams {
+    /// The person's words, quoted (1 to 2000 characters).
+    pub evidence: String,
+    /// The question you asked the person.
+    pub question: Option<String>,
+    /// The chat session the person spoke in (default: mcp).
+    pub session_ref: Option<String>,
 }
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {
@@ -31,14 +46,37 @@ pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyErro
         .unwrap_or_else(|| st.view.clone());
     let changes = p.changes.clone();
     let alternatives = p.alternatives.map(rdy_engine::alt::AltPick::from);
-    propose_and_report(&*st.engine, p.max_tokens, move |r| {
-        r.propose_with(
+    // with a relay, the person's proposal of their own view (O32); the session is the relay
+    let root = st.engine.root();
+    let relay = p.relay.map(|r| {
+        let input = RelayInput {
+            relayed_by: None,
+            evidence: Some(r.evidence),
+            question: r.question,
+            session_ref: r.session_ref,
+            kind: None,
+        };
+        (input, human_actor_for_env(&root))
+    });
+    propose_and_report(&*st.engine, p.max_tokens, move |r| match relay {
+        Some((relay, person)) => r.propose_as(
+            &s,
+            &person,
+            &relay,
+            true,
+            &view,
+            &p.title,
+            changes.as_deref(),
+            p.summary.as_deref(),
+            alternatives.as_ref(),
+        ),
+        None => r.propose_with(
             &s,
             &view,
             &p.title,
             changes.as_deref(),
             p.summary.as_deref(),
             alternatives.as_ref(),
-        )
+        ),
     })
 }

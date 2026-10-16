@@ -1,17 +1,21 @@
-//! The every-kind project: one project that holds an object of every kind of dump format 1 and a
-//! ref of every family, and one read of it ("facts") that a later rdy can repeat. Shared by the
-//! sg6 store test and the dump and load tests (D-69AY3, D-EV4F1).
+//! The every-kind project: one project that holds an object of every kind of dump format 1 (store
+//! format 11) and a ref of every family, and one read of it ("facts") that a later rdy can
+//! repeat. Shared by the sg6 store test and the dump and load tests (D-69AY3, D-EV4F1).
 use crate::fixtures::*;
 use crate::inbox::on;
+use crate::intake::{PERSON, confirm_exceptions, decide_in};
 use crate::packs::qa_project;
 use crate::tensions::{ag, created, one_involving, put, upd};
 use rdy_engine::alt::AltMemberInput;
+use rdy_engine::answer::AnswerRequest;
+use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::inbox::sub::subscribe;
 use rdy_engine::mention_review::MentionVerdict;
+use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::tensions::{TensionKind, tension_label};
-use rdy_engine::{Engine, LandOptions, Local, Rdy, Scope, Session};
+use rdy_engine::{DecisionInput, Engine, LandOptions, Local, Rdy, Scope, Session};
 use rdy_model::{
     ActorRun, BlockId, Finding, Hash, PairItem, Provenance, RelayEvidence, Review, ReviewSubject,
     Role, SemanticTension, Verdict, pair_key,
@@ -23,10 +27,11 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The ref families of an every-kind store (store format 10): the ten of an M2 store, `canon`
-/// and the open proposals (`proposal/`). A store format that adds a family adds it here; the
-/// frozen v1 fixture test keeps its own list (`V1_FAMILIES` in `io_dump_fixture.rs`).
-pub const FAMILIES: [&str; 12] = [
+/// The ref families of an every-kind store (store format 11): the ten of an M2 store, `canon`,
+/// the open proposals (`proposal/`), the answers (`answer/`) and the snoozes (`pending/`). A
+/// store format that adds a family adds it here; each frozen fixture test keeps its own list
+/// (`V1_FAMILIES` in `io_dump_fixture.rs`, `V11_FAMILIES` in `io_dump_fixture_s11.rs`).
+pub const FAMILIES: [&str; 14] = [
     "meta/store_format",
     "view/",
     "tag/",
@@ -39,9 +44,12 @@ pub const FAMILIES: [&str; 12] = [
     "inbox/",
     "canon",
     "proposal/",
+    "answer/",
+    "pending/",
 ];
 
-/// The object kinds of dump format 1 that the project holds: every kind but the batch marker.
+/// The object kinds of dump format 1 with store format 10 that the project holds: every kind but
+/// the batch marker. Frozen with the v1-s10 fixture.
 pub const V1_KINDS: [u8; 15] = [
     kinds::BLOCK,
     kinds::CHANGE,
@@ -52,6 +60,27 @@ pub const V1_KINDS: [u8; 15] = [
     kinds::BLOB_MANIFEST,
     kinds::REF_UPDATE,
     kinds::TAG,
+    kinds::VIEW_OP,
+    kinds::INTENT,
+    kinds::ALT_SET,
+    kinds::REVIEW,
+    kinds::TENSION,
+    kinds::TRANSITION,
+];
+
+/// The object kinds of dump format 1 with store format 11 that the project holds: `V1_KINDS` and
+/// `ANSWER`. Frozen with the v1-s11 fixture.
+pub const V11_KINDS: [u8; 16] = [
+    kinds::BLOCK,
+    kinds::CHANGE,
+    kinds::PROPOSAL,
+    kinds::LANDING,
+    kinds::SNAPSHOT,
+    kinds::BLOB_CHUNK,
+    kinds::BLOB_MANIFEST,
+    kinds::REF_UPDATE,
+    kinds::TAG,
+    kinds::ANSWER,
     kinds::VIEW_OP,
     kinds::INTENT,
     kinds::ALT_SET,
@@ -183,9 +212,11 @@ fn foreign_export(out: &Path) {
 }
 
 /// A `qa_project`, written through `Local` (each step seals its batch, as the daemon's writer
-/// does), that holds at least one object of every kind of `V1_KINDS` and one ref of every family
-/// of `FAMILIES`: an imported blob, the open proposal `sa` (`proposal/`), a `.rdyignore` with the
-/// line `*.draft.yaml`, and a `.rdy/local.yaml` with `actor: human:qa` (a dump leaves it out).
+/// does), that holds at least one object of every kind of `V11_KINDS` and one ref of every family
+/// of `FAMILIES`: an imported blob, the open proposals `sa` and `dec` (`proposal/`), an `ANSWER`
+/// of each family (a relayed tag and a local confirm under `answer/`, a relayed snooze under
+/// `pending/`), a `.rdyignore` with the line `*.draft.yaml`, and a `.rdy/local.yaml` with
+/// `actor: human:qa` (a dump leaves it out).
 /// Closed.
 pub fn project() -> tempfile::TempDir {
     build(None)
@@ -193,7 +224,7 @@ pub fn project() -> tempfile::TempDir {
 
 /// `project`, built on a store whose segments hold `segment_max` bytes: its log rolls where a
 /// batch and its marker do not fit, and a batch that grows past the limit stays in its segment
-/// (the soft limit). The dump format 1 fixture is written from it (dl8).
+/// (the soft limit). The dump format 1 fixtures are written from it (dl8, di2).
 pub fn rolling_project(segment_max: u64) -> tempfile::TempDir {
     build(Some(segment_max))
 }
@@ -277,7 +308,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     let p = on(&e, move |r| {
         put(r, "sa", upd(&k4, "Four never holds with three."));
         advise_blocking(r, &k3, &k4);
-        r.propose(&ag("sa"), "sa", "sa").unwrap()
+        r.propose(&ag("sa"), "sa", "sa", None).unwrap()
     });
     on(&e, move |r| {
         let req = AcceptRequest {
@@ -288,7 +319,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
             session_ref: Some("chat-1".into()),
             ..Default::default()
         };
-        let a = r.accept_advice(&ag("relay"), req).unwrap();
+        let a = r.accept_advice(&ag("relay"), "human:qa", req).unwrap();
         assert_eq!(a.accepted.len(), 1, "the advice is accepted");
     });
     // a rebase that records a conflict: rb edits k1, the person lands another edit of k1
@@ -305,7 +336,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     let sec = s.section.clone();
     on(&e, move |r| {
         put(r, "rel", claim(&sec, "Relayed claim."));
-        let p = r.propose(&ag("rel"), "rel", "rel").unwrap();
+        let p = r.propose(&ag("rel"), "rel", "rel", None).unwrap();
         let relay = Relay {
             by: ActorRun {
                 actor: "agent:relay".into(),
@@ -339,6 +370,81 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
             .any(|c| st.reader().change(c).unwrap().links.imported_by.is_some())
     });
     assert!(imported, "the import records its importer");
+    // store format 11: a relayed tag on canon's head (TAG, and an ANSWER under answer/ that
+    // holds the relay, D-DGCH7)
+    on(&e, |r| {
+        let info = r
+            .tag_as(
+                &relaying_agent(),
+                PERSON,
+                &relay_words("Tag it v0.2.0.", "chat-3"),
+                true,
+                "v0.2.0",
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(info.answer.is_some(), "the relayed tag writes an ANSWER");
+    });
+    // a batch that holds an exception: a `one_way` decision, proposed with a summary; it does
+    // not land. The person snoozes its approve item through a relay (ANSWER, pending/) and
+    // confirms the exception as themselves (ANSWER, answer/).
+    let (sec, ent) = (s.section.clone(), s.entity.clone());
+    on(&e, move |r| {
+        decide_in(
+            r,
+            "dec",
+            DecisionInput {
+                parent: sec.to_string(),
+                statement: "The ledger is copied once a night".into(),
+                title: Some("Copy the ledger nightly".into()),
+                why: Some("the person decides how often the ledger is copied".into()),
+                reversibility: Some("one_way".into()),
+                affects: vec![ent.to_string()],
+                ..Default::default()
+            },
+        );
+        let p = r
+            .propose_subset(
+                &ag("dec"),
+                "dec",
+                "dec",
+                None,
+                Some("Records how often the ledger is copied."),
+            )
+            .unwrap();
+        let q = r
+            .read()
+            .pending(&PendingQuery {
+                person: PERSON.into(),
+                session_ref: None,
+                max_tokens: CARD_MAX_TOKENS,
+            })
+            .unwrap();
+        let batch = q
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::Approve && i.r#ref == p.r#ref)
+            .unwrap_or_else(|| panic!("the approve item {}: {q:#?}", p.r#ref))
+            .clone();
+        let later = r
+            .answer(
+                &relaying_agent(),
+                PERSON,
+                AnswerRequest {
+                    r#ref: batch.r#ref.clone(),
+                    option: "later".into(),
+                    card_hash: Some(batch.card_hash.clone()),
+                    note: None,
+                    relay: relay_words("Not now.", "chat-3"),
+                    brief: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(later.act, "later");
+        let confirmed = confirm_exceptions(r, &approver(), &p.r#ref);
+        assert_eq!(confirmed.len(), 1, "one exception: the one_way decision");
+    });
     // the inbox ack moves the persisted cursor
     let before = e.read().reader().inbox("agent:a", Some("a")).unwrap();
     let req: InboxRequest = serde_json::from_value(json!({"ack": true})).unwrap();
@@ -352,6 +458,21 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     std::fs::write(dir.path().join(".rdyignore"), "*.draft.yaml\n").unwrap();
     std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
     dir
+}
+
+/// The agent that relays the person's words from chat.
+fn relaying_agent() -> Session {
+    Session::agent("agent:relay".into(), Some("chat".into()), Role::Writer).unwrap()
+}
+
+/// The person's words `quote`, relayed over MCP from chat session `session_ref`.
+fn relay_words(quote: &str, session_ref: &str) -> RelayInput {
+    RelayInput {
+        evidence: Some(quote.into()),
+        question: Some("Shall I record your answer?".into()),
+        session_ref: Some(session_ref.into()),
+        ..Default::default()
+    }
 }
 
 fn hex(b: &[u8]) -> String {

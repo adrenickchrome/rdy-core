@@ -49,6 +49,12 @@ pub const E_VIEW_EXISTS: &str = "E_VIEW_EXISTS";
 pub const E_VIEW_CLOSED: &str = "E_VIEW_CLOSED";
 /// The proposal version named is not its latest.
 pub const E_PROPOSAL_MOVED: &str = "E_PROPOSAL_MOVED";
+/// An approval names a version whose exceptions have no confirm answer (F2); `corrected` holds
+/// each exception's fresh card.
+pub const E_EXCEPTION_OPEN: &str = "E_EXCEPTION_OPEN";
+/// An answer names a queue item that changed or left the queue since its card was shown;
+/// `corrected` holds the fresh card when the item has one.
+pub const E_ITEM_MOVED: &str = "E_ITEM_MOVED";
 /// Changes in the view depend on the change being excluded (each one is an issue).
 pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
 /// A subset leaves out changes its members depend on (each one is an issue).

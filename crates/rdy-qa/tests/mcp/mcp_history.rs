@@ -269,7 +269,7 @@ fn df7_context_history_names_the_relay() {
         )
         .unwrap();
     let claim = w.created.values().next().unwrap().clone();
-    let p = r.propose(&a, "r1", "c").unwrap();
+    let p = r.propose(&a, "r1", "c", None).unwrap();
     r.land_with(
         &approver(),
         &p.r#ref,

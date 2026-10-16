@@ -56,7 +56,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
             && h.contains("Tiny, <span data-rdy-label>v0.1.0 · view: work, 1 change, not landed</span>."),
         "{h}"
     );
-    let p = r.propose(&writer(), "work", "rename").unwrap();
+    let p = r.propose(&writer(), "work", "rename", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     let out = render(&mut r, &Scope::Canon);
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();

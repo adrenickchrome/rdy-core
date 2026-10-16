@@ -184,3 +184,83 @@ fn kind1_typed_entries_coexist_and_the_untyped_entry_is_the_first_written() {
         "untyped: the first written"
     );
 }
+
+/// Final review fix round 1 (R5): the open-proposal table mirrors the `open/` refs that name a
+/// proposal. A landing empties its view's ref: `refs` keeps the empty ref, the table drops it.
+#[test]
+fn di_final_the_open_proposal_table_follows_the_open_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = Index::open(&dir.path().join("index.redb")).unwrap();
+    let (a, b) = (Hash::of(b"a").0.to_vec(), Hash::of(b"b").0.to_vec());
+    let at = |offset| Location { segment: 0, offset };
+    idx.apply(
+        &[
+            IndexEntry::Ref("open/a".into(), a.clone()),
+            IndexEntry::Ref("open/b".into(), b.clone()),
+            IndexEntry::Ref("opener".into(), vec![1]),
+        ],
+        at(10),
+    )
+    .unwrap();
+    assert_eq!(
+        idx.open_proposal_refs().unwrap(),
+        vec![
+            ("open/a".to_string(), a.clone()),
+            ("open/b".to_string(), b.clone())
+        ]
+    );
+    idx.apply(&[IndexEntry::Ref("open/a".into(), vec![])], at(20))
+        .unwrap();
+    assert_eq!(
+        idx.open_proposal_refs().unwrap(),
+        vec![("open/b".to_string(), b.clone())]
+    );
+    assert_eq!(
+        idx.refs_with_prefix("open/").unwrap(),
+        vec![
+            ("open/a".to_string(), vec![]),
+            ("open/b".to_string(), b.clone())
+        ],
+        "the refs keep the empty ref, as a dump lists it"
+    );
+    // a proposal of view a again
+    idx.apply(&[IndexEntry::Ref("open/a".into(), a.clone())], at(30))
+        .unwrap();
+    assert_eq!(idx.open_proposal_refs().unwrap().len(), 2);
+}
+
+/// An index written before the open-proposal table existed gets it filled from its refs when it
+/// opens, so a project's open proposals are not lost until a reindex.
+#[test]
+fn di_final_an_index_without_the_open_proposal_table_fills_it_from_its_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    let b = Hash::of(b"b").0.to_vec();
+    {
+        let idx = Index::open(&path).unwrap();
+        idx.apply(
+            &[
+                IndexEntry::Ref("open/a".into(), vec![]),
+                IndexEntry::Ref("open/b".into(), b.clone()),
+            ],
+            Location {
+                segment: 0,
+                offset: 10,
+            },
+        )
+        .unwrap();
+        idx.checkpoint().unwrap();
+    }
+    {
+        let raw = redb::Database::create(&path).unwrap();
+        let w = raw.begin_write().unwrap();
+        let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("open_proposals");
+        assert!(w.delete_table(def).unwrap(), "the table was there");
+        w.commit().unwrap();
+    }
+    let idx = Index::open(&path).unwrap();
+    assert_eq!(
+        idx.open_proposal_refs().unwrap(),
+        vec![("open/b".to_string(), b)]
+    );
+}

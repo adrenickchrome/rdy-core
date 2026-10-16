@@ -6,8 +6,9 @@ use super::{
 };
 use crate::error::*;
 use crate::read_state::ReadState;
+use crate::version::answer_write_error;
 use crate::{Delta, Rdy, Scope, Session};
-use rdy_model::Hash;
+use rdy_model::{Answer, Hash};
 use rdy_store::view::{ResolvedOp, ViewOp, ViewOpKind};
 use rdy_store::{StoreError, StoreReader};
 use serde::Serialize;
@@ -521,35 +522,8 @@ impl Rdy {
         views: &[String],
         reason: &str,
     ) -> Result<Vec<CloseResult>, RdyError> {
-        if views.is_empty() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "name at least one view to close",
-                "rdy view close <view>...",
-            ));
-        }
-        let reason = if reason.trim().is_empty() {
-            "closed by hand"
-        } else {
-            reason
-        };
-        // 1. the rules, for every name, before any write (a name given twice is closed once
-        //    the first is, so it is already closed)
-        let st = self.read();
-        let mut seen = BTreeSet::new();
-        for v in views {
-            check_view_op(&st, s, v, Action::Close)?;
-            let h = st.view_head(v).ok_or_else(|| no_view(v))?;
-            if h.closed || !seen.insert(v.as_str()) {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    format!("view {v:?} is already closed"),
-                    "nothing to do; reopen it with rdy undo if that was the intent",
-                ));
-            }
-        }
-        drop(st);
-        // 2. one write and one publish per view
+        let reason = self.closable(s, views, reason)?;
+        // one write and one publish per view
         let mut out = vec![];
         for v in views {
             self.store
@@ -572,5 +546,83 @@ impl Rdy {
             });
         }
         Ok(out)
+    }
+
+    /// `view_close` for a person's relayed act (O14, D-DGCH7): the same rules, run as `s` (the
+    /// person), and every close and the answer `a` in one write. The answer's `targets` are the
+    /// close ops. Returns the closed views and the answer's id.
+    pub(crate) fn view_close_answered(
+        &mut self,
+        s: &Session,
+        views: &[String],
+        reason: &str,
+        a: Answer,
+    ) -> Result<(Vec<CloseResult>, Hash), RdyError> {
+        let reason = self.closable(s, views, reason)?;
+        let appends: Vec<(String, Vec<ViewOpKind>)> = views
+            .iter()
+            .map(|v| {
+                (
+                    v.clone(),
+                    vec![ViewOpKind::Close {
+                        reason: reason.to_string(),
+                    }],
+                )
+            })
+            .collect();
+        let (_, answer) = self
+            .store
+            .view_append_answered(&appends, &s.provenance(), a)
+            .map_err(answer_write_error)?;
+        self.publish(Delta::Coord {
+            closed: views.to_vec(),
+        })?;
+        Ok((
+            views
+                .iter()
+                .map(|v| CloseResult {
+                    view: v.clone(),
+                    reason: reason.to_string(),
+                })
+                .collect(),
+            answer,
+        ))
+    }
+
+    /// The rules of a close, for every name, before any write: at least one name, the session
+    /// may close each view, and each view is open (a name given twice is closed once the first
+    /// is, so it is already closed). Returns the reason to record.
+    fn closable<'a>(
+        &self,
+        s: &Session,
+        views: &[String],
+        reason: &'a str,
+    ) -> Result<&'a str, RdyError> {
+        if views.is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "name at least one view to close",
+                "rdy view close <view>...",
+            ));
+        }
+        let reason = if reason.trim().is_empty() {
+            "closed by hand"
+        } else {
+            reason
+        };
+        let st = self.read();
+        let mut seen = BTreeSet::new();
+        for v in views {
+            check_view_op(&st, s, v, Action::Close)?;
+            let h = st.view_head(v).ok_or_else(|| no_view(v))?;
+            if h.closed || !seen.insert(v.as_str()) {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("view {v:?} is already closed"),
+                    "nothing to do; reopen it with rdy undo if that was the intent",
+                ));
+            }
+        }
+        Ok(reason)
     }
 }

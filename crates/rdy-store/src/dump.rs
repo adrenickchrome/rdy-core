@@ -13,7 +13,8 @@
 //!   (`Hash::of(payload)`), `payload`. Record kinds of the container: `HEADER = 0xF0`,
 //!   `FILE = 0xF1`, `BATCH = 0xF2`, `TRAILER = 0xFF`. The frames of a batch keep their store
 //!   kinds: exactly the kinds that the header's store format assigns (`frame_kinds`; for the pair
-//!   (1, 10): 1 to 9, 13, and 15 to 19). Never 14 (the batch marker), never an unassigned kind.
+//!   (1, 10): 1 to 9, 13, and 15 to 19; for (1, 11): 1 to 10, 13, and 15 to 19). Never 14 (the
+//!   batch marker), never an unassigned kind.
 //! - **Order (closed):** one `HEADER`; zero or more `FILE`; zero or more `BATCH`, each followed
 //!   by exactly its `frames` store frames; one `TRAILER`; the end of the file.
 //! - **`HEADER` payload:** `store_format: u32`, `log_end.segment: u32`, `log_end.offset: u64`,
@@ -54,7 +55,7 @@ pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
 pub const DUMP_FORMAT: u32 = 1;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
 /// this list (D-69AY3).
-pub const READS: &[(u32, u32)] = &[(1, 10)];
+pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11)];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -133,26 +134,49 @@ pub fn is_project_file(path: &str) -> bool {
 /// The store kinds a batch's frames may have, for each `(dump_format, store_format)` pair of
 /// `READS`: exactly the kinds that store format assigns, never the batch marker. The writer and
 /// the reader both use this one table. A pair, once released, never changes its set.
-const FRAME_KINDS: &[((u32, u32), &[u8])] = &[(
-    (1, 10),
-    &[
-        kinds::BLOCK,
-        kinds::CHANGE,
-        kinds::PROPOSAL,
-        kinds::LANDING,
-        kinds::SNAPSHOT,
-        kinds::BLOB_CHUNK,
-        kinds::BLOB_MANIFEST,
-        kinds::REF_UPDATE,
-        kinds::TAG,
-        kinds::VIEW_OP,
-        kinds::INTENT,
-        kinds::ALT_SET,
-        kinds::REVIEW,
-        kinds::TENSION,
-        kinds::TRANSITION,
-    ],
-)];
+const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
+    (
+        (1, 10),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+        ],
+    ),
+    (
+        (1, 11),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+        ],
+    ),
+];
 
 /// The store kinds a batch's frames may have in a dump of `dump_format` whose frames are of
 /// `store_format`; None for a pair this rdy does not read.

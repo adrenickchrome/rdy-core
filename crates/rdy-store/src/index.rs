@@ -1,7 +1,7 @@
 use crate::error::{StoreError, db};
 use crate::segment::Location;
 use rdy_model::{BlockId, Hash};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,7 +27,15 @@ const OPEN_TENSIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("open_
 /// An open suspect's key (`transition::suspect_key`, 32 bytes) -> the hash of the TRANSITION
 /// record that made it new: what the log's suspect moves fold to.
 const OPEN_SUSPECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("open_suspects");
+/// An `open/<view>` ref that names an open proposal -> its value (the proposal's stable hash):
+/// the refs of that prefix whose value is not empty. A landing empties its view's ref, which
+/// `refs` keeps (a dump lists it) and this table drops (final review fix round 1, R5), so the
+/// open proposals are read without reading every view that ever proposed. Derived from the
+/// refs, so a replay of the log rebuilds it.
+const OPEN_PROPOSALS: TableDefinition<&str, &[u8]> = TableDefinition::new("open_proposals");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+/// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
+const OPEN_PREFIX: &str = "open/";
 
 pub enum IndexEntry {
     /// An object frame: indexed by (kind, hash), and by hash alone if it is the first frame
@@ -105,6 +113,7 @@ pub struct IndexDump {
     pub deleters: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_tensions: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_suspects: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub open_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 fn dump_table(
@@ -214,6 +223,12 @@ impl Index {
 
     fn with_tables(database: Database) -> Result<Index, StoreError> {
         let w = database.begin_write().map_err(db)?;
+        // an index written before the open-proposal table existed gets it filled from its refs,
+        // once, in this commit
+        let had_open = w
+            .list_tables()
+            .map_err(db)?
+            .any(|t| t.name() == OPEN_PROPOSALS.name());
         {
             w.open_table(OBJECTS).map_err(db)?;
             w.open_table(TYPED).map_err(db)?;
@@ -225,6 +240,19 @@ impl Index {
             w.open_table(OPEN_TENSIONS).map_err(db)?;
             w.open_table(OPEN_SUSPECTS).map_err(db)?;
             w.open_table(META).map_err(db)?;
+            let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
+            if !had_open {
+                let refs = w.open_table(REFS).map_err(db)?;
+                for item in refs.range(OPEN_PREFIX..).map_err(db)? {
+                    let (k, v) = item.map_err(db)?;
+                    if !k.value().starts_with(OPEN_PREFIX) {
+                        break;
+                    }
+                    if !v.value().is_empty() {
+                        open.insert(k.value(), v.value()).map_err(db)?;
+                    }
+                }
+            }
         }
         w.commit().map_err(db)?;
         Ok(Index { db: database })
@@ -279,6 +307,7 @@ impl Index {
             let mut landed = w.open_table(LANDED).map_err(db)?;
             let mut deleters = w.open_table(DELETERS).map_err(db)?;
             let mut refs = w.open_table(REFS).map_err(db)?;
+            let mut open_proposals = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             let mut open_tensions = w.open_table(OPEN_TENSIONS).map_err(db)?;
             let mut open_suspects = w.open_table(OPEN_SUSPECTS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
@@ -302,6 +331,15 @@ impl Index {
                     }
                     IndexEntry::Ref(name, value) => {
                         refs.insert(name.as_str(), &value[..]).map_err(db)?;
+                        if name.starts_with(OPEN_PREFIX) {
+                            if value.is_empty() {
+                                open_proposals.remove(name.as_str()).map_err(db)?;
+                            } else {
+                                open_proposals
+                                    .insert(name.as_str(), &value[..])
+                                    .map_err(db)?;
+                            }
+                        }
                     }
                     IndexEntry::ViewOp { view, op } => {
                         let mut key = name_prefix(view);
@@ -467,11 +505,16 @@ impl Index {
     #[doc(hidden)]
     pub fn dump(&self) -> Result<IndexDump, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
-        let mut refs = BTreeMap::new();
-        for item in r.open_table(REFS).map_err(db)?.iter().map_err(db)? {
-            let (k, v) = item.map_err(db)?;
-            refs.insert(k.value().as_bytes().to_vec(), v.value().to_vec());
-        }
+        let named = |def: TableDefinition<&'static str, &'static [u8]>| {
+            let mut out = BTreeMap::new();
+            for item in r.open_table(def).map_err(db)?.iter().map_err(db)? {
+                let (k, v) = item.map_err(db)?;
+                out.insert(k.value().as_bytes().to_vec(), v.value().to_vec());
+            }
+            Ok::<_, StoreError>(out)
+        };
+        let refs = named(REFS)?;
+        let open_proposals = named(OPEN_PROPOSALS)?;
         Ok(IndexDump {
             objects: dump_table(&r, OBJECTS)?,
             typed: dump_table(&r, TYPED)?,
@@ -482,6 +525,7 @@ impl Index {
             deleters: dump_table(&r, DELETERS)?,
             open_tensions: dump_table(&r, OPEN_TENSIONS)?,
             open_suspects: dump_table(&r, OPEN_SUSPECTS)?,
+            open_proposals,
         })
     }
 
@@ -541,6 +585,45 @@ impl Index {
             out.push((k.value().to_string(), v.value().to_vec()));
         }
         Ok(out)
+    }
+
+    /// The `open/<view>` refs that name an open proposal, with their values, by name: the refs
+    /// `refs_with_prefix("open/")` gives less the empty ones, read from [`OPEN_PROPOSALS`], so
+    /// the cost follows the open proposals, not every view that ever proposed.
+    pub fn open_proposal_refs(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(OPEN_PROPOSALS).map_err(db)?;
+        let mut out = vec![];
+        for item in t.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            out.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Whether [`OPEN_PROPOSALS`] holds exactly the `open/` refs whose value is not empty, both
+    /// read in one read transaction: a writer that proposes or lands between two reads would
+    /// make a sound index look damaged (rdr1).
+    pub fn open_proposals_match_refs(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let refs = r.open_table(REFS).map_err(db)?;
+        let mut named = vec![];
+        for item in refs.range(OPEN_PREFIX..).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            if !k.value().starts_with(OPEN_PREFIX) {
+                break;
+            }
+            if !v.value().is_empty() {
+                named.push((k.value().to_string(), v.value().to_vec()));
+            }
+        }
+        let open = r.open_table(OPEN_PROPOSALS).map_err(db)?;
+        let mut table = vec![];
+        for item in open.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            table.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(named == table)
     }
 
     /// How many refs start with `prefix`, counted without reading their values.

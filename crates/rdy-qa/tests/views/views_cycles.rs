@@ -109,7 +109,7 @@ fn cyc1_a_landing_that_would_make_canon_cyclic_is_refused() {
     // x is pinned: the landing of y does not rebase it, so its proposal lands behind canon
     r.view_create(&writer(), "x", None, true).unwrap();
     write(&mut r, "x", mv(&a, &b)).unwrap();
-    let px = r.propose(&writer(), "x", "x").unwrap();
+    let px = r.propose(&writer(), "x", "x", None).unwrap();
     write(&mut r, "y", mv(&b, &a)).unwrap();
     land(&mut r, "y").unwrap();
     let canon = r.read().canon_head();

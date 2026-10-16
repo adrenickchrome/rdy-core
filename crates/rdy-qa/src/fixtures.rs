@@ -141,9 +141,13 @@ pub fn seed_doc(r: &mut Rdy, view: &str) -> (String, String, String) {
     )
 }
 
-/// Proposes `view` as a writer and lands it as an approver; returns the landing id.
+/// Proposes `view` as a writer (with a summary when it writes a decision,
+/// [`summary_for`](crate::intake::summary_for)), confirms each exception as the approver (F2)
+/// and lands it as the approver; returns the landing id.
 pub fn land(r: &mut Rdy, view: &str) -> Result<String, RdyError> {
-    let p = r.propose(&writer(), view, view)?;
+    let summary = crate::intake::summary_for(r, view);
+    let p = r.propose(&writer(), view, view, summary)?;
+    crate::intake::confirm_before_landing(r, &approver(), &p);
     r.land(&approver(), &p.id)
 }
 

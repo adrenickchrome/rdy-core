@@ -551,8 +551,8 @@ fn dl1_an_unassigned_kind_is_refused() {
     let (_b, s, batches) = store_and_batches();
     assert_eq!(
         frame_kinds(DUMP_FORMAT, STORE_FORMAT),
-        Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 15, 16, 17, 18, 19][..]),
-        "exactly the kinds store format 10 assigns"
+        Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19][..]),
+        "exactly the kinds store format 11 assigns"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
@@ -560,7 +560,7 @@ fn dl1_an_unassigned_kind_is_refused() {
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    for k in [10u8, 11, 12, 14] {
+    for k in [11u8, 12, 14] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;

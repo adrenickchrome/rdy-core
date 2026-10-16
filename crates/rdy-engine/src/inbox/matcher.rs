@@ -3,6 +3,7 @@
 //! the events below match here.
 use super::Entry;
 use super::inflight::RunInFlight;
+use crate::gate::{ProposalRef, version_number};
 use crate::semantic::candidates::Request;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, Op};
@@ -180,8 +181,50 @@ pub fn match_event(
                 ),
             )
         }
+        // O10 (D-JV6Z8): the two events that put something in the needs-you queue. Neither reads
+        // readiness, so a re-derived inbox stays the same.
+        EventKind::Proposed { proposal, .. } => {
+            let stable = st.reader().proposal(proposal)?.stable.unwrap_or(*proposal);
+            let pref = ProposalRef {
+                version: *proposal,
+                stable,
+                n: version_number(st, proposal)?,
+            };
+            entry(
+                "pending_added",
+                vec![proposal.to_string()],
+                format!("{pref} waits for an answer; read rdy_pending"),
+            )
+        }
+        EventKind::ReviewSubmitted { review, pair, .. } => {
+            // a verdict that carries advice adds one entry that points at the review (ruling
+            // task-11, rule 2); the queue says which proposal waits on it. The review id never
+            // changes, so a re-derived inbox is the same.
+            if !verdict_carries_advice(st, review, pair)? {
+                return Ok(None);
+            }
+            entry(
+                "pending_added",
+                vec![review.to_string()],
+                "new advice waits for an answer; read rdy_pending".into(),
+            )
+        }
         _ => None,
     })
+}
+
+/// Whether the verdict `review` carries the reviewer's advice: the first version of the pair's
+/// tension is the one that review opened, and it holds the advice. `false` for any other verdict.
+/// An acceptance adds a later version; it never changes the first one.
+fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<bool, RdyError> {
+    let Some(open) = st.semantic().tension(pair) else {
+        return Ok(false);
+    };
+    let mut first = open.record.clone();
+    while let Some(prev) = first.prev {
+        first = st.reader().semantic_tension(&prev)?;
+    }
+    Ok(first.review == *review && first.advice.is_some())
 }
 
 /// How many blocks the changes of `landing` write (create or update) that are in one of `areas`

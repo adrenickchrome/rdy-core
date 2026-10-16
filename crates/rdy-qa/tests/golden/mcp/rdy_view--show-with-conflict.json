@@ -3,22 +3,22 @@
   "changes": [
     {
       "actor": "agent:a",
-      "at_ms": 1760000000026,
+      "at_ms": 1760000000042,
       "blocks": [
         "c-CFPE0"
       ],
-      "id": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+      "id": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
       "message": "a edits A",
       "run": "a"
     },
     {
       "actor": "agent:b",
-      "at_ms": 1760000000033,
+      "at_ms": 1760000000049,
       "blocks": [
         "c-CFPE0",
         "c-ZCQ17"
       ],
-      "id": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+      "id": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
       "message": "b edits A and C",
       "run": "b"
     }
@@ -27,16 +27,16 @@
     {
       "base": "e3538dcd6ff0837e20521111ba0fb43569c29e113eb9b27c83a001df38068c71",
       "block": "c-CFPE0",
-      "id": "00ae8312dd93f64fc5e6eea786e49027593cdcd3ae3bfca23722348354d9d313",
+      "id": "d8f27e0a821de96b1259269c35a25112cc7c41d91c7c61dcb9640f713f197375",
       "sides": [
         {
-          "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+          "change": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
           "landed": null,
           "summary": "agent:a: a edits A",
           "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
         },
         {
-          "change": "8868cbe8fbf382174409e889ef6756fdacb81d3e1ec2d8cdffe80c0fecb6f731",
+          "change": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "landed": null,
           "summary": "agent:b: b edits A and C",
           "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
@@ -44,12 +44,12 @@
       ]
     }
   ],
-  "effective_base": "4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+  "effective_base": "63825437b9f76688439bf634fc7d971d745519343f0f8767fd446dd757961213",
   "head": {
-    "base": "4fdcad20017bbf821b1723d6170b0ca321c183873072be6b754bc2121450245f",
+    "base": "63825437b9f76688439bf634fc7d971d745519343f0f8767fd446dd757961213",
     "changes": 2,
     "closed": false,
-    "head": "01e961cd6884770c2add29ce0263147dc038fa82682689fd95094d960df58876",
+    "head": "c260aa4e229d43cf3ea0aeeef326f6dbd387ff58d70d14855a2505f15b2743a3",
     "owner": {
       "actor": "agent:a",
       "run": "a"
@@ -60,24 +60,24 @@
   "ops": [
     {
       "actor": "agent:a",
-      "at_ms": 1760000000037,
-      "id": "01e961cd6884770c2add29ce0263147dc038fa82682689fd95094d960df58876",
+      "at_ms": 1760000000053,
+      "id": "c260aa4e229d43cf3ea0aeeef326f6dbd387ff58d70d14855a2505f15b2743a3",
       "kind": "include",
       "run": "a",
       "undone": false
     },
     {
       "actor": "agent:a",
-      "at_ms": 1760000000026,
-      "id": "77ef4abbdb48533637acaf6df8e07542bb5b36540d1e17b079963abd3e2aad4d",
+      "at_ms": 1760000000042,
+      "id": "228b59fc16ffde74455c8859928e6fe5567a9870a6b29e4e9bf50f88e3df8810",
       "kind": "commit",
       "run": "a",
       "undone": false
     },
     {
       "actor": "agent:a",
-      "at_ms": 1760000000026,
-      "id": "cb6fda65e012b4e28b18bc829a64d7a01f3af8abd25502faf3a71e8e84a93d54",
+      "at_ms": 1760000000042,
+      "id": "d6f6900f864b651bff235dc137ff088c1342a0e049586b51f997782768963282",
       "kind": "create",
       "run": "a",
       "undone": false

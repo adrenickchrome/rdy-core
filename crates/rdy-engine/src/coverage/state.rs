@@ -4,8 +4,10 @@
 use super::kinds::{KindCount, kinds_of};
 use super::model::*;
 use super::score::{Rollup, RollupSums};
-use super::structural::{CxMemo, EntryCx, entry_of, structural_of};
+use super::structural::{CxMemo, EntryCx, entry_of, structural_in, structural_of};
 use crate::error::E_BAD_INPUT;
+use crate::lexicon::Lexicon;
+use crate::read_state::Built;
 use crate::tensions::set::TensionSet;
 use crate::tensions::{SideRef, Tension, TensionStatus, tension_label};
 use crate::{Materialized, RdyError, ReadState, Scope};
@@ -135,16 +137,28 @@ struct Inputs {
 }
 
 impl Inputs {
-    /// `scope`'s inputs in `st`; `scope` is one `coverage_scope` gave.
     /// `scope`'s inputs in `st`; `scope` is one `coverage_scope` gave. With `prev`, the inputs
     /// of the entry a carry starts from, the suspects are carried from its: only the blocks
     /// whose suspects can differ between the two graphs are read again (perf4: not a walk of
     /// every edge).
     fn of(st: &ReadState, scope: &Scope, prev: Option<&Inputs>) -> Result<Inputs, RdyError> {
         let structural = st.structural(scope)?;
-        let tensions = st.tensions()?;
         let m = st.materialized(scope)?;
         let g = st.graph(scope)?;
+        Inputs::assemble(st, structural, m, g, Counted::of(st, scope), prev)
+    }
+
+    /// The inputs of materialization `m` (graph `g`, structural layer `structural`) in `st`,
+    /// counting the tensions `counted` counts; `prev` as in [`Inputs::of`].
+    fn assemble(
+        st: &ReadState,
+        structural: Arc<Structural>,
+        m: Arc<Materialized>,
+        g: Arc<Graph>,
+        counted: Counted,
+        prev: Option<&Inputs>,
+    ) -> Result<Inputs, RdyError> {
+        let tensions = st.tensions()?;
         // a suspect whose target the scope does not hold is its citer's dangling reference
         // (Connected), not a pin to confirm (final review M1)
         let kept = |s: &Suspect| !st.is_presentational_source(&m, s) && m.get(&s.target).is_some();
@@ -175,7 +189,7 @@ impl Inputs {
             m,
             g,
             tensions,
-            counted: Counted::of(st, scope),
+            counted,
             dismissals: Arc::clone(&st.dismissals),
             mention_dismissals: Arc::clone(&st.mention_dismissals),
             suspects,
@@ -222,6 +236,14 @@ pub struct CoverageSummary {
     pub issues_total: usize,
     pub kinds: Vec<KindCount>,
     pub similar_kinds: Vec<Vec<String>>,
+}
+
+/// The coverage of the canon a proposal version's landing would give
+/// ([`ReadState::candidate_coverage`]).
+pub(crate) struct CandidateCoverage {
+    /// The whole score, as a scope's rollup gives it.
+    pub(crate) score: u32,
+    pub(crate) issues: CoverageIssues,
 }
 
 /// A coverage read error as a reply's `coverage_error` gives it: `<code>: <message>`. A
@@ -453,6 +475,58 @@ impl ReadState {
         }
         let s = Arc::new(structural_of(self, scope)?);
         Ok(Arc::clone(built.structural.get_or_init(|| s)))
+    }
+
+    /// The coverage of `built`, the canon that landing a proposal version with changes
+    /// `changes` would give (canon's build with their ops applied): its issues and its score,
+    /// worked out as a view's are, the version's changes counted as a view counts its own
+    /// (di5 fix round 1: what the version holds, not what its view holds now). Not memoised: a
+    /// proposal version is no coverage scope (`coverage_scope`). The structural layer is
+    /// `built`'s when it was carried from canon's (`Built::after`), and the suspects are carried
+    /// from canon's coverage inputs when canon's coverage is memoised.
+    pub(crate) fn candidate_coverage(
+        &self,
+        built: &Built,
+        changes: &[Hash],
+    ) -> Result<CandidateCoverage, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let m = Arc::clone(&built.m);
+        let g = Arc::clone(built.graph.get_or_init(|| {
+            Arc::new(Graph::build_with(
+                m.iter(),
+                Arc::clone(self.reader().tracking()),
+            ))
+        }));
+        let lex = Arc::clone(
+            built
+                .lexicon
+                .get_or_init(|| Arc::new(Lexicon::build(&self.pack, m.iter()))),
+        );
+        let structural = Arc::clone(
+            built
+                .structural
+                .get_or_init(|| Arc::new(structural_in(&m, &g, &lex, &self.pack))),
+        );
+        let canon = self.memo_entry(&Scope::Canon, false)?;
+        let inputs = Inputs::assemble(
+            self,
+            structural,
+            m,
+            g,
+            Counted::View(changes.iter().copied().collect()),
+            canon.as_deref().map(|c| &c.inputs),
+        )?;
+        let issues = self.full_issues(&inputs);
+        let mut sums = RollupSums::new(&self.pack);
+        for e in issues.blocks.values() {
+            sums.add(e);
+        }
+        Ok(CandidateCoverage {
+            score: sums.rollup(&self.pack).score,
+            issues,
+        })
     }
 
     /// The coverage issues of `inputs` built in full: the structural layer with the dismissed

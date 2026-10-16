@@ -24,8 +24,8 @@ fn collide_and_land(first: &str, second: &str) {
     let sb = as_agent("agent:b", "r1");
     write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
     write_as(&mut r, &sb, "b", update(&c, &v, "b's")).unwrap();
-    let pa = r.propose(&sa, "a", "a").unwrap();
-    let pb = r.propose(&sb, "b", "b").unwrap();
+    let pa = r.propose(&sa, "a", "a", None).unwrap();
+    let pb = r.propose(&sb, "b", "b", None).unwrap();
     assert!(pa.conflicts.is_empty() && pb.conflicts.is_empty());
     let (pf, ps, sess_second) = if first == "a" {
         (&pa, &pb, &sb)
@@ -41,7 +41,7 @@ fn collide_and_land(first: &str, second: &str) {
         "{e}"
     );
     // re-proposed on the new canon without resolving: the version carries the recorded conflict
-    let p2 = r.propose(sess_second, second, "rebased").unwrap();
+    let p2 = r.propose(sess_second, second, "rebased", None).unwrap();
     assert_eq!(
         (p2.version, p2.blocking.len(), p2.conflicts.len()),
         (2, 1, 1)
@@ -76,7 +76,7 @@ fn collide_and_land(first: &str, second: &str) {
     let e3 = r.land_report(&approver(), &p2.r#ref).unwrap_err();
     assert_eq!(e3.code, E_CONFLICT_UNRESOLVED, "{e3}");
     assert!(e3.fix.contains("propose again"), "{e3}");
-    let p3 = r.propose(sess_second, second, "resolved").unwrap();
+    let p3 = r.propose(sess_second, second, "resolved", None).unwrap();
     assert_eq!(p3.version, 3);
     assert!(p3.conflicts.is_empty() && p3.blocking.is_empty());
     let e = r.land_report(&approver(), &p2.r#ref).unwrap_err();
@@ -122,7 +122,7 @@ fn gconf1_propose_lists_every_conflict_and_marks_the_blocking_ones() {
     .unwrap()
     .change;
     r.view_include(&sa, "a", std::slice::from_ref(&cb)).unwrap();
-    let whole = r.propose(&sa, "a", "whole").unwrap();
+    let whole = r.propose(&sa, "a", "whole", None).unwrap();
     assert_eq!(whole.conflicts.len(), 1);
     assert_eq!(
         whole
@@ -214,7 +214,7 @@ fn gconf1_an_empty_subset_is_refused_and_writes_no_proposal() {
         None,
         "no proposal ref is written"
     );
-    let whole = r.propose(&sa, "a", "whole").unwrap();
+    let whole = r.propose(&sa, "a", "whole", None).unwrap();
     assert_eq!((whole.version, whole.changes), (1, 1));
     r.fsck().unwrap();
 }
@@ -236,7 +236,7 @@ fn gconf1_a_pinned_views_canon_collision_stays_e_stale_base() {
     )
     .unwrap();
     land(&mut r, "b").unwrap();
-    let p = r.propose(&sa, "pinned", "p");
+    let p = r.propose(&sa, "pinned", "p", None);
     let e = match p {
         Ok(p) => r.land_report(&approver(), &p.r#ref).unwrap_err(),
         Err(e) => e,
@@ -282,7 +282,7 @@ fn gconf1_a_version_listing_a_delete_before_its_decisions_creation_lands() {
     // c includes b's delete: the include adds the creation too, after it in the set
     r.view_include(&sc, "c", std::slice::from_ref(&deleted.change))
         .unwrap();
-    let p = r.propose(&sc, "c", "net nothing").unwrap();
+    let p = r.propose(&sc, "c", "net nothing", None).unwrap();
     assert_eq!(p.changes, 2, "the delete and the creation it depends on");
     let info = r.land_report(&approver(), &p.r#ref).unwrap();
     assert!(info.warnings.is_empty(), "{info:?}");
@@ -401,7 +401,7 @@ fn msw2_an_unreadable_producer_fails_the_conflict_check_instead_of_settling_cano
     let b1 = version_of(&r, &view("b"), &c);
     write_as(&mut r, &sb, "b", update(&c, &b1, "b2")).unwrap();
     land(&mut r, "a").unwrap();
-    let pb = r.propose(&sb, "b", "b").unwrap();
+    let pb = r.propose(&sb, "b", "b", None).unwrap();
     assert_eq!(
         pb.conflicts.len(),
         1,
@@ -438,7 +438,7 @@ fn msw2_an_unreadable_producer_fails_the_conflict_check_instead_of_settling_cano
         "proposal show must not report no conflict: {:?}",
         shown.map(|s| s.conflicts.len())
     );
-    let again = r.propose(&sb, "b", "again");
+    let again = r.propose(&sb, "b", "again", None);
     assert!(
         again.is_err(),
         "propose must not report no conflict: {:?}",

@@ -1,6 +1,10 @@
 use crate::alt::{AltPick, alt_label};
+use crate::answer::card_of;
+use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
+use crate::pending::Item;
+use crate::pending::queue::approval_holds;
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
@@ -9,8 +13,8 @@ use crate::views::{
 };
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{
-    AltChoice, AltSet, AltStatus, ApprovalEvidence, Block, BlockId, Change, ChangeLinks,
-    EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
+    ActorRun, AltChoice, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence, Block, BlockId,
+    Change, ChangeLinks, EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
 };
 use rdy_schema::{Issue, Severity, validate_block, validate_prefix};
 use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
@@ -88,6 +92,12 @@ pub struct ProposalInfo {
     /// after the write, off the writer, and joins the reply in `propose_and_report`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_error: Option<String>,
+    /// The agent that relayed the person's proposal of their own view (`propose_as`, O32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<ActorRun>,
+    /// The hash of the `ANSWER` that holds that relay, written with the version (O14).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -228,7 +238,7 @@ pub(crate) fn version_number(st: &ReadState, h: &Hash) -> Result<u32, RdyError> 
 }
 
 /// `pref` is not its proposal's latest version: name the latest, and how to approve it.
-fn moved(
+pub(crate) fn moved(
     st: &ReadState,
     pref: &ProposalRef,
     latest: &Hash,
@@ -305,7 +315,9 @@ fn approver_stale(e: rdy_store::StoreError, view: &str) -> RdyError {
 /// FW-B9: what a relayed approval must satisfy, and the evidence it records. Only a human
 /// session records a relay, and it names the exact version it relays (the one the human was
 /// shown): a full hash or `P-<id>@<n>`. Returns the evidence to store: the options' own for a
-/// local approval, `text` for a relay that names none.
+/// local approval, `text` for a relay that names none. A relay's evidence is `text`, or `card`
+/// with the hash of the card the person answered (O20: only `answer` passes one); `elicited`
+/// and a card with no hash are refused.
 fn relay_evidence_kind(
     s: &Session,
     text: &str,
@@ -360,11 +372,16 @@ fn relay_evidence_kind(
         ));
     }
     match &opts.evidence {
-        Some(e) if e.kind != EvidenceKind::Text => Err(RdyError::new(
-            E_BAD_INPUT,
-            "only a text relay is recorded from the command line",
-            "quote the human's words with --evidence",
-        )),
+        Some(e)
+            if !(e.kind == EvidenceKind::Text
+                || (e.kind == EvidenceKind::Card && e.card_hash.is_some())) =>
+        {
+            Err(RdyError::new(
+                E_BAD_INPUT,
+                "only a text relay is recorded from the command line",
+                "quote the human's words with --evidence",
+            ))
+        }
         Some(e) => Ok(Some(e.clone())),
         None => Ok(Some(ApprovalEvidence {
             kind: EvidenceKind::Text,
@@ -554,11 +571,32 @@ pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, Rd
     Ok(None)
 }
 
+/// The latest version of view `view`'s open proposal, read from its one `open/<view>` ref; `None`
+/// when the view has none or its latest version has landed. It reads no other proposal and counts
+/// no versions, so its cost does not grow with the proposals of other views or with history.
+pub(crate) fn open_proposal_of_view(
+    st: &ReadState,
+    view: &str,
+) -> Result<Option<Proposal>, RdyError> {
+    let Some(b) = st.reader().get_ref(&format!("open/{view}"))? else {
+        return Ok(None);
+    };
+    if b.len() != 32 {
+        return Ok(None);
+    }
+    let stable = ref_hash(&b, "an open ref")?;
+    let latest = latest_version(st, &stable)?;
+    let p = st.reader().proposal(&latest)?;
+    Ok(landed_as(st, &p)?.is_none().then_some(p))
+}
+
 /// Every open proposal at its latest version: each `open/<view>` ref whose latest version has
-/// not landed, sorted by the ref's text (`P-<stable short>@<n>`).
+/// not landed, sorted by the ref's text (`P-<stable short>@<n>`). It reads the store's open
+/// proposal refs only, never the empty ref each landed view leaves (final review fix round 1,
+/// R5), so its cost follows the open proposals, not the project's history.
 pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposal)>, RdyError> {
     let mut open = vec![];
-    for (_, b) in st.reader().refs_with_prefix("open/")? {
+    for (_, b) in st.reader().open_proposal_refs()? {
         if b.len() != 32 {
             continue;
         }
@@ -577,6 +615,86 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
     }
     open.sort_by_cached_key(|(pref, _)| pref.to_string());
     Ok(open)
+}
+
+/// The landing checks of version `pref` (`p`, with its changes `changes` read), computed on a
+/// published state for the needs-you queue: checks 1 to 3 of the plan's closed readiness list
+/// ("Readiness before M3b", D-3JZP4). Each failed check is one issue with the code, message and
+/// fix the landing gives today:
+/// 1. a conflict on a block the version writes (`gconf1`, `E_CONFLICT_UNRESOLVED`);
+/// 2. a blocking tension the landing would put into canon (`tgat1`, `E_BLOCKING_TENSION`);
+/// 3. an error in the canon the landing would give (`E_VALIDATION`, or the merge's refusal).
+///
+/// The landing stops at the first failed check; the queue makes each check it can, so the agent
+/// gets every fix at once (fix round 1). A version with a conflict still gets check 2, less the
+/// tensions whose blocks all carry the conflict (the conflict reports them, as
+/// `proposal_tensions` leaves them out). Check 3 is not made for it: the canon its landing would
+/// give depends on how the conflict is resolved, and the merge onto canon refuses for the same
+/// cause. A key rdy derives again at the landing (K1) is not a clash.
+pub(crate) fn landing_readiness(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    changes: &[Change],
+) -> Result<Vec<Issue>, RdyError> {
+    let as_issue = |e: RdyError| Issue {
+        severity: Severity::Error,
+        code: e.code,
+        block: None,
+        message: e.message,
+        fix: e.fix,
+    };
+    let mut out = vec![];
+    let blocking = blocking_conflicts(st, &p.view, &p.changes)?;
+    let conflicted: BTreeSet<BlockId> = blocking.iter().map(|c| c.block.clone()).collect();
+    if !blocking.is_empty() {
+        out.push(as_issue(unresolved(st, &p.view, &blocking)?));
+    }
+    let applied = st.landing_order(changes);
+    let landing = st.landing_tensions_applied(&p.view, &p.changes, changes, &applied)?;
+    let mut cache = crate::tensions::info::InfoCache::default();
+    let refusing: Vec<TensionInfo> = st
+        .refusing_among(&p.changes, landing)
+        .iter()
+        .filter(|t| conflicted.is_empty() || !t.blocks().iter().all(|b| conflicted.contains(b)))
+        .map(|t| st.tension_info_with(t, &mut cache))
+        .collect();
+    if !refusing.is_empty() {
+        out.push(as_issue(blocking_tensions(pref, &refusing)));
+    }
+    if !conflicted.is_empty() {
+        return Ok(out);
+    }
+    match prospective(st, changes, Some(&p.view)) {
+        Ok((next, applied)) => {
+            let canon = st.materialized(&Scope::Canon)?;
+            let vm = st.materialized(&Scope::View(p.view.clone()))?;
+            let rekeyed: BTreeSet<BlockId> =
+                crate::keys::rederive(&next, &rekeyable_in(changes, &applied, &canon), &vm)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+            let issues = Rdy::issues_in(st, changes, &next, &applied)?;
+            let first = issues.iter().find(|i| {
+                i.severity == Severity::Error
+                    && !(i.code == E_KEY_CLASH
+                        && i.block.as_ref().is_some_and(|b| rekeyed.contains(b)))
+            });
+            if let Some(first) = first {
+                out.push(as_issue(RdyError::new(
+                    E_VALIDATION,
+                    first.message.clone(),
+                    first.fix.clone(),
+                )));
+            }
+        }
+        // the merge's refusals, worded for the approver as the landing words them
+        Err(e) if [E_STALE_BASE, E_ALREADY_EXISTS, E_FROZEN].contains(&e.code) => {
+            out.push(as_issue(e));
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(out)
 }
 
 /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
@@ -765,6 +883,30 @@ impl ReadState {
             .collect();
         Ok((out, omitted))
     }
+}
+
+/// The fix of `E_EXCEPTION_OPEN` for a version with no summary: its exceptions are no items of the
+/// queue until the version is ready, and readiness needs a summary (D-4PG9Y, D-3JZP4).
+const EXCEPTION_FIX_NO_SUMMARY: &str = "propose again with a summary (rdy propose --summary <text> / rdy_propose {summary}), then answer each exception card";
+
+/// F2 (D-DKJS5): the refusal of an approval while exceptions of `pref` have no confirm answer. It
+/// names each exception and carries its card in `corrected.exceptions` (O21). The fix is closed:
+/// a version with no summary is proposed again with one first ([`EXCEPTION_FIX_NO_SUMMARY`]);
+/// any other version answers each exception card.
+fn exceptions_open(pref: &ProposalRef, p: &Proposal, open: &[Item]) -> RdyError {
+    let refs: Vec<&str> = open.iter().map(|i| i.r#ref.as_str()).collect();
+    let cards: Vec<_> = open.iter().map(card_of).collect();
+    let fix = if p.summary.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        EXCEPTION_FIX_NO_SUMMARY.to_string()
+    } else {
+        format!("answer each exception card first: {}", refs.join(", "))
+    };
+    RdyError::new(
+        E_EXCEPTION_OPEN,
+        format!("{} exceptions of {pref} have no answer", open.len()),
+        fix,
+    )
+    .with_corrected(serde_json::json!({ "exceptions": cards }))
 }
 
 /// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
@@ -1267,12 +1409,12 @@ impl Rdy {
         approving: Option<&str>,
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
         let (next, applied) = prospective(st, changes, approving)?;
-        Ok((self.issues_in(st, changes, &next, &applied)?, applied))
+        Ok((Self::issues_in(st, changes, &next, &applied)?, applied))
     }
 
     /// The issues of `next`, the canon that landing `changes` (applied at `applied`) would give.
+    /// It reads no store of its own, so the queue's readiness check runs it on a published state.
     fn issues_in(
-        &self,
         st: &ReadState,
         changes: &[Change],
         next: &Materialized,
@@ -1577,14 +1719,16 @@ impl Rdy {
         Ok(change)
     }
 
-    /// Proposes view `view`'s included changes (a new version of its open proposal, if any).
+    /// Proposes view `view`'s included changes (a new version of its open proposal, if any),
+    /// with `summary` as `propose_subset` stores it.
     pub fn propose(
         &mut self,
         s: &Session,
         view: &str,
         title: &str,
+        summary: Option<&str>,
     ) -> Result<ProposalInfo, RdyError> {
-        self.propose_with(s, view, title, None, None, None)
+        self.propose_with(s, view, title, None, summary, None)
     }
 
     /// Proposes `changes` of view `view` (its whole included set when `None`): a new version of
@@ -1617,6 +1761,76 @@ impl Rdy {
         changes: Option<&[String]>,
         summary: Option<&str>,
         alternative: Option<&AltPick>,
+    ) -> Result<ProposalInfo, RdyError> {
+        self.propose_relayed(s, view, title, changes, summary, alternative, None)
+    }
+
+    /// `propose_with` on the person's word (O32, C3, D-KQ4CA), under the relay table
+    /// (`answer::relay::relayed`, D-HA7YZ). `person` is the project's human actor, from the
+    /// caller (O18); `implicit` is true over MCP, where the session is the relay. The cases,
+    /// closed:
+    /// - a human session with no relay: `propose_with` as the session;
+    /// - a relay of a view the person owns, or of the person's default `work`: `propose_with` as
+    ///   the person (the version's `provenance`), and an `ANSWER` (act `propose`, item
+    ///   `propose:<view>`, `targets` the version, evidence `text`) in the version's batch (O14);
+    /// - a relay of any other view: today's ownership rule for the session (`check_view_op`),
+    ///   and a view the session may propose itself is refused (a relay proposes the person's
+    ///   view only);
+    /// - any other case is the table's refusal, in the answer's words (O19).
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_as(
+        &mut self,
+        s: &Session,
+        person: &str,
+        relay: &RelayInput,
+        implicit: bool,
+        view: &str,
+        title: &str,
+        changes: Option<&[String]>,
+        summary: Option<&str>,
+        alternative: Option<&AltPick>,
+    ) -> Result<ProposalInfo, RdyError> {
+        let (who, relay) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
+        let Some(relay) = relay else {
+            return self.propose_with(s, view, title, changes, summary, alternative);
+        };
+        let st = self.read();
+        let persons = view == "work"
+            || st
+                .view_head(view)
+                .and_then(|h| h.owner.as_ref())
+                .is_some_and(|o| o.actor == person);
+        if !persons {
+            crate::views::check_view_op(&st, s, view, Action::Propose)?;
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("view {view:?} is not the person's: a relay proposes only their view"),
+                "drop the relay to propose your own view",
+            ));
+        }
+        drop(st);
+        self.propose_relayed(
+            &who,
+            view,
+            title,
+            changes,
+            summary,
+            alternative,
+            Some(relay),
+        )
+    }
+
+    /// `propose_with` as `s`, with the person's relay when `s` is the person (`propose_as`).
+    #[allow(clippy::too_many_arguments)]
+    fn propose_relayed(
+        &mut self,
+        s: &Session,
+        view: &str,
+        title: &str,
+        changes: Option<&[String]>,
+        summary: Option<&str>,
+        alternative: Option<&AltPick>,
+        relay: Option<Relay>,
     ) -> Result<ProposalInfo, RdyError> {
         if !s.role.can_write() {
             return Err(RdyError::new(
@@ -1784,7 +1998,7 @@ impl Rdy {
                 &vm,
             );
             if re.is_empty() {
-                issues = self.issues_in(&st, &changes, &next, &applied)?;
+                issues = Self::issues_in(&st, &changes, &next, &applied)?;
             } else {
                 let mut change = self.rekey_change(&st, s, view, &re, &ids)?;
                 // alts1: a change in a member view of an open set records the set, as a write does
@@ -1844,28 +2058,48 @@ impl Rdy {
             set: alt_label(&a.set),
             member: a.member.clone(),
         });
-        let (id, stable, n) = match open {
-            Some((stable, latest)) => {
-                let id = self.store.propose_next(
-                    &latest,
-                    ids,
-                    title,
-                    summary,
-                    s.provenance(),
-                    alternative,
-                )?;
-                (id, stable, version_number(&st, &latest)? + 1)
+        let by = s.provenance();
+        // the relay's ANSWER: the person proposes, the agent relays (O32); the store sets targets
+        let answer = relay.as_ref().map(|r| Answer {
+            item: format!("propose:{view}"),
+            act: AnswerAct::Propose,
+            option: None,
+            label: None,
+            options: vec![],
+            card_hash: None,
+            targets: vec![],
+            person: by.clone(),
+            relayed_by: Some(r.by.clone()),
+            relay_evidence: Some(r.evidence.clone()),
+            evidence_kind: Some(EvidenceKind::Text),
+            note: None,
+        });
+        let (id, stable, n, answer) = match (open, answer) {
+            (Some((stable, latest)), None) => {
+                let id = self
+                    .store
+                    .propose_next(&latest, ids, title, summary, by, alternative)?;
+                (id, stable, version_number(&st, &latest)? + 1, None)
             }
-            None => {
-                let id = self.store.propose_changes(
-                    view,
-                    title,
-                    summary,
-                    s.provenance(),
-                    ids,
-                    alternative,
-                )?;
-                (id, id, 1)
+            (Some((stable, latest)), Some(a)) => {
+                let (id, a) = self
+                    .store
+                    .propose_next_answered(&latest, ids, title, summary, by, alternative, a)
+                    .map_err(crate::version::answer_write_error)?;
+                (id, stable, version_number(&st, &latest)? + 1, Some(a))
+            }
+            (None, None) => {
+                let id = self
+                    .store
+                    .propose_changes(view, title, summary, by, ids, alternative)?;
+                (id, id, 1, None)
+            }
+            (None, Some(a)) => {
+                let (id, a) = self
+                    .store
+                    .propose_changes_answered(view, title, summary, by, ids, alternative, a)
+                    .map_err(crate::version::answer_write_error)?;
+                (id, id, 1, Some(a))
             }
         };
         let stored = self.store.proposal(&id)?;
@@ -1936,6 +2170,8 @@ impl Rdy {
             keys,
             tensions_error,
             coverage_error,
+            relayed_by: relay.map(|r| r.by),
+            answer: answer.map(|a| a.to_string()),
         })
     }
 
@@ -2124,6 +2360,26 @@ impl Rdy {
             .collect();
         if !refusing.is_empty() {
             return Err(blocking_tensions(&pref, &refusing));
+        }
+        // F2 (D-DKJS5, D-T5S9A): every approval path waits until each exception of the version
+        // has a confirm answer. F1: a decision whose current version the person rejected never
+        // lands, exception or not (final review fix round 1, R1), with the issue readiness gives.
+        // Only a proposed decision can be an exception or rejected, so a version that writes no
+        // decision skips the read.
+        let decides = changes.iter().flat_map(|c| &c.ops).any(|op| {
+            matches!(op, Op::Create { block } | Op::Update { block, .. }
+                if block.block_type == decision::DECISION)
+        });
+        if decides {
+            let holds = approval_holds(&st, &pref)?;
+            if !holds.open.is_empty() {
+                return Err(exceptions_open(&pref, &p, &holds.open));
+            }
+            if let Some(first) = holds.rejected.first() {
+                let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+                e.issues = holds.rejected;
+                return Err(e);
+            }
         }
 
         // 1. prospective canon: canon + the proposal's own changes

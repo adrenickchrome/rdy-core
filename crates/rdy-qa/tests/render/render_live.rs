@@ -60,7 +60,7 @@ fn ls2_a_proposal_version_renders_in_review_mode() {
     )
     .unwrap();
     let p = r
-        .propose(&rdy_qa::golden::writer(), "w", "Add a doc")
+        .propose(&rdy_qa::golden::writer(), "w", "Add a doc", None)
         .unwrap();
     let pref = r.resolve_proposal(&p.id).unwrap().to_string();
     let scope = r.read().resolve_scope(&format!("proposal:{pref}")).unwrap();
@@ -131,7 +131,7 @@ fn ls2_an_unchanged_key_means_unchanged_pages() {
     // final review M8: a proposal version too; a landing moves canon's head under it
     edit_second_prose(&mut r, "prop", "Beta", "Proposed text.", false);
     let p = r
-        .propose(&rdy_qa::golden::writer(), "prop", "Proposed")
+        .propose(&rdy_qa::golden::writer(), "prop", "Proposed", None)
         .unwrap();
     let proposal = r
         .read()
@@ -207,7 +207,7 @@ fn ls2_a_proposal_at_canons_head_is_reviewed_against_canon() {
     let (_dir, mut r) = two_docs();
     edit_second_prose(&mut r, "prop", "Alpha", "Proposed.", false);
     let p = r
-        .propose(&rdy_qa::golden::writer(), "prop", "Proposed")
+        .propose(&rdy_qa::golden::writer(), "prop", "Proposed", None)
         .unwrap();
     let scope = r
         .read()

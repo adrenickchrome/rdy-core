@@ -62,7 +62,7 @@ fn snap1_propose_and_land_check_against_the_states_canon_and_refuse_as_before() 
     write(&mut r, "b", json!([{"op": "create", "type": "doc", "fields": {"name": "DUP", "title": "B", "doc_type": "page"}}])).unwrap();
     land(&mut r, "a").unwrap();
     let e = r
-        .propose(&rdy_qa::fixtures::writer(), "b", "clash")
+        .propose(&rdy_qa::fixtures::writer(), "b", "clash", None)
         .unwrap_err();
     assert_eq!(e.code, rdy_engine::E_VALIDATION);
     assert!(e.issues.iter().any(|i| i.code == "E_PATH_CLASH"), "{e:?}");
@@ -77,7 +77,8 @@ fn snap1_propose_and_land_check_against_the_states_canon_and_refuse_as_before() 
     // a proposal republishes the state (its frame must reach the event stream) without changing content
     write(&mut r, "c", json!([{"op": "create", "type": "doc", "fields": {"name": "c", "title": "C", "doc_type": "page"}}])).unwrap();
     let s1 = r.read();
-    r.propose(&rdy_qa::fixtures::writer(), "c", "fine").unwrap();
+    r.propose(&rdy_qa::fixtures::writer(), "c", "fine", None)
+        .unwrap();
     let s2 = r.read();
     assert!(s2.seq() > s1.seq());
     assert!(

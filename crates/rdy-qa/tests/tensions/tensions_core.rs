@@ -545,7 +545,7 @@ fn tset1_the_cell_is_kept_by_seq_tags_and_a_coord_that_keeps_the_members() {
     put(&mut r, "b", upd(&s.a, "A by b."));
     let set = |r: &rdy_engine::Rdy| r.read().tensions().unwrap();
     let before = set(&r);
-    r.propose(&writer(), "a", "a").unwrap();
+    r.propose(&writer(), "a", "a", None).unwrap();
     assert!(Arc::ptr_eq(&before, &set(&r)), "a proposal (Seq)");
     r.intent_post(
         &ag("i"),

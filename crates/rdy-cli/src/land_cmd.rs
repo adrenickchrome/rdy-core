@@ -21,6 +21,18 @@ pub(crate) struct ProposeArgs {
     /// The view's own member of that set (its label); goes with --alt.
     #[arg(long)]
     chosen: Option<String>,
+    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Proposes the person's own view (one they own, or work) on their word.
+    #[arg(long, requires = "evidence")]
+    relayed_by: Option<String>,
+    /// The person's words, quoted. Requires --relayed-by.
+    #[arg(long, requires = "relayed_by")]
+    evidence: Option<String>,
+    /// The question the person was asked.
+    #[arg(long, requires = "relayed_by")]
+    question: Option<String>,
+    /// Where the person said it (default: cli).
+    #[arg(long = "session", requires = "relayed_by")]
+    session_ref: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -50,6 +62,18 @@ pub(crate) struct TagArgs {
     landing: Option<String>,
     #[arg(short = 'm', long)]
     message: Option<String>,
+    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Records the person's tag, relayed.
+    #[arg(long, requires = "evidence")]
+    relayed_by: Option<String>,
+    /// The person's words, quoted. Requires --relayed-by.
+    #[arg(long, requires = "relayed_by")]
+    evidence: Option<String>,
+    /// The question the person was asked.
+    #[arg(long, requires = "relayed_by")]
+    question: Option<String>,
+    /// Where the person said it (default: cli).
+    #[arg(long = "session", requires = "relayed_by")]
+    session_ref: Option<String>,
 }
 
 pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), ErrorReply> {
@@ -59,6 +83,10 @@ pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), Erro
         summary,
         alt,
         chosen,
+        relayed_by,
+        evidence,
+        question,
+        session_ref,
     } = a;
     let alternatives = match (alt, chosen) {
         (Some(set), Some(chosen)) => Some(json!({"set": set, "chosen": chosen})),
@@ -74,7 +102,16 @@ pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), Erro
     let v = call(
         env,
         "propose",
-        json!({"title": title, "view": view, "summary": summary, "alternatives": alternatives}),
+        json!({
+            "title": title,
+            "view": view,
+            "summary": summary,
+            "alternatives": alternatives,
+            "relayed_by": relayed_by,
+            "evidence": evidence,
+            "question": question,
+            "session_ref": session_ref,
+        }),
     )?;
     let t = propose_text(&v);
     Ok((v, t))
@@ -87,6 +124,7 @@ pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), Erro
 fn propose_text(v: &Value) -> String {
     let pref = text(&v["ref"]);
     let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
+    t.push_str(&relayed_by_text(v));
     if let Some(s) = v["summary"].as_str() {
         t.push_str(&format!("\nsummary: {s}"));
     }
@@ -186,6 +224,13 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             "strict": strict.then_some(true),
         }),
     )?;
+    let t = approve_text(&v);
+    Ok((v, t))
+}
+
+/// The landing lines of an approval, from its reply: the proposal, its summary, the landing,
+/// the relay, the chosen alternative, the consequences, the rebases, new keys and warnings.
+pub(crate) fn approve_text(v: &Value) -> String {
     let approved = text(&v["approved"]);
     let mut t = format!(
         "approving {approved}: {} ({} change(s))",
@@ -199,13 +244,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
         "\nlanded {} ({approved})",
         hash_short(text(&v["landing"]))
     ));
-    // the relayer as recorded (the session's actor and run), which may differ from the flag
-    if let Some(by) = v["relayed_by"]["actor"].as_str() {
-        match v["relayed_by"]["run"].as_str() {
-            Some(run) => t.push_str(&format!(", relayed by {by}/{run}")),
-            None => t.push_str(&format!(", relayed by {by}")),
-        }
-    }
+    t.push_str(&relayed_by_text(v));
     if let Some(member) = v["chosen"]["member"].as_str() {
         t.push_str(&format!(
             "\nchose {member} of {}",
@@ -221,7 +260,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             t.push_str(&format!("; closed {}", closed.join(", ")));
         }
     }
-    t.push_str(&brief_text::consequences_text(&v));
+    t.push_str(&brief_text::consequences_text(v));
     for r in v["rebased"].as_array().into_iter().flatten() {
         if num(&r["conflicts"]) > 0 {
             t.push_str(&format!(
@@ -231,7 +270,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             ));
         }
     }
-    t.push_str(&new_keys_text(&v));
+    t.push_str(&new_keys_text(v));
     for w in v["warnings"].as_array().into_iter().flatten() {
         t.push_str(&format!(
             "\nwarning {}: {}",
@@ -239,7 +278,20 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             text(&w["message"])
         ));
     }
-    Ok((v, t))
+    t
+}
+
+/// `, relayed by <actor>[/<run>]`: the relayer as recorded (the session's actor and run, which
+/// may differ from the flag); empty when the reply names none.
+fn relayed_by_text(v: &Value) -> String {
+    match (
+        v["relayed_by"]["actor"].as_str(),
+        v["relayed_by"]["run"].as_str(),
+    ) {
+        (Some(by), Some(run)) => format!(", relayed by {by}/{run}"),
+        (Some(by), None) => format!(", relayed by {by}"),
+        (None, _) => String::new(),
+    }
 }
 
 pub(crate) fn tag(env: &Env, a: TagArgs) -> Result<(Value, String), ErrorReply> {
@@ -247,16 +299,29 @@ pub(crate) fn tag(env: &Env, a: TagArgs) -> Result<(Value, String), ErrorReply> 
         version,
         landing,
         message,
+        relayed_by,
+        evidence,
+        question,
+        session_ref,
     } = a;
     let v = call(
         env,
         "tag",
-        json!({"version": version, "landing": landing, "message": message}),
+        json!({
+            "version": version,
+            "landing": landing,
+            "message": message,
+            "relayed_by": relayed_by,
+            "evidence": evidence,
+            "question": question,
+            "session_ref": session_ref,
+        }),
     )?;
     let t = format!(
-        "version {} → landing {}",
+        "version {} → landing {}{}",
         text(&v["name"]),
-        hash_short(text(&v["landing"]))
+        hash_short(text(&v["landing"])),
+        relayed_by_text(&v)
     );
     Ok((v, t))
 }

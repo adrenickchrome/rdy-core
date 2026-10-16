@@ -1,7 +1,9 @@
 pub mod accept;
 pub mod alt;
+pub mod answer;
 mod areas;
 pub mod brief;
+pub mod card_words;
 pub mod code_brief;
 pub mod code_index;
 mod config;
@@ -33,6 +35,7 @@ mod materialize;
 pub mod mention_review;
 mod pack_load;
 mod paths;
+pub mod pending;
 pub mod proposal_show;
 mod publish;
 mod query;
@@ -99,8 +102,8 @@ pub use session::{
 };
 pub use tree_io::Diagnostic;
 pub use version::{
-    AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, VersionInfo, VersionPosition, VersionRef, ViewPosition,
-    parse_version,
+    AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, TagInfo, VersionInfo, VersionPosition, VersionRef,
+    ViewPosition, parse_version,
 };
 pub use view_query::{
     ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, ViewDetail, ViewSummary,
@@ -112,7 +115,9 @@ pub use write::{
     json_to_field, parse_justification, parse_op, parse_ops,
 };
 
-pub use config::{DEFAULT_LEASE_TTL_MINUTES, ServeConfig, serve_config};
+pub use config::{
+    DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig, serve_config,
+};
 pub use engine::{Engine, Local, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{

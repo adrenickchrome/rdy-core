@@ -1,5 +1,5 @@
 {
-  "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+  "change": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
   "consequences": [
     {
       "because": {
@@ -9,9 +9,9 @@
       "block": "c-CFPE0",
       "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
       "follow_up": "resolve",
-      "id": "cq-a7fc2d999bc9e167",
+      "id": "cq-d5c10b0d71318283",
       "kind": "tension",
-      "tension": "tn-db1594a2c146"
+      "tension": "tn-ce1bd0011555"
     },
     {
       "because": {
@@ -20,7 +20,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "update",
-      "id": "cq-ba47c295e50ebc70",
+      "id": "cq-f40983e1537b1172",
       "kind": "suspect"
     }
   ],
@@ -44,7 +44,7 @@
         "blocks": [
           "c-CFPE0"
         ],
-        "id": "tn-db1594a2c146",
+        "id": "tn-ce1bd0011555",
         "kind": "unjustified_change",
         "overridden": true,
         "severity": "blocking",
@@ -57,17 +57,17 @@
                 "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
               }
             ],
-            "change": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+            "change": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
             "run": "a",
-            "side": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+            "side": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
             "views": [
               "a"
             ]
           }
         ],
         "status": "open",
-        "summary": "change 592ccd6c6f77 edits stable normative block c-CFPE0 without a justification",
-        "tension": "db1594a2c14655892fb3dbebe9e73d8321454e1c9b96cca9184d6ce1c1528fbf"
+        "summary": "change ed2ae5f9f34b edits stable normative block c-CFPE0 without a justification",
+        "tension": "ce1bd001155510d639b035a82a4b41b100c61ad36b7872ef6c5779508fe2f61e"
       }
     ]
   },

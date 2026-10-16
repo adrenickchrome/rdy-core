@@ -600,7 +600,7 @@ mod tests {
             },
         )
         .unwrap();
-        let p = r.propose(&writer, view, view).unwrap();
+        let p = r.propose(&writer, view, view, None).unwrap();
         r.land(&Session::human("human:qa".into(), Role::Approver), &p.id)
             .unwrap();
     }

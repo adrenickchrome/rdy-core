@@ -14,6 +14,7 @@ mod tensions_fork;
 mod tensions_log;
 mod tensions_overlap;
 mod tensions_premise;
+mod tensions_relayed;
 mod tensions_semantic;
 mod tensions_semantic_golden;
 mod tensions_unjustified;

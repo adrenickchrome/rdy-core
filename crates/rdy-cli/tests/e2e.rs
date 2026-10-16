@@ -154,8 +154,13 @@ fn agent_over_mcp_then_human_approves() {
             .unwrap()
             .contains("E_UNKNOWN_REF")
     );
-    let p = m.tool("rdy_propose", json!({"title": "wallet ruling"}));
+    // a version that lands a proposed decision carries a summary: the approval card leads with it
+    let p = m.tool(
+        "rdy_propose",
+        json!({"title": "wallet ruling", "summary": "test summary"}),
+    );
     let pid = p["id"].as_str().unwrap().to_string();
+    let pref = p["ref"].as_str().unwrap().to_string();
     drop(m.child.stdin.take());
     // Wait for exit (releases the store lock), bounded.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -170,6 +175,16 @@ fn agent_over_mcp_then_human_approves() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // F2 (D-DKJS5): the person confirms each exception of the version before approving it
+    let q = rdy(dir.path(), &["pending"]);
+    for i in q["items"].as_array().unwrap() {
+        if i["kind"] == "confirm" && i["batch"] == json!(pref) {
+            rdy(
+                dir.path(),
+                &["answer", i["ref"].as_str().unwrap(), "confirm"],
+            );
+        }
+    }
     let landed = rdy(dir.path(), &["approve", &pid]);
     assert!(landed["landing"].is_string());
     let show = rdy(dir.path(), &["show", &did]);

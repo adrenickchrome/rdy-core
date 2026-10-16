@@ -1,3 +1,4 @@
+pub mod answer;
 pub mod block;
 mod canon;
 mod change;
@@ -11,6 +12,7 @@ mod order;
 pub mod tree;
 mod value;
 
+pub use answer::{Answer, AnswerAct};
 pub use block::{Block, Link, RefMode, RefSpan, Tracking, hash_of, ref_spans};
 pub use canon::{
     ActorRun, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Proposal, RelayEvidence,

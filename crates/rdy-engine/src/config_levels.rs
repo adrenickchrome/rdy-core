@@ -119,6 +119,12 @@ pub enum Ty {
     /// A string. A string that is not a private IPv4 address is not a wrong type:
     /// `range_warnings` warns and drops it.
     LanAddress,
+    /// A whole number (a YAML integer, any sign). A whole number outside 1 to 1000 is not a
+    /// wrong type: `range_warnings` warns and sets the key's default at that level.
+    Count,
+    /// A string. A string that is not one of the choices is not a wrong type: `range_warnings`
+    /// warns and sets the key's default at that level.
+    Choice(&'static [&'static str]),
     /// Not read by `Config` yet: any value.
     Any,
 }
@@ -160,8 +166,39 @@ impl Ty {
                     )),
                 };
             }
+            Ty::Count => {
+                return match v {
+                    Value::Number(n) if n.is_i64() || n.is_u64() => Ok(()),
+                    other => Err(format!(
+                        "invalid type: {}, expected a whole number from 1 to 1000",
+                        flow(other)
+                    )),
+                };
+            }
+            Ty::Choice(choices) => {
+                return match v {
+                    Value::String(_) => Ok(()),
+                    other => Err(format!(
+                        "invalid type: {}, expected one of {}",
+                        flow(other),
+                        choice_list(choices)
+                    )),
+                };
+            }
         };
         r.map_err(|e| e.to_string())
+    }
+}
+
+/// The choices of `propose.cadence` (FW-PC1), in the order the docs give them.
+pub const PROPOSE_CADENCES: &[&str] = &["break", "task", "changes", "asked"];
+
+/// `choices` as a message names them: `a, b or c`.
+fn choice_list(choices: &[&str]) -> String {
+    match choices {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [init @ .., last] => format!("{} or {last}", init.join(", ")),
     }
 }
 
@@ -254,6 +291,18 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         levels: PERSON,
         ty: Ty::LanAddress,
         default: None,
+    },
+    KeyRule {
+        key: "propose.cadence",
+        levels: ANY,
+        ty: Ty::Choice(PROPOSE_CADENCES),
+        default: Some("break"),
+    },
+    KeyRule {
+        key: "propose.changes",
+        levels: ANY,
+        ty: Ty::Count,
+        default: Some("10"),
     },
     // the default is `human:$USER`, taken from the environment in `effective`
     KeyRule {
@@ -747,8 +796,11 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
 }
 
 /// The `W_CONFIG_UNKNOWN` warnings of the range-checked keys of `map`: a percent outside 0 to 100,
-/// a port outside 1024 to 65535 and an address that is not a private IPv4 literal. Each value is
-/// removed from `map`, so the default applies and rdy keeps going (config mistakes warn).
+/// a port outside 1024 to 65535, an address that is not a private IPv4 literal, a count outside 1
+/// to 1000 and a choice that is not one of its words. rdy keeps going (config mistakes warn). A
+/// percent, a port and an address are removed from `map`, so the next level or the default
+/// applies. A count and a choice get the key's default at the level that holds the wrong value:
+/// the message says "using <default>", so a lower level never answers instead (FW-PC1).
 fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
     let mut out = Vec::new();
     for rule in KEY_LEVELS {
@@ -811,9 +863,51 @@ fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
                     ),
                 )
             }
+            Ty::Count => {
+                let outside = get_path(map, rule.key).is_some_and(|v| match v {
+                    Value::Number(n) => n.as_i64().is_none_or(|i| !(1..=1000).contains(&i)),
+                    _ => false,
+                });
+                if !outside {
+                    continue;
+                }
+                (
+                    format!(
+                        "{} must be 1–1000; using {}",
+                        rule.key,
+                        rule.default.unwrap_or("1")
+                    ),
+                    format!("set {} to a whole number from 1 to 1000", rule.key),
+                )
+            }
+            Ty::Choice(choices) => {
+                let outside = get_path(map, rule.key).is_some_and(|v| match v {
+                    Value::String(s) => !choices.contains(&s.as_str()),
+                    _ => false,
+                });
+                if !outside {
+                    continue;
+                }
+                let list = choice_list(choices);
+                (
+                    format!(
+                        "{} must be {list}; using {}",
+                        rule.key,
+                        rule.default.unwrap_or("the default")
+                    ),
+                    format!("set {} to {list}", rule.key),
+                )
+            }
             _ => continue,
         };
-        remove_path(map, rule.key);
+        let default: Option<Value> = match rule.ty {
+            Ty::Count | Ty::Choice(_) => rule.default.and_then(|d| serde_yaml_ng::from_str(d).ok()),
+            _ => None,
+        };
+        match default {
+            Some(d) => set_path(map, rule.key, d),
+            None => remove_path(map, rule.key),
+        }
         out.push(config_warning(message, fix));
     }
     out
@@ -1537,5 +1631,92 @@ mod tests {
                     && w.message.contains("serve.site_lan_address")),
             "the shared file is the wrong level"
         );
+    }
+
+    #[test]
+    fn di11_propose_keys_take_a_choice_and_a_count_at_every_level() {
+        let d = project(
+            "pack: p\npropose:\n  cadence: task\n  changes: 5\n",
+            Some("propose:\n  cadence: asked\n"),
+        );
+        let e = effective(d.path(), None).unwrap();
+        assert!(e.warnings.is_empty(), "{:?}", e.warnings);
+        let row = |k: &str| e.origins.iter().find(|o| o.key == k).unwrap().clone();
+        assert_eq!(row("propose.cadence").value, Value::from("asked"));
+        assert_eq!(row("propose.cadence").level, Level::Local);
+        assert_eq!(row("propose.changes").value, Value::from(5));
+        assert_eq!(row("propose.changes").level, Level::Project);
+        // the defaults
+        let d = project("pack: p\n", None);
+        let e = effective(d.path(), None).unwrap();
+        let row = |k: &str| e.origins.iter().find(|o| o.key == k).unwrap().clone();
+        assert_eq!(row("propose.cadence").value, Value::from("break"));
+        assert_eq!(row("propose.cadence").level, Level::Default);
+        assert_eq!(row("propose.changes").value, Value::from(10));
+    }
+
+    #[test]
+    fn di11_a_wrong_propose_value_warns_and_a_wrong_type_is_an_error() {
+        let d = project(
+            "pack: p\npropose:\n  cadence: sometimes\n  changes: 0\n",
+            None,
+        );
+        let e = effective(d.path(), None).unwrap();
+        let messages: Vec<&str> = e.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "propose.cadence must be break, task, changes or asked; using break",
+                "propose.changes must be 1–1000; using 10"
+            ]
+        );
+        assert!(e.warnings.iter().all(|w| w.code == "W_CONFIG_UNKNOWN"));
+        assert_eq!(
+            e.warnings[0].fix,
+            "set propose.cadence to break, task, changes or asked"
+        );
+        assert_eq!(
+            e.warnings[1].fix,
+            "set propose.changes to a whole number from 1 to 1000"
+        );
+        // the default applies at the level that holds the wrong value
+        assert_eq!(
+            get_path(&e.merged, "propose.cadence"),
+            Some(&Value::from("break"))
+        );
+        assert_eq!(
+            get_path(&e.merged, "propose.changes"),
+            Some(&Value::from(10))
+        );
+        let row = |k: &str| e.origins.iter().find(|o| o.key == k).unwrap().clone();
+        assert_eq!(row("propose.cadence").level, Level::Project);
+        assert_eq!(row("propose.changes").level, Level::Project);
+        // and it wins over a lower level: a person's wrong word is `break`, not the project's
+        let d = project(
+            "pack: p\npropose:\n  cadence: task\n  changes: 4\n",
+            Some("propose:\n  cadence: Always\n  changes: 1001\n"),
+        );
+        let e = effective(d.path(), None).unwrap();
+        assert_eq!(e.warnings.len(), 2, "{:?}", e.warnings);
+        let row = |k: &str| e.origins.iter().find(|o| o.key == k).unwrap().clone();
+        assert_eq!(row("propose.cadence").value, Value::from("break"));
+        assert_eq!(row("propose.cadence").level, Level::Local);
+        assert_eq!(row("propose.changes").value, Value::from(10));
+        assert_eq!(row("propose.changes").level, Level::Local);
+        // a negative whole number is a wrong value, not a wrong type
+        let d = project("pack: p\npropose:\n  changes: -4\n", None);
+        let e = effective(d.path(), None).unwrap();
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        // a wrong YAML type is E_CONFIG
+        for bad in [
+            "cadence: [a]",
+            "cadence: 7",
+            "changes: many",
+            "changes: 2.5",
+        ] {
+            let d = project(&format!("pack: p\npropose:\n  {bad}\n"), None);
+            let err = effective(d.path(), None).unwrap_err();
+            assert_eq!(err.code, E_CONFIG, "{bad}: {}", err.message);
+        }
     }
 }

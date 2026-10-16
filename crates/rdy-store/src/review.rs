@@ -59,6 +59,21 @@ impl Store {
     /// `StoreError::Refused`. The same review again
     /// is an idempotent retry: it returns the id and writes nothing.
     pub fn put_dismissal(&mut self, r: &Review) -> Result<Hash, StoreError> {
+        let (id, frames) = self.dismissal_frames(r)?;
+        if let Some(items) = frames {
+            self.write(items)?;
+        }
+        Ok(id)
+    }
+
+    /// The checks of `put_dismissal` for `r`: its id, and the frames that write it (the review
+    /// and its `dismiss/<vkey>` ref), or `None` when the ref already names this review (an
+    /// idempotent retry). A refusal is `StoreError::Refused`.
+    #[allow(clippy::type_complexity)]
+    fn dismissal_frames(
+        &self,
+        r: &Review,
+    ) -> Result<(Hash, Option<Vec<(u8, Vec<u8>)>>), StoreError> {
         let vkey = match (r.verdict, r.vkey()) {
             (Verdict::Dismiss, Some(k)) => k,
             _ => {
@@ -73,7 +88,7 @@ impl Store {
         if let Some(held) = self.get_ref(&name)? {
             let held = hash_from(&held, "dismissal ref")?;
             if held == id {
-                return Ok(id);
+                return Ok((id, None));
             }
             return Err(StoreError::Refused(format!(
                 "tension vkey {vkey} is already dismissed by review {held}"
@@ -81,8 +96,42 @@ impl Store {
         }
         let mut items = vec![(kinds::REVIEW, bytes)];
         items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
-        self.write(items)?;
-        Ok(id)
+        Ok((id, Some(items)))
+    }
+
+    /// Writes the dismissals `reviews` and the answer `a` that holds the person's relay, in one
+    /// batch (O14, D-562QR): each review and its `dismiss/<vkey>` ref, with the checks of
+    /// `put_dismissal`, then the answer and its ref (`put_answer_with`). The answer's `targets`
+    /// are set to the reviews, in order. An empty list, and two reviews of one vkey, are refused.
+    /// Returns the reviews' ids and the answer's id. A refusal writes nothing.
+    pub fn put_dismissals_answered(
+        &mut self,
+        reviews: &[Review],
+        mut a: rdy_model::Answer,
+    ) -> Result<(Vec<Hash>, Hash), StoreError> {
+        if reviews.is_empty() {
+            return Err(StoreError::Refused(
+                "an answered dismissal names at least one review".into(),
+            ));
+        }
+        let mut ids = vec![];
+        let mut vkeys = BTreeSet::new();
+        let mut extra = vec![];
+        for r in reviews {
+            let (id, frames) = self.dismissal_frames(r)?;
+            if let Some(vkey) = r.vkey()
+                && !vkeys.insert(vkey)
+            {
+                return Err(StoreError::Refused(format!(
+                    "tension vkey {vkey} is dismissed twice in one batch"
+                )));
+            }
+            extra.extend(frames.into_iter().flatten());
+            ids.push(id);
+        }
+        a.targets.clone_from(&ids);
+        let answer = self.put_answer_with(&a, extra)?;
+        Ok((ids, answer))
     }
 
     /// Writes a mention review: the review and the ref `mention/<block>/<entity>` to it, in one

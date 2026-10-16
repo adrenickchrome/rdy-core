@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod schema;
 mod schema_areas;
+mod schema_card_words;
 mod schema_class;
 mod schema_packs;
 mod schema_rules;

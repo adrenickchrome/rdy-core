@@ -45,6 +45,21 @@ pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
         return;
     }
     eprintln!("error {}: {}\nfix: {}", e.code, e.message, e.fix);
+    // an answer that names a card that moved, or an approval that waits for exceptions, carries
+    // the fresh card or cards (O21): show them to the person
+    if let Some(corrected) = e.extra.get("corrected") {
+        let cards = corrected
+            .get("exceptions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(corrected.get("card").map(|_| corrected));
+        for c in cards {
+            if let Some(card) = c.get("card").and_then(Value::as_str) {
+                eprintln!("\n{card}");
+            }
+        }
+    }
     if let Some(issues) = e.extra.get("issues").and_then(Value::as_array) {
         for i in issues {
             let block = match i["block"].as_str() {

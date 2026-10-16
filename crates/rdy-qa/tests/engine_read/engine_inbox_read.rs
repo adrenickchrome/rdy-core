@@ -80,12 +80,17 @@ fn ib6_two_hundred_entries_per_page_and_ack_moves_on() {
     let p1 = read(&e, &ag("a"), json!({"ack": true, "max_tokens": 100000}));
     assert_eq!(p1["entries"].as_array().unwrap().len(), 200);
     assert_eq!(p1["more"], true);
-    // the setup landing of view work also changes payments blocks: 1 + 205 entries in all
-    let first = p1["entries"][0]["line"].as_str().unwrap();
+    // the setup landing of view work also changes payments blocks: 1 + 205 landings, each
+    // after its proposal (di11: `pending_added`), so 412 entries in all
+    assert_eq!(p1["entries"][0]["event"], "pending_added");
+    let first = p1["entries"][1]["line"].as_str().unwrap();
     assert!(first.contains(" of view work changed "), "{first}");
     let p2 = read(&e, &ag("a"), json!({"ack": true, "max_tokens": 100000}));
-    assert_eq!(p2["entries"].as_array().unwrap().len(), 6);
-    assert_eq!(p2["more"], false);
+    assert_eq!(p2["entries"].as_array().unwrap().len(), 200);
+    assert_eq!(p2["more"], true);
+    let p3 = read(&e, &ag("a"), json!({"ack": true, "max_tokens": 100000}));
+    assert_eq!(p3["entries"].as_array().unwrap().len(), 12);
+    assert_eq!(p3["more"], false);
     assert_eq!(read(&e, &ag("a"), json!({}))["entries"], json!([]));
 }
 
@@ -554,7 +559,8 @@ fn ib6_a_cursor_at_a_segment_end_reads_on() {
     subscribe(&e, &ag("a"), Some(vec!["payments".into()])).unwrap();
     on(&e, |r| payments_landings(r, 3));
     let all = read(&e, &ag("a"), json!({"max_tokens": 100000}))["entries"].clone();
-    assert_eq!(all.as_array().unwrap().len(), 4, "{all}");
+    // 1 + 3 landings, each after its proposal (di11: `pending_added`)
+    assert_eq!(all.as_array().unwrap().len(), 8, "{all}");
     let (mut got, mut since, mut at_ends) = (vec![], None::<String>, 0);
     for _ in 0..100 {
         let mut req = json!({"max_tokens": 1});

@@ -37,6 +37,7 @@ pub(crate) struct TensionsArgs {
 }
 
 #[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("relayed_act").args(["accept", "dismiss"])))]
 pub(crate) struct ResolveArgs {
     /// The tension: tn-<hex>, or a unique prefix of at least 6 hex digits.
     tension: Option<String>,
@@ -54,11 +55,13 @@ pub(crate) struct ResolveArgs {
         value_delimiter = ','
     )]
     tensions: Option<Vec<String>>,
-    /// The person's words, quoted, when an agent relays them. Requires --relayed-by.
-    #[arg(long, value_name = "WORDS", requires_all = ["accept", "relayed_by"])]
+    /// With --accept or --dismiss: the person's words, quoted, when an agent relays them.
+    /// Requires --relayed-by.
+    #[arg(long, value_name = "WORDS", requires_all = ["relayed_act", "relayed_by"])]
     evidence: Option<String>,
-    /// The agent that relays the person's answer. Requires --evidence.
-    #[arg(long, value_name = "ACTOR[/RUN]", requires_all = ["accept", "evidence"])]
+    /// The agent that relays the person's answer: your own actor (or actor/run). Only an agent
+    /// session relays. Requires --evidence.
+    #[arg(long, value_name = "ACTOR[/RUN]", requires_all = ["relayed_act", "evidence"])]
     relayed_by: Option<String>,
     /// The question the person was asked.
     #[arg(long, value_name = "TEXT", requires = "evidence")]
@@ -297,15 +300,29 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
         return Ok((v, t));
     }
     let mention = mention.map(|m| json!({"block": m[0], "entity": m[1]}));
-    let reason = |r: Option<String>| r.map(|r| json!({"reason": r}));
+    // a relay rides with the dismissal; clap pairs its flags
+    let dismiss = dismiss.map(|r| {
+        let mut d = json!({"reason": r});
+        for (k, v) in [
+            ("evidence", evidence),
+            ("question", question),
+            ("session_ref", session_ref),
+            ("relayed_by", relayed_by),
+        ] {
+            if let Some(v) = v {
+                d[k] = json!(v);
+            }
+        }
+        d
+    });
     let v = call(
         env,
         "resolve",
         json!({
             "tension": tension,
             "mention": mention,
-            "dismiss": reason(dismiss),
-            "restore": reason(restore),
+            "dismiss": dismiss,
+            "restore": restore.map(|r| json!({"reason": r})),
             "scope": scope,
         }),
     )?;
@@ -322,8 +339,15 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
             hash_short(text(&v["review"]))
         )
     } else {
+        let relayed = v["relayed_by"]["actor"]
+            .as_str()
+            .map(|a| match v["relayed_by"]["run"].as_str() {
+                Some(run) => format!(", relayed by {a}/{run}"),
+                None => format!(", relayed by {a}"),
+            })
+            .unwrap_or_default();
         format!(
-            "dismissed {} (review {})",
+            "dismissed {} (review {}{relayed})",
             text(&v["id"]),
             hash_short(text(&v["review"]))
         )

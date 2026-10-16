@@ -292,14 +292,30 @@ fn inject_engine_types(pack: &mut Pack) {
         ("kind", f(FieldKind::Str, false, &[])),
         ("placeholders", f(FieldKind::List, false, &[])),
         ("needs_content", f(FieldKind::Bool, false, &[])),
+        // The authored words of the decision's card (FW-I1).
+        ("title", f(FieldKind::Str, false, &[])),
+        ("why", f(FieldKind::Str, false, &[])),
+        (
+            "recommend",
+            f(FieldKind::Enum, false, &["confirm", "reject"]),
+        ),
+        ("recommend_reason", f(FieldKind::Str, false, &[])),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect();
-    let question_core: BTreeMap<String, FieldDef> =
-        [("prompt".to_string(), f(FieldKind::Str, true, &[]))]
-            .into_iter()
-            .collect();
+    // The authored words of the question's card (FW-I1): `options` holds two to four labels.
+    let question_core: BTreeMap<String, FieldDef> = [
+        ("prompt", f(FieldKind::Str, true, &[])),
+        ("title", f(FieldKind::Str, false, &[])),
+        ("why", f(FieldKind::Str, false, &[])),
+        ("options", f(FieldKind::List, false, &[])),
+        ("recommended", f(FieldKind::Str, false, &[])),
+        ("recommend_reason", f(FieldKind::Str, false, &[])),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
 
     force(
         pack,

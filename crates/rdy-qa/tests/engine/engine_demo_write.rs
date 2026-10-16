@@ -56,7 +56,7 @@ fn df1_unapplied_with_implements() {
     let governed = r.read().graph(&scope).unwrap().governed_by(&d);
     assert!(governed.contains(&c), "governed_by: {governed:?}");
     let e = Local::new(r);
-    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "cap", "Cap")).unwrap();
+    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "cap", "Cap", None)).unwrap();
     assert!(
         p["warnings"]
             .as_array()
@@ -223,7 +223,7 @@ fn df1_the_engine_relay_check_names_the_agent_path() {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "W").unwrap();
+    let p = r.propose(&writer(), "w", "W", None).unwrap();
     // `Session::agent` never holds the approver role, and `land_with` checks the role first; a
     // session built by hand reaches the engine's own relay check
     let agent = Session {

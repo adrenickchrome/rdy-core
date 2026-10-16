@@ -36,6 +36,7 @@ fn proposal_scope(r: &mut rdy_engine::Rdy) -> Scope {
             &rdy_qa::fixtures::writer(),
             REVIEW_VIEW,
             "Rewrite the guide",
+            None,
         )
         .unwrap();
     r.read()

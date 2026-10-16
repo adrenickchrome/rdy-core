@@ -54,7 +54,7 @@ fn golden_served() -> (Served, ProposalInfo, String) {
             "body": "So far we have used three simple patterns. They compose."}]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "editing", "tutorial").unwrap();
+    let p = r.propose(&writer(), "editing", "tutorial", None).unwrap();
     r.close().unwrap();
     (s, p, landing)
 }
@@ -324,7 +324,9 @@ fn sr2_no_changes_link_to_a_doc_that_owns_the_page() {
         json!([{"op": "create", "type": "doc", "fields": {"name": "changes", "title": "Authored changes guide", "doc_type": "overview"}}]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "collision", "Add a guide").unwrap();
+    let p = r
+        .propose(&writer(), "collision", "Add a guide", None)
+        .unwrap();
     r.close().unwrap();
 
     let kept = "the top-level doc named changes has the page changes.html: the change summary of this view or proposal is left out. Rename the doc to publish it.";

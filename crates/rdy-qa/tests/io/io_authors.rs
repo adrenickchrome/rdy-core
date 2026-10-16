@@ -49,7 +49,7 @@ fn two_authors(dir: &Path) -> (Rdy, String, String) {
         ]),
     );
     let d = w.created["$d"].clone();
-    let p = r.propose(&a, "va", "a").unwrap();
+    let p = r.propose(&a, "va", "a", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let b = sess("agent:b", Some("r2"), Role::Writer);
     let w = put(
@@ -61,7 +61,7 @@ fn two_authors(dir: &Path) -> (Rdy, String, String) {
         ]),
     );
     let prose = w.created["$p"].clone();
-    let p = r.propose(&b, "vb", "b").unwrap();
+    let p = r.propose(&b, "vb", "b", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     (r, d, prose)
 }
@@ -154,7 +154,7 @@ fn mfb3_the_import_view_stays_the_importers() {
     drop(st);
     assert_eq!(owner.as_ref().map(|o| o.actor.as_str()), Some("human:imp"));
     // the importer proposes and lands it as before
-    let p = b.propose(&imp, "import", "migrate").unwrap();
+    let p = b.propose(&imp, "import", "migrate", None).unwrap();
     b.land(&imp, &p.id).unwrap();
 }
 
@@ -275,7 +275,7 @@ fn mfb3_interleaved_authors_import_to_the_exported_tree() {
         ]),
     );
     let q = w.created["$q"].clone();
-    let pr = r.propose(&a, "vc", "c").unwrap();
+    let pr = r.propose(&a, "vc", "c", None).unwrap();
     r.land(&founder(), &pr.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     let first = out.path().join("one");
@@ -308,7 +308,7 @@ fn mfb3_interleaved_authors_import_to_the_exported_tree() {
         assert_eq!(two.provenance.actor, "agent:a");
         assert_eq!(two.provenance.at_ms, 300);
     }
-    let pr = b.propose(&imp, "import", "migrate").unwrap();
+    let pr = b.propose(&imp, "import", "migrate", None).unwrap();
     b.land(&imp, &pr.id).unwrap();
     assert_eq!(
         b.read().materialized(&Scope::Canon).unwrap().snapshot(),
@@ -570,7 +570,7 @@ fn older_author_export(out: &Path, ops: serde_json::Value) {
         )
         .unwrap();
     }
-    let p = r.propose(&a, "va", "a").unwrap();
+    let p = r.propose(&a, "va", "a", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let b = sess("agent:b", Some("r2"), Role::Writer);
     put(
@@ -581,7 +581,7 @@ fn older_author_export(out: &Path, ops: serde_json::Value) {
             {"op": "create", "type": "doc", "fields": {"name": "plain", "title": "Plain", "doc_type": "overview"}}
         ]),
     );
-    let p = r.propose(&b, "vb", "b").unwrap();
+    let p = r.propose(&b, "vb", "b", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     r.read().export(&Scope::Canon, out).unwrap();
 }

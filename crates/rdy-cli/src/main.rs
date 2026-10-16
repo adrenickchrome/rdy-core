@@ -17,6 +17,7 @@ mod dump_cmd;
 mod edit_cmd;
 mod history_text;
 mod inbox_cmd;
+mod intake_cmd;
 mod intent_cmd;
 mod land_cmd;
 mod output;
@@ -91,6 +92,10 @@ enum Cmd {
     Resolve(tension_cmd::ResolveArgs),
     /// Print your inbox: the events and tension moves since your cursor. The first call starts it; --ack moves your cursor past the entries shown. The chat path is rdy_inbox.
     Inbox(inbox_cmd::InboxArgs),
+    /// Print what waits for the person: the cards of the "needs you" queue, then the versions that are not ready. The chat path is rdy_pending.
+    Pending(intake_cmd::PendingArgs),
+    /// Answer one card of the queue: rdy answer <ref> <option> [--card <hash>], or rdy answer --all-recommended <ref>... A person answers as themselves; an agent only by relaying the person's words (--relayed-by with --evidence). The CLI has no Later. The chat path is rdy_answer.
+    Answer(intake_cmd::AnswerArgs),
     /// Print the coverage report: the score per dimension, the lowest pages, and each coverage issue with its fix
     Coverage(coverage_cmd::CoverageArgs),
     /// Undo the newest op of this session on a view, or the named op. The commits of one
@@ -171,6 +176,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Tensions(a) => tension_cmd::tensions(env, a),
         Cmd::Resolve(a) => tension_cmd::resolve(env, a),
         Cmd::Inbox(a) => inbox_cmd::inbox(env, a),
+        Cmd::Pending(a) => intake_cmd::pending(env, a),
+        Cmd::Answer(a) => intake_cmd::answer(env, a),
         Cmd::Coverage(a) => coverage_cmd::coverage(env, a),
         Cmd::Undo(a) => view_cmd::undo(env, a),
         Cmd::Tag(a) => land_cmd::tag(env, a),

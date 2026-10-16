@@ -75,6 +75,8 @@ impl Rdy {
                     require_up_to_date: prev.require_up_to_date,
                     idle_days: prev.idle_days,
                     coverage_target: prev.coverage_target,
+                    propose_cadence: prev.propose_cadence,
+                    propose_changes: prev.propose_changes,
                     decisions_home: prev.decisions_home.clone(),
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
@@ -259,6 +261,7 @@ impl Rdy {
             require_up_to_date,
             idle_days,
             coverage_target,
+            (propose_cadence, propose_changes),
             decisions_home,
             lease_ttl_ms,
         ) = match delta {
@@ -271,6 +274,7 @@ impl Rdy {
                     cfg.require_up_to_date(),
                     cfg.idle_days(),
                     cfg.coverage_target(),
+                    (cfg.propose_cadence(), cfg.propose_changes()),
                     cfg.decisions_home(),
                     i64::from(cfg.lease_ttl_minutes()) * 60_000,
                 )
@@ -281,6 +285,7 @@ impl Rdy {
                 prev.require_up_to_date,
                 prev.idle_days,
                 prev.coverage_target,
+                (prev.propose_cadence, prev.propose_changes),
                 prev.decisions_home.clone(),
                 prev.lease_ttl_ms,
             ),
@@ -367,7 +372,13 @@ impl Rdy {
         // the dismissals: re-read by a full publish, one added by a dismissal, else carried
         let dismissals = match &delta {
             Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
-            Delta::Dismissed { vkey, review } => Arc::new(prev.dismissals.update(*vkey, *review)),
+            Delta::Dismissed { reviews } => {
+                let mut map = (*prev.dismissals).clone();
+                for (vkey, review) in reviews {
+                    map.insert(*vkey, *review);
+                }
+                Arc::new(map)
+            }
             _ => Arc::clone(&prev.dismissals),
         };
         // the dismissed mentions: re-read by a full publish (only the pairs whose latest review
@@ -554,6 +565,8 @@ impl Rdy {
             require_up_to_date,
             idle_days,
             coverage_target,
+            propose_cadence,
+            propose_changes,
             decisions_home,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),

@@ -266,7 +266,7 @@ fn reb1_pinned_closed_and_empty_views_are_not_rebased_and_the_proposing_views_la
     r.invalidate();
     r.view_create(&a, "empty", None, false).unwrap();
     write_as(&mut r, &a, "p", update(&c, &v, "p's")).unwrap();
-    let p = r.propose(&a, "p", "p").unwrap();
+    let p = r.propose(&a, "p", "p", None).unwrap();
     let later = write_as(&mut r, &a, "p", claim(&section, "after proposing"))
         .unwrap()
         .change;
@@ -344,7 +344,7 @@ fn reb1_after_a_landed_rekey_a_rebased_view_gets_no_siblings_rekeyed_warning() {
         r.read().canon_head(),
         "vb was rebased onto va's landing"
     );
-    let p = r.propose(&b, "vb", "b").unwrap();
+    let p = r.propose(&b, "vb", "b", None).unwrap();
     assert!(
         !p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),
         "{:?}",

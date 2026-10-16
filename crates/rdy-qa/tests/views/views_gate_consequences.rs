@@ -31,7 +31,7 @@ fn changed_a() -> (tempfile::TempDir, Local, Spec) {
 #[test]
 fn pcq1_propose_reports_what_landing_would_make_suspect_in_canon() {
     let (_d, e, s) = changed_a();
-    let v = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A")).unwrap();
+    let v = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A", None)).unwrap();
     let b = entry(&v, &s.b);
     assert_eq!(
         (b["kind"].as_str(), b["follow_up"].as_str()),
@@ -48,7 +48,7 @@ fn pcq1_propose_reports_what_landing_would_make_suspect_in_canon() {
 #[test]
 fn pcq1_the_approval_reports_the_same_consequences_with_the_same_ids() {
     let (_d, e, _s) = changed_a();
-    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A")).unwrap();
+    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A", None)).unwrap();
     let pref = p["ref"].as_str().unwrap().to_string();
     let l = land_and_report(&e, move |r| {
         r.land_with(&approver(), &pref, LandOptions::default())
@@ -66,7 +66,7 @@ fn pcq1_a_version_that_does_not_merge_onto_canon_says_why_it_has_no_consequences
     write(&mut r, "o", upd(&s.a, "A from o.")).unwrap();
     land(&mut r, "o").unwrap();
     let e = Local::new(r);
-    let v = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A")).unwrap();
+    let v = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A", None)).unwrap();
     assert!(!v["blocking"].as_array().unwrap().is_empty(), "{v}");
     assert_eq!(v["consequences"], json!([]));
     assert!(

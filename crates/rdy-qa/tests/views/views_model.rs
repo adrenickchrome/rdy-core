@@ -1055,7 +1055,7 @@ impl<'a> Driver<'a> {
                 let want = plan.as_ref().map(|_| ()).map_err(|e| *e);
                 let got = self
                     .r
-                    .propose(&session(&v), &v, "model")
+                    .propose(&session(&v), &v, "model", None)
                     .and_then(|p| self.r.land_report(&approver(), &p.id));
                 let Some(info) = self.expect(&what, want, got)? else {
                     if want == Err(E_CONFLICT_UNRESOLVED) {

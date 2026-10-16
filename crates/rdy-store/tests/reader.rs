@@ -326,3 +326,48 @@ fn rdr1_compound_reads_answer_for_one_head_while_the_writer_lands() {
         (ROUNDS * 2) as usize
     );
 }
+
+/// The open-proposal table and the `open/` refs it mirrors are read at one point: a propose sets
+/// `open/v` and a landing empties it, so two reads at two points can see a ref and a table row
+/// that never existed together, and `check_objects` would report a false failure.
+#[test]
+fn rdr1_check_objects_reads_the_open_refs_and_their_table_at_one_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    let r = s.reader();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(3));
+    const ROUNDS: u32 = 300;
+    let writer = {
+        let (done, start) = (Arc::clone(&done), Arc::clone(&start));
+        std::thread::spawn(move || {
+            start.wait();
+            for round in 0..ROUNDS {
+                let b = block(&nth_id(round), "claim", "x");
+                s.commit_to_view("v", change("v", vec![Op::Create { block: b }]))
+                    .unwrap();
+                let p = s.propose("v", "round", prov(Role::Writer)).unwrap();
+                s.land(&p, prov(Role::Approver)).unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let (r, done, start) = (r.clone(), Arc::clone(&done), Arc::clone(&start));
+            std::thread::spawn(move || {
+                start.wait();
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Err(e) = r.check_objects() {
+                        panic!("check_objects failed under a live writer: {e}");
+                    }
+                }
+            })
+        })
+        .collect();
+    writer.join().unwrap();
+    for t in readers {
+        t.join().unwrap();
+    }
+    r.check_objects().unwrap();
+}

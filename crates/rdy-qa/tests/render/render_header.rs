@@ -662,7 +662,7 @@ fn sr5_a_pre_landing_proposal_keeps_its_name_and_count_after_a_first_landing() {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "Initial proposal").unwrap();
+    let p = r.propose(&writer(), "w", "Initial proposal", None).unwrap();
     let scope = r
         .read()
         .resolve_scope(&format!("proposal:{}", p.id))

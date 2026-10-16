@@ -2,6 +2,7 @@
 
 use super::*;
 use rdy_engine::engine::open_report_json;
+use rdy_engine::pending::PendingQuery;
 use rdy_engine::*;
 use rdy_model::Role;
 use schemars::JsonSchema;
@@ -76,7 +77,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             return Err(RdyError::new(
                 E_PERMISSION,
                 "approver sessions are not available over MCP",
-                "approvals are made by humans with rdy approve",
+                "relay the person's answer with rdy_answer",
             ));
         }
         other => {
@@ -112,7 +113,33 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     st.view = view;
     st.session = Some(session);
     st.reported.clear();
-    let mut out = json!({ "view": st.view, "role": p.role, "areas": sub.areas });
+    let read = st.engine.read();
+    // FW-PC1: the cadence the agent follows, and the count under cadence `changes`
+    let cadence = read.propose_cadence();
+    let mut propose = json!({ "cadence": cadence.as_str() });
+    if cadence == ProposeCadence::Changes {
+        propose["changes"] = json!(read.propose_changes());
+    }
+    let mut out = json!({
+        "view": st.view, "role": p.role, "areas": sub.areas, "propose": propose,
+    });
+    // s-4A488: what waits for the person, so the agent checks the queue at session start. The
+    // count never hides a snoozed item; a queue that cannot be read does not fail the session.
+    let person = human_actor_for_env(&st.engine.root());
+    let query = PendingQuery {
+        person,
+        ..PendingQuery::default()
+    };
+    // final review fix round 1 (R6): both counts are of the whole queue, past its cap too
+    match read.pending_counts(&query) {
+        Ok(c) => {
+            out["pending"] = json!({"items": c.items, "blocking": c.blocking});
+        }
+        Err(e) => {
+            out["pending"] = json!({"items": 0, "blocking": 0});
+            out["pending_error"] = json!(format!("{}: {}", e.code, e.message));
+        }
+    }
     // R-P6: a config key rdy does not know is a warning, never silence
     let warnings = rdy_engine::config_levels::config_warnings_for_env(&st.engine.root());
     if !warnings.is_empty() {
