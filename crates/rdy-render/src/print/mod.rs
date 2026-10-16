@@ -8,6 +8,7 @@
 //! script, navigation, search, review mark, change summary, version pill or "Why?" trail
 //! (D-X61DT). A diagram prints as its source (O3). No id is shown (O4).
 pub mod ir;
+pub mod md;
 
 use crate::page::{self, Kind};
 use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};

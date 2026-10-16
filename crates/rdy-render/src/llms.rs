@@ -97,7 +97,7 @@ fn md_text(s: &str) -> String {
 
 /// [`md_text`]; `line_start` says whether `s` begins a line, where a `#`, `-`, `+` or `N.` would
 /// open a heading, a list item or a numbered one.
-fn md_escape(s: &str, line_start: bool) -> String {
+pub(crate) fn md_escape(s: &str, line_start: bool) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     let lead = s.len() - s.trim_start().len();
     out.push_str(&s[..lead]);

@@ -20,6 +20,7 @@ mod render_no_coverage;
 mod render_plain;
 mod render_presentational;
 mod render_print;
+mod render_print_md;
 mod render_ref;
 mod render_review;
 mod render_review_bar;
