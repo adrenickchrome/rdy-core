@@ -21,7 +21,7 @@ pub struct StaleClose {
     /// The agent that relayed the person's words, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relayed_by: Option<ActorRun>,
-    /// The `ANSWER` record's hash, when a relayed close wrote views.
+    /// The `ANSWER` record's hash, for a relayed close (also when no view was idle).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
 }
@@ -214,7 +214,8 @@ impl Rdy {
     /// [`Rdy::view_own_as`]. A relayed close runs as the person, so it closes what the person's
     /// own `rdy view close --stale` would, and keeps the person's default view. One batch holds
     /// every close and an `ANSWER` (act `close_stale`, item `stale:<the person's default view>`,
-    /// `targets` the close ops). When nothing is idle, nothing is written and `answer` is empty.
+    /// `targets` the close ops). When nothing is idle, no view changes, and the `ANSWER` is still
+    /// written alone, with no targets: the person's words are kept.
     pub fn view_close_stale_as(
         &mut self,
         s: &Session,
@@ -233,20 +234,23 @@ impl Rdy {
         };
         let relayed_by = by.by.clone();
         let (kept, idle) = self.idle_views(&who, days, now_ms)?;
-        if idle.is_empty() {
-            return Ok(StaleClose {
-                closed: vec![],
-                kept,
-                relayed_by: Some(relayed_by),
-                answer: None,
-            });
-        }
         let a = answer_of(
             format!("stale:{}", who.default_view()),
             AnswerAct::CloseStale,
             &who,
             by,
         );
+        if idle.is_empty() {
+            // nothing to close, but the person's words are kept: an answer with no targets
+            let answer = self.store.put_answer(&a).map_err(answer_write_error)?;
+            self.publish(Delta::Seq)?;
+            return Ok(StaleClose {
+                closed: vec![],
+                kept,
+                relayed_by: Some(relayed_by),
+                answer: Some(answer.to_string()),
+            });
+        }
         let (closed, answer) =
             self.view_close_answered(&who, &idle, &format!("idle for more than {days} days"), a)?;
         Ok(StaleClose {

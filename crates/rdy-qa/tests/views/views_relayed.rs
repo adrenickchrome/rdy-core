@@ -283,15 +283,43 @@ fn di10_a_relayed_stale_close_closes_what_the_person_would() {
     );
     assert_eq!(a.evidence_kind, Some(EvidenceKind::Text));
 
-    // nothing idle: nothing is written, and the earlier answer stays the latest
-    let before = r.store().last_batch().to_vec();
+    // nothing idle: no view changes, but the person's words are still recorded (an answer with
+    // no targets), and its hash is returned
+    let heads: Vec<String> = ["a", "b", "seed", "work"]
+        .iter()
+        .map(|v| head(&r, v))
+        .collect();
     let none = r
         .view_close_stale_as(&agent(), FOUNDER, &words("Again"), 14, now_ms())
         .unwrap();
-    assert!(none.closed.is_empty() && none.answer.is_none(), "{none:?}");
+    assert!(none.closed.is_empty(), "{none:?}");
     assert_eq!(none.relayed_by, Some(relayer()));
-    assert_eq!(r.store().last_batch(), &before[..], "no write");
-    assert_eq!(answer_of(&r, "stale:work").map(|(h, _)| h), Some(id));
+    assert_eq!(
+        (
+            last_of(&r, kinds::ANSWER).len(),
+            last_of(&r, kinds::VIEW_OP).len()
+        ),
+        (1, 0),
+        "one answer and no view op: {:?}",
+        last_kinds(&r)
+    );
+    let (id2, a2) = answer_of(&r, "stale:work").expect("the answer");
+    assert_ne!(id2, id, "a new answer");
+    assert_eq!(none.answer, Some(id2.to_string()));
+    assert_eq!(a2.act, AnswerAct::CloseStale);
+    assert!(a2.targets.is_empty(), "{a2:?}");
+    assert_eq!(a2.person.actor, FOUNDER);
+    assert_eq!(a2.relayed_by, Some(relayer()));
+    assert_eq!(
+        a2.relay_evidence.as_ref().map(|e| e.quoted.as_str()),
+        Some("Again")
+    );
+    assert_eq!(a2.evidence_kind, Some(EvidenceKind::Text));
+    let after: Vec<String> = ["a", "b", "seed", "work"]
+        .iter()
+        .map(|v| head(&r, v))
+        .collect();
+    assert_eq!(after, heads, "no view head moved");
     r.fsck().expect("fsck");
 
     // through run_view over MCP: the session is the relay
