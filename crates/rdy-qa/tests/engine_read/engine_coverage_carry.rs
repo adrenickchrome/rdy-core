@@ -116,25 +116,54 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
     }
     // POST-LAUNCH 41: the ids of a run are random, so the walk may never find a childless
     // section to delete (case 14) or a proposed decision to edit (case 11). Drive each missing
-    // case directly: seeds with `seed % 15 == case`, at most 50, until one write succeeds.
+    // case directly with a target chosen by rule, creating the fixture when none exists, so
+    // the write cannot fail for want of an eligible block.
     for case in 10..15u64 {
         if written.get(&case).is_some_and(|n| *n > 0) {
             continue;
         }
-        for try_no in 0..50usize {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let forced = (seed >> 1) / 15 * 15 + case; // seed % 15 == case, no overflow
-            let ops = random_op(&r, &v, &c, forced, 300 + try_no);
-            if write(&mut r, "next", ops).is_ok() {
-                *written.entry(case).or_default() += 1;
-                r.read().coverage_issues(&v).unwrap();
-                same(&r, &v);
-                same_issues(&r, &v);
-                break;
+        let step = 300 + case as usize;
+        let ops = match case {
+            11 => {
+                let mut ids = block_ids(&r, &v, |b| {
+                    b.block_type == "decision" && b.field_str("status") == Some("proposed")
+                });
+                if ids.is_empty() {
+                    write(
+                        &mut r,
+                        "next",
+                        json!([{"op": "create", "type": "decision", "parent": c["$s"],
+                                "fields": {"statement": "Fixture rule", "status": "proposed"}}]),
+                    )
+                    .unwrap();
+                    ids = block_ids(&r, &v, |b| {
+                        b.block_type == "decision" && b.field_str("status") == Some("proposed")
+                    });
+                }
+                json!([{"op": "update", "id": ids[0].to_string(),
+                        "fields": {"statement": format!("Restated at step {step}"), "status": "proposed"}}])
             }
-        }
+            14 => {
+                let mut ids = childless_sections(&r, &v);
+                if ids.is_empty() {
+                    write(
+                        &mut r,
+                        "next",
+                        json!([{"op": "create", "type": "section", "parent": c["$o"],
+                                "fields": {"title": "Fixture"}}]),
+                    )
+                    .unwrap();
+                    ids = childless_sections(&r, &v);
+                }
+                json!([{"op": "delete", "id": ids[0].to_string()}])
+            }
+            _ => random_op(&r, &v, &c, (seed >> 1) / 15 * 15 + case, step),
+        };
+        write(&mut r, "next", ops).unwrap();
+        *written.entry(case).or_default() += 1;
+        r.read().coverage_issues(&v).unwrap();
+        same(&r, &v);
+        same_issues(&r, &v);
     }
     // final review I1, I4: the new cases are reached
     for case in 10..15 {
@@ -143,6 +172,28 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
             "case {case}: {written:?}"
         );
     }
+}
+
+/// The ids (sorted) of the view's blocks that `keep` accepts.
+fn block_ids(r: &Rdy, scope: &Scope, keep: impl Fn(&rdy_model::Block) -> bool) -> Vec<BlockId> {
+    let st = r.read();
+    let m = st.materialized(scope).unwrap();
+    let mut ids: Vec<BlockId> = m.iter().filter(|b| keep(b)).map(|b| b.id.clone()).collect();
+    ids.sort();
+    ids
+}
+
+/// The sections of the view with no children (sorted by id): the ones a delete is not refused.
+fn childless_sections(r: &Rdy, scope: &Scope) -> Vec<BlockId> {
+    let st = r.read();
+    let m = st.materialized(scope).unwrap();
+    let mut ids: Vec<BlockId> = m
+        .iter()
+        .filter(|b| b.block_type == "section" && m.children(Some(&b.id)).is_empty())
+        .map(|b| b.id.clone())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Targeted writes the random ones rarely reach, each carried (no full build) and equal to a
