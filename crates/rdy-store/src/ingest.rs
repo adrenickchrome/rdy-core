@@ -12,6 +12,7 @@
 //! A dump of an older store format gets one more batch after its own: `upgrade` appends it, and
 //! it sets `meta/store_format` to this rdy's store format (FW-UP1, in its smallest form). Until
 //! M3a a store format change only adds kinds and refs (D-F0904), so no frame is re-encoded.
+//! A log of a store format before 12 has no repo id: the upgrade batch gives it one (RULING F2).
 //!
 //! A converter for another store format must remap every location inside a payload
 //! (`RefUpdate.at`, `InboxCursor.at`) if it changes the layout.
@@ -20,8 +21,10 @@ use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
 use crate::kinds::{self, RefUpdate, batch_digest};
+use crate::meta::{REF_REPO_ID, encode_repo_id};
 use crate::segment::{Location, SegmentLog};
 use crate::store::encode;
+use rdy_model::RepoId;
 use std::path::{Path, PathBuf};
 
 /// The directory of the log inside a store directory.
@@ -33,6 +36,8 @@ pub struct Ingest {
     log: SegmentLog,
     batches: u64,
     frames: u64,
+    /// Whether an ingested frame set `meta/repo_id`.
+    has_repo_id: bool,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -69,12 +74,13 @@ impl Ingest {
             log,
             batches: 0,
             frames: 0,
+            has_repo_id: false,
         })
     }
 
-    /// Appends batch `n` of the dump at its source place, then its marker. When the batch starts
-    /// at offset 0 of the next segment and the current segment holds frames, the log rolls once
-    /// first. The log's end must then equal the batch's start, so a batch at any other place is
+    /// Appends batch `n` of the dump at its source place, then its marker, and notes whether the
+    /// batch sets `meta/repo_id`. When the batch starts at offset 0 of the next segment and the
+    /// current segment holds frames, the log rolls once first. The log's end must then equal the batch's start, so a batch at any other place is
     /// refused before the log rolls or takes a frame. The marker's digest must equal the batch's
     /// digest. Either failure is `StoreError::Dump`. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
@@ -103,6 +109,11 @@ impl Ingest {
             return Err(dump_error(format!("batch {n} does not match its digest")));
         }
         self.log.append_marker(b.start, hashes.iter())?;
+        self.has_repo_id |= b.frames.iter().any(|f| {
+            f.kind == kinds::REF_UPDATE
+                && postcard::from_bytes::<RefUpdate>(&f.payload)
+                    .is_ok_and(|u| u.name == REF_REPO_ID)
+        });
         self.batches += 1;
         self.frames += placed.len() as u64;
         Ok(())
@@ -115,10 +126,12 @@ impl Ingest {
 
     /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
     /// store format of the dump's log. The cases (closed):
-    /// - `from` is this rdy's store format: nothing is appended;
-    /// - `from` is older: one batch is appended after the dump's batches. It holds one
+    /// - `from` is this rdy's store format: nothing is appended (a format-12 log holds its id);
+    /// - `from` is older: one batch is appended after the dump's batches. It holds the
     ///   `REF_UPDATE` that sets `meta/store_format` to this rdy's store format, salted with the
-    ///   log end as every ref write is, and its marker. Every earlier byte is kept;
+    ///   log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
+    ///   `REF_UPDATE` of `meta/repo_id` with a new repo id, salted with the log end plus one
+    ///   (RULING F2); then its marker. Every earlier byte is kept;
     /// - `from` is newer: refused with `StoreError::Dump`, and nothing is appended.
     ///
     /// Returns whether it appended the batch. Call it once, after the last `batch`.
@@ -133,14 +146,28 @@ impl Ingest {
             return Ok(false);
         }
         let start = self.log.end();
-        let update = RefUpdate {
-            name: format::REF_STORE_FORMAT.into(),
-            value: format::encode_u32(current),
-            at: start,
-        };
-        let placed = self
-            .log
-            .append_frames(&[(kinds::REF_UPDATE, encode(&update))], false)?;
+        let mut refs = vec![(format::REF_STORE_FORMAT, format::encode_u32(current))];
+        if !self.has_repo_id {
+            refs.push((REF_REPO_ID, encode_repo_id(&RepoId::new())));
+        }
+        // the i-th ref of the batch is salted with the log end plus i, as the store salts
+        let frames: Vec<(u8, Vec<u8>)> = refs
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, value))| {
+                let at = Location {
+                    segment: start.segment,
+                    offset: start.offset + i as u64,
+                };
+                let update = RefUpdate {
+                    name: name.into(),
+                    value,
+                    at,
+                };
+                (kinds::REF_UPDATE, encode(&update))
+            })
+            .collect();
+        let placed = self.log.append_frames(&frames, false)?;
         self.log
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
         Ok(true)

@@ -77,9 +77,10 @@ impl StoreReader {
     }
 
     /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the three, in
-    /// name order; (2) `meta/repo_id`, when present, holds 16 bytes; (3) Task 2 adds: `meta/repo_id`
-    /// is present; (4) `meta/origin`, when present, decodes; (5) it names this repo id when `fork`
-    /// is false and another one when it is true. The first failure is returned.
+    /// name order; (2) `meta/repo_id`, when present, holds 16 bytes; (3) `meta/repo_id` is present
+    /// (RULING F2: a load gives an older log one); (4) `meta/origin`, when present, decodes;
+    /// (5) it names this repo id when `fork` is false and another one when it is true. The first
+    /// failure is returned.
     pub(crate) fn check_meta(&self) -> Result<(), StoreError> {
         for (name, _) in self.refs_with_prefix(META_REF)? {
             if !KNOWN.contains(&name.as_str()) {
@@ -88,22 +89,24 @@ impl StoreReader {
                 )));
             }
         }
-        let repo = self.repo_id()?;
+        let Some(r) = self.repo_id()? else {
+            return Err(bad(
+                "meta/repo_id is missing; load the project from a dump with this rdy",
+            ));
+        };
         let Some(o) = self.origin()? else {
             return Ok(());
         };
-        if let Some(r) = repo {
-            if !o.fork && o.repo_id != r {
-                return Err(bad(format!(
-                    "meta/origin names repo {} for a clone, but meta/repo_id is {r}",
-                    o.repo_id
-                )));
-            }
-            if o.fork && o.repo_id == r {
-                return Err(bad(format!(
-                    "meta/origin names this repo {r} as the repo it was forked from"
-                )));
-            }
+        if !o.fork && o.repo_id != r {
+            return Err(bad(format!(
+                "meta/origin names repo {} for a clone, but meta/repo_id is {r}",
+                o.repo_id
+            )));
+        }
+        if o.fork && o.repo_id == r {
+            return Err(bad(format!(
+                "meta/origin names this repo {r} as the repo it was forked from"
+            )));
         }
         Ok(())
     }

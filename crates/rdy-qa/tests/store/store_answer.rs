@@ -7,6 +7,7 @@ use rdy_model::*;
 use rdy_store::dump::{DumpItem, DumpReader};
 use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
+use rdy_store::meta::REF_REPO_ID;
 use rdy_store::transition::Transitions;
 use rdy_store::view::ViewOp;
 use rdy_store::{ANSWER_REF, PENDING_REF, Store, StoreError, answer_ref, snooze_ref};
@@ -416,7 +417,8 @@ fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
+    // RULING F2 (Export and clone): a log with no repo id gets one in the upgrade batch.
+    assert_eq!(tail.len(), 3, "two ref frames and their marker: {tail:?}");
     assert_eq!(tail[0].0, kinds::REF_UPDATE);
     let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
     assert_eq!(
@@ -427,7 +429,19 @@ fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
             at: log_end,
         }
     );
-    assert_eq!(tail[1].0, kinds::BATCH_COMMIT);
+    assert_eq!(tail[1].0, kinds::REF_UPDATE);
+    let u: RefUpdate = postcard::from_bytes(&tail[1].1).unwrap();
+    assert_eq!(u.name, REF_REPO_ID);
+    assert_eq!(u.value.len(), 16, "a repo id is 16 bytes");
+    assert_eq!(
+        u.at,
+        rdy_store::segment::Location {
+            segment: log_end.segment,
+            offset: log_end.offset + 1,
+        }
+    );
+    assert_eq!(reader.get_ref(REF_REPO_ID).unwrap(), Some(u.value));
+    assert_eq!(tail[2].0, kinds::BATCH_COMMIT);
     assert_eq!(
         reader.get_ref(REF_STORE_FORMAT).unwrap(),
         Some(STORE_FORMAT.to_string().into_bytes())
