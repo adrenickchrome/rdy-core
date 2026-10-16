@@ -34,6 +34,9 @@ pub struct Print {
     pub blobs: BTreeMap<Hash, Blob>,
     /// The site build's warnings for the scope.
     pub warnings: Vec<String>,
+    /// The project's `.rdy` directory, as the project path names it. The writers refuse an
+    /// `out` that resolves into it (O29). It is not part of any output.
+    pub rdy_dir: std::path::PathBuf,
 }
 
 /// A figure's file.
@@ -373,6 +376,7 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
         docs,
         blobs: print_blobs,
         warnings,
+        rdy_dir: rdy.root().join(".rdy"),
     })
 }
 

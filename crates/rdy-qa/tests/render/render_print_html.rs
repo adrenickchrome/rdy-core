@@ -484,9 +484,6 @@ fn ec7_an_out_inside_the_project_rdy_directory_is_refused() {
     // a direct descendant, and one deeper
     assert_inside_rdy(&p, &rdy.join("export.html"), &[&rdy, &sub]);
     assert_inside_rdy(&p, &sub.join("export.yaml"), &[&rdy, &sub]);
-    // an `out` named `.rdy`, in a directory outside it, would also be the store's name
-    let outside = tempfile::tempdir().unwrap();
-    assert_inside_rdy(&p, &outside.path().join(".rdy"), &[outside.path()]);
     // a path that reaches `.rdy` through `..`
     let other = d.path().join("other");
     std::fs::create_dir(&other).unwrap();
@@ -506,4 +503,57 @@ fn ec7_a_symlink_into_the_project_rdy_directory_is_refused() {
     let link = outside.path().join("store");
     rdy_qa::platform::symlink(&rdy, &link).unwrap();
     assert_inside_rdy(&p, &link.join("export.html"), &[&rdy]);
+}
+
+/// O29 is containment in the project's `.rdy` directory, not a reserved name: a file or a
+/// directory called `.rdy` elsewhere is an ordinary path.
+#[test]
+fn ec7_a_path_named_rdy_outside_the_project_rdy_directory_is_exported() {
+    let (_d, r, _ids) = project();
+    let p = canon(&r);
+    let outside = tempfile::tempdir().unwrap();
+    // an `out` named `.rdy`
+    let named = outside.path().join(".rdy");
+    let sum = print::single::write_single_html(&p, &named).expect("a file named .rdy elsewhere");
+    assert_eq!(sum.bytes, std::fs::read(&named).unwrap().len() as u64);
+    // an `out` under a directory named `.rdy`
+    let dir = outside.path().join("a").join(".rdy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let under = dir.join("export.html");
+    print::single::write_single_html(&p, &under).expect("a directory named .rdy elsewhere");
+    assert_eq!(
+        std::fs::read(&under).unwrap(),
+        print::single::single_html(&p)
+    );
+}
+
+/// The project's `.rdy` may be a symlink to a directory whose own path has no `.rdy` in it. The
+/// refusal compares resolved paths: the symlink and the physical path both name the store.
+#[test]
+fn ec7_a_symlinked_project_rdy_directory_is_refused_by_either_path() {
+    let (d, r, _ids) = project();
+    let p = canon(&r);
+    drop(r);
+    let storage = tempfile::tempdir().unwrap();
+    let state = storage.path().join("state");
+    let rdy = d.path().join(".rdy");
+    std::fs::rename(&rdy, &state).unwrap();
+    rdy_qa::platform::symlink(&state, &rdy).unwrap();
+    let packs = state.join("packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let alias = storage.path().join("alias");
+    rdy_qa::platform::symlink(&state, &alias).unwrap();
+    // through the project's symlink, through the physical path, through another alias of it
+    assert_inside_rdy(&p, &rdy.join("export.html"), &[&state]);
+    assert_inside_rdy(
+        &p,
+        &rdy.join("packs").join("export.yaml"),
+        &[&state, &packs],
+    );
+    assert_inside_rdy(&p, &state.join("export.html"), &[&state]);
+    assert_inside_rdy(&p, &packs.join("export.yaml"), &[&state, &packs]);
+    assert_inside_rdy(&p, &alias.join("export.html"), &[&state]);
+    // a sibling of the store, in the same storage directory, is outside it
+    let ok = storage.path().join("export.html");
+    print::single::write_single_html(&p, &ok).expect("a sibling of the store");
 }

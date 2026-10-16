@@ -18,10 +18,10 @@ use std::path::Path;
 const PRINT_CSS: &str = include_str!("../../theme/rdy-standard/print.css");
 
 /// Writes the print as one HTML file at `out`. O29's path rules come first: the directory of
-/// `out` must exist and must not be the project's `.rdy` directory or inside it. `out` must not
+/// `out` must exist and must not be in the project's `.rdy` directory. `out` must not
 /// exist; the file is placed whole or not at all (`rdy_engine::dump::place_file`).
 pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError> {
-    check_path(out)?;
+    check_path(p, out)?;
     let bytes = single_html(p);
     let n = place_file(out, &bytes, "rdy export")?;
     let count = |k: PageKind| p.docs.iter().filter(|d| d.kind == k).count();
@@ -37,10 +37,11 @@ pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError
     })
 }
 
-/// O29's path rules for a file: the parent of `out` exists (`E_BAD_INPUT`), and neither it nor
-/// `out` is in a `.rdy` directory. A file in `.rdy` can break the store. The check reads the
-/// resolved path, so a symlink or `..` does not pass.
-fn check_path(out: &Path) -> Result<(), RdyError> {
+/// O29's path rules for a file: the parent of `out` exists (`E_BAD_INPUT`), and `out` is not in
+/// the project's `.rdy` directory. A file there can break the store. Both paths are resolved
+/// before they are compared, so a symlink (the project's `.rdy` may be one), its physical path or
+/// `..` does not pass. A path named `.rdy` elsewhere is an ordinary path.
+fn check_path(p: &Print, out: &Path) -> Result<(), RdyError> {
     let dir = out
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
@@ -52,10 +53,17 @@ fn check_path(out: &Path) -> Result<(), RdyError> {
             "create the directory first, or pick another path",
         ));
     }
-    let resolved = std::fs::canonicalize(dir)
-        .map_err(|e| RdyError::new(E_IO, format!("{}: {e}", dir.display()), "check the path"))?;
-    let in_rdy = |s: &std::ffi::OsStr| s == ".rdy";
-    if resolved.iter().any(in_rdy) || out.file_name().is_some_and(in_rdy) {
+    let io = |at: &Path, e: std::io::Error| {
+        RdyError::new(E_IO, format!("{}: {e}", at.display()), "check the path")
+    };
+    let dir = std::fs::canonicalize(dir).map_err(|e| io(dir, e))?;
+    // a project with no `.rdy` directory has no store to protect
+    let rdy = match std::fs::canonicalize(&p.rdy_dir) {
+        Ok(rdy) => rdy,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(&p.rdy_dir, e)),
+    };
+    if dir.starts_with(&rdy) {
         return Err(RdyError::new(
             E_BAD_INPUT,
             format!("{} is inside the project .rdy directory", out.display()),
