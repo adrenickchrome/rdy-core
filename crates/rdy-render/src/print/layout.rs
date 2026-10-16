@@ -111,8 +111,10 @@ const CODE_SIZE: f32 = 9.0;
 const CODE_LINE: f32 = 11.0;
 /// A tab in code moves to the next multiple of this many columns.
 const TAB_STOP: usize = 4;
-/// Lists: indent per level.
+/// Lists: indent per level, and the least space between a marker and its item. A marker
+/// ends that space before its item; one too wide for the indent is set smaller to fit.
 const LIST_INDENT: f32 = 14.0;
+const MARKER_GAP: f32 = 3.0;
 /// Callouts: indent and the width of the rule at the left.
 const CALLOUT_INDENT: f32 = 10.0;
 const CALLOUT_RULE: f32 = 2.0;
@@ -234,8 +236,8 @@ struct Layout<'a> {
     pages: Vec<Vec<LItem>>,
     /// The top of the next line on the last page.
     y: f32,
-    /// List markers that wait for the first line of their item: (x, text).
-    markers: Vec<(f32, String)>,
+    /// List markers that wait for the first line of their item: (x, size, text).
+    markers: Vec<(f32, f32, String)>,
     anchors: BTreeMap<(String, Option<String>), (usize, f32)>,
     outline: Vec<OutlineEntry>,
     missing: BTreeSet<char>,
@@ -321,16 +323,33 @@ impl Layout<'_> {
 
     /// The waiting list markers, on `baseline`.
     fn place_markers(&mut self, baseline: f32) {
-        for (x, text) in std::mem::take(&mut self.markers) {
+        for (x, size, text) in std::mem::take(&mut self.markers) {
             let text = self.printable(Face::Sans, &text);
             self.push(LItem::Text {
                 x,
                 y: baseline,
                 face: Face::Sans,
-                size: BODY_SIZE,
+                size,
                 text,
             });
         }
+    }
+
+    /// A list marker for an item whose text starts at `x + LIST_INDENT`: its place and size.
+    /// It ends `MARKER_GAP` before the item, and it is set smaller when it is wider than the
+    /// space the indent leaves, so that it starts no further left than `x`.
+    fn marker(&self, x: f32, text: &str) -> (f32, f32) {
+        let room = LIST_INDENT - MARKER_GAP;
+        let w: f32 = text
+            .chars()
+            .map(|c| self.fonts.advance(Face::Sans, c, BODY_SIZE))
+            .sum();
+        let (size, w) = if w > room {
+            (BODY_SIZE * room / w, room)
+        } else {
+            (BODY_SIZE, w)
+        };
+        (x + room - w, size)
     }
 
     /// `text` with each character `face` has no glyph for as `?`, recorded in `missing`.
@@ -592,7 +611,8 @@ impl Layout<'_> {
                     } else {
                         "•".to_string()
                     };
-                    self.markers.push((x, marker));
+                    let (mx, size) = self.marker(x, &marker);
+                    self.markers.push((mx, size, marker));
                     let g = if i == 0 { gap } else { ITEM_GAP };
                     if item.is_empty() {
                         self.gap(g);
@@ -769,7 +789,14 @@ impl Layout<'_> {
                 .collect();
             let n = lines.iter().map(Vec::len).max().unwrap_or(0).max(1);
             let h = n as f32 * BODY_LINE + 2.0 * CELL_PAD;
-            if !self.at_top() && self.y - h < self.bottom() && h <= self.top() - self.bottom() {
+            // a row moves to a new page whole; a row taller than a page moves only when its
+            // padding and first line do not fit, so its rule and anchor go with that line
+            let need = if h <= self.top() - self.bottom() {
+                h
+            } else {
+                CELL_PAD + BODY_LINE
+            };
+            if !self.at_top() && self.y - need < self.bottom() {
                 if !first {
                     self.table_rule(x, w);
                 }
@@ -1454,5 +1481,171 @@ mod tests {
                 .contains_key(&("glossary.html".to_string(), None))
         );
         assert!(one.missing.is_empty(), "{:?}", one.missing);
+    }
+
+    /// The ink of `text` set at `x` in `face` and `size`: (left, right), from the glyphs'
+    /// outlines, not their advances.
+    fn ink(fonts: &Fonts, face: Face, size: f32, x: f32, text: &str) -> (f32, f32) {
+        use crate::print::fonts::{SANS, SANS_BOLD};
+        let bytes = match face {
+            Face::Sans | Face::Italic => SANS,
+            Face::Bold | Face::BoldItalic => SANS_BOLD,
+            Face::Mono => panic!("ink is measured in the DejaVu faces only"),
+        };
+        let f = ttf_parser::Face::parse(bytes, 0).unwrap();
+        let scale = size / f32::from(f.units_per_em());
+        let (mut left, mut right) = (f32::MAX, f32::MIN);
+        let mut pen = x;
+        for c in text.chars() {
+            let g = ttf_parser::GlyphId(fonts.glyph(face, c).unwrap());
+            if let Some(b) = f.glyph_bounding_box(g) {
+                left = left.min(pen + f32::from(b.x_min) * scale);
+                right = right.max(pen + f32::from(b.x_max) * scale);
+            }
+            pen += fonts.advance(face, c, size);
+        }
+        (left, right)
+    }
+
+    /// Asserts that no two text items on one baseline of `laid` share ink.
+    fn assert_no_ink_overlaps(fonts: &Fonts, laid: &Laid) {
+        for (pi, pg) in laid.pages.iter().enumerate() {
+            let t = texts(pg);
+            for (i, a) in t.iter().enumerate() {
+                for b in &t[i + 1..] {
+                    if (a.1 - b.1).abs() > 1e-3 {
+                        continue;
+                    }
+                    let ia = ink(fonts, a.2, a.3, a.0, &a.4);
+                    let ib = ink(fonts, b.2, b.3, b.0, &b.4);
+                    assert!(
+                        ia.1 < ib.0 || ib.1 < ia.0,
+                        "page {pi}: {:?} at {} and {:?} at {} share ink: {ia:?} {ib:?}",
+                        a.4,
+                        a.0,
+                        b.4,
+                        b.0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ec8_a_list_marker_of_two_or_more_digits_stays_clear_of_its_item() {
+        let fonts = Fonts::load();
+        let spec = a4();
+        let ol = |start: u32, n: usize| PBlock::List {
+            ordered: true,
+            start,
+            items: (0..n)
+                .map(|i| vec![para(None, &format!("item {start}+{i}"))])
+                .collect(),
+        };
+        let mut blocks =
+            crate::print::ir::from_html(r#"<ol start="10"><li>item</li></ol>"#, "doc.html");
+        blocks.push(ol(1, 12));
+        blocks.push(ol(99, 3));
+        blocks.push(ol(123_456, 2));
+        blocks.push(ol(u32::MAX, 2));
+        // a nested list as the first block of an item: two markers on one line
+        blocks.push(PBlock::List {
+            ordered: true,
+            start: 40,
+            items: vec![vec![ol(70, 2)], vec![ol(100_000, 1)]],
+        });
+        let p = print(vec![doc(PageKind::Doc, "doc.html", "Lists", blocks)]);
+        let laid = lay_out(&p, &fonts, &spec, &no_size);
+        assert_no_ink_overlaps(&fonts, &laid);
+        let all: Vec<_> = laid.pages.iter().flat_map(texts).collect();
+        let x0 = spec.margin;
+        let item_x = |text: &str| {
+            all.iter()
+                .find(|t| t.4 == text)
+                .unwrap_or_else(|| panic!("{text} in {all:?}"))
+                .0
+        };
+        // the indent is 14 pt a level, whatever the markers' widths
+        assert_eq!(item_x("item"), x0 + 14.0);
+        assert_eq!(item_x("item 1+11"), x0 + 14.0);
+        assert_eq!(item_x("item 4294967295+1"), x0 + 14.0);
+        assert_eq!(item_x("item 70+1"), x0 + 28.0);
+        assert_eq!(item_x("item 100000+0"), x0 + 28.0);
+        // each marker is whole, and inside its list's indent
+        for (n, level) in [
+            ("10.", 0),
+            ("9.", 0),
+            ("12.", 0),
+            ("101.", 0),
+            ("123457.", 0),
+            ("4294967296.", 0),
+            ("40.", 0),
+            ("41.", 0),
+            ("70.", 1),
+            ("71.", 1),
+            ("100000.", 1),
+        ] {
+            let m = all
+                .iter()
+                .find(|t| t.4 == n && t.2 == Face::Sans)
+                .unwrap_or_else(|| panic!("marker {n} in {all:?}"));
+            let left = x0 + 14.0 * level as f32;
+            let (l, r) = ink(&fonts, m.2, m.3, m.0, &m.4);
+            assert!(
+                m.0 >= left - 1e-3 && l >= left - 1e-3,
+                "{n} starts at {}",
+                m.0
+            );
+            assert!(r < left + 14.0, "{n} ends at {r}");
+        }
+    }
+
+    #[test]
+    fn ec8_an_oversized_first_table_row_anchors_on_the_page_of_its_first_line() {
+        let fonts = Fonts::load();
+        let spec = a4();
+        let mut blocks: Vec<PBlock> = (0..35).map(|i| para(None, &format!("p{i}"))).collect();
+        let cell: Vec<String> = (0..60).map(|i| format!("H{i:03}")).collect();
+        blocks.push(PBlock::Table {
+            anchor: Some("t".into()),
+            head: vec![vec![run(&cell.join("\n"))]],
+            rows: vec![],
+        });
+        let p = print(vec![doc(PageKind::Doc, "doc.html", "Tables", blocks)]);
+        let laid = lay_out(&p, &fonts, &spec, &no_size);
+        let (pg, y) = laid.anchors[&("doc.html".to_string(), Some("t".to_string()))];
+        let (first_pg, first) = laid
+            .pages
+            .iter()
+            .enumerate()
+            .find_map(|(i, page)| {
+                texts(page)
+                    .into_iter()
+                    .find(|t| t.4 == "H000")
+                    .map(|t| (i, t))
+            })
+            .expect("H000 is printed");
+        assert!(
+            y >= spec.margin,
+            "the anchor {y} is above the bottom margin"
+        );
+        assert_eq!(pg, first_pg, "the anchor is on the page of the first line");
+        // the anchor is the top of the table: the first line's baseline sits just under it
+        assert!(
+            first.1 < y && first.1 > y - 14.0 - 3.0 - 1e-3,
+            "{} vs {y}",
+            first.1
+        );
+        // the table's first rule is on that page too: none is left behind
+        let rules_before: usize = laid.pages[..first_pg]
+            .iter()
+            .map(|page| {
+                page.items
+                    .iter()
+                    .filter(|i| matches!(i, LItem::Rule { width, .. } if *width == 0.5))
+                    .count()
+            })
+            .sum();
+        assert_eq!(rules_before, 0);
     }
 }
