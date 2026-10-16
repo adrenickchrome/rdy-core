@@ -940,6 +940,8 @@ mod tests {
             docs,
             blobs: BTreeMap::new(),
             warnings: vec![],
+            // a hand-built print has no project; the layout does not read it
+            rdy_dir: std::path::PathBuf::new(),
         }
     }
 
