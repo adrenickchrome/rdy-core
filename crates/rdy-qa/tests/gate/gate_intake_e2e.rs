@@ -322,6 +322,67 @@ fn site_pages(url: &str) -> Vec<(String, String)> {
     pages
 }
 
+/// The refs in `refs` that `page` holds outside its own scope identity. A proposal-scoped page
+/// carries the proposal's ref in one place only: the scope in its live-update script's
+/// `data-events` URL, which is page chrome and names no item to act on. Every other occurrence,
+/// in a title, in content, in a question, is a ref on the site.
+fn refs_outside_identity<'a>(page: &str, scope: &str, refs: &'a [String]) -> Vec<&'a str> {
+    // the one allowed spot, as the renderer writes it: `/_rdy/events?scope=<scope>&amp;`
+    let identity = format!("/_rdy/events?scope={scope}&amp;");
+    let rest = if scope.is_empty() {
+        page.to_string()
+    } else {
+        page.replace(&identity, "/_rdy/events?")
+    };
+    refs.iter()
+        .filter(|r| rest.contains(r.as_str()))
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn di14_the_ref_check_allows_the_scope_identity_and_nothing_else() {
+    let pref = "P-0123456789ab@1".to_string();
+    let refs = vec![pref.clone(), "D-ABCDE".to_string()];
+    let scope = format!("proposal:{pref}");
+    let chrome = format!(
+        "<script src=\"/_rdy/live.js\" data-events=\"/_rdy/events?scope={scope}&amp;page=index.html&amp;rev=1&amp;label=x\" defer></script>"
+    );
+    let clean =
+        format!("<html><head>{chrome}<title>Spec</title></head><body><p>text</p></body></html>");
+    assert!(refs_outside_identity(&clean, &scope, &refs).is_empty());
+    // the batch ref anywhere else on the page is caught: a title, content, a question
+    for (what, extra) in [
+        ("title", format!("<title>{pref}</title>")),
+        ("content", format!("<p>see {pref}</p>")),
+        ("question", format!("<li class=\"q\">Answer {pref}?</li>")),
+    ] {
+        let page = format!("{clean}{extra}");
+        assert_eq!(
+            refs_outside_identity(&page, &scope, &refs),
+            vec![pref.as_str()],
+            "a ref in a {what} is not allowed"
+        );
+    }
+    // another item's ref is caught even inside the identity script's page
+    let other = format!("{clean}<p>D-ABCDE</p>");
+    assert_eq!(
+        refs_outside_identity(&other, &scope, &refs),
+        vec!["D-ABCDE"]
+    );
+    // canon scope: no identity to allow
+    assert_eq!(
+        refs_outside_identity("<p>text</p>", "", &refs),
+        Vec::<&str>::new(),
+        "a canon page without a ref is clean"
+    );
+    let canon = format!("<p>{pref}</p>");
+    assert_eq!(
+        refs_outside_identity(&canon, "", &refs),
+        vec![pref.as_str()]
+    );
+}
+
 #[test]
 fn di14_the_site_shows_no_call_to_action() {
     let (s, spec) = seeded_with_question();
@@ -360,13 +421,14 @@ fn di14_the_site_shows_no_call_to_action() {
             for label in &labels {
                 assert!(!page.contains(label.as_str()), "label {label:?} on {at}");
             }
-            // a proposal's own page names its version, as its title: that is no call to act
-            for r#ref in refs
-                .iter()
-                .filter(|r| !scope.to_string().contains(r.as_str()))
-            {
-                assert!(!page.contains(r#ref.as_str()), "ref {ref} on {at}");
-            }
+            // no item's ref, the proposal's own included: its page holds its ref only in the
+            // scope of its live-update script, which is page chrome
+            let scope_id = scope["scope"].as_str().unwrap_or("");
+            assert_eq!(
+                refs_outside_identity(&page, scope_id, &refs),
+                Vec::<&str>::new(),
+                "an item ref on {at}"
+            );
             checked += 1;
         }
     }
