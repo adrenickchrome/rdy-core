@@ -14,7 +14,17 @@
 //!   question's parent.
 //!
 //! The decision is `proposed`; it lands with the view's next proposal. A write the view refuses
-//! (a stable parent with no briefing, say) refuses the answer, and nothing is written.
+//! refuses the answer, and nothing is written.
+//!
+//! # Checks before the write (closed)
+//!
+//! - The view holds the version of the question the person answered. The card shows canon's
+//!   version (the ref's version short); a view that rewrote the question, or whose base is
+//!   older, holds another one, and landing the view would close a question the person never saw.
+//!   `E_ITEM_MOVED`, and nothing is written. A view that does not exist yet starts from canon.
+//! - A decision under stable content cites a briefing (bwr1), as any write there does: the
+//!   answer's `brief`. Without one, or with a stale one, the refusal's fix names the retry:
+//!   brief the blocks the refusal names, then answer again with the token.
 //!
 //! # Two batches (O14)
 //!
@@ -22,7 +32,8 @@
 //! `answer_question`, `targets` = the decision's change) follows in a batch of its own. A crash
 //! between them leaves the question open, so the agent asks again.
 use super::{AnswerInfo, Answerer, Bound, assurance, labels, put_alone};
-use crate::error::{E_BAD_INPUT, RdyError};
+use crate::brief::{E_BRIEF_REQUIRED, E_BRIEF_STALE};
+use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, RdyError};
 use crate::pending::ItemOption;
 use crate::{DecisionInput, Rdy, Scope, Session};
 use rdy_model::{Answer, AnswerAct, BlockId, Hash, Role};
@@ -60,11 +71,11 @@ pub(crate) fn act(
     } else {
         b.option.label.clone()
     };
-    let qid = b
+    let (qid, shown) = b
         .item
         .r#ref
         .split_once('@')
-        .and_then(|(id, _)| BlockId::parse(id).ok())
+        .and_then(|(id, v)| Some((BlockId::parse(id).ok()?, v.to_string())))
         .ok_or_else(|| {
             RdyError::new(
                 E_BAD_INPUT,
@@ -83,6 +94,24 @@ pub(crate) fn act(
     };
     let view = writer.default_view();
     let st = r.read();
+    if st.has_view(&view) {
+        let held = st
+            .block(&Scope::View(view.clone()), &qid)
+            .ok()
+            .map(|q| q.version_hash().short());
+        if held.as_deref() != Some(shown.as_str()) {
+            return Err(RdyError::new(
+                E_ITEM_MOVED,
+                format!(
+                    "{qid} in view {view} is not the version the person answered ({})",
+                    b.item.r#ref
+                ),
+                format!(
+                    "land or drop view {view}'s edit of {qid}, or rebase the view, then show the person the card again"
+                ),
+            ));
+        }
+    }
     let given = match st.decisions_home() {
         Some(_) => None,
         None => st.block(&Scope::Canon, &qid)?.parent.map(|p| p.to_string()),
@@ -102,18 +131,21 @@ pub(crate) fn act(
         }
         None => person.to_string(),
     };
-    let w = r.decide(
-        &writer,
-        &view,
-        DecisionInput {
-            parent,
-            statement: statement.clone(),
-            answers: vec![qid.to_string()],
-            authority_basis: Some("direct_ruling".into()),
-            attested_by: Some(attested_by),
-            ..Default::default()
-        },
-    )?;
+    let w = r
+        .decide(
+            &writer,
+            &view,
+            DecisionInput {
+                parent: parent.clone(),
+                statement: statement.clone(),
+                answers: vec![qid.to_string()],
+                authority_basis: Some("direct_ruling".into()),
+                attested_by: Some(attested_by),
+                brief: by.brief.clone(),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| briefing_retry(e, &parent))?;
     let change: Hash = w.change.parse().map_err(|_| {
         RdyError::new(
             crate::error::E_INTERNAL,
@@ -148,4 +180,27 @@ pub(crate) fn act(
         relayed_by: by.relay.as_ref().map(|r| r.by.clone()),
         next: None,
     })
+}
+
+/// A briefing refusal of the answer's write, with the fix that names the answer's retry: brief
+/// the blocks the refusal names (`briefing.ids`; the parent when it names none), then answer
+/// again with the token. Any other error comes back unchanged.
+fn briefing_retry(mut e: RdyError, parent: &str) -> RdyError {
+    if e.code != E_BRIEF_REQUIRED && e.code != E_BRIEF_STALE {
+        return e;
+    }
+    let ids: Vec<&str> = e
+        .briefing
+        .as_ref()
+        .and_then(|b| b.get("ids"))
+        .and_then(|ids| ids.as_array())
+        .map(|ids| ids.iter().filter_map(|i| i.as_str()).collect())
+        .unwrap_or_default();
+    let on = if ids.is_empty() {
+        parent.to_string()
+    } else {
+        ids.join(", ")
+    };
+    e.fix = format!("call rdy_brief on {on}, then rdy_answer again with brief: <token>");
+    e
 }

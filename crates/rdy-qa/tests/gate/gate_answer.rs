@@ -45,6 +45,7 @@ fn req(r#ref: &str, option: &str, card_hash: Option<&str>, relay: RelayInput) ->
         card_hash: card_hash.map(str::to_string),
         note: None,
         relay,
+        brief: None,
     }
 }
 

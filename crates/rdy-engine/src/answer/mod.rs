@@ -34,7 +34,8 @@
 //!
 //! The batch acts, and Later on any item, are in [`batch`]. An approval lands through `land_with`
 //! and writes no `ANSWER`; every other batch act writes one `ANSWER` record in a batch of its
-//! own. The answer to a question is in [`question`]: a proposed decision, then its `ANSWER`. The
+//! own. The answer to a question is in [`question`]: a proposed decision, then its `ANSWER`;
+//! only it reads `brief`, which its write cites under stable content (bwr1). The
 //! answers to tensions are in [`resolve`]: an acceptance writes semantic tension versions and no
 //! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch.
 pub mod batch;
@@ -68,6 +69,10 @@ pub struct AnswerRequest {
     /// The person's note, 1 to 2000 characters.
     pub note: Option<String>,
     pub relay: RelayInput,
+    /// The briefing the answer's write cites (a `brief:` token from rdy_brief): an answer to a
+    /// question whose decision goes under stable content needs one, as any write there does.
+    /// Every other act writes no content and ignores it.
+    pub brief: Option<String>,
 }
 
 /// What an answer did.
@@ -108,13 +113,15 @@ enum Pick<'a> {
     Recommended,
 }
 
-/// The session an answer runs as, its relay and its evidence kind, and the session that gave
-/// the answer (the relaying agent's, or the person's own).
+/// The session an answer runs as, its relay and its evidence kind, the session that gave the
+/// answer (the relaying agent's, or the person's own) and the briefing its write cites (only an
+/// answer to a question reads it; a batch of recommended answers cites none).
 pub(crate) struct Answerer {
     pub who: Session,
     pub relay: Option<Relay>,
     pub kind: Option<EvidenceKind>,
     pub from: Session,
+    pub brief: Option<String>,
 }
 
 impl Rdy {
@@ -126,7 +133,10 @@ impl Rdy {
         person: &str,
         req: AnswerRequest,
     ) -> Result<AnswerInfo, RdyError> {
-        let by = answerer(s, person, &req.relay)?;
+        let by = Answerer {
+            brief: req.brief,
+            ..answerer(s, person, &req.relay)?
+        };
         let note = note_of(req.note)?;
         let mut info = self.answer_one(
             &by,
@@ -220,6 +230,7 @@ fn answerer(s: &Session, person: &str, r: &RelayInput) -> Result<Answerer, RdyEr
         relay,
         kind,
         from: s.clone(),
+        brief: None,
     })
 }
 

@@ -13,12 +13,13 @@ use rdy_engine::pending::{Item, ItemKind, Pending};
 use rdy_engine::tensions::api::{AcceptRequest, DismissRequest, ResolveRequest, run_resolve};
 use rdy_engine::tensions::{TensionKind, TensionSeverity, TensionStatus, tension_label};
 use rdy_engine::{
-    DecisionInput, E_BAD_INPUT, E_PERMISSION, E_SELF_REVIEW, Rdy, RdyError, Scope, Session,
+    DecisionInput, E_BAD_INPUT, E_BRIEF_REQUIRED, E_ITEM_MOVED, E_PERMISSION, E_SELF_REVIEW, Rdy,
+    RdyError, Scope, Session,
 };
 use rdy_model::{ActorRun, Answer, AnswerAct, BlockId, EvidenceKind, FieldValue, Hash, Role};
 use rdy_qa::daemon::Served;
-use rdy_qa::edit_loop::{Spec, spec_doc};
-use rdy_qa::fixtures::{land, version_of, write, writer};
+use rdy_qa::edit_loop::{Spec, brief_of, spec_doc, write_cited};
+use rdy_qa::fixtures::{land, version_of, write, write_as, writer};
 use rdy_qa::intake::*;
 use rdy_qa::tensions::{ag, created, of_kind, open, put, upd};
 use rdy_store::kinds;
@@ -61,6 +62,7 @@ fn req(r#ref: &str, option: &str, card_hash: Option<&str>, note: Option<&str>) -
         card_hash: card_hash.map(str::to_string),
         note: note.map(str::to_string),
         relay: RelayInput::default(),
+        brief: None,
     }
 }
 
@@ -91,12 +93,26 @@ fn relay(
     note: Option<&str>,
     quote: &str,
 ) -> Result<AnswerInfo, RdyError> {
+    relay_briefed(r, person, r#ref, option, note, quote, None)
+}
+
+/// [`relay`], citing the briefing `brief`.
+fn relay_briefed(
+    r: &mut Rdy,
+    person: &str,
+    r#ref: &str,
+    option: &str,
+    note: Option<&str>,
+    quote: &str,
+    brief: Option<&str>,
+) -> Result<AnswerInfo, RdyError> {
     let h = item(&queue(r), r#ref).card_hash;
     r.answer(
         &agent(),
         person,
         AnswerRequest {
             relay: words(quote),
+            brief: brief.map(str::to_string),
             ..req(r#ref, option, Some(&h), note)
         },
     )
@@ -300,6 +316,94 @@ fn di8_a_free_answer_needs_a_note() {
     assert_eq!(answers(&d), vec![q.to_string()]);
 }
 
+/// The decisions view `view` holds that answer `q`.
+fn answering(r: &Rdy, view: &str, q: &BlockId) -> Vec<rdy_model::Block> {
+    let m = r
+        .read()
+        .materialized(&Scope::View(view.into()))
+        .expect("the view");
+    m.iter()
+        .filter(|b| b.block_type == "decision" && answers(b) == vec![q.to_string()])
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn di8_an_answer_is_refused_while_the_view_holds_another_version_of_the_question() {
+    let (_d, mut r, _spec, q, it) = with_question();
+    let view = agent().default_view();
+    // the agent rewrites the question in its own view and does not land it
+    write_as(
+        &mut r,
+        &agent(),
+        &view,
+        json!([{"op": "update", "id": q.to_string(), "fields": {
+            "prompt": "Who deploys production?",
+            "title": "Who deploys production?",
+            "options": ["Operations", "Engineering"],
+            "recommended": "Operations"
+        }}]),
+    )
+    .unwrap();
+    // the person answers canon's card, which is unchanged
+    let card = item(&queue(&r), &it);
+    assert_eq!(card.options[0].label, "Finance");
+    let e = relay(&mut r, PERSON, &it, "o1", None, "Finance, please").unwrap_err();
+    refused(
+        &e,
+        E_ITEM_MOVED,
+        &format!("{q} in view {view} is not the version the person answered ({it})"),
+    );
+    assert!(answer_of(&r, &it).is_none(), "nothing written");
+    assert!(
+        answering(&r, &view, &q).is_empty(),
+        "no decision in the view"
+    );
+    // the person's own view holds canon's version: their answer is written
+    r.answer(&writer(), PERSON, req(&it, "o1", None, None))
+        .unwrap();
+    assert_eq!(answering(&r, "work", &q).len(), 1);
+}
+
+#[test]
+fn di8_a_question_under_a_stable_parent_answers_with_a_brief() {
+    let (_d, mut r, spec, q, it) = with_question();
+    // the question's section becomes stable
+    let t = brief_of(&r, &Scope::Canon, &[&spec.section]).base.token;
+    write_cited(
+        &mut r,
+        "st",
+        json!([{"op": "update", "id": spec.section.to_string(),
+        "fields": {"lifecycle": "stable"}}]),
+        Some(&t),
+    )
+    .expect("make the section stable");
+    land(&mut r, "st").expect("land the stable section");
+    let view = agent().default_view();
+    // without a briefing: refused, and the fix names the retry
+    let e = relay(&mut r, PERSON, &it, "o1", None, "Finance, please").unwrap_err();
+    assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
+    assert_eq!(
+        e.fix,
+        format!(
+            "call rdy_brief on {}, then rdy_answer again with brief: <token>",
+            spec.section
+        )
+    );
+    assert!(answer_of(&r, &it).is_none(), "nothing written");
+    assert!(!r.read().has_view(&view), "no view either");
+    // briefed: the decision is written
+    let t = brief_of(&r, &Scope::Canon, &[&spec.section]).base.token;
+    let info = relay_briefed(&mut r, PERSON, &it, "o1", None, "Finance, please", Some(&t)).unwrap();
+    assert_eq!(info.act, "answer_question");
+    let (_, a) = answer_of(&r, &it).expect("the answer");
+    let d = decision_of(&r, &view, &a.targets[0]);
+    assert_eq!(str_field(&d, "statement"), Some("Finance"));
+    assert_eq!(d.parent, Some(spec.section.clone()));
+    assert_eq!(answers(&d), vec![q.to_string()]);
+    r.fsck().expect("fsck");
+}
+
 // ---- advice ----
 
 /// `batch_project` with a second advised tension (the batch's claim Q against the spec's claim B)
@@ -427,6 +531,69 @@ fn di8_dismissing_the_advice_once_dismisses_every_advised_tension() {
     }
     assert_eq!(semantic(&r).len(), 2);
     assert_eq!(undismissed(&r), 0, "every advised tension is dismissed");
+    assert!(find(&queue(&r), &advice).is_none());
+    r.fsck().expect("fsck");
+}
+
+#[test]
+fn di8_dismissing_advice_whose_tensions_share_a_vkey_writes_one_review_a_vkey() {
+    // two agents make the same edit to C; view a includes both changes
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let sp = spec_doc(&mut r);
+    put(&mut r, "a", upd(&sp.c, "C contradicts B."));
+    let wb = put(&mut r, "b", upd(&sp.c, "C contradicts B."));
+    r.view_include(&ag("a"), "a", std::slice::from_ref(&wb.change))
+        .unwrap();
+    verdict_on(
+        &mut r,
+        &Scope::View("a".into()),
+        &sp.b,
+        &sp.c,
+        "agent:r",
+        true,
+    );
+    let (mut r, report) = propose_reported(dir.path(), r, "a", "a", Some(BATCH_SUMMARY));
+    let advice = format!("advice:{}", report["ref"].as_str().unwrap());
+    let card = item(&queue(&r), &advice);
+    let covered: Vec<_> = semantic(&r)
+        .into_iter()
+        .filter(|t| {
+            let label = tension_label(&t.id);
+            card.members.iter().any(|m| m.starts_with(&label))
+        })
+        .collect();
+    assert_eq!(covered.len(), 2, "{:?}", card.members);
+    assert_eq!(covered[0].vkey, covered[1].vkey, "one vkey");
+    let info = relay(
+        &mut r,
+        FOUNDER,
+        &advice,
+        "dismiss",
+        Some("C restates B"),
+        "No, C restates B",
+    )
+    .unwrap();
+    assert_eq!(info.act, "dismiss");
+    // one batch: one review for the one vkey, and the answer that names it
+    let reviews = last_of(&r, kinds::REVIEW);
+    assert_eq!(reviews.len(), 1, "{:?}", last_kinds(&r));
+    assert_eq!(last_of(&r, kinds::ANSWER).len(), 1, "{:?}", last_kinds(&r));
+    let (_, a) = answer_of(&r, &advice).expect("the answer");
+    assert_eq!(a.targets, reviews);
+    let review = r.store().reader().review(&reviews[0]).unwrap();
+    assert_eq!(review.provenance.actor, FOUNDER);
+    assert_eq!(review.vkey(), Some(covered[0].vkey));
+    let st = r.read();
+    for t in &covered {
+        assert_eq!(
+            st.tension_status(t),
+            TensionStatus::Dismissed(reviews[0]),
+            "{}",
+            tension_label(&t.id)
+        );
+    }
+    drop(st);
     assert!(find(&queue(&r), &advice).is_none());
     r.fsck().expect("fsck");
 }

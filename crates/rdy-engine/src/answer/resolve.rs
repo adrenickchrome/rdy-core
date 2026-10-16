@@ -4,7 +4,7 @@
 //! | item                  | option    | act                                                     |
 //! |-----------------------|-----------|---------------------------------------------------------|
 //! | `advice:P-x@n`        | `accept`  | `accept_advice` with the card's advised digest; no `ANSWER` |
-//! | `advice:P-x@n`        | `dismiss` | one dismissal per advised tension, and one `ANSWER`     |
+//! | `advice:P-x@n`        | `dismiss` | one dismissal per vkey of the advised tensions, and one `ANSWER` |
 //! | a blocking tension id | `dismiss` | one dismissal, and one `ANSWER`                         |
 //!
 //! Later is in [`super::batch`]. Any other pair is refused with `E_BAD_INPUT`.
@@ -13,8 +13,9 @@
 //! it keeps no note. A dismissal needs the person's reason as the note. It runs as the person
 //! (D-562QR: a relay with the person's words counts as the person), so the reviewer-or-human rule
 //! holds and the self-review rule checks the person against every side's author. Every tension
-//! passes those checks before anything is written. The reviews and the `ANSWER` (act `dismiss`,
-//! `targets` = the reviews) are one batch (O14).
+//! passes those checks before anything is written. A dismissal binds to a vkey (FW-CH7), so
+//! advised tensions that share one (two changes that write the same content) get one review.
+//! The reviews and the `ANSWER` (act `dismiss`, `targets` = the reviews) are one batch (O14).
 use super::{AnswerInfo, Answerer, Bound, assurance, labels};
 use crate::error::{E_BAD_INPUT, RdyError};
 use crate::gate::resolve_in;

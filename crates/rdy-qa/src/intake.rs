@@ -371,6 +371,7 @@ pub fn confirm_exceptions(r: &mut Rdy, s: &Session, pref: &str) -> Vec<AnswerInf
                     card_hash: None,
                     note: None,
                     relay: RelayInput::default(),
+                    brief: None,
                 },
             )
             .unwrap_or_else(|e| panic!("confirm {item}: {e}"))

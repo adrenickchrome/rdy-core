@@ -414,8 +414,10 @@ impl Rdy {
 
     /// Dismisses each of `tensions` as `who` with `reason` (checked), and writes the answer `a`
     /// in the same batch (`Store::put_dismissals_answered`, O14): its `targets` are the reviews.
-    /// Every tension passes the checks of one dismissal before anything is written. Returns one
-    /// row a tension, and the answer's id.
+    /// Every tension passes the checks of one dismissal before anything is written. A dismissal
+    /// binds to a vkey (FW-CH7), and two tensions can share one (two changes that write the same
+    /// content): such tensions get one review, the first in the given order, so the batch writes
+    /// one review a vkey. Returns one row a tension, and the answer's id.
     pub(crate) fn dismiss_answered(
         &mut self,
         who: &Session,
@@ -425,22 +427,32 @@ impl Rdy {
     ) -> Result<(Vec<DismissInfo>, Hash), RdyError> {
         let reason = ReadState::dismissal_reason(who, reason)?;
         let st = self.read();
-        let reviews = tensions
+        let all = tensions
             .iter()
             .map(|t| st.dismissal_of(who, t, reason))
             .collect::<Result<Vec<_>, _>>()?;
         drop(st);
+        let mut seen = BTreeSet::new();
+        let reviews: Vec<Review> = all
+            .into_iter()
+            .zip(tensions)
+            .filter(|(_, t)| seen.insert(t.vkey))
+            .map(|(r, _)| r)
+            .collect();
         let (ids, answer) = self
             .store_mut()
             .put_dismissals_answered(&reviews, a)
             .map_err(crate::answer::internal)?;
-        self.publish(Delta::Dismissed {
-            reviews: tensions.iter().map(|t| t.vkey).zip(ids.clone()).collect(),
-        })?;
+        let written: Vec<(Hash, Hash)> = reviews
+            .iter()
+            .filter_map(Review::vkey)
+            .zip(ids.iter().copied())
+            .collect();
+        let by_vkey: BTreeMap<Hash, Hash> = written.iter().copied().collect();
+        self.publish(Delta::Dismissed { reviews: written })?;
         let infos = tensions
             .iter()
-            .zip(ids)
-            .map(|(t, id)| dismissed(t, id))
+            .map(|t| dismissed(t, by_vkey[&t.vkey]))
             .collect();
         Ok((infos, answer))
     }
