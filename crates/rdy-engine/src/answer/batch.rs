@@ -16,17 +16,16 @@
 //!
 //! An approval is refused with `E_EXCEPTION_OPEN` while an exception of the version has no
 //! `confirm` answer bound to its decision's current version (`open_exceptions`). The refusal
-//! names each one and carries its card in `corrected.exceptions` (O21). It runs before
-//! `land_with`, so nothing is written.
-use super::{AnswerInfo, Bound, card_of};
-use crate::error::{E_BAD_INPUT, E_EXCEPTION_OPEN, E_INTERNAL, RdyError};
-use crate::gate::{LandOptions, resolve_in};
-use crate::pending::queue::open_exceptions;
+//! names each one and carries its card in `corrected.exceptions` (O21). `land_with` holds the
+//! check for every approval path (Task 17), so an answer's approval gets it there, and nothing
+//! is written.
+use super::{AnswerInfo, Bound};
+use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
+use crate::gate::LandOptions;
 use crate::pending::{Item, ItemKind};
 use crate::{Delta, Rdy, Session};
 use rdy_model::{Answer, AnswerAct, ApprovalEvidence, EvidenceKind};
 use rdy_store::{Relay, StoreError};
-use serde_json::json;
 
 /// Runs the act the item's kind and the chosen option name (the table in the module docs).
 pub(crate) fn act(
@@ -76,8 +75,8 @@ fn assurance(relay: &Option<Relay>) -> &'static str {
     if relay.is_some() { "relayed" } else { "local" }
 }
 
-/// approve · `approve`: the exception check (F2), then the landing, with the card as evidence
-/// for a relay.
+/// approve · `approve`: the landing (which holds the exception check, F2), with the card as
+/// evidence for a relay.
 fn approve(
     r: &mut Rdy,
     who: &Session,
@@ -92,20 +91,6 @@ fn approve(
             "an approval keeps no note",
             "drop the note; the landing records the approval",
         ));
-    }
-    let st = r.read();
-    let pref = resolve_in(&st, &b.item.r#ref)?;
-    let open = open_exceptions(&st, &pref)?;
-    drop(st);
-    if !open.is_empty() {
-        let refs: Vec<&str> = open.iter().map(|i| i.r#ref.as_str()).collect();
-        let cards: Vec<_> = open.iter().map(card_of).collect();
-        return Err(RdyError::new(
-            E_EXCEPTION_OPEN,
-            format!("{} exceptions of {pref} have no answer", open.len()),
-            format!("answer each exception card first: {}", refs.join(", ")),
-        )
-        .with_corrected(json!({ "exceptions": cards })));
     }
     let evidence = relay.as_ref().map(|_| ApprovalEvidence {
         kind: kind.unwrap_or(EvidenceKind::Card),

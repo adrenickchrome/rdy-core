@@ -1,7 +1,10 @@
 use crate::alt::{AltPick, alt_label};
+use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
+use crate::pending::Item;
+use crate::pending::queue::open_exceptions;
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
@@ -883,6 +886,19 @@ impl ReadState {
 /// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
 /// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
 /// hint once, in the order the tensions come.
+/// F2 (D-DKJS5): the refusal of an approval while exceptions of `pref` have no confirm answer. It
+/// names each exception and carries its card in `corrected.exceptions` (O21).
+fn exceptions_open(pref: &ProposalRef, open: &[Item]) -> RdyError {
+    let refs: Vec<&str> = open.iter().map(|i| i.r#ref.as_str()).collect();
+    let cards: Vec<_> = open.iter().map(card_of).collect();
+    RdyError::new(
+        E_EXCEPTION_OPEN,
+        format!("{} exceptions of {pref} have no answer", open.len()),
+        format!("answer each exception card first: {}", refs.join(", ")),
+    )
+    .with_corrected(serde_json::json!({ "exceptions": cards }))
+}
+
 fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
     let mut hints: Vec<&str> = vec![];
     for t in refusing {
@@ -2329,6 +2345,19 @@ impl Rdy {
             .collect();
         if !refusing.is_empty() {
             return Err(blocking_tensions(&pref, &refusing));
+        }
+        // F2 (D-DKJS5, D-T5S9A): every approval path waits until each exception of the version
+        // has a confirm answer. Only a proposed decision can be an exception, so a version that
+        // writes no decision skips the read.
+        let decides = changes.iter().flat_map(|c| &c.ops).any(|op| {
+            matches!(op, Op::Create { block } | Op::Update { block, .. }
+                if block.block_type == decision::DECISION)
+        });
+        if decides {
+            let open = open_exceptions(&st, &pref)?;
+            if !open.is_empty() {
+                return Err(exceptions_open(&pref, &open));
+            }
         }
 
         // 1. prospective canon: canon + the proposal's own changes
