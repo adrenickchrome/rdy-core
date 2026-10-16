@@ -391,11 +391,12 @@ fn vw5_a_ctl_connect_waits_while_the_daemon_is_starting() {
     let dir = short_tempdir();
     drop(rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap());
     let run = RunDir::of_project(dir.path());
+    let gate = dir.path().join("release-ready");
     let (spawn, _count) = spawn_child_daemon(
         &rdy_qa::test_name!("race1_child"),
         &run,
         "1",
-        &[("RDY_DAEMON_PROGRESS_MS", "600")],
+        &[("RDY_DAEMON_READY_FILE", gate.to_str().unwrap())],
     );
     let _child = spawn.spawn(&run).unwrap();
     let t = std::time::Instant::now();
@@ -414,12 +415,15 @@ fn vw5_a_ctl_connect_waits_while_the_daemon_is_starting() {
         project: run.project_id().expect("the project's .rdy"),
     };
     rt().block_on(async {
-        let t = std::time::Instant::now();
-        let mut c = connect_ready(&run, &hello).await;
-        assert!(
-            t.elapsed() >= Duration::from_millis(100),
-            "the daemon was still starting when the helper was called"
-        );
+        // The daemon stays `starting` until the gate file exists. The helper releases it only
+        // after its own first answer was `starting`, then must return a usable ready client.
+        let mut met_starting = false;
+        let mut c = connect_ready_noting(&run, &hello, || {
+            met_starting = true;
+            std::fs::write(&gate, "").unwrap();
+        })
+        .await;
+        assert!(met_starting, "the helper never met starting");
         assert_eq!(c.version(), "1");
         c.ctl("stop", json!({})).await.unwrap();
     });
