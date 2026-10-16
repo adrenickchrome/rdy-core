@@ -373,7 +373,7 @@ fn build_commit_tree(
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let base = kept
                     .iter()
-                    .find(|b| under(dir, b).is_ok_and(|p| same_file(&p, &to)))
+                    .find(|b| under(dir, b).is_ok_and(|p| rdy_store::fileid::same_file(&p, &to)))
                     .map_or("a base file", |b| b.as_str());
                 return Err(one(clash(rel, base, None)));
             }
@@ -399,15 +399,6 @@ fn build_base_tree(place: &Place, st: &WcState, dir: &Path) -> Result<(), Vec<Di
             .map_err(|e| vec![io_diag(rel, "link the base copy", e)])?;
     }
     Ok(())
-}
-
-/// Whether `a` and `b` are one file.
-fn same_file(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (fs::symlink_metadata(a), fs::symlink_metadata(b)) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-        _ => false,
-    }
 }
 
 /// The errors of a commit tree that does not read every file it holds: a file the reader leaves

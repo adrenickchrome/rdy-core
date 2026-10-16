@@ -12,9 +12,7 @@ use std::sync::Arc;
 /// What one `stat` of a file says, for telling whether its bytes may have changed: length,
 /// modification time, inode number and status-change time (`ctime`), all at full precision.
 /// `ctime` is set by the kernel on every write, rename into place and `utimes`, and no tool can
-/// set it back or ahead, so it is what "changed since" is judged by. On a non-unix target there
-/// is no `ino` or `ctime`: `ino` is 0 and `ctime` is the mtime (a tool can set it: the weaker
-/// rule).
+/// set it back or ahead, so it is what "changed since" is judged by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp {
     pub len: u64,
@@ -26,16 +24,7 @@ pub struct FileStamp {
 impl FileStamp {
     pub fn of(meta: &std::fs::Metadata) -> FileStamp {
         let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        #[cfg(unix)]
-        let (ino, ctime) = {
-            use std::os::unix::fs::MetadataExt;
-            let ctime = u64::try_from(meta.ctime()).map_or(std::time::UNIX_EPOCH, |s| {
-                std::time::UNIX_EPOCH + std::time::Duration::new(s, meta.ctime_nsec() as u32)
-            });
-            (meta.ino(), ctime)
-        };
-        #[cfg(not(unix))]
-        let (ino, ctime) = (0, mtime);
+        let rdy_store::fileid::ChangeStamp { ino, ctime } = rdy_store::fileid::change_stamp(meta);
         FileStamp {
             len: meta.len(),
             mtime,
@@ -305,4 +294,21 @@ struct Loaded {
     serve: ServeConfig,
     fingerprint: PackFingerprint,
     config: Arc<Config>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ps3_file_stamp_reads_the_inode_and_ctime_of_the_seam() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.yaml");
+        std::fs::write(&f, "x\n").unwrap();
+        let m = std::fs::metadata(&f).unwrap();
+        let seam = rdy_store::fileid::change_stamp(&m);
+        let stamp = FileStamp::of(&m);
+        assert_eq!(stamp.ino, seam.ino);
+        assert_eq!(stamp.ctime, seam.ctime);
+    }
 }
