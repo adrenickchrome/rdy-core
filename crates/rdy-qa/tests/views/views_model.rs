@@ -515,6 +515,10 @@ impl Model {
     /// The outcome of proposing and approving `view` at once: the new canon, or the refusal.
     fn plan_land(&self, view: &str) -> Result<BTreeMap<BlockId, u32>, &'static str> {
         let v = &self.views[view];
+        // propose: a closed view takes no proposal (D-K0SS1, R2)
+        if v.closed {
+            return Err(E_VIEW_CLOSED);
+        }
         // propose: an empty view has nothing to propose
         if v.included.is_empty() {
             return Err(E_BAD_INPUT);

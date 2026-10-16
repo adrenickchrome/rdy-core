@@ -46,7 +46,9 @@ pub mod relay;
 pub mod resolve;
 
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, E_PROPOSAL_MOVED, RdyError};
-use crate::gate::{LandInfo, latest_version, moved, resolve_in};
+use crate::gate::{
+    LandInfo, landed_as, latest_version, moved, resolve_in, withdrawn, withdrawn_error,
+};
 use crate::pending::PendingQuery;
 use crate::pending::queue::Eligible;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
@@ -366,16 +368,21 @@ pub fn is_item_ref(r: &str) -> bool {
 }
 
 /// The refusal of `r`, which is not in the queue `q`: a proposal version that is not its
-/// latest is `E_PROPOSAL_MOVED`; anything else is `E_ITEM_MOVED`. Either carries the fresh card
-/// when the queue has one, and a batch that is not ready lists its issues.
+/// latest is `E_PROPOSAL_MOVED`; a latest version that has not landed and that a close of its
+/// view withdrew is `E_VIEW_CLOSED` (D-K0SS1), with no fresh card (the queue has none); anything
+/// else, an `advice:` ref of a withdrawn version too (R3), is `E_ITEM_MOVED`. `E_PROPOSAL_MOVED`
+/// and `E_ITEM_MOVED` carry the fresh card when the queue has one, and a batch that is not ready
+/// lists its issues.
 fn gone(st: &ReadState, q: &Eligible, r: &str) -> Result<RdyError, RdyError> {
     let mut e = None;
     if is_proposal_ref(r) {
         let pref = resolve_in(st, r)?;
         let latest = latest_version(st, &pref.stable)?;
+        let p = st.reader().proposal(&pref.version)?;
         if latest != pref.version {
-            let p = st.reader().proposal(&pref.version)?;
             e = Some(moved(st, &pref, &latest, &p.view)?);
+        } else if landed_as(st, &p)?.is_none() && withdrawn(st, &pref.version, &p)? {
+            return Ok(withdrawn_error(&pref, &p.view));
         }
     }
     let mut e = e.unwrap_or_else(|| changed(E_ITEM_MOVED, r));

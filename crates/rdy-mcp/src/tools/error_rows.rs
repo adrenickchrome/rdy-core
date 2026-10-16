@@ -16,8 +16,8 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_VIEW_CLOSED",
-        "the view is closed and takes no write, include, exclude or undo, except the undo of its close",
-        "reopen it with rdy_view {op: \"undo\", view, target: <the close op>}, or fork it",
+        "the view is closed and takes no write, include, exclude, undo or propose, except the undo of its close; or an approval names a proposal version that a close of its view withdrew",
+        "reopen it with rdy_view {op: \"undo\", view, target: <the close op>}, or fork it; a withdrawn proposal stays withdrawn, so propose again after the reopen",
     ),
     (
         "E_HAS_DEPENDENTS",

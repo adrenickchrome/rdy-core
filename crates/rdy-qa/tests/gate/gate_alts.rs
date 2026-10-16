@@ -139,7 +139,7 @@ fn altg1_land_rechecks_the_set_at_approval() {
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
     assert_eq!(
-        e.code, E_ALT_MEMBER,
+        e.code, E_VIEW_CLOSED,
         "the set was chosen between propose and approve"
     );
     // a view that joins a set after proposing must propose again
@@ -168,7 +168,7 @@ fn altg1_land_rechecks_the_set_at_approval() {
         .propose_with(&writer(), "late2", "q", None, None, Some(&pick(&u, "q")))
         .unwrap();
     r.alt_abandon(&writer(), &u, "no").unwrap();
-    assert_eq!(r.land(&approver(), &p2.id).unwrap_err().code, E_ALT_MEMBER);
+    assert_eq!(r.land(&approver(), &p2.id).unwrap_err().code, E_VIEW_CLOSED);
 }
 
 /// Canon with a seeded section; view a creates claim `alt A` and view b creates claim `alt B`,
@@ -211,10 +211,10 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
         .unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
-    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
-    assert!(
-        e.message
-            .contains("is chosen; this proposal can no longer land"),
+    assert_eq!(e.code, E_VIEW_CLOSED, "{}", e.message);
+    assert_eq!(
+        e.message,
+        format!("{} was withdrawn when view \"b\" closed", pb.r#ref),
         "{}",
         e.message
     );
@@ -243,10 +243,10 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_the_set_is_abandoned() 
         .id;
     r.alt_abandon(&writer(), &set, "neither").unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
-    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
-    assert!(
-        e.message
-            .contains("is abandoned; this proposal can no longer land"),
+    assert_eq!(e.code, E_VIEW_CLOSED, "{}", e.message);
+    assert_eq!(
+        e.message,
+        format!("{} was withdrawn when view \"b\" closed", pb.r#ref),
         "{}",
         e.message
     );

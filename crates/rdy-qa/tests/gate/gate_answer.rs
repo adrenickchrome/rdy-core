@@ -10,8 +10,8 @@ use rdy_engine::answer::{AnswerInfo, AnswerRequest};
 use rdy_engine::engine::Local;
 use rdy_engine::pending::{Item, ItemKind, Pending};
 use rdy_engine::{
-    E_BAD_INPUT, E_EXCEPTION_OPEN, E_ITEM_MOVED, E_PERMISSION, E_PROPOSAL_MOVED, Rdy, RdyError,
-    Scope, Session,
+    E_BAD_INPUT, E_EXCEPTION_OPEN, E_ITEM_MOVED, E_PERMISSION, E_PROPOSAL_MOVED, E_VIEW_CLOSED,
+    Rdy, RdyError, Scope, Session,
 };
 use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, Role};
 use rdy_qa::fixtures::{approver, land};
@@ -1172,4 +1172,33 @@ fn di7_the_daemon_approval_checks_the_whole_relay() {
     )
     .unwrap();
     assert_eq!(v["assurance"], "relayed", "{v}");
+}
+
+/// D-K0SS1: a relayed approval of a version that a close of its view withdrew is refused with
+/// `E_VIEW_CLOSED`, bound to the card the person was shown; nothing lands.
+#[test]
+fn vw2_a_relayed_approval_of_a_withdrawn_version_is_e_view_closed() {
+    let (_d, mut r, m) = ready_and_not_ready();
+    let shown = item(&pending(&r), &m.ready.r#ref);
+    let before = landings(&r);
+    r.view_close(&ag("ready"), &["ready".into()], "done")
+        .unwrap();
+    let e = r
+        .answer(
+            &agent(),
+            PERSON,
+            req(
+                &shown.r#ref,
+                "approve",
+                Some(&shown.card_hash),
+                words("Yes."),
+            ),
+        )
+        .unwrap_err();
+    refused(
+        &e,
+        E_VIEW_CLOSED,
+        &format!("{} was withdrawn when view \"ready\" closed", shown.r#ref),
+    );
+    assert_eq!(landings(&r), before);
 }

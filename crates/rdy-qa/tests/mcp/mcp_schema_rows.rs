@@ -112,13 +112,20 @@ fn msw3_the_undo_rows_cover_a_closed_view_and_a_landed_dep() {
     let (when, _) = row(E_VIEW_CLOSED);
     assert_eq!(
         when,
-        "the view is closed and takes no write, include, exclude or undo, except the undo of its close"
+        "the view is closed and takes no write, include, exclude, undo or propose, except the undo of its close; or an approval names a proposal version that a close of its view withdrew"
     );
     let (_, fix) = row(E_UNDO_LANDING);
     assert!(
         fix.contains("rdy_revoke") && fix.contains("rdy_view include"),
         "{fix}"
     );
+}
+
+/// D-K0SS1: the row says a withdrawn proposal stays withdrawn after the view reopens.
+#[test]
+fn vw2_the_e_view_closed_row_says_a_withdrawn_proposal_stays_withdrawn() {
+    let (_, fix) = row(E_VIEW_CLOSED);
+    assert!(fix.contains("propose again after the reopen"), "{fix}");
 }
 
 #[test]

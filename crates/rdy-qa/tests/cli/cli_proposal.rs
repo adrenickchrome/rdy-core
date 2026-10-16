@@ -76,3 +76,40 @@ fn pshow1_rdy_show_prints_a_proposal_version_and_json_has_its_state() {
         "{v}"
     );
 }
+
+/// D-K0SS1: `rdy show` reads a withdrawn version, and `rdy approve` of it is `E_VIEW_CLOSED`.
+#[test]
+fn vw2_rdy_show_and_rdy_approve_of_a_withdrawn_version() {
+    let s = Served::new();
+    let p = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let (_doc, section, _c) = seed_doc(&mut r, "seed");
+        land(&mut r, "seed").unwrap();
+        write(&mut r, "v", claim(&section, "a")).unwrap();
+        let p = r.propose(&writer(), "v", "first", None).unwrap();
+        r.view_close(&writer(), &["v".into()], "done").unwrap();
+        r.close().unwrap();
+        p
+    };
+    let out = s.rdy(&["show", &p.r#ref]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("state: withdrawn (view v closed)\n"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("blocking: withdrawn (view v closed)\n"),
+        "{text}"
+    );
+    let (ok, v) = s.json(&["--json", "show", &p.r#ref]);
+    assert!(ok, "{v}");
+    assert_eq!(v["proposal"]["state"], "withdrawn", "{v}");
+    let (ok, v) = s.json(&["--json", "approve", &p.r#ref]);
+    assert!(!ok, "{v}");
+    assert_eq!(v["code"], "E_VIEW_CLOSED", "{v}");
+}

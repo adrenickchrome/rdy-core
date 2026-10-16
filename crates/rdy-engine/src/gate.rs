@@ -588,6 +588,18 @@ pub(crate) fn withdrawn(st: &ReadState, version: &Hash, p: &Proposal) -> Result<
         .closed_after(&p.view, &head.head, rdy_store::kinds::PROPOSAL, version)?)
 }
 
+/// The refusal of an approval, a landing or an advice acceptance of version `pref`, which a close
+/// of view `view` withdrew (D-K0SS1).
+pub(crate) fn withdrawn_error(pref: &ProposalRef, view: &str) -> RdyError {
+    RdyError::new(
+        E_VIEW_CLOSED,
+        format!("{pref} was withdrawn when view {view:?} closed"),
+        format!(
+            "reopen the view with rdy undo --view {view} <close op> (rdy view show {view} lists the ops), then propose again"
+        ),
+    )
+}
+
 /// The latest version of view `view`'s open proposal, read from its one `open/<view>` ref; `None`
 /// when the view has none, or its latest version has landed or is withdrawn (D-K0SS1: after an
 /// undo of the close, the old version does not carry the view's changes). It reads no other
@@ -1864,6 +1876,10 @@ impl Rdy {
         }
         let st = self.read();
         crate::views::check_view_op(&st, s, view, Action::Propose)?;
+        // D-K0SS1 (R2): a closed view takes no proposal
+        if st.view_head(view).is_some_and(|h| h.closed) {
+            return Err(rdy_store::StoreError::ViewClosed(view.to_string()).into());
+        }
         let alternative = proposed_alt(&st, view, alternative)?;
         let included = st.included(view);
         if included.is_empty() {
@@ -2350,6 +2366,11 @@ impl Rdy {
         let latest = latest_version(&st, &pref.stable)?;
         if latest != pid {
             return Err(moved(&st, &pref, &latest, &p.view)?);
+        }
+        // D-K0SS1: a close of the version's view withdrew it; a losing member's version meets
+        // this before the alternative checks (R1)
+        if withdrawn(&st, &pid, &p)? {
+            return Err(withdrawn_error(&pref, &p.view));
         }
         // altg1: the set is re-checked at approval, before the base check, so a set an earlier
         // landing chose is reported as such

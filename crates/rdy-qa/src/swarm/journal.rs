@@ -177,6 +177,7 @@ const LAND_CODES: &[&str] = &[
     "E_ALT_UNCHOSEN",
     "E_ALT_CHOSEN",
     "E_ALREADY_LANDED",
+    "E_VIEW_CLOSED",
 ];
 const WC_CODES: &[&str] = &["E_WC_STALE", "E_WC_CONFLICT"];
 
