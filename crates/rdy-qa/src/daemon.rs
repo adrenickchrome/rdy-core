@@ -373,7 +373,6 @@ impl Drop for Hosted {
 pub struct Served {
     pub dir: tempfile::TempDir,
     /// Holds the user config `env` points at.
-    #[allow(dead_code)]
     cfg: tempfile::TempDir,
     env: Vec<(String, String)>,
 }
@@ -428,6 +427,11 @@ impl Served {
         io::Write::write_all(&mut file, b"serve:\n  idle_timeout: 60\n")
             .expect("append the serve section");
         Served { dir, cfg, env }
+    }
+
+    /// The user config the served commands read (`$XDG_CONFIG_HOME/rdy/config.yaml`).
+    pub fn user_config(&self) -> PathBuf {
+        self.cfg.path().join("rdy/config.yaml")
     }
 
     /// The command `rdy --project <dir> <args>` in the project, as the human (`human_command`).

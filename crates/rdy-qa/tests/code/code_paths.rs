@@ -364,6 +364,9 @@ fn ps5_a_wrong_type_is_e_config_at_briefing_and_the_project_opens() {
             &local_map,
         ),
         ("code_repos: [app]\n", "code_paths:\n  app: 7\n", &local_map),
+        // a null value is not a mapping: only a missing key means no entries
+        ("code_repos: [app]\n", "code_paths: null\n", &local_map),
+        ("code_repos: [app]\n", "code_paths:\n", &local_map),
     ] {
         let (d, r) = project();
         drop(r);
@@ -395,6 +398,108 @@ fn ps5_a_wrong_type_is_e_config_at_briefing_and_the_project_opens() {
         )
     );
     assert!(linked_repos(d.path(), Some(&uf)).is_err());
+    // a null in the user config is a wrong type there too
+    let (_u, uf) = user("code_paths:\n");
+    assert!(effective(d.path(), Some(&uf)).is_ok());
+    let e = code_repos_with(d.path(), Some(&uf)).unwrap_err();
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert_eq!(
+        (e.message.as_str(), e.fix),
+        (
+            "code_paths must map repo names to paths",
+            format!(
+                "fix code_paths in {}, e.g. code_paths: {{app: ../app}}",
+                uf.display()
+            )
+        )
+    );
+    // a local null never falls back to the user entry of the same name
+    let g = GitRepo::new();
+    let (_u, uf) = user(&format!("code_paths:\n  app: {}\n", q(g.path())));
+    local(d.path(), "code_paths: null\n");
+    assert!(effective(d.path(), Some(&uf)).is_ok());
+    let e = code_repos_with(d.path(), Some(&uf)).unwrap_err();
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert_eq!(
+        (e.message.as_str(), e.fix.as_str()),
+        (
+            "code_paths must map repo names to paths",
+            "fix code_paths in .rdy/local.yaml, e.g. code_paths: {app: ../app}"
+        )
+    );
+    assert!(linked_repos(d.path(), Some(&uf)).is_err());
+}
+
+/// F1 in `rdy config` (ruling, fix round 1): `code_paths` shows one row per entry that applies,
+/// each with the level and file that supplied it, sorted by name; `merged` holds the same set.
+#[test]
+fn ps5_config_lists_each_code_path_with_its_own_level() {
+    let s = Served::new();
+    let app = GitRepo::at(&s.dir.path().join("checkouts").join("app"));
+    app.write("src/a.rs", "a\n");
+    app.commit("feat: a");
+    let lib = GitRepo::at(&s.dir.path().join("lib"));
+    let hidden = GitRepo::new();
+    append_config(s.dir.path(), "code_repos: [app, lib]\n");
+    local(s.dir.path(), "code_paths:\n  app: checkouts/app\n");
+    let uf = s.user_config();
+    let mut text = std::fs::read_to_string(&uf).unwrap();
+    text.push_str(&format!(
+        "code_paths:\n  lib: {}\n  app: {}\n",
+        q(lib.path()),
+        q(hidden.path())
+    ));
+    std::fs::write(&uf, text).unwrap();
+    let local_file = s.dir.path().join(LOCAL_FILE);
+
+    let (ok, v) = s.json(&["--json", "config"]);
+    assert!(ok, "{v}");
+    let rows: Vec<&serde_json::Value> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["key"].as_str().unwrap().starts_with("code_paths"))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            &serde_json::json!({"key": "code_paths.app", "value": "checkouts/app",
+                "level": "local", "file": local_file}),
+            &serde_json::json!({"key": "code_paths.lib", "value": lib.path(),
+                "level": "user", "file": uf}),
+        ],
+        "{v}"
+    );
+    let o = s.rdy(&["config", "--show-origin"]);
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(o.status.success(), "{out}");
+    let want = [
+        format!("code_paths.app = checkouts/app  # {}", local_file.display()),
+        format!(
+            "code_paths.lib = {}  # {}",
+            lib.path().display(),
+            uf.display()
+        ),
+    ];
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("code_paths"))
+        .collect();
+    assert_eq!(lines, want, "{out}");
+
+    let e = effective(s.dir.path(), Some(&uf)).unwrap();
+    let merged: serde_yaml_ng::Mapping =
+        serde_yaml_ng::from_str(&format!("app: checkouts/app\nlib: {}\n", q(lib.path()))).unwrap();
+    assert_eq!(
+        e.merged.get("code_paths"),
+        Some(&serde_yaml_ng::Value::Mapping(merged)),
+        "{:?}",
+        e.merged
+    );
+
+    let (ok, v) = s.json(&["--json", "brief", "--code", "src/a.rs"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["code"]["repos"], serde_json::json!(["app", "lib"]), "{v}");
 }
 
 /// The closed list of warnings, each from `config_warnings` (and `effective`) in list order.

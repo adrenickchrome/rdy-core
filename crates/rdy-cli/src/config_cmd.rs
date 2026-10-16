@@ -1,5 +1,6 @@
 //! `rdy config [--show-origin]`: the settings in effect, one row per key that has a value, in
-//! the order of `KEY_LEVELS`. Runs in this process: it reads files and needs no daemon.
+//! the order of `KEY_LEVELS`; `code_paths` shows one row per repo, each with the level it comes
+//! from (F1). Runs in this process: it reads files and needs no daemon.
 use crate::ErrorReply;
 use rdy_engine::config_levels::{effective, user_file_from_env};
 use serde_json::{Value, json};

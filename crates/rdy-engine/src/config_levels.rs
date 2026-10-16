@@ -13,9 +13,9 @@
 //!
 //! One key merges name by name, not file by file: `code_paths` (FW-X5, F1). `code_repos` in
 //! `.rdy.yaml` names the linked code repos; each name's checkout path is its `code_paths` entry in
-//! `.rdy/local.yaml`, else its entry in the user config ([`linked_repos`]). The origin of
-//! `code_paths` names the most specific file that sets it, but the other file's entries still
-//! apply to the names it leaves out.
+//! `.rdy/local.yaml`, else its entry in the user config ([`linked_repos`]). So `code_paths` has
+//! one origin per entry that applies (`code_paths.<name>`, from the file that supplied it), and
+//! `merged` holds those entries as one mapping.
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
@@ -346,9 +346,12 @@ impl Origin {
 #[derive(Clone, Debug)]
 pub struct Effective {
     /// One entry per key of [`KEY_LEVELS`] that has a value, in table order, defaults included.
+    /// `code_paths` instead has one entry per entry that applies (F1): key `code_paths.<name>`,
+    /// the path as written, and the level and file that supplied it, sorted by name.
     pub origins: Vec<Origin>,
     /// What `Config` is read from: the project file's keys as they are, each key of the table
     /// replaced by its winning value (a default is not written in; the accessors have it).
+    /// `code_paths` is the by-name merge: every entry that applies, as written.
     pub merged: Mapping,
     /// One `W_CONFIG_UNKNOWN` per key outside the table, in file precedence order.
     pub warnings: Vec<Issue>,
@@ -1027,8 +1030,37 @@ fn build(
         .find(|(l, _)| *l == Level::Project)
         .map(|(_, m)| m.clone())
         .unwrap_or_default();
+    // O15: from the mappings parsed above, never a second read; a wrong type adds no warning
+    // and no `code_paths` row here (the code briefing reports it)
+    let map_of = |level: Level| files.iter().find(|(l, _)| *l == level).map(|(_, m)| m);
+    let code = linked_core(
+        project,
+        map_of(Level::Project),
+        map_of(Level::Local),
+        map_of(Level::User),
+        user_file,
+    );
     let mut origins = Vec::new();
     for rule in KEY_LEVELS {
+        if rule.key == CODE_PATHS_KEY {
+            if let Ok((linked, _)) = &code {
+                let rows = code_path_origins(project, linked, map_of, user_file);
+                if !rows.is_empty() {
+                    let entries: Mapping = rows
+                        .iter()
+                        .map(|o| {
+                            (
+                                Value::from(&o.key[CODE_PATHS_KEY.len() + 1..]),
+                                o.value.clone(),
+                            )
+                        })
+                        .collect();
+                    set_path(&mut merged, CODE_PATHS_KEY, Value::Mapping(entries));
+                }
+                origins.extend(rows);
+            }
+            continue;
+        }
         let found = files
             .iter()
             .find_map(|(level, map)| get_path(map, rule.key).map(|v| (*level, v.clone())));
@@ -1059,16 +1091,7 @@ fn build(
         }
     }
     warnings.extend(lan_address_warning(&merged));
-    // O15: from the mappings parsed above, never a second read; a wrong type adds none here
-    // (the code briefing reports it)
-    let map_of = |level: Level| files.iter().find(|(l, _)| *l == level).map(|(_, m)| m);
-    if let Ok((_, code)) = linked_core(
-        project,
-        map_of(Level::Project),
-        map_of(Level::Local),
-        map_of(Level::User),
-        user_file,
-    ) {
+    if let Ok((_, code)) = code {
         warnings.extend(code);
     }
     Ok(Effective {
@@ -1076,6 +1099,34 @@ fn build(
         merged,
         warnings,
     })
+}
+
+/// One origin per linked repo (F1), sorted by name: key `code_paths.<name>`, the path as its file
+/// writes it, and the level and file that supplied it.
+fn code_path_origins<'a>(
+    project: &Path,
+    linked: &[LinkedRepo],
+    map_of: impl Fn(Level) -> Option<&'a Mapping>,
+    user_file: Option<&Path>,
+) -> Vec<Origin> {
+    let mut rows: Vec<Origin> = linked
+        .iter()
+        .filter_map(|l| {
+            let value = map_of(l.level)?
+                .get(CODE_PATHS_KEY)?
+                .as_mapping()?
+                .get(l.name.as_str())?
+                .clone();
+            Some(Origin {
+                key: format!("{CODE_PATHS_KEY}.{}", l.name),
+                value,
+                level: l.level,
+                file: path_of(project, l.level, user_file),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
+    rows
 }
 
 /// The key of `.rdy/local.yaml` and the user config that maps each code repo's name to the path
@@ -1154,8 +1205,9 @@ fn repo_entries(project_map: Option<&Mapping>) -> Result<Vec<&str>, RdyError> {
         .collect()
 }
 
-/// The entries of `code_paths` in the file of `level`, in file order; no key and a null value are
-/// none. A key that is not a string is a wrong type, as a value that is not a string is.
+/// The entries of `code_paths` in the file of `level`, in file order; no key is none. A value that
+/// is not a mapping (a null included) is a wrong type, as a key or an entry's value that is not a
+/// string is.
 fn path_entries<'a>(
     map: Option<&'a Mapping>,
     level: Level,
@@ -1171,9 +1223,8 @@ fn path_entries<'a>(
             ),
         )
     };
-    let value = match map.and_then(|m| m.get(CODE_PATHS_KEY)) {
-        None | Some(Value::Null) => return Ok(Vec::new()),
-        Some(v) => v,
+    let Some(value) = map.and_then(|m| m.get(CODE_PATHS_KEY)) else {
+        return Ok(Vec::new());
     };
     let entries = value.as_mapping().ok_or_else(bad)?;
     entries
