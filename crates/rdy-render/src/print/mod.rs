@@ -9,6 +9,7 @@
 //! (D-X61DT). A diagram prints as its source (O3). No id is shown (O4).
 pub mod ir;
 pub mod md;
+pub mod single;
 
 use crate::page::{self, Kind};
 use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
