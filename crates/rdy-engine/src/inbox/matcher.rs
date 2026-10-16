@@ -5,15 +5,9 @@ use super::Entry;
 use super::inflight::RunInFlight;
 use crate::gate::{ProposalRef, version_number};
 use crate::semantic::candidates::Request;
-use crate::tensions::TensionKind;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
-use rdy_model::{BlockId, Hash, Op, PairItem, Proposal, ReviewSubject};
-use rdy_store::StoreError;
+use rdy_model::{BlockId, Hash, Op};
 use rdy_store::inbox::InboxSub;
-use rdy_store::kinds;
-use rdy_store::segment::Location;
-use rdy_store::transition::Cause;
-use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
 /// The areas that concern the session: its declared areas, or else the areas of the blocks its
@@ -199,26 +193,21 @@ pub fn match_event(
             entry(
                 "pending_added",
                 vec![proposal.to_string()],
-                pending_line(&pref),
+                format!("{pref} waits for an answer; read rdy_pending"),
             )
         }
         EventKind::ReviewSubmitted { review, pair, .. } => {
-            // the verdict carries advice (read from the stored first version of the pair's
-            // tension, which this review opened), and it waits on the proposal version that held
-            // its items when it was written; both are read from records that never change and
-            // from the log before the review, so landing the proposal, answering the advice,
-            // publishing a later version or another proposal, or a pack change alters no entry
+            // a verdict that carries advice adds one entry that points at the review (ruling
+            // task-11, rule 2); the queue says which proposal waits on it. The review id never
+            // changes, so a re-derived inbox is the same.
             if !verdict_carries_advice(st, review, pair)? {
                 return Ok(None);
             }
-            match first_holding(st, review, ev.seq)? {
-                Some(pref) => entry(
-                    "pending_added",
-                    vec![review.to_string()],
-                    pending_line(&pref),
-                ),
-                None => None,
-            }
+            entry(
+                "pending_added",
+                vec![review.to_string()],
+                "new advice waits for an answer; read rdy_pending".into(),
+            )
         }
         _ => None,
     })
@@ -236,176 +225,6 @@ fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<
         first = st.reader().semantic_tension(&prev)?;
     }
     Ok(first.review == *review && first.advice.is_some())
-}
-
-/// The proposal version that held the pair `review` judged when the review was written, read from
-/// records that never change and bounded by the review's own place in the log.
-///
-/// Which changes held the judged items is read from the sides of the tension the review opened:
-/// the review's own batch logs them (`TRANSITION`, cause `reviewed`), as the detector found them
-/// when it wrote the verdict, under the tracking in force then. No content is hashed here, so a
-/// pack change, a later edit of a block and a block with any number of fields change nothing.
-/// A proposal counts only through its latest version written before the review, and only if none
-/// of its changes had landed before the review. A version holds the pair for each item whose
-/// block one of its changes writes (creates or updates) while that change is a side of the
-/// tension. The proposal with the most items held wins, then the one whose version was written
-/// last (the pair completes when the later of its items is written), then the smaller version
-/// hash. A proposal published, replaced or landed after the review, a tension answered and a
-/// pack change after the review change none of it, so the same verdict names the same version on
-/// every read. A review of a pair that no proposal waiting at that time writes (an item in a view
-/// that was never proposed, the other in canon) gives none.
-fn first_holding(
-    st: &ReadState,
-    review: &Hash,
-    batch_end: Location,
-) -> Result<Option<ProposalRef>, RdyError> {
-    let reader = st.reader();
-    let ReviewSubject::Pair { items, .. } = reader.review(review)?.subject else {
-        return Ok(None);
-    };
-    let Some(bound) = reader.location_of(kinds::REVIEW, review)? else {
-        return Ok(None);
-    };
-    let sides = judged_changes(st, review, bound, batch_end)?;
-    if sides.is_empty() {
-        return Ok(None);
-    }
-    let mut best: Option<(Rank, Hash)> = None;
-    for (key, latest) in reader.refs_with_prefix("proposal/")? {
-        let (Some(stable), Ok(latest)) = (
-            key.strip_prefix("proposal/")
-                .and_then(|h| h.parse::<Hash>().ok()),
-            <[u8; 32]>::try_from(latest.as_slice()).map(Hash),
-        ) else {
-            continue;
-        };
-        // the latest version written before the review
-        let mut cur = Some(latest);
-        let mut asof: Option<(Hash, Location, Proposal)> = None;
-        while let Some(version) = cur {
-            let p = reader.proposal(&version)?;
-            match reader.location_of(kinds::PROPOSAL, &version)? {
-                Some(at) if at < bound => {
-                    asof = Some((version, at, p));
-                    break;
-                }
-                _ => cur = p.prev,
-            }
-        }
-        let Some((version, at, p)) = asof else {
-            continue;
-        };
-        if landed_before(st, &p, bound)? {
-            continue;
-        }
-        let score = holds_score(st, &p, &items, &sides)?;
-        if score == 0 {
-            continue;
-        }
-        let rank = (score, at, Reverse(version));
-        if best.as_ref().is_none_or(|(b, _)| rank > *b) {
-            best = Some((rank, stable));
-        }
-    }
-    best.map(|((_, _, Reverse(version)), stable)| {
-        Ok(ProposalRef {
-            version,
-            stable,
-            n: version_number(st, &version)?,
-        })
-    })
-    .transpose()
-}
-
-/// What ranks a proposal's version: the items it holds, where it was written in the log and, last,
-/// the smaller hash first.
-type Rank = (u32, Location, Reverse<Hash>);
-
-/// Whether a change of `p` had landed before `bound` in the log.
-fn landed_before(st: &ReadState, p: &Proposal, bound: Location) -> Result<bool, RdyError> {
-    let reader = st.reader();
-    for c in &p.changes {
-        if let Some(landing) = reader.landing_of(c)?
-            && reader
-                .location_of(kinds::LANDING, &landing)?
-                .is_some_and(|at| at < bound)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// The in-flight changes that were sides of the semantic tensions `review` opened, read from the
-/// `TRANSITION` record of the review's own batch (the frames from `review_at` to the batch's
-/// commit, which ends before `batch_end`). A canon side holds no change. Empty when the batch
-/// logged no such move.
-fn judged_changes(
-    st: &ReadState,
-    review: &Hash,
-    review_at: Location,
-    batch_end: Location,
-) -> Result<BTreeSet<Hash>, RdyError> {
-    let reader = st.reader();
-    let mut records = Vec::new();
-    let mut committed = false;
-    let walk = reader.for_each_frame_from(review_at, batch_end, |_, kind, hash, _, _| {
-        if kind == kinds::BATCH_COMMIT {
-            committed = true;
-            // stops the walk at the end of the review's batch
-            return Err(StoreError::Db("batch end".into()));
-        }
-        if kind == kinds::TRANSITION {
-            records.push(hash);
-        }
-        Ok(())
-    });
-    if !committed {
-        walk?;
-    }
-    let mut out = BTreeSet::new();
-    for h in records {
-        for m in reader.transitions(&h)?.opened {
-            if m.kind == TensionKind::Semantic.name()
-                && m.why.cause == Cause::Reviewed
-                && m.why.id == Some(*review)
-            {
-                out.extend(m.sides.iter().filter_map(|s| s.change));
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// How many items of a pair version `p` holds: the items whose block one of its changes writes
-/// (creates or updates) while that change is one of the judged `sides`. Only the changes' ops are
-/// read.
-fn holds_score(
-    st: &ReadState,
-    p: &Proposal,
-    items: &[PairItem],
-    sides: &BTreeSet<Hash>,
-) -> Result<u32, RdyError> {
-    let reader = st.reader();
-    let mut held = vec![false; items.len()];
-    for c in p.changes.iter().filter(|c| sides.contains(c)) {
-        for op in reader.change(c)?.ops {
-            let (Op::Create { block } | Op::Update { block, .. }) = op else {
-                continue;
-            };
-            for (i, item) in items.iter().enumerate() {
-                if item.block == block.id {
-                    held[i] = true;
-                }
-            }
-        }
-    }
-    Ok(held.iter().filter(|h| **h).count() as u32)
-}
-
-/// The line of a `pending_added` entry.
-fn pending_line(pref: &ProposalRef) -> String {
-    format!("{pref} waits for an answer; read rdy_pending")
 }
 
 /// How many blocks the changes of `landing` write (create or update) that are in one of `areas`

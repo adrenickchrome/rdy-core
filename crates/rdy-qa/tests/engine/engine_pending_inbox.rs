@@ -14,6 +14,9 @@ use serde_json::json;
 
 const WATCHER: &str = "agent:watcher";
 
+/// The line of the `pending_added` entry that an advised verdict gives (ruling task-11, rule 2).
+const ADVICE_LINE: &str = "new advice waits for an answer; read rdy_pending";
+
 /// A subscription of `agent:watcher` that starts at the head of the log.
 fn watcher_at_head(r: &Rdy) -> InboxSub {
     InboxSub {
@@ -134,7 +137,7 @@ fn di11_an_advised_verdict_adds_pending_added() {
         pending_added(&r, &sub).is_empty(),
         "no advice: nothing waits"
     );
-    // a verdict that advises blocking waits for the person, on the version that holds it
+    // a verdict that advises blocking waits for the person; the entry points at the review
     verdict_on(
         &mut r,
         &rdy_engine::Scope::Inflight,
@@ -149,10 +152,8 @@ fn di11_an_advised_verdict_adds_pending_added() {
     assert_eq!(ids.len(), 1, "{ids:?}");
     let review: rdy_model::Hash = ids[0].parse().expect("the id is the review");
     assert!(r.read().reader().review(&review).is_ok(), "{ids:?}");
-    assert_eq!(
-        line,
-        &format!("{} waits for an answer; read rdy_pending", p.r#ref)
-    );
+    assert_eq!(line, ADVICE_LINE);
+    assert_ne!(ids[0], p.id, "the id is the review, not the proposal");
 }
 
 #[test]
@@ -192,11 +193,13 @@ fn di11_pending_added_is_stable_across_reindex() {
         2,
         "the version and the advised verdict: {entries:?}"
     );
-    assert!(
-        added
-            .iter()
-            .all(|e| e["line"]
-                == format!("{} waits for an answer; read rdy_pending", p.r#ref).as_str()),
+    let lines: Vec<_> = added.iter().map(|e| e["line"].clone()).collect();
+    assert_eq!(
+        lines,
+        vec![
+            json!(format!("{} waits for an answer; read rdy_pending", p.r#ref)),
+            json!(ADVICE_LINE),
+        ],
         "{added:?}"
     );
     r.close().expect("close");
@@ -240,10 +243,7 @@ fn advised_project() -> (
     let mut entries = pending_added(&r, &sub);
     assert_eq!(entries.len(), 1, "{entries:?}");
     let first = entries.remove(0);
-    assert_eq!(
-        first.1,
-        format!("{} waits for an answer; read rdy_pending", p.r#ref)
-    );
+    assert_eq!(first.1, ADVICE_LINE);
     (dir, r, spec, p, sub, first)
 }
 
@@ -282,9 +282,9 @@ fn di11_an_advised_entry_stays_after_the_advice_is_dismissed() {
 }
 
 #[test]
-fn di11_an_advised_entry_keeps_its_proposal_when_a_replacement_is_published() {
-    let (_dir, mut r, spec, p, sub, first) = advised_project();
-    // a second claim and a replacement version: the verdict's entry still names the first
+fn di11_an_advised_entry_stays_when_a_replacement_is_published() {
+    let (_dir, mut r, spec, _p, sub, first) = advised_project();
+    // a second claim and a replacement version: the verdict's entry is the same
     put(
         &mut r,
         "v1",
@@ -303,387 +303,20 @@ fn di11_an_advised_entry_keeps_its_proposal_when_a_replacement_is_published() {
         vec![&first],
         "{entries:?}"
     );
-    assert!(
-        first.1.starts_with(&p.r#ref),
-        "the entry names the version the verdict met: {first:?}"
-    );
 }
 
 #[test]
-fn di11_an_advised_entry_stays_after_the_advice_is_dismissed_and_the_proposal_lands() {
+fn di11_an_advised_entry_names_no_proposal() {
     let (_dir, mut r, _spec, p, sub, first) = advised_project();
-    let shown = r.read().proposal_show(&p.r#ref).expect("show");
-    let tension = shown.advised[0].tension.clone();
-    let rev = Session::agent("agent:rev".into(), Some("rev".into()), Role::Reviewer).unwrap();
-    r.dismiss_tension(&rev, &tension, "both stand for now")
-        .expect("dismiss");
-    assert_eq!(pending_added(&r, &sub), vec![first.clone()]);
-    // landing the holding proposal changes no record the entry reads: the same cursor, the same entry
+    let (ids, line) = &first;
+    // the entry points at the review alone; the queue says which proposal holds the advice
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let review: rdy_model::Hash = ids[0].parse().expect("the id is the review");
+    assert!(r.read().reader().review(&review).is_ok(), "{ids:?}");
+    assert_ne!(ids[0], p.id, "{ids:?}");
+    assert_eq!(line, ADVICE_LINE);
+    assert!(!line.contains("P-"), "the line names no proposal: {line}");
+    // landing the proposal changes nothing: the review id is immutable
     r.land(&approver(), &p.id).expect("land");
     assert_eq!(pending_added(&r, &sub), vec![first]);
-}
-
-#[test]
-fn di11_an_advised_entry_stays_after_the_holding_proposal_lands() {
-    let (_dir, mut r, _spec, p, sub, first) = advised_project();
-    r.land(&approver(), &p.id).expect("land");
-    assert_eq!(pending_added(&r, &sub), vec![first]);
-}
-
-// ---- fix round 3: the holder is read from the records written before the review ----
-
-#[test]
-fn di11_advice_on_an_unproposed_claim_and_a_landed_canon_claim_names_no_proposal() {
-    // the canon claim was written by the proposal that landed the spec; that proposal never held
-    // the pair, so the advice waits on no version and gives no entry
-    let (_dir, mut r) = project();
-    let spec = spec_doc(&mut r);
-    let u = created(
-        &put(
-            &mut r,
-            "v1",
-            json!([{"op": "create", "type": "claim", "id": "$u", "parent": spec.section.to_string(),
-                    "body": "Guests read every rule of the spec."}]),
-        ),
-        "$u",
-    );
-    let sub = watcher_at_head(&r);
-    verdict_on(
-        &mut r,
-        &rdy_engine::Scope::Inflight,
-        &u,
-        &spec.c,
-        "agent:r",
-        true,
-    );
-    assert_eq!(pending_added(&r, &sub), vec![]);
-}
-
-/// A pack whose claims carry a field `note`, tracked or not.
-fn note_pack(tracked: bool) -> String {
-    format!(
-        "name: trk\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  claim:\n    prefix: c\n    traits: [normative, describes]\n    body: required\n    fields:\n      note: {{ kind: str }}\n{}",
-        if tracked {
-            "    tracking: [note]\n"
-        } else {
-            ""
-        }
-    )
-}
-
-/// A project on the `trk` pack (claims carry `note`; tracked or not) with an open proposal whose
-/// view holds the claim `$q` (note `n1`), a subscription at the head of the log, and a verdict
-/// that advises blocking on `$q` and the spec's claim: the one entry the verdict gave.
-fn noted_project(
-    tracked: bool,
-) -> (
-    tempfile::TempDir,
-    Rdy,
-    rdy_qa::edit_loop::Spec,
-    rdy_engine::ProposalInfo,
-    InboxSub,
-    (Vec<String>, String),
-) {
-    let (dir, r) = project();
-    drop(r);
-    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(tracked)).unwrap();
-    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
-    let mut r = Rdy::open(dir.path()).unwrap();
-    let spec = spec_doc(&mut r);
-    let q = created(
-        &put(
-            &mut r,
-            "v1",
-            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
-                    "body": "Guests read every rule of the spec.", "fields": {"note": "n1"}}]),
-        ),
-        "$q",
-    );
-    let p = r
-        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
-        .unwrap();
-    let sub = watcher_at_head(&r);
-    verdict_on(
-        &mut r,
-        &rdy_engine::Scope::Inflight,
-        &q,
-        &spec.c,
-        "agent:r",
-        true,
-    );
-    let mut entries = pending_added(&r, &sub);
-    assert_eq!(entries.len(), 1, "{entries:?}");
-    let first = entries.remove(0);
-    assert_eq!(
-        first.1,
-        format!("{} waits for an answer; read rdy_pending", p.r#ref)
-    );
-    (dir, r, spec, p, sub, first)
-}
-
-/// The entry of the review (`first`'s ids) among `sub`'s `pending_added` entries.
-fn entry_of(r: &Rdy, sub: &InboxSub, first: &(Vec<String>, String)) -> Vec<(Vec<String>, String)> {
-    pending_added(r, sub)
-        .into_iter()
-        .filter(|e| e.0 == first.0)
-        .collect()
-}
-
-#[test]
-fn di11_a_later_competing_proposal_does_not_rename_the_entry() {
-    let (_dir, mut r, spec, _p, sub, first) = noted_project(true);
-    // a second view rewrites only the tracked field of the canon claim, so it writes the canon
-    // item at the very content the verdict judged, and it is proposed after the verdict
-    put(
-        &mut r,
-        "v2",
-        json!([{"op": "update", "id": spec.c.to_string(), "fields": {"note": "other"}}]),
-    );
-    let p2 = r
-        .propose_subset(&ag("v2"), "v2", "Notes", None, None)
-        .unwrap();
-    assert!(
-        pending_added(&r, &sub)
-            .iter()
-            .any(|e| e.0 == [p2.id.clone()]),
-        "the later proposal has its own entry"
-    );
-    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
-}
-
-#[test]
-fn di11_a_higher_scoring_replacement_does_not_rename_the_entry() {
-    let (_dir, mut r, spec, _p, sub, first) = noted_project(true);
-    // the replacement version also writes the canon claim at the judged content: it would hold
-    // both items, but it was written after the verdict
-    put(
-        &mut r,
-        "v1",
-        json!([{"op": "update", "id": spec.c.to_string(), "fields": {"note": "other"}}]),
-    );
-    let p2 = r
-        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
-        .unwrap();
-    assert_eq!(p2.version, 2, "{p2:?}");
-    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
-}
-
-#[test]
-fn di11_an_entry_survives_a_pack_change_that_starts_tracking_a_field() {
-    let (dir, mut r, _spec, _p, sub, first) = noted_project(false);
-    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(true)).unwrap();
-    assert!(matches!(
-        r.reload_pack().unwrap(),
-        rdy_engine::ReloadOutcome::Reloaded
-    ));
-    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
-}
-
-#[test]
-fn di11_an_entry_survives_a_pack_change_that_stops_tracking_a_field() {
-    let (dir, mut r, _spec, _p, sub, first) = noted_project(true);
-    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
-    assert!(matches!(
-        r.reload_pack().unwrap(),
-        rdy_engine::ReloadOutcome::Reloaded
-    ));
-    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
-}
-
-// ---- fix round 4: the holder is read under the tracking in force, not under any omission ----
-
-/// A pack whose claims carry `n` fields `f01`, `f02`, ...; `tracked` of them are tracking.
-fn wide_pack(n: usize, tracked: &[&str]) -> String {
-    let mut s = String::from(
-        "name: wide\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  claim:\n    prefix: c\n    traits: [normative, describes]\n    body: required\n    fields:\n",
-    );
-    for i in 1..=n {
-        s.push_str(&format!("      f{i:02}: {{ kind: str }}\n"));
-    }
-    if !tracked.is_empty() {
-        s.push_str(&format!("    tracking: [{}]\n", tracked.join(", ")));
-    }
-    s
-}
-
-/// `n` fields, two of them tracking when the verdict was written; the pack then stops tracking
-/// both. The content hash under the tracking now differs, and the entry stays.
-fn wide_entry_survives(n: usize) {
-    let (dir, r) = project();
-    drop(r);
-    std::fs::write(
-        dir.path().join(".rdy/packs/wide.yaml"),
-        wide_pack(n, &["f03", "f07"]),
-    )
-    .unwrap();
-    std::fs::write(dir.path().join(".rdy.yaml"), "pack: wide\n").unwrap();
-    let mut r = Rdy::open(dir.path()).unwrap();
-    let spec = spec_doc(&mut r);
-    let fields: serde_json::Map<String, serde_json::Value> = (1..=n)
-        .map(|i| (format!("f{i:02}"), json!(format!("v{i}"))))
-        .collect();
-    let q = created(
-        &put(
-            &mut r,
-            "v1",
-            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
-                    "body": "Guests read every rule of the spec.", "fields": fields}]),
-        ),
-        "$q",
-    );
-    let p = r
-        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
-        .unwrap();
-    let sub = watcher_at_head(&r);
-    verdict_on(
-        &mut r,
-        &rdy_engine::Scope::Inflight,
-        &q,
-        &spec.c,
-        "agent:r",
-        true,
-    );
-    let first = {
-        let mut e = pending_added(&r, &sub);
-        assert_eq!(e.len(), 1, "{e:?}");
-        e.remove(0)
-    };
-    assert_eq!(
-        first.1,
-        format!("{} waits for an answer; read rdy_pending", p.r#ref)
-    );
-    std::fs::write(dir.path().join(".rdy/packs/wide.yaml"), wide_pack(n, &[])).unwrap();
-    assert!(matches!(
-        r.reload_pack().unwrap(),
-        rdy_engine::ReloadOutcome::Reloaded
-    ));
-    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
-}
-
-#[test]
-fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_wide_block() {
-    wide_entry_survives(13);
-}
-
-#[test]
-fn di11_an_unproposed_removal_of_an_ordinary_field_names_no_proposal() {
-    // `note` is never a tracking field. The proposal wrote the claim with `note`; the view then
-    // unset it and nobody proposed that. The verdict judges the claim without `note`, which no
-    // proposal wrote, so no proposal holds the pair and the verdict gives no entry.
-    let (dir, r) = project();
-    drop(r);
-    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
-    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
-    let mut r = Rdy::open(dir.path()).unwrap();
-    let spec = spec_doc(&mut r);
-    let q = created(
-        &put(
-            &mut r,
-            "v1",
-            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
-                    "body": "Guests read every rule of the spec.", "fields": {"note": "n1"}}]),
-        ),
-        "$q",
-    );
-    r.propose_subset(&ag("v1"), "v1", "Guests", None, None)
-        .unwrap();
-    put(
-        &mut r,
-        "v1",
-        json!([{"op": "update", "id": q.to_string(), "unset": ["note"]}]),
-    );
-    let sub = watcher_at_head(&r);
-    verdict_on(
-        &mut r,
-        &rdy_engine::Scope::Inflight,
-        &q,
-        &spec.c,
-        "agent:r",
-        true,
-    );
-    assert_eq!(pending_added(&r, &sub), vec![]);
-}
-
-// ---- fix round 5: the holder is read from the sides the review's own batch logged ----
-
-#[test]
-fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_block_above_sixteen_fields() {
-    // the matcher has no field-count cutoff: it hashes nothing
-    wide_entry_survives(17);
-}
-
-#[test]
-fn di11_an_ordinary_field_removal_and_a_later_body_edit_name_no_proposal() {
-    // as the ordinary-field removal above, then the view edits the body and nobody proposes it:
-    // no block shows the judged content any more, and the old proposal still holds nothing
-    let (dir, r) = project();
-    drop(r);
-    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
-    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
-    let mut r = Rdy::open(dir.path()).unwrap();
-    let spec = spec_doc(&mut r);
-    let q = created(
-        &put(
-            &mut r,
-            "v1",
-            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
-                    "body": "Guests read every rule of the spec.", "fields": {"note": "n1"}}]),
-        ),
-        "$q",
-    );
-    r.propose_subset(&ag("v1"), "v1", "Guests", None, None)
-        .unwrap();
-    put(
-        &mut r,
-        "v1",
-        json!([{"op": "update", "id": q.to_string(), "unset": ["note"]}]),
-    );
-    let sub = watcher_at_head(&r);
-    verdict_on(
-        &mut r,
-        &rdy_engine::Scope::Inflight,
-        &q,
-        &spec.c,
-        "agent:r",
-        true,
-    );
-    assert_eq!(pending_added(&r, &sub), vec![]);
-    put(
-        &mut r,
-        "v1",
-        json!([{"op": "update", "id": q.to_string(), "body": "Guests read the rules of the spec."}]),
-    );
-    assert_eq!(pending_added(&r, &sub), vec![]);
-}
-
-#[test]
-fn di11_an_entry_survives_dropping_tracking_and_unsetting_the_formerly_tracked_field() {
-    // the verdict judged the claim with its tracked `note`; the pack then stops tracking `note`
-    // and the view unsets it without proposing. The claim now hashes to the judged content under
-    // the tracking now, yet the proposal held the pair when the verdict was written.
-    let (dir, mut r, spec, _p, sub, first) = noted_project(true);
-    // the judged claim is the pair's item that is not the spec's
-    let review: rdy_model::Hash = first.0[0].parse().expect("the id is the review");
-    let rdy_model::ReviewSubject::Pair { items, .. } =
-        r.read().reader().review(&review).unwrap().subject
-    else {
-        panic!("a pair review");
-    };
-    let q = items
-        .iter()
-        .find(|i| i.block != spec.c)
-        .expect("the claim")
-        .block
-        .clone();
-    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
-    assert!(matches!(
-        r.reload_pack().unwrap(),
-        rdy_engine::ReloadOutcome::Reloaded
-    ));
-    put(
-        &mut r,
-        "v1",
-        json!([{"op": "update", "id": q.to_string(), "unset": ["note"]}]),
-    );
-    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
 }
