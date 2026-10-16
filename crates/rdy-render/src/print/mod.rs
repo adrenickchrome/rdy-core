@@ -9,7 +9,7 @@
 //! (D-X61DT). A diagram prints as its source (O3). No id is shown (O4).
 pub mod ir;
 
-use crate::page::{self, Kind, PageContext};
+use crate::page::{self, Kind};
 use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
 use rdy_engine::{RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
@@ -229,21 +229,27 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
     if !site.terms.is_empty() {
         kinds.push((PageKind::Glossary, String::new(), Kind::Glossary));
     }
-    // each blob's file and media type as the first printed page that shows it names them: a
-    // figure the print leaves out names none
-    let mut assets: BTreeMap<Hash, (String, String)> = BTreeMap::new();
-    let mut pages: Vec<(PageKind, String, PageContext)> = vec![];
-    for (kind, id, k) in kinds {
-        let ctx = page::build(&sh, k);
-        for (file, (h, media_type)) in sh.used_blobs.take() {
-            assets.entry(h).or_insert((file, media_type));
-        }
-        pages.push((kind, id, ctx));
-    }
+    // each page with the files it renders: site path → (blob, media type)
+    let pages: Vec<_> = kinds
+        .into_iter()
+        .map(|(kind, id, k)| {
+            let ctx = page::build(&sh, k);
+            (kind, id, ctx, sh.used_blobs.take())
+        })
+        .collect();
     let env = env()?;
+    // each blob's file and media type as the first figure of the print that shows it names them:
+    // a figure the print leaves out, or a download link, names none
+    let mut assets: BTreeMap<Hash, (String, String)> = BTreeMap::new();
     let mut docs = vec![];
-    for (kind, id, ctx) in &pages {
+    for (kind, id, ctx, used) in &pages {
         let at = ctx.page_url.as_str();
+        let mut figures = vec![];
+        let from_html = |html: &str, figures: &mut Vec<String>| {
+            let (blocks, files) = ir::from_html_with_figures(html, at);
+            figures.extend(files);
+            blocks
+        };
         let mut blocks = vec![];
         match kind {
             PageKind::Folder => {
@@ -253,21 +259,21 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
                     .as_ref()
                     .and_then(|f| f.description_html.as_ref())
                 {
-                    blocks.extend(ir::from_html(&format!("<p>{d}</p>"), at));
+                    blocks.extend(from_html(&format!("<p>{d}</p>"), &mut figures));
                 }
             }
             PageKind::Doc => {
                 if let Some(d) = &ctx.body.doc
                     && let Some(lede) = &d.lede
                 {
-                    let mut lede = ir::from_html(&format!("<p>{lede}</p>"), at);
+                    let mut lede = from_html(&format!("<p>{lede}</p>"), &mut figures);
                     if let Some(a) = &d.lede_anchor {
                         ir::set_anchor(&mut lede, a);
                     }
                     blocks.extend(lede);
                 }
                 for item in &ctx.items {
-                    let mut b = ir::from_html(&item.html, at);
+                    let mut b = from_html(&item.html, &mut figures);
                     if !item.anchor.is_empty() {
                         ir::set_anchor(&mut b, &item.anchor);
                     }
@@ -280,7 +286,14 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
                     .map_err(tpl)?
                     .render(ctx)
                     .map_err(tpl)?;
-                blocks.extend(ir::from_html(&html, at));
+                blocks.extend(from_html(&html, &mut figures));
+            }
+        }
+        for file in figures {
+            if let Some((h, media_type)) = used.get(&file) {
+                assets
+                    .entry(*h)
+                    .or_insert_with(|| (file, media_type.clone()));
             }
         }
         docs.push(PrintDoc {

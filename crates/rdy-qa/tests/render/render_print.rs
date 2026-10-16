@@ -678,6 +678,56 @@ fn ec3_a_figure_the_print_leaves_out_changes_no_printed_blob() {
     }
 }
 
+/// Fix round 2: a download on a printed page shows no figure, so it names no printed blob, even
+/// when it holds the bytes of an image on the same page (its file, `.bin`, comes first by path).
+#[test]
+fn ec3_a_download_beside_its_image_changes_no_printed_blob() {
+    let (_d, mut r, ids) = project();
+    let figure = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .get(&ids.image_figure)
+        .unwrap()
+        .clone();
+    let blob = figure.field_str("blob").unwrap().to_string();
+    let parent = figure.parent.expect("the figure has a parent").to_string();
+    write(
+        &mut r,
+        "blob-download",
+        json!([
+            {"op": "create", "type": "figure", "parent": parent, "fields": {"blob": blob, "media_type": "application/octet-stream", "alt": "The same bytes"}}
+        ]),
+    )
+    .expect("a download of the image's bytes beside it");
+    let scope = Scope::View("blob-download".into());
+    let site = build_site(&r.read(), &scope, Mode::Static).unwrap();
+    let (bin, png) = (format!("assets/{blob}.bin"), format!("assets/{blob}.png"));
+    let p = print::build(&r.read(), &scope).unwrap();
+    // guard: one printed page shows the image and links the download of its bytes
+    let both = p.docs.iter().find(|d| {
+        let html = String::from_utf8_lossy(&site.files[&d.page]).into_owned();
+        html.contains(&format!("{blob}.bin\" download")) && html.contains(&format!("{blob}.png\""))
+    });
+    assert!(
+        both.is_some(),
+        "guard: the image and the download share a page"
+    );
+    assert!(
+        site.files.contains_key(&bin) && site.files.contains_key(&png),
+        "guard: the site writes both files"
+    );
+    let h: Hash = blob.parse().unwrap();
+    let printed = &p.blobs[&h];
+    assert_eq!(
+        (printed.media_type.as_str(), printed.file.as_str()),
+        ("image/png", png.as_str())
+    );
+    for (h, b) in &p.blobs {
+        assert_eq!(site.files.get(&b.file), Some(&b.bytes), "{h}");
+    }
+}
+
 /// Every page link of the print leads to a page it holds and, with an anchor, to an anchor a
 /// block of that page has.
 fn assert_links_resolve(p: &Print) {

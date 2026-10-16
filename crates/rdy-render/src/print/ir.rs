@@ -11,6 +11,7 @@
 use super::{Href, PBlock, Run};
 use crate::llms::{attr, decode, unseen};
 use rdy_model::Hash;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 /// A node of the renderer's HTML: text (decoded), or an element with its start tag's text (its
@@ -172,13 +173,14 @@ fn resolve(href: &str, page: &str) -> Option<Href> {
     })
 }
 
-/// The blob an image's `src` on `page` names: a site asset is `assets/<hash>.<extension>`.
-fn blob_of(src: &str, page: &str) -> Option<Hash> {
+/// The blob an image's `src` on `page` names, and the site file it names it by: a site asset is
+/// `assets/<hash>.<extension>`.
+fn asset_of(src: &str, page: &str) -> Option<(Hash, String)> {
     match resolve(src, page)? {
         Href::Page { page, anchor: None } => {
             let file = page.strip_prefix("assets/")?;
             let (stem, _ext) = file.split_once('.')?;
-            stem.parse().ok()
+            Some((stem.parse().ok()?, page))
         }
         _ => None,
     }
@@ -354,9 +356,18 @@ struct Ctx {
 
 struct Reader<'a> {
     page: &'a str,
+    /// The site file of each figure read, in the order of the figures.
+    figures: RefCell<Vec<String>>,
 }
 
 impl Reader<'_> {
+    /// The blob an image's `src` names; the file it names it by is the file of a figure.
+    fn figure_blob(&self, src: &str) -> Option<Hash> {
+        let (h, file) = asset_of(&decode(src), self.page)?;
+        self.figures.borrow_mut().push(file);
+        Some(h)
+    }
+
     /// The runs of `nodes` in a line of text.
     fn inline(&self, nodes: &[&Node], style: &Style, out: &mut Vec<Run>) {
         for n in nodes {
@@ -512,7 +523,7 @@ impl Reader<'_> {
                             .unwrap_or_default();
                         out.push(PBlock::Figure {
                             anchor: id_of(tag),
-                            blob: attr(img, "src").and_then(|s| blob_of(&decode(s), self.page)),
+                            blob: attr(img, "src").and_then(|s| self.figure_blob(s)),
                             alt: attr(img, "alt").map(decode).unwrap_or_default(),
                             caption,
                         });
@@ -532,7 +543,7 @@ impl Reader<'_> {
                 flush(out, pending);
                 out.push(PBlock::Figure {
                     anchor: id_of(tag),
-                    blob: attr(tag, "src").and_then(|s| blob_of(&decode(s), self.page)),
+                    blob: attr(tag, "src").and_then(|s| self.figure_blob(s)),
                     alt: attr(tag, "alt").map(decode).unwrap_or_default(),
                     caption: vec![],
                 });
@@ -739,9 +750,20 @@ fn flush(out: &mut Vec<PBlock>, pending: &mut Vec<Run>) {
 /// it prints that page, [`unlink`]); any other target leaves its words as plain text. An `img`
 /// whose `src` is a site asset (`assets/<hash>.<extension>`) names its blob's hash.
 pub fn from_html(html: &str, page: &str) -> Vec<PBlock> {
+    from_html_with_figures(html, page).0
+}
+
+/// [`from_html`], and the site file of each [`PBlock::Figure`] it reads, in the order of the
+/// figures: the files a reader of the page sees as images (a download link names none).
+pub(crate) fn from_html_with_figures(html: &str, page: &str) -> (Vec<PBlock>, Vec<String>) {
     let nodes = parse(html);
     let kids: Vec<&Node> = nodes.iter().collect();
-    Reader { page }.blocks(&kids, &Ctx::default())
+    let reader = Reader {
+        page,
+        figures: RefCell::default(),
+    };
+    let blocks = reader.blocks(&kids, &Ctx::default());
+    (blocks, reader.figures.into_inner())
 }
 
 /// Every link of `blocks` to a page `printed` does not hold becomes plain text (a permalink,
