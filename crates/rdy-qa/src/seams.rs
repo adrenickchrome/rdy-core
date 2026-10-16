@@ -75,11 +75,15 @@ pub fn seam_problems(root: &Path) -> Vec<String> {
 /// The line of a problem with the whole file: after every real line.
 const FILE: usize = usize::MAX;
 
+/// A problem before sorting: (path, line, message).
+type Problem = (String, usize, String);
+
 /// [`seam_problems`] with the seam files and the unit-test allowlist given.
 fn problems_with(root: &Path, seams: &[&str], unit_uses: &[(&str, usize, &str)]) -> Vec<String> {
     // (path, line, message); a file's own problems have line FILE and sort after its lines.
-    let mut found: Vec<(String, usize, String)> = Vec::new();
-    let files = rust_files(root);
+    let (files, mut found) = rust_files(root);
+    // The paths the scan could not read; a file at or under one of them is not "gone".
+    let unscanned: Vec<String> = found.iter().map(|(p, _, _)| p.clone()).collect();
     for seam in seams {
         if !root.join(seam).is_file() {
             found.push((
@@ -149,7 +153,13 @@ fn problems_with(root: &Path, seams: &[&str], unit_uses: &[(&str, usize, &str)])
     }
     // An allowlisted file that is gone has no lines in its tests.
     for (path, want, _) in unit_uses {
-        if !files.iter().any(|(p, _)| p == path) {
+        let blocked = unscanned.iter().any(|u| {
+            path == u
+                || path
+                    .strip_prefix(u.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+        });
+        if !blocked && !files.iter().any(|(p, _)| p == path) {
             found.push((path.to_string(), FILE, count_message(path, 0, *want)));
         }
     }
@@ -188,57 +198,133 @@ fn is_test_or_bench(path: &str) -> bool {
     matches!(path.split('/').nth(2), Some("tests" | "benches"))
 }
 
+/// The files of a scan and the paths it could not scan.
+struct Scan<'a> {
+    root: &'a Path,
+    files: Vec<(String, String)>,
+    /// (path, FILE, message), ready to merge with the other problems.
+    problems: Vec<Problem>,
+}
+
+impl Scan<'_> {
+    /// `p` from `root`, with `/` separators.
+    fn name(&self, p: &Path) -> String {
+        p.strip_prefix(self.root)
+            .unwrap_or(p)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn failed(&mut self, p: &Path, err: &std::io::Error) {
+        let name = self.name(p);
+        let message = format!("{name}: cannot be scanned: {err}");
+        self.problems.push((name, FILE, message));
+    }
+
+    fn read(&mut self, p: &Path) {
+        match std::fs::read(p) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                self.files.push((self.name(p), text));
+            }
+            Err(e) => self.failed(p, &e),
+        }
+    }
+
+    /// The metadata of `p` (following links); `None` when it is absent (or a dangling link),
+    /// and a problem for any other error.
+    fn metadata(&mut self, p: &Path) -> Option<std::fs::Metadata> {
+        match std::fs::metadata(p) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                self.failed(p, &e);
+                None
+            }
+        }
+    }
+
+    /// The entries of `dir`, sorted; a problem when it or one of its entries cannot be read.
+    fn entries(&mut self, dir: &Path) -> Vec<PathBuf> {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                self.failed(dir, &e);
+                return Vec::new();
+            }
+        };
+        let mut v = Vec::new();
+        for entry in rd {
+            match entry {
+                Ok(e) => v.push(e.path()),
+                Err(e) => self.failed(dir, &e),
+            }
+        }
+        v.sort();
+        v
+    }
+
+    /// Every `.rs` file under `dir`. `ancestors` holds the canonical path and the name of each
+    /// directory the walk is in; a directory that resolves to one of them is a cycle and a
+    /// problem, so the walk always ends.
+    fn walk(&mut self, dir: &Path, ancestors: &mut Vec<(PathBuf, String)>) {
+        let canonical = match std::fs::canonicalize(dir) {
+            Ok(c) => c,
+            Err(e) => return self.failed(dir, &e),
+        };
+        if let Some((_, outer)) = ancestors.iter().find(|(c, _)| *c == canonical) {
+            let name = self.name(dir);
+            let message = format!(
+                "{name}: leads back to {outer}, a directory the scan is already in; remove the link"
+            );
+            self.problems.push((name, FILE, message));
+            return;
+        }
+        ancestors.push((canonical, self.name(dir)));
+        for entry in self.entries(dir) {
+            let Some(meta) = self.metadata(&entry) else {
+                continue;
+            };
+            if meta.is_dir() {
+                self.walk(&entry, ancestors);
+            } else if meta.is_file() && entry.extension().is_some_and(|e| e == "rs") {
+                self.read(&entry);
+            }
+        }
+        ancestors.pop();
+    }
+}
+
 /// Every scanned file, as (its path from `root` with `/` separators, its text), in path order:
 /// each `.rs` file under `crates/*/src`, `crates/*/tests` and `crates/*/benches`, and each
-/// `crates/*/build.rs`.
-fn rust_files(root: &Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for krate in sorted_entries(&root.join("crates")) {
-        if !krate.is_dir() {
+/// `crates/*/build.rs`. Also the problems of every path that could not be scanned (unreadable,
+/// or a directory cycle): an absent `src`, `tests`, `benches` or `build.rs` is no problem, but
+/// every other failure is, so the scan never passes without reading every file it names.
+fn rust_files(root: &Path) -> (Vec<(String, String)>, Vec<Problem>) {
+    let mut scan = Scan {
+        root,
+        files: Vec::new(),
+        problems: Vec::new(),
+    };
+    for krate in scan.entries(&root.join("crates")) {
+        if !scan.metadata(&krate).is_some_and(|m| m.is_dir()) {
             continue;
         }
         let build = krate.join("build.rs");
-        if build.is_file() {
-            out.push(build);
+        if scan.metadata(&build).is_some_and(|m| m.is_file()) {
+            scan.read(&build);
         }
         for dir in ["src", "tests", "benches"] {
-            walk(&krate.join(dir), &mut out);
+            let dir = krate.join(dir);
+            if scan.metadata(&dir).is_some_and(|m| m.is_dir()) {
+                scan.walk(&dir, &mut Vec::new());
+            }
         }
     }
-    let mut files: Vec<(String, String)> = out
-        .into_iter()
-        .map(|p| {
-            let rel = p.strip_prefix(root).unwrap_or(&p);
-            let name = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            let text = String::from_utf8_lossy(&std::fs::read(&p).unwrap_or_default()).into_owned();
-            (name, text)
-        })
-        .collect();
-    files.sort();
-    files
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in sorted_entries(dir) {
-        if entry.is_dir() {
-            walk(&entry, out);
-        } else if entry.extension().is_some_and(|e| e == "rs") && entry.is_file() {
-            out.push(entry);
-        }
-    }
-}
-
-/// The entries of `dir`, sorted; none when it is not a readable directory.
-fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    v.sort();
-    v
+    scan.files.sort();
+    (scan.files, scan.problems)
 }
 
 #[cfg(test)]
@@ -487,6 +573,112 @@ mod tests {
                 "tokio::net::unix"
             )]
         );
+    }
+
+    /// Makes `p` unreadable (mode 000) and runs `f`, then restores the mode. Returns `None` when
+    /// the mode does not stop this user (root), so the caller skips its checks.
+    #[cfg(unix)]
+    fn unreadable<T>(p: &Path, f: impl FnOnce() -> T) -> Option<T> {
+        use std::os::unix::fs::PermissionsExt;
+        let before = std::fs::metadata(p).unwrap().permissions();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let blocked = if p.is_dir() {
+            std::fs::read_dir(p).is_err()
+        } else {
+            std::fs::read(p).is_err()
+        };
+        let out = blocked.then(f);
+        std::fs::set_permissions(p, before).unwrap();
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ps11_an_unreadable_source_file_is_named() {
+        let path = "crates/rdy-engine/src/reviewer_forbidden.rs";
+        let d = tree(&[
+            (path, "use std::os::unix::fs::MetadataExt;\n"),
+            ("crates/rdy-engine/src/lib.rs", "fn f() {}\n"),
+        ]);
+        assert_eq!(
+            problems_with(d.path(), &[], &[]),
+            vec![move_it(path, 1, "std::os::unix")]
+        );
+        let p = d.path().join(path);
+        // An unreadable allowlisted file is named once, not also as "has 0 lines".
+        let allow = [(path, 1, "a test")];
+        let got = unreadable(&p, || {
+            let err = std::fs::read(&p).unwrap_err();
+            (
+                problems_with(d.path(), &[], &[]),
+                problems_with(d.path(), &[], &allow),
+                err.to_string(),
+            )
+        });
+        if let Some((got, allowed, err)) = got {
+            let want = vec![format!("{path}: cannot be scanned: {err}")];
+            assert_eq!(got, want);
+            assert_eq!(allowed, want);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ps11_an_unreadable_directory_is_named() {
+        let d = tree(&[
+            (
+                "crates/rdy-engine/src/hidden/forbidden.rs",
+                "use std::os::unix::fs::MetadataExt;\n",
+            ),
+            ("crates/rdy-engine/src/lib.rs", "fn f() {}\n"),
+        ]);
+        let p = d.path().join("crates/rdy-engine/src/hidden");
+        let got = unreadable(&p, || {
+            let err = std::fs::read_dir(&p).unwrap_err();
+            (problems_with(d.path(), &[], &[]), err.to_string())
+        });
+        if let Some((got, err)) = got {
+            assert_eq!(
+                got,
+                vec![format!(
+                    "crates/rdy-engine/src/hidden: cannot be scanned: {err}"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn ps11_absent_tests_and_benches_directories_are_fine() {
+        // A crate with only src/, and a crate with no src/, tests/ or benches/ at all.
+        let got = bare(&[
+            ("crates/rdy-engine/src/lib.rs", "fn f() {}\n"),
+            ("crates/rdy-empty/Cargo.toml", "[package]\n"),
+        ]);
+        assert_eq!(got, Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ps11_a_directory_cycle_is_named_and_the_scan_ends() {
+        let d = tree(&[("crates/rdy-engine/src/lib.rs", "fn f() {}\n")]);
+        let src = d.path().join("crates/rdy-engine/src");
+        std::os::unix::fs::symlink(".", src.join("a")).unwrap();
+        std::os::unix::fs::symlink(".", src.join("b")).unwrap();
+        let root = d.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(problems_with(&root, &[], &[]));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the scan did not end within 10 s");
+        let cycle = |link: &str| {
+            format!(
+                "crates/rdy-engine/src/{link}: leads back to crates/rdy-engine/src, a directory \
+                 the scan is already in; remove the link"
+            )
+        };
+        assert_eq!(got, vec![cycle("a"), cycle("b")]);
     }
 
     #[test]
