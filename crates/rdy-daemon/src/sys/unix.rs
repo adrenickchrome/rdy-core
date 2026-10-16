@@ -309,7 +309,7 @@ mod tests {
     };
     use std::fs::{self, OpenOptions};
     use std::io;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
     use std::process::{Command, ExitStatus};
@@ -376,37 +376,107 @@ mod tests {
         open_no_follow(OpenOptions::new().read(true), &target).unwrap();
     }
 
+    /// The umask the child case runs under, in octal, and the directory it works in. The
+    /// parent test sets both; without them the child case does nothing.
+    const CHILD_UMASK: &str = "RDY_PS6_CHILD_UMASK";
+    const CHILD_DIR: &str = "RDY_PS6_CHILD_DIR";
+
     #[test]
     fn ps6_private_files_and_dirs_get_0600_and_0700_whatever_the_umask() {
-        let d = tempfile::tempdir().unwrap();
-        // a new file opened private
-        let new = d.path().join("new");
+        // Each umask runs in its own process, so it touches no other test, and is set by
+        // `sh`, so the test needs no `unsafe`. 000 masks nothing: a creation mode wider than
+        // 0o600 or 0o700 shows. 077 is the usual umask. 277 masks the owner's write and
+        // execute bits: only the make_private_* calls give the exact modes.
+        let name = format!(
+            "{}::ps6_private_modes_under_the_child_umask",
+            module_path!().split_once("::").unwrap().1
+        );
+        let exe = std::env::current_exe().unwrap();
+        for umask in ["000", "077", "277"] {
+            let d = tempfile::tempdir().unwrap();
+            // the fixture directory stays usable whatever umask this process has
+            fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let out = Command::new("/bin/sh")
+                .args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
+                .arg(&exe)
+                .args([&name, "--exact", "--test-threads=1", "--nocapture"])
+                .env(CHILD_UMASK, umask)
+                .env(CHILD_DIR, d.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "umask {umask}: {}\n{stdout}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// The child case of the test above: it runs only in the process that test starts.
+    #[test]
+    fn ps6_private_modes_under_the_child_umask() {
+        let (Some(umask), Some(dir)) = (std::env::var_os(CHILD_UMASK), std::env::var_os(CHILD_DIR))
+        else {
+            return;
+        };
+        let umask = u32::from_str_radix(umask.to_str().unwrap(), 8).unwrap();
+        let d = Path::new(&dir);
+        // the umask is in effect
+        let probe = d.join("probe");
         drop(
-            private_file(OpenOptions::new().write(true).create_new(true))
-                .open(&new)
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o666)
+                .open(&probe)
                 .unwrap(),
         );
+        assert_eq!(mode(&probe), 0o666 & !umask, "the umask is {umask:03o}");
+        // a new file opened private: 0o600 less the umask, then exactly 0o600
+        let new = d.join("new");
+        let f = private_file(OpenOptions::new().write(true).create_new(true))
+            .open(&new)
+            .unwrap();
+        assert_eq!(
+            mode(&new),
+            0o600 & !umask,
+            "creation mode, umask {umask:03o}"
+        );
+        make_private_file(&f).unwrap();
         assert_eq!(mode(&new), 0o600);
+        drop(f);
         // an existing 0o644 file, through its handle
-        let open = d.path().join("open");
+        let open = d.join("open");
         fs::write(&open, b"x").unwrap();
         fs::set_permissions(&open, fs::Permissions::from_mode(0o644)).unwrap();
         let f = OpenOptions::new().write(true).open(&open).unwrap();
         make_private_file(&f).unwrap();
         assert_eq!(mode(&open), 0o600);
         // an existing 0o644 file, by its path (the socket)
-        let by_path = d.path().join("by-path");
+        let by_path = d.join("by-path");
         fs::write(&by_path, b"x").unwrap();
         fs::set_permissions(&by_path, fs::Permissions::from_mode(0o644)).unwrap();
         make_private_path(&by_path).unwrap();
         assert_eq!(mode(&by_path), 0o600);
-        // a new directory
-        let dir = d.path().join("dir");
+        // a new directory: 0o700 less the umask, then exactly 0o700
+        let dir = d.join("dir");
         create_private_dir(&dir).unwrap();
+        assert_eq!(
+            mode(&dir),
+            0o700 & !umask,
+            "creation mode, umask {umask:03o}"
+        );
+        assert_eq!(
+            is_private_dir(&fs::symlink_metadata(&dir).unwrap()),
+            umask & 0o700 == 0
+        );
+        make_private_dir(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
         assert!(is_private_dir(&fs::symlink_metadata(&dir).unwrap()));
         // an existing 0o755 directory
-        let wide = d.path().join("wide");
+        let wide = d.join("wide");
         fs::create_dir(&wide).unwrap();
         fs::set_permissions(&wide, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!is_private_dir(&fs::symlink_metadata(&wide).unwrap()));
