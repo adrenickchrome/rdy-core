@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! dl6: rdy load rebuilds a project from a dump, byte for byte, then builds the index and runs
 //! fsck; a refused or failed load leaves the target as it was.
 use rdy_engine::{Rdy, load::load};

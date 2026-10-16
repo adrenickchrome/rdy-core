@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! cli2: every command is a client of the daemon; direct mode keeps the in-process path; serve
 //! starts, detaches and stops; the human comes from the user config and agents stay in their views.
 use rdy_daemon::E_DAEMON_START;

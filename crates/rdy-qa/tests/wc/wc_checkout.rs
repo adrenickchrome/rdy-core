@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcco1: rdy checkout writes the view as files with the metadata split (MS, FW-D10, FW-D14,
 //! FW-F2a), refuses over edits and untracked files, writes blobs, and the checked-out tree reads
 //! back as the view (invariant 7). The bound view is the CLI default view (D-874AS).

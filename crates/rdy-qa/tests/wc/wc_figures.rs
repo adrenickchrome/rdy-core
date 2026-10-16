@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcfg1: a figure enters through a file: commit stores the image as a blob, copies it to
 //! _blobs/<hash>.<ext> and rewrites the reference to the hash (spec §12.1, D-7BKK5).
 use rdy_engine::*;

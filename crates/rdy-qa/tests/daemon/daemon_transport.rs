@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! The daemon area, transport part (race1): real client processes and threads against a daemon
 //! in a child process, auto-start races, a stale socket, hostile hellos and lines.
 use rdy_daemon::*;

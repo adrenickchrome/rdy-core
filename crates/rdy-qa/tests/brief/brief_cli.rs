@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! cbrf1: rdy edit briefs, shows the briefing, cites its token and prints consequences.
 use rdy_engine::Rdy;
 use rdy_qa::daemon::Served;

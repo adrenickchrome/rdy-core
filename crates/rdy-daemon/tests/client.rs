@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it uses Unix sockets, file modes and symlinks. FW-XP1 Phase 4 ports it.
 //! The client's connect-or-start protocol (start1).
 mod common;
 use common::*;

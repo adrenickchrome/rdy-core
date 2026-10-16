@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it uses Unix sockets, owners and symlinks. FW-XP1 Phase 4 ports it.
 //! df3 (F12, D-YMWEM): a project whose `.rdy/run/rdy.sock` is longer than `sun_path` allows
 //! gets a short socket, `/tmp/rdy-<uid>/<hash>.sock`, in a directory only the user can read.
 //! Every other run file stays in `.rdy/run/`.

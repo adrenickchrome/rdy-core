@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it makes symlinks and uses path bytes. FW-XP1 Phase 4 ports it.
 //! wcly1: which files belong to the working tree (spec §12.1, D-7BKK5), what is untracked, and the
 //! working-copy reader, where new entries need no id, order or parent.
 use rdy_engine::wc::ignore::Ignore;

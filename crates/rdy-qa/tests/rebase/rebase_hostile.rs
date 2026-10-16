@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it reads the signal that ended a child. FW-XP1 Phase 4 ports it.
 //! vhost1: hostile view names and large sizes for views and rebase.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;

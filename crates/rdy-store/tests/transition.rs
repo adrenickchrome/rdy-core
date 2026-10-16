@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! ib14: the TRANSITION record, held batches and the open-move tables.
 use rdy_model::Hash;
 use rdy_store::kinds;

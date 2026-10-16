@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! The hello, starting/ready and the version handshake (hello1).
 mod common;
 use common::*;

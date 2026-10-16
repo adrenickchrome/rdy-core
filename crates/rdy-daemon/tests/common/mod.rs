@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it uses Unix sockets and path bytes. FW-XP1 Phase 4 ports it.
 #![allow(dead_code)]
 use rdy_daemon::*;
 use serde_json::{Value, json};

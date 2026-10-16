@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! The write and open path of one flush per write (plan M2.0): batch markers (mark1), segment
 //! rolls at batch boundaries (roll1), index rollback versus damage (kill1), checkpoints (ckpt1)
 //! and the streaming catch-up (cat1).
