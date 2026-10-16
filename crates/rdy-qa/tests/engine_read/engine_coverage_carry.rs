@@ -114,6 +114,28 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
             same_issues(&r, &v); // fix round 2: the carried issues too
         }
     }
+    // POST-LAUNCH 41: the ids of a run are random, so the walk may never find a childless
+    // section to delete (case 14) or a proposed decision to edit (case 11). Drive each missing
+    // case directly: seeds with `seed % 15 == case`, at most 50, until one write succeeds.
+    for case in 10..15u64 {
+        if written.get(&case).is_some_and(|n| *n > 0) {
+            continue;
+        }
+        for try_no in 0..50usize {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let forced = (seed >> 1) / 15 * 15 + case; // seed % 15 == case, no overflow
+            let ops = random_op(&r, &v, &c, forced, 300 + try_no);
+            if write(&mut r, "next", ops).is_ok() {
+                *written.entry(case).or_default() += 1;
+                r.read().coverage_issues(&v).unwrap();
+                same(&r, &v);
+                same_issues(&r, &v);
+                break;
+            }
+        }
+    }
     // final review I1, I4: the new cases are reached
     for case in 10..15 {
         assert!(
@@ -202,7 +224,9 @@ fn pick(ids: &[BlockId], seed: u64, fallback: &str) -> String {
     if ids.is_empty() {
         return fallback.to_string();
     }
-    ids[((seed >> 24) as usize) % ids.len()].to_string()
+    let mut sorted: Vec<&BlockId> = ids.iter().collect(); // by id, whatever the walk order
+    sorted.sort();
+    sorted[((seed >> 24) as usize) % sorted.len()].to_string()
 }
 
 /// One random write on the live ids of `scope`, chosen by `seed % 15`: create prose naming
