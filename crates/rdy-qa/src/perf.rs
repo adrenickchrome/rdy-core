@@ -6,9 +6,12 @@ use rdy_daemon::site::live::{LiveEvent, LiveSite, STREAM_QUEUE, Subscription};
 use rdy_daemon::{
     Attempt, Client, Hello, IdleHold, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, Shared,
 };
+use rdy_engine::answer::AnswerRequest;
+use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
 use rdy_engine::engine::write_typed;
+use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
 use rdy_engine::{Materialized, Rdy, Scope, Session, now_ms, testkit};
 use rdy_model::{Block, BlockId, Hash, Op, Role};
 use serde::{Deserialize, Serialize};
@@ -136,6 +139,10 @@ fn spec_target(op: &str) -> Option<String> {
         "write_batch_200" => {
             "no spec target: one write of 200 creates, one durable flush (recorded; the < 5 ms write budget is for one op)"
         }
+        "pending" => {
+            "no spec target: the needs-you queue with every open proposal carded (reported)"
+        }
+        "answer_later" => "no spec target: one relayed snooze, one ANSWER record (reported)",
         "propose_land_500_flat" => {
             "no spec target: one write of 500 docs and its landing (recorded; the < 5 ms write budget is for one op)"
         }
@@ -1367,6 +1374,62 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
             s.elapsed()
         },
     ));
+}
+
+/// The decision-intake ops (plan Decision intake, D-JV6Z8): the needs-you queue with every open
+/// proposal carded, and one relayed snooze. Two proposals with a summary are made first (untimed),
+/// so the queue holds cards beside whatever the tier's earlier ops left open. Run after the view
+/// ops, since the proposals it leaves behind would move the ops before it. The snooze is an
+/// `ANSWER` record bound to no session of the query, so every run answers the same first item.
+fn tier_intake(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: usize) {
+    let human = writer();
+    for i in 0..2 {
+        let name = format!("intake{i}");
+        write(
+            r,
+            &name,
+            json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": "Intake", "doc_type": "overview"}}]),
+        )
+        .expect("intake write");
+        r.propose_with(
+            &human,
+            &name,
+            &name,
+            None,
+            Some("Perf intake proposal."),
+            None,
+        )
+        .expect("intake propose");
+    }
+    let query = PendingQuery {
+        person: crate::intake::PERSON.into(),
+        session_ref: None,
+        max_tokens: CARD_DEFAULT_TOKENS,
+    };
+    out.push(measure(&format!("pending{sfx}"), runs, |_| {
+        let p = r.read().pending(&query).expect("pending");
+        assert!(!p.items.is_empty(), "the queue holds no card");
+    }));
+    let first = r.read().pending(&query).expect("pending").items.remove(0);
+    let relay = RelayInput {
+        evidence: Some("later".into()),
+        question: Some("Shall I record your answer?".into()),
+        session_ref: Some("perf-chat".into()),
+        ..Default::default()
+    };
+    let agent = Session::agent("agent:relay".into(), Some("perf".into()), Role::Writer)
+        .expect("agent session");
+    out.push(measure(&format!("answer_later{sfx}"), runs, |_| {
+        let req = AnswerRequest {
+            r#ref: first.r#ref.clone(),
+            option: "later".into(),
+            card_hash: Some(first.card_hash.clone()),
+            relay: relay.clone(),
+            ..Default::default()
+        };
+        r.answer(&agent, crate::intake::PERSON, req)
+            .expect("answer later");
+    }));
 }
 
 /// Changes in flight for the `_1k` ops.
@@ -3575,6 +3638,7 @@ pub fn run_workload() -> Vec<Measure> {
     // timer, not by the first timed write (plan M2e2)
     r.reconcile_transitions().expect("reconcile");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_intake(&mut out, &mut r, "", TYPICAL_RUNS.view_ops);
     tier_versions_page(&mut out, &mut r, "vb", 5);
     tier_invariants(&mut out, &r, TYPICAL_RUNS.read);
     // after the view ops (the view it leaves behind would move the ops before it), before the
@@ -4294,6 +4358,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     r.reconcile_transitions().expect("reconcile");
     prepare_rebased_view(&mut r, &fx, &LARGE_RUNS);
     tier_views(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
+    tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);
     tier_inflight(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, INFLIGHT_N);
     tier_tensions(
         &mut out,
@@ -4936,6 +5001,30 @@ mod tests {
         assert!(spec_target("load_50k").is_some());
     }
 
+    /// The intake ops run end to end on a small tree with two proposals, and each has a reported
+    /// target and no spec ceiling.
+    #[test]
+    fn diperf1_the_intake_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6469_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let mut out = vec![];
+        tier_intake(&mut out, &mut r, "", 2);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["pending", "answer_later"]);
+        for m in &out {
+            assert!(m.median_ms >= 0.0, "{m:?}");
+            assert!(spec_target(&m.op).is_some(), "{} has no target", m.op);
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
+        }
+        assert!(spec_target("pending_50k").is_some());
+    }
+
     /// Final review M11 (minors item 27): `run_workload` runs the M2g ops, so taking the wiring
     /// out fails a test. Both tiers render cold after their warm render.
     #[test]
@@ -4952,6 +5041,7 @@ mod tests {
                 < at("tier_invariants(&mut out, &r, TYPICAL_RUNS.read);"),
             "the checker runs after the view ops"
         );
+        at("tier_intake(&mut out, &mut r, \"\", TYPICAL_RUNS.view_ops);");
         at("out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));");
         at("tier_render_cold(&mut out, &proj, dir.path(), \"\", 5);");
         at("tier_dump(&mut out, &proj, dir.path(), \"\", 5);");
@@ -4959,6 +5049,7 @@ mod tests {
         let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
         assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_dump(&mut out, &proj, parent, sfx, 3);"));
+        assert!(large.contains("tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);"));
     }
 
     /// Final review M2 (minors item 34): `render_cold` renders on a fresh handle, so each run
