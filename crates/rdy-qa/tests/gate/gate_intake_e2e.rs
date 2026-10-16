@@ -327,13 +327,19 @@ fn site_pages(url: &str) -> Vec<(String, String)> {
 /// `data-events` URL, which is page chrome and names no item to act on. Every other occurrence,
 /// in a title, in content, in a question, is a ref on the site.
 fn refs_outside_identity<'a>(page: &str, scope: &str, refs: &'a [String]) -> Vec<&'a str> {
-    // the one allowed spot, as the renderer writes it: `/_rdy/events?scope=<scope>&amp;`
+    // the one allowed spot, as the renderer writes it: the `data-events` value of the
+    // live-update script tag, which starts `/_rdy/events?scope=<scope>&amp;`
+    const TAG: &str = "<script src=\"/_rdy/live.js\" data-events=\"";
     let identity = format!("/_rdy/events?scope={scope}&amp;");
-    let rest = if scope.is_empty() {
-        page.to_string()
-    } else {
-        page.replace(&identity, "/_rdy/events?")
-    };
+    let mut rest = page.to_string();
+    if !scope.is_empty() {
+        if let Some(at) = page.find(TAG) {
+            let value_at = at + TAG.len();
+            if page[value_at..].starts_with(&identity) {
+                rest.replace_range(value_at..value_at + identity.len(), "/_rdy/events?");
+            }
+        }
+    }
     refs.iter()
         .filter(|r| rest.contains(r.as_str()))
         .map(String::as_str)
@@ -362,6 +368,31 @@ fn di14_the_ref_check_allows_the_scope_identity_and_nothing_else() {
             refs_outside_identity(&page, &scope, &refs),
             vec![pref.as_str()],
             "a ref in a {what} is not allowed"
+        );
+    }
+    // the scope URL text is exempt in the live-update script's data-events only: the same
+    // text in visible content, in a question, or in another element's attribute is caught
+    let url_text = format!("/_rdy/events?scope={scope}&amp;");
+    for (what, extra) in [
+        ("content", format!("<p>{url_text}page=x</p>")),
+        (
+            "question",
+            format!("<li class=\"q\">Answer {url_text}?</li>"),
+        ),
+        (
+            "another element",
+            format!("<div data-events=\"{url_text}page=x\">x</div>"),
+        ),
+        (
+            "a second script",
+            format!("<script src=\"/other.js\" data-events=\"{url_text}page=x\"></script>"),
+        ),
+    ] {
+        let page = format!("{clean}{extra}");
+        assert_eq!(
+            refs_outside_identity(&page, &scope, &refs),
+            vec![pref.as_str()],
+            "the scope URL in {what} is not the identity"
         );
     }
     // another item's ref is caught even inside the identity script's page
