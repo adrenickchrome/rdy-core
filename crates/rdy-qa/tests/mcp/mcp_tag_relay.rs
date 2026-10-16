@@ -77,6 +77,51 @@ fn doc_in(r: &mut Rdy, view: &str, name: &str) {
     .unwrap();
 }
 
+/// `Role::Approver`'s variant index in the frozen layout (Reader 0, Writer 1, Reviewer 2,
+/// Approver 3).
+const ROLE_APPROVER: u32 = 3;
+
+/// The TAG payload as store format 10 lays it out (postcard), written by hand so the test does
+/// not lean on `Tag`'s encoder (D-F0904): `name`, `landing` (32 raw bytes), `message`
+/// (option), then `tagged_by` as `actor`, `run` (option), `role` (variant index), `at_ms`
+/// (zigzag). Strings are a varint length and the UTF-8 bytes; an option is a 0 or 1 byte first.
+fn frozen_tag_bytes(
+    name: &str,
+    landing: &Hash,
+    message: Option<&str>,
+    (actor, run, role, at_ms): (&str, Option<&str>, u32, i64),
+) -> Vec<u8> {
+    fn varint(out: &mut Vec<u8>, mut n: u64) {
+        while n >= 0x80 {
+            out.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        out.push(n as u8);
+    }
+    fn string(out: &mut Vec<u8>, s: &str) {
+        varint(out, s.len() as u64);
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn option(out: &mut Vec<u8>, s: Option<&str>) {
+        match s {
+            None => out.push(0),
+            Some(s) => {
+                out.push(1);
+                string(out, s);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    string(&mut out, name);
+    out.extend_from_slice(&landing.0);
+    option(&mut out, message);
+    string(&mut out, actor);
+    option(&mut out, run);
+    varint(&mut out, u64::from(role));
+    varint(&mut out, ((at_ms << 1) ^ (at_ms >> 63)) as u64);
+    out
+}
+
 fn tag(st: &mut McpState, args: Value) -> Result<Value, RdyError> {
     rdy_tag(st, p(args))
 }
@@ -178,20 +223,28 @@ fn di9_a_relayed_tag_records_the_person_and_an_answer() {
     assert_eq!(a.evidence_kind, Some(EvidenceKind::Text));
     assert_eq!((a.option.as_deref(), a.card_hash), (None, None));
     assert_eq!(a.targets.len(), 1);
-    // the TAG encodes as before (D-F0904): its bytes hash to its id, and the person tagged it
+    // the TAG encodes as before (D-F0904): the stored bytes equal the frozen TAG layout written
+    // out by hand below, not by `Tag`'s own encoder, so a re-encoded TAG kind fails here
     let tag_hash = v["tag"].as_str().unwrap().parse::<Hash>().unwrap();
     assert_eq!(a.targets[0], tag_hash);
-    let t = on(&st, move |r| {
-        let (k, _) = r.store().get_raw(&tag_hash).unwrap();
-        let t = r.store().read_tag(&tag_hash).unwrap();
-        Ok(
-            json!({"kind": k, "same_id": t.id() == tag_hash, "by": t.tagged_by.actor,
-                  "run": t.tagged_by.run}),
-        )
-    });
+    let landing = v["landing"].as_str().unwrap().parse::<Hash>().unwrap();
+    let at_ms = v["at_ms"].as_i64().unwrap();
+    let frozen = frozen_tag_bytes(
+        "v0.1.0",
+        &landing,
+        Some("first"),
+        ("human:qa", Some("cli"), ROLE_APPROVER, at_ms),
+    );
     assert_eq!(
-        t,
-        json!({"kind": kinds::TAG, "same_id": true, "by": "human:qa", "run": "cli"})
+        Hash::of(&frozen),
+        tag_hash,
+        "the tag's id is the frozen bytes' hash"
+    );
+    let (k, raw): (u8, Vec<u8>) = p(on(&st, move |r| Ok(r.store().get_raw(&tag_hash).unwrap())));
+    assert_eq!(k, kinds::TAG);
+    assert_eq!(
+        raw, frozen,
+        "the TAG payload keeps its store format 10 layout"
     );
     let fsck = on(&st, |r| r.fsck().map(|_| true));
     assert_eq!(fsck, json!(true));
