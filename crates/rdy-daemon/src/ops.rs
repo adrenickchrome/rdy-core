@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 mod brief;
 mod dump;
 mod edit;
+mod intake;
 mod land;
 mod project;
 mod read;
@@ -31,6 +32,7 @@ mod wc;
 use brief::brief;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_folder};
+use intake::{answer, pending};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
@@ -91,6 +93,8 @@ pub const OPS: &[&str] = &[
     "coverage",
     "inbox",
     "site_url",
+    "pending",
+    "answer",
 ];
 
 #[derive(Deserialize)]
@@ -347,7 +351,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         ),
         "propose" => propose(
             cx,
-            parse(op, args, "{title, view?, summary?, max_tokens?}")?,
+            parse(
+                op,
+                args,
+                "{title, view?, summary?, max_tokens?, alternatives?, relayed_by?, evidence?, question?, session_ref?}",
+            )?,
         ),
         "approve" => approve(
             cx,
@@ -357,7 +365,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{proposal, relayed_by?, evidence?, question?, session_ref?, strict?}",
             )?,
         ),
-        "tag" => tag(cx, parse(op, args, "{version, landing?, message?}")?),
+        "tag" => tag(
+            cx,
+            parse(
+                op,
+                args,
+                "{version, landing?, message?, relayed_by?, evidence?, question?, session_ref?}",
+            )?,
+        ),
         "import" => import(cx, parse(op, args, "{dir, view}")?),
         "reindex" => {
             parse::<NoArgs>(op, args, "{}")?;
@@ -432,6 +447,15 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             run_inbox(cx.engine, cx.session, req)
         }
         "site_url" => site_url(cx, parse(op, args, "{scope?}")?),
+        "pending" => pending(cx, parse(op, args, "{max_tokens?, session_ref?}")?),
+        "answer" => answer(
+            cx,
+            parse(
+                op,
+                args,
+                "{ref?, option?, card_hash?, note?, brief?, relayed_by?, evidence?, question?, session_ref?, kind?, all_recommended?}",
+            )?,
+        ),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

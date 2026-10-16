@@ -224,6 +224,13 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             "strict": strict.then_some(true),
         }),
     )?;
+    let t = approve_text(&v);
+    Ok((v, t))
+}
+
+/// The landing lines of an approval, from its reply: the proposal, its summary, the landing,
+/// the relay, the chosen alternative, the consequences, the rebases, new keys and warnings.
+pub(crate) fn approve_text(v: &Value) -> String {
     let approved = text(&v["approved"]);
     let mut t = format!(
         "approving {approved}: {} ({} change(s))",
@@ -237,7 +244,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
         "\nlanded {} ({approved})",
         hash_short(text(&v["landing"]))
     ));
-    t.push_str(&relayed_by_text(&v));
+    t.push_str(&relayed_by_text(v));
     if let Some(member) = v["chosen"]["member"].as_str() {
         t.push_str(&format!(
             "\nchose {member} of {}",
@@ -253,7 +260,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             t.push_str(&format!("; closed {}", closed.join(", ")));
         }
     }
-    t.push_str(&brief_text::consequences_text(&v));
+    t.push_str(&brief_text::consequences_text(v));
     for r in v["rebased"].as_array().into_iter().flatten() {
         if num(&r["conflicts"]) > 0 {
             t.push_str(&format!(
@@ -263,7 +270,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             ));
         }
     }
-    t.push_str(&new_keys_text(&v));
+    t.push_str(&new_keys_text(v));
     for w in v["warnings"].as_array().into_iter().flatten() {
         t.push_str(&format!(
             "\nwarning {}: {}",
@@ -271,7 +278,7 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
             text(&w["message"])
         ));
     }
-    Ok((v, t))
+    t
 }
 
 /// `, relayed by <actor>[/<run>]`: the relayer as recorded (the session's actor and run, which

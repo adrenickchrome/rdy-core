@@ -36,7 +36,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 37);
+    assert_eq!(OPS.len(), 39);
     assert_eq!(OPS[0], "session");
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
@@ -761,4 +761,42 @@ fn cc15_status_builds_no_coverage_report_and_agrees_with_it() {
     ] {
         assert_eq!(v["coverage"][k], report[k], "{k}: {v:#} vs {report:#}");
     }
+}
+
+#[test]
+fn di12_pending_and_answer_refuse_a_field_they_do_not_take() {
+    // FW-HD1: every mutation request refuses unknown fields, and so do the queue's ops
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let q = dispatch(&c, "pending", json!({})).unwrap();
+    assert_eq!(q["items"], json!([]), "{q}");
+    assert_eq!(q["snoozed"], 0, "{q}");
+    for (op, args) in [
+        ("pending", json!({"max_tokens": 100, "limit": 3})),
+        (
+            "answer",
+            json!({"ref": "P-x@1", "option": "approve", "force": true}),
+        ),
+        (
+            "answer",
+            json!({"all_recommended": [{"ref": "P-x@1", "hash": "00"}]}),
+        ),
+    ] {
+        let err = dispatch(&c, op, args).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{op}: {err}");
+    }
+    // a malformed item ref is bad input too, not a missing item
+    let err = dispatch(&c, "answer", json!({"ref": "nope", "option": "approve"})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    // a request must name its item, or the items to answer with their recommendation
+    let err = dispatch(&c, "answer", json!({"option": "approve"})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    let err = dispatch(
+        &c,
+        "answer",
+        json!({"ref": "P-x@1", "option": "approve", "all_recommended": [{"ref": "P-x@1"}]}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
 }

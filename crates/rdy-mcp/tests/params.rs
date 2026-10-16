@@ -240,15 +240,16 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 37 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 40 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
-    // `RelayParams`).
+    // `RelayParams`, `RecommendedParams`).
     check!(
         AcceptAdviceParams,
         AcceptParams,
         AltMemberParams,
         AltPickParams,
         AltParams,
+        AnswerParams,
         AssetParams,
         BriefParams,
         CoverageParams,
@@ -263,8 +264,10 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         LoadParams,
         LogParams,
         MentionParams,
+        PendingParams,
         ProposeParams,
         ReadParams,
+        RecommendedParams,
         RelayParams,
         ResolveParams,
         ReviewNextParams,

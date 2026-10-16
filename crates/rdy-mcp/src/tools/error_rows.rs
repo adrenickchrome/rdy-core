@@ -159,4 +159,19 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
         "add the section, or give the doc a doc_type without it (page)",
     ),
+    (
+        "E_EXCEPTION_OPEN",
+        "an approval names a version whose exceptions have no answer",
+        "answer each exception card first",
+    ),
+    (
+        "E_ITEM_MOVED",
+        "the item changed since its card was shown",
+        "show the fresh card and ask again",
+    ),
+    (
+        "W_CARD_WORDS",
+        "a decision or question lacks its card words, or they are too long",
+        "add a short title, a one-line why and, for a question, two to four options",
+    ),
 ];

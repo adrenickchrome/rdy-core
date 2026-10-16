@@ -1,0 +1,23 @@
+//! The `intake` family's tool registration.
+
+use crate::params::Parameters;
+use crate::server::RdyServer;
+use crate::tools::{self, AnswerParams, PendingParams};
+use rmcp::{model::CallToolResult, tool, tool_router};
+
+#[tool_router(router = intake_router, vis = "pub(crate)")]
+impl RdyServer {
+    #[tool(
+        description = "Read what waits for the person: {items, not_ready, snoozed, omitted}. Each item has a ref, its kind (approve, confirm, answer, resolve), its options, its card and card_hash. Show the card to the person word for word; never change its options, recommendation or consequences. A batch (approve) stands first, its exceptions (confirm) beside it. Pass session_ref (the chat session) so Later hides a card only there; max_tokens cuts each card. not_ready lists the versions that need work from you first."
+    )]
+    async fn rdy_pending(&self, Parameters(p): Parameters<PendingParams>) -> CallToolResult {
+        self.run("rdy_pending", p, tools::rdy_pending).await
+    }
+
+    #[tool(
+        description = "Relay the person's answer to one card: ref, option (an option id of the card), card_hash (of the card you showed) and the person's words as evidence. It records the person as the one who answered and you as the relay. A card or version that changed is refused with the fresh card in corrected; show it and ask again. An approval waits until every exception beside the batch has a confirm answer. Pass all_recommended: [{ref, card_hash}] to answer each item with its recommended option. kind is card (default) or text. brief is for a question under stable content."
+    )]
+    async fn rdy_answer(&self, Parameters(p): Parameters<AnswerParams>) -> CallToolResult {
+        self.run("rdy_answer", p, tools::rdy_answer).await
+    }
+}

@@ -14,6 +14,7 @@ mod mcp_history;
 mod mcp_inbox;
 mod mcp_inbox_session;
 mod mcp_instructions;
+mod mcp_intake;
 mod mcp_intents;
 mod mcp_log;
 mod mcp_mentions;
