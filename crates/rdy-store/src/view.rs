@@ -164,6 +164,33 @@ struct Resolver<'r> {
     view: &'r str,
     resolved: HashMap<Hash, ResolvedOp>,
     owner_after: HashMap<Hash, Option<Owner>>,
+    effects: HashMap<Hash, Effect>,
+}
+
+/// The kind of effect an op has, without what it changes: enough to tell a close from the rest
+/// (`closed_after`). `Change` is an include or an exclude. `Checkpoint` is a `Create` or a
+/// `Fork`: its effect is `ResolvedOp::Nothing`, and its undo closes the view. Only a checkpoint
+/// resolves to `Nothing`, so no other variant is needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Effect {
+    Change,
+    Close,
+    Reopen,
+    Owner,
+    Checkpoint,
+}
+
+impl Effect {
+    /// The kind of effect an undo of an op with effect `self` has, as `Resolver::inverse` gives.
+    fn inverse(self) -> Effect {
+        match self {
+            Effect::Change => Effect::Change,
+            Effect::Close => Effect::Reopen,
+            Effect::Reopen => Effect::Close,
+            Effect::Owner => Effect::Owner,
+            Effect::Checkpoint => Effect::Close,
+        }
+    }
 }
 
 impl<'r> Resolver<'r> {
@@ -173,7 +200,44 @@ impl<'r> Resolver<'r> {
             view,
             resolved: HashMap::new(),
             owner_after: HashMap::new(),
+            effects: HashMap::new(),
         }
+    }
+
+    /// The kind of effect op `op_id` has, with an `Undo` followed through its targets only: the
+    /// same checks as `resolve` (the op is on this chain, the undo depth, no undo of a rebase),
+    /// but no owner or change set is rebuilt, so it reads the op and the ops it undoes, never the
+    /// history before them. `depth` counts the undos followed to reach it.
+    fn effect(&mut self, op_id: &Hash, depth: u32) -> Result<Effect, StoreError> {
+        if let Some(e) = self.effects.get(op_id) {
+            return Ok(*e);
+        }
+        let op = self.op(op_id)?;
+        if depth > MAX_UNDO_DEPTH {
+            return Err(StoreError::UndoTooDeep {
+                view: self.view.to_string(),
+                op: *op_id,
+            });
+        }
+        let e = match op.op {
+            ViewOpKind::Commit { .. } | ViewOpKind::Include { .. } | ViewOpKind::Exclude { .. } => {
+                Effect::Change
+            }
+            ViewOpKind::Close { .. } => Effect::Close,
+            ViewOpKind::Own { .. } => Effect::Owner,
+            ViewOpKind::Create { .. } | ViewOpKind::Fork { .. } => Effect::Checkpoint,
+            ViewOpKind::Rebase { .. } => return Err(self.undone_rebase(op_id)),
+            ViewOpKind::Undo { target } => self.effect(&target, depth + 1)?.inverse(),
+        };
+        self.effects.insert(*op_id, e);
+        Ok(e)
+    }
+
+    fn undone_rebase(&self, op_id: &Hash) -> StoreError {
+        StoreError::Decode(format!(
+            "view {:?}: op {op_id} is a rebase, which cannot be undone",
+            self.view
+        ))
     }
 
     /// Op `op_id`, which must be on this view's chain.
@@ -206,12 +270,7 @@ impl<'r> Resolver<'r> {
             ViewOpKind::Close { .. } => ResolvedOp::Close,
             ViewOpKind::Own { owner } => ResolvedOp::SetOwner(owner),
             ViewOpKind::Create { .. } | ViewOpKind::Fork { .. } => ResolvedOp::Nothing,
-            ViewOpKind::Rebase { .. } => {
-                return Err(StoreError::Decode(format!(
-                    "view {:?}: op {op_id} is a rebase, which cannot be undone",
-                    self.view
-                )));
-            }
+            ViewOpKind::Rebase { .. } => return Err(self.undone_rebase(op_id)),
             ViewOpKind::Undo { target } => {
                 let undone = self.resolve(&target, depth + 1)?;
                 self.inverse(&target, undone, depth)?
@@ -384,15 +443,24 @@ impl StoreReader {
         }
     }
 
-    /// Whether view `name`'s chain took a close after the log took object `object` (D-K0SS1): an
-    /// op of the chain from `head` back, written after `object`, whose effect is
-    /// `ResolvedOp::Close` (a `Close`, or an `Undo` that closes again). The walk goes back from
-    /// `head` and stops at the first op the log holds before `object`. It reads no clock.
-    /// `object` must be indexed (`NotFound`); an op the index lacks is a broken chain.
-    pub fn closed_after(&self, name: &str, head: &Hash, object: &Hash) -> Result<bool, StoreError> {
+    /// Whether view `name`'s chain took a close after the log took the object of kind `kind`
+    /// with hash `object` (D-K0SS1): an op of the chain from `head` back, written after that
+    /// object, whose effect is `ResolvedOp::Close` (a `Close`, or an `Undo` that closes again).
+    /// The mark is that kind's frame, never another kind's frame with the same bytes. The walk
+    /// goes back from `head` and stops at the first op the log holds before the mark. An `Undo`
+    /// is followed through its targets only, with the checks `resolve` makes, so the read does
+    /// not grow with the history before the mark. It reads no clock. The object must be indexed
+    /// (`NotFound`); an op the index lacks is a broken chain.
+    pub fn closed_after(
+        &self,
+        name: &str,
+        head: &Hash,
+        kind: u8,
+        object: &Hash,
+    ) -> Result<bool, StoreError> {
         let mark = self
             .index()
-            .object(object)?
+            .typed(kind, object)?
             .ok_or(StoreError::NotFound(*object))?;
         let mut resolver = Resolver::new(self, name);
         let mut cur = *head;
@@ -414,7 +482,9 @@ impl StoreReader {
             }
             let closes = match op.op {
                 ViewOpKind::Close { .. } => true,
-                ViewOpKind::Undo { .. } => resolver.resolve(&cur, 0)? == ResolvedOp::Close,
+                ViewOpKind::Undo { target } => {
+                    resolver.effect(&target, 1)?.inverse() == Effect::Close
+                }
                 _ => false,
             };
             if closes {

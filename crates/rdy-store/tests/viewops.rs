@@ -733,3 +733,114 @@ fn mfb3_commit_many_refuses_a_block_in_two_changes() {
     );
     assert!(s.view_head("v").unwrap().is_none());
 }
+
+/// The frames `closed_after` reads for a version proposed after `n` commits and an `Own`, with
+/// one op after the version: an undo of that `Own`.
+fn closed_after_reads(n: usize) -> u64 {
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    for i in 1..=n {
+        create(&mut s, "a", &format!("c-{i:05}"), &by);
+    }
+    let own = s
+        .view_append(
+            "a",
+            vec![ViewOpKind::Own {
+                owner: Some(owner("agent:b")),
+            }],
+            &by,
+        )
+        .unwrap()
+        .head;
+    let p = s.propose("a", "T", by.clone()).unwrap();
+    let head = s
+        .view_append("a", vec![ViewOpKind::Undo { target: own }], &by)
+        .unwrap()
+        .head;
+    let before = s.frames_read();
+    assert!(
+        !s.closed_after("a", &head, rdy_store::kinds::PROPOSAL, &p)
+            .unwrap(),
+        "no close"
+    );
+    s.frames_read() - before
+}
+
+/// vw1 fix round 1: whether a close followed a version reads the ops after it and what each
+/// undo among them targets, never the history before the version (an undo of an `Own` is no
+/// close, whatever owner it restores).
+#[test]
+fn vw1_closed_after_reads_no_history_before_the_version() {
+    let one = closed_after_reads(1);
+    assert_eq!(closed_after_reads(128), one, "128 earlier commits");
+    assert_eq!(closed_after_reads(512), one, "512 earlier commits");
+    assert!(one <= 3, "the undo and its target: {one} frames");
+}
+
+/// vw1 fix round 1: `closed_after` tells a closing undo as the full resolve does. After a
+/// version: an undo of the commit and of the `Own` close nothing; an undo of the view's create
+/// closes it; an undo of that undo reopens it, and the earlier close still counts.
+#[test]
+fn vw1_closed_after_tells_a_closing_undo_as_undo_effect_does() {
+    use rdy_store::ResolvedOp;
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    let commit = create(&mut s, "a", "c-00001", &by);
+    let mut first = s.view_head("a").unwrap().unwrap().head;
+    let commit_op = first;
+    while let Some(prev) = s.view_op(&first).unwrap().prev {
+        first = prev;
+    }
+    assert!(matches!(
+        s.view_op(&first).unwrap().op,
+        ViewOpKind::Create { .. }
+    ));
+    let own = s
+        .view_append(
+            "a",
+            vec![ViewOpKind::Own {
+                owner: Some(owner("agent:b")),
+            }],
+            &by,
+        )
+        .unwrap()
+        .head;
+    let p = s.propose("a", "T", by.clone()).unwrap();
+    let pk = rdy_store::kinds::PROPOSAL;
+    let undo = |s: &mut Store, target: Hash| {
+        s.view_append("a", vec![ViewOpKind::Undo { target }], &by)
+            .unwrap()
+            .head
+    };
+    let h = undo(&mut s, own);
+    assert!(
+        !s.closed_after("a", &h, pk, &p).unwrap(),
+        "an undo of an own"
+    );
+    let h = undo(&mut s, commit_op);
+    assert_eq!(
+        s.undo_effect("a", &commit_op).unwrap(),
+        ResolvedOp::Exclude(vec![commit])
+    );
+    assert!(
+        !s.closed_after("a", &h, pk, &p).unwrap(),
+        "an undo of a commit"
+    );
+    assert_eq!(s.undo_effect("a", &first).unwrap(), ResolvedOp::Close);
+    let closing = undo(&mut s, first);
+    assert!(
+        s.closed_after("a", &closing, pk, &p).unwrap(),
+        "an undo of the create"
+    );
+    assert_eq!(s.undo_effect("a", &closing).unwrap(), ResolvedOp::Reopen);
+    let h = undo(&mut s, closing);
+    assert!(!s.view_head("a").unwrap().unwrap().closed);
+    assert!(
+        s.closed_after("a", &h, pk, &p).unwrap(),
+        "the earlier close counts"
+    );
+    let e = s
+        .closed_after("a", &h, rdy_store::kinds::BLOB_CHUNK, &p)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::NotFound(_)), "{e:?}");
+}

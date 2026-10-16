@@ -342,3 +342,82 @@ fn vw1_a_landed_version_stays_landed_after_its_view_closes() {
     r.view_close(&writer(), &["v".into()], "done").unwrap();
     assert_eq!(state_of(&r, &p.r#ref), "landed");
 }
+
+/// What `proposal_show` and `open_proposals` say of version `id` in the project at `dir`.
+fn read_back(dir: &std::path::Path, id: &rdy_model::Hash) -> (String, Vec<String>) {
+    let r = Rdy::open(dir).unwrap();
+    let state = r.read().proposal_show(&id.to_string()).unwrap().state;
+    let open = open_refs(&r);
+    r.close().unwrap();
+    (state, open)
+}
+
+/// Fix round 1 (D-K0SS1, the log order): the withdrawal boundary is the version's PROPOSAL
+/// frame, never the first frame with its bytes. A blob chunk with the bytes of a later version,
+/// written before a close and its undo, does not make that version withdrawn: not when it is
+/// proposed, not after a reindex, and not after a dump and a load.
+#[test]
+fn vw1_a_blob_with_a_versions_bytes_before_a_close_does_not_withdraw_it() {
+    use rdy_model::{Proposal, Provenance, Role};
+    use rdy_store::Store;
+    use rdy_store::view::ViewOpKind;
+    let (d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(&mut r, "v", claim(&section, "a")).unwrap();
+    r.close().unwrap();
+    let mut s = Store::open(&d.path().join(".rdy/store")).unwrap();
+    let by = Provenance {
+        actor: "agent:w".into(),
+        run: Some("r".into()),
+        role: Role::Writer,
+        at_ms: 7,
+    };
+    // the version `Store::propose` writes below, as its bytes
+    let p = Proposal {
+        stable: None,
+        prev: None,
+        title: "first".into(),
+        view: "v".into(),
+        changes: s.included("v").unwrap().as_ref().clone(),
+        alternative: None,
+        provenance: by.clone(),
+        canon_at: s.canon_head().unwrap(),
+        summary: None,
+    };
+    s.put_blob(&postcard::to_allocvec(&p).unwrap()).unwrap();
+    let close = s
+        .view_append(
+            "v",
+            vec![ViewOpKind::Close {
+                reason: "done".into(),
+            }],
+            &by,
+        )
+        .unwrap()
+        .head;
+    s.view_append("v", vec![ViewOpKind::Undo { target: close }], &by)
+        .unwrap();
+    let id = s.propose("v", "first", by).unwrap();
+    assert_eq!(id, p.id(), "the blob chunk holds the version's bytes");
+    drop(s);
+    let (state, open) = read_back(d.path(), &id);
+    assert_eq!(state, "open", "the close precedes the version");
+    assert_eq!(open.len(), 1, "{open:?}");
+    let mut r = Rdy::open(d.path()).unwrap();
+    r.reindex().unwrap();
+    r.close().unwrap();
+    assert_eq!(
+        read_back(d.path(), &id),
+        (state.clone(), open.clone()),
+        "reindex"
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    let r = Rdy::open(d.path()).unwrap();
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    let to = scratch.path().join("loaded");
+    rdy_engine::load::load(&file, &to).unwrap();
+    assert_eq!(read_back(&to, &id), (state, open), "dump and load");
+}
