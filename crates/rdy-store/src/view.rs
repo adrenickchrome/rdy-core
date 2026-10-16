@@ -8,9 +8,9 @@ use crate::error::StoreError;
 use crate::kinds;
 use crate::merge::Conflict;
 use crate::state::view_ref;
-use crate::store::encode;
+use crate::store::{Frames, encode};
 use crate::{Store, StoreReader};
-use rdy_model::{Hash, Provenance};
+use rdy_model::{Answer, Hash, Provenance};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -607,6 +607,53 @@ impl Store {
         ops: Vec<ViewOpKind>,
         by: &Provenance,
     ) -> Result<ViewHead, StoreError> {
+        let (items, new_head, _) = self.view_append_frames(name, ops, by)?;
+        self.write(items)?;
+        Ok(new_head)
+    }
+
+    /// `view_append` for several views, with the answer `a` that holds a person's relay in the
+    /// same batch (O14, D-DGCH7): every view's ops and head, then `a` with `targets` set to the
+    /// view ops written, and its ref. Each view passes the checks of `view_append` before
+    /// anything is written. Refuses, with nothing written, an empty list, a view named twice and
+    /// an answer that breaks a rule of the record. Returns each view's new head, in the given
+    /// order, and the answer's id.
+    pub fn view_append_answered(
+        &mut self,
+        appends: &[(String, Vec<ViewOpKind>)],
+        by: &Provenance,
+        a: Answer,
+    ) -> Result<(Vec<ViewHead>, Hash), StoreError> {
+        if appends.is_empty() {
+            return Err(StoreError::Decode("view_append_answered: no views".into()));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut items = vec![];
+        let mut heads = vec![];
+        let mut targets = vec![];
+        for (name, ops) in appends {
+            if !seen.insert(name.as_str()) {
+                return Err(StoreError::Decode(format!(
+                    "view_append_answered: view {name:?} is named twice"
+                )));
+            }
+            let (frames, head, written) = self.view_append_frames(name, ops.clone(), by)?;
+            items.extend(frames);
+            heads.push(head);
+            targets.extend(written);
+        }
+        let a = Answer { targets, ..a };
+        Ok((heads, self.put_answer_with(&a, items)?))
+    }
+
+    /// The frames `view_append` writes for view `name`, its new head, and the ids of the view
+    /// ops among them. Nothing is written here.
+    fn view_append_frames(
+        &self,
+        name: &str,
+        ops: Vec<ViewOpKind>,
+        by: &Provenance,
+    ) -> Result<(Frames, ViewHead, Vec<Hash>), StoreError> {
         // 1. the head and the ops
         let head = self
             .view_head(name)?
@@ -653,6 +700,7 @@ impl Store {
         }
         // 4. one op each, applied in order
         let mut items = vec![];
+        let mut written = vec![];
         for op in ops {
             match &op {
                 ViewOpKind::Include { changes } => set.include(changes.clone()),
@@ -686,6 +734,7 @@ impl Store {
             }
             let bytes = encode(&view_op(name, prev, op, by));
             prev = Some(Hash::of(&bytes));
+            written.extend(prev);
             items.push((kinds::VIEW_OP, bytes));
         }
         // 5. the new head, in the same write
@@ -699,8 +748,7 @@ impl Store {
             last_write_ms: last_write,
         };
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
-        self.write(items)?;
-        Ok(new_head)
+        Ok((items, new_head, written))
     }
 
     /// A `Close { reason }` op of view `name` after its head `prev_head`, for a caller's batch

@@ -47,20 +47,49 @@ pub enum ViewCmd {
         #[arg(long)]
         all: bool,
     },
-    /// Close views, or with --stale the views idle that many days. Human only for --stale.
+    /// Close views, or with --stale the views idle that many days. --stale is a person's act:
+    /// an agent session relays it with the person's words (--relayed-by and --evidence).
     Close {
         views: Vec<String>,
         #[arg(long)]
         reason: Option<String>,
         #[arg(long)]
         stale: Option<u32>,
+        /// With --stale: the person's words, quoted, when an agent relays the act. Requires
+        /// --relayed-by.
+        #[arg(long, value_name = "WORDS", requires_all = ["stale", "relayed_by"])]
+        evidence: Option<String>,
+        /// The agent that relays the person's act: your own actor (or actor/run). Only an agent
+        /// session relays. Requires --evidence.
+        #[arg(long, value_name = "ACTOR[/RUN]", requires_all = ["stale", "evidence"])]
+        relayed_by: Option<String>,
+        /// The question the person was asked.
+        #[arg(long, value_name = "TEXT", requires = "evidence")]
+        question: Option<String>,
+        /// Where the person said it (default: cli).
+        #[arg(long = "session", value_name = "REF", requires = "evidence")]
+        session_ref: Option<String>,
     },
-    /// Hand a view to another session (actor[/run]), or leave it unowned. Human only.
+    /// Hand a view to another session (actor[/run]), or leave it unowned. A person's act: an
+    /// agent session relays it with the person's words (--relayed-by and --evidence).
     Own {
         view: String,
         owner: Option<String>,
         #[arg(long)]
         none: bool,
+        /// The person's words, quoted, when an agent relays the act. Requires --relayed-by.
+        #[arg(long, value_name = "WORDS", requires = "relayed_by")]
+        evidence: Option<String>,
+        /// The agent that relays the person's act: your own actor (or actor/run). Only an agent
+        /// session relays. Requires --evidence.
+        #[arg(long, value_name = "ACTOR[/RUN]", requires = "evidence")]
+        relayed_by: Option<String>,
+        /// The question the person was asked.
+        #[arg(long, value_name = "TEXT", requires = "evidence")]
+        question: Option<String>,
+        /// Where the person said it (default: cli).
+        #[arg(long = "session", value_name = "REF", requires = "evidence")]
+        session_ref: Option<String>,
     },
 }
 
@@ -86,13 +115,29 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
             views,
             reason,
             stale,
+            evidence,
+            relayed_by,
+            question,
+            session_ref,
         } => {
             // an empty `views` would close nothing: `--stale` is the other way to name views
             let views = (!views.is_empty()).then_some(views);
-            json!({"op": "close", "views": views, "reason": reason, "stale": stale})
+            json!({"op": "close", "views": views, "reason": reason, "stale": stale,
+                "evidence": evidence, "question": question, "session_ref": session_ref,
+                "relayed_by": relayed_by})
         }
-        ViewCmd::Own { view, owner, none } => {
-            json!({"op": "own", "view": view, "owner": owner, "none": none})
+        ViewCmd::Own {
+            view,
+            owner,
+            none,
+            evidence,
+            relayed_by,
+            question,
+            session_ref,
+        } => {
+            json!({"op": "own", "view": view, "owner": owner, "none": none,
+                "evidence": evidence, "question": question, "session_ref": session_ref,
+                "relayed_by": relayed_by})
         }
     }
 }
@@ -379,7 +424,17 @@ fn close_text(v: &Value) -> String {
     if let Some(kept) = v["kept"].as_str() {
         lines.push(format!("kept {kept} open (your default view)"));
     }
+    lines.extend(relayed_line(v));
     lines.join("\n")
+}
+
+/// `relayed by <actor>[/<run>]`, when the reply names the relaying agent.
+fn relayed_line(v: &Value) -> Option<String> {
+    let by = v["relayed_by"]["actor"].as_str()?;
+    Some(match v["relayed_by"]["run"].as_str() {
+        Some(run) => format!("relayed by {by}/{run}"),
+        None => format!("relayed by {by}"),
+    })
 }
 
 /// The text of the `view` op's reply to `cmd`.
@@ -425,15 +480,21 @@ pub fn render(op: &str, reply: &Value) -> String {
         "list" => ls_text(reply),
         "show" => show_text(reply, false),
         "close" => close_text(reply),
-        "own" => format!(
-            "view {} owner {}",
-            text(&reply["view"]),
-            if reply["owner"].is_object() {
-                owner_text(&reply["owner"])
-            } else {
-                "none".into()
+        "own" => {
+            let mut out = format!(
+                "view {} owner {}",
+                text(&reply["view"]),
+                if reply["owner"].is_object() {
+                    owner_text(&reply["owner"])
+                } else {
+                    "none".into()
+                }
+            );
+            if let Some(line) = relayed_line(reply) {
+                out.push_str(&format!(", {line}"));
             }
-        ),
+            out
+        }
         "undo" => {
             let mut out = format!(
                 "undid {} {}: {}",

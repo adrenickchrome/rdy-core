@@ -324,9 +324,16 @@ fn own1_work_is_the_humans_view() {
         json!({"op": "fork", "from": "r1", "name": "work"}),
     ] {
         if v["op"] == "fork" {
-            run_view(&e, &a, "r1", req(json!({"op": "create", "name": "r1"}))).unwrap();
+            run_view(
+                &e,
+                &a,
+                "human:qa",
+                "r1",
+                req(json!({"op": "create", "name": "r1"})),
+            )
+            .unwrap();
         }
-        let err = run_view(&e, &a, "r1", req(v)).unwrap_err();
+        let err = run_view(&e, &a, "human:qa", "r1", req(v)).unwrap_err();
         assert_eq!(err.code, E_VIEW_OWNER, "{err}");
         assert!(e.read().view_head("work").is_none(), "nothing was created");
     }

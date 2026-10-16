@@ -86,6 +86,7 @@ fn tonc1_an_include_that_puts_both_sides_in_one_view_resolves_a_shift() {
     let v = run_view(
         &e,
         &ag("b"),
+        "human:qa",
         "b",
         ViewRequest {
             op: "include".into(),
@@ -262,7 +263,7 @@ proptest! {
                 // a view op: include another view's change, or exclude one of this view's
                 let (op, from) = if kind == 3 { ("include", other) } else { ("exclude", view) };
                 let Some((_, c)) = mine.iter().rev().find(|(v, _)| *v == from) else { continue };
-                let reply = run_view(&e, &ag(view), view, ViewRequest {
+                let reply = run_view(&e, &ag(view), "human:qa", view, ViewRequest {
                     op: op.into(),
                     view: Some(view.into()),
                     changes: Some(vec![c.to_string()]),
@@ -369,6 +370,7 @@ fn tonc1_an_exclude_of_that_delete_reports_the_reopened_tension() {
     let reply = run_view(
         &o.e,
         &ag("a"),
+        "human:qa",
         "a",
         ViewRequest {
             op: "exclude".into(),
@@ -476,7 +478,7 @@ proptest! {
                         }
                         _ => ViewRequest { op: "undo".into(), view: Some(view.into()), ..Default::default() },
                     };
-                    let Ok(reply) = run_view(e, &ag(view), view, req) else { continue };
+                    let Ok(reply) = run_view(e, &ag(view), "human:qa", view, req) else { continue };
                     check_step(e, view, &before, &reply);
                     continue;
                 }

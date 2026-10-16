@@ -382,11 +382,12 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "view" => view_api::run_view(
             cx.engine,
             cx.session,
+            cx.human,
             &cx.session.default_view(),
             parse(
                 op,
                 args,
-                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?}",
+                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}",
             )?,
         ),
         "wc_view" => wc_view(cx, parse(op, args, "{view?, ids?, blobs_dir?}")?),
