@@ -492,14 +492,12 @@ fn di11_an_entry_survives_a_pack_change_that_stops_tracking_a_field() {
 
 // ---- fix round 4: the holder is read under the tracking in force, not under any omission ----
 
-const WIDE_FIELDS: usize = 13;
-
-/// A pack whose claims carry thirteen fields `f01` to `f13`; `tracked` of them are tracking.
-fn wide_pack(tracked: &[&str]) -> String {
+/// A pack whose claims carry `n` fields `f01`, `f02`, ...; `tracked` of them are tracking.
+fn wide_pack(n: usize, tracked: &[&str]) -> String {
     let mut s = String::from(
         "name: wide\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  claim:\n    prefix: c\n    traits: [normative, describes]\n    body: required\n    fields:\n",
     );
-    for i in 1..=WIDE_FIELDS {
+    for i in 1..=n {
         s.push_str(&format!("      f{i:02}: {{ kind: str }}\n"));
     }
     if !tracked.is_empty() {
@@ -508,21 +506,20 @@ fn wide_pack(tracked: &[&str]) -> String {
     s
 }
 
-#[test]
-fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_wide_block() {
-    // thirteen fields, two of them tracking when the verdict was written; the pack then stops
-    // tracking both. The content hash under the tracking now differs, and the entry stays.
+/// `n` fields, two of them tracking when the verdict was written; the pack then stops tracking
+/// both. The content hash under the tracking now differs, and the entry stays.
+fn wide_entry_survives(n: usize) {
     let (dir, r) = project();
     drop(r);
     std::fs::write(
         dir.path().join(".rdy/packs/wide.yaml"),
-        wide_pack(&["f03", "f07"]),
+        wide_pack(n, &["f03", "f07"]),
     )
     .unwrap();
     std::fs::write(dir.path().join(".rdy.yaml"), "pack: wide\n").unwrap();
     let mut r = Rdy::open(dir.path()).unwrap();
     let spec = spec_doc(&mut r);
-    let fields: serde_json::Map<String, serde_json::Value> = (1..=WIDE_FIELDS)
+    let fields: serde_json::Map<String, serde_json::Value> = (1..=n)
         .map(|i| (format!("f{i:02}"), json!(format!("v{i}"))))
         .collect();
     let q = created(
@@ -555,12 +552,17 @@ fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_wide_block() {
         first.1,
         format!("{} waits for an answer; read rdy_pending", p.r#ref)
     );
-    std::fs::write(dir.path().join(".rdy/packs/wide.yaml"), wide_pack(&[])).unwrap();
+    std::fs::write(dir.path().join(".rdy/packs/wide.yaml"), wide_pack(n, &[])).unwrap();
     assert!(matches!(
         r.reload_pack().unwrap(),
         rdy_engine::ReloadOutcome::Reloaded
     ));
     assert_eq!(entry_of(&r, &sub, &first), vec![first]);
+}
+
+#[test]
+fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_wide_block() {
+    wide_entry_survives(13);
 }
 
 #[test]
@@ -600,4 +602,88 @@ fn di11_an_unproposed_removal_of_an_ordinary_field_names_no_proposal() {
         true,
     );
     assert_eq!(pending_added(&r, &sub), vec![]);
+}
+
+// ---- fix round 5: the holder is read from the sides the review's own batch logged ----
+
+#[test]
+fn di11_an_entry_survives_dropping_two_tracking_fields_of_a_block_above_sixteen_fields() {
+    // the matcher has no field-count cutoff: it hashes nothing
+    wide_entry_survives(17);
+}
+
+#[test]
+fn di11_an_ordinary_field_removal_and_a_later_body_edit_name_no_proposal() {
+    // as the ordinary-field removal above, then the view edits the body and nobody proposes it:
+    // no block shows the judged content any more, and the old proposal still holds nothing
+    let (dir, r) = project();
+    drop(r);
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let spec = spec_doc(&mut r);
+    let q = created(
+        &put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec.", "fields": {"note": "n1"}}]),
+        ),
+        "$q",
+    );
+    r.propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .unwrap();
+    put(
+        &mut r,
+        "v1",
+        json!([{"op": "update", "id": q.to_string(), "unset": ["note"]}]),
+    );
+    let sub = watcher_at_head(&r);
+    verdict_on(
+        &mut r,
+        &rdy_engine::Scope::Inflight,
+        &q,
+        &spec.c,
+        "agent:r",
+        true,
+    );
+    assert_eq!(pending_added(&r, &sub), vec![]);
+    put(
+        &mut r,
+        "v1",
+        json!([{"op": "update", "id": q.to_string(), "body": "Guests read the rules of the spec."}]),
+    );
+    assert_eq!(pending_added(&r, &sub), vec![]);
+}
+
+#[test]
+fn di11_an_entry_survives_dropping_tracking_and_unsetting_the_formerly_tracked_field() {
+    // the verdict judged the claim with its tracked `note`; the pack then stops tracking `note`
+    // and the view unsets it without proposing. The claim now hashes to the judged content under
+    // the tracking now, yet the proposal held the pair when the verdict was written.
+    let (dir, mut r, spec, _p, sub, first) = noted_project(true);
+    // the judged claim is the pair's item that is not the spec's
+    let review: rdy_model::Hash = first.0[0].parse().expect("the id is the review");
+    let rdy_model::ReviewSubject::Pair { items, .. } =
+        r.read().reader().review(&review).unwrap().subject
+    else {
+        panic!("a pair review");
+    };
+    let q = items
+        .iter()
+        .find(|i| i.block != spec.c)
+        .expect("the claim")
+        .block
+        .clone();
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), note_pack(false)).unwrap();
+    assert!(matches!(
+        r.reload_pack().unwrap(),
+        rdy_engine::ReloadOutcome::Reloaded
+    ));
+    put(
+        &mut r,
+        "v1",
+        json!([{"op": "update", "id": q.to_string(), "unset": ["note"]}]),
+    );
+    assert_eq!(entry_of(&r, &sub, &first), vec![first]);
 }

@@ -5,15 +5,16 @@ use super::Entry;
 use super::inflight::RunInFlight;
 use crate::gate::{ProposalRef, version_number};
 use crate::semantic::candidates::Request;
+use crate::tensions::TensionKind;
 use crate::{E_UNKNOWN_BLOCK, Event, EventKind, RdyError, ReadState, Scope};
-use rdy_model::block::DERIVED_FIELDS;
-use rdy_model::{Block, BlockId, Hash, Op, PairItem, Proposal, ReviewSubject, Tracking};
+use rdy_model::{BlockId, Hash, Op, PairItem, Proposal, ReviewSubject};
+use rdy_store::StoreError;
 use rdy_store::inbox::InboxSub;
 use rdy_store::kinds;
 use rdy_store::segment::Location;
+use rdy_store::transition::Cause;
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 /// The areas that concern the session: its declared areas, or else the areas of the blocks its
 /// in-flight changes write (D-V4NZX).
@@ -210,7 +211,7 @@ pub fn match_event(
             if !verdict_carries_advice(st, review, pair)? {
                 return Ok(None);
             }
-            match first_holding(st, review)? {
+            match first_holding(st, review, ev.seq)? {
                 Some(pref) => entry(
                     "pending_added",
                     vec![review.to_string()],
@@ -238,17 +239,26 @@ fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<
 }
 
 /// The proposal version that held the pair `review` judged when the review was written, read from
-/// records that never change and bounded by the review's own place in the log: a proposal counts
-/// only through its latest version written before the review, and only if none of its changes had
-/// landed before the review. A version holds the pair for each item whose block one of its changes
-/// writes (creates or updates) at the item's content, compared by [`same_content`]. The proposal
-/// with the most items held wins, then the one whose version was written last (the pair completes
-/// when the later of its items is written), then the smaller version hash. A proposal published,
-/// replaced or landed after the review, a tension answered and a pack change after the review
-/// change none of it, so the same verdict names the same version on every read. A review of a
-/// pair that no proposal waiting at that time writes (an item in a view that was never proposed,
-/// the other in canon) gives none.
-fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, RdyError> {
+/// records that never change and bounded by the review's own place in the log.
+///
+/// Which changes held the judged items is read from the sides of the tension the review opened:
+/// the review's own batch logs them (`TRANSITION`, cause `reviewed`), as the detector found them
+/// when it wrote the verdict, under the tracking in force then. No content is hashed here, so a
+/// pack change, a later edit of a block and a block with any number of fields change nothing.
+/// A proposal counts only through its latest version written before the review, and only if none
+/// of its changes had landed before the review. A version holds the pair for each item whose
+/// block one of its changes writes (creates or updates) while that change is a side of the
+/// tension. The proposal with the most items held wins, then the one whose version was written
+/// last (the pair completes when the later of its items is written), then the smaller version
+/// hash. A proposal published, replaced or landed after the review, a tension answered and a
+/// pack change after the review change none of it, so the same verdict names the same version on
+/// every read. A review of a pair that no proposal waiting at that time writes (an item in a view
+/// that was never proposed, the other in canon) gives none.
+fn first_holding(
+    st: &ReadState,
+    review: &Hash,
+    batch_end: Location,
+) -> Result<Option<ProposalRef>, RdyError> {
     let reader = st.reader();
     let ReviewSubject::Pair { items, .. } = reader.review(review)?.subject else {
         return Ok(None);
@@ -256,7 +266,10 @@ fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, R
     let Some(bound) = reader.location_of(kinds::REVIEW, review)? else {
         return Ok(None);
     };
-    let tracking = Arc::clone(reader.tracking());
+    let sides = judged_changes(st, review, bound, batch_end)?;
+    if sides.is_empty() {
+        return Ok(None);
+    }
     let mut best: Option<(Rank, Hash)> = None;
     for (key, latest) in reader.refs_with_prefix("proposal/")? {
         let (Some(stable), Ok(latest)) = (
@@ -285,7 +298,7 @@ fn first_holding(st: &ReadState, review: &Hash) -> Result<Option<ProposalRef>, R
         if landed_before(st, &p, bound)? {
             continue;
         }
-        let score = holds_score(st, &p, &items, &tracking)?;
+        let score = holds_score(st, &p, &items, &sides)?;
         if score == 0 {
             continue;
         }
@@ -323,82 +336,71 @@ fn landed_before(st: &ReadState, p: &Proposal, bound: Location) -> Result<bool, 
     Ok(false)
 }
 
+/// The in-flight changes that were sides of the semantic tensions `review` opened, read from the
+/// `TRANSITION` record of the review's own batch (the frames from `review_at` to the batch's
+/// commit, which ends before `batch_end`). A canon side holds no change. Empty when the batch
+/// logged no such move.
+fn judged_changes(
+    st: &ReadState,
+    review: &Hash,
+    review_at: Location,
+    batch_end: Location,
+) -> Result<BTreeSet<Hash>, RdyError> {
+    let reader = st.reader();
+    let mut records = Vec::new();
+    let mut committed = false;
+    let walk = reader.for_each_frame_from(review_at, batch_end, |_, kind, hash, _, _| {
+        if kind == kinds::BATCH_COMMIT {
+            committed = true;
+            // stops the walk at the end of the review's batch
+            return Err(StoreError::Db("batch end".into()));
+        }
+        if kind == kinds::TRANSITION {
+            records.push(hash);
+        }
+        Ok(())
+    });
+    if !committed {
+        walk?;
+    }
+    let mut out = BTreeSet::new();
+    for h in records {
+        for m in reader.transitions(&h)?.opened {
+            if m.kind == TensionKind::Semantic.name()
+                && m.why.cause == Cause::Reviewed
+                && m.why.id == Some(*review)
+            {
+                out.extend(m.sides.iter().filter_map(|s| s.change));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// How many items of a pair version `p` holds: the items whose block one of its changes writes
-/// (creates or updates) at the item's content. Only the changes' ops are read.
+/// (creates or updates) while that change is one of the judged `sides`. Only the changes' ops are
+/// read.
 fn holds_score(
     st: &ReadState,
     p: &Proposal,
     items: &[PairItem],
-    tracking: &Tracking,
+    sides: &BTreeSet<Hash>,
 ) -> Result<u32, RdyError> {
     let reader = st.reader();
     let mut held = vec![false; items.len()];
-    for c in &p.changes {
+    for c in p.changes.iter().filter(|c| sides.contains(c)) {
         for op in reader.change(c)?.ops {
             let (Op::Create { block } | Op::Update { block, .. }) = op else {
                 continue;
             };
             for (i, item) in items.iter().enumerate() {
-                if item.block == block.id && same_content(st, &block, item, tracking) {
+                if item.block == block.id {
                     held[i] = true;
                 }
             }
         }
     }
     Ok(held.iter().filter(|h| **h).count() as u32)
-}
-
-/// The most non-derived fields of one block whose every subset `same_content` tries.
-const MAX_SUBSET_FIELDS: usize = 16;
-
-/// Whether `block` has the content `item` names.
-///
-/// The tracking in force when the verdict was written is not stored, and a pack change moves what
-/// the content hash leaves out. So the answer has three steps.
-/// 1. The block matches if it hashes to the item's content under the tracking now.
-/// 2. If a block of the item's id that is in the project now (in flight or in canon) hashes to
-///    that content under the tracking now, the tracking now is the tracking the verdict used, and
-///    step 1 was exact: the block does not match. This is the evidence that stops a field that was
-///    never tracking from being left out (a field unset after the proposal, and not proposed).
-/// 3. Otherwise no block still shows the judged content under the tracking now, so a pack change
-///    moved the tracking. The block matches if it hashes to the item's content with some set of
-///    its own fields left out: exactly the tracking fields of the old pack. A block with more than
-///    [`MAX_SUBSET_FIELDS`] fields has no such match.
-fn same_content(st: &ReadState, block: &Block, item: &PairItem, tracking: &Tracking) -> bool {
-    if block.content_hash_with(tracking) == item.content {
-        return true;
-    }
-    if shows_content_now(st, item, tracking) {
-        return false;
-    }
-    let names: Vec<&str> = block
-        .fields
-        .keys()
-        .map(String::as_str)
-        .filter(|k| !DERIVED_FIELDS.contains(k))
-        .collect();
-    if names.len() > MAX_SUBSET_FIELDS {
-        return false;
-    }
-    (0..1u64 << names.len()).any(|mask| {
-        block.content_hash_ignoring(|k| {
-            names
-                .iter()
-                .position(|n| *n == k)
-                .is_some_and(|i| mask >> i & 1 == 1)
-        }) == item.content
-    })
-}
-
-/// Whether the block of `item` in flight or in canon hashes to the item's content under
-/// `tracking`.
-fn shows_content_now(st: &ReadState, item: &PairItem, tracking: &Tracking) -> bool {
-    [Scope::Inflight, Scope::Canon].iter().any(|scope| {
-        st.materialized(scope).is_ok_and(|m| {
-            m.get(&item.block)
-                .is_some_and(|b| b.content_hash_with(tracking) == item.content)
-        })
-    })
 }
 
 /// The line of a `pending_added` entry.
