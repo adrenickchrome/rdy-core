@@ -385,3 +385,43 @@ fn msw15_the_run_dir_ignores_itself_in_git() {
         "*\n"
     );
 }
+
+#[test]
+fn vw5_a_ctl_connect_waits_while_the_daemon_is_starting() {
+    let dir = short_tempdir();
+    drop(rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let run = RunDir::of_project(dir.path());
+    let (spawn, _count) = spawn_child_daemon(
+        &rdy_qa::test_name!("race1_child"),
+        &run,
+        "1",
+        &[("RDY_DAEMON_PROGRESS_MS", "600")],
+    );
+    let _child = spawn.spawn(&run).unwrap();
+    let t = std::time::Instant::now();
+    while !run.socket().exists() {
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "the child never bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let hello = Hello {
+        rdy: PROTO_VERSION,
+        version: "1".into(),
+        proto: Proto::Ctl,
+        cwd: dir.path().into(),
+        project: run.project_id().expect("the project's .rdy"),
+    };
+    rt().block_on(async {
+        let t = std::time::Instant::now();
+        let mut c = connect_ready(&run, &hello).await;
+        assert!(
+            t.elapsed() >= Duration::from_millis(100),
+            "the daemon was still starting when the helper was called"
+        );
+        assert_eq!(c.version(), "1");
+        c.ctl("stop", json!({})).await.unwrap();
+    });
+    wait_gone(&run);
+}

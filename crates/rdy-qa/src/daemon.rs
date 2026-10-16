@@ -244,6 +244,22 @@ pub struct Hosted {
 /// How long `Hosted`'s clients wait for `ready`.
 const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A connection for `hello` to the daemon at `run`, past `ready`: waits up to 30 s while the
+/// daemon answers `starting`. Panics if the daemon does not answer or does not become ready.
+pub async fn connect_ready(run: &RunDir, hello: &Hello) -> Client {
+    match connect(run, hello).await {
+        Attempt::Ready(c) => c,
+        Attempt::Starting(p) => p
+            .wait(
+                std::time::Instant::now() + HOSTED_READY_TIMEOUT,
+                &mut |_| {},
+            )
+            .await
+            .unwrap_or_else(|e| panic!("the host did not become ready: {e}")),
+        other => panic!("the host did not answer the hello: {other:?}"),
+    }
+}
+
 impl Hosted {
     /// `new_with_human("human:qa")`.
     pub fn new() -> Hosted {
@@ -307,9 +323,9 @@ impl Hosted {
             .expect("client runtime")
     }
 
-    /// A connection of `proto` past `ready`.
-    async fn connect(&self, proto: Proto) -> Client {
-        let hello = Hello {
+    /// The hello of a `proto` connection to this host.
+    pub fn hello(&self, proto: Proto) -> Hello {
+        Hello {
             rdy: PROTO_VERSION,
             version: "t".into(),
             proto,
@@ -317,19 +333,12 @@ impl Hosted {
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&self.dir.path()))
                 .project_id()
                 .expect("the project's .rdy"),
-        };
-        let run = RunDir::of_project(self.dir.path());
-        match connect(&run, &hello).await {
-            Attempt::Ready(c) => c,
-            Attempt::Starting(p) => p
-                .wait(
-                    std::time::Instant::now() + HOSTED_READY_TIMEOUT,
-                    &mut |_| {},
-                )
-                .await
-                .unwrap_or_else(|e| panic!("the host did not become ready: {e}")),
-            other => panic!("the host did not answer the hello: {other:?}"),
         }
+    }
+
+    /// A connection of `proto` past `ready`. Waits while the host answers `starting`.
+    pub async fn connect(&self, proto: Proto) -> Client {
+        connect_ready(&RunDir::of_project(self.dir.path()), &self.hello(proto)).await
     }
 
     /// A `ctl` connection past `ready` whose session op sent `actor` and `run`.
