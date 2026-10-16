@@ -380,6 +380,8 @@ fn hand(blocks: Vec<PBlock>, blobs: BTreeMap<rdy_model::Hash, Blob>) -> Print {
         ],
         blobs,
         warnings: vec![],
+        // a hand-built print has no project; the Markdown writer does not read it
+        rdy_dir: std::path::PathBuf::new(),
     }
 }
 
