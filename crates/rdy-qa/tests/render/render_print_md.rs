@@ -790,7 +790,13 @@ fn ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone() {
     let result = write_markdown(&p, &out, Layout::Plain);
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     if writable {
-        return; // running as a user the mode does not bind
+        // a user the mode does not bind (root): nothing to test; RDY_QA_REQUIRE_ALL=1 fails it
+        rdy_qa::skip::skip(
+            "ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone",
+            rdy_qa::skip::Why::Prerequisite,
+            "a read-only directory takes writes here (running as root?)",
+        );
+        return;
     }
     let e = result.expect_err("the staging directory cannot be created");
     assert_eq!(e.code, rdy_engine::E_IO);
