@@ -1345,3 +1345,111 @@ fn vw1_a_losing_members_version_reads_withdrawn_after_the_choosing_landing() {
         "pb leaves the open proposals"
     );
 }
+
+/// Canon with one section; members a ("alt A") and b ("alt B") each wrote a claim before set
+/// T {x: a, y: b} was written through the store, and view d is a fork of a. With `alias`, a
+/// blob chunk with the set version's bytes was written before both claims. Returns the set's
+/// stable id and a's change.
+fn set_after_a_blob(alias: bool) -> (tempfile::TempDir, Rdy, Hash, Hash) {
+    use rdy_model::{AltMember, AltSet, AltStatus, Provenance, Role};
+    use rdy_store::Store;
+    let (d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    r.close().unwrap();
+    let store = d.path().join(".rdy/store");
+    let set = AltSet {
+        stable: None,
+        prev: None,
+        title: "T".into(),
+        question: None,
+        members: vec![
+            AltMember {
+                label: "x".into(),
+                view: "a".into(),
+            },
+            AltMember {
+                label: "y".into(),
+                view: "b".into(),
+            },
+        ],
+        status: AltStatus::Open,
+        provenance: Provenance {
+            actor: "agent:w".into(),
+            run: Some("r".into()),
+            role: Role::Writer,
+            at_ms: 7,
+        },
+    };
+    let bytes = postcard::to_allocvec(&set).unwrap();
+    if alias {
+        let mut s = Store::open(&store).unwrap();
+        s.put_blob(&bytes).unwrap();
+    }
+    let mut r = Rdy::open(d.path()).unwrap();
+    let a = claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    r.close().unwrap();
+    let mut s = Store::open(&store).unwrap();
+    let stable = s.put_alt_set(&set).unwrap();
+    assert_eq!(
+        stable,
+        Hash::of(&bytes),
+        "the blob chunk holds the set's bytes"
+    );
+    drop(s);
+    let mut r = Rdy::open(d.path()).unwrap();
+    r.view_fork(&writer(), "a", "d").unwrap();
+    (d, r, stable, a.parse().unwrap())
+}
+
+/// The member set `stable` binds change `a` to, and the refusal of a's change proposed and
+/// landed from view d, which is no member and names no choice.
+fn a_from_d(r: &mut Rdy, stable: &Hash, a: &Hash) -> (Option<String>, &'static str) {
+    let bound = r.read().coord_heads().alt_binds[stable]
+        .bound
+        .get(a)
+        .cloned();
+    let e = r
+        .propose(&writer(), "d", "d", None)
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert!(!canon_bodies(r).iter().any(|b| b == "alt A"));
+    (bound, e.code)
+}
+
+/// Guard (final fix round 1, the control of the next test): a's change, written before the
+/// set, is bound to a, so it does not land from view d.
+#[test]
+fn msw20_a_members_pre_set_change_from_a_fork_is_refused() {
+    let (_d, mut r, stable, a) = set_after_a_blob(false);
+    assert_eq!(
+        a_from_d(&mut r, &stable, &a),
+        (Some("a".into()), E_ALT_MEMBER)
+    );
+}
+
+/// Final fix round 1 (F2): a member's holdings at a set version are read at the version's
+/// `ALT_SET` frame, never at an earlier blob chunk with its bytes. a's change is bound to a and
+/// does not land from view d: as written, after a reindex, and after a dump and a load.
+#[test]
+fn msw20_a_blob_with_a_set_versions_bytes_does_not_move_its_members_holdings() {
+    let (d, mut r, stable, a) = set_after_a_blob(true);
+    let want = (Some("a".to_string()), E_ALT_MEMBER);
+    assert_eq!(a_from_d(&mut r, &stable, &a), want, "as written");
+    r.reindex().unwrap();
+    assert_eq!(a_from_d(&mut r, &stable, &a), want, "after a reindex");
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    drop(d);
+    let to = scratch.path().join("loaded");
+    rdy_engine::load::load(&file, &to).unwrap();
+    let mut r = Rdy::open(&to).unwrap();
+    assert_eq!(
+        a_from_d(&mut r, &stable, &a),
+        want,
+        "after a dump and a load"
+    );
+}

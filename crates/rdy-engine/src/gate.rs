@@ -572,8 +572,9 @@ pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, Rd
 }
 
 /// Whether proposal version `version` (`p`) is withdrawn (D-K0SS1): its view is closed now, or
-/// the view's chain took a close after the version's `PROPOSAL` frame (`closed_after`, from the
-/// head this state holds). An undo of the close reopens the view, never the version. The caller
+/// the view was closed when the log took the version's `PROPOSAL` frame (a record from before
+/// R2), or the view's chain took a close after that frame (`closed_after`, from the head this
+/// state holds). An undo of the close reopens the view, never the version. The caller
 /// has checked that the version is its proposal's latest and has not landed. A view with no head
 /// in the state is not closed, and its versions are not withdrawn.
 pub(crate) fn withdrawn(st: &ReadState, version: &Hash, p: &Proposal) -> Result<bool, RdyError> {

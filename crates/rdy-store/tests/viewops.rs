@@ -597,17 +597,72 @@ fn msw20_included_before_reads_a_views_set_as_the_log_held_it_when_an_object_was
         .unwrap();
     create(&mut s, "b", "c-00003", &by);
     assert_eq!(s.included("a").unwrap().as_ref(), &vec![c2]);
-    assert_eq!(s.included_before("a", &mark).unwrap().as_ref(), &vec![c1]);
+    assert_eq!(
+        s.included_before("a", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .as_ref(),
+        &vec![c1]
+    );
     assert_eq!(
         s.included("a").unwrap().as_ref(),
         &vec![c2],
         "the cache still serves the head"
     );
     assert!(
-        s.included_before("b", &mark).unwrap().is_empty(),
+        s.included_before("b", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .is_empty(),
         "b had no op then"
     );
-    assert!(s.included_before("none", &mark).unwrap().is_empty());
+    assert!(
+        s.included_before("none", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Final fix round 1 (F2): `included_before` marks the frame of the kind it is asked for. A
+/// blob chunk with an alternative set version's bytes, written before a's commit, moves the
+/// mark of neither the set version nor the blob.
+#[test]
+fn msw20_included_before_marks_the_frame_of_the_kind_asked_for() {
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    let set = AltSet {
+        stable: None,
+        prev: None,
+        title: "T".into(),
+        question: None,
+        members: vec![],
+        status: AltStatus::Open,
+        provenance: by.clone(),
+    };
+    let bytes = postcard::to_allocvec(&set).unwrap();
+    s.put_blob(&bytes).unwrap();
+    let c1 = create(&mut s, "a", "c-00001", &by);
+    let mark = s.put_alt_set(&set).unwrap();
+    assert_eq!(
+        mark,
+        Hash::of(&bytes),
+        "the blob chunk holds the set's bytes"
+    );
+    assert_eq!(
+        s.included_before("a", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .as_ref(),
+        &vec![c1],
+        "the set version's frame"
+    );
+    assert!(
+        s.included_before("a", rdy_store::kinds::BLOB_CHUNK, &mark)
+            .unwrap()
+            .is_empty(),
+        "the blob chunk's frame"
+    );
+    let e = s
+        .included_before("a", rdy_store::kinds::PROPOSAL, &mark)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::NotFound(_)), "{e:?}");
 }
 
 fn author(actor: &str, run: Option<&str>, at_ms: i64) -> Provenance {

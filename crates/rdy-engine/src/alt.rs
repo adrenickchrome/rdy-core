@@ -199,7 +199,9 @@ fn need_open(stable: &Hash, set: &AltSet) -> Result<(), RdyError> {
 ///   landing's changes created.
 ///
 /// The log is a total order of writes and each version is written in a batch of its own, so a
-/// member's holdings then are `included_before(member, version)`: the same after a reindex.
+/// member's holdings then are `included_before(member, ALT_SET, version)`, read at the version's
+/// own `ALT_SET` frame (never an earlier frame of another kind with its bytes): the same after a
+/// reindex.
 pub(crate) fn alt_binds(
     reader: &StoreReader,
     latest: &Hash,
@@ -225,7 +227,7 @@ pub(crate) fn alt_binds(
         if !joined.is_empty() {
             let mut held: BTreeMap<&str, BTreeSet<Hash>> = BTreeMap::new();
             for m in &members {
-                let set = reader.included_before(m, vh)?;
+                let set = reader.included_before(m, rdy_store::kinds::ALT_SET, vh)?;
                 held.insert(m, set.iter().copied().collect());
             }
             for j in &joined {
