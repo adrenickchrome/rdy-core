@@ -332,13 +332,11 @@ fn refs_outside_identity<'a>(page: &str, scope: &str, refs: &'a [String]) -> Vec
     const TAG: &str = "<script src=\"/_rdy/live.js\" data-events=\"";
     let identity = format!("/_rdy/events?scope={scope}&amp;");
     let mut rest = page.to_string();
-    if !scope.is_empty() {
-        if let Some(at) = page.find(TAG) {
-            let value_at = at + TAG.len();
-            if page[value_at..].starts_with(&identity) {
-                rest.replace_range(value_at..value_at + identity.len(), "/_rdy/events?");
-            }
-        }
+    let value_at = page.find(TAG).map(|at| at + TAG.len());
+    if let Some(value_at) = value_at.filter(|_| !scope.is_empty())
+        && page[value_at..].starts_with(&identity)
+    {
+        rest.replace_range(value_at..value_at + identity.len(), "/_rdy/events?");
     }
     refs.iter()
         .filter(|r| rest.contains(r.as_str()))
