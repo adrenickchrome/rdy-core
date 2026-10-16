@@ -10,6 +10,7 @@ mod llms;
 pub mod menu;
 mod nav;
 mod page;
+pub mod print;
 pub mod review;
 mod search;
 mod site;
@@ -238,6 +239,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/colophon.html",
         "partials/change.html",
         "partials/removed.html",
+        "partials/glossary.html",
     );
     Ok(env)
 }
@@ -565,8 +567,32 @@ fn since_doc_kept(tag: &str) -> String {
     )
 }
 
-/// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
-pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
+/// What a build reads of a scope before it builds a page: the site and the print read it the
+/// same way ([`read_scope`]).
+struct ScopeRead<'a> {
+    position: rdy_engine::VersionPosition,
+    versions: Vec<rdy_engine::VersionInfo>,
+    /// When each version's landing was approved, by landing hash (hex).
+    landed_ms: BTreeMap<String, i64>,
+    m: &'a rdy_engine::Materialized,
+    /// The figure blobs the store holds, with their bytes.
+    blobs: BTreeMap<Hash, Vec<u8>>,
+    site_name: String,
+    description: Option<String>,
+    pack: rdy_schema::Pack,
+    g: std::sync::Arc<rdy_graph::Graph>,
+    /// The site's shape, with its disagreements.
+    site: Site<'a>,
+}
+
+/// Reads `scope` (its position, versions, landing times, materialized blocks, figure blobs,
+/// name, description, pack and graph, and the site's shape with its disagreements), then hands
+/// what it read to `f`.
+fn read_scope<R>(
+    rdy: &ReadState,
+    scope: &Scope,
+    f: impl FnOnce(ScopeRead<'_>) -> Result<R, RdyError>,
+) -> Result<R, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     // when each version's landing was approved (only the versions' landings are read)
@@ -593,9 +619,57 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     let description = rdy.project_description();
     let pack = rdy.pack().clone();
     let g = rdy.graph(scope)?;
-    let env = env()?;
     let mut site = Site::new(&m, &pack, &site_name);
     site.set_disagreements(disagree::list(rdy, scope)?);
+    f(ScopeRead {
+        position,
+        versions,
+        landed_ms,
+        m: &m,
+        blobs,
+        site_name,
+        description,
+        pack,
+        g,
+        site,
+    })
+}
+
+/// The render's warning about a top-level doc named `glossary`, when the site has one (D-Y4884).
+fn glossary_warning(site: &Site) -> Option<&'static str> {
+    site.glossary_doc_dropped
+        .then_some(if site.terms.is_empty() {
+            GLOSSARY_DOC_DROPPED_NO_TERMS
+        } else {
+            GLOSSARY_DOC_DROPPED
+        })
+}
+
+/// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
+pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
+    read_scope(rdy, scope, |read| build_site_from(rdy, scope, mode, read))
+}
+
+/// [`build_site`] from what [`read_scope`] read.
+fn build_site_from(
+    rdy: &ReadState,
+    scope: &Scope,
+    mode: Mode,
+    read: ScopeRead,
+) -> Result<SiteFiles, RdyError> {
+    let ScopeRead {
+        position,
+        versions,
+        landed_ms,
+        m,
+        mut blobs,
+        site_name,
+        description,
+        pack,
+        g,
+        site,
+    } = read;
+    let env = env()?;
     // what the scope changes: its chip, its change summary, the home page's list and the
     // menu's count all read it (O12). A proposal version with no base here (made on the empty
     // project, read once canon has landed) still names itself and counts against that empty base
@@ -630,7 +704,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         };
         let sides = changes::Sides {
             from: &from,
-            to: &m,
+            to: m,
             text: &site,
         };
         let (s, inline) = changes::summary(
@@ -641,7 +715,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
             &sides,
             &changes::Of::Review(r.kind),
         );
-        if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::CHANGES_PAGE) {
+        if rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::CHANGES_PAGE) {
             summary.warnings.push(CHANGES_DOC_KEPT.into());
         } else {
             changes_summary = Some(s);
@@ -668,7 +742,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
     };
     let mut since_summary: Option<changes::Summary> = None;
     if let Some((name, landings, tag, to)) = since_of {
-        if rdy_engine::site_scope::summary_page_taken(&m, rdy_engine::site_scope::SINCE_PAGE) {
+        if rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::SINCE_PAGE) {
             summary.warnings.push(since_doc_kept(&name));
         } else {
             let rv = review::between(rdy, &tag, &to)?;
@@ -679,7 +753,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
             let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
             let sides = changes::Sides {
                 from: &from,
-                to: to_m.as_deref().unwrap_or(&m),
+                to: to_m.as_deref().unwrap_or(m),
                 text: to_site.as_ref().unwrap_or(&site),
             };
             let (s, _) = changes::summary(
@@ -699,7 +773,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
 
     let sh = page::Shared {
         site: &site,
-        m: &m,
+        m,
         g: &g,
         position: &position,
         pack: &pack,
@@ -719,13 +793,9 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         changes_page: changes_summary.is_some(),
         since_page: since_summary.is_some(),
     };
-    if site.glossary_doc_dropped {
-        summary.warnings.push(if site.terms.is_empty() {
-            GLOSSARY_DOC_DROPPED_NO_TERMS.into()
-        } else {
-            GLOSSARY_DOC_DROPPED.into()
-        });
-    }
+    summary
+        .warnings
+        .extend(glossary_warning(&site).map(String::from));
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
     let mut kinds = vec![page::Kind::Home];
