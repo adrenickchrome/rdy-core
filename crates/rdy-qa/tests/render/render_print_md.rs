@@ -674,16 +674,16 @@ fn ec6_a_non_empty_out_is_refused_and_untouched() {
         .collect();
     names.sort();
     assert_eq!(names, ["a-file", "full"]);
-    // an empty directory is filled, and a stale partial directory is cleared
+    // an empty directory is filled
     let empty = dir.path().join("empty");
     std::fs::create_dir(&empty).unwrap();
-    let stale = dir.path().join(".empty.rdy-export-partial");
-    std::fs::create_dir(&stale).unwrap();
-    std::fs::write(stale.join("old"), b"old").unwrap();
     let s = write_markdown(&p, &empty, Layout::Plain).expect("an empty out is fine");
     assert_eq!(s.format, "md");
     assert!(empty.join("index.md").is_file());
-    assert!(!stale.exists());
+    assert!(
+        !dir.path().join(".empty.rdy-export-partial").exists(),
+        "the staging directory is gone after the rename"
+    );
     // the summary
     assert_eq!(s.out, empty.display().to_string());
     assert_eq!(
@@ -719,4 +719,289 @@ fn ec6_two_exports_are_the_same_bytes() {
             assert_eq!(tree(&one), tree(&two), "{scope:?}");
         }
     }
+}
+
+/// The refusal of an occupied staging path, and that the path is left as it was.
+fn assert_staging_refused(p: &Print, out: &Path, staging: &Path, layout: Layout) {
+    let e = write_markdown(p, out, layout).expect_err("an occupied staging path is refused");
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(
+        e.message,
+        format!(
+            "{} already exists: a Markdown export may be running, or an earlier one stopped",
+            staging.display()
+        )
+    );
+    assert_eq!(e.fix, "if no export is running, remove it and export again");
+}
+
+#[test]
+fn ec6_an_occupied_staging_path_is_refused_and_never_deleted() {
+    let (_d, r, _ids) = project();
+    let p = print::build(&r.read(), &Scope::Canon).unwrap();
+    for layout in [Layout::Plain, Layout::Mkdocs] {
+        // out does not exist; the staging path is a user's file
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("md");
+        let staging = dir.path().join(".md.rdy-export-partial");
+        std::fs::write(&staging, b"the user's data").unwrap();
+        assert_staging_refused(&p, &out, &staging, layout);
+        assert_eq!(std::fs::read(&staging).unwrap(), b"the user's data");
+        assert!(!out.exists());
+        // out does not exist; the staging path is a directory that holds files (a competing export)
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("md");
+        let staging = dir.path().join(".md.rdy-export-partial");
+        std::fs::create_dir_all(staging.join("sub")).unwrap();
+        std::fs::write(staging.join("sub").join("busy"), b"in use").unwrap();
+        let was = tree(&staging);
+        assert_staging_refused(&p, &out, &staging, layout);
+        assert_eq!(tree(&staging), was);
+        assert!(!out.exists());
+        // out is an empty directory: it stays, and the staging path stays
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("md");
+        std::fs::create_dir(&out).unwrap();
+        let staging = dir.path().join(".md.rdy-export-partial");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("busy"), b"in use").unwrap();
+        let was = tree(&staging);
+        assert_staging_refused(&p, &out, &staging, layout);
+        assert_eq!(tree(&staging), was);
+        assert!(out.is_dir() && std::fs::read_dir(&out).unwrap().next().is_none());
+        // once the user removes it, the export goes through
+        std::fs::remove_dir_all(&staging).unwrap();
+        write_markdown(&p, &out, layout).expect("exports");
+        assert!(!staging.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, r, _ids) = project();
+    let p = print::build(&r.read(), &Scope::Canon).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("md");
+    std::fs::write(dir.path().join("neighbour"), b"mine").unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let writable = std::fs::File::create(dir.path().join("probe")).is_ok();
+    let result = write_markdown(&p, &out, Layout::Plain);
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    if writable {
+        return; // running as a user the mode does not bind
+    }
+    let e = result.expect_err("the staging directory cannot be created");
+    assert_eq!(e.code, rdy_engine::E_IO);
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["neighbour"]);
+}
+
+/// The file of the doc "Deep *doc*" in a hand-built print.
+fn doc_md(p: &Print) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("md");
+    write_markdown(p, &out, Layout::Plain).unwrap();
+    text_of(&std::fs::read(out.join("top/doc.md")).unwrap())
+}
+
+/// What a CommonMark reader shows of an ATX heading line: the text, without the opening hashes
+/// and the closing sequence.
+fn atx_text(line: &str) -> String {
+    let rest = line
+        .trim_start_matches('#')
+        .strip_prefix(' ')
+        .expect("a # line");
+    let t = rest.trim_end();
+    let body = t.trim_end_matches('#');
+    let text = if body.is_empty() {
+        ""
+    } else if body.ends_with(' ') && body.len() < t.len() {
+        body.trim_end()
+    } else {
+        t
+    };
+    unescape(text)
+}
+
+/// The lines that a setext reader would take as an underline of the line before them.
+fn setext_underlines(md: &str) -> Vec<String> {
+    let lines: Vec<&str> = md.lines().collect();
+    (1..lines.len())
+        .filter(|&i| {
+            let t = lines[i].trim();
+            !lines[i - 1].trim().is_empty()
+                && !t.is_empty()
+                && (t.chars().all(|c| c == '=') || t.chars().all(|c| c == '-'))
+        })
+        .map(|i| lines[i].to_string())
+        .collect()
+}
+
+#[test]
+fn ec6_literal_entities_stay_literal() {
+    let mut code = run("&copy;");
+    code.code = true;
+    let mut link = run("&lt;b&gt;");
+    link.link = Some(Href::External("https://example.com/?a=1&copy;=2".into()));
+    let mut p = hand(
+        vec![
+            PBlock::Para {
+                anchor: None,
+                runs: vec![
+                    run("&copy; and &#169; and &#xA9; and &amp; but AT&T and 5 & 6 "),
+                    code,
+                    run(" "),
+                    link,
+                ],
+            },
+            PBlock::Figure {
+                anchor: None,
+                blob: None,
+                alt: String::new(),
+                caption: vec![run("&nbsp;caption")],
+            },
+            PBlock::Table {
+                anchor: None,
+                head: vec![vec![run("&reg;")]],
+                rows: vec![vec![vec![run("&amp;")]]],
+            },
+        ],
+        BTreeMap::new(),
+    );
+    p.description = Some("Uses &trade; and\n&#38;.".into());
+    let md = doc_md(&p);
+    // each entity-like text opens with `&amp;`, which every reader shows as `&`
+    assert!(
+        md.contains(
+            "&amp;copy; and &amp;#169; and &amp;#xA9; and &amp;amp; but AT&T and 5 & 6 `&copy;` [&amp;lt;b&amp;gt;](https://example.com/?a=1&amp;copy;=2)"
+        ),
+        "{md}"
+    );
+    assert!(md.contains("&amp;nbsp;caption"), "{md}");
+    assert!(md.contains("| &amp;reg; |"), "{md}");
+    assert!(md.contains("| &amp;amp; |"), "{md}");
+    // in a code span the text is verbatim
+    assert!(md.contains("`&copy;`"), "{md}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("md");
+    write_markdown(&p, &out, Layout::Plain).unwrap();
+    let index = text_of(&std::fs::read(out.join("index.md")).unwrap());
+    assert!(
+        index.contains("Uses &amp;trade; and\n&amp;#38;."),
+        "{index}"
+    );
+}
+
+#[test]
+fn ec6_text_never_becomes_a_setext_heading_or_a_fence() {
+    let mut p = hand(
+        vec![
+            PBlock::Para {
+                anchor: None,
+                runs: vec![run("a\nb\n===")],
+            },
+            PBlock::Para {
+                anchor: None,
+                runs: vec![run("c\n  ==  ")],
+            },
+            PBlock::Para {
+                anchor: None,
+                runs: vec![run("= x\n~~~\nlast")],
+            },
+            PBlock::Para {
+                anchor: Some("a".into()),
+                runs: vec![run("===")],
+            },
+            PBlock::Figure {
+                anchor: None,
+                blob: None,
+                alt: String::new(),
+                caption: vec![run("cap\n===")],
+            },
+            PBlock::List {
+                ordered: false,
+                start: 1,
+                items: vec![vec![PBlock::Para {
+                    anchor: None,
+                    runs: vec![run("item\n===")],
+                }]],
+            },
+        ],
+        BTreeMap::new(),
+    );
+    p.description = Some("first\n===\n\nsecond\n=".into());
+    let md = doc_md(&p);
+    assert_eq!(
+        setext_underlines(&split(&md).1),
+        Vec::<String>::new(),
+        "{md}"
+    );
+    // the text of each line still reads as written: `&#61;` is `=`
+    assert!(md.contains("a\\\nb\\\n&#61;==\n"), "{md}");
+    assert!(md.contains("c\\\n  &#61;=  \n"), "{md}");
+    assert!(
+        md.contains("= x\\\n&#126;~~\\\nlast\n"),
+        "a line with other text is no underline: {md}"
+    );
+    assert!(md.contains("<a id=\"a\"></a>\n&#61;=="), "{md}");
+    assert!(md.contains("cap\\\n&#61;=="), "{md}");
+    assert!(md.contains("-   item\\\n    &#61;=="), "{md}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("md");
+    write_markdown(&p, &out, Layout::Plain).unwrap();
+    let index = text_of(&std::fs::read(out.join("index.md")).unwrap());
+    assert_eq!(
+        setext_underlines(&split(&index).1),
+        Vec::<String>::new(),
+        "{index}"
+    );
+    assert!(index.contains("first\n&#61;=="), "{index}");
+    assert!(index.contains("second\n&#61;\n"), "{index}");
+}
+
+#[test]
+fn ec6_a_trailing_hash_in_a_title_is_text_not_a_closing_sequence() {
+    let mut p = hand(
+        vec![
+            PBlock::Heading {
+                level: 2,
+                anchor: None,
+                runs: vec![run("Part #")],
+            },
+            PBlock::Heading {
+                level: 3,
+                anchor: Some("h".into()),
+                runs: vec![run("#")],
+            },
+        ],
+        BTreeMap::new(),
+    );
+    p.title = "Release #".into();
+    p.docs[0].title = "Top ##".into();
+    p.docs[1].title = "Deep *doc* #".into();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("md");
+    write_markdown(&p, &out, Layout::Plain).unwrap();
+    let heading = |file: &str, level: usize| {
+        let md = text_of(&std::fs::read(out.join(file)).unwrap());
+        let prefix = format!("{} ", "#".repeat(level));
+        md.lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("a level {level} heading in {md}"))
+            .to_string()
+    };
+    assert_eq!(atx_text(&heading("index.md", 1)), "Release #");
+    assert_eq!(atx_text(&heading("top/index.md", 1)), "Top ##");
+    assert_eq!(atx_text(&heading("top/doc.md", 1)), "Deep *doc* #");
+    assert_eq!(atx_text(&heading("top/doc.md", 2)), "Part #");
+    assert_eq!(atx_text(&heading("top/doc.md", 3)), "#");
+    // the project title in `index.md` is protected on the page itself
+    let index = text_of(&std::fs::read(out.join("index.md")).unwrap());
+    assert!(index.contains("\n# Release \\#\n"), "{index}");
 }

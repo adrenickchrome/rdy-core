@@ -10,7 +10,7 @@
 //! The tree is written to a staging directory beside `out` and renamed into place, so `out` holds
 //! the whole tree or nothing. The module makes portable `std::fs` calls only (D-1RXEA).
 use super::{Href, PBlock, PageKind, Print, PrintDoc, PrintSummary, Run};
-use crate::llms::md_escape;
+use crate::llms::md_escape as llms_escape;
 use rdy_engine::{E_BAD_INPUT, E_IO, RdyError};
 use rdy_model::Hash;
 use std::collections::BTreeMap;
@@ -58,6 +58,67 @@ struct Cx<'a> {
     blobs: &'a BTreeMap<Hash, super::Blob>,
 }
 
+/// `s` with each `&` that opens something a reader takes for a character reference written as
+/// `&amp;`, which every reader shows as `&`: the text `&copy;` stays `&copy;` and never becomes
+/// `©`.
+fn entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        let name = tail.strip_prefix('#').unwrap_or(tail);
+        let len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
+        out.push_str(if len > 0 && name[len..].starts_with(';') {
+            "&amp;"
+        } else {
+            "&"
+        });
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The exporter's text escape: the llms escape (the characters that start markup), and the
+/// character references that it leaves alone.
+fn md_escape(s: &str, line_start: bool) -> String {
+    entities(&llms_escape(s, line_start))
+}
+
+/// One line of a paragraph (or of text like it) that no reader takes for the underline of the
+/// line before it (`===`) or for a tilde fence (`~~~`): its first such character is the
+/// reference `&#61;` or `&#126;`, which every reader shows as the character.
+fn guard_line(line: &str) -> String {
+    let text = line.trim_start();
+    let lead = &line[..line.len() - text.len()];
+    let rest = &text[text.chars().next().map_or(0, char::len_utf8)..];
+    if !text.is_empty() && text.trim_end().bytes().all(|b| b == b'=') {
+        format!("{lead}&#61;{rest}")
+    } else if text.starts_with("~~~") {
+        format!("{lead}&#126;{rest}")
+    } else {
+        line.to_string()
+    }
+}
+
+/// The lines of `text` (already escaped), each guarded by [`guard_line`].
+fn guarded_lines(text: &str) -> Vec<String> {
+    text.split('\n').map(guard_line).collect()
+}
+
+/// An ATX heading line. `text` is escaped; a `#` that ends it is text, not a closing sequence.
+fn heading(level: usize, text: &str) -> String {
+    let mut text = text.to_string();
+    if text.ends_with('#') {
+        text.pop();
+        text.push_str("\\#");
+    }
+    format!("{} {text}", "#".repeat(level.clamp(1, 6)))
+        .trim_end()
+        .to_string()
+}
+
 /// A link target as Markdown reads it inside `(…)`.
 fn url(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -72,7 +133,7 @@ fn url(raw: &str) -> String {
             c => out.push(c),
         }
     }
-    out
+    entities(&out)
 }
 
 /// A piece of code as an inline code span: its delimiter is longer than any backtick run inside.
@@ -175,19 +236,12 @@ impl Cx<'_> {
                 anchor,
                 runs,
             } => {
-                let mut text = self.inline(runs, " ", false);
-                if text.ends_with('#') {
-                    text.pop();
-                    text.push_str("\\#");
-                }
-                let hashes = "#".repeat(usize::from((*level).clamp(1, 6)));
-                let line = format!("{hashes} {text}");
-                anchored(anchor, true, vec![line.trim_end().to_string()])
+                let text = self.inline(runs, " ", false);
+                anchored(anchor, true, vec![heading(usize::from(*level), &text)])
             }
             PBlock::Para { anchor, runs } => {
                 let text = self.inline(runs, "\\\n", true);
-                let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-                anchored(anchor, true, lines)
+                anchored(anchor, true, guarded_lines(&text))
             }
             PBlock::List {
                 ordered,
@@ -226,13 +280,13 @@ impl Cx<'_> {
                 }
                 let caption = self.inline(caption, "\\\n", true);
                 if file.is_none() && caption.is_empty() && !alt_text.is_empty() {
-                    lines.push(md_escape(&alt_text, true));
+                    lines.push(guard_line(&md_escape(&alt_text, true)));
                 }
                 if !caption.is_empty() {
                     if !lines.is_empty() {
                         lines.push(String::new());
                     }
-                    lines.extend(caption.split('\n').map(str::to_string));
+                    lines.extend(guarded_lines(&caption));
                 }
                 anchored(anchor, false, lines)
             }
@@ -341,7 +395,7 @@ fn page_file(p: &Print, d: &PrintDoc) -> String {
         out.push_str(&format!("rdy_id: {}\n", d.id));
     }
     out.push_str("---\n\n");
-    out.push_str(&format!("# {}\n", text_line(&d.title, false)));
+    out.push_str(&format!("{}\n", heading(1, &text_line(&d.title, false))));
     let file = md_path(&d.page);
     let cx = Cx {
         file: &file,
@@ -359,9 +413,9 @@ fn page_file(p: &Print, d: &PrintDoc) -> String {
 /// The title part (O2, O28 (a)).
 fn title_file(p: &Print) -> String {
     let mut out = format!(
-        "---\ntitle: {}\n---\n\n# {}\n",
+        "---\ntitle: {}\n---\n\n{}\n",
         json(&p.title),
-        text_line(&p.title, false)
+        heading(1, &text_line(&p.title, false))
     );
     if let Some(d) = p
         .description
@@ -373,7 +427,7 @@ fn title_file(p: &Print) -> String {
             .split("\n\n")
             .map(|para| {
                 para.lines()
-                    .map(|l| md_escape(l.trim(), true))
+                    .map(|l| guard_line(&md_escape(l.trim(), true)))
                     .collect::<Vec<_>>()
                     .join("\n")
             })
@@ -493,21 +547,25 @@ pub fn write_markdown(p: &Print, out: &Path, layout: Layout) -> Result<PrintSumm
         .unwrap_or(Path::new("."));
     let replaces_empty = check_out(out, parent, name)?;
     // everything is written to a staging directory beside `out` and renamed into place at the
-    // end: a failure leaves nothing behind but, at worst, the staging directory, which the next
-    // export clears
+    // end: a failure leaves nothing behind. The directory is ours only if `create_dir` made it:
+    // a path that is already there is somebody's (a file of the user's, or the staging of an
+    // export that runs now), so it is refused and never touched
     let staging = parent.join(format!(".{}.rdy-export-partial", name.to_string_lossy()));
-    if let Ok(md) = std::fs::symlink_metadata(&staging) {
-        let cleared = if md.is_dir() {
-            std::fs::remove_dir_all(&staging)
-        } else {
-            std::fs::remove_file(&staging)
-        };
-        cleared.map_err(|e| io(&staging, e))?;
+    match std::fs::create_dir(&staging) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "{} already exists: a Markdown export may be running, or an earlier one stopped",
+                    staging.display()
+                ),
+                "if no export is running, remove it and export again",
+            ));
+        }
+        Err(e) => return Err(io(&staging, e)),
     }
-    let written = std::fs::create_dir(&staging)
-        .map_err(|e| io(&staging, e))
-        .and_then(|()| write_tree(p, &staging, layout));
-    let bytes = match written {
+    let bytes = match write_tree(p, &staging, layout) {
         Ok(bytes) => bytes,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&staging);
