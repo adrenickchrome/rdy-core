@@ -777,6 +777,57 @@ fn tgat1_a_landing_only_form_is_listed_with_its_proposal() {
     );
 }
 
+/// D-K0SS1, D-CRTJG: closing view b withdraws its version, so the landing form the gate
+/// refused with has no landing: the listing drops it, and a dismissal cannot name it.
+#[test]
+fn vw1_a_withdrawn_versions_landing_form_leaves_the_listing_and_cannot_be_named() {
+    use rdy_engine::tensions::api::{TensionsRequest, run_tensions};
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let tok = |r: &Rdy| brief_of(r, &Scope::Canon, &[&s.section]).base.token;
+    let t0 = tok(&r);
+    write_cited_as(&mut r, &ag("a"), "a", term(&s.section, "Fee"), Some(&t0)).unwrap();
+    let pa = propose(&mut r, "a");
+    approve(&mut r, &pa).unwrap();
+    let t1 = tok(&r);
+    write_cited_as(
+        &mut r,
+        &ag("o"),
+        "o",
+        json!([{"op": "update", "id": s.section.to_string(), "fields": {"lifecycle": "draft"}}]),
+        Some(&t1),
+    )
+    .unwrap();
+    let t2 = tok(&r);
+    write_cited_as(&mut r, &ag("b"), "b", term(&s.section, "fee"), Some(&t2)).unwrap();
+    let pb = propose(&mut r, "b");
+    let refusing: Vec<String> = pb
+        .tensions
+        .iter()
+        .filter(|t| t.refuses == Some(true))
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(refusing.len(), 1, "{:?}", pb.tensions);
+    r.view_close(&ag("b"), &["b".into()], "done").unwrap();
+    assert!(
+        r.read().resolve_tension(&refusing[0], now_ms()).is_err(),
+        "a withdrawn version's landing form cannot be named"
+    );
+    let engine = Local::new(r);
+    let all = run_tensions(&engine, &writer(), TensionsRequest::default()).unwrap()["tensions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        all.iter().all(|t| t["id"] != refusing[0].as_str()),
+        "{all:#?}"
+    );
+    assert!(
+        all.iter().all(|t| t["proposal"] != pb.r#ref.as_str()),
+        "{all:#?}"
+    );
+}
+
 /// Perf fix (mcp_write_9mib): a version with thousands of tensions builds the sides of only the
 /// `PROPOSAL_TENSIONS_MAX` it lists; the rest are counted in `tensions_omitted`.
 #[test]

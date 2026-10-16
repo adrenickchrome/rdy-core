@@ -1,7 +1,9 @@
 //! A person's acceptance of a reviewer's advice (D-WMCFW, D-2K8Q5): one answer for the advised semantic tensions of one proposal version, given plainly by a human session or relayed by an agent as itself with the person's words (FW-B9, FW-UX1, D-67ZN7). An accepted tension blocks until a side's content changes.
 use crate::answer::relay::{RelayInput, RelayRefusal, relayed};
 use crate::error::{E_BAD_INPUT, E_PERMISSION, E_PROPOSAL_MOVED, RdyError};
-use crate::gate::{ProposalRef, landed_as, latest_version, open_proposals, resolve_in};
+use crate::gate::{
+    ProposalRef, landed_as, latest_version, open_proposals, resolve_in, withdrawn, withdrawn_error,
+};
 use crate::proposal_show::is_proposal_ref;
 use crate::semantic::state::OpenTension;
 use crate::tensions::api::AcceptRequest;
@@ -144,7 +146,8 @@ fn relay_of(
     }
 }
 
-/// The exact proposal version `text` names, open and latest, with its view and changes.
+/// The exact proposal version `text` names, open and latest, with its view and changes. A
+/// version that a close of its view withdrew is `E_VIEW_CLOSED` (D-K0SS1).
 fn open_version(st: &ReadState, text: &str) -> Result<(ProposalRef, String, Vec<Hash>), RdyError> {
     let exact = (text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()))
         || (is_proposal_ref(text) && text.contains('@'));
@@ -162,6 +165,10 @@ fn open_version(st: &ReadState, text: &str) -> Result<(ProposalRef, String, Vec<
             format!("{pref} is not the latest open version"),
             "propose again and show the person the new version",
         ));
+    }
+    // D-K0SS1: a close of the version's view withdrew it
+    if withdrawn(st, &pref.version, &p)? {
+        return Err(withdrawn_error(&pref, &p.view));
     }
     Ok((pref, p.view, p.changes))
 }

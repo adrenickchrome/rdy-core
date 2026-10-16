@@ -29,6 +29,9 @@ const ENV_IDLE_MS: &str = "RDY_DAEMON_IDLE_MS";
 const CHILD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the child reports `starting` before `ready`, in ms (default 0).
 const ENV_PROGRESS_MS: &str = "RDY_DAEMON_PROGRESS_MS";
+/// A file path: when set, the child stays `starting` until that file exists (then `ready`), so a
+/// test releases readiness itself instead of racing a timer.
+const ENV_READY_FILE: &str = "RDY_DAEMON_READY_FILE";
 
 /// How long `client`'s `connect_or_start` waits for a daemon.
 const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -113,6 +116,11 @@ pub fn child_daemon_entry() {
         readiness.progress("starting");
         let task = tokio::spawn(d.run());
         tokio::time::sleep(progress).await;
+        if let Some(gate) = std::env::var_os(ENV_READY_FILE) {
+            while !Path::new(&gate).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
         readiness.ready();
         match task.await {
             Ok(Ok(reason)) => {
@@ -238,6 +246,35 @@ pub struct Hosted {
 /// How long `Hosted`'s clients wait for `ready`.
 const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A connection for `hello` to the daemon at `run`, past `ready`: waits up to 30 s while the
+/// daemon answers `starting`. Panics if the daemon does not answer or does not become ready.
+pub async fn connect_ready(run: &RunDir, hello: &Hello) -> Client {
+    connect_ready_noting(run, hello, || {}).await
+}
+
+/// `connect_ready`, calling `on_starting` once, when the daemon first answers `starting` and
+/// before the helper waits: a test uses it to release a gated daemon only after the helper has
+/// met `starting`.
+pub async fn connect_ready_noting(
+    run: &RunDir,
+    hello: &Hello,
+    on_starting: impl FnOnce(),
+) -> Client {
+    match connect(run, hello).await {
+        Attempt::Ready(c) => c,
+        Attempt::Starting(p) => {
+            on_starting();
+            p.wait(
+                std::time::Instant::now() + HOSTED_READY_TIMEOUT,
+                &mut |_| {},
+            )
+            .await
+            .unwrap_or_else(|e| panic!("the host did not become ready: {e}"))
+        }
+        other => panic!("the host did not answer the hello: {other:?}"),
+    }
+}
+
 impl Hosted {
     /// `new_with_human("human:qa")`.
     pub fn new() -> Hosted {
@@ -301,9 +338,9 @@ impl Hosted {
             .expect("client runtime")
     }
 
-    /// A connection of `proto` past `ready`.
-    async fn connect(&self, proto: Proto) -> Client {
-        let hello = Hello {
+    /// The hello of a `proto` connection to this host.
+    pub fn hello(&self, proto: Proto) -> Hello {
+        Hello {
             rdy: PROTO_VERSION,
             version: "t".into(),
             proto,
@@ -311,19 +348,12 @@ impl Hosted {
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&self.dir.path()))
                 .project_id()
                 .expect("the project's .rdy"),
-        };
-        let run = RunDir::of_project(self.dir.path());
-        match connect(&run, &hello).await {
-            Attempt::Ready(c) => c,
-            Attempt::Starting(p) => p
-                .wait(
-                    std::time::Instant::now() + HOSTED_READY_TIMEOUT,
-                    &mut |_| {},
-                )
-                .await
-                .unwrap_or_else(|e| panic!("the host did not become ready: {e}")),
-            other => panic!("the host did not answer the hello: {other:?}"),
         }
+    }
+
+    /// A connection of `proto` past `ready`. Waits while the host answers `starting`.
+    pub async fn connect(&self, proto: Proto) -> Client {
+        connect_ready(&RunDir::of_project(self.dir.path()), &self.hello(proto)).await
     }
 
     /// A `ctl` connection past `ready` whose session op sent `actor` and `run`.

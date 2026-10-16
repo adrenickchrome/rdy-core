@@ -141,8 +141,9 @@ fn no_create(s: &Session) -> Result<(), RdyError> {
 /// The role, existence, closed and ownership rules for `action` on `view`. A commit or an
 /// include into a view with no ref creates it; a closed view takes no commit, include or
 /// exclude; an agent acts only in a view it owns (`check_view_access`). Propose keeps its own
-/// role and existence checks and takes only the ownership rule (legacy `:` views stay
-/// proposable by the human).
+/// role, existence and closed checks (a closed view takes no proposal, D-K0SS1, R2, in
+/// `propose_relayed`) and takes only the ownership rule here (legacy `:` views stay proposable
+/// by the human).
 pub(crate) fn check_view_op(
     st: &ReadState,
     s: &Session,

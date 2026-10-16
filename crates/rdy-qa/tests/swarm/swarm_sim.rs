@@ -872,6 +872,8 @@ fn sg5_an_alternative_refusal_is_judged_by_the_set_at_that_time() {
 /// 2): a refusal of it is a product defect. The binding is read from the stored change and the
 /// sets' fixed bindings; the set's state at each refusal from canon's landing records, in the
 /// order the journal names the landings.
+/// `land`/`E_VIEW_CLOSED` (D-K0SS1, R1) names no change and comes from a view that lost its set
+/// before it: the choosing landing closed the view and withdrew its version.
 ///
 /// The drain's `propose`/`E_ALT_MEMBER` names a change bound to a member of a set still open at
 /// that propose. The drain then lands that set's member (the gate's fix: "propose from <member>
@@ -942,6 +944,7 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
             let row = match (&e.outcome, e.act) {
                 (Met::Refused(c), "propose") if c == "E_ALT_CHOSEN" => c,
                 (Met::Refused(c), "land") if c == "E_ALT_MEMBER" => c,
+                (Met::Refused(c), "land") if c == "E_VIEW_CLOSED" => c,
                 (Met::Refused(c), "propose") if c == "E_ALT_MEMBER" && drain => c,
                 _ => continue,
             };
@@ -2074,4 +2077,11 @@ fn sg5_the_checker_and_reindex_pass_at_the_end() {
             "swarm seed {seed}: rdy fsck: {fsck}"
         );
     });
+}
+
+/// D-K0SS1, R1: a land of a version that a close of its view withdrew (a losing member's, by
+/// the landing that chose its set) meets `E_VIEW_CLOSED`, a row of the closed table.
+#[test]
+fn vw2_the_closed_table_lets_a_land_meet_e_view_closed() {
+    assert!(allowed("land", "E_VIEW_CLOSED"));
 }

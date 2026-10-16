@@ -597,17 +597,72 @@ fn msw20_included_before_reads_a_views_set_as_the_log_held_it_when_an_object_was
         .unwrap();
     create(&mut s, "b", "c-00003", &by);
     assert_eq!(s.included("a").unwrap().as_ref(), &vec![c2]);
-    assert_eq!(s.included_before("a", &mark).unwrap().as_ref(), &vec![c1]);
+    assert_eq!(
+        s.included_before("a", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .as_ref(),
+        &vec![c1]
+    );
     assert_eq!(
         s.included("a").unwrap().as_ref(),
         &vec![c2],
         "the cache still serves the head"
     );
     assert!(
-        s.included_before("b", &mark).unwrap().is_empty(),
+        s.included_before("b", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .is_empty(),
         "b had no op then"
     );
-    assert!(s.included_before("none", &mark).unwrap().is_empty());
+    assert!(
+        s.included_before("none", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Final fix round 1 (F2): `included_before` marks the frame of the kind it is asked for. A
+/// blob chunk with an alternative set version's bytes, written before a's commit, moves the
+/// mark of neither the set version nor the blob.
+#[test]
+fn msw20_included_before_marks_the_frame_of_the_kind_asked_for() {
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    let set = AltSet {
+        stable: None,
+        prev: None,
+        title: "T".into(),
+        question: None,
+        members: vec![],
+        status: AltStatus::Open,
+        provenance: by.clone(),
+    };
+    let bytes = postcard::to_allocvec(&set).unwrap();
+    s.put_blob(&bytes).unwrap();
+    let c1 = create(&mut s, "a", "c-00001", &by);
+    let mark = s.put_alt_set(&set).unwrap();
+    assert_eq!(
+        mark,
+        Hash::of(&bytes),
+        "the blob chunk holds the set's bytes"
+    );
+    assert_eq!(
+        s.included_before("a", rdy_store::kinds::ALT_SET, &mark)
+            .unwrap()
+            .as_ref(),
+        &vec![c1],
+        "the set version's frame"
+    );
+    assert!(
+        s.included_before("a", rdy_store::kinds::BLOB_CHUNK, &mark)
+            .unwrap()
+            .is_empty(),
+        "the blob chunk's frame"
+    );
+    let e = s
+        .included_before("a", rdy_store::kinds::PROPOSAL, &mark)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::NotFound(_)), "{e:?}");
 }
 
 fn author(actor: &str, run: Option<&str>, at_ms: i64) -> Provenance {
@@ -732,4 +787,115 @@ fn mfb3_commit_many_refuses_a_block_in_two_changes() {
         "{e}"
     );
     assert!(s.view_head("v").unwrap().is_none());
+}
+
+/// The frames `closed_after` reads for a version proposed after `n` commits and an `Own`, with
+/// one op after the version: an undo of that `Own`.
+fn closed_after_reads(n: usize) -> u64 {
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    for i in 1..=n {
+        create(&mut s, "a", &format!("c-{i:05}"), &by);
+    }
+    let own = s
+        .view_append(
+            "a",
+            vec![ViewOpKind::Own {
+                owner: Some(owner("agent:b")),
+            }],
+            &by,
+        )
+        .unwrap()
+        .head;
+    let p = s.propose("a", "T", by.clone()).unwrap();
+    let head = s
+        .view_append("a", vec![ViewOpKind::Undo { target: own }], &by)
+        .unwrap()
+        .head;
+    let before = s.frames_read();
+    assert!(
+        !s.closed_after("a", &head, rdy_store::kinds::PROPOSAL, &p)
+            .unwrap(),
+        "no close"
+    );
+    s.frames_read() - before
+}
+
+/// vw1 fix round 1: whether a close followed a version reads the ops after it and what each
+/// undo among them targets, never the history before the version (an undo of an `Own` is no
+/// close, whatever owner it restores).
+#[test]
+fn vw1_closed_after_reads_no_history_before_the_version() {
+    let one = closed_after_reads(1);
+    assert_eq!(closed_after_reads(128), one, "128 earlier commits");
+    assert_eq!(closed_after_reads(512), one, "512 earlier commits");
+    assert!(one <= 3, "the undo and its target: {one} frames");
+}
+
+/// vw1 fix round 1: `closed_after` tells a closing undo as the full resolve does. After a
+/// version: an undo of the commit and of the `Own` close nothing; an undo of the view's create
+/// closes it; an undo of that undo reopens it, and the earlier close still counts.
+#[test]
+fn vw1_closed_after_tells_a_closing_undo_as_undo_effect_does() {
+    use rdy_store::ResolvedOp;
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    let commit = create(&mut s, "a", "c-00001", &by);
+    let mut first = s.view_head("a").unwrap().unwrap().head;
+    let commit_op = first;
+    while let Some(prev) = s.view_op(&first).unwrap().prev {
+        first = prev;
+    }
+    assert!(matches!(
+        s.view_op(&first).unwrap().op,
+        ViewOpKind::Create { .. }
+    ));
+    let own = s
+        .view_append(
+            "a",
+            vec![ViewOpKind::Own {
+                owner: Some(owner("agent:b")),
+            }],
+            &by,
+        )
+        .unwrap()
+        .head;
+    let p = s.propose("a", "T", by.clone()).unwrap();
+    let pk = rdy_store::kinds::PROPOSAL;
+    let undo = |s: &mut Store, target: Hash| {
+        s.view_append("a", vec![ViewOpKind::Undo { target }], &by)
+            .unwrap()
+            .head
+    };
+    let h = undo(&mut s, own);
+    assert!(
+        !s.closed_after("a", &h, pk, &p).unwrap(),
+        "an undo of an own"
+    );
+    let h = undo(&mut s, commit_op);
+    assert_eq!(
+        s.undo_effect("a", &commit_op).unwrap(),
+        ResolvedOp::Exclude(vec![commit])
+    );
+    assert!(
+        !s.closed_after("a", &h, pk, &p).unwrap(),
+        "an undo of a commit"
+    );
+    assert_eq!(s.undo_effect("a", &first).unwrap(), ResolvedOp::Close);
+    let closing = undo(&mut s, first);
+    assert!(
+        s.closed_after("a", &closing, pk, &p).unwrap(),
+        "an undo of the create"
+    );
+    assert_eq!(s.undo_effect("a", &closing).unwrap(), ResolvedOp::Reopen);
+    let h = undo(&mut s, closing);
+    assert!(!s.view_head("a").unwrap().unwrap().closed);
+    assert!(
+        s.closed_after("a", &h, pk, &p).unwrap(),
+        "the earlier close counts"
+    );
+    let e = s
+        .closed_after("a", &h, rdy_store::kinds::BLOB_CHUNK, &p)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::NotFound(_)), "{e:?}");
 }

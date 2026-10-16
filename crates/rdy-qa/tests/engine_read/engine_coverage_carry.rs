@@ -114,6 +114,63 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
             same_issues(&r, &v); // fix round 2: the carried issues too
         }
     }
+    // POST-LAUNCH 41: the ids of a run are random, so the walk may never find a childless
+    // section to delete (case 14) or a proposed decision to edit (case 11). Drive each missing
+    // case directly with a target chosen by rule, creating the fixture when none exists, so
+    // the write cannot fail for want of an eligible block.
+    for case in 10..15u64 {
+        if written.get(&case).is_some_and(|n| *n > 0) {
+            continue;
+        }
+        let step = 300 + case as usize;
+        let ops = match case {
+            11 => {
+                let mut ids = block_ids(&r, &v, |b| {
+                    b.block_type == "decision" && b.field_str("status") == Some("proposed")
+                });
+                if ids.is_empty() {
+                    write(
+                        &mut r,
+                        "next",
+                        json!([{"op": "create", "type": "decision", "parent": c["$s"],
+                                "fields": {"statement": "Fixture rule", "status": "proposed"}}]),
+                    )
+                    .unwrap();
+                    r.read().coverage_issues(&v).unwrap();
+                    same(&r, &v);
+                    same_issues(&r, &v);
+                    ids = block_ids(&r, &v, |b| {
+                        b.block_type == "decision" && b.field_str("status") == Some("proposed")
+                    });
+                }
+                json!([{"op": "update", "id": ids[0].to_string(),
+                        "fields": {"statement": format!("Restated at step {step}"), "status": "proposed"}}])
+            }
+            14 => {
+                let mut ids = childless_sections(&r, &v);
+                if ids.is_empty() {
+                    write(
+                        &mut r,
+                        "next",
+                        json!([{"op": "create", "type": "section", "parent": c["$o"],
+                                "fields": {"title": "Fixture"}}]),
+                    )
+                    .unwrap();
+                    r.read().coverage_issues(&v).unwrap();
+                    same(&r, &v);
+                    same_issues(&r, &v);
+                    ids = childless_sections(&r, &v);
+                }
+                json!([{"op": "delete", "id": ids[0].to_string()}])
+            }
+            _ => random_op(&r, &v, &c, (seed >> 1) / 15 * 15 + case, step),
+        };
+        write(&mut r, "next", ops).unwrap();
+        *written.entry(case).or_default() += 1;
+        r.read().coverage_issues(&v).unwrap();
+        same(&r, &v);
+        same_issues(&r, &v);
+    }
     // final review I1, I4: the new cases are reached
     for case in 10..15 {
         assert!(
@@ -121,6 +178,28 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
             "case {case}: {written:?}"
         );
     }
+}
+
+/// The ids (sorted) of the view's blocks that `keep` accepts.
+fn block_ids(r: &Rdy, scope: &Scope, keep: impl Fn(&rdy_model::Block) -> bool) -> Vec<BlockId> {
+    let st = r.read();
+    let m = st.materialized(scope).unwrap();
+    let mut ids: Vec<BlockId> = m.iter().filter(|b| keep(b)).map(|b| b.id.clone()).collect();
+    ids.sort();
+    ids
+}
+
+/// The sections of the view with no children (sorted by id): the ones a delete is not refused.
+fn childless_sections(r: &Rdy, scope: &Scope) -> Vec<BlockId> {
+    let st = r.read();
+    let m = st.materialized(scope).unwrap();
+    let mut ids: Vec<BlockId> = m
+        .iter()
+        .filter(|b| b.block_type == "section" && m.children(Some(&b.id)).is_empty())
+        .map(|b| b.id.clone())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Targeted writes the random ones rarely reach, each carried (no full build) and equal to a
@@ -202,7 +281,9 @@ fn pick(ids: &[BlockId], seed: u64, fallback: &str) -> String {
     if ids.is_empty() {
         return fallback.to_string();
     }
-    ids[((seed >> 24) as usize) % ids.len()].to_string()
+    let mut sorted: Vec<&BlockId> = ids.iter().collect(); // by id, whatever the walk order
+    sorted.sort();
+    sorted[((seed >> 24) as usize) % sorted.len()].to_string()
 }
 
 /// One random write on the live ids of `scope`, chosen by `seed % 15`: create prose naming
