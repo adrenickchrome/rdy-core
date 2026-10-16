@@ -3963,8 +3963,8 @@ fn daemon_clients_ops(
 
 /// One JSON-RPC line out, and the reply with `id` back (other lines are skipped).
 async fn mcp_call(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
-    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    w: &mut rdy_daemon::sys::WriteHalf,
+    r: &mut tokio::io::BufReader<rdy_daemon::sys::ReadHalf>,
     id: u64,
     tool: &str,
     args: serde_json::Value,
@@ -3974,7 +3974,7 @@ async fn mcp_call(
 }
 
 async fn mcp_send(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut rdy_daemon::sys::WriteHalf,
     id: u64,
     tool: &str,
     args: serde_json::Value,
@@ -3987,7 +3987,7 @@ async fn mcp_send(
 }
 
 async fn mcp_reply(
-    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    r: &mut tokio::io::BufReader<rdy_daemon::sys::ReadHalf>,
     id: u64,
 ) -> serde_json::Value {
     use tokio::io::AsyncBufReadExt;
@@ -4138,7 +4138,7 @@ fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
     .expect("big doc");
     // a symlink loop under docs/
     let link = export("bound-link");
-    std::os::unix::fs::symlink(link.join("docs"), link.join("docs/loop")).expect("symlink");
+    crate::platform::symlink(&link.join("docs"), &link.join("docs/loop")).expect("symlink");
     let pack = PackSet::with_builtin()
         .resolve("rdy-standard")
         .expect("rdy-standard");

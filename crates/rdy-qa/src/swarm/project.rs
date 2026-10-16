@@ -5,6 +5,7 @@ use crate::daemon::Served;
 use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{land, write, writer};
 use crate::packs::{QA_PACK_YAML, use_pack};
+use crate::platform;
 use rdy_engine::{DecisionInput, Rdy, Scope};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ const PARENT_PREFIX: &str = "rdysw-";
 pub fn run_parent() -> &'static Path {
     static PARENT: OnceLock<PathBuf> = OnceLock::new();
     PARENT.get_or_init(|| {
-        let root = Path::new("/tmp");
+        let root = platform::short_tmp_root();
         let me = std::process::id();
         sweep(root, me);
         let p = root.join(format!("{PARENT_PREFIX}{me}"));
@@ -216,9 +217,7 @@ mod tests {
     #[test]
     fn sg5_the_sweep_removes_the_parents_of_exited_processes() {
         let root = tempfile::tempdir().expect("tempdir");
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn true");
+        let mut child = platform::no_op_command().spawn().expect("spawn true");
         let dead = child.id();
         child.wait().expect("wait for true");
         let live = std::process::id();

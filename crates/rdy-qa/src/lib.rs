@@ -15,6 +15,7 @@ pub mod landing_audit;
 pub mod mcp;
 pub mod packs;
 pub mod perf;
+pub mod platform;
 pub mod reindex_check;
 pub mod report;
 pub mod site;

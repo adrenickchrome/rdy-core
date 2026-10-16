@@ -30,7 +30,7 @@ pub(crate) fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         } else if kind.is_file() {
             std::fs::copy(&src, &dst)?;
         } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+            crate::platform::symlink(&std::fs::read_link(&src)?, &dst)?;
         }
     }
     Ok(())
