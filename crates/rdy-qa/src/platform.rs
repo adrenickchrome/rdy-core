@@ -78,6 +78,7 @@ pub fn no_op_command() -> Command {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -95,7 +96,12 @@ mod tests {
         assert!(process_running(pid), "the child is running");
         assert!(!process_exited(pid), "the child has not exited");
         kill_hard(pid);
-        child.wait().expect("reap the child");
+        let status = child.wait().expect("reap the child");
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "the child was killed by SIGKILL, not left to finish ({status:?})"
+        );
         let until = Instant::now() + Duration::from_secs(10);
         while !process_exited(pid) {
             assert!(Instant::now() < until, "the child did not exit");
