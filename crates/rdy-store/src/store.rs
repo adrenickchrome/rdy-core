@@ -1,4 +1,5 @@
 use crate::error::StoreError;
+use crate::fileid::FileId;
 use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
@@ -317,22 +318,10 @@ impl StoreLock {
     /// Whether this is the lock of the store at `dir`: the held file is the file at `dir/lock`.
     /// A store directory renamed after the lock was taken keeps its lock.
     fn guards(&self, dir: &Path) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            match (
-                self.0.0.metadata(),
-                std::fs::symlink_metadata(dir.join("lock")),
-            ) {
-                (Ok(held), Ok(at)) => held.dev() == at.dev() && held.ino() == at.ino(),
-                _ => false,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = dir;
-            true
-        }
+        matches!(
+            (FileId::of_file(&self.0.0), FileId::lstat(&dir.join("lock"))),
+            (Ok(a), Ok(b)) if a == b
+        )
     }
 }
 
