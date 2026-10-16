@@ -103,13 +103,9 @@ impl StoreReader {
             sets.push((name.to_string(), head, c.included));
             views += 1;
         }
-        // the open-proposal table holds exactly the `open/` refs that name a proposal (R5)
-        let named: Vec<(String, Vec<u8>)> = self
-            .refs_with_prefix("open/")?
-            .into_iter()
-            .filter(|(_, v)| !v.is_empty())
-            .collect();
-        if named != self.open_proposal_refs()? {
+        // the open-proposal table holds exactly the `open/` refs that name a proposal (R5), both
+        // read at one point so a live writer's propose or landing is not a false failure (rdr1)
+        if !self.index().open_proposals_match_refs()? {
             return Err(bad(
                 "the open proposal table differs from the open refs; run rdy reindex".to_string(),
             ));

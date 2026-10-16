@@ -601,6 +601,31 @@ impl Index {
         Ok(out)
     }
 
+    /// Whether [`OPEN_PROPOSALS`] holds exactly the `open/` refs whose value is not empty, both
+    /// read in one read transaction: a writer that proposes or lands between two reads would
+    /// make a sound index look damaged (rdr1).
+    pub fn open_proposals_match_refs(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let refs = r.open_table(REFS).map_err(db)?;
+        let mut named = vec![];
+        for item in refs.range(OPEN_PREFIX..).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            if !k.value().starts_with(OPEN_PREFIX) {
+                break;
+            }
+            if !v.value().is_empty() {
+                named.push((k.value().to_string(), v.value().to_vec()));
+            }
+        }
+        let open = r.open_table(OPEN_PROPOSALS).map_err(db)?;
+        let mut table = vec![];
+        for item in open.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            table.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(named == table)
+    }
+
     /// How many refs start with `prefix`, counted without reading their values.
     pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
