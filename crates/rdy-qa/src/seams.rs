@@ -233,17 +233,29 @@ impl Scan<'_> {
         }
     }
 
-    /// The metadata of `p` (following links); `None` when it is absent (or a dangling link),
-    /// and a problem for any other error.
+    /// The metadata of `p` (following links); `None` and a problem for any error. A path the
+    /// scan found in a directory exists, so even `NotFound` (a dangling link) is a problem.
     fn metadata(&mut self, p: &Path) -> Option<std::fs::Metadata> {
         match std::fs::metadata(p) {
             Ok(m) => Some(m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 self.failed(p, &e);
                 None
             }
         }
+    }
+
+    /// [`Self::metadata`] for an optional path (`src`, `tests`, `benches`, `build.rs`): `None`
+    /// with no problem only when nothing is there at all. A link that resolves to nothing is a
+    /// problem.
+    fn optional_metadata(&mut self, p: &Path) -> Option<std::fs::Metadata> {
+        let absent = |r: std::io::Result<std::fs::Metadata>| {
+            r.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        };
+        if absent(std::fs::metadata(p)) && absent(std::fs::symlink_metadata(p)) {
+            return None;
+        }
+        self.metadata(p)
     }
 
     /// The entries of `dir`, sorted; a problem when it or one of its entries cannot be read.
@@ -300,8 +312,9 @@ impl Scan<'_> {
 /// Every scanned file, as (its path from `root` with `/` separators, its text), in path order:
 /// each `.rs` file under `crates/*/src`, `crates/*/tests` and `crates/*/benches`, and each
 /// `crates/*/build.rs`. Also the problems of every path that could not be scanned (unreadable,
-/// or a directory cycle): an absent `src`, `tests`, `benches` or `build.rs` is no problem, but
-/// every other failure is, so the scan never passes without reading every file it names.
+/// a link that resolves to nothing, or a directory cycle): an absent `src`, `tests`, `benches`
+/// or `build.rs` (nothing there, not even a link) is no problem, but every other failure is, so
+/// the scan never passes without reading every file it names.
 fn rust_files(root: &Path) -> (Vec<(String, String)>, Vec<Problem>) {
     let mut scan = Scan {
         root,
@@ -313,12 +326,12 @@ fn rust_files(root: &Path) -> (Vec<(String, String)>, Vec<Problem>) {
             continue;
         }
         let build = krate.join("build.rs");
-        if scan.metadata(&build).is_some_and(|m| m.is_file()) {
+        if scan.optional_metadata(&build).is_some_and(|m| m.is_file()) {
             scan.read(&build);
         }
         for dir in ["src", "tests", "benches"] {
             let dir = krate.join(dir);
-            if scan.metadata(&dir).is_some_and(|m| m.is_dir()) {
+            if scan.optional_metadata(&dir).is_some_and(|m| m.is_dir()) {
                 scan.walk(&dir, &mut Vec::new());
             }
         }
@@ -645,6 +658,50 @@ mod tests {
                 )]
             );
         }
+    }
+
+    /// The message for a path whose link `std::fs::metadata` cannot follow.
+    #[cfg(unix)]
+    fn unscannable(root: &Path, path: &str) -> String {
+        let err = std::fs::metadata(root.join(path)).unwrap_err();
+        format!("{path}: cannot be scanned: {err}")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ps11_a_dangling_link_in_a_scanned_directory_is_named() {
+        let d = tree(&[("crates/rdy-engine/src/lib.rs", "fn f() {}\n")]);
+        let src = d.path().join("crates/rdy-engine/src");
+        // A source file whose target is gone, and a link that may have been a directory.
+        std::os::unix::fs::symlink("missing.rs", src.join("gone.rs")).unwrap();
+        std::os::unix::fs::symlink("missing", src.join("gone_dir")).unwrap();
+        assert_eq!(
+            problems_with(d.path(), &[], &[]),
+            vec![
+                unscannable(d.path(), "crates/rdy-engine/src/gone.rs"),
+                unscannable(d.path(), "crates/rdy-engine/src/gone_dir"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ps11_a_dangling_crate_or_optional_path_link_is_named() {
+        let d = tree(&[("crates/rdy-engine/src/lib.rs", "fn f() {}\n")]);
+        let krate = d.path().join("crates/rdy-engine");
+        // An entry of crates/, and a build.rs and tests/ that exist as links but resolve to
+        // nothing: none of them is absent.
+        std::os::unix::fs::symlink("missing", d.path().join("crates/rdy-ghost")).unwrap();
+        std::os::unix::fs::symlink("missing.rs", krate.join("build.rs")).unwrap();
+        std::os::unix::fs::symlink("missing", krate.join("tests")).unwrap();
+        assert_eq!(
+            problems_with(d.path(), &[], &[]),
+            vec![
+                unscannable(d.path(), "crates/rdy-engine/build.rs"),
+                unscannable(d.path(), "crates/rdy-engine/tests"),
+                unscannable(d.path(), "crates/rdy-ghost"),
+            ]
+        );
     }
 
     #[test]
