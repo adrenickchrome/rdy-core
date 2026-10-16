@@ -8,6 +8,7 @@
 use super::*;
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
+use rdy_engine::consequence::report_answer_landings;
 use rdy_engine::engine::write_typed;
 use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
 use rdy_engine::*;
@@ -134,9 +135,11 @@ pub fn rdy_answer(st: &mut McpState, p: AnswerParams) -> Result<Value, RdyError>
         }
         let (refs, hashes): (Vec<String>, Vec<String>) =
             entries.into_iter().map(|e| (e.r#ref, e.card_hash)).unzip();
-        return write_typed(&*st.engine, move |r| {
+        let mut v = write_typed(&*st.engine, move |r| {
             r.answer_all_recommended(&s, &person, &refs, &hashes, relay)
-        });
+        })?;
+        report_answer_landings(&*st.engine, &mut v);
+        return Ok(v);
     }
     let (Some(r#ref), Some(option)) = (p.r#ref, p.option) else {
         return Err(bad(
@@ -152,5 +155,7 @@ pub fn rdy_answer(st: &mut McpState, p: AnswerParams) -> Result<Value, RdyError>
         relay,
         brief: p.brief,
     };
-    write_typed(&*st.engine, move |r| r.answer(&s, &person, req))
+    let mut v = write_typed(&*st.engine, move |r| r.answer(&s, &person, req))?;
+    report_answer_landings(&*st.engine, &mut v);
+    Ok(v)
 }

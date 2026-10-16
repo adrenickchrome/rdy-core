@@ -1332,6 +1332,25 @@ pub fn land_and_report(
     Ok(v)
 }
 
+/// Attaches the landing consequences to the landing of an answer's reply, which is an
+/// `AnswerInfo` or a list of them: for each one with a `landing`, the consequences of the
+/// version it landed, as `land_and_report` attaches them to an approval. Other answers stay as
+/// they are.
+pub fn report_answer_landings(engine: &dyn Engine, v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Array(done) => {
+            for one in done {
+                report_answer_landings(engine, one);
+            }
+        }
+        _ => {
+            if let Some(landing) = v.get_mut("landing").filter(|l| l.is_object()) {
+                report_landing(engine, landing, "version", None);
+            }
+        }
+    }
+}
+
 /// Attaches the landing consequences of the version hash in `v[key]`.
 fn report_landing(
     engine: &dyn Engine,

@@ -134,10 +134,7 @@ fn di12_rdy_answer_answers_locally_from_a_human_session() {
     let (ok, e) = s.json(&["--json", "answer", &ready[0], "later"]);
     assert!(!ok);
     assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
-    assert_eq!(
-        e["message"], "Later needs a chat session; the CLI has no Later",
-        "{e}"
-    );
+    assert_eq!(e["message"], "the CLI has no Later", "{e}");
     let (ok, out) = text(&s.rdy(&["answer", &ready[0], "approve", "--session", "chat-1"]));
     assert!(!ok && out.contains("--relayed-by"), "{out}");
     // a person answers as themselves
@@ -207,6 +204,91 @@ fn di12_rdy_answer_answers_locally_from_a_human_session() {
     );
     let (_, fsck) = s.json(&["--json", "fsck"]);
     assert!(fsck.is_object(), "{fsck}");
+}
+
+/// A served project whose one proposal changes claim A, so landing it makes claim B suspect: the
+/// proposal's ref and the consequence line `rdy approve` prints for it.
+fn changing_a() -> (Served, String, String) {
+    let s = Served::new();
+    let (pref, line) = with_rdy(&s, |r| {
+        let spec = spec_doc(r);
+        put(
+            r,
+            "w",
+            json!([{"op": "update", "id": spec.a.to_string(), "body": "A, changed."}]),
+        );
+        let p = r
+            .propose_subset(&ag("w"), "w", "w", None, Some("Changes A."))
+            .expect("propose");
+        (
+            p.r#ref,
+            format!("suspect {}: update (references {})", spec.b, spec.a),
+        )
+    });
+    (s, pref, line)
+}
+
+/// The consequence lines of an approval's text: one line for each entry.
+fn consequence_lines(out: &str) -> Vec<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("suspect "))
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn di12_rdy_answer_prints_the_consequences_rdy_approve_prints() {
+    // the same landing, once through rdy approve and once through each way of rdy answer; block
+    // ids differ between projects, so the lines compare with the ids blanked
+    let blank = |l: &str| {
+        l.split_whitespace()
+            .map(|w| {
+                let id = w.trim_matches(|c| c == ':' || c == '(' || c == ')');
+                if id.starts_with("c-") { "<id>" } else { w }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let (s, pref, line) = changing_a();
+    let (ok, approved) = text(&s.rdy(&["approve", &pref]));
+    assert!(ok, "{approved}");
+    assert_eq!(consequence_lines(&approved), vec![line], "{approved}");
+    let want: Vec<String> = consequence_lines(&approved)
+        .iter()
+        .map(|l| blank(l))
+        .collect();
+    assert_eq!(
+        want,
+        vec!["suspect <id> update (references <id>"],
+        "{approved}"
+    );
+    for all in [false, true] {
+        let (s, pref, line) = changing_a();
+        let args: Vec<&str> = if all {
+            vec!["answer", "--all-recommended", &pref]
+        } else {
+            vec!["answer", &pref, "approve"]
+        };
+        let (ok, out) = text(&s.rdy(&args));
+        assert!(ok, "{out}");
+        assert_eq!(consequence_lines(&out), vec![line], "{out}");
+        let got: Vec<String> = consequence_lines(&out).iter().map(|l| blank(l)).collect();
+        assert_eq!(got, want, "answer prints what approve prints");
+        // and the JSON carries them beside the landing
+        let (s, pref, _) = changing_a();
+        let args: Vec<&str> = if all {
+            vec!["--json", "answer", "--all-recommended", &pref]
+        } else {
+            vec!["--json", "answer", &pref, "approve"]
+        };
+        let (ok, v) = s.json(&args);
+        assert!(ok, "{v}");
+        let done = if all { &v[0] } else { &v };
+        let c = done["landing"]["consequences"].as_array().unwrap();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["kind"], "suspect", "{v}");
+    }
 }
 
 #[test]
@@ -306,38 +388,39 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
         "{out}"
     );
     assert!(out.contains(", relayed by agent:relay/r1"), "{out}");
-    // Later is a chat act: an agent relays it, and it hides the card in that session only
-    let (ok, v) = s.json_as(
-        agent,
-        run,
+    // Later is a chat act: the CLI refuses it whoever asks, relayed or not (F4); nothing is
+    // hidden and no record is written (MCP covers the session-scoped Later)
+    let before = landings(&s);
+    for relay_flags in [
+        &[][..],
         &[
-            "--json",
-            "answer",
-            &ready[1],
-            "later",
-            "--card",
-            &hash_of(&ready[1]),
             "--relayed-by",
             "agent:relay/r1",
             "--evidence",
             "not now",
             "--session",
             "chat-3",
-        ],
-    );
-    assert!(ok, "{v}");
-    assert_eq!(v["act"], "later", "{v}");
-    let (_, hidden) = s.json_as(agent, run, &["--json", "pending", "--session", "chat-3"]);
-    assert_eq!(hidden["snoozed"], 1, "{hidden}");
+        ][..],
+    ] {
+        let card = hash_of(&ready[1]);
+        let mut args = vec!["--json", "answer", &ready[1], "later", "--card", &card];
+        args.extend_from_slice(relay_flags);
+        let (ok, e) = s.json_as(agent, run, &args);
+        assert!(!ok, "{e}");
+        assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+        assert_eq!(e["message"], "the CLI has no Later", "{e}");
+    }
+    let (_, kept) = s.json_as(agent, run, &["--json", "pending", "--session", "chat-3"]);
+    assert_eq!(kept["snoozed"], 0, "{kept}");
     assert!(
-        hidden["items"]
+        kept["items"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|i| i["ref"] != ready[1].as_str())
+            .any(|i| i["ref"] == ready[1].as_str()),
+        "{kept}"
     );
-    let (_, other) = s.json_as(agent, run, &["--json", "pending", "--session", "chat-4"]);
-    assert_eq!(other["snoozed"], 0, "{other}");
+    assert_eq!(landings(&s), before, "a refusal lands nothing");
     // the landing records the person, the relay and the card
     let rows = with_rdy(&s, |r| r.read().log_rows().unwrap());
     assert_eq!(rows.len(), base + 1);

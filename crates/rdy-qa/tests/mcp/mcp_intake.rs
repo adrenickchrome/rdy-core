@@ -208,6 +208,8 @@ fn di12_rdy_answer_relays_a_batch_approval() {
     assert_eq!(info["act"], "approve", "{info}");
     assert_eq!(info["assurance"], "relayed", "{info}");
     assert_eq!(info["landing"]["approved"], b.r#ref.as_str(), "{info}");
+    // as an approval reports: the consequences of the landed version, always a list
+    assert!(info["landing"]["consequences"].is_array(), "{info}");
     let rows = st.engine.read().log_rows().unwrap();
     let row = rows.first().expect("a landing");
     assert_eq!(row.approved_by, PERSON);

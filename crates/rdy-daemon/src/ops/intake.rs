@@ -5,6 +5,7 @@
 //! unknown fields (FW-HD1).
 use super::*;
 use rdy_engine::answer::AnswerRequest;
+use rdy_engine::consequence::report_answer_landings;
 use rdy_engine::engine::write_typed;
 use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
 use rdy_mcp::tools::evidence_kind;
@@ -50,12 +51,21 @@ pub(super) fn pending(cx: &OpContext, a: PendingArgs) -> Result<Value, RdyError>
     Ok(to_json(&q))
 }
 
+/// The refusal of Later on the ctl surface, which the CLI is (F4).
+const NO_LATER: &str = "the CLI has no Later";
+const NO_LATER_FIX: &str =
+    "answer with another option; Later is a chat act, relayed with rdy_answer";
+
 fn bad(what: impl Into<String>, fix: impl Into<String>) -> RdyError {
     RdyError::new(E_BAD_INPUT, what, fix)
 }
 
 /// One answer, or each of `all_recommended` with its recommended option.
 pub(super) fn answer(cx: &OpContext, a: AnswerArgs) -> Result<Value, RdyError> {
+    // Later is a chat act, relayed with rdy_answer; no ctl caller gets it, relay or not (F4)
+    if a.option.as_deref() == Some("later") {
+        return Err(bad(NO_LATER, NO_LATER_FIX));
+    }
     // an agent's relay is `relayed_by` with `evidence`: half of it never reaches the engine
     if !cx.session.is_human() && a.relayed_by.is_some() != a.evidence.is_some() {
         return Err(RdyError::new(E_BAD_INPUT, RELAY_PAIR, RELAY_PAIR_FIX));
@@ -93,9 +103,11 @@ pub(super) fn answer(cx: &OpContext, a: AnswerArgs) -> Result<Value, RdyError> {
             ));
         }
         let refs: Vec<String> = entries.into_iter().map(|e| e.r#ref).collect();
-        return write_typed(cx.engine, move |r| {
+        let mut v = write_typed(cx.engine, move |r| {
             r.answer_all_recommended(&s, &person, &refs, &hashes, relay)
-        });
+        })?;
+        report_answer_landings(cx.engine, &mut v);
+        return Ok(v);
     }
     let (Some(r#ref), Some(option)) = (a.r#ref, a.option) else {
         return Err(bad(
@@ -111,5 +123,7 @@ pub(super) fn answer(cx: &OpContext, a: AnswerArgs) -> Result<Value, RdyError> {
         relay,
         brief: a.brief,
     };
-    write_typed(cx.engine, move |r| r.answer(&s, &person, req))
+    let mut v = write_typed(cx.engine, move |r| r.answer(&s, &person, req))?;
+    report_answer_landings(cx.engine, &mut v);
+    Ok(v)
 }
