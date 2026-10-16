@@ -305,6 +305,9 @@ fn main() {
             problems.is_empty(),
             problems.join("\n"),
         );
+        // Unix-only code lives only in the seam modules (FW-XP1 D-1RXEA).
+        let problems = rdy_qa::seams::seam_problems(&root());
+        gate("unix seams", problems.is_empty(), problems.join("\n"));
     }
 
     // The hardening suite, one test binary at a time; each area reports as one row (an area

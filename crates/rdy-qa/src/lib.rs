@@ -18,6 +18,7 @@ pub mod perf;
 pub mod platform;
 pub mod reindex_check;
 pub mod report;
+pub mod seams;
 pub mod site;
 pub mod skip;
 pub mod swarm;
