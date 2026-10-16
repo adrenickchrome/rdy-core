@@ -10,7 +10,6 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-libc.workspace = true
 rdy-engine.workspace = true
 rdy-mcp.workspace = true
 rdy-render.workspace = true
@@ -18,6 +17,9 @@ rdy-model.workspace = true
 rdy-store.workspace = true
 rmcp.workspace = true
 arc-swap.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

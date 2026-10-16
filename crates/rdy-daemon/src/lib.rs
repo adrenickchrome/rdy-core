@@ -10,6 +10,7 @@ pub mod layout;
 pub mod session;
 pub mod site;
 pub mod socket;
+pub mod sys;
 
 pub use ctl::{CtlReply, CtlRequest, DaemonInfo, MAX_CTL_LINE_BYTES, serve_ctl};
 pub use daemon::{
