@@ -43,7 +43,7 @@ fn two_authors(dir: &Path) -> (Rdy, String, String) {
         ]),
     );
     let d = w.created["$d"].clone();
-    let p = r.propose(&a, "va", "a").unwrap();
+    let p = r.propose(&a, "va", "a", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let b = sess("agent:b", Some("r2"), Role::Writer);
     let w = put(
@@ -55,7 +55,7 @@ fn two_authors(dir: &Path) -> (Rdy, String, String) {
         ]),
     );
     let prose = w.created["$p"].clone();
-    let p = r.propose(&b, "vb", "b").unwrap();
+    let p = r.propose(&b, "vb", "b", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     (r, d, prose)
 }

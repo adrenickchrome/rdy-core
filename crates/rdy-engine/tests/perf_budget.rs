@@ -197,7 +197,7 @@ fn spec_11_targets_at_100k_blocks() {
         role: Role::Approver,
         kind: rdy_engine::SessionKind::Human,
     };
-    let p = r.propose(&s, "work", "seed").unwrap();
+    let p = r.propose(&s, "work", "seed", None).unwrap();
     r.land(&approver, &p.id).unwrap();
     r.tag(&approver, "v0.1.0", None, None).unwrap();
     let mut positions = vec![];
@@ -336,7 +336,7 @@ fn chain1_log_bytes_per_write_stay_flat_to_10k() {
         kind: rdy_engine::SessionKind::Human,
     };
     let t = Instant::now();
-    let p = r.propose(&s, "work", "chain1").unwrap();
+    let p = r.propose(&s, "work", "chain1", None).unwrap();
     let propose = t.elapsed();
     let t = Instant::now();
     r.land(&approver, &p.id).unwrap();
@@ -381,7 +381,7 @@ fn m2c_landing_with_50_views_at_100k() {
         .unwrap();
     };
     // the generator never lands: land `work`, so every view below reads on the 100k canon
-    let p = r.propose(&writer, "work", "seed").unwrap();
+    let p = r.propose(&writer, "work", "seed", None).unwrap();
     r.land(&approver, &p.id).unwrap();
 
     let claims: Vec<String> = ids[..LANDINGS].iter().map(|c| c.to_string()).collect();
@@ -417,7 +417,7 @@ fn m2c_landing_with_50_views_at_100k() {
             json!([{"op": "update", "id": claim, "body": format!("Landed {i}.")}]),
         );
         let t = Instant::now();
-        let p = r.propose(&writer, &view, "m2c").unwrap();
+        let p = r.propose(&writer, &view, "m2c", None).unwrap();
         r.land(&approver, &p.id).unwrap();
         lands.push(t.elapsed());
     }

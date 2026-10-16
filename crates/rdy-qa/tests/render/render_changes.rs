@@ -20,7 +20,7 @@ fn review() -> (tempfile::TempDir, Rdy, ReviewIds, tempfile::TempDir) {
 fn proposal_site() -> (tempfile::TempDir, Rdy, tempfile::TempDir) {
     let (d, mut r, _ids) = review_project();
     let p = r
-        .propose(&writer(), REVIEW_VIEW, "Rewrite the intro")
+        .propose(&writer(), REVIEW_VIEW, "Rewrite the intro", None)
         .expect("propose the review view");
     let scope = r
         .read()
@@ -592,7 +592,7 @@ fn sr6_a_proposal_made_before_the_first_landing_lists_every_block_as_new() {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "Initial proposal").unwrap();
+    let p = r.propose(&writer(), "w", "Initial proposal", None).unwrap();
     write(
         &mut r,
         "x",
@@ -640,7 +640,7 @@ fn sr6_an_initial_proposal_agrees_on_menu_home_and_summary() {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "Initial proposal").unwrap();
+    let p = r.propose(&writer(), "w", "Initial proposal", None).unwrap();
     write(
         &mut r,
         "x",

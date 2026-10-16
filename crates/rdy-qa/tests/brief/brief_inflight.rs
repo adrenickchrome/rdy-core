@@ -83,7 +83,7 @@ fn infl1_open_proposals_that_touch_a_covered_block_are_listed_at_their_latest_ve
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     write(&mut r, "pa", upd(&s.a, "A in pa.")).unwrap();
-    let p1 = r.propose(&writer(), "pa", "Change A").unwrap();
+    let p1 = r.propose(&writer(), "pa", "Change A", None).unwrap();
     let b = brief_of(&r, &Scope::Canon, &[&s.a]);
     assert_eq!(b.inflight.proposals.len(), 1, "{:?}", b.inflight);
     let p = &b.inflight.proposals[0];
@@ -93,7 +93,7 @@ fn infl1_open_proposals_that_touch_a_covered_block_are_listed_at_their_latest_ve
     );
     assert_eq!(p.blocks, vec![s.a.to_string()]);
     write(&mut r, "pa", upd(&s.c, "C in pa.")).unwrap();
-    let p2 = r.propose(&writer(), "pa", "Change A and C").unwrap();
+    let p2 = r.propose(&writer(), "pa", "Change A and C", None).unwrap();
     let b = brief_of(&r, &Scope::Canon, &[&s.a]);
     let refs: Vec<&str> = b
         .inflight
@@ -154,7 +154,7 @@ fn infl1_an_open_proposals_written_blocks_are_read_once_per_version() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     write(&mut r, "pa", upd(&s.a, "A in pa.")).unwrap();
-    r.propose(&writer(), "pa", "Change A").unwrap();
+    r.propose(&writer(), "pa", "Change A", None).unwrap();
     assert_eq!(r.read().proposal_touched_cache_len(), 0);
     let first = brief_of(&r, &Scope::Canon, &[&s.a]);
     assert_eq!(r.read().proposal_touched_cache_len(), 1);
@@ -163,7 +163,7 @@ fn infl1_an_open_proposals_written_blocks_are_read_once_per_version() {
     assert_eq!(again.inflight.proposals, first.inflight.proposals);
     assert_eq!(r.read().proposal_touched_cache_len(), 1, "read once");
     write(&mut r, "pa", upd(&s.c, "C in pa.")).unwrap();
-    r.propose(&writer(), "pa", "Change A and C").unwrap();
+    r.propose(&writer(), "pa", "Change A and C", None).unwrap();
     let b = brief_of(&r, &Scope::Canon, &[&s.a]);
     assert_eq!(b.inflight.proposals.len(), 1);
     assert_eq!(r.read().proposal_touched_cache_len(), 2);

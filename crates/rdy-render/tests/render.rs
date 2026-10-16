@@ -21,6 +21,43 @@ fn founder() -> Session {
     }
 }
 
+/// The one summary a test gives a version that lands a proposed decision (F2, D-DKJS5: a
+/// version is approved through a card, and readiness needs a summary).
+const TEST_SUMMARY: &str = "test summary";
+
+/// F2 (D-DKJS5): before a landing, the person (human session `s`) confirms each exception that
+/// stands beside version `p` in their queue, through `Rdy::answer`. An answer writes no canon.
+fn confirm_exceptions(r: &mut Rdy, s: &Session, p: &ProposalInfo) {
+    use rdy_engine::answer::{AnswerRequest, relay::RelayInput};
+    use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
+    let q = r
+        .read()
+        .pending(&PendingQuery {
+            person: s.actor.clone(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .expect("pending");
+    let refs: Vec<String> = q
+        .items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(p.r#ref.as_str()))
+        .map(|i| i.r#ref.clone())
+        .collect();
+    for item in refs {
+        let req = AnswerRequest {
+            r#ref: item.clone(),
+            option: "confirm".into(),
+            card_hash: None,
+            note: None,
+            relay: RelayInput::default(),
+            brief: None,
+        };
+        r.answer(s, &s.actor, req)
+            .unwrap_or_else(|e| panic!("confirm {item}: {e}"));
+    }
+}
+
 #[test]
 fn text_html_escapes_then_links() {
     let t = BlockId::parse("t-MEDGR").unwrap();
@@ -62,7 +99,10 @@ fn renders_docs_decisions_diagrams_and_assets() {
         },
     )
     .unwrap();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some(TEST_SUMMARY))
+        .unwrap();
+    confirm_exceptions(&mut r, &founder(), &p);
     r.land(&founder(), &p.id).unwrap();
 
     let out = tempfile::tempdir().unwrap();
@@ -154,7 +194,7 @@ fn dangling_and_junk_blobs_become_placeholders() {
             raw_figure("fg-BBBBB", &s, "a2", "not-a-hash", "junk"),
         ],
     );
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r.propose(&agent(), "work", "seed", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     let summary = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -188,7 +228,10 @@ fn hostile_text_is_escaped_in_attribute_contexts() {
         },
     )
     .unwrap();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some(TEST_SUMMARY))
+        .unwrap();
+    confirm_exceptions(&mut r, &founder(), &p);
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -275,7 +318,7 @@ fn link_labels_render_references_as_text_on_one_line() {
     r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "claim", "parent": s, "body": format!("Compare {{{{{claim}}}}}.")}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r.propose(&agent(), "work", "seed", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -306,7 +349,7 @@ fn site_tree(r: &mut Rdy) -> serde_json::Map<String, serde_json::Value> {
         {"op": "create", "type": "folder", "id": "$c", "parent": "$w", "fields": {"name": "cards", "description": "Card products."}},
         {"op": "create", "type": "doc", "id": "$l", "parent": "$c", "fields": {"title": "Limits", "doc_type": "page"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let p = r.propose(&agent(), "work", "tree").unwrap();
+    let p = r.propose(&agent(), "work", "tree", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     serde_json::to_value(res.created)
         .unwrap()
@@ -394,7 +437,10 @@ fn url1_assets_live_under_assets_and_decisions_have_no_page() {
         )
         .unwrap();
     let did = d.created["$decision"].clone();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some(TEST_SUMMARY))
+        .unwrap();
+    confirm_exceptions(&mut r, &founder(), &p);
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&r.read(), &Scope::Canon, out.path()).unwrap();

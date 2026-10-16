@@ -9,7 +9,7 @@
       "blocks": [
         "c-CFPE0"
       ],
-      "id": "tn-b8fad1db8c41",
+      "id": "tn-8c00bc46cf81",
       "kind": "edit_collision",
       "severity": "blocking",
       "sides": [
@@ -21,9 +21,9 @@
               "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
             }
           ],
-          "change": "16f7e2997563b88963ece523bcf555903a7c3e9e3964b05be49a34b38e04e083",
+          "change": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
           "run": "a",
-          "side": "16f7e2997563b88963ece523bcf555903a7c3e9e3964b05be49a34b38e04e083",
+          "side": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
           "views": [
             "a",
             "a-fork"
@@ -37,9 +37,9 @@
               "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
             }
           ],
-          "change": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "change": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "run": "b",
-          "side": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "side": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "views": [
             "a",
             "b"
@@ -48,13 +48,13 @@
       ],
       "status": "open",
       "summary": "two changes edit c-CFPE0 from one base",
-      "tension": "b8fad1db8c41f56b8a31e76467ba15b1aff45935ed6b33da41cea75437c90d59"
+      "tension": "8c00bc46cf814563c65de9eb12ea7c8864ef7313c08177751a9002ccaa0163b9"
     },
     {
       "blocks": [
         "c-CFPE0"
       ],
-      "id": "tn-b49aae56c812",
+      "id": "tn-303b3e2b919c",
       "kind": "unjustified_change",
       "overridden": true,
       "severity": "blocking",
@@ -67,9 +67,9 @@
               "version": "af0c39fc7420e52384f28a6b4f5a62c273179a675ef7d49d5f18cfca88fc4f96"
             }
           ],
-          "change": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "change": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "run": "b",
-          "side": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "side": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "views": [
             "a",
             "b"
@@ -77,14 +77,14 @@
         }
       ],
       "status": "open",
-      "summary": "change eea05d815351 edits stable normative block c-CFPE0 without a justification",
-      "tension": "b49aae56c812ef03919d52da228643a7bfe4c8aa7627e1d0004abc4ecdfe2bb8"
+      "summary": "change ed5f2a300bd9 edits stable normative block c-CFPE0 without a justification",
+      "tension": "303b3e2b919cbcc2d5b3f14ef3d44c1661d0505188663685468cfd181509a3d5"
     },
     {
       "blocks": [
         "c-ZCQ17"
       ],
-      "id": "tn-f4ed9226d133",
+      "id": "tn-d015917278d1",
       "kind": "unjustified_change",
       "overridden": true,
       "severity": "blocking",
@@ -97,9 +97,9 @@
               "version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
             }
           ],
-          "change": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "change": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "run": "b",
-          "side": "eea05d815351c10bd9df7a8fe85489cfe548c7a7c64d00ff670c14e70c977930",
+          "side": "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f",
           "views": [
             "a",
             "b"
@@ -107,8 +107,8 @@
         }
       ],
       "status": "open",
-      "summary": "change eea05d815351 edits stable normative block c-ZCQ17 without a justification",
-      "tension": "f4ed9226d1334ba0df15d6a33f14cbb886a0af58ff79fcfdf174dfdf80108982"
+      "summary": "change ed5f2a300bd9 edits stable normative block c-ZCQ17 without a justification",
+      "tension": "d015917278d14037a0c873d801d7142631e0100cddb6f6f23cd16fa95a9c42d3"
     }
   ]
 }

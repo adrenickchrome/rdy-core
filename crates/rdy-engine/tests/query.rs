@@ -1,3 +1,5 @@
+mod common;
+
 use rdy_engine::*;
 use rdy_model::*;
 use serde_json::json;
@@ -40,7 +42,10 @@ fn context_and_suspects_after_landing() {
         )
         .unwrap();
     let did = d.created["$decision"].clone();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
     r.land(&founder(), &p.id).unwrap();
     // a claim decided by the (now accepted) decision
     let c = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
@@ -75,7 +80,10 @@ fn context_and_suspects_after_landing() {
         },
     )
     .unwrap();
-    let p = r.propose(&agent(), "work", "reverse").unwrap();
+    let p = r
+        .propose(&agent(), "work", "reverse", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
     r.land(&founder(), &p.id).unwrap();
     let sus = r.read().suspects(&Scope::Canon).unwrap();
     assert!(
@@ -146,7 +154,10 @@ fn graph_cache_is_refreshed_after_landing() {
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let (_s, did) = setup(&mut r);
     let id = BlockId::parse(&did).unwrap();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &founder(), &p);
     // warm the canon caches before landing (decision absent from canon)
     assert!(r.read().context(&Scope::Canon, &id).is_err());
     r.land(&founder(), &p.id).unwrap();

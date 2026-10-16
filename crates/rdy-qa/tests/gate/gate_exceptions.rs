@@ -317,3 +317,63 @@ fn di17_a_version_with_no_exception_lands_as_before() {
     land(&mut r, "plain").expect("a version with no decision lands");
     r.fsck().expect("fsck");
 }
+
+/// Ruling task-17, option D: the queue lists a version's exception cards only once the version is
+/// ready, and readiness needs a summary (D-4PG9Y, D-3JZP4). So a version with no summary is told
+/// to propose again with one first. Once it has one, the fix names each card.
+#[test]
+fn di17_a_version_with_no_summary_is_told_to_propose_again_with_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let spec = spec_doc(&mut r);
+    let d = decide_in(&mut r, GUEST, unapplied(&spec, "Guests see a banner"));
+    let bare = r
+        .propose_subset(&ag(GUEST), GUEST, GUEST, None, None)
+        .unwrap()
+        .r#ref;
+    assert!(
+        exceptions_of(&r, &bare).is_empty(),
+        "a version with no summary is not ready, so its exceptions are no items"
+    );
+    let before = log_end(&r);
+    let e = r
+        .land_with(&approver(), &bare, LandOptions::default())
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            E_EXCEPTION_OPEN,
+            format!("1 exceptions of {bare} have no answer").as_str()
+        ),
+        "{e}"
+    );
+    assert_eq!(
+        e.fix,
+        "propose again with a summary (rdy propose --summary <text> / rdy_propose {summary}), then answer each exception card"
+    );
+    let cards = e.corrected.as_ref().expect("the cards")["exceptions"]
+        .as_array()
+        .expect("a list")
+        .clone();
+    assert_eq!(cards.len(), 1, "{cards:#?}");
+    assert!(
+        cards[0]["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{d}@")),
+        "{cards:#?}"
+    );
+    assert_eq!(log_end(&r), before, "a refused landing writes nothing");
+    // proposed again with a summary, the version is ready and the fix names each card
+    let pref = propose(&mut r, GUEST);
+    assert_ne!(pref, bare);
+    let ex = exceptions_of(&r, &pref);
+    assert_eq!(ex.len(), 1, "{ex:#?}");
+    let e = r
+        .land_with(&approver(), &pref, LandOptions::default())
+        .unwrap_err();
+    exception_open(&e, &pref, &ex);
+    confirm_exceptions(&mut r, &approver(), &pref);
+    r.land_with(&approver(), &pref, LandOptions::default())
+        .expect("lands once the exception is confirmed");
+}

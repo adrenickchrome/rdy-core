@@ -15,7 +15,7 @@ fn proposed() -> (tempfile::TempDir, Rdy, String) {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "Add a doc").unwrap();
+    let p = r.propose(&writer(), "w", "Add a doc", None).unwrap();
     let pref = r.resolve_proposal(&p.id).unwrap().to_string();
     (d, r, pref)
 }
@@ -83,7 +83,7 @@ fn ls8_the_latest_ref_follows_new_versions() {
         ]),
     )
     .unwrap();
-    r.propose(&writer(), "w", "Add two docs").unwrap();
+    r.propose(&writer(), "w", "Add two docs", None).unwrap();
     let v2 = r
         .read()
         .resolve_scope(&format!("proposal:{stable}"))
@@ -154,7 +154,7 @@ fn first_proposal() -> (tempfile::TempDir, Rdy, Scope) {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "Add a doc").unwrap();
+    let p = r.propose(&writer(), "w", "Add a doc", None).unwrap();
     let scope = r
         .read()
         .resolve_scope(&format!("proposal:{}", p.id))
@@ -237,7 +237,7 @@ fn ledger_proposal() -> (tempfile::TempDir, Rdy, Scope, String) {
         ]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "w", "Add the ledger").unwrap();
+    let p = r.propose(&writer(), "w", "Add the ledger", None).unwrap();
     let scope = r
         .read()
         .resolve_scope(&format!("proposal:{}", p.id))

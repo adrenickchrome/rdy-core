@@ -7,6 +7,7 @@ use rdy_engine::engine::Local;
 use rdy_engine::*;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, confirm_exceptions_in};
 use serde_json::{Value, json};
 
 fn kept<'a>(v: &'a Value, block: &str) -> Option<&'a Value> {
@@ -58,7 +59,7 @@ fn df4_rewriting_a_suspect_block_names_the_suspect() {
         kept(&w2, &b).is_some(),
         "write 2 names no kept suspect: {w2:#}"
     );
-    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "A and B")).unwrap();
+    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "A and B", None)).unwrap();
     assert!(
         kept(&p, &b).is_some(),
         "propose names no kept suspect: {p:#}"
@@ -83,7 +84,7 @@ fn df4_rewriting_a_suspect_block_names_the_suspect() {
     })
     .unwrap();
     assert!(kept(&w3, &b).is_none(), "{w3:#}");
-    let p2 = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "A and B")).unwrap();
+    let p2 = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "A and B", None)).unwrap();
     assert!(kept(&p2, &b).is_none(), "{p2:#}");
 }
 
@@ -106,7 +107,7 @@ fn df4_conflicted_propose_consequences_error() {
     .unwrap();
     land(&mut r, "o").unwrap();
     let e = Local::new(r);
-    let v = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A")).unwrap();
+    let v = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A", None)).unwrap();
     assert_eq!(v["consequences"], json!([]));
     assert_eq!(
         v["consequences_error"],
@@ -297,11 +298,15 @@ fn df4_a_new_decision_refining_a_superseded_one_is_listed_in_every_reply() {
     assert_eq!(k["because"], json!({"edge": "refines", "changed": old}));
     assert_eq!(k["follow_up"], "update");
     assert_eq!(k["fix"], rdy_engine::consequence::KEPT_REPLACED_FIX);
-    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Keep A short")).unwrap();
+    let p = propose_and_report(&e, None, |r| {
+        r.propose(&writer(), "w", "Keep A short", Some(TEST_SUMMARY))
+    })
+    .unwrap();
     let k = kept(&p, &n).unwrap_or_else(|| panic!("the propose names no kept suspect: {p:#}"));
     assert_eq!(k["because"], json!({"edge": "refines", "changed": old}));
     assert!(p["blocking"].as_array().unwrap().is_empty(), "{p:#}");
     let pref = p["ref"].as_str().unwrap().to_string();
+    confirm_exceptions_in(&e, &approver(), &pref);
     let l = land_and_report(&e, move |r| {
         r.land_with(&approver(), &pref, LandOptions::default())
     })

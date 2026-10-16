@@ -1401,7 +1401,7 @@ mod tests {
             },
         )
         .unwrap();
-        let info = r.propose(&s, "work", "work").unwrap();
+        let info = r.propose(&s, "work", "work", None).unwrap();
         let v = serde_json::to_value(&info).unwrap();
         (dir, Local::new(r), v)
     }

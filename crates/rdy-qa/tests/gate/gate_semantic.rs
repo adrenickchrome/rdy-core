@@ -13,7 +13,7 @@ use rdy_qa::tensions::*;
 use std::collections::BTreeSet;
 
 fn propose(r: &mut Rdy, view: &str) -> ProposalInfo {
-    r.propose(&writer(), view, view).unwrap()
+    r.propose(&writer(), view, view, None).unwrap()
 }
 fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
     r.land(&approver(), &p.id)

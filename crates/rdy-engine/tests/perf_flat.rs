@@ -44,7 +44,7 @@ fn flat(n: usize) -> (Duration, Duration, Duration) {
     .unwrap();
     let write = t.elapsed();
     let t = Instant::now();
-    let p = r.propose(&agent(), "work", "many").unwrap();
+    let p = r.propose(&agent(), "work", "many", None).unwrap();
     let propose = t.elapsed();
     let t = Instant::now();
     r.land(&founder(), &p.id).unwrap();
@@ -99,7 +99,7 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
         .unwrap();
     r.invalidate();
     let t = Instant::now();
-    r.propose(&agent(), "work", "legacy").unwrap();
+    r.propose(&agent(), "work", "legacy", None).unwrap();
     let propose = t.elapsed();
     let work = Scope::View("work".into());
     r.read().materialized(&work).unwrap();

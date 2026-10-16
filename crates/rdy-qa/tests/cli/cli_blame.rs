@@ -259,7 +259,7 @@ fn df7_blame_omits_relay() {
             )
             .unwrap();
         let claim = w.created.values().next().unwrap().clone();
-        let pref = r.propose(&a, "r1", "c").unwrap().r#ref;
+        let pref = r.propose(&a, "r1", "c", None).unwrap().r#ref;
         r.close().unwrap();
         (claim, pref)
     };

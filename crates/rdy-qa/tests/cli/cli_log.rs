@@ -32,7 +32,7 @@ fn seeded() -> (Served, String, String) {
         },
     )
     .unwrap();
-    let p = r.propose(&a, "ra", "Agent work").unwrap();
+    let p = r.propose(&a, "ra", "Agent work", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     let l2 = r.read().canon_head().unwrap().to_string();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();

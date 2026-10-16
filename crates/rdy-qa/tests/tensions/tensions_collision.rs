@@ -287,7 +287,7 @@ fn tcol1_a_resolution_that_covers_canon_through_an_included_change_is_not_a_coll
         canon.is_empty(),
         "b builds on canon's version through o's change: {canon:#?}"
     );
-    let p = r.propose(&writer(), "b", "b").unwrap();
+    let p = r.propose(&writer(), "b", "b", None).unwrap();
     assert!(p.blocking.is_empty(), "{:?}", p.blocking);
     r.land(&approver(), &p.id).unwrap();
 }

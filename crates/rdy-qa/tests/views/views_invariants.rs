@@ -109,7 +109,9 @@ fn vinv1_a_clean_swarm_passes() {
             r.view_close(&agents[0], &["s0".into()], "done").unwrap();
         }
         let lander = format!("s{}", 1 + round % 3);
-        let p = r.propose(&agents[1 + round % 3], &lander, "t").unwrap();
+        let p = r
+            .propose(&agents[1 + round % 3], &lander, "t", None)
+            .unwrap();
         let _ = r.land_report(&approver(), &p.r#ref);
         assert!(rules(&r).is_empty(), "round {round}: {:?}", check_views(&r));
     }

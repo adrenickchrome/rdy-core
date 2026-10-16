@@ -304,7 +304,7 @@ mod sr5 {
         rdy_engine::testkit::generate_tree(dir.path(), 1, 1, 1);
         let mut r = Rdy::open(dir.path()).expect("open");
         let p = r
-            .propose(&session(Role::Writer), "work", "first")
+            .propose(&session(Role::Writer), "work", "first", None)
             .expect("propose");
         r.land(&session(Role::Approver), &p.id).expect("land");
         let key = |r: &Rdy, s: &Scope| inputs_key(&r.read(), s, 0).expect("key");

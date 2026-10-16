@@ -209,7 +209,7 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
     let sh = shared(&h);
     let p = on_writer(&sh, |r| {
         edit_second_prose(r, "draft", "Alpha", "Draft one.", false);
-        r.propose(&writer(), "draft", "Draft").unwrap()
+        r.propose(&writer(), "draft", "Draft", None).unwrap()
     });
     let pref = p["ref"].as_str().unwrap().to_string();
     assert!(pref.ends_with("@1"), "guard: version 1: {pref}");
@@ -223,7 +223,7 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
     let p2 = on_writer(&sh, |r| {
         // the first prose: the home page shows it
         edit_prose(r, "draft", "Beta", 0, "Beta drafted first.", false);
-        r.propose(&writer(), "draft", "Draft").unwrap()
+        r.propose(&writer(), "draft", "Draft", None).unwrap()
     });
     assert!(
         p2["ref"].as_str().unwrap().ends_with("@2"),

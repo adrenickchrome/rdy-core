@@ -63,7 +63,7 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
     };
     r.record_verdict(&review, Some(&first)).unwrap();
     let tn = tension_label(&one(&r, TensionKind::Semantic).id);
-    let p = r.propose(&writer(), "a", "a").unwrap();
+    let p = r.propose(&writer(), "a", "a", None).unwrap();
     let (pref, digest) = (p.r#ref, p.advised_digest.unwrap());
     r.close().unwrap();
 

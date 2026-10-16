@@ -70,7 +70,7 @@ fn judged(advise: bool) -> (tempfile::TempDir, Rdy, Spec, String, ProposalInfo) 
     put(&mut r, "a", upd(&s.c, "C contradicts B."));
     verdict_on(&mut r, &Scope::Inflight, &s.b, &s.c, "agent:r", advise);
     let tn = tension_label(&one(&r, TensionKind::Semantic).id);
-    let p = r.propose(&writer(), "a", "a").unwrap();
+    let p = r.propose(&writer(), "a", "a", None).unwrap();
     (d, r, s, tn, p)
 }
 /// An acceptance relayed from chat, for the advised tensions `p` showed.
@@ -206,7 +206,7 @@ fn se8_only_advised_tensions_of_the_named_version_are_accepted() {
         "an acceptance names the exact proposal version the person was shown"
     );
     put(&mut r, "a", upd(&s.a, "A changed."));
-    r.propose(&writer(), "a", "a").unwrap();
+    r.propose(&writer(), "a", "a", None).unwrap();
     assert_eq!(
         r.accept_advice(&writer(), "human:qa", direct(&p))
             .unwrap_err()
@@ -455,7 +455,7 @@ fn se8_past_the_proposal_cut_the_digest_covers_every_advised_tension() {
         let x = created(&w, &format!("$x{i}"));
         verdict_on(&mut r, &Scope::Inflight, &x, &s.c, "agent:r", true);
     }
-    let p = r.propose(&writer(), "a", "a").unwrap();
+    let p = r.propose(&writer(), "a", "a", None).unwrap();
     assert_eq!(p.tensions.len(), rdy_engine::PROPOSAL_TENSIONS_MAX);
     let listed = p
         .tensions
@@ -489,7 +489,7 @@ fn se8_an_acceptance_binds_to_the_two_texts_in_every_view() {
         true,
     );
     assert_eq!(of_kind(&r, TensionKind::Semantic).len(), 2);
-    let p = r.propose(&writer(), "a", "a").unwrap();
+    let p = r.propose(&writer(), "a", "a", None).unwrap();
     let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     assert_eq!(a.accepted.len(), 1);
     let rows: Vec<(&str, Option<&str>)> = a
@@ -505,7 +505,7 @@ fn se8_an_acceptance_binds_to_the_two_texts_in_every_view() {
     let listed: std::collections::BTreeSet<String> =
         a.now_blocking.iter().map(|b| b.tension.clone()).collect();
     assert_eq!(listed, now);
-    let pb = r.propose(&writer(), "b", "b").unwrap();
+    let pb = r.propose(&writer(), "b", "b", None).unwrap();
     assert!(
         pb.tensions
             .iter()
@@ -618,7 +618,7 @@ fn se8_an_advised_tension_is_dismissed_only_as_a_blocking_one_is() {
         E_SELF_REVIEW,
         "a person who wrote a side is not independent either"
     );
-    let still = r.propose(&writer(), "a", "a").unwrap();
+    let still = r.propose(&writer(), "a", "a", None).unwrap();
     assert_eq!(
         still.advised_digest, p.advised_digest,
         "the advice is still on the card"
@@ -645,7 +645,7 @@ fn se8_advice_stays_on_the_card_while_another_view_edits_the_canon_side() {
     put(&mut r, "a", upd(&s.b, "B contradicts C."));
     verdict_on(&mut r, &Scope::Inflight, &s.b, &s.c, "agent:r", true);
     put(&mut r, "b", upd(&s.c, "C in view b."));
-    let p = r.propose(&writer(), "a", "a").unwrap();
+    let p = r.propose(&writer(), "a", "a", None).unwrap();
     assert!(p.advised_digest.is_some(), "{:?}", p.tensions);
     assert!(
         p.tensions

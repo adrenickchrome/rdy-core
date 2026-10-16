@@ -497,7 +497,7 @@ fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
     // A rebalances and lands first
     write(&mut r, "va", json!([{"op": "rebalance", "parent": s}])).unwrap();
     land(&mut r, "va").unwrap();
-    let prop = r.propose(&writer(), "vb", "b").unwrap();
+    let prop = r.propose(&writer(), "vb", "b", None).unwrap();
     let w = prop
         .warnings
         .iter()
@@ -559,7 +559,7 @@ fn ord3_a_landed_move_of_one_sibling_also_warns_siblings_rekeyed() {
     )
     .unwrap();
     land(&mut r, "va").unwrap();
-    let prop = r.propose(&writer(), "vb", "b").unwrap();
+    let prop = r.propose(&writer(), "vb", "b", None).unwrap();
     assert!(
         prop.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),
         "{:?}",
@@ -600,7 +600,7 @@ fn ord3_a_frozen_decision_with_a_bad_key_is_told_to_move_its_siblings() {
             ),
         ],
     );
-    let e = r.propose(&writer(), "work", "legacy").unwrap_err();
+    let e = r.propose(&writer(), "work", "legacy", None).unwrap_err();
     let i = e
         .issues
         .iter()

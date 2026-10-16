@@ -887,7 +887,7 @@ fn served_advice() -> (Served, String, String) {
     let sp = spec_doc(&mut r);
     put(&mut r, "a", upd(&sp.c, "C contradicts B."));
     verdict_on(&mut r, &Scope::Inflight, &sp.b, &sp.c, "agent:r", true);
-    let p = r.propose(&ag("a"), "a", "a").unwrap();
+    let p = r.propose(&ag("a"), "a", "a", None).unwrap();
     r.close().unwrap();
     (s, p.r#ref, p.advised_digest.unwrap())
 }

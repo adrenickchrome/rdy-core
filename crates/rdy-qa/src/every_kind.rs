@@ -308,7 +308,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     let p = on(&e, move |r| {
         put(r, "sa", upd(&k4, "Four never holds with three."));
         advise_blocking(r, &k3, &k4);
-        r.propose(&ag("sa"), "sa", "sa").unwrap()
+        r.propose(&ag("sa"), "sa", "sa", None).unwrap()
     });
     on(&e, move |r| {
         let req = AcceptRequest {
@@ -336,7 +336,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     let sec = s.section.clone();
     on(&e, move |r| {
         put(r, "rel", claim(&sec, "Relayed claim."));
-        let p = r.propose(&ag("rel"), "rel", "rel").unwrap();
+        let p = r.propose(&ag("rel"), "rel", "rel", None).unwrap();
         let relay = Relay {
             by: ActorRun {
                 actor: "agent:relay".into(),

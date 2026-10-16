@@ -25,12 +25,12 @@ fn pver1_a_second_propose_on_an_open_view_makes_a_version_under_the_same_stable_
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     assert_eq!((p1.version, p1.changes), (1, 1));
     assert_eq!(p1.stable, p1.id);
     assert_eq!(p1.r#ref, format!("P-{}@1", &p1.id[..12]));
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "work", "second").unwrap();
+    let p2 = r.propose(&writer(), "work", "second", None).unwrap();
     assert_eq!(
         (p2.version, p2.changes, p2.stable.as_str()),
         (2, 2, p1.id.as_str())
@@ -73,9 +73,9 @@ fn pver1_approving_a_moved_proposal_is_refused_and_the_latest_lands_with_its_ver
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "work", "second").unwrap();
+    let p2 = r.propose(&writer(), "work", "second", None).unwrap();
     let landings = r.read().landings().unwrap().len();
     let e = r.land_report(&approver(), &p1.r#ref).unwrap_err();
     assert_eq!(e.code, E_PROPOSAL_MOVED, "{e}");
@@ -120,9 +120,9 @@ fn pver1_an_older_version_by_full_hash_is_moved() {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    r.propose(&writer(), "work", "second").unwrap();
+    r.propose(&writer(), "work", "second", None).unwrap();
     let e = r.land_report(&approver(), &p1.id).unwrap_err();
     assert_eq!(e.code, E_PROPOSAL_MOVED, "{e}");
 }
@@ -134,7 +134,7 @@ fn pver1_a_landing_carries_the_version_not_the_views_current_set() {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     let later = write(&mut r, "work", claim(&section, "b")).unwrap().change;
     let info = r.land_report(&approver(), &p1.r#ref).unwrap();
     assert_eq!(info.approved, p1.r#ref);
@@ -169,10 +169,10 @@ fn pver1_after_a_landing_the_next_propose_starts_a_new_stable_id() {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     r.land_report(&approver(), &p1.r#ref).unwrap();
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "work", "next").unwrap();
+    let p2 = r.propose(&writer(), "work", "next", None).unwrap();
     assert_ne!(p2.stable, p1.stable);
     assert_eq!(p2.version, 1);
     let e = r.land_report(&approver(), &p1.r#ref).unwrap_err();
@@ -189,11 +189,11 @@ fn hb1_an_approval_survives_an_unrelated_landing() {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     let l0 = land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p = r.propose(&writer(), "work", "mine").unwrap();
+    let p = r.propose(&writer(), "work", "mine", None).unwrap();
     assert_eq!(p.canon_at.as_deref(), Some(l0.as_str()));
     let o = as_agent("agent:o", "r1");
     write_as(&mut r, &o, "other", claim(&section, "unrelated")).unwrap();
-    let po = r.propose(&o, "other", "theirs").unwrap();
+    let po = r.propose(&o, "other", "theirs", None).unwrap();
     let lo = r.land_report(&approver(), &po.r#ref).unwrap();
     let info = r.land_report(&approver(), &p.r#ref).unwrap();
     assert_eq!(info.approved, p.r#ref, "the version the approver saw lands");
@@ -221,8 +221,8 @@ fn hb1_a_landing_on_the_versions_blocks_moves_the_proposal() {
     let sb = as_agent("agent:b", "r1");
     write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
     write_as(&mut r, &sb, "b", update(&c, &v, "b's")).unwrap();
-    let pa = r.propose(&sa, "a", "a").unwrap();
-    let pb = r.propose(&sb, "b", "b").unwrap();
+    let pa = r.propose(&sa, "a", "a", None).unwrap();
+    let pb = r.propose(&sb, "b", "b", None).unwrap();
     let lb = r.land_report(&approver(), &pb.r#ref).unwrap();
     let landings = r.read().landings().unwrap().len();
     let e = r.land_report(&approver(), &pa.r#ref).unwrap_err();
@@ -250,10 +250,10 @@ fn hb1_strict_and_require_up_to_date_refuse_any_moved_base() {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p = r.propose(&writer(), "work", "mine").unwrap();
+    let p = r.propose(&writer(), "work", "mine", None).unwrap();
     let o = as_agent("agent:o", "r1");
     write_as(&mut r, &o, "other", claim(&section, "unrelated")).unwrap();
-    let po = r.propose(&o, "other", "theirs").unwrap();
+    let po = r.propose(&o, "other", "theirs", None).unwrap();
     r.land_report(&approver(), &po.r#ref).unwrap();
     let e = r
         .land_with(
@@ -282,7 +282,7 @@ fn hb1_strict_and_require_up_to_date_refuse_any_moved_base() {
     let e = r.land_report(&approver(), &p.r#ref).unwrap_err();
     assert_eq!(e.code, E_PROPOSAL_MOVED, "{e}");
     assert!(e.fix.contains("require_up_to_date"), "{e}");
-    let p2 = r.propose(&writer(), "work", "mine").unwrap();
+    let p2 = r.propose(&writer(), "work", "mine", None).unwrap();
     assert_eq!(p2.version, 2, "re-proposed on the current canon");
     r.land_report(&approver(), &p2.r#ref).unwrap();
 }
@@ -313,7 +313,7 @@ fn hb1_approving_across_a_sibling_rekey_warns() {
         json!([{"op": "create", "type": "claim", "parent": s, "after": first, "body": "from b"}]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "vb", "b").unwrap();
+    let p = r.propose(&writer(), "vb", "b", None).unwrap();
     assert!(
         !p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),
         "{:?}",

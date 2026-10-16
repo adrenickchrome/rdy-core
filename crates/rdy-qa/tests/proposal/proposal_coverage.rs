@@ -31,7 +31,7 @@ fn write_and_report_json(e: &Local, view: &str, ops: Value) -> Value {
 /// `propose_and_report` of view `view`.
 fn propose_json(e: &Local, view: &str) -> Value {
     let name = view.to_string();
-    propose_and_report(e, None, move |r| r.propose(&writer(), &name, &name)).unwrap()
+    propose_and_report(e, None, move |r| r.propose(&writer(), &name, &name, None)).unwrap()
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn cc16_the_proposal_coverage_is_read_after_the_write() {
         json!([{"op": "update", "id": c["$c1"], "body": "The Ledger is append-only.", "links": {"describes": [{"target": c["$t"]}]}}]),
         j_typo(),
     );
-    let info = r.propose(&writer(), "fix", "fix").unwrap();
+    let info = r.propose(&writer(), "fix", "fix", None).unwrap();
     let on_writer = serde_json::to_value(&info).unwrap();
     assert!(on_writer.get("coverage").is_none(), "{on_writer:#}");
     let e = Local::new(r);

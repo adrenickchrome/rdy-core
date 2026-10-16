@@ -238,7 +238,7 @@ fn seed_and_land(dir: &std::path::Path, title: &str) -> String {
             },
         )
         .unwrap();
-    let p = r.propose(&w, "work", title).unwrap();
+    let p = r.propose(&w, "work", title, None).unwrap();
     r.land(&a, &p.id).unwrap();
     res.created.values().next().cloned().unwrap_or_default()
 }

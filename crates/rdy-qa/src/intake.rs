@@ -7,6 +7,7 @@ use crate::tensions::{ag, created, put, try_briefed, upd};
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::answer::{AnswerInfo, AnswerRequest};
 use rdy_engine::consequence::propose_and_report;
+use rdy_engine::engine::Engine;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, Pending, PendingQuery};
 use rdy_engine::{DecisionInput, Local, ProposalInfo, Rdy, Scope, Session};
 use rdy_model::*;
@@ -22,6 +23,9 @@ pub const BATCH_SUMMARY: &str =
     "Lets a visitor read a shared doc without an account, and records five decisions on access.";
 /// The person every answer of these fixtures names.
 pub const PERSON: &str = "human:qa";
+/// The one summary a test gives a version that lands a proposed decision (Task 17 ruling): a
+/// version is approved through a card, and readiness needs a summary (D-4PG9Y, D-3JZP4).
+pub const TEST_SUMMARY: &str = "test summary";
 
 /// What [`batch_project`] built.
 #[derive(Clone, Debug)]
@@ -339,6 +343,51 @@ pub fn put_answer(dir: &Path, mut r: Rdy, a: &Answer) -> Rdy {
     r.store_mut().put_answer(a).expect("put_answer");
     r.close().expect("close");
     Rdy::open(dir).expect("reopen")
+}
+
+/// Whether one of `changes` writes a decision block. Only a proposed decision can be an
+/// exception, so the landing reads the exceptions only then (F2).
+pub fn changes_write_decision(r: &Rdy, changes: &[Hash]) -> bool {
+    changes.iter().any(|c| {
+        r.store().change(c).expect("change").ops.iter().any(|op| {
+            matches!(op, Op::Create { block } | Op::Update { block, .. }
+                if block.block_type == decision::DECISION)
+        })
+    })
+}
+
+/// Whether version `id` (a full version hash, as `ProposalInfo::id` gives it) writes a decision.
+pub fn writes_decision(r: &Rdy, id: &str) -> bool {
+    let h: Hash = id.parse().unwrap_or_else(|e| panic!("version {id}: {e}"));
+    let p = r.store().proposal(&h).expect("proposal");
+    changes_write_decision(r, &p.changes)
+}
+
+/// The summary a test proposes view `view` with: [`TEST_SUMMARY`] when one of its included
+/// changes writes a decision (a version that lands one is approved through a card), else none.
+pub fn summary_for(r: &Rdy, view: &str) -> Option<&'static str> {
+    let changes = r.read().included(view);
+    changes_write_decision(r, &changes).then_some(TEST_SUMMARY)
+}
+
+/// The sweep rule of F2 (D-DKJS5) before a landing of version `p`: when it writes a decision,
+/// the human session `s` confirms each exception beside it ([`confirm_exceptions`]).
+pub fn confirm_before_landing(r: &mut Rdy, s: &Session, p: &ProposalInfo) -> Vec<AnswerInfo> {
+    if !writes_decision(r, &p.id) {
+        return vec![];
+    }
+    confirm_exceptions(r, s, &p.r#ref)
+}
+
+/// [`confirm_exceptions`] through engine `e` (a `Local`, as the MCP and daemon paths hold one),
+/// as the human session `s`, on the batch `pref`.
+pub fn confirm_exceptions_in(e: &dyn Engine, s: &Session, pref: &str) {
+    let (s, pref) = (s.clone(), pref.to_string());
+    e.write(Box::new(move |r| {
+        confirm_exceptions(r, &s, &pref);
+        Ok(Value::Null)
+    }))
+    .expect("confirm the exceptions");
 }
 
 /// Confirms each exception that stands beside the batch `pref` in the queue, in queue order, as

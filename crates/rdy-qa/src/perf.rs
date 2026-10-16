@@ -1359,7 +1359,7 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
                 json!([{"op": "update", "id": claims[i % claims.len()].to_string(), "body": format!("Proposed {i}.")}]),
             )
             .expect("proposal write");
-            let p = r.propose(&human, &name, &name).expect("propose");
+            let p = r.propose(&human, &name, &name, None).expect("propose");
             let version: Hash = p.id.parse().expect("version");
             let st = r.read();
             let s = Instant::now();
@@ -2069,7 +2069,7 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
         |_| {
             let (label, view) = next.next().expect("a tension a submit run opened");
             let p = r
-                .propose(&human, view, "Perf review")
+                .propose(&human, view, "Perf review", None)
                 .expect("propose the view");
             r.read().tensions().expect("tensions");
             let req = AcceptRequest {
@@ -2717,9 +2717,13 @@ fn tier_coord_chosen(
             set: set.id.clone(),
             chosen: "w".into(),
         };
+        // F2: a version that lands the choice decision carries a summary, and the person
+        // confirms its exceptions before the landing
+        let summary = decision.is_some().then_some(crate::intake::TEST_SUMMARY);
         let p = r
-            .propose_with(&writer(), &w, &w, None, None, Some(&pick))
+            .propose_with(&writer(), &w, &w, None, summary, Some(&pick))
             .expect("a choosing proposal");
+        crate::intake::confirm_before_landing(&mut r, &approver(), &p);
         r.land(&approver(), &p.id).expect("the choosing landing");
         if let (Some(d), Some(c)) = (decision, lost.first()) {
             release = Some((c.clone(), d));
@@ -2775,7 +2779,7 @@ fn tier_coord_chosen(
             )
             .expect("the release decision");
             let s = Instant::now();
-            r.propose(&writer(), &name, &name)
+            r.propose(&writer(), &name, &name, None)
                 .expect("propose: the decision releases the loser change");
             s.elapsed()
         },
@@ -3454,7 +3458,11 @@ pub fn run_workload() -> Vec<Measure> {
             .map(|d| json!({"op": "create", "type": "doc", "fields": {"name": format!("flat-{i}-{d}"), "title": format!("Flat {i} {d}"), "doc_type": "constraints"}}))
             .collect();
         write(&mut r, &view, json!(ops)).expect("flat write");
-        land(&mut r, &view).expect("flat land");
+        // the product path only: these docs write no decision, so nothing waits for an answer
+        let p = r
+            .propose(&writer(), &view, &view, None)
+            .expect("flat propose");
+        r.land(&approver(), &p.id).expect("flat land");
     }));
     // no version tag on this chain, so every run walks all of its landings
     out.push(measure_timed("version_position", 20, |_| {

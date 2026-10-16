@@ -23,9 +23,9 @@ fn two_versions() -> (tempfile::TempDir, Rdy, ProposalInfo, ProposalInfo) {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "work", "second").unwrap();
+    let p2 = r.propose(&writer(), "work", "second", None).unwrap();
     (d, r, p1, p2)
 }
 
@@ -117,10 +117,10 @@ fn pshow1_a_conflicted_version_lists_its_blocking_conflicts() {
     let sb = as_agent("agent:b", "r1");
     write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
     write_as(&mut r, &sb, "b", update(&c, &v, "b's")).unwrap();
-    let pa = r.propose(&sa, "a", "a").unwrap();
-    r.propose(&sb, "b", "b").unwrap();
+    let pa = r.propose(&sa, "a", "a", None).unwrap();
+    r.propose(&sb, "b", "b", None).unwrap();
     r.land_report(&approver(), &pa.r#ref).unwrap();
-    let pb2 = r.propose(&sb, "b", "rebased").unwrap();
+    let pb2 = r.propose(&sb, "b", "rebased", None).unwrap();
     assert_eq!(
         pb2.blocking.len(),
         1,
@@ -191,7 +191,15 @@ fn pshow1_an_approved_version_with_a_decision_reads_landed_like_the_gate_and_the
         },
     )
     .unwrap();
-    let p1 = r.propose(&writer(), "work", "decide").unwrap();
+    let p1 = r
+        .propose(
+            &writer(),
+            "work",
+            "decide",
+            Some(rdy_qa::intake::TEST_SUMMARY),
+        )
+        .unwrap();
+    rdy_qa::intake::confirm_before_landing(&mut r, &approver(), &p1);
     let info = r.land_report(&approver(), &p1.r#ref).unwrap();
     assert_eq!(info.approved, p1.r#ref);
     let st = r.read();

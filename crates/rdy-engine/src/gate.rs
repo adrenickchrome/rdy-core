@@ -883,22 +883,33 @@ impl ReadState {
     }
 }
 
-/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
-/// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
-/// hint once, in the order the tensions come.
+/// The fix of `E_EXCEPTION_OPEN` for a version with no summary: its exceptions are no items of the
+/// queue until the version is ready, and readiness needs a summary (D-4PG9Y, D-3JZP4).
+const EXCEPTION_FIX_NO_SUMMARY: &str = "propose again with a summary (rdy propose --summary <text> / rdy_propose {summary}), then answer each exception card";
+
 /// F2 (D-DKJS5): the refusal of an approval while exceptions of `pref` have no confirm answer. It
-/// names each exception and carries its card in `corrected.exceptions` (O21).
-fn exceptions_open(pref: &ProposalRef, open: &[Item]) -> RdyError {
+/// names each exception and carries its card in `corrected.exceptions` (O21). The fix is closed:
+/// a version with no summary is proposed again with one first ([`EXCEPTION_FIX_NO_SUMMARY`]);
+/// any other version answers each exception card.
+fn exceptions_open(pref: &ProposalRef, p: &Proposal, open: &[Item]) -> RdyError {
     let refs: Vec<&str> = open.iter().map(|i| i.r#ref.as_str()).collect();
     let cards: Vec<_> = open.iter().map(card_of).collect();
+    let fix = if p.summary.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        EXCEPTION_FIX_NO_SUMMARY.to_string()
+    } else {
+        format!("answer each exception card first: {}", refs.join(", "))
+    };
     RdyError::new(
         E_EXCEPTION_OPEN,
         format!("{} exceptions of {pref} have no answer", open.len()),
-        format!("answer each exception card first: {}", refs.join(", ")),
+        fix,
     )
     .with_corrected(serde_json::json!({ "exceptions": cards }))
 }
 
+/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
+/// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
+/// hint once, in the order the tensions come.
 fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
     let mut hints: Vec<&str> = vec![];
     for t in refusing {
@@ -1706,14 +1717,16 @@ impl Rdy {
         Ok(change)
     }
 
-    /// Proposes view `view`'s included changes (a new version of its open proposal, if any).
+    /// Proposes view `view`'s included changes (a new version of its open proposal, if any),
+    /// with `summary` as `propose_subset` stores it.
     pub fn propose(
         &mut self,
         s: &Session,
         view: &str,
         title: &str,
+        summary: Option<&str>,
     ) -> Result<ProposalInfo, RdyError> {
-        self.propose_with(s, view, title, None, None, None)
+        self.propose_with(s, view, title, None, summary, None)
     }
 
     /// Proposes `changes` of view `view` (its whole included set when `None`): a new version of
@@ -2356,7 +2369,7 @@ impl Rdy {
         if decides {
             let open = open_exceptions(&st, &pref)?;
             if !open.is_empty() {
-                return Err(exceptions_open(&pref, &open));
+                return Err(exceptions_open(&pref, &p, &open));
             }
         }
 

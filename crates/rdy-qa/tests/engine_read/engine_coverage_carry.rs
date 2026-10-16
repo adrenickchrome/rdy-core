@@ -856,7 +856,19 @@ fn cc11_fix3_a_suspect_the_structural_carry_misses_is_carried() {
         "links": {"supersedes": [{"target": c["$d1"]}]}}]),
     )
     .unwrap();
-    land(&mut r, "sup").unwrap();
+    let p = r
+        .propose(&writer(), "sup", "sup", Some(rdy_qa::intake::TEST_SUMMARY))
+        .unwrap();
+    assert_eq!(
+        (state_layer_builds(), structural_builds()),
+        (layers, structural),
+        "the write and the proposal build nothing in full"
+    );
+    // F2: the person confirms the exception (the supersede) first. The queue they read builds
+    // the prospective canon in full; the landing's own carry is measured from here.
+    rdy_qa::intake::confirm_before_landing(&mut r, &approver(), &p);
+    let (layers, structural) = (state_layer_builds(), structural_builds());
+    r.land(&approver(), &p.id).unwrap();
     r.read().coverage_issues(&canon).unwrap();
     assert_eq!(
         structural_builds(),

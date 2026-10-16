@@ -14,14 +14,14 @@ fn pshow1_rdy_read_reads_a_proposal_version() {
         json!([{"op": "create", "type": "claim", "parent": section, "body": "a"}]),
     )
     .unwrap();
-    r.propose(&writer(), "work", "first").unwrap();
+    r.propose(&writer(), "work", "first", None).unwrap();
     write(
         &mut r,
         "work",
         json!([{"op": "create", "type": "claim", "parent": section, "body": "b"}]),
     )
     .unwrap();
-    let p2 = r.propose(&writer(), "work", "second").unwrap();
+    let p2 = r.propose(&writer(), "work", "second", None).unwrap();
     drop(r);
     let mut c = McpClient::start(dir.path());
     let s = c.call(

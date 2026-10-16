@@ -199,10 +199,6 @@ impl ReadState {
 /// current version (F2): a rejected decision's item is among them. Each card is cut to
 /// [`CARD_DEFAULT_TOKENS`]. It does not ask whether the version is ready; the landing asks that
 /// itself. The F2 check of the answer's approve path (Task 7) and of `land_with` (Task 17) call it.
-#[allow(
-    dead_code,
-    reason = "its callers, the F2 checks, come with Tasks 7 and 17"
-)]
 pub(crate) fn open_exceptions(st: &ReadState, pref: &ProposalRef) -> Result<Vec<Item>, RdyError> {
     let p = st.reader().proposal(&pref.version)?;
     let v = Version::read(st, *pref, p)?;

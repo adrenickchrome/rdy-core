@@ -235,7 +235,7 @@ fn ib4_other_kinds_never_match() {
         json!([{"op": "create", "type": "doc", "id": "$d",
         "fields": {"name": "x", "title": "X", "doc_type": "overview"}}]),
     );
-    let p = r.propose(&writer(), "b", "b").unwrap();
+    let p = r.propose(&writer(), "b", "b", None).unwrap();
     let _ = p;
     // di11: the write and the view ops match nothing; the proposal is the one entry (O10)
     assert_eq!(events(&entries(&r, &a)), ["pending_added"]);

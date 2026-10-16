@@ -105,7 +105,7 @@ pub(crate) fn golden_live() -> Golden {
     )
     .expect("the tutorial edit");
     let p = r
-        .propose(&writer(), "tutorial-edit", "Edit the tutorial")
+        .propose(&writer(), "tutorial-edit", "Edit the tutorial", None)
         .expect("propose the edit");
     let pref = r.resolve_proposal(&p.id).unwrap().to_string();
     let canon = Scope::Canon;

@@ -248,7 +248,9 @@ fn rebasing_landing() -> (Served, Landing) {
         json!([{"op": "update", "id": claim, "body": "The person's edit."}]),
     )
     .unwrap();
-    let p = r.propose(&writer(), "work", "the person's edit").unwrap();
+    let p = r
+        .propose(&writer(), "work", "the person's edit", None)
+        .unwrap();
     let st = r.read();
     let old_head = st.canon_head().expect("a canon head");
     for v in &views {

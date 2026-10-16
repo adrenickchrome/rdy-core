@@ -13,9 +13,9 @@ fn two_versions(s: &Served) -> (ProposalInfo, ProposalInfo) {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "work", claim(&section, "a")).unwrap();
-    let p1 = r.propose(&writer(), "work", "first").unwrap();
+    let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "work", "second").unwrap();
+    let p2 = r.propose(&writer(), "work", "second", None).unwrap();
     r.close().unwrap();
     (p1, p2)
 }

@@ -2,6 +2,7 @@
 //! of the landing; a kill after the sync leaves all of it.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, confirm_before_landing};
 use rdy_qa::invariants::check;
 use rdy_store::segment::CrashPoint;
 use serde_json::json;
@@ -21,7 +22,8 @@ fn child(test: &str, dir: &Path, point: &str) -> std::process::ExitStatus {
         .unwrap()
 }
 
-/// A project whose work view holds a proposed decision; returns the proposal id.
+/// A project whose work view holds a proposed decision, proposed with a summary and its
+/// exception confirmed (F2); returns the proposal id.
 fn proposal_with_a_decision(dir: &Path) -> String {
     let mut r = Rdy::init(dir, "rdy-standard").unwrap();
     let res = write(&mut r, "work", json!([
@@ -39,7 +41,11 @@ fn proposal_with_a_decision(dir: &Path) -> String {
         },
     )
     .unwrap();
-    r.propose(&writer(), "work", "with a decision").unwrap().id
+    let p = r
+        .propose(&writer(), "work", "with a decision", Some(TEST_SUMMARY))
+        .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
+    p.id
 }
 
 const NAME: &str = "atom1_a_kill_during_a_landing_leaves_all_or_nothing";

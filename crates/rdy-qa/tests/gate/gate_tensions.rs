@@ -6,15 +6,21 @@ use rdy_model::{BlockId, Hash};
 use rdy_model::{EditorialClass, Justification, Role};
 use rdy_qa::edit_loop::{brief_of, spec_doc, stable_spec, write_cited_as};
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{confirm_before_landing, summary_for};
 use rdy_qa::packs::qa_project;
 use rdy_qa::tensions::*;
 use serde_json::json;
 use std::collections::BTreeSet;
 
+/// Proposes `view`, with a summary when it writes a decision (F2: such a version is approved
+/// through a card).
 fn propose(r: &mut Rdy, view: &str) -> ProposalInfo {
-    r.propose(&writer(), view, view).unwrap()
+    let summary = summary_for(r, view);
+    r.propose(&writer(), view, view, summary).unwrap()
 }
+/// Lands `p` as the approver, after the person confirms each of its exceptions (F2).
 fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
+    confirm_before_landing(r, &approver(), p);
     r.land(&approver(), &p.id)
 }
 fn reviewer() -> Session {
@@ -472,7 +478,7 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
                 // refused as not closed, which proposes nothing)
                 let propose = |r: &mut Rdy| {
                     if n == 0 {
-                        r.propose(&writer(), vn, vn)
+                        r.propose(&writer(), vn, vn, None)
                     } else {
                         let ids: Vec<String> = inc
                             .iter()

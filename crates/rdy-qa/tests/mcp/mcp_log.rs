@@ -30,7 +30,7 @@ fn logt1_rdy_log_takes_limit_and_since_and_names_the_proposer() {
         },
     )
     .unwrap();
-    let p = r.propose(&a, "ra", "Agent work").unwrap();
+    let p = r.propose(&a, "ra", "Agent work", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
     let mut st = McpState::new(Arc::new(Local::new(r)));

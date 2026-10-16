@@ -1,4 +1,6 @@
 //! evt1: events derive from a batch's frames, and the bus fans them out.
+mod common;
+
 use rdy_engine::events::{Event, EventKind, Events, events_for_batch};
 use rdy_engine::{Rdy, Session};
 use rdy_model::Role;
@@ -81,7 +83,9 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
         },
     )
     .unwrap();
-    let p = r.propose(&writer(), "v", "p").unwrap();
+    let p = r
+        .propose(&writer(), "v", "p", Some(common::TEST_SUMMARY))
+        .unwrap();
     let pf = r.store().last_batch().to_vec();
     let pe = events_for_batch(&r.store().reader(), r.store().last_batch_end(), &pf).unwrap();
     assert!(
@@ -94,6 +98,7 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
         role: Role::Approver,
         kind: rdy_engine::SessionKind::Human,
     };
+    common::confirm_exceptions(&mut r, &approver, &p);
     r.land(&approver, &p.id).unwrap();
     let lf = r.store().last_batch().to_vec();
     let le = events_for_batch(&r.store().reader(), r.store().last_batch_end(), &lf).unwrap();

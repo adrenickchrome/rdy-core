@@ -277,7 +277,7 @@ fn akey1_a_key_two_blocks_hold_in_a_view_is_refused_not_resolved_to_the_first() 
     ]))
     .unwrap();
     // K1: the key rdy gave b's doc is re-derived when b is proposed, and the result lists it
-    let p = r.propose(&writer(), "b", "b").unwrap();
+    let p = r.propose(&writer(), "b", "b", None).unwrap();
     assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
     assert_eq!(p.keys[&db], "onboarding.overview-2");
     assert_eq!(key(&r, "b", &db).as_deref(), Some("onboarding.overview-2"));
@@ -297,7 +297,7 @@ fn akey1_a_key_two_blocks_hold_in_a_view_is_refused_not_resolved_to_the_first() 
         da
     );
     // a key an agent set is still refused: view c gave its doc the key before a landed
-    let e = r.propose(&writer(), "c", "c").unwrap_err();
+    let e = r.propose(&writer(), "c", "c", None).unwrap_err();
     assert_eq!(e.code, "E_VALIDATION", "{e}");
     assert!(
         e.issues.iter().any(|i| i.code == "E_KEY_CLASH"),
@@ -443,10 +443,10 @@ fn rkey1_two_views_that_derive_the_same_key_both_land() {
         keyed(&b, "onboarding.overview"),
     );
     assert!(key_auto(&r, "a", &da) && key_auto(&r, "b", &db));
-    let pa = r.propose(&writer(), "a", "a").unwrap();
+    let pa = r.propose(&writer(), "a", "a", None).unwrap();
     assert!(pa.keys.is_empty(), "{:?}", pa.keys);
     r.land(&approver(), &pa.id).unwrap();
-    let pb = r.propose(&writer(), "b", "b").unwrap();
+    let pb = r.propose(&writer(), "b", "b", None).unwrap();
     assert_eq!(pb.keys.len(), 1, "{:?}", pb.keys);
     assert_eq!(pb.keys[&db], "onboarding.overview-2");
     let l = r.land_report(&approver(), &pb.id).unwrap();
@@ -479,7 +479,7 @@ fn rkey1_two_top_level_spec_docs_land_once_one_is_renamed() {
     let da = write(&mut r, "a", doc.clone()).unwrap().created["$d"].clone();
     let db = write(&mut r, "b", doc).unwrap().created["$d"].clone();
     land(&mut r, "a").unwrap();
-    let e = r.propose(&writer(), "b", "b").unwrap_err();
+    let e = r.propose(&writer(), "b", "b", None).unwrap_err();
     assert_eq!(e.code, "E_VALIDATION", "{e}");
     assert!(
         e.issues.iter().any(|i| i.code == "E_PATH_CLASH"),
@@ -506,7 +506,7 @@ fn rkey1_two_top_level_spec_docs_land_once_one_is_renamed() {
         w.keys[&db], "spec-b",
         "the key follows the rename (FW-PR3a)"
     );
-    let p = r.propose(&writer(), "b", "b").unwrap();
+    let p = r.propose(&writer(), "b", "b", None).unwrap();
     assert!(p.keys.is_empty(), "nothing clashes now: {:?}", p.keys);
     r.land(&approver(), &p.id).unwrap();
     let c = Scope::Canon;
@@ -528,8 +528,8 @@ fn rkey1_a_clash_that_appears_after_the_proposal_is_re_derived_at_landing() {
     let w = write(&mut r, "b", doc).unwrap();
     let db = w.created["$d"].clone();
     assert_eq!(w.keys[&db], "guide");
-    let pa = r.propose(&writer(), "a", "a").unwrap();
-    let pb = r.propose(&writer(), "b", "b").unwrap();
+    let pa = r.propose(&writer(), "a", "a", None).unwrap();
+    let pb = r.propose(&writer(), "b", "b", None).unwrap();
     assert!(
         pb.keys.is_empty(),
         "no clash when b is proposed: {:?}",
@@ -577,7 +577,7 @@ fn rkey1_an_explicit_key_still_refuses_and_setting_a_key_makes_it_explicit() {
     assert!(!key_auto(&r, "c", &dc), "a key the agent sets is explicit");
     land(&mut r, "a").unwrap();
     for (view, id) in [("b", &db), ("c", &dc)] {
-        let e = r.propose(&writer(), view, view).unwrap_err();
+        let e = r.propose(&writer(), view, view, None).unwrap_err();
         assert_eq!(e.code, "E_VALIDATION", "{view}: {e}");
         assert!(
             e.issues.iter().any(|i| i.code == "E_KEY_CLASH"
@@ -767,7 +767,7 @@ fn manual_2_stays_the_agents(r: &mut Rdy, m: &str, o: &str) {
     let e = Scope::View("e".into());
     assert_eq!(r.read().resolve_id(&e, "manual-2").unwrap().to_string(), o);
     assert_eq!(r.read().resolve_id(&e, "manual-3").unwrap().to_string(), m);
-    let p = r.propose(&writer(), "e", "rest").unwrap();
+    let p = r.propose(&writer(), "e", "rest", None).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert_eq!(
         r.read()
@@ -803,7 +803,7 @@ fn rkey1_a_subset_proposal_does_not_re_key_onto_a_key_its_own_view_holds() {
 fn rkey1_a_land_time_re_key_does_not_take_a_key_the_view_holds() {
     let (_d, mut r) = project();
     let (c1, m, o) = manual_views(&mut r);
-    let pa = r.propose(&writer(), "a", "a").unwrap();
+    let pa = r.propose(&writer(), "a", "a", None).unwrap();
     let p = r
         .propose_subset(
             &writer(),
@@ -1085,7 +1085,7 @@ fn kfol1_two_views_whose_moves_derive_the_same_key_both_land() {
     .unwrap();
     assert_eq!(w.keys[&d], "guide");
     land(&mut r, "a").unwrap();
-    let p = r.propose(&writer(), "b", "b").unwrap();
+    let p = r.propose(&writer(), "b", "b", None).unwrap();
     assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
     assert_eq!(p.keys[&d], "guide-2");
     r.land(&approver(), &p.id).unwrap();

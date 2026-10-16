@@ -12,7 +12,7 @@ fn doc_ops(title: &str) -> serde_json::Value {
 fn land1_approving_a_landed_proposal_again_is_refused_with_its_landing() {
     let (_d, mut r) = project();
     write(&mut r, "work", doc_ops("One")).unwrap();
-    let p = r.propose(&writer(), "work", "first").unwrap();
+    let p = r.propose(&writer(), "work", "first", None).unwrap();
     let landing = r.land(&approver(), &p.id).unwrap();
     let before = r.store().landings().unwrap().len();
     let e = r.land(&approver(), &p.id).unwrap_err();
@@ -43,7 +43,15 @@ fn land1_a_landed_proposal_with_decisions_is_refused_the_same_way() {
         },
     )
     .unwrap();
-    let p = r.propose(&writer(), "work", "with a decision").unwrap();
+    let p = r
+        .propose(
+            &writer(),
+            "work",
+            "with a decision",
+            Some(rdy_qa::intake::TEST_SUMMARY),
+        )
+        .unwrap();
+    rdy_qa::intake::confirm_before_landing(&mut r, &approver(), &p);
     let landing = r.land(&approver(), &p.id).unwrap();
     let e = r.land(&approver(), &p.id).unwrap_err();
     assert_eq!(e.code, "E_ALREADY_LANDED", "not E_STALE_BASE: {e}");
@@ -55,9 +63,9 @@ fn land1_a_landed_proposal_with_decisions_is_refused_the_same_way() {
 fn land1_an_older_proposal_whose_changes_landed_in_a_newer_one_is_refused() {
     let (_d, mut r) = project();
     write(&mut r, "work", doc_ops("One")).unwrap();
-    let older = r.propose(&writer(), "work", "older").unwrap();
+    let older = r.propose(&writer(), "work", "older", None).unwrap();
     write(&mut r, "work", doc_ops("Two")).unwrap();
-    let newer = r.propose(&writer(), "work", "newer").unwrap();
+    let newer = r.propose(&writer(), "work", "newer", None).unwrap();
     let landing = r.land(&approver(), &newer.id).unwrap();
     let e = r.land(&approver(), &older.id).unwrap_err();
     assert_eq!(e.code, "E_ALREADY_LANDED", "{e}");

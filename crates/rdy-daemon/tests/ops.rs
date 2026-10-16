@@ -139,7 +139,7 @@ fn ctl2_render_export_and_check_resolve_relative_paths_against_the_session_cwd()
     let s = human();
     doc(&e, "a");
     write_typed(&e, |r| {
-        r.propose(&human(), "work", "p")
+        r.propose(&human(), "work", "p", None)
             .and_then(|p| r.land_report(&Session::human("human:t".into(), Role::Approver), &p.id))
     })
     .unwrap();

@@ -32,7 +32,7 @@ fn cgr1_in_flight_changes_are_nodes_with_authors_deps_and_proposals() {
     )
     .unwrap()
     .change;
-    r.propose(&a, "ra", "a's work").unwrap();
+    r.propose(&a, "ra", "a's work", None).unwrap();
     let st = r.read();
     let g = &st.coord().unwrap().graph;
     let h1: Hash = c1.parse().unwrap();
@@ -231,7 +231,7 @@ fn claim_in_flight_with_a_proposal() -> (tempfile::TempDir, Rdy, String, String)
     )
     .unwrap()
     .change;
-    r.propose(&a, "ra", "a's work").unwrap();
+    r.propose(&a, "ra", "a's work", None).unwrap();
     (d, r, claim, c)
 }
 

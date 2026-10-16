@@ -227,7 +227,7 @@ fn sg1_a_stale_version_over_a_resolved_view_is_flagged() {
         .unwrap()
         .change;
     land(&mut r, "a").unwrap();
-    let p = r.propose(&sb, "b", "b").unwrap();
+    let p = r.propose(&sb, "b", "b", None).unwrap();
     assert_eq!(p.blocking.len(), 1, "the version carries the conflict");
     // b resolves the conflict in its view, after the version was proposed
     let block = rdy_model::BlockId::parse(&c).unwrap();

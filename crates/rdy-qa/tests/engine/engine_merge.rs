@@ -33,8 +33,8 @@ fn merge1_a_proposal_made_before_another_landing_on_its_blocks_is_moved_at_land(
         json!([{"op": "update", "id": c, "body": "B."}]),
     )
     .unwrap();
-    let pa = r.propose(&writer(), "a", "a").unwrap();
-    let pb = r.propose(&writer(), "b", "b").unwrap();
+    let pa = r.propose(&writer(), "a", "a", None).unwrap();
+    let pb = r.propose(&writer(), "b", "b", None).unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let head = r.store().canon_head().unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
@@ -42,7 +42,7 @@ fn merge1_a_proposal_made_before_another_landing_on_its_blocks_is_moved_at_land(
     assert_eq!(r.store().canon_head().unwrap(), head);
     // gconf1: the landing rebased b and recorded the collision as a conflict; proposing never
     // refuses for it, the version marks it blocking and its landing is refused until resolved
-    let again = r.propose(&writer(), "b", "again").unwrap();
+    let again = r.propose(&writer(), "b", "again", None).unwrap();
     assert_eq!((again.conflicts.len(), again.blocking.len()), (1, 1));
     assert_eq!(
         r.land(&approver(), &again.id).unwrap_err().code,
