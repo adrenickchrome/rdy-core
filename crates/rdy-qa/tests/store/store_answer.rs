@@ -399,10 +399,10 @@ fn di1_no_existing_kind_changes_its_bytes() {
 }
 
 /// Guard beside `dl8_the_v1_fixture_loads_with_every_hash`: a load of the v1-s10 fixture into
-/// store format 11 appends one `meta/store_format` batch and nothing else (FW-UP1, D-WWAK7).
+/// the current store format appends one `meta/store_format` batch and nothing else (FW-UP1,
+/// D-WWAK7).
 #[test]
-fn di1_a_v1_s10_dump_loads_into_store_format_11() {
-    assert_eq!(STORE_FORMAT, 11);
+fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
     let to = tempfile::tempdir().unwrap();
     let dir = to.path().join("p");
     load(&fixture("v1-s10.rdydump"), &dir).unwrap();
@@ -423,14 +423,14 @@ fn di1_a_v1_s10_dump_loads_into_store_format_11() {
         u,
         RefUpdate {
             name: REF_STORE_FORMAT.into(),
-            value: encode_u32(11),
+            value: encode_u32(STORE_FORMAT),
             at: log_end,
         }
     );
     assert_eq!(tail[1].0, kinds::BATCH_COMMIT);
     assert_eq!(
         reader.get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(b"11".to_vec())
+        Some(STORE_FORMAT.to_string().into_bytes())
     );
     for f in &frames {
         assert!(

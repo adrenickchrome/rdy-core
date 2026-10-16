@@ -87,7 +87,8 @@ impl StoreReader {
     /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
     /// view's included set, the version chains of intents and alternative sets, the links that
     /// name them, the dismissal, mention review and verdict refs, the semantic tension chains, the
-    /// inbox refs and the open-proposal table; the first failure found is a `StoreError::Decode`.
+    /// inbox refs, the open-proposal table, the answers and the meta refs; the first failure found
+    /// is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -151,6 +152,7 @@ impl StoreReader {
         let inboxes = self.check_inboxes()?;
         let transitions = self.check_transitions()?;
         let answers = self.check_answers()?;
+        self.check_meta()?;
         Ok(StoreCheck {
             views,
             view_ops,

@@ -47,10 +47,10 @@ fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
         s.get_ref(REF_STORE_FORMAT).unwrap(),
         Some(STORE_FORMAT.to_string().into_bytes())
     );
-    assert_eq!(s.verify().unwrap(), 1, "one format batch of one ref");
+    assert_eq!(s.verify().unwrap(), 2, "one format batch of two refs");
     drop(s);
     let s = Store::create(&dir).unwrap();
-    assert_eq!(s.verify().unwrap(), 1, "no second format batch");
+    assert_eq!(s.verify().unwrap(), 2, "no second format batch");
     assert!(s.open_report().quarantined.is_empty());
 }
 
@@ -162,7 +162,7 @@ fn fmt2_a_log_that_says_another_format_is_refused() {
     let dir = base.path().join("s");
     Store::create(&dir)
         .unwrap()
-        .set_refs(vec![(REF_STORE_FORMAT.into(), b"2".to_vec())])
+        .set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), b"2".to_vec())])
         .unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
     refused(&dir, "has store format 2", RE_CREATE);

@@ -9,6 +9,7 @@ mod hash;
 mod id;
 pub mod key;
 mod order;
+pub mod repo_id;
 pub mod tree;
 mod value;
 
@@ -29,6 +30,7 @@ pub use id::{seed_ids_for_tests, unseed_ids_for_tests};
 pub use order::{
     MAX_ORDER_KEY_LEN, OrderError, order_between, order_run, rebalance_keys, valid_order_key,
 };
+pub use repo_id::RepoId;
 pub use value::FieldValue;
 pub mod reference;
 pub mod review;

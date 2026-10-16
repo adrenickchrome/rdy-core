@@ -13,8 +13,8 @@
 //!   (`Hash::of(payload)`), `payload`. Record kinds of the container: `HEADER = 0xF0`,
 //!   `FILE = 0xF1`, `BATCH = 0xF2`, `TRAILER = 0xFF`. The frames of a batch keep their store
 //!   kinds: exactly the kinds that the header's store format assigns (`frame_kinds`; for the pair
-//!   (1, 10): 1 to 9, 13, and 15 to 19; for (1, 11): 1 to 10, 13, and 15 to 19). Never 14 (the
-//!   batch marker), never an unassigned kind.
+//!   (1, 10): 1 to 9, 13, and 15 to 19; for (1, 11) and (1, 12): 1 to 10, 13, and 15 to 19).
+//!   Never 14 (the batch marker), never an unassigned kind.
 //! - **Order (closed):** one `HEADER`; zero or more `FILE`; zero or more `BATCH`, each followed
 //!   by exactly its `frames` store frames; one `TRAILER`; the end of the file.
 //! - **`HEADER` payload:** `store_format: u32`, `log_end.segment: u32`, `log_end.offset: u64`,
@@ -55,7 +55,7 @@ pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
 pub const DUMP_FORMAT: u32 = 1;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
 /// this list (D-69AY3).
-pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11)];
+pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12)];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -157,6 +157,28 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
     ),
     (
         (1, 11),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+        ],
+    ),
+    // store format 12 adds refs only (meta/repo_id, meta/origin): the kinds of 11
+    (
+        (1, 12),
         &[
             kinds::BLOCK,
             kinds::CHANGE,
