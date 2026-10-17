@@ -42,7 +42,12 @@ pub const RULING_FIELDS: [&str; 3] = ["statement", "options", "status"];
 /// trk1 (D-DZC1J): `new` differs from `old` in at least one tracking field of `old`'s type and in
 /// nothing else: the same id, type, parent, order, body and links, and every non-tracking field
 /// equal. Pins are compared.
+///
+/// A redacted block's removed fields are unknown, so a write over one is never tracking-only.
 pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
+    if old.is_redacted() || new.is_redacted() {
+        return false;
+    }
     let Some(tracking) = t.fields(&old.block_type) else {
         return false;
     };
@@ -64,7 +69,12 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
             .any(|f| old.fields.get(f) != new.fields.get(f))
 }
 
+/// An accepted or rejected decision. A redacted block keeps the frozen fact its marker
+/// recorded; removing a body never unfreezes a decision.
 pub fn is_frozen(b: &Block) -> bool {
+    if let Some(r) = &b.read_identity {
+        return r.frozen;
+    }
     matches!(
         status(b),
         Some(DecisionStatus::Accepted | DecisionStatus::Rejected)

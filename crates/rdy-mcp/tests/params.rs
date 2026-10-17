@@ -268,7 +268,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 42 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 43 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
     // `RelayParams`, `RecommendedParams`).
     check!(
@@ -298,6 +298,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         ProposeParams,
         ReadParams,
         RecommendedParams,
+        RedactParams,
         RelayParams,
         ResolveParams,
         ReviewNextParams,
@@ -410,4 +411,356 @@ fn ib7_every_inbox_request_key_is_an_inbox_params_key() {
     let request = serde_keys::<rdy_engine::inbox::api::InboxRequest>();
     assert_eq!(request.len(), 3, "{request:?}");
     assert_eq!(request, params);
+}
+
+/// rdx12: a project with one secret prose block in the agent's view `r1`, and the agent's MCP
+/// state; returns the block's id.
+fn redact_state() -> (tempfile::TempDir, McpState, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(rdy)));
+    rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:a", "run": "r1", "role": "writer"})).unwrap(),
+    )
+    .unwrap();
+    let w = rdy_write(
+        &mut st,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Doc", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let id = w["created"]["$p"].as_str().unwrap().to_string();
+    (dir, st, id)
+}
+
+fn redact_args(v: Value) -> RedactParams {
+    RedactParams(v.as_object().expect("an object").clone())
+}
+
+/// The keys of rdy_redact, in the interface's order (plan Redaction).
+const REDACT_KEYS: &str = "targets, reason_class, reason, dry_run, view, max_tokens";
+
+/// rdx12: an unknown key gets the shared did-you-mean with context `redact` and the interface's
+/// key order (the daemon op's own text); an approval switch is no key at all; a wrong reason and
+/// a selector outside the closed grammar get the engine's exact refusal.
+#[test]
+fn rdx12_unknown_keys_and_selectors_fail_with_exact_text() {
+    let (_d, mut st, id) = redact_state();
+    // near keys: the nearest key, every key in the interface's order
+    for (near, want) in [
+        ("dryrun", "dry_run"),
+        ("target", "targets"),
+        ("reason_clas", "reason_class"),
+        ("max_token", "max_tokens"),
+        ("views", "view"),
+    ] {
+        let mut args = json!({"targets": [id], "reason_class": "secret", "reason": "x"});
+        args[near] = json!(true);
+        let e = parse_redact(args.as_object().unwrap().clone()).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                "E_BAD_INPUT",
+                format!("redact: unknown field \"{near}\"").as_str(),
+                format!("did you mean \"{want}\"? the fields are {REDACT_KEYS}").as_str()
+            ),
+            "{near}"
+        );
+        // the tool gives the same refusal, and before it asks for a session
+        let mut fresh = McpState::new(std::sync::Arc::clone(&st.engine));
+        let t = rdy_redact(&mut fresh, redact_args(args)).unwrap_err();
+        assert_eq!((t.code, t.message, t.fix), (e.code, e.message, e.fix));
+    }
+    // no approval or policy switch exists: each is an unknown key
+    for forbidden in ["force", "yes", "policy", "approve", "apply"] {
+        let mut args = json!({"targets": [id], "reason_class": "secret", "reason": "x"});
+        args[forbidden] = json!(true);
+        let e = rdy_redact(&mut st, redact_args(args)).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{forbidden}");
+        assert_eq!(
+            e.message,
+            format!("redact: unknown field \"{forbidden}\""),
+            "{forbidden}"
+        );
+        assert!(
+            e.fix.ends_with(&format!("the fields are {REDACT_KEYS}")),
+            "{forbidden}: {}",
+            e.fix
+        );
+    }
+    // a wrong-typed key is the tool parameter refusal every MCP tool gives
+    let e = parse_redact(
+        json!({"targets": [id], "reason_class": "secret", "reason": "x", "dry_run": "yes"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "rdy_redact: parameter \"dry_run\" must be a boolean, not a string",
+            "pass \"dry_run\" as a boolean"
+        )
+    );
+    let e = parse_redact(json!({"targets": [id]}).as_object().unwrap().clone()).unwrap_err();
+    assert_eq!(
+        e.message, "rdy_redact: parameter \"reason_class\" is required",
+        "{e}"
+    );
+    // an unknown reason class, and a reason that trims to nothing: the engine's refusal
+    for (class, reason) in [("other", "x"), ("Secret", "x"), ("secret", "  \n ")] {
+        let e = rdy_redact(
+            &mut st,
+            redact_args(
+                json!({"targets": [id], "reason_class": class, "reason": reason, "dry_run": true}),
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                "E_REDACTION_REASON",
+                "The redaction needs a reason and a reason class.",
+                "Use secret, personal, legal, or retraction, with a reason of 1 to 4096 UTF-8 bytes."
+            ),
+            "{class:?} {reason:?}"
+        );
+    }
+    // the closed selector grammar
+    let short = format!("{id}@abc");
+    let upper = format!("{id}@{}", "A".repeat(64));
+    let cases: Vec<(Value, String)> = vec![
+        (json!([]), "Cannot redact []: invalid selector.".into()),
+        (
+            json!(["design/doc"]),
+            "Cannot redact \"design/doc\": invalid selector.".into(),
+        ),
+        (
+            json!([short]),
+            format!("Cannot redact \"{short}\": invalid selector."),
+        ),
+        (
+            json!([upper]),
+            format!("Cannot redact \"{upper}\": invalid selector."),
+        ),
+        (
+            json!(["blob:abc"]),
+            "Cannot redact \"blob:abc\": invalid selector.".into(),
+        ),
+        (
+            json!(["tag:v1.0.0"]),
+            "Cannot redact \"tag:v1.0.0\": metadata is not content.".into(),
+        ),
+        (
+            json!(["meta/x"]),
+            "Cannot redact \"meta/x\": metadata is not content.".into(),
+        ),
+        (
+            json!(["p-ZZZZZ"]),
+            "Cannot redact p-ZZZZZ: unknown target.".into(),
+        ),
+        (
+            json!([format!("blob:{}", "0".repeat(64))]),
+            format!("Cannot redact blob:{}: unknown target.", "0".repeat(64)),
+        ),
+    ];
+    for (targets, want) in cases {
+        let e = rdy_redact(
+            &mut st,
+            redact_args(json!({"targets": targets, "reason_class": "secret", "reason": "x", "dry_run": true})),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                "E_REDACTION_TARGET",
+                want.as_str(),
+                "Use a block id, id@full-version-hash, or blob:full-manifest-hash."
+            ),
+            "{targets}"
+        );
+    }
+    // 257 selectors and a 257-byte selector are over the bounds
+    let many: Vec<String> = (0..257).map(|_| id.clone()).collect();
+    let long = "x".repeat(257);
+    for (targets, limit) in [
+        (json!(many), "256 targets"),
+        (json!([long]), "256 bytes per target"),
+    ] {
+        let e = rdy_redact(
+            &mut st,
+            redact_args(json!({"targets": targets, "reason_class": "secret", "reason": "x", "dry_run": true})),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "E_REDACTION_LIMIT");
+        assert_eq!(e.message, format!("The redaction exceeds {limit}."));
+        assert_eq!(e.fix, "Select fewer targets, then run the dry run again.");
+    }
+    // a valid dry run of the same block passes the same parser
+    let v = rdy_redact(
+        &mut st,
+        redact_args(
+            json!({"targets": [id, id], "reason_class": "secret", "reason": "x", "dry_run": true}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        v["report"]["targets"],
+        json!([{"all_versions": id}]),
+        "deduplicated"
+    );
+}
+
+/// rdx12: rdy_redact's input schema publishes the required keys, the closed reason classes and
+/// the defaults and bounds; every key it publishes parses; rdy_schema's error table has a row
+/// for every redaction error and warning code, in the shared texts.
+#[test]
+fn rdx12_tool_schema_and_error_rows_cover_redaction() {
+    let schema =
+        rmcp::handler::server::common::schema_for_input::<RedactParams>().expect("an input schema");
+    let schema = Value::Object((*schema).clone());
+    assert_eq!(
+        schema["required"],
+        json!(["targets", "reason_class", "reason"]),
+        "{schema}"
+    );
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
+    let props = schema["properties"].as_object().unwrap();
+    let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "dry_run",
+            "max_tokens",
+            "reason",
+            "reason_class",
+            "targets",
+            "view"
+        ]
+    );
+    assert_eq!(
+        props["reason_class"]["enum"],
+        json!(["secret", "personal", "legal", "retraction"])
+    );
+    assert_eq!(props["targets"]["type"], "array");
+    assert_eq!(props["targets"]["items"]["type"], "string");
+    assert_eq!(props["dry_run"]["default"], false);
+    assert_eq!(props["max_tokens"]["default"], 4000);
+    assert_eq!(props["max_tokens"]["minimum"], 256);
+    assert_eq!(props["max_tokens"]["maximum"], 20000);
+    // no approval switch is published
+    for k in ["force", "yes", "policy", "approve", "approved_by"] {
+        assert!(!props.contains_key(k), "{k}");
+    }
+    // every published key parses (a null optional is absent)
+    let p = parse_redact(
+        json!({"targets": ["p-AAAAA"], "reason_class": "legal", "reason": "r", "dry_run": null, "view": null, "max_tokens": null})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        (p.dry_run, p.view, p.max_tokens, p.reason_class.as_str()),
+        (None, None, None, "legal")
+    );
+    // the error rows: the shared message as when, the shared fix; warnings have empty fixes
+    let row = |code: &str| {
+        ERROR_ROWS
+            .iter()
+            .find(|(c, _, _)| *c == code)
+            .map(|(_, w, f)| (w.to_string(), f.to_string()))
+            .unwrap_or_else(|| panic!("no row for {code}"))
+    };
+    let errors = [
+        (
+            "E_REDACTION_TARGET",
+            "Cannot redact {target}: {cause}.",
+            "Use a block id, id@full-version-hash, or blob:full-manifest-hash.",
+        ),
+        (
+            "E_REDACTION_LIMIT",
+            "The redaction exceeds {limit}.",
+            "Select fewer targets, then run the dry run again.",
+        ),
+        (
+            "E_REDACTION_REASON",
+            "The redaction needs a reason and a reason class.",
+            "Use secret, personal, legal, or retraction, with a reason of 1 to 4096 UTF-8 bytes.",
+        ),
+        (
+            "E_REDACTION_STALE",
+            "The redaction report changed after the request was recorded.",
+            "Record a new request, show its report, and ask for approval again.",
+        ),
+        (
+            "E_REDACTION_HUMAN",
+            "Content removal needs a person's approval.",
+            "Show the redaction card and relay the person's answer, or approve from the CLI as a human.",
+        ),
+        (
+            "E_REDACTION_PENDING",
+            "Content removal was authorized but has not finished.",
+            "Close the project and reopen it to finish the removal. Do not delete the log.",
+        ),
+        (
+            "E_REDACTION_CORRUPT",
+            "The redaction record does not authorize the missing payload at {segment}:{offset}.",
+            "Keep the store unchanged and inspect it with rdy fsck.",
+        ),
+        (
+            "E_REDACTED_STATE",
+            "This read state predates content removal.",
+            "Read the project again.",
+        ),
+        (
+            "E_REDACTED",
+            "Content removed by redaction {hash}.",
+            "Read the redaction details in the source history.",
+        ),
+        (
+            "E_REDACTION_BUDGET",
+            "The output budget is too small for the redaction warning.",
+            "Increase max_tokens, or propose fewer redaction requests at once.",
+        ),
+    ];
+    for (code, when, fix) in errors {
+        assert_eq!(row(code), (when.to_string(), fix.to_string()), "{code}");
+    }
+    let warnings = [
+        ("W_REDACTION_COPIES", rdy_engine::W_REDACTION_COPIES_MESSAGE),
+        (
+            "W_REDACTION_INVENTORY",
+            rdy_engine::W_REDACTION_INVENTORY_MESSAGE,
+        ),
+        ("W_REDACTION_QUOTES", rdy_engine::W_REDACTION_QUOTES_MESSAGE),
+        ("W_REDACTION_REUSE", rdy_engine::W_REDACTION_REUSE_MESSAGE),
+        (
+            "W_REDACTION_QUARANTINE",
+            rdy_engine::W_REDACTION_QUARANTINE_MESSAGE,
+        ),
+        ("W_REDACTION_SECRET", rdy_engine::W_REDACTION_SECRET_MESSAGE),
+    ];
+    for (code, message) in warnings {
+        assert_eq!(row(code), (message.to_string(), String::new()), "{code}");
+    }
+    // the rows sit in the global order: the ten errors, then the six warnings
+    let codes: Vec<&str> = ERROR_ROWS
+        .iter()
+        .map(|(c, _, _)| *c)
+        .filter(|c| c.contains("REDACT"))
+        .collect();
+    let want: Vec<&str> = errors
+        .iter()
+        .map(|(c, _, _)| *c)
+        .chain(warnings.iter().map(|(c, _)| *c))
+        .collect();
+    assert_eq!(codes, want);
 }

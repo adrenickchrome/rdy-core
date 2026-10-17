@@ -15,7 +15,9 @@
 //!    where the header says the source log ends, and there must be at least one (every store
 //!    holds its format batch from its first open). When the dump's store format is older than
 //!    this rdy's, append one batch that sets `meta/store_format` to this rdy's (FW-UP1, in its
-//!    smallest form). Then write the store's `FORMAT`.
+//!    smallest form). Then check each dropped frame's authorization against the whole log (dump
+//!    format 2, `rdy_store::ingest`): a refusal is damage at the end of the stream, where the
+//!    check runs. Then write the store's `FORMAT`.
 //! 5. Write each project file the target does not have.
 //! 6. Take the new store's lock, then rename `.rdy/store.loading` to `.rdy/store`. The load
 //!    holds the lock until it ends, so no other rdy process opens the project before step 7
@@ -246,7 +248,7 @@ fn check_target(project: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<Strin
         return Err(RdyError::new(
             E_LOCKED,
             format!("a daemon still runs for {dir} (pid {pid})"),
-            format!("run rdy serve --stop in {dir}, then load again"),
+            format!("run rdy serve --stop in {dir}, then load or clone again"),
         ));
     }
     let mut absent = Vec::new();
@@ -446,7 +448,12 @@ fn ingest<R: Read>(
     ingest
         .upgrade(store_format)
         .map_err(|e| target_error(&loading, e))?;
-    let report = ingest.finish().map_err(|e| target_error(&loading, e))?;
+    // the dropped frames' authorizations are checked against the whole stream, at its end
+    let at = reader.offset();
+    let report = ingest.finish().map_err(|e| match e {
+        StoreError::Dump { what, .. } => damaged(file, at, &what),
+        e => target_error(&loading, e),
+    })?;
     Ok((report.batches, report.frames))
 }
 
@@ -664,7 +671,7 @@ fn read_error(file: &Path, e: StoreError) -> RdyError {
                 format!("{}: {what}", file.display()),
                 "load it with the rdy that wrote it, or a later one",
             ),
-            DumpRefusal::Damaged => damaged(file, at, &what),
+            DumpRefusal::Damaged | DumpRefusal::Claim => damaged(file, at, &what),
         },
         StoreError::Io(e) => io_at(file, e),
         e => e.into(),
@@ -680,12 +687,19 @@ fn incomplete(what: String) -> RdyError {
     )
 }
 
-/// `file` is damaged at byte `at`.
+/// `file` is damaged at byte `at`. Dropped frames that claim more bytes than rdy writes for
+/// them (`DumpRefusal::Claim`, ruling task-9) may not be rdy's dump at all, and their fix says so.
 fn damaged(file: &Path, at: u64, what: &str) -> RdyError {
+    let fix = match DumpRefusal::of(what) {
+        DumpRefusal::Claim => {
+            "the dump is damaged or was not written by rdy; dump the source again"
+        }
+        _ => "dump the project again; rdy never repairs a dump",
+    };
     RdyError::new(
         E_DUMP,
         format!("{} is damaged at byte {at}: {what}", file.display()),
-        "dump the project again; rdy never repairs a dump",
+        fix,
     )
 }
 

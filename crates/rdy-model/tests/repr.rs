@@ -51,6 +51,7 @@ fn change(links: ChangeLinks) -> Change {
         justification: None,
         message: "m".into(),
         links,
+        read_identity: None,
     }
 }
 
@@ -291,6 +292,7 @@ fn decision_block(fields: &[(&str, &str)]) -> Block {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 

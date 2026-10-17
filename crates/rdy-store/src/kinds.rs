@@ -31,6 +31,14 @@ pub const TENSION: u8 = 18;
 /// One batch's tension and suspect moves (`crate::transition::Transitions`; plan M2e2, D-Z0EMP):
 /// at most one per batch, its last data frame. Never deduped: two batches may log the same bytes.
 pub const TRANSITION: u8 = 19;
+/// A content removal request (`rdy_model::Redaction`; plan Redaction, D-600CW): it names its
+/// carrier change and binds the complete manifest. Derived tables map the carrier to it.
+pub const REDACTION: u8 = 20;
+/// What survives a removed block version or change (`rdy_model::RedactionResidue`, D-3M81W).
+pub const REDACTION_RESIDUE: u8 = 21;
+/// The human apply record that activates a request (`rdy_model::RedactionApply`): it shares a
+/// sealed batch with the landing it names.
+pub const REDACTION_APPLY: u8 = 22;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

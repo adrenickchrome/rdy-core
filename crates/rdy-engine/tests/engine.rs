@@ -274,6 +274,7 @@ fn eng1_a_write_that_panics_leaves_local_republishing_the_store_on_the_next_lock
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                read_identity: None,
             };
             r.store_mut()
                 .commit_to_view(
@@ -286,6 +287,7 @@ fn eng1_a_write_that_panics_leaves_local_republishing_the_store_on_the_next_lock
                         justification: None,
                         message: "half".into(),
                         links: ChangeLinks::default(),
+                        read_identity: None,
                     },
                 )
                 .unwrap();

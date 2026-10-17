@@ -30,6 +30,9 @@ pub struct LiveBuild {
     /// The render's warnings for this build, as `rdy render` gives them (`RenderSummary`), in
     /// the same order.
     pub warnings: Vec<String>,
+    /// The redaction epoch the build's state captured (D-CC90E): a build serves only while the
+    /// store's epoch is still this one.
+    pub epoch: u64,
 }
 
 /// The first 16 lowercase hex digits of the hash of `bytes`.
@@ -98,6 +101,7 @@ pub fn build_live(st: &ReadState, scope: &Scope, root: &str) -> Result<LiveBuild
         label_rev,
         label_at,
         warnings: summary.warnings,
+        epoch: st.redaction_epoch(),
     })
 }
 
@@ -139,10 +143,13 @@ impl Key {
 /// canon's head (a landing rebases a view and moves every label), the versions, the pack
 /// generation, the project's name and description, and the disagreements list (a dismissal or a
 /// judged tension changes canon's page and moves no head). The list is empty for a view and a
-/// proposal version, so only canon (and a version at canon's head) holds entries.
+/// proposal version, so only canon (and a version at canon's head) holds entries. The key also
+/// holds the redaction epoch the state captured: no build is reused across a removal, even where
+/// the scope's ids are unchanged.
 pub fn inputs_key(st: &ReadState, scope: &Scope, pack_generation: u64) -> Result<Hash, RdyError> {
     rdy_engine::refuse_inflight_export(scope)?;
     let mut k = Key(Vec::new());
+    k.num(st.redaction_epoch());
     match scope {
         Scope::Canon => {
             k.num(0).hash(st.canon_head());

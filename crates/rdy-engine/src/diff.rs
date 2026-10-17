@@ -29,7 +29,11 @@
 //!    `to`), `body` (the pieces) and `moved`.
 //! 4. **`body`.** `worddiff::diff(from.body, to.body, unit)` when the bodies differ, with
 //!    [`Unit::Lines`] for a `code` block, else [`Unit::Words`]. An added block has
-//!    `[Add(body)]` and a removed one `[Del(body)]`, when the body is not empty.
+//!    `[Add(body)]` and a removed one `[Del(body)]`, when the body is not empty. When either
+//!    side is a removed version's stub (D-3M81W), its body is the notice `Content removed.` and
+//!    is never diffed word by word: the pieces are `[Del(from.body), Add(to.body)]`, each when
+//!    not empty. A stub keeps its id and recorded version; its removed fields and links are
+//!    absent, so no removed title or name reaches an entry, and paths name it by its id.
 //! 5. **Order.** The depth-first reading order of `to` (`children` in order). A removed block
 //!    goes right before the first block that follows it in `from`'s reading order and is still
 //!    in `to`. With none, it goes after every entry of its old parent's subtree in `to` (the
@@ -62,7 +66,7 @@ use crate::error::*;
 use crate::query::field_json;
 use crate::read_state::ReadState;
 use crate::view_query::CompareEntry;
-use crate::worddiff::{self, Piece, Unit};
+use crate::worddiff::{self, Op as PieceOp, Piece, Unit};
 use crate::{Materialized, Scope};
 
 /// What happened to a block from `from` to `to` (rule 1).
@@ -205,6 +209,21 @@ fn unit_of(b: &Block) -> Unit {
     }
 }
 
+/// The body pieces of a block on both sides whose bodies differ (rule 4).
+fn body_pieces(old: &Block, new: &Block) -> Vec<Piece> {
+    if !old.is_redacted() && !new.is_redacted() {
+        return worddiff::diff(&old.body, &new.body, unit_of(new));
+    }
+    [(PieceOp::Del, &old.body), (PieceOp::Add, &new.body)]
+        .into_iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(op, text)| Piece {
+            op,
+            text: text.clone(),
+        })
+        .collect()
+}
+
 fn own_path(m: &Materialized, b: &Block) -> Option<String> {
     if tree::is_tree_type(&b.block_type) {
         m.path_of(&b.id)
@@ -270,7 +289,7 @@ fn both_sides(places: &mut SiblingPlaces, old: &Block, new: &Block) -> DiffEntry
         from: links_json(old),
         to: links_json(new),
     });
-    let body = (old.body != new.body).then(|| worddiff::diff(&old.body, &new.body, unit_of(new)));
+    let body = (old.body != new.body).then(|| body_pieces(old, new));
     let content = !fields.is_empty() || type_change.is_some() || links.is_some() || body.is_some();
     let same_parent = old.parent == new.parent;
     // a new key alone is no move: the place among the siblings must differ too
@@ -372,59 +391,94 @@ impl ReadState {
         both.extend(ids(&cmp.moved)?);
         let added = ids(&cmp.added)?;
         let removed = ids(&cmp.deleted)?;
-
-        let to_order = reading_order(&mt);
-        let to_pos = positions(&mt, &to_order);
-        let from_order = reading_order(&mf);
-        let from_index: BTreeMap<&BlockId, usize> = from_order
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (id, i))
-            .collect();
-        // for each place in `from`'s order: where the first later block that `to` still holds
-        // sits in `to`, if any (one pass, so a large removed subtree stays linear)
-        let mut next_kept: Vec<Option<usize>> = vec![None; from_order.len() + 1];
-        for (i, id) in from_order.iter().enumerate().rev() {
-            next_kept[i] = to_pos.get(id).map(|p| p.0).or(next_kept[i + 1]);
-        }
-
-        // (place in `to`, before (0) or at (1) that place, `from` index) sorts the entries
-        let mut keyed: Vec<((usize, u8, usize), DiffEntry)> = vec![];
-        let mut places = SiblingPlaces::new(&mf, &mt);
-        for id in &both {
-            let (Some(old), Some(new)) = (mf.get(id), mt.get(id)) else {
-                continue;
-            };
-            let at = to_pos.get(id).map_or(to_order.len(), |p| p.0);
-            keyed.push(((at, 1, 0), both_sides(&mut places, old, new)));
-        }
-        for id in &added {
-            if let Some(b) = mt.get(id) {
-                let at = to_pos.get(id).map_or(to_order.len(), |p| p.0);
-                keyed.push(((at, 1, 0), one_side(&mt, b, true)));
-            }
-        }
-        for id in &removed {
-            let Some(b) = mf.get(id) else { continue };
-            let fi = from_index.get(id).copied().unwrap_or(from_order.len());
-            let after = next_kept.get(fi + 1).copied().flatten();
-            let at = after.unwrap_or_else(|| subtree_end(&mf, &to_pos, b, to_order.len()));
-            keyed.push(((at, 0, fi), one_side(&mf, b, false)));
-        }
-        keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
-
-        let entries: Vec<DiffEntry> = keyed.into_iter().map(|(_, e)| e).collect();
-        let mut counts = DiffCounts::default();
-        for e in &entries {
-            match e.change {
-                DiffChange::Added => counts.added += 1,
-                DiffChange::Removed => counts.removed += 1,
-                DiffChange::Updated => counts.updated += 1,
-                DiffChange::Moved => counts.moved += 1,
-            }
-        }
-        Ok(Diff { entries, counts })
+        Ok(build(&mf, &mt, &both, &added, &removed))
     }
+}
+
+/// The block diff from the state `from` to the state `to`: [`ReadState::diff`] of two states
+/// given as blocks. The entries are the ids the compare gives: added in `to`, removed from
+/// `from`, and on both sides with another version.
+pub fn diff_states(from: &Materialized, to: &Materialized) -> Diff {
+    let mut both = BTreeSet::new();
+    let mut removed = BTreeSet::new();
+    for (id, v) in from.versions() {
+        match to.version_of(id) {
+            Some(w) if w != *v => {
+                both.insert(id.clone());
+            }
+            Some(_) => {}
+            None => {
+                removed.insert(id.clone());
+            }
+        }
+    }
+    let added = to
+        .ids()
+        .filter(|id| from.get(id).is_none())
+        .cloned()
+        .collect();
+    build(from, to, &both, &added, &removed)
+}
+
+/// The entries of the given ids, ordered and counted (rules 1 to 6).
+fn build(
+    mf: &Materialized,
+    mt: &Materialized,
+    both: &BTreeSet<BlockId>,
+    added: &BTreeSet<BlockId>,
+    removed: &BTreeSet<BlockId>,
+) -> Diff {
+    let to_order = reading_order(mt);
+    let to_pos = positions(mt, &to_order);
+    let from_order = reading_order(mf);
+    let from_index: BTreeMap<&BlockId, usize> = from_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
+    // for each place in `from`'s order: where the first later block that `to` still holds
+    // sits in `to`, if any (one pass, so a large removed subtree stays linear)
+    let mut next_kept: Vec<Option<usize>> = vec![None; from_order.len() + 1];
+    for (i, id) in from_order.iter().enumerate().rev() {
+        next_kept[i] = to_pos.get(id).map(|p| p.0).or(next_kept[i + 1]);
+    }
+
+    // (place in `to`, before (0) or at (1) that place, `from` index) sorts the entries
+    let mut keyed: Vec<((usize, u8, usize), DiffEntry)> = vec![];
+    let mut places = SiblingPlaces::new(mf, mt);
+    for id in both {
+        let (Some(old), Some(new)) = (mf.get(id), mt.get(id)) else {
+            continue;
+        };
+        let at = to_pos.get(id).map_or(to_order.len(), |p| p.0);
+        keyed.push(((at, 1, 0), both_sides(&mut places, old, new)));
+    }
+    for id in added {
+        if let Some(b) = mt.get(id) {
+            let at = to_pos.get(id).map_or(to_order.len(), |p| p.0);
+            keyed.push(((at, 1, 0), one_side(mt, b, true)));
+        }
+    }
+    for id in removed {
+        let Some(b) = mf.get(id) else { continue };
+        let fi = from_index.get(id).copied().unwrap_or(from_order.len());
+        let after = next_kept.get(fi + 1).copied().flatten();
+        let at = after.unwrap_or_else(|| subtree_end(mf, &to_pos, b, to_order.len()));
+        keyed.push(((at, 0, fi), one_side(mf, b, false)));
+    }
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+
+    let entries: Vec<DiffEntry> = keyed.into_iter().map(|(_, e)| e).collect();
+    let mut counts = DiffCounts::default();
+    for e in &entries {
+        match e.change {
+            DiffChange::Added => counts.added += 1,
+            DiffChange::Removed => counts.removed += 1,
+            DiffChange::Updated => counts.updated += 1,
+            DiffChange::Moved => counts.moved += 1,
+        }
+    }
+    Diff { entries, counts }
 }
 
 /// Where a removed block with no later block in `to` goes (rule 5): the end of its nearest old

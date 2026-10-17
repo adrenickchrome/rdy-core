@@ -3,6 +3,7 @@
 //! that leave out `id`, `order` and `parent`.
 use crate::error::*;
 use crate::io::{BlockYaml, KeyedLink, from_yaml_struct};
+use crate::lint::is_notice_entry;
 use crate::wc::ignore::{Ignore, IgnoreAt};
 use crate::wc::layout::{BLOBS_DIR, FileKind, MAX_MEMBER_BYTES, THEIRS_SUFFIX, Untracked, WcFile};
 use crate::yaml_pos::{Positions, Seg, positions};
@@ -329,6 +330,7 @@ pub(crate) fn read_file(path: &Path, shown: &str) -> (Vec<Loaded>, Vec<Diagnosti
     } else if let Some(stem) = fname.strip_suffix(".yaml") {
         r.check_name(stem, shown);
         r.doc_file(path, shown, stem, None);
+        r.trust_neutral_name(0, 0, stem);
     } else {
         r.diags.push(Diagnostic::error(
             shown,
@@ -440,7 +442,9 @@ impl Reader<'_> {
                 ));
                 continue;
             }
+            let name_at = self.diags.len();
             self.check_name(&name, &here);
+            let start = self.loaded.len();
             if path.is_dir() {
                 let ff = path.join(FOLDER_FILE);
                 let ff_shown = format!("{here}/{FOLDER_FILE}");
@@ -459,12 +463,33 @@ impl Reader<'_> {
                     continue;
                 }
                 if let Some(id) = self.folder_file(&ff, &ff_shown, &name, parent) {
+                    self.trust_neutral_name(name_at, start, &name);
                     let inner = self.enter(at, &fname);
                     self.dir(&path, &here, Some(&id), &inner);
                 }
             } else {
                 self.doc_file(&path, &here, &name, parent);
+                self.trust_neutral_name(name_at, start, &name);
             }
+        }
+    }
+
+    /// Takes back the `E_BAD_NAME` that `check_name` pushed at `name_at` when the entry loaded at
+    /// `start` is a removed version's stub (D-3M81W) in the file or directory its own id names:
+    /// that name always looks like an id. The schema still checks the entry's name, and trusts it
+    /// only for a view's stub of that id, so a written doc or folder keeps the name rule.
+    fn trust_neutral_name(&mut self, name_at: usize, start: usize, name: &str) {
+        let neutral = self
+            .loaded
+            .get(start)
+            .is_some_and(|l| l.block.id.as_str() == name && is_notice_entry(&l.block));
+        if neutral
+            && self
+                .diags
+                .get(name_at)
+                .is_some_and(|d| d.code == E_BAD_NAME)
+        {
+            self.diags.remove(name_at);
         }
     }
 
@@ -1206,10 +1231,13 @@ impl Reader<'_> {
         if !self.claim(seen, name, here) {
             return;
         }
+        let name_at = self.diags.len();
         self.check_name(name, here);
         let before = self.diags.len();
+        let start = self.loaded.len();
         match self.folder_file(&ff, &ff_rel, name, parent) {
             Some(id) => {
+                self.trust_neutral_name(name_at, start, name);
                 let new_head = self.loaded.last().is_some_and(|l| l.new);
                 let hash = Hash::of(self.text.as_bytes());
                 self.files.insert(
@@ -1267,6 +1295,7 @@ impl Reader<'_> {
         if !self.claim(seen, stem, here) {
             return;
         }
+        let name_at = self.diags.len();
         self.check_name(stem, here);
         let hash = Hash::of(self.text.as_bytes());
         let start = self.loaded.len();
@@ -1279,7 +1308,10 @@ impl Reader<'_> {
             .and_then(serde_yaml_ng::Value::as_str)
             .and_then(|s| BlockId::parse(s).ok());
         let (head, new_head) = match self.doc_items(items, &pos, here, stem, parent) {
-            Some(head) => (head, self.loaded.get(start).is_some_and(|l| l.new)),
+            Some(head) => {
+                self.trust_neutral_name(name_at, start, stem);
+                (head, self.loaded.get(start).is_some_and(|l| l.new))
+            }
             // the doc entry did not load: its diagnostics stay, so status shows the file as
             // changed, add stages it and the commit's lint names the problem
             None => match given {

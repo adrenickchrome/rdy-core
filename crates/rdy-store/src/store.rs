@@ -5,6 +5,7 @@ use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
+use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
     CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
@@ -19,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,11 @@ pub struct StoreReader {
     /// trk1: the project pack's tracking fields, which the freeze checks let change on a frozen
     /// decision. Empty until the engine calls [`Store::set_tracking`].
     tracking: Arc<Tracking>,
+    /// The redaction epoch of the reader family when this reader was taken (a clone keeps it).
+    epoch: u64,
+    /// The masks of recorded requests this reader reads as applied (`redaction_preview_reader`);
+    /// None for every other reader.
+    preview: Option<Arc<crate::redaction::Preview>>,
 }
 
 /// What every reader of one store shares, whatever index it holds.
@@ -86,6 +92,15 @@ struct ReaderShared {
     frames_read: AtomicU64,
     /// Ref entries read by `refs_with_prefix` and `open_proposal_refs` (a test hook).
     refs_read: AtomicU64,
+    /// The redaction epoch of this store family: zero at open; it advances once per newly synced
+    /// apply batch, before any payload is erased. A reader whose captured epoch is older reads a
+    /// state that predates content removal.
+    epoch: Arc<AtomicU64>,
+    /// The store's poisoned state, as its readers see it (`Store::poisoned`).
+    poisoned: AtomicBool,
+    /// Set when a removal failed after its apply was synced (E_REDACTION_PENDING): no reader of
+    /// this family serves content again; a reopen finishes the removal.
+    pending: AtomicBool,
 }
 
 pub struct Store {
@@ -160,6 +175,25 @@ fn poisoned_error() -> StoreError {
     StoreError::Io(std::io::Error::other(
         "an earlier failed write could not be rolled back; reopen the store",
     ))
+}
+
+/// The holes of the active spans `spans` (from the index), for a hole-aware walk.
+pub(crate) fn holes_of(
+    spans: &BTreeMap<Location, crate::index::ActiveSpan>,
+) -> crate::segment::Holes {
+    spans
+        .iter()
+        .map(|(loc, s)| {
+            (
+                *loc,
+                crate::segment::Hole {
+                    kind: s.span.kind,
+                    hash: s.span.hash,
+                    len: s.span.len,
+                },
+            )
+        })
+        .collect()
 }
 
 impl Deref for Store {
@@ -350,7 +384,7 @@ pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
 }
 
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
     postcard::from_bytes(bytes).map_err(|e| StoreError::Decode(e.to_string()))
 }
 
@@ -402,6 +436,8 @@ fn entries_for_frame(
                 landing: hash,
             }));
         }
+        kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
+        kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
             let rec: Transitions = decode(payload)?;
             out.extend(
@@ -468,11 +504,20 @@ fn replay_into(
     let mut done = CatchUp::default();
     let mut entries = vec![];
     let mut in_chunk = 0usize;
-    log.for_each_from(from, |loc, kind, hash, payload, next| {
+    let auth = log.authorization();
+    log.for_each_view(from, |loc, v, next| {
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
         }
-        entries.extend(entries_for_frame(kind, hash, loc, payload)?);
+        // the redaction rows come from the validated stream only: an apply the bootstrap did not
+        // validate is never a row, and a removed payload's entries come from its residue
+        if v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc) {
+            return Err(StoreError::corrupt_at(loc));
+        }
+        entries.extend(match v.payload {
+            Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload)?,
+            None => auth.entries_for_hole(v.kind, v.hash, loc)?,
+        });
         done.frames += 1;
         in_chunk += 1;
         if in_chunk == CATCH_UP_CHUNK {
@@ -626,7 +671,9 @@ impl Store {
         // The log opens by the marker rule: the acknowledged boundary is the last valid batch
         // marker. The index's durable end is only the floor under which damage is refused, never
         // the boundary, because it lags the log.
-        let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
+        // two passes: the redaction bootstrap validates every apply from the log's own frames,
+        // then the marker rule's scan hashes every payload but the authorized holes
+        let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
         let report = OpenReport {
             quarantined,
             unclean_shutdown: unclean,
@@ -642,8 +689,13 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
+                epoch: Arc::new(AtomicU64::new(0)),
+                poisoned: AtomicBool::new(false),
+                pending: AtomicBool::new(false),
             }),
             tracking: Arc::default(),
+            epoch: 0,
+            preview: None,
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -688,10 +740,17 @@ impl Store {
         if let Some(n) = store.format_ref()? {
             format::check_format(Format { store_format: n }, dir)?;
         }
+        // the index's redaction rows must be the ones the log's validated records give: a
+        // forged or forgotten row is rebuilt from the log, never trusted
+        if store.ensure_redaction_index(upto)? {
+            store.report.index_rebuilt = true;
+        }
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
         store.ensure_format()?;
+        // an authorized removal finishes before any reader escapes this open
+        store.finish_redactions_at_open()?;
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
         // there) is left as it is, and nothing is followed or truncated.
@@ -786,9 +845,32 @@ impl Store {
         &self.report
     }
 
-    /// A reader of this store: a clone of its own (rdr1).
+    /// A reader of this store: a clone of its own (rdr1), which captures the family's redaction
+    /// epoch now.
     pub fn reader(&self) -> StoreReader {
-        StoreReader::clone(self)
+        let mut r = StoreReader::clone(self);
+        r.epoch = r.shared.epoch.load(Ordering::Acquire);
+        r.preview = None;
+        r
+    }
+
+    /// A reader of this store that reads through `preview`'s masks too.
+    pub(crate) fn reader_with_preview(
+        &self,
+        preview: Arc<crate::redaction::Preview>,
+    ) -> StoreReader {
+        let mut r = self.reader();
+        r.preview = Some(preview);
+        r
+    }
+
+    /// Poisons the store: every later write fails until reopen, and its readers' epoch checks
+    /// fail.
+    fn poison(&mut self) {
+        self.poisoned = true;
+        if let Some(r) = &self.reader {
+            r.shared.poisoned.store(true, Ordering::Release);
+        }
     }
 
     /// The kind and hash of every data frame the last successful `write` appended, after dedupe
@@ -831,6 +913,10 @@ impl Store {
     /// sync per batch, held or not. With no batch open and `last` empty it does nothing; with no
     /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
     ///
+    /// Like `write`, it refuses a redaction record (kinds 20 to 22) and an item that would bring
+    /// back a removed hash, before anything is appended. If the batch holds a redaction apply,
+    /// `last` must be empty or one TRANSITION frame (`Refused` otherwise, the batch still open).
+    ///
     /// A failure truncates the log to the batch's start. If a batch was open, it also poisons the
     /// store: the index already holds entries of frames that are gone, so every later write and
     /// every checkpoint fails until reopen. If no batch was open, the index holds nothing of the
@@ -841,7 +927,21 @@ impl Store {
             return Ok(());
         }
         if self.poisoned {
-            return Err(poisoned_error());
+            return Err(self.poisoned_err());
+        }
+        // the same refusals as `write`, before anything is appended: a redaction record (only
+        // the store's checked redaction writers write one) or an item that would bring back a
+        // removed hash is refused with the batch still open, and nothing poisoned
+        crate::redaction::refuse_redaction_kinds(&last)?;
+        self.refuse_removed(&last)?;
+        // a held batch that holds a redaction apply seals through the apply hook, which never
+        // takes the rollback below once the batch is synced
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
+        {
+            return self.seal_held_apply(last).map(|_| ());
         }
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
@@ -860,14 +960,14 @@ impl Store {
             Err(e) => {
                 self.open = None;
                 if was_open {
-                    self.poisoned = true;
+                    self.poison();
                     self.stale_index = true;
                 }
                 // as in `write`: a log that cannot be rolled back poisons the store
                 let rolled_back = !std::mem::take(&mut self.faults.rollback)
                     && self.log.truncate_to(start).is_ok();
                 if !rolled_back {
-                    self.poisoned = true;
+                    self.poison();
                 }
                 Err(e)
             }
@@ -893,8 +993,10 @@ impl Store {
             .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
         let mut placed_entries = vec![];
         for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
-            if let Some(IndexEntry::Object { loc, .. }) = frame.first_mut() {
-                *loc = *at;
+            for e in &mut frame {
+                if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } = e {
+                    *loc = *at;
+                }
             }
             placed_entries.extend(frame);
         }
@@ -953,6 +1055,7 @@ impl Store {
                  index,
                  shared,
                  tracking,
+                 ..
              }| {
                 drop(index);
                 (shared, tracking)
@@ -962,10 +1065,13 @@ impl Store {
 
     /// Makes `index` the store's index, in a new reader that shares everything else with the old.
     fn set_index(&mut self, (shared, tracking): (Arc<ReaderShared>, Arc<Tracking>), index: Index) {
+        let epoch = shared.epoch.load(Ordering::Acquire);
         self.reader = Some(StoreReader {
             index: Arc::new(index),
             shared,
             tracking,
+            epoch,
+            preview: None,
         });
     }
 
@@ -1027,7 +1133,7 @@ impl Store {
             });
         }
         // at the end of its segment, the next one follows
-        Ok(from.offset < len && self.log.read_hashed(from).is_err())
+        Ok(from.offset < len && !self.log.frame_readable(from)?)
     }
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
@@ -1079,6 +1185,7 @@ impl Store {
             replay_into(&self.log, &ix, ORIGIN, fail_after)?;
             // durable before it becomes the index
             ix.checkpoint()?;
+            crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
             Ok(ix)
         });
         let ix = match built {
@@ -1108,11 +1215,39 @@ impl Store {
     }
 
     /// Writes `items` as one batch: one marker and one sync. With held batches on, the frames
-    /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once.
+    /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once;
+    /// a held batch that holds a redaction apply takes no more writes until its seal.
+    ///
+    /// A redaction record (kinds 20 to 22) is refused: only the store's checked redaction writers
+    /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
+    /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
+    /// chunk, nor a change that embeds a removed block version. Nothing is written then.
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        crate::redaction::refuse_redaction_kinds(&items)?;
+        self.write_guarded(items)
+    }
+
+    /// `write` for the store's own checked writers: any kind, with the removed-hash refusal.
+    pub(crate) fn write_guarded(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
-            return Err(poisoned_error());
+            return Err(self.poisoned_err());
         }
+        // a held batch that holds a redaction apply takes only its seal: its TRANSITION is the
+        // last data frame, and no copy of the content it removes can join it before the seal
+        if self.held
+            && self
+                .open
+                .as_ref()
+                .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
+        {
+            return Err(StoreError::Refused(
+                "the held batch holds a redaction apply: seal it before writing more".into(),
+            ));
+        }
+        self.refuse_removed(&items)?;
         let start = self.log.end();
         let result = if self.held {
             self.append_held(items)
@@ -1133,7 +1268,7 @@ impl Store {
                 self.log.truncate_to(start)
             };
             if rollback.is_err() {
-                self.poisoned = true;
+                self.poison();
             }
         }
         result
@@ -1164,7 +1299,8 @@ impl Store {
 
     /// A write of a held batch: its frames join the open batch (the first write of a batch
     /// opens it, and may roll the segment), with no marker and no sync, and are indexed at once
-    /// with a commit that is not durable.
+    /// with a commit that is not durable. A redaction apply's frame is indexed as an object, but
+    /// its mask is activated only by the seal (`seal_held_apply`), after the batch is synced.
     fn append_held(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         let (hashes, batch) = self.dedupe(items)?;
         if batch.is_empty() {
@@ -1177,7 +1313,14 @@ impl Store {
         let placed = self.log.append_frames(&batch, self.open.is_none())?;
         let mut entries = vec![];
         for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
-            entries.extend(entries_for_frame(*kind, *hash, *loc, payload)?);
+            // an apply's mask is not activated here: the shared index serves every reader, and
+            // the apply authorizes nothing before its seal syncs it (`seal_held_apply`
+            // activates it then)
+            entries.extend(
+                entries_for_frame(*kind, *hash, *loc, payload)?
+                    .into_iter()
+                    .filter(|e| !matches!(e, IndexEntry::RedactionApply { .. })),
+            );
         }
         if self.take_index_fault() {
             return Err(StoreError::Db("injected index failure".into()));
@@ -1193,6 +1336,13 @@ impl Store {
     }
 
     fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        // an apply seals only through `seal_apply_batch`, whose failures after the sync never
+        // reach this path's rollback
+        if items.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY) {
+            return Err(StoreError::Refused(
+                "a redaction apply seals only through the checked apply writer".into(),
+            ));
+        }
         let (hashes, batch) = self.dedupe(items)?;
         if batch.is_empty() {
             self.last_batch.clear();
@@ -1291,10 +1441,11 @@ impl Store {
                 std::mem::forget(self.reader.take());
                 return Err(e);
             }
+            let err = self.poisoned_err();
             drop(self.drop_index());
             self.log.crash_point(CrashPoint::StaleIndexClosed);
             sealed?;
-            return Err(poisoned_error());
+            return Err(err);
         }
         sealed?;
         self.checkpoint()?;
@@ -1395,7 +1546,33 @@ impl Store {
         self.log.fail_next_append_after(bytes);
     }
 
-    pub fn put<T: Serialize>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {
+    /// Writes `value` as one object of `kind` (see `write`). A block or change that is a read
+    /// projection is refused before it is serialized: `Redacted` when its marker names a request
+    /// that removed it, `ProjectedWrite` for a forged or unmatched marker.
+    ///
+    /// A `BLOCK` takes a `Block`, and a `CHANGE` takes a `Change`, bare, boxed or as a `'static`
+    /// reference. Any other value of those kinds is `Refused`, because its read identity cannot
+    /// be checked and serialization would drop it.
+    pub fn put<T: Serialize + 'static>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {
+        let any: &dyn std::any::Any = value;
+        match typed_record(any) {
+            TypedRecord::Block(block) => {
+                if kind == kinds::CHANGE {
+                    return Err(unchecked_put(kind));
+                }
+                self.refuse_block_projection(block)?;
+            }
+            TypedRecord::Change(change) => {
+                if kind == kinds::BLOCK {
+                    return Err(unchecked_put(kind));
+                }
+                self.refuse_projection(change)?;
+            }
+            TypedRecord::Other if kind == kinds::BLOCK || kind == kinds::CHANGE => {
+                return Err(unchecked_put(kind));
+            }
+            TypedRecord::Other => {}
+        }
         Ok(self.write(vec![(kind, encode(value))])?[0])
     }
 
@@ -1550,6 +1727,40 @@ impl StoreReader {
         &self.index
     }
 
+    /// The segments this reader reads by position.
+    pub(crate) fn segments(&self) -> &SegmentReader {
+        &self.shared.segments
+    }
+
+    /// The preview overlay of this reader, if it is a preview reader.
+    pub(crate) fn preview(&self) -> Option<&crate::redaction::Preview> {
+        self.preview.as_deref()
+    }
+
+    /// The redaction epoch of the reader family now (an Acquire load).
+    pub fn redaction_epoch(&self) -> u64 {
+        self.shared.epoch.load(Ordering::Acquire)
+    }
+
+    /// The redaction epoch this reader captured when it was taken.
+    pub fn captured_redaction_epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Whether this reader may serve a new response: its captured epoch is the family's
+    /// (`RedactedState` when a redaction was applied since it was taken), and the store is not
+    /// poisoned (the store's poisoned-handle error).
+    pub fn check_redaction_epoch(&self) -> Result<(), StoreError> {
+        self.refuse_pending()?;
+        if self.epoch != self.redaction_epoch() {
+            return Err(StoreError::RedactedState);
+        }
+        if self.shared.poisoned.load(Ordering::Acquire) {
+            return Err(poisoned_error());
+        }
+        Ok(())
+    }
+
     /// The cached (head, set) of view `name`, if `included` has read one.
     pub(crate) fn cached_set(&self, name: &str) -> Option<CachedSet> {
         self.shared
@@ -1572,23 +1783,48 @@ impl StoreReader {
     /// Calls `f(location, kind, hash, payload, next)` for every frame in `[from, upto)`, batch
     /// markers included, continuing through segment rolls. `upto` comes from the writer
     /// (`log_end()` or `last_batch_end()`), so the walk never meets a batch being appended.
+    ///
+    /// A frame whose payload an applied redaction removed stops the walk with `Redacted`: this
+    /// walk hands out only original payloads. `for_each_record_from` walks past such frames.
     pub fn for_each_frame_from(
         &self,
         from: Location,
         upto: Location,
-        f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), StoreError>,
+        mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.shared.segments.for_each_from(from, upto, f)
+        self.refuse_pending()?;
+        let spans = self.index().redaction_spans_in(from, upto)?;
+        if spans.is_empty() {
+            return self.shared.segments.for_each_from(from, upto, f);
+        }
+        let holes = holes_of(&spans);
+        self.shared
+            .segments
+            .for_each_view_from(from, upto, &holes, |loc, v, next| {
+                if let Some(s) = spans.get(&loc) {
+                    return Err(StoreError::Redacted { request: s.request });
+                }
+                match v.payload {
+                    Some(payload) => f(loc, v.kind, v.hash, payload, next),
+                    None => Err(StoreError::corrupt_at(loc)),
+                }
+            })
     }
 
-    /// The first object written with hash `h`, whatever its kind, and that kind.
+    /// The first object written with hash `h`, whatever its kind, and that kind. A payload a
+    /// redaction removed is `Redacted`, never a valid object.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
+        self.refuse_pending()?;
         let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
+        if let Some(request) = self.mask_at(&loc)? {
+            return Err(StoreError::Redacted { request });
+        }
         self.read_object(h, loc)
     }
 
     /// Reads the frame at `loc`, which the index says holds an object with hash `h`.
     fn read_object(&self, h: &Hash, loc: Location) -> Result<(u8, Vec<u8>), StoreError> {
+        self.refuse_pending()?;
         self.shared.frames_read.fetch_add(1, Ordering::Relaxed);
         let (kind, found, payload) = self.shared.segments.read_hashed(loc)?;
         if found != *h {
@@ -1599,12 +1835,17 @@ impl StoreReader {
         Ok((kind, payload))
     }
 
-    /// The payload of the object of `kind` with hash `h` (kind1).
+    /// The payload of the object of `kind` with hash `h` (kind1). A payload a redaction removed
+    /// is `Redacted`.
     pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        self.refuse_pending()?;
         let loc = self
             .index()
             .typed(kind, h)?
             .ok_or(StoreError::NotFound(*h))?;
+        if let Some(request) = self.mask_at(&loc)? {
+            return Err(StoreError::Redacted { request });
+        }
         let (found_kind, payload) = self.read_object(h, loc)?;
         if found_kind != kind {
             return Err(StoreError::Decode(format!(
@@ -1638,9 +1879,14 @@ impl StoreReader {
         }
     }
 
-    /// The change with id `h` (repr1).
+    /// The change with id `h` (repr1). A change a redaction removed reads as its projection: its
+    /// residue, with its original id, audit fields and op order, each op's block read by its
+    /// original version (the block, or its stub).
     pub fn change(&self, h: &Hash) -> Result<Change, StoreError> {
-        self.get_named(kinds::CHANGE, "change", h)
+        match self.get_named(kinds::CHANGE, "change", h) {
+            Err(StoreError::Redacted { request }) => self.change_projection(h, request),
+            r => r,
+        }
     }
 
     /// The proposal version with id `h` (repr1).
@@ -1682,8 +1928,22 @@ impl StoreReader {
         Ok(self.index().object(h)?.is_some())
     }
 
+    /// The block version `version`. A version a redaction removed reads as its stub: id, type,
+    /// parent, order and the recorded identity, body `Content removed.`.
+    ///
+    /// The `BLOCK` frame is read and masked by kind, so an earlier object of another kind with
+    /// the same bytes never stands in for a removed version. With no `BLOCK` frame of that hash,
+    /// the first object with it is decoded, as before redaction existed.
     pub fn get_block(&self, version: &Hash) -> Result<Block, StoreError> {
-        self.get(version)
+        let read = match self.get_kind(kinds::BLOCK, version) {
+            Err(StoreError::NotFound(_)) => self.get_raw(version).map(|(_, payload)| payload),
+            r => r,
+        };
+        match read {
+            Ok(payload) => decode(&payload),
+            Err(StoreError::Redacted { request }) => self.block_projection(version, request),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -1753,6 +2013,10 @@ impl StoreReader {
             return Err(StoreError::Decode(format!(
                 "{h} is not a canonical blob manifest"
             )));
+        }
+        // a blob a redaction selected, or one with a removed chunk, is unavailable
+        if let Some(e) = self.blob_mask(h, &m)? {
+            return Err(e);
         }
         // the chunk count `put_blob` would produce, checked before anything is allocated or read
         if m.chunks.len() as u64 != m.len.div_ceil(CHUNK as u64) {
@@ -1990,6 +2254,17 @@ impl StoreReader {
         self.index().producers(version)
     }
 
+    /// Calls `f` with the hash of every stored object of `kind` (every BLOCK version, whether a
+    /// change produced it or not), once each, in ascending hash order, from the index (no log
+    /// walk).
+    pub fn for_each_object_of(
+        &self,
+        kind: u8,
+        f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.index().for_each_object_of(kind, f)
+    }
+
     /// The changes with an op that deletes `block`, ascending.
     pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
         self.index().deleters(block)
@@ -2025,6 +2300,8 @@ impl Store {
         view: Option<&str>,
         conflicts: &[Conflict],
     ) -> Result<(Frames, usize), StoreError> {
+        // a read projection is never serialized as an original object
+        self.refuse_projection(change)?;
         change.deps = self.change_deps_resolving(change, view, conflicts)?;
         let mut items = vec![];
         for op in &change.ops {
@@ -2152,6 +2429,533 @@ impl StoreReader {
         }
         Ok(slot.as_ref().expect("set above"))
     }
+}
+
+impl StoreReader {
+    /// `RedactionPending` once a removal failed after its apply was synced: no reader of this
+    /// store family serves content again.
+    pub(crate) fn refuse_pending(&self) -> Result<(), StoreError> {
+        if self.shared.pending.load(Ordering::Acquire) {
+            return Err(StoreError::RedactionPending);
+        }
+        Ok(())
+    }
+}
+
+/// The removal of payloads (`crate::redaction_io`): finishing authorized work, the live apply
+/// writer, and fsck's counts.
+impl Store {
+    /// The error of a write on a poisoned store: `RedactionPending` after a removal failed past
+    /// its synced apply, else the poisoned-handle error.
+    fn poisoned_err(&self) -> StoreError {
+        if self.shared.pending.load(Ordering::Acquire) {
+            StoreError::RedactionPending
+        } else {
+            poisoned_error()
+        }
+    }
+
+    /// A failure after a synced apply: the handle is poisoned for writes and reads, its index
+    /// is not checkpointed (the close removes it and the next open rebuilds it from the log), and
+    /// the error is `RedactionPending`. Nothing is rolled back: the apply stays in the log, and
+    /// the next open finishes the exact authorized operation.
+    fn pending_failure(&mut self) -> StoreError {
+        self.poison();
+        self.shared.pending.store(true, Ordering::Release);
+        self.stale_index = true;
+        StoreError::RedactionPending
+    }
+
+    /// Advances the store family's redaction epoch to `epoch` (one past the current value; the
+    /// caller checked it) after an apply batch is synced and before any payload is written. The
+    /// store's own reader takes the new epoch; every reader taken before keeps its old one, and
+    /// refuses new responses with `RedactedState`.
+    fn advance_epoch(&mut self, epoch: u64) {
+        self.shared.epoch.store(epoch, Ordering::Release);
+        if let Some(r) = self.reader.as_mut() {
+            r.epoch = epoch;
+        }
+    }
+
+    /// Abandons the open held batch without sealing it, as a failed seal does: the log is cut
+    /// back to the batch's start, nothing of the batch is acknowledged, and nothing it holds is
+    /// authorized (no marker and no sync were written, so no redaction apply in it takes effect
+    /// and the epoch does not move). The index already holds entries of the abandoned frames, so
+    /// the store is poisoned until reopen; the close removes the index and the next open
+    /// rebuilds it from the log. Does nothing when no batch is open.
+    ///
+    /// The engine calls it when a batch that holds a redaction apply cannot be sealed with the
+    /// moves it computed (a preview or move failure before authorization).
+    pub fn abandon_open_batch(&mut self) {
+        let Some(open) = self.open.take() else {
+            return;
+        };
+        self.poison();
+        self.stale_index = true;
+        self.roll_back(open.start);
+    }
+
+    /// The rollback of a batch that failed before its sync: the log is cut back to `to`; a
+    /// rollback that fails poisons the store.
+    fn roll_back(&mut self, to: Location) {
+        let rolled_back =
+            !std::mem::take(&mut self.faults.rollback) && self.log.truncate_to(to).is_ok();
+        if !rolled_back {
+            self.poison();
+        }
+    }
+
+    /// Whether the index's six redaction tables hold exactly the rows the log's validated records
+    /// before `upto` (the index's `indexed_upto`) give. They are derived again, in an index in
+    /// memory, from the requests and the validated applies; nothing in the index is trusted.
+    fn redaction_index_matches(&self, upto: Location) -> Result<bool, StoreError> {
+        let auth = Arc::clone(self.log.authorization());
+        let have = self.index().redaction_rows()?;
+        if auth.requests.is_empty() && auth.applies.is_empty() && have.iter().all(|t| t.is_empty())
+        {
+            return Ok(true);
+        }
+        let want = Index::in_memory()?;
+        let entries = auth.index_entries(self.log.readers(), upto)?;
+        want.apply(&entries, upto)?;
+        Ok(want.redaction_rows()? == have)
+    }
+
+    /// Makes the index's redaction rows the ones the log's validated records before `upto` give:
+    /// on any difference the index is rebuilt from the log and checked again. Returns whether it
+    /// was rebuilt. A difference that remains after the rebuild is corruption
+    /// (`RedactionCorrupt` at the redaction record the authorization does not hold), never a
+    /// silent rebuild at every open.
+    fn ensure_redaction_index(&mut self, upto: Location) -> Result<bool, StoreError> {
+        if self.redaction_index_matches(upto)? {
+            return Ok(false);
+        }
+        self.reindex()?;
+        let upto = self.index().indexed_upto()?;
+        if !self.redaction_index_matches(upto)? {
+            return Err(self.unexplained_redaction_rows());
+        }
+        Ok(true)
+    }
+
+    /// The refusal of redaction rows a rebuilt index still holds and the log's authorization
+    /// does not give: `RedactionCorrupt` at the first redaction request or apply frame of the log
+    /// that the authorization does not hold (else at its first record, or the log's start).
+    fn unexplained_redaction_rows(&self) -> StoreError {
+        let auth = Arc::clone(self.log.authorization());
+        let walked = self.log.for_each_view(ORIGIN, |loc, v, _| {
+            let held = match v.kind {
+                kinds::REDACTION => auth
+                    .requests
+                    .binary_search_by_key(&loc, |(l, _)| *l)
+                    .is_ok(),
+                kinds::REDACTION_APPLY => auth.holds_apply(loc),
+                _ => true,
+            };
+            if held {
+                Ok(())
+            } else {
+                Err(StoreError::corrupt_at(loc))
+            }
+        });
+        match walked {
+            Err(e) => e,
+            Ok(()) => {
+                let first = auth
+                    .requests
+                    .first()
+                    .map(|(l, _)| *l)
+                    .into_iter()
+                    .chain(auth.applies.first().map(|a| a.loc))
+                    .min()
+                    .unwrap_or(ORIGIN);
+                StoreError::corrupt_at(first)
+            }
+        }
+    }
+
+    /// Finishes the removal an open found authorized, before the open returns. A failure is
+    /// `RedactionPending` (the open is refused; the next one retries), except a proof the open
+    /// finds broken, which stays `RedactionCorrupt`.
+    fn finish_redactions_at_open(&mut self) -> Result<(), StoreError> {
+        if self.log.authorization().holes.is_empty() {
+            return Ok(());
+        }
+        match self.finish(true) {
+            Ok(_) => Ok(()),
+            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(_) => Err(StoreError::RedactionPending),
+        }
+    }
+
+    /// Finishes every authorized removal this store's log holds: each authorized payload that is
+    /// not all zero yet (intact, or partly zeroed by an interrupted removal) is overwritten with
+    /// zeros through one fixed buffer, in `(segment, offset)` order; each affected segment is
+    /// synced; then the derived index is rebuilt from the surviving data and the residues (no
+    /// old index is kept). Work already complete is recognized and left alone, so the call is
+    /// safe to repeat. Returns the active redaction's objects, frames and bytes, and the
+    /// authorized payloads found intact (and hashed) before this call erased them.
+    ///
+    /// The open runs it before it returns a store, and the live apply writer runs it after the
+    /// apply batch is synced. A failure poisons the store (`RedactionPending`): no write and no
+    /// read is served, and the next open finishes the removal.
+    pub fn finish_redactions(&mut self) -> Result<RedactionCounts, StoreError> {
+        if self.poisoned {
+            return Err(self.poisoned_err());
+        }
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
+        match self.finish(false) {
+            Ok(c) => Ok(c),
+            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(_) => Err(self.pending_failure()),
+        }
+    }
+
+    /// The work of `finish_redactions`. `at_open`: the open's run, which reaches the
+    /// after-apply-sync failpoint before its first zero write (the live writer reaches it right
+    /// after its sync).
+    fn finish(&mut self, at_open: bool) -> Result<RedactionCounts, StoreError> {
+        let auth = Arc::clone(self.log.authorization());
+        let mut counts = auth.counts();
+        let mut affected: BTreeSet<u32> = BTreeSet::new();
+        for (loc, hole) in &auth.holes {
+            match self.log.hole_state(*loc, hole)? {
+                Some(true) => continue,
+                Some(false) => counts.checked_payloads += 1,
+                None => {}
+            }
+            if at_open && affected.is_empty() {
+                crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync)?;
+            }
+            let span = crate::redaction_io::drop_span(*loc, hole, &auth.spans[loc]);
+            self.log.zero_payload(&span)?;
+            affected.insert(loc.segment);
+        }
+        if affected.is_empty() {
+            return Ok(counts);
+        }
+        self.log.sync_segments(&affected)?;
+        crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
+        self.reindex()?;
+        Ok(counts)
+    }
+
+    /// Reads and hash-checks every frame as `verify` does, reading the authorized holes as frames
+    /// whose payloads are neither read nor hashed, and returns the data frames with, when an
+    /// active redaction exists, its counts (`checked_payloads`: the intact data frames hashed).
+    pub fn verify_report(&self) -> Result<VerifyReport, StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
+        let (frames, holes) = self.log.verify_frames_counted()?;
+        let auth = self.log.authorization();
+        let redaction = auth.is_active().then(|| RedactionCounts {
+            checked_payloads: (frames - holes) as u64,
+            ..auth.counts()
+        });
+        Ok(VerifyReport { frames, redaction })
+    }
+
+    /// Seals one batch that holds REDACTION_APPLY records, then finishes the removal before it
+    /// returns. Kept apart from the ordinary append path:
+    ///
+    /// 1. Before anything is written, the batch is validated with the log as the open validates
+    ///    it (`redaction_io::bootstrap_pending`): a landing no person approved is
+    ///    `RedactionHuman`, any other failure `RedactionCorrupt`; the epoch's next value is
+    ///    checked (overflow is `RedactionPending`).
+    /// 2. The batch is appended with its marker and synced. A failure up to here rolls back as
+    ///    an ordinary write does: nothing is acknowledged.
+    /// 3. From the sync on the removal is authorized and irreversible: the store family's epoch
+    ///    advances once (older readers refuse new responses with `RedactedState`), the batch is
+    ///    indexed, and `finish_redactions` erases, syncs and rebuilds the index. A failure here
+    ///    never truncates the batch: it poisons the handle (`RedactionPending`) and the next open
+    ///    finishes the removal.
+    pub(crate) fn seal_apply_batch(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<RedactionCounts, StoreError> {
+        if self.poisoned {
+            return Err(self.poisoned_err());
+        }
+        if self.open.is_some() {
+            return Err(batch_open("before a redaction apply"));
+        }
+        if !items.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY) {
+            return Err(StoreError::Refused(
+                "a redaction apply batch holds at least one REDACTION_APPLY".into(),
+            ));
+        }
+        crate::redaction_io::refuse_oversized_records(&items)?;
+        self.refuse_removed(&items)?;
+        let (_, batch) = self.dedupe(items)?;
+        let start = self.log.batch_start(&batch);
+        let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;
+        let epoch = self
+            .shared
+            .epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(StoreError::RedactionPending)?;
+        let mut entries = vec![];
+        for (kind, payload) in &batch {
+            entries.push(entries_for_frame(
+                *kind,
+                Hash::of(payload),
+                ORIGIN,
+                payload,
+            )?);
+        }
+        let before = self.log.end();
+        let placed = match self.log.append_batch(&batch) {
+            Ok(p) => p,
+            Err(e) => {
+                self.roll_back(before);
+                return Err(e.into());
+            }
+        };
+        let mut placed_entries = vec![];
+        for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
+            for e in &mut frame {
+                if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } = e {
+                    *loc = *at;
+                }
+            }
+            placed_entries.extend(frame);
+        }
+        self.log.crash_point(CrashPoint::BeforeSync);
+        if let Err(e) = self.log.sync() {
+            self.roll_back(before);
+            return Err(e.into());
+        }
+        // authorized: the apply is durable, and no error below rolls it back
+        self.log.set_authorization(Arc::new(auth));
+        if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+            return Err(self.pending_failure());
+        }
+        self.advance_epoch(epoch);
+        if self.take_index_fault() || self.index().apply(&placed_entries, self.log.end()).is_err() {
+            return Err(self.pending_failure());
+        }
+        self.writes += 1;
+        self.acknowledge(
+            batch
+                .iter()
+                .zip(&placed)
+                .map(|((kind, _), (_, hash))| (*kind, *hash))
+                .collect(),
+        );
+        match self.finish(false) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(self.pending_failure()),
+        }
+    }
+
+    /// The seal hook of a held batch that holds REDACTION_APPLY records. `last` must be empty or
+    /// the one final TRANSITION; anything else is `Refused`. Then the batch (its frames read
+    /// back from the log, then `last`) is validated as the open validates a stored one. Both
+    /// checks run before anything more is written; a refusal leaves the batch open and nothing
+    /// poisoned. Then `last` and the marker are appended and synced; a failure there truncates
+    /// the batch and poisons the store, as `seal` does. From the sync on, the removal is
+    /// authorized: the epoch advances once, the batch's apply masks (which `append_held` kept
+    /// out of the shared index) and `last` are indexed, and `finish_redactions` runs; a failure
+    /// poisons the handle with `RedactionPending` and never truncates the batch.
+    fn seal_held_apply(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<RedactionCounts, StoreError> {
+        // `land_atomic` checked the applies against the log as it stood then, and their masks
+        // are not active yet: a BLOCK, CHANGE or BLOB_CHUNK in the tail could add a copy of the
+        // removed content that no span covers. So the tail holds the TRANSITION only.
+        if !(last.is_empty() || (last.len() == 1 && last[0].0 == kinds::TRANSITION)) {
+            return Err(StoreError::Refused(
+                "a held batch that holds a redaction apply seals with nothing or one TRANSITION"
+                    .into(),
+            ));
+        }
+        let start = self.open.as_ref().expect("a batch is open").start;
+        let mut batch: Vec<(u8, Vec<u8>)> = vec![];
+        // the masks of the batch's applies, which `append_held` left out of the shared index
+        let mut activation: Vec<IndexEntry> = vec![];
+        self.log
+            .for_each_from(start, |loc, kind, hash, payload, _| {
+                if kind == kinds::REDACTION_APPLY {
+                    activation.push(crate::redaction::apply_entry(hash, loc, payload)?);
+                }
+                batch.push((kind, payload.to_vec()));
+                Ok::<(), StoreError>(())
+            })?;
+        batch.extend(last.iter().cloned());
+        crate::redaction_io::refuse_oversized_records(&batch)?;
+        let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;
+        let epoch = self
+            .shared
+            .epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(StoreError::RedactionPending)?;
+        let mut entries = vec![];
+        for (kind, payload) in &last {
+            entries.push(entries_for_frame(
+                *kind,
+                Hash::of(payload),
+                ORIGIN,
+                payload,
+            )?);
+        }
+        let synced = (|| -> Result<Vec<IndexEntry>, StoreError> {
+            let placed = self.log.append_frames(&last, false)?;
+            let open = self.open.as_mut().expect("a batch is open");
+            open.frames
+                .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+            let mut placed_entries = vec![];
+            for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
+                for e in &mut frame {
+                    if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } =
+                        e
+                    {
+                        *loc = *at;
+                    }
+                }
+                placed_entries.extend(frame);
+            }
+            let open = self.open.as_ref().expect("a batch is open");
+            self.log
+                .append_marker(open.start, open.frames.iter().map(|(_, h)| h))?;
+            self.log.crash_point(CrashPoint::BeforeSync);
+            self.log.sync()?;
+            Ok(placed_entries)
+        })();
+        let placed_entries = match synced {
+            Ok(e) => {
+                activation.extend(e);
+                activation
+            }
+            Err(e) => {
+                // not synced: nothing is authorized, and the batch goes as a failed seal's does
+                self.open = None;
+                self.poison();
+                self.stale_index = true;
+                self.roll_back(start);
+                return Err(e);
+            }
+        };
+        // authorized: the apply is durable, and no error below rolls it back
+        self.log.set_authorization(Arc::new(auth));
+        if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+            self.open = None;
+            return Err(self.pending_failure());
+        }
+        self.advance_epoch(epoch);
+        if self.take_index_fault() || self.index().apply(&placed_entries, self.log.end()).is_err() {
+            self.open = None;
+            return Err(self.pending_failure());
+        }
+        let open = self.open.take().expect("a batch is open");
+        self.acknowledge(open.frames);
+        match self.finish(false) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(self.pending_failure()),
+        }
+    }
+
+    /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the
+    /// checked apply writer (`seal_apply_batch`): the batch is validated exactly as an open
+    /// validates a stored one, before anything is written. The store's own landing path
+    /// (`land_atomic`) calls that writer after its checks; this hook drives it directly.
+    #[doc(hidden)]
+    pub fn seal_redaction_batch_for_tests(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<RedactionCounts, StoreError> {
+        self.seal_apply_batch(items)
+    }
+
+    /// Test hook: forges an active span over the frame at `loc` in the index (an authorization
+    /// the log does not hold).
+    #[doc(hidden)]
+    pub fn forge_active_span_for_tests(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: Hash,
+        len: u32,
+        apply: Hash,
+        request: Hash,
+    ) -> Result<(), StoreError> {
+        let span = crate::index::RedactedSpan {
+            loc,
+            kind,
+            hash,
+            len,
+            residue: None,
+        };
+        self.index()
+            .forge_active_span_for_tests(&span, &apply, &request)
+    }
+
+    /// Test hook: makes the log's validated redaction authorization forget the log's requests
+    /// and applies; the authorized holes and their residues stay.
+    #[doc(hidden)]
+    pub fn forget_redaction_authorization_for_tests(&mut self) {
+        let mut auth = (**self.log.authorization()).clone();
+        auth.applies.clear();
+        auth.requests.clear();
+        self.log.set_authorization(Arc::new(auth));
+    }
+
+    /// Test hook: the open's check of the index's redaction rows against the log's validated
+    /// authorization, from the index's `indexed_upto`.
+    #[doc(hidden)]
+    pub fn check_redaction_index_for_tests(&mut self) -> Result<(), StoreError> {
+        let upto = self.index().indexed_upto()?;
+        self.ensure_redaction_index(upto).map(|_| ())
+    }
+
+    /// Test hook: empties the index's applied, active and span tables (an index that forgot the
+    /// log's authorization).
+    #[doc(hidden)]
+    pub fn clear_redaction_rows_for_tests(&mut self) -> Result<(), StoreError> {
+        self.index().clear_redaction_rows_for_tests()
+    }
+}
+
+/// A `put` value seen as the block or change it serializes as, if `put` can check it.
+enum TypedRecord<'a> {
+    Block(&'a Block),
+    Change(&'a Change),
+    Other,
+}
+
+/// The block or change behind `any`: bare, boxed or a `'static` reference. Every wrapper `put`
+/// accepts for a `BLOCK` or a `CHANGE` is listed here; a wrapper not listed is `Other`.
+fn typed_record(any: &dyn std::any::Any) -> TypedRecord<'_> {
+    if let Some(b) = any.downcast_ref::<Block>() {
+        TypedRecord::Block(b)
+    } else if let Some(b) = any.downcast_ref::<Box<Block>>() {
+        TypedRecord::Block(b)
+    } else if let Some(b) = any.downcast_ref::<&'static Block>() {
+        TypedRecord::Block(b)
+    } else if let Some(c) = any.downcast_ref::<Change>() {
+        TypedRecord::Change(c)
+    } else if let Some(c) = any.downcast_ref::<Box<Change>>() {
+        TypedRecord::Change(c)
+    } else if let Some(c) = any.downcast_ref::<&'static Change>() {
+        TypedRecord::Change(c)
+    } else {
+        TypedRecord::Other
+    }
+}
+
+/// The refusal of a `put` value whose read identity cannot be checked for `kind`.
+fn unchecked_put(kind: u8) -> StoreError {
+    let want = if kind == kinds::BLOCK {
+        "Block"
+    } else {
+        "Change"
+    };
+    StoreError::Refused(format!(
+        "put of kind {kind} takes a {want}, bare, boxed or as a 'static reference: \
+         another value's read identity cannot be checked"
+    ))
 }
 
 #[cfg(test)]

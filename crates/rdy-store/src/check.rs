@@ -10,6 +10,7 @@ use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
 use crate::kinds;
+use crate::redaction::StoredFrame;
 use crate::review::{DISMISS_REF, MENTION_REF, PAIR_REF, SEMANTIC_REF, mention_key};
 use crate::segment::Location;
 use crate::transition::Transitions;
@@ -183,10 +184,20 @@ impl StoreReader {
         let mut tensions: BTreeMap<Hash, Hash> = BTreeMap::new();
         let mut suspects: BTreeMap<Hash, Hash> = BTreeMap::new();
         let mut n = 0;
-        self.for_each_frame_from(origin, upto, |_, kind, hash, payload, _| {
-            if kind != kinds::TRANSITION {
-                return Ok(());
-            }
+        self.for_each_record_from(origin, upto, |at, frame, _| {
+            let (hash, payload) = match frame {
+                StoredFrame::Present {
+                    kind: kinds::TRANSITION,
+                    hash,
+                    payload,
+                } => (hash, payload),
+                // a transition record is never removable: a dropped one is damage
+                StoredFrame::Dropped {
+                    kind: kinds::TRANSITION,
+                    ..
+                } => return Err(StoreError::corrupt_at(at)),
+                _ => return Ok(()),
+            };
             let damage = |what: String| bad(format!("transition record {hash}: {what}"));
             let rec: Transitions = postcard::from_bytes(payload)
                 .map_err(|_| damage("its value does not decode".into()))?;

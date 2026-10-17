@@ -92,10 +92,18 @@ pub struct Change {
     pub justification: Option<Justification>,
     pub message: String,
     pub links: ChangeLinks,
+    /// The recorded id of a change read through its redaction residue: never serialized, `None`
+    /// on every normal change and after decoding. Built only by `ChangeResidue::project`.
+    #[serde(skip)]
+    pub read_identity: Option<Hash>,
 }
 
 impl Change {
+    /// The hash of the change's encoding. A residue projection returns its recorded id.
     pub fn id(&self) -> Hash {
-        hash_of(self)
+        match self.read_identity {
+            Some(id) => id,
+            None => hash_of(self),
+        }
     }
 }

@@ -15,6 +15,7 @@ fn claim(parent: Option<BlockId>, body: &str) -> Block {
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 

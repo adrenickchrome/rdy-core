@@ -137,8 +137,10 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
 
 pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
-    // pshow1: `P-<id>@<n>` is a proposal version, never a block; scope does not apply to it
-    if rdy_engine::is_proposal_ref(&a.id) {
+    // pshow1: `P-<id>@<n>` is a proposal version, never a block; scope does not apply to it.
+    // A full hash names a proposal version too, as an approval reads it (rdx13: `rdy approve`
+    // reads the version's removal card here, by any spelling the approval takes)
+    if rdy_engine::is_proposal_ref(&a.id) || a.id.parse::<rdy_model::Hash>().is_ok() {
         if a.blame {
             return Err(RdyError::new(
                 E_BAD_INPUT,

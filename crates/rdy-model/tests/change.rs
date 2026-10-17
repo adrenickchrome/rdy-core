@@ -12,6 +12,7 @@ fn block(id: &str, ty: &str) -> Block {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn change_id_covers_ops_and_provenance() {
         justification: None,
         message: "m".into(),
         links: ChangeLinks::default(),
+        read_identity: None,
     };
     let mut c2 = c.clone();
     assert_eq!(c.id(), c2.id());

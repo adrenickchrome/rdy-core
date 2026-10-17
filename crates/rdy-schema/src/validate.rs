@@ -126,7 +126,25 @@ pub fn validate_prefix(pack: &Pack, block: &Block) -> Option<Issue> {
     ))
 }
 
+/// The write schema: every check, whatever the block's read marker says, so a write can never
+/// pass a removed block's stub off as content (D-3M81W).
 pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
+    check_block(pack, block, parent, false)
+}
+
+/// The read schema of a stored state (D-3M81W). A normal block gets exactly the checks of
+/// [`validate_block`]. A trusted read projection of a removed version
+/// ([`Block::is_redacted`]) keeps its type, parent and order checks (and `validate_prefix`
+/// applies as before); only the checks of what removal made unavailable are skipped: required
+/// fields, and the body rule (its body is the notice). A name equal to its own id (the neutral
+/// segment a working copy names a removed doc's file or folder's directory by) is not checked.
+pub fn validate_read_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
+    check_block(pack, block, parent, block.is_redacted())
+}
+
+/// `projection`: skip the required-field and body checks, which a removed version cannot meet,
+/// and the name check of a name equal to the block's id.
+fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: bool) -> Vec<Issue> {
     let mut out = vec![];
     let Some(def) = pack.block_types.get(&block.block_type) else {
         let known: Vec<&str> = pack.block_types.keys().map(String::as_str).collect();
@@ -244,7 +262,7 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         ));
     }
     for (name, fd) in &def.fields {
-        if fd.required && !block.fields.contains_key(name) {
+        if fd.required && !projection && !block.fields.contains_key(name) {
             out.push(err(
                 block,
                 "E_FIELD_REQUIRED",
@@ -254,6 +272,7 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         }
     }
     match def.body {
+        _ if projection => {}
         BodyRule::Required if block.body.trim().is_empty() => out.push(err(
             block,
             "E_BODY_REQUIRED",
@@ -329,6 +348,9 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
     }
     if top_ok
         && let Some(name) = block.field_str("name")
+        // a projection in the file or directory its id names (the neutral segment of a removed
+        // doc or folder) is no name a person wrote
+        && !(projection && name == block.id.as_str())
         && let Some(why) = tree::name_problem(name)
     {
         out.push(err(

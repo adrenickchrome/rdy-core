@@ -23,6 +23,7 @@ fn decision(fields: &[(&str, &str)]) -> Block {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 

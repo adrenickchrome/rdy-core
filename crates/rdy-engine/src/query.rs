@@ -2,6 +2,7 @@ use crate::error::*;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Edge, Suspect};
 use rdy_model::entity::render_refs;
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, RefSpan};
 use serde::Serialize;
 
@@ -38,6 +39,17 @@ pub struct Context {
     /// trk1: the block type's tracking fields, ascending; absent when it has none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tracking: Vec<String>,
+    /// rdx6: for a stub of removed content, the request that removed it; absent for every block
+    /// whose content stays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<RedactionRef>,
+}
+
+/// rdx6: the redaction a source block reply names, as `{"id": "<request hash>"}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RedactionRef {
+    /// The request's full hash.
+    pub id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -167,15 +179,37 @@ fn resolved_text(b: &Block, resolve: &dyn Fn(&RefSpan) -> String) -> (String, bo
     }
 }
 
+/// The source-only line that names the redaction a stub reads under: `Redaction: {hash}.`, the
+/// request's full hash. None for a block whose content stays. Source reads show it after
+/// `Content removed.`; renderer outputs never do.
+fn redaction_line(b: &Block) -> Option<String> {
+    b.redaction().map(|h| format!("Redaction: {h}."))
+}
+
+/// The full source text of `b`, as a source read shows its body: the body itself, or, for a stub
+/// of removed content, `Content removed.` and then, after a blank line, the line that names its
+/// redaction (`Redaction: {hash}.`).
+pub fn source_body(b: &Block) -> String {
+    match redaction_line(b) {
+        Some(line) => format!("{CONTENT_REMOVED}\n\n{line}"),
+        None => b.body.clone(),
+    }
+}
+
 /// The longest a compact line's fallback text gets, ellipsis included.
 const COMPACT_LINE_MAX: usize = 200;
 
 /// read1: the compact read's text for `b`: its whole statement, prompt, name or title field, else
-/// the first sentence of its body. A body with no sentence end (and any diagram, code or table
+/// the first sentence of its body. A stub of removed content reads `Content removed.
+/// Redaction: {hash}.` (rdx6). A body with no sentence end (and any diagram, code or table
 /// body, which hold ". " as content) shows as its `alt` or `caption` field, else its first line,
 /// capped at 200 characters with an ellipsis. References stay as bare ids; a field or sentence
 /// is not cut at a length (the read's max_tokens does the cutting).
 pub fn compact_summary(b: &Block) -> String {
+    // a stub of removed content: the notice and the request that removed it, on one line
+    if let Some(line) = redaction_line(b) {
+        return format!("{CONTENT_REMOVED} {line}");
+    }
     let (text, from_body) = resolved_text(b, &|span| span.token.clone());
     if !from_body {
         return collapse(&text);
@@ -306,6 +340,9 @@ impl ReadState {
                 .get(&block.block_type)
                 .map(|t| t.tracking.iter().cloned().collect())
                 .unwrap_or_default(),
+            redaction: block
+                .redaction()
+                .map(|h| RedactionRef { id: h.to_string() }),
         })
     }
 

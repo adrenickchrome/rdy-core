@@ -120,7 +120,7 @@ fn dl6_a_load_runs_fsck_and_reports_it() {
     assert!(s.landings >= 3 && s.tags >= 1 && s.views >= 3, "{s:?}");
     assert_eq!(
         (s.dump_format, s.store_format),
-        (1, rdy_store::format::STORE_FORMAT)
+        (2, rdy_store::format::STORE_FORMAT)
     );
 }
 
@@ -282,15 +282,15 @@ fn dl6_a_dump_that_fails_fsck_leaves_the_target_as_it_was() {
 fn dl6_a_dump_of_another_format_is_refused_before_anything_is_written() {
     let (_src, scratch, file) = dumped();
     let mut b = std::fs::read(&file).unwrap();
-    b[8] = 2; // dump format 2
-    let f = scratch.path().join("v2.rdydump");
+    b[8] = 3; // dump format 3: 2 is the current format
+    let f = scratch.path().join("v3.rdydump");
     std::fs::write(&f, &b).unwrap();
     let to = scratch.path().join("new");
     let e = load(&f, &to).unwrap_err();
     assert_eq!(e.code, "E_DUMP");
     assert_eq!(
         e.message,
-        format!("{}: dump format 2 is not one this rdy reads", f.display())
+        format!("{}: dump format 3 is not one this rdy reads", f.display())
     );
     assert_eq!(e.fix, "load it with the rdy that wrote it, or a later one");
     assert!(!to.exists());
@@ -559,7 +559,10 @@ fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
     );
     assert_eq!(
         e.fix,
-        format!("run rdy serve --stop in {}, then load again", p.display())
+        format!(
+            "run rdy serve --stop in {}, then load or clone again",
+            p.display()
+        )
     );
     assert_eq!(tree_but(&p, &skip), before, "the target is untouched");
     // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside

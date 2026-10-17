@@ -97,7 +97,18 @@ pub(crate) fn last_change_line(entry: &Value) -> Option<String> {
         line.push_str(&format!(", {j}"));
     }
     line.push_str(&landed_suffix(entry));
+    if let Some(r) = removed_by(entry) {
+        line.push_str(&format!("; {r}"));
+    }
     Some(line)
+}
+
+/// rdx13 (Task 6): `content removed by redaction <hash>` for an entry whose version reads as a
+/// stub, naming the request by its full hash; `None` for any other entry.
+fn removed_by(entry: &Value) -> Option<String> {
+    entry["redaction"]
+        .as_str()
+        .map(|h| format!("content removed by redaction {h}"))
 }
 
 /// The `history:` section of `rdy show --blame`, starting with a newline.
@@ -118,6 +129,9 @@ pub(crate) fn blame_text(reply: &Value) -> String {
         }
         if let Some(i) = imported_by(e) {
             out.push_str(&format!("  {i}"));
+        }
+        if let Some(r) = removed_by(e) {
+            out.push_str(&format!("\n    {r}"));
         }
         match e["landing"]["id"].as_str() {
             Some(id) => {
@@ -215,6 +229,26 @@ mod tests {
         );
         let reply = json!({"history": [entry(Some(json!({"actor": "human:imp", "run": null})))]});
         assert!(blame_text(&reply).contains("  imported by human:imp\n"));
+    }
+
+    /// rdx13 (Task 6): a history entry whose version reads as a stub names the request that
+    /// removed its content, in the last-change line and in blame; others print as before.
+    #[test]
+    fn rdx13_history_names_the_removing_request() {
+        let h = "ef".repeat(32);
+        let mut e = entry(None);
+        let plain_line = last_change_line(&e).unwrap();
+        let plain_blame = blame_text(&json!({"history": [e.clone()]}));
+        e["redaction"] = json!(h);
+        assert_eq!(
+            last_change_line(&e).unwrap(),
+            format!("{plain_line}; content removed by redaction {h}")
+        );
+        let blame = blame_text(&json!({"history": [e]}));
+        let mut lines: Vec<&str> = plain_blame.lines().collect();
+        let line = format!("    content removed by redaction {h}");
+        lines.insert(3, &line);
+        assert_eq!(blame, lines.join("\n"));
     }
 
     #[test]

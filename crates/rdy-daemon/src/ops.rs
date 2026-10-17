@@ -25,6 +25,7 @@ mod intake;
 mod land;
 mod project;
 mod read;
+mod redaction;
 mod search;
 mod site;
 mod site_url;
@@ -39,6 +40,7 @@ use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
+use redaction::redact;
 use search::search;
 pub(crate) use site::export_print;
 use site::{EXPORT_SHAPE, export, import, render};
@@ -74,6 +76,7 @@ pub const OPS: &[&str] = &[
     "export",
     "dump",
     "clone",
+    "redact",
     "check",
     "new_folder",
     "new_doc",
@@ -301,7 +304,16 @@ pub(crate) fn scope_of(
 }
 
 /// Runs the ctl op `op` with `args`. An unknown op is `E_BAD_INPUT` naming every op.
+///
+/// Every op is a new response, so it first checks the state the engine serves now: a state
+/// read before a content removal refuses with `E_REDACTED_STATE`, before any op parses or reads
+/// (plan Redaction: one response-check layer, no name allowlist). The CLI's direct route calls
+/// this function too. The acquired state marks where the response starts; an op may read a
+/// newer one.
 pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError> {
+    let state = cx.engine.read();
+    state.ensure_current_epoch()?;
+    drop(state);
     match op {
         "session" => Err(RdyError::new(
             E_BAD_INPUT,
@@ -342,6 +354,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out}")?),
         "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),
+        "redact" => redact(
+            cx,
+            parse(
+                op,
+                args,
+                "{targets, reason_class, reason, dry_run?, view?, max_tokens?}",
+            )?,
+        ),
         "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),

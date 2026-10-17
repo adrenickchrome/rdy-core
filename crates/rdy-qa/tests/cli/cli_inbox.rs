@@ -84,13 +84,19 @@ fn ib9_ack_prints_acked_and_empties_the_inbox() {
     assert!(lines[0].starts_with("cursor: "), "{again}");
 }
 
+/// POST-LAUNCH 51 (orchestrator ruling 2026-10-17, Redaction Task 13): the help names no export
+/// manifest format any more; it never names the old export-format-2.
 #[test]
-fn ib9_the_check_help_names_the_manifest_format() {
+fn ib9_the_check_help_names_no_manifest_format() {
     let out = std::process::Command::new(rdy_bin())
         .args(["check", "--help"])
         .output()
         .expect("run rdy");
     let text = stdout(&out);
-    assert!(text.contains("the export manifest is format 3"), "{text}");
+    assert!(
+        text.contains("Lint a doc file, a _folder.yaml or a directory without touching the store."),
+        "{text}"
+    );
+    assert!(!text.contains("manifest is format"), "{text}");
     assert!(!text.contains("export-format-2"), "{text}");
 }

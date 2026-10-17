@@ -23,6 +23,7 @@ mod land_cmd;
 mod output;
 mod project_cmd;
 mod read_cmd;
+mod redact_cmd;
 mod search_cmd;
 mod serve_cmd;
 mod site_cmd;
@@ -66,6 +67,10 @@ enum Cmd {
     /// List the suspects in a scope (default canon), as rdy_suspects does.
     Suspects(read_cmd::SuspectsArgs),
     Propose(land_cmd::ProposeArgs),
+    /// Request content removal: report what removing the targets would erase (--dry-run), or
+    /// record the request in a view. Recording erases nothing: propose the view, and a person
+    /// approves it (rdy approve, or the card relayed). The chat path is rdy_redact.
+    Redact(redact_cmd::RedactArgs),
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve(land_cmd::ApproveArgs),
     /// Create, fork, include, exclude, compare, list, show, close and hand over views.
@@ -131,11 +136,11 @@ enum Cmd {
     Fsck(project_cmd::FsckArgs),
     /// Run the MCP server over stdio.
     Mcp,
-    /// Lint exported files (a doc file, a _folder.yaml or a directory; the export manifest is
-    /// format 3) without touching the store. Inside a checkout, with no path or a path in the
-    /// working tree, it lints the working copy against the bound view; the working copy carries
-    /// no format number. A new entry needs no id, and a file rdy does not read is a warning.
-    /// Commit rewrites the committed files in canonical form and drops their YAML comments.
+    /// Lint a doc file, a _folder.yaml or a directory without touching the store. Inside a
+    /// checkout, with no path or a path in the working tree, it lints the working copy against
+    /// the bound view; the working copy carries no format number. A new entry needs no id, and a
+    /// file rdy does not read is a warning. Commit rewrites the committed files in canonical form
+    /// and drops their YAML comments.
     Check(project_cmd::CheckArgs),
     Pack {
         #[command(subcommand)]
@@ -155,6 +160,7 @@ enum Cmd {
 }
 
 fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
+    let as_json = cli.json;
     match cli.cmd {
         Cmd::Config(a) => config_cmd::run(&env.project, a.show_origin),
         Cmd::Wc(c) => wc::run(c, env),
@@ -172,7 +178,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Search(a) => search_cmd::search(env, a),
         Cmd::Suspects(a) => read_cmd::suspects(env, a),
         Cmd::Propose(a) => land_cmd::propose(env, a),
-        Cmd::Approve(a) => land_cmd::approve(env, a),
+        Cmd::Redact(a) => redact_cmd::redact(env, a),
+        Cmd::Approve(a) => land_cmd::approve(env, a, as_json),
         Cmd::View { cmd } => view_cmd::view(env, cmd),
         Cmd::Alt { cmd } => alt_cmd::alt(env, cmd),
         Cmd::Intent { cmd } => intent_cmd::intent(env, cmd),
@@ -274,6 +281,115 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    fn about_of(name: &str) -> String {
+        let cmd = Cli::command();
+        let sub = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == name)
+            .unwrap_or_else(|| panic!("{name}"));
+        sub.get_long_about()
+            .or(sub.get_about())
+            .map(|a| a.to_string())
+            .unwrap_or_default()
+    }
+
+    /// POST-LAUNCH 51 (orchestrator ruling 2026-10-17): `rdy check`'s help names no export
+    /// manifest format.
+    #[test]
+    fn rdx13_the_check_help_names_no_manifest_format() {
+        let about = about_of("check");
+        assert!(
+            about.starts_with(
+                "Lint a doc file, a _folder.yaml or a directory without touching the store. Inside a checkout"
+            ),
+            "{about}"
+        );
+        assert!(!about.contains("manifest"), "{about}");
+        assert!(!about.contains("format 3"), "{about}");
+    }
+
+    /// rdx13 (D-KQ4CA, D-CC90E): `rdy redact <target>... --reason-class <class> --reason <text>
+    /// [--dry-run] [--view <view>] [--max-tokens <n>]` sends the shared op's keys with its
+    /// defaults (false, the session's view, 4000 tokens); neither it nor `rdy approve` takes a
+    /// switch that skips the person.
+    #[test]
+    fn rdx13_redact_sends_the_shared_request() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["rdy"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        let Ok(Cli {
+            cmd: Cmd::Redact(a),
+            ..
+        }) = parse(&[
+            "redact",
+            "p-AAAAA",
+            "blob:00",
+            "--reason-class",
+            "secret",
+            "--reason",
+            "a leak",
+        ])
+        else {
+            panic!("redact parses");
+        };
+        assert_eq!(
+            redact_cmd::request(&a),
+            serde_json::json!({"targets": ["p-AAAAA", "blob:00"], "reason_class": "secret",
+                "reason": "a leak", "dry_run": false, "view": null, "max_tokens": null})
+        );
+        let Ok(Cli {
+            cmd: Cmd::Redact(a),
+            ..
+        }) = parse(&[
+            "redact",
+            "p-AAAAA",
+            "--reason-class",
+            "legal",
+            "--reason",
+            "x",
+            "--dry-run",
+            "--view",
+            "r1",
+            "--max-tokens",
+            "300",
+        ])
+        else {
+            panic!("redact parses");
+        };
+        assert_eq!(
+            redact_cmd::request(&a),
+            serde_json::json!({"targets": ["p-AAAAA"], "reason_class": "legal", "reason": "x",
+                "dry_run": true, "view": "r1", "max_tokens": 300})
+        );
+        // zero targets reach the op, which refuses them with its own text
+        let Ok(Cli {
+            cmd: Cmd::Redact(a),
+            ..
+        }) = parse(&["redact", "--reason-class", "secret", "--reason", "x"])
+        else {
+            panic!("redact parses");
+        };
+        assert_eq!(redact_cmd::request(&a)["targets"], serde_json::json!([]));
+        for flag in ["--force", "--yes", "--policy", "--approve", "--apply"] {
+            assert!(
+                parse(&[
+                    "redact",
+                    "p-AAAAA",
+                    "--reason-class",
+                    "secret",
+                    "--reason",
+                    "x",
+                    flag
+                ])
+                .is_err(),
+                "{flag}"
+            );
+            assert!(parse(&["approve", "P-0123@1", flag]).is_err(), "{flag}");
+        }
+    }
 
     /// Final review M3: `rdy --help` names the mention form of `rdy resolve`, so a person finds
     /// `--mention <block> <entity>` with `--dismiss` or `--restore`.

@@ -6,6 +6,8 @@ use crate::gate::{
     RelayedByRow, blocking_conflicts, changes_of, landed_as, latest_version, resolve_in,
     version_number, withdrawn,
 };
+use crate::pending::queue::removal_item;
+use crate::pending::{Item, RemovalCard};
 use crate::semantic::accept_advice::advised_digest;
 use crate::session::rfc3339;
 use crate::tensions::info::FindingInfo;
@@ -83,6 +85,35 @@ pub struct ProposalShow {
     /// The digest of `advised`, which an acceptance passes back (as the propose reply's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advised_digest: Option<String>,
+    /// The approval card of this version when it is `open` or `withdrawn` and a change of it
+    /// carries a content removal request (D-CC90E): read for this version alone, whatever the
+    /// queue lists. A direct approval (`rdy approve`) shows it before the approval runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removal_card: Option<RemovalCardShow>,
+    /// Why the removal card could not be read (`E_REDACTION_BUDGET` when its mandatory lines do
+    /// not fit [`crate::pending::CARD_MAX_TOKENS`]); the rest of the show stands, and a direct
+    /// approval refuses with this error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removal_card_error: Option<ErrorRow>,
+}
+
+/// The approval card of a version that carries content removal: the queue item's ref, its card
+/// whole, the card's hash and its removal facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemovalCardShow {
+    /// `P-<stable short>@<version>`.
+    pub r#ref: String,
+    pub card: String,
+    pub card_hash: String,
+    pub removal: Vec<RemovalCard>,
+}
+
+/// An error as a read carries it beside its other parts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ErrorRow {
+    pub code: String,
+    pub message: String,
+    pub fix: String,
 }
 
 /// An advised semantic tension of a proposal version: the reviewer, the advice and findings,
@@ -109,6 +140,31 @@ pub fn is_proposal_ref(text: &str) -> bool {
     (4..=64).contains(&id.len())
         && id.bytes().all(|b| b.is_ascii_hexdigit())
         && n.is_none_or(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The spelling of `text` that `is_proposal_ref` (or the hash parser) recognizes, when the
+/// approval's resolver reads `text` as a proposal; `None` when the resolver refuses `text` on
+/// its syntax alone. It reads `text` exactly as `resolve_in` does: a full version hash as is,
+/// else `P-`, 4 to 64 hex digits, then nothing or `@` and a version that parses as a `u32`
+/// (which takes `@01` and `@+1`). The spelling it returns, `P-<digits>[@<n>]` with `n` in
+/// decimal, resolves to what `text` resolves to. A direct approval reads the version's card by
+/// it (rdx13), so no spelling the approval takes skips the card.
+pub fn canonical_proposal_ref(text: &str) -> Option<String> {
+    if text.parse::<Hash>().is_ok() {
+        return Some(text.to_string());
+    }
+    let rest = text.strip_prefix("P-")?;
+    let (prefix, n) = match rest.split_once('@') {
+        Some((prefix, n)) => (prefix, Some(n.parse::<u32>().ok()?)),
+        None => (rest, None),
+    };
+    if !((4..=64).contains(&prefix.len()) && prefix.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return None;
+    }
+    Some(match n {
+        Some(n) => format!("P-{prefix}@{n}"),
+        None => format!("P-{prefix}"),
+    })
 }
 
 impl ReadState {
@@ -192,6 +248,24 @@ impl ReadState {
                 conflicts.len()
             ));
         }
+        // a landed or superseded version never lands again (the approval refuses it before
+        // anything else), so only an open version, or one a close withdrew (an undo can reopen
+        // its view), has a removal card to show before an approval
+        let (removal_card, removal_card_error) = if matches!(state, "open" | "withdrawn") {
+            match removal_item(self, pref, p.clone()) {
+                Ok(item) => (item.map(removal_card_show), None),
+                Err(e) => (
+                    None,
+                    Some(ErrorRow {
+                        code: e.code.to_string(),
+                        message: e.message,
+                        fix: e.fix,
+                    }),
+                ),
+            }
+        } else {
+            (None, None)
+        };
         let (advised, advised_digest, advised_error) = if state == "open" {
             match self.advised_rows(&p.view, &p.changes) {
                 Ok((rows, digest)) => (rows, digest, None),
@@ -224,6 +298,8 @@ impl ReadState {
             advised,
             advised_error,
             advised_digest,
+            removal_card,
+            removal_card_error,
         })
     }
 
@@ -261,8 +337,20 @@ impl ReadState {
     }
 }
 
+/// The show of a removal item ([`removal_item`]).
+fn removal_card_show(item: Item) -> RemovalCardShow {
+    RemovalCardShow {
+        r#ref: item.r#ref,
+        card: item.card,
+        card_hash: item.card_hash,
+        removal: item.removal.unwrap_or_default(),
+    }
+}
+
 /// The text of `s`, a serialized [`ProposalShow`]: the command line renders the daemon's JSON
-/// and MCP renders its own.
+/// and MCP renders its own. A version with a removal card shows the card whole and its card
+/// hash before the approve or blocking line; a card that could not be read shows its error
+/// row (code, message and fix) there instead.
 pub fn proposal_text(v: &Value) -> String {
     let s = |x: &Value| x.as_str().unwrap_or("").to_string();
     let first12 = |x: &Value| s(x).chars().take(12).collect::<String>();
@@ -331,6 +419,23 @@ pub fn proposal_text(v: &Value) -> String {
         })
         .collect();
     out.push_str(&format!("versions: {}\n", versions.join(", ")));
+    // the removal card whole, the text `rdy pending` and `rdy approve` print (D-CC90E), so a
+    // person sees what approving removes before the approve line
+    if let Some(c) = v.get("removal_card").filter(|c| c.is_object()) {
+        out.push_str(&format!(
+            "\n{}\n\ncard hash: {}\n",
+            s(&c["card"]),
+            s(&c["card_hash"])
+        ));
+    }
+    if let Some(e) = v.get("removal_card_error").filter(|e| e.is_object()) {
+        out.push_str(&format!(
+            "removal card: not read ({}: {}) (fix: {})\n",
+            s(&e["code"]),
+            s(&e["message"]),
+            s(&e["fix"])
+        ));
+    }
     let blocking: Vec<String> = v["blocking"]
         .as_array()
         .into_iter()
@@ -492,5 +597,253 @@ mod tests {
         v["advised"] = json!([]);
         v["advised_error"] = json!("E_IO: busy");
         assert!(proposal_text(&v).ends_with("advised: not read (E_IO: busy)\n"));
+    }
+
+    /// rdx13 (13.promoted fix round 1; ruling task-13-round1 item 2): the text of a show that
+    /// carries `removal_card` prints that card whole, as `rdy approve` and `rdy pending` print it,
+    /// then its card hash, before the approve or blocking line. A show that carries
+    /// `removal_card_error` prints its code, message and fix there instead.
+    #[test]
+    fn rdx13_proposal_text_shows_the_removal_card_or_its_error() {
+        let h = |c: char| c.to_string().repeat(64);
+        let card = "P-111111111111@2  Pins                approve\n\nContent removal r-1\n  Reason class: secret.\n\nApproved content removal cannot be undone.";
+        let mut v = json!({
+            "ref": "P-111111111111@2", "id": h('2'), "stable": h('1'), "version": 2,
+            "title": "Pins", "summary": null, "view": "work",
+            "proposed_by": {"actor": "agent:a", "run": null}, "proposed_at": "2026-10-06T10:00:00Z",
+            "canon_at": null, "state": "open", "landing": null, "changes": [], "blocks": 0,
+            "conflicts": [], "blocking": [],
+            "versions": [{"ref": "P-111111111111@2", "id": h('2'), "latest": true, "landed": false}],
+            "removal_card": {"ref": "P-111111111111@2", "card": card, "card_hash": h('9'), "removal": []}
+        });
+        let head = "proposal P-111111111111@2 (version 222222222222): Pins\n\
+                    view work, proposed by agent:a at 2026-10-06T10:00:00Z\n";
+        let open = format!(
+            "{head}state: open\n\
+             changes: 0 (0 blocks)\n\
+             versions: P-111111111111@2 (latest)\n\
+             \n{card}\n\n\
+             card hash: {}\n\
+             approve with: rdy approve P-111111111111@2\n",
+            h('9')
+        );
+        assert_eq!(proposal_text(&v), open);
+        // a withdrawn version keeps its card and offers no approve command
+        v["state"] = json!("withdrawn");
+        v["blocking"] = json!(["withdrawn (view work closed)"]);
+        let t = proposal_text(&v);
+        assert!(
+            t.ends_with(&format!(
+                "\n{card}\n\ncard hash: {}\nblocking: withdrawn (view work closed)\n",
+                h('9')
+            )),
+            "{t}"
+        );
+        // the card could not be read: the error row stands in its place
+        v["state"] = json!("open");
+        v["blocking"] = json!([]);
+        v.as_object_mut().unwrap().remove("removal_card");
+        v["removal_card_error"] = json!({
+            "code": "E_REDACTION_BUDGET",
+            "message": "The output budget is too small for the redaction warning.",
+            "fix": "raise max_tokens"
+        });
+        assert_eq!(
+            proposal_text(&v),
+            format!(
+                "{head}state: open\n\
+                 changes: 0 (0 blocks)\n\
+                 versions: P-111111111111@2 (latest)\n\
+                 removal card: not read (E_REDACTION_BUDGET: The output budget is too small for the redaction warning.) (fix: raise max_tokens)\n\
+                 approve with: rdy approve P-111111111111@2\n"
+            )
+        );
+    }
+
+    /// The JSON a show serialized to before rdx13 (plan amendment, rulings task-13-round1 and
+    /// task-13-round2): its
+    /// fields in order, each as serde writes it, with the three skipped when empty.
+    fn before_rdx13(s: &ProposalShow) -> String {
+        let mut parts: Vec<(&str, String)> = vec![];
+        let mut put = |k: &'static str, v: String| parts.push((k, v));
+        fn j<T: Serialize>(v: &T) -> String {
+            serde_json::to_string(v).unwrap()
+        }
+        put("ref", j(&s.r#ref));
+        put("id", j(&s.id));
+        put("stable", j(&s.stable));
+        put("version", j(&s.version));
+        put("title", j(&s.title));
+        put("summary", j(&s.summary));
+        put("view", j(&s.view));
+        put("proposed_by", j(&s.proposed_by));
+        put("proposed_at", j(&s.proposed_at));
+        put("canon_at", j(&s.canon_at));
+        put("state", j(&s.state));
+        put("landing", j(&s.landing));
+        put("changes", j(&s.changes));
+        put("blocks", j(&s.blocks));
+        put("conflicts", j(&s.conflicts));
+        put("blocking", j(&s.blocking));
+        put("versions", j(&s.versions));
+        if !s.advised.is_empty() {
+            put("advised", j(&s.advised));
+        }
+        if s.advised_error.is_some() {
+            put("advised_error", j(&s.advised_error));
+        }
+        if s.advised_digest.is_some() {
+            put("advised_digest", j(&s.advised_digest));
+        }
+        let body: Vec<String> = parts
+            .iter()
+            .map(|(k, v)| format!("{}:{v}", serde_json::to_string(k).unwrap()))
+            .collect();
+        format!("{{{}}}", body.join(","))
+    }
+
+    /// rdx13 plan amendment (rulings task-13-round1 and task-13-round2): `removal_card` and
+    /// `removal_card_error` are
+    /// additive. A show without them serializes byte for byte as before; a show with one adds
+    /// only that key, last, and every other key keeps its bytes and its place.
+    #[test]
+    fn rdx13_a_show_without_removal_serializes_as_before() {
+        let h = |c: char| c.to_string().repeat(64);
+        let full = ProposalShow {
+            r#ref: "P-111111111111@2".into(),
+            id: h('2'),
+            stable: h('1'),
+            version: 2,
+            title: "Pins".into(),
+            summary: Some("Pins record content.".into()),
+            view: "work".into(),
+            proposed_by: RelayedByRow {
+                actor: "agent:a".into(),
+                run: Some("r1".into()),
+            },
+            proposed_at: "2026-10-06T10:00:00Z".into(),
+            canon_at: Some(h('3')),
+            state: "open".into(),
+            landing: None,
+            changes: vec![ProposalChangeRow {
+                change: h('4'),
+                message: "pin it".into(),
+                blocks: 2,
+            }],
+            blocks: 2,
+            conflicts: vec![],
+            blocking: vec!["1 blocking tension(s)".into()],
+            versions: vec![ProposalVersionRow {
+                r#ref: "P-111111111111@1".into(),
+                id: h('1'),
+                latest: false,
+                landed: false,
+            }],
+            advised: vec![AdvisedRow {
+                tension: "tn-000000000001".into(),
+                reviewer: "agent:r".into(),
+                advice: "block".into(),
+                findings: vec![],
+                accepted: false,
+            }],
+            advised_error: Some("E_IO: busy".into()),
+            advised_digest: Some(h('5')),
+            removal_card: None,
+            removal_card_error: None,
+        };
+        let bare = ProposalShow {
+            summary: None,
+            canon_at: None,
+            advised: vec![],
+            advised_error: None,
+            advised_digest: None,
+            ..full.clone()
+        };
+        for s in [&full, &bare] {
+            let now = serde_json::to_string(s).unwrap();
+            assert_eq!(now, before_rdx13(s));
+            assert!(!now.contains("removal_card"), "{now}");
+            let card = RemovalCardShow {
+                r#ref: s.r#ref.clone(),
+                card: "the card".into(),
+                card_hash: h('6'),
+                removal: vec![],
+            };
+            let with_card = ProposalShow {
+                removal_card: Some(card.clone()),
+                ..s.clone()
+            };
+            let before = before_rdx13(s);
+            assert_eq!(
+                serde_json::to_string(&with_card).unwrap(),
+                format!(
+                    "{},\"removal_card\":{}}}",
+                    &before[..before.len() - 1],
+                    serde_json::to_string(&card).unwrap()
+                )
+            );
+            let row = ErrorRow {
+                code: "E_REDACTION_BUDGET".into(),
+                message: "The output budget is too small for the redaction warning.".into(),
+                fix: "Increase max_tokens, or propose fewer redaction requests at once.".into(),
+            };
+            let with_error = ProposalShow {
+                removal_card_error: Some(row.clone()),
+                ..s.clone()
+            };
+            assert_eq!(
+                serde_json::to_string(&with_error).unwrap(),
+                format!(
+                    "{},\"removal_card_error\":{}}}",
+                    &before[..before.len() - 1],
+                    serde_json::to_string(&row).unwrap()
+                )
+            );
+        }
+    }
+
+    /// rdx13 ruling task-13-round2: the wire shapes, key by key and in order. `removal_card` is
+    /// `{ref, card, card_hash, removal}`, where each `removal` entry is Task 8's `RemovalCard`
+    /// with its nine fields unchanged; `removal_card_error` is `{code, message, fix}`.
+    #[test]
+    fn rdx13_the_removal_card_fields_have_the_ruled_shapes() {
+        let h = |c: char| c.to_string().repeat(64);
+        let card = RemovalCardShow {
+            r#ref: "P-111111111111@1".into(),
+            card: "the card".into(),
+            card_hash: h('6'),
+            removal: vec![RemovalCard {
+                request: h('7').parse().unwrap(),
+                report: h('8').parse().unwrap(),
+                versions: 1,
+                blobs: 2,
+                shared_blobs: 3,
+                payloads: 4,
+                bytes: 5,
+                reason_class: rdy_model::redaction::ReasonClass::Secret,
+                reason: "a leaked code".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&card).unwrap(),
+            format!(
+                "{{\"ref\":\"P-111111111111@1\",\"card\":\"the card\",\"card_hash\":\"{}\",\
+                 \"removal\":[{{\"request\":\"{}\",\"report\":\"{}\",\"versions\":1,\"blobs\":2,\
+                 \"shared_blobs\":3,\"payloads\":4,\"bytes\":5,\"reason_class\":\"secret\",\
+                 \"reason\":\"a leaked code\"}}]}}",
+                h('6'),
+                h('7'),
+                h('8')
+            )
+        );
+        let row = ErrorRow {
+            code: "E_REDACTION_BUDGET".into(),
+            message: "m".into(),
+            fix: "f".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            "{\"code\":\"E_REDACTION_BUDGET\",\"message\":\"m\",\"fix\":\"f\"}"
+        );
     }
 }

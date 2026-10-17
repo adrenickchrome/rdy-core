@@ -34,6 +34,30 @@ const OPEN_SUSPECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("open_
 /// refs, so a replay of the log rebuilds it.
 const OPEN_PROPOSALS: TableDefinition<&str, &[u8]> = TableDefinition::new("open_proposals");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+/// A carrier change's hash -> the hash of the first redaction request logged for it.
+const REDACTION_CARRIERS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("redaction_carriers");
+/// Every request's items, derived when the request is logged and before any apply. Key: the
+/// request's hash, then 0x00, the kind byte and the object's hash -> the residue's hash (or empty):
+/// every object it removes (block versions, changes, chunks) and every blob manifest it names. Key:
+/// the request's hash, then 0x01 and a frame location (`loc_key`) -> the kind byte, the object's
+/// hash, the payload length (u32 little-endian) and the residue's hash (or nothing): every frame
+/// payload it removes. No value holds a payload.
+const REDACTION_ITEMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_items");
+/// An object's hash, its kind byte, then the hash of a request that names it -> empty: the
+/// requests of each object, applied or not.
+const REDACTION_OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_objects");
+/// A request's hash -> the hash of the first apply record that activated it, then that record's
+/// location (`loc_key`).
+const REDACTION_APPLIED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_applied");
+/// The active mask by object: an object's hash and kind byte (as `typed`) -> the request, the apply
+/// record and its location, then the residue's hash (or nothing). The earliest apply in log order
+/// keeps an object.
+const REDACTION_ACTIVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_active");
+/// The active mask by frame: a frame location (`loc_key`) -> the apply record, the request, the
+/// kind byte, the object's hash, the payload length (u32 little-endian) and the residue's hash (or
+/// nothing). The earliest apply in log order keeps a frame.
+const REDACTION_SPANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_spans");
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
 
@@ -84,10 +108,56 @@ pub enum IndexEntry {
     SuspectShut {
         key: Hash,
     },
+    /// Redaction request `request` (kind REDACTION), carried by change `carrier`: the objects it
+    /// removes or names (kind, hash, residue) and the frame payloads it removes.
+    RedactionRequest {
+        request: Hash,
+        carrier: Hash,
+        objects: Vec<(u8, Hash, Option<Hash>)>,
+        spans: Vec<RedactedSpan>,
+    },
+    /// Apply record `apply`, at `loc`, activates request `request`. A request it does not follow
+    /// in the log is damage: `RedactionCorrupt` at `loc`.
+    RedactionApply {
+        apply: Hash,
+        request: Hash,
+        loc: Location,
+    },
+}
+
+/// One frame payload a request removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RedactedSpan {
+    pub loc: Location,
+    pub kind: u8,
+    pub hash: Hash,
+    pub len: u32,
+    pub residue: Option<Hash>,
+}
+
+/// One frame of the active mask: the span, and the apply record and request that authorize it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveSpan {
+    pub span: RedactedSpan,
+    pub apply: Hash,
+    pub request: Hash,
+}
+
+/// One object of the active mask: its request, the apply record and that record's location, and
+/// its residue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveObject {
+    pub request: Hash,
+    pub apply: Hash,
+    pub at: Location,
+    pub residue: Option<Hash>,
 }
 
 pub struct Index {
     db: Database,
+    /// Whether the active redaction mask may hold a row: false only while it is empty, so the
+    /// reads of a store with no applied redaction never open its tables.
+    redacted: AtomicBool,
 }
 
 /// An index opened with its integrity checked (see `Index::open_checked`).
@@ -114,6 +184,12 @@ pub struct IndexDump {
     pub open_tensions: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_suspects: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_carriers: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_items: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_objects: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_applied: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_active: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_spans: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 fn dump_table(
@@ -169,6 +245,125 @@ fn hashes_under(
     Ok(out)
 }
 
+/// A frame location as a key: the segment (u32) then the offset (u64), big-endian, so keys sort
+/// in log order.
+fn loc_key(loc: &Location) -> [u8; 12] {
+    let mut key = [0u8; 12];
+    key[..4].copy_from_slice(&loc.segment.to_be_bytes());
+    key[4..].copy_from_slice(&loc.offset.to_be_bytes());
+    key
+}
+
+fn loc_from(bytes: &[u8], what: &str) -> Result<Location, StoreError> {
+    let bad = || StoreError::Decode(format!("{what} holds a damaged frame location"));
+    let segment = u32::from_be_bytes(
+        bytes
+            .get(..4)
+            .ok_or_else(bad)?
+            .try_into()
+            .map_err(|_| bad())?,
+    );
+    let offset = u64::from_be_bytes(
+        bytes
+            .get(4..12)
+            .ok_or_else(bad)?
+            .try_into()
+            .map_err(|_| bad())?,
+    );
+    Ok(Location { segment, offset })
+}
+
+/// A residue hash as a value suffix: nothing for none.
+fn residue_bytes(r: &Option<Hash>) -> &[u8] {
+    match r {
+        Some(h) => &h.0,
+        None => &[],
+    }
+}
+
+fn residue_from(bytes: &[u8], what: &str) -> Result<Option<Hash>, StoreError> {
+    match bytes.len() {
+        0 => Ok(None),
+        _ => hash_from(bytes, what).map(Some),
+    }
+}
+
+/// A span's value in `redaction_items` and the tail of one in `redaction_spans`: kind, hash,
+/// length, residue.
+fn span_value(span: &RedactedSpan) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + 32 + 4 + 32);
+    v.push(span.kind);
+    v.extend_from_slice(&span.hash.0);
+    v.extend_from_slice(&span.len.to_le_bytes());
+    v.extend_from_slice(residue_bytes(&span.residue));
+    v
+}
+
+fn span_from(loc: Location, v: &[u8], what: &str) -> Result<RedactedSpan, StoreError> {
+    if v.len() < 37 {
+        return Err(StoreError::Decode(format!("{what} is {} bytes", v.len())));
+    }
+    Ok(RedactedSpan {
+        loc,
+        kind: v[0],
+        hash: hash_from(&v[1..33], what)?,
+        len: u32::from_le_bytes(v[33..37].try_into().expect("four bytes")),
+        residue: residue_from(&v[37..], what)?,
+    })
+}
+
+fn active_object_from(v: &[u8]) -> Result<ActiveObject, StoreError> {
+    let what = "redaction mask entry";
+    if v.len() < 76 {
+        return Err(StoreError::Decode(format!("{what} is {} bytes", v.len())));
+    }
+    Ok(ActiveObject {
+        request: hash_from(&v[..32], what)?,
+        apply: hash_from(&v[32..64], what)?,
+        at: loc_from(&v[64..76], what)?,
+        residue: residue_from(&v[76..], what)?,
+    })
+}
+
+fn active_span_from(loc: Location, v: &[u8]) -> Result<ActiveSpan, StoreError> {
+    let what = "redaction span entry";
+    if v.len() < 64 {
+        return Err(StoreError::Decode(format!("{what} is {} bytes", v.len())));
+    }
+    Ok(ActiveSpan {
+        apply: hash_from(&v[..32], what)?,
+        request: hash_from(&v[32..64], what)?,
+        span: span_from(loc, &v[64..], what)?,
+    })
+}
+
+/// The key of an object item of `request` in `redaction_items`.
+fn item_object_key(request: &Hash, kind: u8, h: &Hash) -> [u8; 66] {
+    let mut key = [0u8; 66];
+    key[..32].copy_from_slice(&request.0);
+    key[32] = 0;
+    key[33] = kind;
+    key[34..].copy_from_slice(&h.0);
+    key
+}
+
+/// The key of a span item of `request` in `redaction_items`.
+fn item_span_key(request: &Hash, loc: &Location) -> [u8; 45] {
+    let mut key = [0u8; 45];
+    key[..32].copy_from_slice(&request.0);
+    key[32] = 1;
+    key[33..].copy_from_slice(&loc_key(loc));
+    key
+}
+
+/// The prefix of `request`'s items of one class (0 objects, 1 spans) in `redaction_items`.
+fn item_prefix(request: &Hash, class: u8) -> [u8; 33] {
+    let mut key = [0u8; 33];
+    key[..32].copy_from_slice(&request.0);
+    key[32] = class;
+    key
+}
+
 fn enc(loc: &Location) -> Vec<u8> {
     postcard::to_allocvec(loc).expect("encode location")
 }
@@ -194,6 +389,139 @@ fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
     match e {
         redb::DatabaseError::DatabaseAlreadyOpen => StoreError::HeldByReader(path.to_path_buf()),
         e => db(e),
+    }
+}
+
+/// The raw rows of the six redaction tables: carriers, items, objects, applied, active, spans.
+pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 6];
+
+/// The six redaction tables of one write transaction.
+struct RedactionTables<'t> {
+    carriers: redb::Table<'t, &'static [u8], &'static [u8]>,
+    items: redb::Table<'t, &'static [u8], &'static [u8]>,
+    objects: redb::Table<'t, &'static [u8], &'static [u8]>,
+    applied: redb::Table<'t, &'static [u8], &'static [u8]>,
+    active: redb::Table<'t, &'static [u8], &'static [u8]>,
+    spans: redb::Table<'t, &'static [u8], &'static [u8]>,
+}
+
+impl<'t> RedactionTables<'t> {
+    fn open(w: &'t redb::WriteTransaction) -> Result<RedactionTables<'t>, StoreError> {
+        Ok(RedactionTables {
+            carriers: w.open_table(REDACTION_CARRIERS).map_err(db)?,
+            items: w.open_table(REDACTION_ITEMS).map_err(db)?,
+            objects: w.open_table(REDACTION_OBJECTS).map_err(db)?,
+            applied: w.open_table(REDACTION_APPLIED).map_err(db)?,
+            active: w.open_table(REDACTION_ACTIVE).map_err(db)?,
+            spans: w.open_table(REDACTION_SPANS).map_err(db)?,
+        })
+    }
+
+    /// A request's rows: its carrier (the first request logged for a carrier keeps it), its
+    /// objects both ways, and its spans.
+    fn request(
+        &mut self,
+        request: &Hash,
+        carrier: &Hash,
+        objects: &[(u8, Hash, Option<Hash>)],
+        spans: &[RedactedSpan],
+    ) -> Result<(), StoreError> {
+        if self.carriers.get(&carrier.0[..]).map_err(db)?.is_none() {
+            self.carriers
+                .insert(&carrier.0[..], &request.0[..])
+                .map_err(db)?;
+        }
+        for (kind, h, residue) in objects {
+            self.items
+                .insert(
+                    &item_object_key(request, *kind, h)[..],
+                    residue_bytes(residue),
+                )
+                .map_err(db)?;
+            let mut key = Vec::with_capacity(65);
+            key.extend_from_slice(&typed_key(*kind, h));
+            key.extend_from_slice(&request.0);
+            self.objects.insert(&key[..], &[][..]).map_err(db)?;
+        }
+        for span in spans {
+            self.items
+                .insert(
+                    &item_span_key(request, &span.loc)[..],
+                    &span_value(span)[..],
+                )
+                .map_err(db)?;
+        }
+        Ok(())
+    }
+
+    /// An apply's rows: the request's objects and spans enter the active mask, where an earlier
+    /// apply keeps what it holds. A second apply of a request changes nothing; an apply of a
+    /// request the log does not hold before it is `RedactionCorrupt` at the apply.
+    fn apply(
+        &mut self,
+        flag: &AtomicBool,
+        apply: &Hash,
+        request: &Hash,
+        loc: &Location,
+    ) -> Result<(), StoreError> {
+        if self.applied.get(&request.0[..]).map_err(db)?.is_some() {
+            return Ok(());
+        }
+        let mut objects = vec![];
+        let (lo, mid, hi) = (
+            item_prefix(request, 0),
+            item_prefix(request, 1),
+            item_prefix(request, 2),
+        );
+        for item in self.items.range(&lo[..]..&mid[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let k = k.value();
+            objects.push((
+                k[33],
+                hash_from(&k[34..], "redaction item")?,
+                residue_from(v.value(), "redaction item")?,
+            ));
+        }
+        let mut spans = vec![];
+        for item in self.items.range(&mid[..]..&hi[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let at = loc_from(&k.value()[33..], "redaction item")?;
+            spans.push(span_from(at, v.value(), "redaction item")?);
+        }
+        if objects.is_empty() && spans.is_empty() {
+            return Err(StoreError::RedactionCorrupt {
+                segment: loc.segment,
+                offset: loc.offset,
+            });
+        }
+        let mut a = Vec::with_capacity(44);
+        a.extend_from_slice(&apply.0);
+        a.extend_from_slice(&loc_key(loc));
+        self.applied.insert(&request.0[..], &a[..]).map_err(db)?;
+        flag.store(true, Ordering::Release);
+        for (kind, h, residue) in objects {
+            let key = typed_key(kind, &h);
+            if self.active.get(&key[..]).map_err(db)?.is_some() {
+                continue;
+            }
+            let mut v = Vec::with_capacity(108);
+            v.extend_from_slice(&request.0);
+            v.extend_from_slice(&a);
+            v.extend_from_slice(residue_bytes(&residue));
+            self.active.insert(&key[..], &v[..]).map_err(db)?;
+        }
+        for span in spans {
+            let key = loc_key(&span.loc);
+            if self.spans.get(&key[..]).map_err(db)?.is_some() {
+                continue;
+            }
+            let mut v = Vec::with_capacity(64 + 69);
+            v.extend_from_slice(&apply.0);
+            v.extend_from_slice(&request.0);
+            v.extend_from_slice(&span_value(&span));
+            self.spans.insert(&key[..], &v[..]).map_err(db)?;
+        }
+        Ok(())
     }
 }
 
@@ -240,6 +568,12 @@ impl Index {
             w.open_table(OPEN_TENSIONS).map_err(db)?;
             w.open_table(OPEN_SUSPECTS).map_err(db)?;
             w.open_table(META).map_err(db)?;
+            w.open_table(REDACTION_CARRIERS).map_err(db)?;
+            w.open_table(REDACTION_ITEMS).map_err(db)?;
+            w.open_table(REDACTION_OBJECTS).map_err(db)?;
+            w.open_table(REDACTION_APPLIED).map_err(db)?;
+            w.open_table(REDACTION_ACTIVE).map_err(db)?;
+            w.open_table(REDACTION_SPANS).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
                 let refs = w.open_table(REFS).map_err(db)?;
@@ -255,7 +589,15 @@ impl Index {
             }
         }
         w.commit().map_err(db)?;
-        Ok(Index { db: database })
+        let redacted = {
+            let r = database.begin_read().map_err(db)?;
+            let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
+            t.first().map_err(db)?.is_some()
+        };
+        Ok(Index {
+            db: database,
+            redacted: AtomicBool::new(redacted),
+        })
     }
 
     /// Applies `entries` and moves `indexed_upto` to `upto` in one commit that is not durable: a
@@ -311,6 +653,8 @@ impl Index {
             let mut open_tensions = w.open_table(OPEN_TENSIONS).map_err(db)?;
             let mut open_suspects = w.open_table(OPEN_SUSPECTS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
+            // the redaction tables are opened only for a batch with a redaction record
+            let mut redaction: Option<RedactionTables<'_>> = None;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
@@ -371,6 +715,29 @@ impl Index {
                     IndexEntry::SuspectShut { key } => {
                         open_suspects.remove(&key.0[..]).map_err(db)?;
                     }
+                    IndexEntry::RedactionRequest {
+                        request,
+                        carrier,
+                        objects,
+                        spans,
+                    } => {
+                        let t = match &mut redaction {
+                            Some(t) => t,
+                            None => redaction.insert(RedactionTables::open(&w)?),
+                        };
+                        t.request(request, carrier, objects, spans)?;
+                    }
+                    IndexEntry::RedactionApply {
+                        apply,
+                        request,
+                        loc,
+                    } => {
+                        let t = match &mut redaction {
+                            Some(t) => t,
+                            None => redaction.insert(RedactionTables::open(&w)?),
+                        };
+                        t.apply(&self.redacted, apply, request, loc)?;
+                    }
                 }
             }
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
@@ -413,6 +780,33 @@ impl Index {
             out.push(hash_from(&key[32..], "producer entry")?);
         }
         Ok(out)
+    }
+
+    /// Calls `f` with the hash of every stored object of `kind`, once each, in ascending hash
+    /// order: one read of the typed table, no log walk. An object whose payload a redaction
+    /// removed is still stored (its frame and hash remain).
+    pub fn for_each_object_of(
+        &self,
+        kind: u8,
+        mut f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(TYPED).map_err(db)?;
+        for item in t.iter().map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            // every key is a hash and a kind byte, 33 bytes; anything else is damage
+            if key.len() != 33 {
+                return Err(StoreError::Decode(format!(
+                    "typed entry is {} bytes, expected 33",
+                    key.len()
+                )));
+            }
+            if key[32] == kind {
+                f(hash_from(&key[..32], "typed entry")?)?;
+            }
+        }
+        Ok(())
     }
 
     /// The ops of `view`'s chain, in ascending hash order.
@@ -526,6 +920,12 @@ impl Index {
             open_tensions: dump_table(&r, OPEN_TENSIONS)?,
             open_suspects: dump_table(&r, OPEN_SUSPECTS)?,
             open_proposals,
+            redaction_carriers: dump_table(&r, REDACTION_CARRIERS)?,
+            redaction_items: dump_table(&r, REDACTION_ITEMS)?,
+            redaction_objects: dump_table(&r, REDACTION_OBJECTS)?,
+            redaction_applied: dump_table(&r, REDACTION_APPLIED)?,
+            redaction_active: dump_table(&r, REDACTION_ACTIVE)?,
+            redaction_spans: dump_table(&r, REDACTION_SPANS)?,
         })
     }
 
@@ -565,6 +965,235 @@ impl Index {
         }
         w.commit().map_err(db)?;
         Ok(())
+    }
+
+    /// An empty index in memory, for deriving the redaction rows a log's records give
+    /// (`Store::redaction_index_matches`). Nothing is written to disk.
+    pub(crate) fn in_memory() -> Result<Index, StoreError> {
+        let database = redb::Builder::new()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .map_err(db)?;
+        Index::with_tables(database)
+    }
+
+    /// The rows of the six redaction tables, from one read transaction: carriers, items,
+    /// objects, applied, active, spans.
+    pub(crate) fn redaction_rows(&self) -> Result<RedactionRows, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        Ok([
+            dump_table(&r, REDACTION_CARRIERS)?,
+            dump_table(&r, REDACTION_ITEMS)?,
+            dump_table(&r, REDACTION_OBJECTS)?,
+            dump_table(&r, REDACTION_APPLIED)?,
+            dump_table(&r, REDACTION_ACTIVE)?,
+            dump_table(&r, REDACTION_SPANS)?,
+        ])
+    }
+
+    /// Writes a forged active span and mask row (an apply the log does not hold) in a durable
+    /// commit. No store path calls it: it is the test hook that forges an authorization in the
+    /// index, which the next open must not trust.
+    #[doc(hidden)]
+    pub fn forge_active_span_for_tests(
+        &self,
+        span: &RedactedSpan,
+        apply: &Hash,
+        request: &Hash,
+    ) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut spans = w.open_table(REDACTION_SPANS).map_err(db)?;
+            let mut v = Vec::with_capacity(64 + 69);
+            v.extend_from_slice(&apply.0);
+            v.extend_from_slice(&request.0);
+            v.extend_from_slice(&span_value(span));
+            spans.insert(&loc_key(&span.loc)[..], &v[..]).map_err(db)?;
+            let mut active = w.open_table(REDACTION_ACTIVE).map_err(db)?;
+            let mut v = Vec::with_capacity(76);
+            v.extend_from_slice(&request.0);
+            v.extend_from_slice(&apply.0);
+            v.extend_from_slice(&loc_key(&span.loc));
+            active
+                .insert(&typed_key(span.kind, &span.hash)[..], &v[..])
+                .map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        self.redacted.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Empties the applied, active and span tables in a durable commit. No store path calls it:
+    /// it is the test hook of an index that forgot the log's authorization.
+    #[doc(hidden)]
+    pub fn clear_redaction_rows_for_tests(&self) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        for def in [REDACTION_APPLIED, REDACTION_ACTIVE, REDACTION_SPANS] {
+            w.delete_table(def).map_err(db)?;
+            w.open_table(def).map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        self.redacted.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether the active redaction mask may hold a row (see `Index::redacted`).
+    pub fn any_redaction_active(&self) -> bool {
+        self.redacted.load(Ordering::Acquire)
+    }
+
+    /// The request logged for carrier change `carrier`, if one was.
+    pub fn redaction_carrier(&self, carrier: &Hash) -> Result<Option<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_CARRIERS).map_err(db)?;
+        match t.get(&carrier.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_from(v.value(), "redaction carrier entry")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The active mask's row for the object of `kind` with hash `h`.
+    pub fn redaction_active(&self, kind: u8, h: &Hash) -> Result<Option<ActiveObject>, StoreError> {
+        if !self.any_redaction_active() {
+            return Ok(None);
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
+        match t.get(&typed_key(kind, h)[..]).map_err(db)? {
+            Some(v) => Ok(Some(active_object_from(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Of `hashes`, the first that the active mask holds under any kind, with the request that
+    /// removed it (of several kinds, the lowest kind byte's): one read transaction, and none when
+    /// the mask is empty.
+    pub fn redaction_active_hit(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Option<(Hash, Hash)>, StoreError> {
+        if hashes.is_empty() || !self.any_redaction_active() {
+            return Ok(None);
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
+        for h in hashes {
+            let lo = typed_key(0, h);
+            let hi = typed_key(u8::MAX, h);
+            if let Some(item) = t.range(&lo[..]..=&hi[..]).map_err(db)?.next() {
+                let (_, v) = item.map_err(db)?;
+                return Ok(Some((*h, active_object_from(v.value())?.request)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The active spans of frames in `[from, upto)`, by location.
+    pub fn redaction_spans_in(
+        &self,
+        from: Location,
+        upto: Location,
+    ) -> Result<BTreeMap<Location, ActiveSpan>, StoreError> {
+        let mut out = BTreeMap::new();
+        if from >= upto || !self.any_redaction_active() {
+            return Ok(out);
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_SPANS).map_err(db)?;
+        let (lo, hi) = (loc_key(&from), loc_key(&upto));
+        for item in t.range(&lo[..]..&hi[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let at = loc_from(k.value(), "redaction span entry")?;
+            out.insert(at, active_span_from(at, v.value())?);
+        }
+        Ok(out)
+    }
+
+    /// The active span of the frame at `loc`, if the mask holds it.
+    pub fn redaction_span_at(&self, loc: &Location) -> Result<Option<ActiveSpan>, StoreError> {
+        if !self.any_redaction_active() {
+            return Ok(None);
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_SPANS).map_err(db)?;
+        match t.get(&loc_key(loc)[..]).map_err(db)? {
+            Some(v) => Ok(Some(active_span_from(*loc, v.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The requests that name the object of `kind` with hash `h`, applied or not, ascending.
+    pub fn redaction_requests_naming(&self, kind: u8, h: &Hash) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_OBJECTS).map_err(db)?;
+        let prefix = typed_key(kind, h);
+        let mut out = vec![];
+        for item in t.range(&prefix[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            out.push(hash_from(&key[33..], "redaction object entry")?);
+        }
+        Ok(out)
+    }
+
+    /// Request `request`'s items: the objects it removes or names (kind, hash, residue), and the
+    /// frame payloads it removes, in log order.
+    #[allow(clippy::type_complexity)]
+    pub fn redaction_request_items(
+        &self,
+        request: &Hash,
+    ) -> Result<(Vec<(u8, Hash, Option<Hash>)>, Vec<RedactedSpan>), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_ITEMS).map_err(db)?;
+        let (lo, mid, hi) = (
+            item_prefix(request, 0),
+            item_prefix(request, 1),
+            item_prefix(request, 2),
+        );
+        let mut objects = vec![];
+        for item in t.range(&lo[..]..&mid[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let k = k.value();
+            objects.push((
+                k[33],
+                hash_from(&k[34..], "redaction item")?,
+                residue_from(v.value(), "redaction item")?,
+            ));
+        }
+        let mut spans = vec![];
+        for item in t.range(&mid[..]..&hi[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let at = loc_from(&k.value()[33..], "redaction item")?;
+            spans.push(span_from(at, v.value(), "redaction item")?);
+        }
+        Ok((objects, spans))
+    }
+
+    /// The apply record that activated request `request`, and its location, if one has.
+    pub fn redaction_applied(
+        &self,
+        request: &Hash,
+    ) -> Result<Option<(Hash, Location)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_APPLIED).map_err(db)?;
+        match t.get(&request.0[..]).map_err(db)? {
+            Some(v) => {
+                let v = v.value();
+                if v.len() != 44 {
+                    return Err(StoreError::Decode(format!(
+                        "redaction apply entry is {} bytes",
+                        v.len()
+                    )));
+                }
+                Ok(Some((
+                    hash_from(&v[..32], "redaction apply entry")?,
+                    loc_from(&v[32..], "redaction apply entry")?,
+                )))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {

@@ -19,7 +19,14 @@ imbl.workspace = true
 arc-swap.workspace = true
 regex.workspace = true
 
+[features]
+# Test hooks that lower the redaction report's bounds for a test thread
+# (`redaction::override_limits_for_tests`). Never enabled by a normal build: only this crate's
+# own tests turn it on, through the dev-dependency below.
+test-support = []
+
 [dev-dependencies]
+rdy-engine = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 rdy-graph.workspace = true
 proptest.workspace = true

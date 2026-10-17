@@ -155,6 +155,7 @@ fn raw_create(r: &mut Rdy, view: &str, blocks: Vec<Block>) {
         justification: None,
         message: "raw".into(),
         links: ChangeLinks::default(),
+        read_identity: None,
     };
     r.store_mut().commit_to_view(view, change).unwrap();
     r.invalidate();
@@ -173,6 +174,7 @@ fn raw_figure(id: &str, parent: &str, order: &str, blob: &str, alt: &str) -> Blo
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 
@@ -508,6 +510,7 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                read_identity: None,
             },
         });
         parent = Some(id);
@@ -523,6 +526,7 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
                 justification: None,
                 message: "damaged".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();

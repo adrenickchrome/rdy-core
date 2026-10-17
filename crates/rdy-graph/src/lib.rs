@@ -108,8 +108,12 @@ pub struct Graph {
     inc: OrdMap<BlockId, Vec<Edge>>,
     decision_status: OrdMap<BlockId, DecisionStatus>,
     /// lpin1: each block's [`Block::content_hash_with`] the graph's tracking fields, which a pin
-    /// is checked against.
+    /// is checked against. A removed block's stub is never here: its tracking hash cannot be
+    /// recomputed (D-3M81W).
     contents: OrdMap<BlockId, Hash>,
+    /// Each removed block (a read projection, [`Block::is_redacted`]) and the request that removed
+    /// it, apart from `contents`.
+    redacted: OrdMap<BlockId, Hash>,
     /// trk1: the project pack's tracking fields, left out of every content hash.
     tracking: Arc<Tracking>,
 }
@@ -124,8 +128,13 @@ fn key_of<'a, V>(item: imbl::ordmap::DiffItem<'a, 'a, BlockId, V>) -> &'a BlockI
     }
 }
 
-/// Whether `a` and `b` differ only in their pins and derived fields.
+/// Whether `a` and `b` differ only in their pins and derived fields. When either is a removed
+/// block's projection, its content is unknown: the two are the same only when their recorded
+/// versions are.
 pub fn same_content(a: &Block, b: &Block) -> bool {
+    if a.is_redacted() || b.is_redacted() {
+        return a.version_hash() == b.version_hash();
+    }
     a.content_hash() == b.content_hash()
 }
 
@@ -256,8 +265,7 @@ impl Graph {
             ..Graph::default()
         };
         for b in blocks {
-            g.contents
-                .insert(b.id.clone(), b.content_hash_with(&g.tracking));
+            g.add_content(b);
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
@@ -267,6 +275,20 @@ impl Graph {
             }
         }
         g
+    }
+
+    /// Records what a pin to `b` is checked against: its tracking-sensitive content hash, or,
+    /// for a removed block's stub, only the request that removed it.
+    fn add_content(&mut self, b: &Block) {
+        match b.redaction() {
+            Some(request) => {
+                self.redacted.insert(b.id.clone(), request);
+            }
+            None => {
+                self.contents
+                    .insert(b.id.clone(), b.content_hash_with(&self.tracking));
+            }
+        }
     }
 
     /// The edges `b`'s own content makes, in order: `Contains` from its parent (if any), then
@@ -297,6 +319,7 @@ impl Graph {
         let mut g = self.clone();
         for b in old {
             g.contents.remove(&b.id);
+            g.redacted.remove(&b.id);
             g.decision_status.remove(&b.id);
             for e in Graph::edges_of(b) {
                 unlist(&mut g.out, &e.from, &e);
@@ -304,8 +327,7 @@ impl Graph {
             }
         }
         for b in new {
-            g.contents
-                .insert(b.id.clone(), b.content_hash_with(&g.tracking));
+            g.add_content(b);
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
@@ -315,6 +337,19 @@ impl Graph {
             }
         }
         g
+    }
+
+    /// The removed targets `id` holds a pin to, each once, sorted by target id, with the request
+    /// that removed it. The pin keeps its value; a removed target is never a `changed` or
+    /// `deleted` suspect (D-3M81W).
+    pub fn redacted_pins_of(&self, id: &BlockId) -> Vec<(BlockId, Hash)> {
+        let found: BTreeMap<&BlockId, Hash> = self
+            .outgoing(id)
+            .iter()
+            .filter(|e| e.pin.is_some() && e.from != e.to)
+            .filter_map(|e| Some((&e.to, *self.redacted.get(&e.to)?)))
+            .collect();
+        found.into_iter().map(|(t, r)| (t.clone(), r)).collect()
     }
 
     /// trk1: the tracking fields this graph's content hashes leave out.
@@ -506,6 +541,9 @@ impl Graph {
         for item in prev.contents.diff(&self.contents) {
             targets.insert(key_of(item).clone());
         }
+        for item in prev.redacted.diff(&self.redacted) {
+            targets.insert(key_of(item).clone());
+        }
         for item in prev.decision_status.diff(&self.decision_status) {
             let d = key_of(item);
             targets.insert(d.clone());
@@ -532,9 +570,11 @@ impl Graph {
     }
 
     /// lpin1: a pinned premise edge is `deleted` when its target is gone and `changed` when the
-    /// pin differs from the target's content hash. A block is never a suspect of itself: a
-    /// write never pins a block to its own id, and a stray self-pin is ignored here. Public so a
-    /// consequence names the edge that made a suspect from this one rule (df4).
+    /// pin differs from the target's content hash. A removed target (a stub) is neither: its
+    /// content is unavailable, and [`Graph::redacted_pins_of`] names it (D-3M81W). A block is
+    /// never a suspect of itself: a write never pins a block to its own id, and a stray self-pin
+    /// is ignored here. Public so a consequence names the edge that made a suspect from this one
+    /// rule (df4).
     pub fn edge_suspect(&self, e: &Edge) -> Option<Suspect> {
         if e.kind == EdgeKind::Contains || e.from == e.to {
             return None;
@@ -559,7 +599,7 @@ impl Graph {
                     EdgeKind::Link(n) => SUSPECT_LINKS.contains(&n.as_str()),
                     EdgeKind::Contains => false,
                 };
-                if !premise {
+                if !premise || self.redacted.contains_key(&e.to) {
                     return None;
                 }
                 match (e.pin, self.contents.get(&e.to)) {

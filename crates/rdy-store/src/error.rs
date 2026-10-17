@@ -3,8 +3,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// An I/O failure. `From<io::Error>` turns a missing payload a read path carried inside an
+    /// `io::Error` (`segment::UnauthorizedHole`) into `RedactionCorrupt` instead.
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] std::io::Error),
     #[error("index error: {0}")]
     Db(String),
     #[error("cannot decode object: {0}")]
@@ -70,6 +72,56 @@ pub enum StoreError {
     /// the record that failed, `what` says how (`crate::dump`).
     #[error("dump damaged at byte {at}: {what}")]
     Dump { at: u64, what: String },
+    /// The object's content was removed by redaction `request` (E_REDACTED): a raw read of its
+    /// payload, a blob with a removed chunk, or a write that would bring an erased hash back.
+    #[error("Content removed by redaction {request}.")]
+    Redacted { request: Hash },
+    /// A reader captured a redaction epoch older than the store's (E_REDACTED_STATE).
+    #[error("This read state predates content removal.")]
+    RedactedState,
+    /// A content removal without a person's approval (E_REDACTION_HUMAN).
+    #[error("Content removal needs a person's approval.")]
+    RedactionHuman,
+    /// An authorized removal that has not finished (E_REDACTION_PENDING).
+    #[error("Content removal was authorized but has not finished.")]
+    RedactionPending,
+    /// The spans or sources a request binds changed since it was prepared (E_REDACTION_STALE).
+    #[error("The redaction report changed after the request was recorded.")]
+    RedactionStale,
+    /// A stored or prepared redaction record that does not authorize the payload at this frame
+    /// location (E_REDACTION_CORRUPT): stored proof damage names the offending frame, a malformed
+    /// preparation names its claimed span.
+    #[error("The redaction record does not authorize the missing payload at {segment}:{offset}.")]
+    RedactionCorrupt { segment: u32, offset: u64 },
+    /// A redaction over one of the fixed bounds (E_REDACTION_LIMIT); `limit` is one of
+    /// `crate::redaction::limit::ALL`.
+    #[error("The redaction exceeds {limit}.")]
+    RedactionLimit { limit: &'static str },
+    /// A read projection (a stub or a residual change) offered to a writer (E_BAD_INPUT).
+    #[error("A read projection cannot be written.")]
+    ProjectedWrite,
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> StoreError {
+        if let Some(crate::segment::UnauthorizedHole(at)) = e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<crate::segment::UnauthorizedHole>())
+        {
+            return StoreError::corrupt_at(*at);
+        }
+        StoreError::Io(e)
+    }
+}
+
+impl StoreError {
+    /// The corrupt-span refusal at frame location `at`.
+    pub(crate) fn corrupt_at(at: crate::segment::Location) -> StoreError {
+        StoreError::RedactionCorrupt {
+            segment: at.segment,
+            offset: at.offset,
+        }
+    }
 }
 
 pub(crate) fn db<E: std::fmt::Display>(e: E) -> StoreError {

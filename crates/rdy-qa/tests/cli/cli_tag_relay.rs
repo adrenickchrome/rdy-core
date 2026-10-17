@@ -33,7 +33,7 @@ fn last_batch_kinds(r: &Rdy) -> Vec<u8> {
     let mut last = vec![];
     st.reader()
         .for_each_batch(st.seq(), |b| {
-            last = b.frames.iter().map(|f| f.kind).collect();
+            last = b.frames.iter().map(|f| f.kind()).collect();
             Ok(())
         })
         .unwrap();

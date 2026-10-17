@@ -364,32 +364,37 @@ fn di1_no_existing_kind_changes_its_bytes() {
     assert_eq!(format, 10);
     let mut seen = BTreeSet::new();
     for f in &frames {
-        let bytes = match f.kind {
-            kinds::BLOCK => again::<Block>(&f.payload),
-            kinds::CHANGE => again::<Change>(&f.payload),
-            kinds::PROPOSAL => again::<Proposal>(&f.payload),
-            kinds::LANDING => again::<LandingRecord>(&f.payload),
-            kinds::SNAPSHOT => again::<StateSnapshot>(&f.payload),
+        let payload = f.present_payload();
+        assert!(payload.is_some(), "a format-1 frame holds its payload");
+        let payload = payload.unwrap();
+        let bytes = match f.kind() {
+            kinds::BLOCK => again::<Block>(payload),
+            kinds::CHANGE => again::<Change>(payload),
+            kinds::PROPOSAL => again::<Proposal>(payload),
+            kinds::LANDING => again::<LandingRecord>(payload),
+            kinds::SNAPSHOT => again::<StateSnapshot>(payload),
             // a chunk is raw bytes: no encoding to change
-            kinds::BLOB_CHUNK => f.payload.clone(),
-            kinds::BLOB_MANIFEST => again::<BlobManifest>(&f.payload),
-            kinds::REF_UPDATE => again::<RefUpdate>(&f.payload),
-            kinds::TAG => again::<Tag>(&f.payload),
-            kinds::VIEW_OP => again::<ViewOp>(&f.payload),
-            kinds::INTENT => again::<Intent>(&f.payload),
-            kinds::ALT_SET => again::<AltSet>(&f.payload),
-            kinds::REVIEW => again::<Review>(&f.payload),
-            kinds::TENSION => again::<SemanticTension>(&f.payload),
-            kinds::TRANSITION => again::<Transitions>(&f.payload),
+            kinds::BLOB_CHUNK => payload.to_vec(),
+            kinds::BLOB_MANIFEST => again::<BlobManifest>(payload),
+            kinds::REF_UPDATE => again::<RefUpdate>(payload),
+            kinds::TAG => again::<Tag>(payload),
+            kinds::VIEW_OP => again::<ViewOp>(payload),
+            kinds::INTENT => again::<Intent>(payload),
+            kinds::ALT_SET => again::<AltSet>(payload),
+            kinds::REVIEW => again::<Review>(payload),
+            kinds::TENSION => again::<SemanticTension>(payload),
+            kinds::TRANSITION => again::<Transitions>(payload),
             k => panic!("kind {k} is not a kind of store format 10"),
         };
         assert_eq!(
-            bytes, f.payload,
+            bytes,
+            payload,
             "kind {} {} changed its bytes",
-            f.kind, f.hash
+            f.kind(),
+            f.hash()
         );
-        assert_eq!(Hash::of(&bytes), f.hash);
-        seen.insert(f.kind);
+        assert_eq!(Hash::of(&bytes), *f.hash());
+        seen.insert(f.kind());
     }
     let want: BTreeSet<u8> = rdy_qa::every_kind::V1_KINDS.into_iter().collect();
     assert_eq!(seen, want, "the fixture holds every kind of V1_KINDS");
@@ -448,10 +453,10 @@ fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
     );
     for f in &frames {
         assert!(
-            reader.has_kind(f.kind, &f.hash).unwrap(),
+            reader.has_kind(f.kind(), f.hash()).unwrap(),
             "{} {}",
-            f.kind,
-            f.hash
+            f.kind(),
+            f.hash()
         );
     }
     assert_eq!(reader.count_refs(ANSWER_REF).unwrap(), 0);

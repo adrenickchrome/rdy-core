@@ -417,8 +417,8 @@ fn ec2_an_upgrade_of_a_log_that_has_a_repo_id_writes_only_the_format() {
 
 #[test]
 fn ec2_check_refuses_a_store_with_no_repo_id() {
-    // The v1-s11 batches with no upgrade batch, the log's format forced to 12 by one hand-made
-    // batch of `meta/store_format` alone, and `FORMAT` forced to 12: a store format 12 log with
+    // The v1-s11 batches with no upgrade batch, the log's format forced to 13 by one hand-made
+    // batch of `meta/store_format` alone, and `FORMAT` forced to 13: a store format 13 log with
     // no repo id.
     let base = tempfile::tempdir().unwrap();
     let to = base.path().join("dst");
@@ -429,7 +429,7 @@ fn ec2_check_refuses_a_store_with_no_repo_id() {
     }
     let payload = postcard::to_allocvec(&RefUpdate {
         name: REF_STORE_FORMAT.into(),
-        value: encode_u32(12),
+        value: encode_u32(13),
         at: log_end,
     })
     .unwrap();
@@ -437,7 +437,7 @@ fn ec2_check_refuses_a_store_with_no_repo_id() {
     let forced = DumpBatch {
         start: log_end,
         digest: kinds::batch_digest([&hash]),
-        frames: vec![Frame {
+        frames: vec![Frame::Present {
             kind: kinds::REF_UPDATE,
             hash,
             payload,
@@ -445,7 +445,7 @@ fn ec2_check_refuses_a_store_with_no_repo_id() {
     };
     i.batch(bs.len() as u64, &forced).unwrap();
     i.finish().unwrap();
-    format::write_format_file(&to, Format { store_format: 12 }).unwrap();
+    format::write_format_file(&to, Format { store_format: 13 }).unwrap();
     let t = Store::open(&to).unwrap();
     assert_eq!(t.reader().get_ref(REF_REPO_ID).unwrap(), None);
     let e = t.check_objects().unwrap_err();

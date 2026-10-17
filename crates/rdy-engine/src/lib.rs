@@ -39,8 +39,10 @@ mod paths;
 pub mod pending;
 pub mod proposal_show;
 mod publish;
+pub mod quarantine;
 mod query;
 mod read_state;
+pub mod redaction;
 pub mod related;
 pub mod repo;
 pub mod search;
@@ -93,6 +95,7 @@ pub use query::{
     Context, ImpactItem, ImpactVia, code_lines, compact_summary, cut_line, field_json, summary,
     summary_in,
 };
+pub use query::{RedactionRef, source_body};
 pub use rdy_store::Relay;
 pub use read_state::{
     AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,

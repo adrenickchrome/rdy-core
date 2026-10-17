@@ -35,6 +35,9 @@ pub struct Link {
     /// The target's key, which a reference the author typed as a key shows (FW-F2a). None for a
     /// doc, a folder or a section, whose title shows instead (FW-F2b; see `site::typed_key`).
     pub key: Option<String>,
+    /// The target is removed content (D-3M81W): the reference reads as the notice, whatever
+    /// display text the author gave it.
+    pub removed: bool,
 }
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
@@ -51,7 +54,7 @@ pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String 
 /// text or its target's label (see [`diagram_label`]): for an attribute, a caption or a place a
 /// link may not go.
 pub fn words_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    escape(&inline::plain_refs(
+    escape(&inline::plain_refs_every(
         text,
         RefMode::Strict,
         inline::Form::Label,
@@ -97,10 +100,15 @@ fn mermaid_label(s: &str) -> String {
 /// a key-typed reference whose target still has one, the target's label, else the unresolved
 /// marker's words; never the id.
 fn diagram_label(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+    let target = BlockId::parse(&span.token).ok().and_then(|id| link(&id));
+    // a removed target reads as the notice, whatever display text the author gave (D-3M81W)
+    if target.as_ref().is_some_and(|l| l.removed) {
+        return rdy_model::redaction::CONTENT_REMOVED.to_string();
+    }
     if let Some(d) = &span.display {
         return d.clone();
     }
-    match BlockId::parse(&span.token).ok().and_then(|id| link(&id)) {
+    match target {
         Some(Link { key: Some(k), .. }) if span.key_typed && !k.is_empty() => k,
         Some(l) => l.label,
         None => UNRESOLVED.to_string(),

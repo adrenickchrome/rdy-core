@@ -17,9 +17,12 @@ use std::path::Path;
 /// 10 (plan M2e2): kind TRANSITION (a batch's tension and suspect moves, founder decision C, D-Z0EMP), and the index's open-tension and open-suspect tables.
 /// 11 = ANSWER, answer/, pending/ (Decision intake).
 /// 12 = meta/repo_id at the first batch, meta/origin (Export and clone).
-pub const STORE_FORMAT: u32 = 12;
-/// The first store format that a dump of format 1 carries (dl2, D-69AY3). A store of this
-/// format or a later one can move to a newer rdy with dump and load; an earlier one cannot.
+/// 13 = kinds REDACTION, REDACTION_RESIDUE and REDACTION_APPLY, and the redaction index
+/// (Redaction); it moves in dump format 2, which carries removed payloads as dropped frames.
+pub const STORE_FORMAT: u32 = 13;
+/// The first store format that a dump carries (dl2, D-69AY3): dump format 1 carries 10 to 12,
+/// dump format 2 carries 13. A store of this format or a later one can move to a newer rdy with
+/// dump and load; an earlier one cannot.
 pub const FIRST_DUMP_STORE_FORMAT: u32 = 10;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
