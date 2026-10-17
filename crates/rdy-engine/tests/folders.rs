@@ -123,6 +123,7 @@ pub fn legacy_doc(r: &mut Rdy, view: &str, id: &str, title: &str, parent: Option
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     };
     r.store_mut()
         .commit_to_view(
@@ -135,6 +136,7 @@ pub fn legacy_doc(r: &mut Rdy, view: &str, id: &str, title: &str, parent: Option
                 justification: None,
                 message: "m1".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();
@@ -435,6 +437,7 @@ fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                read_identity: None,
             },
         });
         parent = Some(id);
@@ -450,6 +453,7 @@ fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
                 justification: None,
                 message: "damaged".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();

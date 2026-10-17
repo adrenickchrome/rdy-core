@@ -310,6 +310,7 @@ fn status_warns_about_legacy_colon_views() {
             body: String::new(),
             links: Default::default(),
             pins: Default::default(),
+            read_identity: None,
         };
         let prov = Provenance {
             actor: "agent:a".into(),
@@ -328,6 +329,7 @@ fn status_warns_about_legacy_colon_views() {
                     justification: None,
                     message: String::new(),
                     links: ChangeLinks::default(),
+                    read_identity: None,
                 },
             )
             .unwrap();

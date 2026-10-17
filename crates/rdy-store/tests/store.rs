@@ -12,6 +12,7 @@ fn block(id: &str, body: &str) -> Block {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 
@@ -29,6 +30,7 @@ fn change(ops: Vec<Op>) -> Change {
         justification: None,
         message: String::new(),
         links: ChangeLinks::default(),
+        read_identity: None,
     }
 }
 

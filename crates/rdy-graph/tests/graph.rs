@@ -12,6 +12,7 @@ fn b(id: &str, ty: &str, parent: Option<&str>) -> Block {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 

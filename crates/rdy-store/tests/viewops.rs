@@ -15,6 +15,7 @@ fn block(id: &str, body: &str) -> Block {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn change(view: &str, ops: Vec<Op>, by: &Provenance) -> Change {
         justification: None,
         message: String::new(),
         links: ChangeLinks::default(),
+        read_identity: None,
     }
 }
 

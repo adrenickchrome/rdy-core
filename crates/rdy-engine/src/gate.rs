@@ -1737,6 +1737,7 @@ impl Rdy {
             justification: None,
             message: format!("new keys rdy derived, as another block holds the old ones: {names}"),
             links: ChangeLinks::default(),
+            read_identity: None,
         };
         change.deps = self.store.change_deps(&change, Some(view))?;
         if let Some(d) = change.deps.iter().find(|d| !ids.contains(d)) {
@@ -2530,6 +2531,7 @@ impl Rdy {
                     _ => format!("accept decisions and give new keys in {}", p.title),
                 },
                 links: ChangeLinks::default(),
+                read_identity: None,
             };
             change.deps = self.store.change_deps(&change, Some(&p.view))?;
             Some(change)

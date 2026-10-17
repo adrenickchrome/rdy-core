@@ -1704,6 +1704,7 @@ fn build_ops(
                     body,
                     links: res.links(links)?,
                     pins: BTreeMap::new(),
+                    read_identity: None,
                 };
                 if tree::is_tree_type(&block.block_type) && !block.fields.contains_key("name") {
                     let base = tree::default_name(block.field_str("title"), &block.id);
@@ -2655,6 +2656,7 @@ impl Rdy {
             justification: req.justification,
             message: req.message,
             links,
+            read_identity: None,
         };
         let id = self.store.commit_to_view_resolving(
             &req.view,

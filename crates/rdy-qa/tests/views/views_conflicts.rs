@@ -464,6 +464,7 @@ fn msw1_a_frozen_conflict_names_only_changes_the_view_can_exclude() {
                 justification: None,
                 message: "accept".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap()
@@ -554,6 +555,7 @@ fn msw1_a_frozen_conflict_in_a_pinned_view_names_a_landed_side_it_includes() {
                 justification: None,
                 message: "accept".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap()

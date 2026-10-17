@@ -178,6 +178,7 @@ fn blk(id: &str, block_type: &str, field: Option<(&str, &str)>, body: &str) -> B
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 

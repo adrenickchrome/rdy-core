@@ -519,6 +519,7 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     };
     let change = Change {
         view: "work".into(),
@@ -528,6 +529,7 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
         justification: None,
         message: "raw".into(),
         links: ChangeLinks::default(),
+        read_identity: None,
     };
     a.store_mut().commit_to_view("work", change).unwrap();
     a.invalidate();
@@ -768,6 +770,7 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     };
     a.store_mut()
         .commit_to_view(
@@ -780,6 +783,7 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
                 justification: None,
                 message: String::new(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();
@@ -852,6 +856,7 @@ fn raw_doc(r: &mut Rdy, id: &str, name: &str) {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     };
     r.store_mut()
         .commit_to_view(
@@ -864,6 +869,7 @@ fn raw_doc(r: &mut Rdy, id: &str, name: &str) {
                 justification: None,
                 message: "raw".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();
