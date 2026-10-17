@@ -812,10 +812,15 @@ impl ReadState {
             if !self.reader().has_blob(h)? {
                 return Err(not_found());
             }
-            let bytes = self.reader().get_blob(h).map_err(|e| match e {
-                rdy_store::StoreError::NotFound(_) => not_found(),
-                other => other.into(),
-            })?;
+            let bytes = match self.reader().get_blob(h) {
+                Ok(bytes) => bytes,
+                // O20: a blob that lost a chunk to a redaction (its own or one it shares) no
+                // longer reads; it gets no file, the summary does not count it, and the export
+                // goes on. Every other error keeps its text.
+                Err(rdy_store::StoreError::Redacted { .. }) => continue,
+                Err(rdy_store::StoreError::NotFound(_)) => return Err(not_found()),
+                Err(other) => return Err(other.into()),
+            };
             std::fs::write(out.join("blobs").join(h.to_string()), bytes).map_err(io_err)?;
             summary.blobs += 1;
         }

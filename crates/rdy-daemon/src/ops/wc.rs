@@ -63,7 +63,8 @@ pub(super) struct WcPutBlobArgs {
 /// `ids` resolve in that scope. With `blobs_dir` (resolved against the session's directory), each
 /// blob whose file is missing or differs from the store's bytes is written from the store (temp
 /// file and rename); a blob the store lacks is `E_NOT_FOUND`, as export's is. A `blobs_dir` or a
-/// blob path that exists as something else (a link included) is `E_WC_OCCUPIED`.
+/// blob path that exists as something else (a link included) is `E_WC_OCCUPIED`. A blob that a
+/// redaction made unreadable (`E_REDACTED`) gets no file, and the checkout goes on (O20).
 pub(super) fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let view = view_of(cx.session, a.view);
@@ -107,7 +108,13 @@ pub(super) fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> 
             if !st.reader().has_blob(&h)? {
                 return Err(not_found());
             }
-            let bytes = st.reader().get_blob(&h)?;
+            // O20: a blob that lost a chunk to a redaction (its own or one it shares) no longer
+            // reads; it gets no file and the checkout goes on. Any other error stops it.
+            let bytes = match st.reader().get_blob(&h) {
+                Ok(bytes) => bytes,
+                Err(rdy_store::StoreError::Redacted { .. }) => continue,
+                Err(e) => return Err(e.into()),
+            };
             let io = |e: std::io::Error| {
                 RdyError::new(
                     E_IO,

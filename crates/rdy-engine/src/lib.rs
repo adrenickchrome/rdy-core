@@ -91,6 +91,7 @@ pub use paths::TreeNode;
 pub use proposal_show::{
     ProposalChangeRow, ProposalShow, ProposalVersionRow, is_proposal_ref, proposal_text,
 };
+pub use query::source_body;
 pub use query::{
     Context, ImpactItem, ImpactVia, code_lines, compact_summary, cut_line, field_json, summary,
     summary_in,

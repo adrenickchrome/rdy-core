@@ -5,12 +5,13 @@ use super::Entry;
 use super::inflight::RunInFlight;
 use super::matcher::batch_items;
 use super::moves::{MoveRef, transition_entries};
-use crate::events::events_for_batch;
+use crate::events::{events_for_batch, frame_kind};
 use crate::{E_BAD_INPUT, Event, EventKind, RdyError, ReadState};
 use rdy_model::Hash;
 use rdy_store::StoreError;
 use rdy_store::inbox::{InboxCursor, InboxSub};
 use rdy_store::kinds::{self, BatchCommit};
+use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use serde::Serialize;
 use std::borrow::Cow;
@@ -246,12 +247,22 @@ impl ReadState {
         let mut failure: Option<RdyError> = None;
         // the first frame walked; the first marker met checks that it opens its batch
         let (mut first, mut checked) = (None, false);
-        let walk = reader.for_each_frame_from(start.at, end, |loc, kind, hash, payload, next| {
+        // the record walker: a frame an applied redaction dropped keeps its kind, hash and place
+        // in its batch, so it never ends the walk and every cursor stays where it was
+        let walk = reader.for_each_record_from(start.at, end, |loc, frame, next| {
             let first = *first.get_or_insert(loc);
+            let (kind, hash) = frame_kind(&frame);
             if kind != kinds::BATCH_COMMIT {
                 group.push((kind, hash));
                 return Ok(());
             }
+            // a batch marker is never removable: one without its payload is damage
+            let StoredFrame::Present { payload, .. } = frame else {
+                return Err(StoreError::RedactionCorrupt {
+                    segment: loc.segment,
+                    offset: loc.offset,
+                });
+            };
             if !checked {
                 checked = true;
                 // the walk starts at `start.at`, or at the next segment's start when `start.at`

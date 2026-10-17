@@ -2,6 +2,7 @@
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
 use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject, Verdict};
+use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use rdy_store::transition::{SuspectMove, TensionMove};
 use rdy_store::view::ViewOpKind;
@@ -146,6 +147,11 @@ mod hex {
 /// The events of every committed batch in the log from `from` to `upto`, in log order: what a
 /// subscriber would have received had it been listening since `from`. The first batch whose
 /// events cannot be read ends the walk with its error.
+///
+/// A frame whose payload an applied redaction removed keeps its kind, hash and place in its
+/// batch: the walk reads the record walker, so a dropped frame never ends it, and an event names
+/// the same seq it named before the removal. No event reads a removable payload (a block, a
+/// change or a blob chunk); a reader that needs a change gets it through its residue.
 pub fn replay(
     reader: &StoreReader,
     from: Location,
@@ -154,7 +160,8 @@ pub fn replay(
     let mut out = Vec::new();
     let mut group: Vec<(u8, Hash)> = Vec::new();
     let mut failure: Option<RdyError> = None;
-    let walk = reader.for_each_frame_from(from, upto, |_, kind, hash, _, next| {
+    let walk = reader.for_each_record_from(from, upto, |_, frame, next| {
+        let (kind, hash) = frame_kind(&frame);
         if kind == kinds::BATCH_COMMIT {
             match events_for_batch(reader, next, &group) {
                 Ok(events) => out.extend(events),
@@ -175,6 +182,15 @@ pub fn replay(
     }
     walk?;
     Ok(out)
+}
+
+/// The kind and hash of a frame the record walker hands out, present or dropped.
+pub(crate) fn frame_kind(frame: &StoredFrame<'_>) -> (u8, Hash) {
+    match *frame {
+        StoredFrame::Present { kind, hash, .. } | StoredFrame::Dropped { kind, hash, .. } => {
+            (kind, hash)
+        }
+    }
 }
 
 /// The events of one batch, in frame order. A frame whose object cannot be read is an error.
