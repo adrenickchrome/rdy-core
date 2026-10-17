@@ -4,6 +4,7 @@ pub mod answer;
 mod areas;
 pub mod brief;
 pub mod card_words;
+pub mod clone;
 pub mod code_brief;
 pub mod code_index;
 mod config;

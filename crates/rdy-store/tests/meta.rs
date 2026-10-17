@@ -228,3 +228,28 @@ fn ec1_the_dump_reads_store_format_12_with_the_kinds_of_11() {
     let (_, totals) = w.finish().unwrap();
     assert_eq!(totals.batches, kinds_11.len() as u64);
 }
+
+#[test]
+fn ec5_put_origin_refuses_while_a_batch_is_open() {
+    let (_d, mut s) = new_store();
+    let r = s.reader().repo_id().unwrap().unwrap();
+    s.set_held(true).unwrap();
+    s.set_refs(vec![("view/held".into(), vec![1; 32])]).unwrap();
+    assert!(s.open_batch().is_some(), "one held write opens a batch");
+    let end = s.log_end();
+    let o = Origin {
+        fork: false,
+        repo_id: r,
+        tag: None,
+        landing: None,
+    };
+    match s.put_origin(&o, None) {
+        Err(StoreError::Refused(m)) => {
+            assert_eq!(m, "a held batch is open: seal it before the origin batch")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.log_end(), end, "the log end does not move");
+    assert!(s.open_batch().is_some(), "the held batch stays open");
+    assert_eq!(s.reader().origin().unwrap(), None);
+}

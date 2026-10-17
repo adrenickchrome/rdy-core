@@ -151,7 +151,7 @@ struct OpenBatch {
 
 /// The refusal of a step that would make the index durable, or read the log as a whole, while a
 /// held batch is open.
-fn batch_open(what: &str) -> StoreError {
+pub(crate) fn batch_open(what: &str) -> StoreError {
     StoreError::Refused(format!("a held batch is open: seal it {what}"))
 }
 
@@ -813,6 +813,11 @@ impl Store {
         }
         self.held = on;
         Ok(())
+    }
+
+    /// Whether held batches are on.
+    pub(crate) fn held(&self) -> bool {
+        self.held
     }
 
     /// The kind and hash of each frame of the open held batch, in order; `None` when no batch is

@@ -1,9 +1,10 @@
 //! The project's metadata refs (store format 12): `meta/store_format`, `meta/repo_id` and
 //! `meta/origin`. Only the store writes a `meta/` ref: a new store's first batch, a load's
-//! upgrade batch (`Ingest::upgrade`) and a clone's origin batch (`Store::put_origin`, Task 5).
+//! upgrade batch (`Ingest::upgrade`) and a clone's origin batch (`Store::put_origin`).
+use crate::Store;
 use crate::error::StoreError;
 use crate::format::REF_STORE_FORMAT;
-use crate::store::StoreReader;
+use crate::store::{StoreReader, batch_open};
 use rdy_model::{Hash, RepoId};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,9 @@ pub const REF_REPO_ID: &str = "meta/repo_id";
 pub const REF_ORIGIN: &str = "meta/origin";
 /// The first store format whose stores hold a repo id.
 pub const FIRST_REPO_ID_STORE_FORMAT: u32 = 12;
+
+/// The fsck text of a store with no `meta/repo_id`.
+const NO_REPO_ID: &str = "meta/repo_id is missing; load the project from a dump with this rdy";
 
 /// The meta refs this rdy knows (closed), in the order the fsck text names them.
 const KNOWN: [&str; 3] = [REF_STORE_FORMAT, REF_REPO_ID, REF_ORIGIN];
@@ -90,9 +94,7 @@ impl StoreReader {
             }
         }
         let Some(r) = self.repo_id()? else {
-            return Err(bad(
-                "meta/repo_id is missing; load the project from a dump with this rdy",
-            ));
+            return Err(bad(NO_REPO_ID));
         };
         let Some(o) = self.origin()? else {
             return Ok(());
@@ -109,5 +111,39 @@ impl StoreReader {
             )));
         }
         Ok(())
+    }
+}
+
+impl Store {
+    /// The clone's batch (D-C8C70, O23): `meta/origin`, and for a fork a new `meta/repo_id`
+    /// first, in one `write` of `ref_items`: one marker, one sync. It writes with held batches
+    /// off and puts them back as they were after, so no TRANSITION frame joins the batch and no
+    /// batch stays open. A batch already open is refused (`StoreError::Refused`); so is a clone
+    /// (no new repo id) of a store with no repo id. Returns the repo id after it.
+    pub fn put_origin(
+        &mut self,
+        origin: &Origin,
+        new_repo_id: Option<RepoId>,
+    ) -> Result<RepoId, StoreError> {
+        if self.open_batch().is_some() {
+            return Err(batch_open("before the origin batch"));
+        }
+        let after = match new_repo_id {
+            Some(id) => id,
+            None => self.reader().repo_id()?.ok_or_else(|| bad(NO_REPO_ID))?,
+        };
+        let mut refs = Vec::with_capacity(2);
+        if let Some(id) = &new_repo_id {
+            refs.push((REF_REPO_ID.to_string(), encode_repo_id(id)));
+        }
+        refs.push((REF_ORIGIN.to_string(), encode_origin(origin)));
+        let items = self.ref_items_pub(refs);
+        let held = self.held();
+        // no batch is open, so turning held batches off seals nothing
+        self.set_held(false)?;
+        let wrote = self.write(items);
+        self.set_held(held)?;
+        wrote?;
+        Ok(after)
     }
 }

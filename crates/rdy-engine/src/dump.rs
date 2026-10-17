@@ -110,8 +110,8 @@ impl ReadState {
         })
     }
 
-    /// Writes the whole dump into `w` and returns `w`, flushed.
-    fn write_dump<W: Write>(
+    /// Writes the whole dump into `w` and returns `w`, flushed (a dump, and a clone's stream).
+    pub(crate) fn write_dump<W: Write>(
         &self,
         w: W,
         files: &[(String, Vec<u8>)],
