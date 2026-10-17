@@ -38,11 +38,12 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 40);
+    assert_eq!(OPS.len(), 41);
     assert_eq!(OPS[0], "session");
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
     assert_eq!(OPS[export + 2], "clone", "ec12: clone follows dump");
+    assert_eq!(OPS[export + 3], "redact");
     let (d, e) = project();
     let s = human();
     let err = dispatch(&cx(&e, &s, d.path()), "frobnicate", json!({})).unwrap_err();
@@ -811,4 +812,247 @@ fn di12_pending_and_answer_refuse_a_field_they_do_not_take() {
     )
     .unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
+}
+
+/// A project whose view `work` holds a prose block with secret text; returns its id.
+fn secret_project() -> (tempfile::TempDir, Local, String) {
+    let (d, e) = project();
+    let w = write_typed(&e, move |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+        ]))
+        .unwrap();
+        r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+    })
+    .unwrap();
+    let id = w["created"]["$p"].as_str().unwrap().to_string();
+    (d, e, id)
+}
+
+fn keys(v: &Value) -> std::collections::BTreeSet<String> {
+    v.as_object().unwrap().keys().cloned().collect()
+}
+
+#[test]
+fn rdx5_daemon_redact_reports_and_records() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let (d, e, id) = secret_project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    // a dry run: the result, the shared text and nothing written
+    let end = e.read().seq();
+    let v = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "secret", "reason": " leaked ", "dry_run": true}),
+    )
+    .unwrap();
+    assert_eq!(
+        keys(&v),
+        [
+            "change",
+            "dry_run",
+            "reason",
+            "reason_class",
+            "redaction",
+            "report",
+            "text",
+            "warnings"
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    );
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["reason"], "leaked");
+    assert_eq!(v["reason_class"], "secret");
+    assert!(v["change"].is_null() && v["redaction"].is_null());
+    assert_eq!(v["report"]["targets"], json!([{"all_versions": id}]));
+    assert_eq!(v["report"]["assessment"], "not_implemented");
+    assert_eq!(v["warnings"].as_array().unwrap().len(), 5);
+    let result: rdy_engine::redaction::RedactResult = serde_json::from_value(json!({
+        "dry_run": v["dry_run"], "reason_class": v["reason_class"], "reason": v["reason"],
+        "change": v["change"], "redaction": v["redaction"], "report": v["report"],
+        "warnings": v["warnings"],
+    }))
+    .unwrap();
+    let text = rdy_engine::redaction::report_text(&result, 4000)
+        .unwrap()
+        .text;
+    assert_eq!(v["text"], text);
+    assert!(text.starts_with("Redaction dry run\n"));
+    assert!(text.ends_with("\nNo request was recorded."));
+    assert_eq!(e.read().seq(), end, "a dry run writes nothing");
+    // the defaults: not a dry run, the session's view, 4000 tokens
+    let v = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "personal", "reason": "a name"}),
+    )
+    .unwrap();
+    assert_eq!(v["dry_run"], false);
+    let change = v["change"].as_str().unwrap().to_string();
+    let redaction = v["redaction"].as_str().unwrap().to_string();
+    assert_eq!(change.len(), 64);
+    assert!(v.get("truncated").is_none());
+    assert!(v["consequences"].is_array(), "the mutation envelope: {v}");
+    let text = v["text"].as_str().unwrap();
+    assert!(text.starts_with("Redaction request\n"), "{text}");
+    assert!(text.ends_with(&format!(
+        "Recorded redaction {redaction} in change {change}.\n\nPropose the view to ask for approval."
+    )));
+    assert!(!text.contains("W_REDACTION_SECRET"));
+    let st = e.read();
+    let ch: rdy_model::Hash = change.parse().unwrap();
+    assert!(st.included("work").contains(&ch), "the carrier is in work");
+    let req = st
+        .reader()
+        .redaction_request(&redaction.parse().unwrap())
+        .unwrap();
+    assert_eq!(req.reason, "a name");
+    assert_eq!(req.carrier, ch);
+    drop(st);
+    // an explicit view, by either spelling, and a budget
+    let v = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "legal", "reason": "a court order", "view": "view:work", "max_tokens": 20000}),
+    )
+    .unwrap();
+    let ch2: rdy_model::Hash = v["change"].as_str().unwrap().parse().unwrap();
+    assert!(e.read().included("work").contains(&ch2));
+    // a small budget truncates the rows, never the warnings; a smaller one is refused first
+    let full = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "legal", "reason": "x", "dry_run": true, "max_tokens": 20000}),
+    )
+    .unwrap();
+    let need = full["text"].as_str().unwrap().len() / 4;
+    let short = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "legal", "reason": "x", "dry_run": true, "max_tokens": need - 1}),
+    );
+    match short {
+        Ok(v) => {
+            assert_eq!(v["truncated"], true);
+            assert!(
+                v["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("The row list was omitted.")
+            );
+        }
+        Err(err) => assert_eq!(err.code, rdy_engine::E_REDACTION_BUDGET),
+    }
+    let end = e.read().seq();
+    for bad in [255, 20_001] {
+        let err = dispatch(
+            &c,
+            "redact",
+            json!({"targets": [id], "reason_class": "legal", "reason": "x", "max_tokens": bad}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT);
+        assert_eq!(err.message, "max_tokens must be from 256 to 20000.");
+    }
+    assert_eq!(e.read().seq(), end, "a refused budget writes nothing");
+}
+
+#[test]
+fn rdx5_daemon_redact_preserves_roles_and_errors() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let (d, e, id) = secret_project();
+    let args = |dry: bool| json!({"targets": [id], "reason_class": "secret", "reason": "leak", "dry_run": dry});
+    let end = e.read().seq();
+    // a reader may run the dry run, never record
+    let reader = Session::human("human:t".into(), Role::Reader);
+    let c = cx(&e, &reader, d.path());
+    dispatch(&c, "redact", args(true)).unwrap();
+    let err = dispatch(&c, "redact", args(false)).unwrap_err();
+    assert_eq!(err.code, "E_PERMISSION", "{err}");
+    // an agent records only in a view it owns
+    let a = Session::agent("agent:a".into(), Some("r1".into()), Role::Writer).unwrap();
+    let c = cx(&e, &a, d.path());
+    dispatch(&c, "redact", args(true)).unwrap();
+    let mut w = args(false);
+    w["view"] = json!("work");
+    let err = dispatch(&c, "redact", w).unwrap_err();
+    assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
+    let err = dispatch(&c, "redact", args(false)).unwrap_err();
+    assert_eq!(err.code, "E_VIEW_OWNER", "r1 has no head yet: {err}");
+    assert_eq!(e.read().seq(), end, "refusals write nothing");
+    let a2 = a.clone();
+    write_typed(&e, move |r| {
+        let ops = serde_json::from_value(json!([{"op": "create", "type": "folder", "fields": {"name": "mine", "title": "Mine"}}])).unwrap();
+        r.write(&a2, WriteRequest { view: "r1".into(), ops, justification: None, message: String::new() })
+    })
+    .unwrap();
+    let v = dispatch(&c, "redact", args(false)).unwrap();
+    let ch: rdy_model::Hash = v["change"].as_str().unwrap().parse().unwrap();
+    assert!(e.read().included("r1").contains(&ch));
+    let other = Session::agent("agent:b".into(), Some("r2".into()), Role::Writer).unwrap();
+    let mut w = args(false);
+    w["view"] = json!("r1");
+    let err = dispatch(&cx(&e, &other, d.path()), "redact", w).unwrap_err();
+    assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
+    // the strict args: a near key names the field, in the args' order
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let err = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "secret", "reason": "x", "dryrun": true}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "redact: unknown field \"dryrun\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"dry_run\"? the fields are targets, reason_class, reason, dry_run, view, max_tokens"
+    );
+    let err = dispatch(&c, "redact", json!({"targets": [id]})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert!(err.message.starts_with("redact:"), "{err}");
+    // the engine's own refusals pass through unchanged
+    let err = dispatch(
+        &c,
+        "redact",
+        json!({"targets": ["p-ZZZZZ"], "reason_class": "secret", "reason": "x"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_REDACTION_TARGET");
+    assert_eq!(err.message, "Cannot redact p-ZZZZZ: unknown target.");
+    let err = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "other", "reason": "x"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_REDACTION_REASON");
+    // the quarantine listing is the engine's, and the cleanup is unchanged
+    let store = d.path().join(".rdy/store");
+    std::fs::write(store.join("segments/seg-000000.log.torn-8"), b"x").unwrap();
+    std::fs::create_dir(store.join("index.redb.damaged-8")).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-9")).unwrap();
+    assert_eq!(
+        quarantine(d.path()),
+        rdy_engine::quarantine::names(d.path())
+    );
+    let cleaned = clean_quarantine(d.path());
+    assert_eq!(
+        cleaned.removed,
+        vec!["segments/seg-000000.log.torn-8".to_string()]
+    );
+    assert_eq!(
+        cleaned
+            .skipped
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["index.redb.damaged-8", "index.redb.damaged-9"]
+    );
 }
