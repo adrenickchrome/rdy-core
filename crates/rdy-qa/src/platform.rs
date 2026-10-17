@@ -69,6 +69,12 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
+/// Sets the permission bits of `path` to `mode` (for example `0o555` for a read-only directory).
+pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
 /// A command that does nothing and succeeds (`true`).
 pub fn no_op_command() -> Command {
     Command::new("true")

@@ -781,16 +781,15 @@ fn ec6_an_occupied_staging_path_is_refused_and_never_deleted() {
 #[cfg(unix)]
 #[test]
 fn ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone() {
-    use std::os::unix::fs::PermissionsExt;
     let (_d, r, _ids) = project();
     let p = print::build(&r.read(), &Scope::Canon).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("md");
     std::fs::write(dir.path().join("neighbour"), b"mine").unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    rdy_qa::platform::set_mode(dir.path(), 0o555).unwrap();
     let writable = std::fs::File::create(dir.path().join("probe")).is_ok();
     let result = write_markdown(&p, &out, Layout::Plain);
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    rdy_qa::platform::set_mode(dir.path(), 0o755).unwrap();
     if writable {
         // a user the mode does not bind (root): nothing to test; RDY_QA_REQUIRE_ALL=1 fails it
         rdy_qa::skip::skip(
