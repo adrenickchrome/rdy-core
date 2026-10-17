@@ -46,6 +46,9 @@ pub struct Version {
     /// The day the version was cut, as `8 February 2021`.
     pub when: String,
     pub current: bool,
+    /// The version's history holds content a redaction removed: the list shows the `redacted`
+    /// badge, and nothing of the redaction (D-3M81W, D-X61DT).
+    pub redacted: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -127,6 +130,7 @@ pub fn build(
                     .map(|ms| date(*ms))
                     .unwrap_or_default(),
                 current: Some(&v.name) == current,
+                redacted: v.redacted,
             })
             .collect(),
     }

@@ -6,6 +6,7 @@ use crate::trail::Trail;
 use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
@@ -26,6 +27,9 @@ pub struct Shared<'a> {
     pub landed_ms: &'a BTreeMap<String, i64>,
     /// The figure blobs the store holds, by hash, with their bytes.
     pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
+    /// The figure blobs a redaction removed content of, by the request that did: a figure that
+    /// shows one reads as removed ([`Shared::shows_removed`]).
+    pub removed_blobs: &'a BTreeMap<Hash, Hash>,
     /// What a review render changes against the base a scope names: the pages' review marks
     /// read it. None for canon and tags, and for a proposal version made on the empty project
     /// once canon has landed (no scope names its base; the task-8 ruling).
@@ -320,6 +324,10 @@ pub enum Kind<'a> {
     ChangesSince(&'a changes::Summary),
 }
 
+/// What a page writes in place of a removed block, whatever its type (D-3M81W): the notice and
+/// nothing of the block's text, fields, links, file, reason or redaction.
+pub const REMOVED_HTML: &str = "<p class=\"redacted\">Content removed.</p>";
+
 /// A reader's word for a block's type: the one the eyebrow, the toc and the search use.
 fn kind_word(block_type: &str) -> &'static str {
     match block_type {
@@ -334,6 +342,17 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
+    /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob a
+    /// redaction removed content of (a block of another side than the scope's, such as a draft's
+    /// removed line, is not projected). Its page shows [`REMOVED_HTML`] in its place.
+    fn shows_removed(&self, b: &Block) -> bool {
+        b.is_redacted()
+            || (b.block_type == "figure"
+                && b.field_str("blob")
+                    .and_then(|h| h.parse::<Hash>().ok())
+                    .is_some_and(|h| self.removed_blobs.contains_key(&h)))
+    }
+
     /// The header's markup for a page at relative root `root` (RULING F4). A static page links
     /// to the home page's Versions list and to the change pages by its root; a live page links
     /// to `/~versions/`, whose menu the pill opens, and to the change pages under the scope's
@@ -827,15 +846,19 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
         let presentational = sh.pack.is_presentational(&b.block_type);
-        // the heading or name as a reader reads it: its references as their labels
+        // the heading or name as a reader reads it: its references as their labels; a removed
+        // block's is the notice
+        let removed = sh.shows_removed(b);
+        let titled = matches!(
+            b.block_type.as_str(),
+            "section" | "term" | "component" | "actor" | "interface" | "flow" | "value" | "entity"
+        );
         let title = match b.block_type.as_str() {
-            "section" => b.field_str("title"),
-            "term" | "component" | "actor" | "interface" | "flow" | "value" | "entity" => {
-                b.field_str("name")
-            }
+            _ if removed => titled.then(|| CONTENT_REMOVED.to_string()),
+            "section" => b.field_str("title").map(|t| site.words(t)),
+            _ if titled => b.field_str("name").map(|t| site.words(t)),
             _ => None,
-        }
-        .map(|t| site.words(t));
+        };
         items.push(Item {
             id: b.id.to_string(),
             block_type: b.block_type.clone(),
@@ -843,7 +866,13 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             anchor: anchor.clone(),
             kind_word: kind_word(&b.block_type),
             title,
-            html: html::block_html(b, &ctx),
+            // the one interception: a removed block of any type is the notice, before its type's
+            // rendering reads anything of it
+            html: if removed {
+                REMOVED_HTML.to_string()
+            } else {
+                html::block_html(b, &ctx)
+            },
             presentational,
             trail: if presentational {
                 Trail::default()
@@ -916,6 +945,10 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
     };
     let mut out = String::new();
     for b in blocks {
+        if sh.shows_removed(b) {
+            out.push_str(REMOVED_HTML);
+            continue;
+        }
         let heading = ["title", "name", "statement", "prompt"]
             .into_iter()
             .find_map(|f| b.field_str(f));

@@ -2,6 +2,7 @@
 //! the order a reader walks the docs in.
 use crate::inline::{self, Form};
 use rdy_engine::Materialized;
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, RefMode, decision, entity, tree};
 use rdy_schema::Pack;
 use regex::Regex;
@@ -771,6 +772,10 @@ impl<'a> Site<'a> {
     }
 
     fn label_uncached(&self, b: &Block, depth: usize) -> String {
+        // a removed block is called by the notice, never by its id path or old words (D-3M81W)
+        if b.is_redacted() {
+            return CONTENT_REMOVED.to_string();
+        }
         if let Some(v) = entity::value_text(b) {
             return v;
         }
@@ -902,6 +907,9 @@ impl<'a> Site<'a> {
     }
 
     fn summary_words_uncached(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        if b.is_redacted() {
+            return CONTENT_REMOVED.to_string();
+        }
         let unresolved_of = |token: &str| match keep_token {
             true => token.to_string(),
             false => crate::html::UNRESOLVED.to_string(),

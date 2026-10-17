@@ -457,6 +457,10 @@ fn field_words(b: &Block, name: &str, site: &Site, coded: bool) -> Option<String
 /// holds it (rule 4): its title, else its name as words, as [`Site::label`] reads a page. The
 /// site's label cache is keyed by id and both sides share one, so it is never read here.
 fn title_of(b: &Block, m: &Materialized, site: &Site, coded: bool) -> String {
+    // a removed doc or folder is called by the notice, never by its neutral id name
+    if b.is_redacted() {
+        return rdy_model::redaction::CONTENT_REMOVED.to_string();
+    }
     if let Some(t) = field_words(b, "title", site, coded) {
         return t;
     }

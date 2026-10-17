@@ -311,7 +311,8 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
         description: description.as_deref(),
         versions: &versions,
         landed_ms: &landed_ms,
-        blobs: &blobs,
+        blobs: &blobs.bytes,
+        removed_blobs: &blobs.removed,
         review: None,
         listed: None,
         reviewed: None,
@@ -451,7 +452,8 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
     }
     let mut print_blobs = BTreeMap::new();
     for h in figures {
-        let (Some(bytes), Some((file, media_type))) = (blobs.get(&h), assets.remove(&h)) else {
+        let (Some(bytes), Some((file, media_type))) = (blobs.bytes.get(&h), assets.remove(&h))
+        else {
             continue;
         };
         print_blobs.insert(
