@@ -615,6 +615,14 @@ fn rdx9_forward_authorization_is_checked_before_placement() {
     }
     case("wrong-residue", bs, INVALID_RESIDUE);
     // a policy landing: the apply names a landing no person approved
+    case("policy", policy_batches(&src), NO_AUTHORIZATION);
+}
+
+/// The batches of `src` with its landing made a policy landing, no person's approval: its apply
+/// is a canonical record that names that landing, and every dropped record names that apply. No
+/// authorization of the stream is valid.
+fn policy_batches(src: &Src) -> Vec<DumpBatch> {
+    let landing = src.batches.len() - 1;
     let mut bs = src.batches.clone();
     let frames = &mut bs[landing].frames;
     let li = frames
@@ -652,7 +660,7 @@ fn rdx9_forward_authorization_is_checked_before_placement() {
             *apply = new_apply.unwrap();
         }
     }
-    case("policy", bs, NO_AUTHORIZATION);
+    bs
 }
 
 /// A dump of `dump_format` whose header names `store_format`: one batch at the start of the log
@@ -1051,9 +1059,7 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
 #[test]
 fn rdx9_unauthorized_claims_are_bounded_in_total() {
     let dir = tempfile::tempdir().unwrap();
-    let apply_a = b"apply a".to_vec();
-    let a = Hash::of(&apply_a);
-    let b = Hash::of(b"apply b");
+    let a = Hash::of(b"apply a");
     // 16 frames of 64 MiB: exactly 1 GiB waits for its authorization, which the bound allows
     let full = |i: &Ingest, apply: Hash, from: u32| {
         batch_at(
@@ -1095,26 +1101,77 @@ fn rdx9_unauthorized_claims_are_bounded_in_total() {
         drop(i);
         assert!(no_store(&to));
     }
+}
+
+#[test]
+fn rdx9_only_a_valid_authorization_releases_its_claim() {
+    let src = source();
+    // what the source's dropped frames claim, and the apply they name
+    let claimed: u64 = src
+        .dropped()
+        .iter()
+        .map(|(i, j)| u64::from(src.batches[*i].frames[*j].original_len()))
+        .sum();
+    assert!(claimed > 0 && claimed < u64::from(FRAME_BOUND));
+    let (i0, j0) = src.dropped()[0];
+    let Frame::Dropped { apply: valid, .. } = src.batches[i0].frames[j0].clone() else {
+        unreachable!()
+    };
+    let ingest_all = |i: &mut Ingest, bs: &[DumpBatch]| {
+        for (n, b) in bs.iter().enumerate() {
+            i.batch(n as u64 + 1, b).unwrap();
+        }
+    };
     {
-        // the apply releases what it names: the next claim fits again
-        let to = dir.path().join("released");
+        // invalid applies release nothing: a policy landing's canonical apply (the source's
+        // dropped frames name it), and a malformed apply whose hash 15 frames of 64 MiB name
+        let to = src._dir.path().join("invalid");
         let mut i = Ingest::create(&to).unwrap();
-        let first = full(&i, a, 0);
-        i.batch(1, &first).unwrap();
+        let bs = policy_batches(&src);
+        ingest_all(&mut i, &bs);
+        let n = bs.len() as u64;
+        let malformed = b"apply a".to_vec();
+        let a = Hash::of(&malformed);
+        let fill = batch_at(&i, (0..15).map(|k| drop_chunk(k, FRAME_BOUND, a)).collect());
+        i.batch(n + 1, &fill).unwrap();
         let apply = batch_at(
             &i,
             vec![Frame::Present {
                 kind: kinds::REDACTION_APPLY,
                 hash: a,
-                payload: apply_a.clone(),
+                payload: malformed,
             }],
         );
-        i.batch(2, &apply).unwrap();
-        let next = batch_at(&i, vec![drop_chunk(16, FRAME_BOUND, b)]);
-        i.batch(3, &next).unwrap();
-        // the forged applies authorize nothing: the load is refused, and no store is made
-        i.upgrade(STORE_FORMAT).unwrap();
-        assert_eq!(what(i.finish().unwrap_err()), NO_AUTHORIZATION);
+        i.batch(n + 2, &apply).unwrap();
+        // 1 GiB plus the source's claim waits, as no apply was valid: refused before it is
+        // written
+        let before = log_bytes(&to);
+        let next = batch_at(&i, vec![drop_chunk(15, FRAME_BOUND, a)]);
+        assert_eq!(what(i.batch(n + 3, &next).unwrap_err()), BUDGET);
+        assert_eq!(
+            log_bytes(&to),
+            before,
+            "nothing of the refused claim was written"
+        );
+        drop(i);
+        assert!(no_store(&to));
+    }
+    {
+        // a valid apply releases exactly its spans: 16 frames of 64 MiB fit after the source's
+        // dropped frames once its authorization is validated
+        let to = src._dir.path().join("valid");
+        let mut i = Ingest::create(&to).unwrap();
+        ingest_all(&mut i, &src.batches);
+        let n = src.batches.len() as u64;
+        // these name the valid apply too, but it does not authorize their spans
+        let fill = batch_at(
+            &i,
+            (0..16).map(|k| drop_chunk(k, FRAME_BOUND, valid)).collect(),
+        );
+        i.batch(n + 1, &fill).unwrap();
+        let next = batch_at(&i, vec![drop_chunk(16, 1, valid)]);
+        assert_eq!(what(i.batch(n + 2, &next).unwrap_err()), BUDGET);
+        drop(i);
         assert!(no_store(&to));
     }
 }

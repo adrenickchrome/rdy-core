@@ -785,6 +785,20 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     Ok(auth)
 }
 
+/// The authorization of a log whose every batch is whole (a load's ingest checked each batch
+/// against its digest before it wrote its marker): the header pass, then the validation of every
+/// apply of its sealed batches, as `bootstrap` validates them. Frames after the last marker (a
+/// batch not yet sealed) play no part. A log with no apply authorizes nothing. Any failed apply
+/// refuses it, as it refuses an open.
+pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreError> {
+    let c = collect(readers)?;
+    if c.applies.is_empty() {
+        return Ok(Authorization::default());
+    }
+    let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
+    validate(&c, readers, &applies, None)
+}
+
 /// The bootstrap of a batch the live writer is about to seal: the header pass over the open log
 /// (an open held batch on disk has no marker yet and does not count), then `batch` as one sealed
 /// batch whose first frame goes at `start`, then the validation of every apply. Refuses before

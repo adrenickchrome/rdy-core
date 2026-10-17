@@ -26,11 +26,14 @@
 //!
 //! The zeros a dropped frame claims are bounded before they are written (ruling task-9, from
 //! tb-A4DAV): one frame claims at most `MAX_BLOB_BYTES` (the reader refuses more, and `batch`
-//! refuses more before its batch writes a byte), and the frames whose authorization has not yet
-//! been read claim at most `MAX_UNAUTHORIZED_BYTES` in all. A frame's bytes are released when
-//! an apply frame with the hash it names is written; the record at which they would pass the
-//! bound is refused before it is written. The ingest's own bookkeeping grows fallibly: a refused
-//! allocation is `record allocation failed`.
+//! refuses more before its batch writes a byte), and the frames whose authorization has not been
+//! validated claim at most `MAX_UNAUTHORIZED_BYTES` in all. A frame's bytes are released only
+//! when the log's sealed batches validly authorize its exact span, as `finish` checks it: the
+//! same validation of every apply, the same span, apply and residue. An apply's hash alone
+//! releases nothing. The validation runs when a record would pass the bound, so a stream within
+//! the bound pays nothing for it; the record that still passes the bound after it is refused
+//! before it is written. The ingest's own bookkeeping grows fallibly: a refused allocation is
+//! `record allocation failed`.
 use crate::dump::{
     DROPPED_LEN, DumpBatch, Frame, drop_text, dropped_payload, parse_dropped, try_batch_digest,
 };
@@ -43,7 +46,6 @@ use crate::redaction_io;
 use crate::segment::{Location, SegmentLog};
 use crate::store::{MAX_BLOB_BYTES, encode};
 use rdy_model::{Hash, RepoId};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The directory of the log inside a store directory.
@@ -53,15 +55,16 @@ const SEGMENTS_DIR: &str = "segments";
 /// scanned frames. One more is refused with `record allocation failed`.
 pub const MAX_PENDING_DROPS: usize = 1_000_000;
 
-/// The most zero bytes the ingest writes for dropped frames whose authorization it has not read
-/// yet (inclusive): 1 GiB. One byte more is refused with `drop_text::BUDGET`.
+/// The most zero bytes the ingest writes for dropped frames whose authorization it has not
+/// validated (inclusive): 1 GiB. One byte more is refused with `drop_text::BUDGET`.
 pub const MAX_UNAUTHORIZED_BYTES: u64 = 1 << 30;
 
-/// A dropped frame waiting for its authorization: its 102 container bytes and its original
-/// location.
+/// A dropped frame waiting for the final check: its 102 container bytes, its original location,
+/// and whether a validated authorization of its exact span released its bytes from the bound.
 struct PendingDrop {
     record: [u8; DROPPED_LEN],
     loc: Location,
+    released: bool,
 }
 
 /// A new store directory that takes a dump's batches in log order.
@@ -74,10 +77,8 @@ pub struct Ingest {
     has_repo_id: bool,
     /// The dropped frames so far, in log order, at most `MAX_PENDING_DROPS`.
     pending: Vec<PendingDrop>,
-    /// The zero bytes written for dropped frames whose apply has not been written yet, by the
-    /// apply hash they name.
-    waiting: HashMap<Hash, u64>,
-    /// Their sum, at most `MAX_UNAUTHORIZED_BYTES`.
+    /// The zero bytes written for dropped frames not yet released, at most
+    /// `MAX_UNAUTHORIZED_BYTES`.
     unauthorized: u64,
 }
 
@@ -121,7 +122,6 @@ impl Ingest {
             frames: 0,
             has_repo_id: false,
             pending: Vec::new(),
-            waiting: HashMap::new(),
             unauthorized: 0,
         })
     }
@@ -133,10 +133,11 @@ impl Ingest {
     /// frame. A dropped frame is written as its original header and zeros of its original length,
     /// with its original hash, and kept for `finish` to check; more than `MAX_PENDING_DROPS` of
     /// them is `record allocation failed`. A dropped frame that claims more than
-    /// `MAX_BLOB_BYTES` is refused before the batch writes anything; one whose claim would take
-    /// the bytes that wait for their authorization past `MAX_UNAUTHORIZED_BYTES` is refused
-    /// before it is written (`drop_text::BUDGET`). An apply frame releases the bytes of the
-    /// dropped frames that name its hash. The marker's digest must equal the batch's digest.
+    /// `MAX_BLOB_BYTES` is refused before the batch writes anything. When a dropped frame's claim
+    /// would take the bytes not yet released past `MAX_UNAUTHORIZED_BYTES`, the sealed batches'
+    /// authorization is validated first (`release_authorized`); if it still would, the frame is
+    /// refused before it is written (`drop_text::BUDGET`). The marker's digest must equal the
+    /// batch's digest.
     /// Each failure is `StoreError::Dump`. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
         for f in &b.frames {
@@ -170,12 +171,6 @@ impl Ingest {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
-                    // the authorization is read: what waited for it is released
-                    if *kind == kinds::REDACTION_APPLY
-                        && let Some(bytes) = self.waiting.remove(&hash)
-                    {
-                        self.unauthorized -= bytes;
-                    }
                     sets_repo_id |= *kind == kinds::REF_UPDATE
                         && postcard::from_bytes::<RefUpdate>(payload)
                             .is_ok_and(|u| u.name == REF_REPO_ID);
@@ -187,14 +182,17 @@ impl Ingest {
                     apply,
                     residue,
                 } => {
-                    let unauthorized = self
-                        .unauthorized
-                        .checked_add(u64::from(*len))
-                        .filter(|u| *u <= MAX_UNAUTHORIZED_BYTES)
+                    let claim = |held: u64| {
+                        held.checked_add(u64::from(*len))
+                            .filter(|u| *u <= MAX_UNAUTHORIZED_BYTES)
+                    };
+                    if claim(self.unauthorized).is_none() {
+                        self.release_authorized()?;
+                    }
+                    let unauthorized = claim(self.unauthorized)
                         .ok_or_else(|| dump_error(drop_text::BUDGET.into()))?;
                     if self.pending.len() >= MAX_PENDING_DROPS
                         || self.pending.try_reserve(1).is_err()
-                        || self.waiting.try_reserve(1).is_err()
                     {
                         return Err(refused_allocation());
                     }
@@ -202,8 +200,8 @@ impl Ingest {
                     self.pending.push(PendingDrop {
                         record: dropped_payload(*kind, hash, *len, apply, residue.as_ref()),
                         loc,
+                        released: false,
                     });
-                    *self.waiting.entry(*apply).or_insert(0) += u64::from(*len);
                     self.unauthorized = unauthorized;
                     hashes.push(*hash);
                 }
@@ -218,6 +216,46 @@ impl Ingest {
         self.has_repo_id |= sets_repo_id;
         self.batches += 1;
         self.frames += hashes.len() as u64;
+        Ok(())
+    }
+
+    /// Releases from the bound the bytes of every dropped frame not yet released whose exact span
+    /// the log's sealed batches validly authorize (`redaction_io::bootstrap_sealed`): an
+    /// authorized span at its location with its original kind, hash and length, by the apply and
+    /// with the residue its record names, which `check_drops` then accepts. When any apply of
+    /// the sealed batches fails its validation, nothing is released (`finish` refuses such a log
+    /// anyway). An I/O error stays one.
+    fn release_authorized(&mut self) -> Result<(), StoreError> {
+        let auth = match redaction_io::bootstrap_sealed(self.log.readers()) {
+            Ok(auth) => auth,
+            Err(StoreError::Io(e)) => return Err(StoreError::Io(e)),
+            Err(_) => return Ok(()),
+        };
+        if !auth.is_active() {
+            return Ok(());
+        }
+        for p in self.pending.iter_mut().filter(|p| !p.released) {
+            let Ok(Frame::Dropped {
+                kind,
+                hash,
+                len,
+                apply,
+                residue,
+            }) = parse_dropped(&p.record)
+            else {
+                continue;
+            };
+            let (Some(hole), Some(span)) = (auth.holes.get(&p.loc), auth.spans.get(&p.loc)) else {
+                continue;
+            };
+            if (hole.kind, hole.hash, hole.len) == (kind, hash, len)
+                && span.apply == apply
+                && span.residue == residue
+            {
+                p.released = true;
+                self.unauthorized -= u64::from(len);
+            }
+        }
         Ok(())
     }
 
