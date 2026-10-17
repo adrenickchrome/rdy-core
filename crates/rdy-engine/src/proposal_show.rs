@@ -580,7 +580,8 @@ mod tests {
         assert!(proposal_text(&v).ends_with("advised: not read (E_IO: busy)\n"));
     }
 
-    /// The JSON a show serialized to before rdx13 (plan amendment, ruling task-13-round1): its
+    /// The JSON a show serialized to before rdx13 (plan amendment, rulings task-13-round1 and
+    /// task-13-round2): its
     /// fields in order, each as serde writes it, with the three skipped when empty.
     fn before_rdx13(s: &ProposalShow) -> String {
         let mut parts: Vec<(&str, String)> = vec![];
@@ -621,7 +622,8 @@ mod tests {
         format!("{{{}}}", body.join(","))
     }
 
-    /// rdx13 plan amendment (ruling task-13-round1): `removal_card` and `removal_card_error` are
+    /// rdx13 plan amendment (rulings task-13-round1 and task-13-round2): `removal_card` and
+    /// `removal_card_error` are
     /// additive. A show without them serializes byte for byte as before; a show with one adds
     /// only that key, last, and every other key keeps its bytes and its place.
     #[test]
@@ -718,5 +720,50 @@ mod tests {
                 )
             );
         }
+    }
+
+    /// rdx13 ruling task-13-round2: the wire shapes, key by key and in order. `removal_card` is
+    /// `{ref, card, card_hash, removal}`, where each `removal` entry is Task 8's `RemovalCard`
+    /// with its nine fields unchanged; `removal_card_error` is `{code, message, fix}`.
+    #[test]
+    fn rdx13_the_removal_card_fields_have_the_ruled_shapes() {
+        let h = |c: char| c.to_string().repeat(64);
+        let card = RemovalCardShow {
+            r#ref: "P-111111111111@1".into(),
+            card: "the card".into(),
+            card_hash: h('6'),
+            removal: vec![RemovalCard {
+                request: h('7').parse().unwrap(),
+                report: h('8').parse().unwrap(),
+                versions: 1,
+                blobs: 2,
+                shared_blobs: 3,
+                payloads: 4,
+                bytes: 5,
+                reason_class: rdy_model::redaction::ReasonClass::Secret,
+                reason: "a leaked code".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&card).unwrap(),
+            format!(
+                "{{\"ref\":\"P-111111111111@1\",\"card\":\"the card\",\"card_hash\":\"{}\",\
+                 \"removal\":[{{\"request\":\"{}\",\"report\":\"{}\",\"versions\":1,\"blobs\":2,\
+                 \"shared_blobs\":3,\"payloads\":4,\"bytes\":5,\"reason_class\":\"secret\",\
+                 \"reason\":\"a leaked code\"}}]}}",
+                h('6'),
+                h('7'),
+                h('8')
+            )
+        );
+        let row = ErrorRow {
+            code: "E_REDACTION_BUDGET".into(),
+            message: "m".into(),
+            fix: "f".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            "{\"code\":\"E_REDACTION_BUDGET\",\"message\":\"m\",\"fix\":\"f\"}"
+        );
     }
 }

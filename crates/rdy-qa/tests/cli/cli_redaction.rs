@@ -923,6 +923,18 @@ fn rdx13_an_oversized_card_elsewhere_never_blocks_an_approval() {
         "{e}"
     );
     assert_eq!(seq(&s), before, "the refusal wrote nothing");
+    // fix round 3 (ruling task-13-round2): the show carries the same error as
+    // `removal_card_error {code, message, fix}` and no card; the refusal is that error, fix too
+    let (ok, v) = s.json(&["--json", "show", &big]);
+    assert!(ok, "{v}");
+    let p = &v["proposal"];
+    assert!(p.get("removal_card").is_none(), "{v}");
+    assert_eq!(
+        p["removal_card_error"],
+        json!({"code": e["code"], "message": e["message"], "fix": e["fix"]}),
+        "{v}"
+    );
+    assert!(!e["fix"].as_str().unwrap_or("").is_empty(), "{e}");
 }
 
 /// rdx13 fix round 2 (finding 3): the removal card that cannot be shown stops the approval
