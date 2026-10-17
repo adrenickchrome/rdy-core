@@ -41,7 +41,7 @@ pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError
 /// the project's `.rdy` directory. A file there can break the store. Both paths are resolved
 /// before they are compared, so a symlink (the project's `.rdy` may be one), its physical path or
 /// `..` does not pass. A path named `.rdy` elsewhere is an ordinary path.
-fn check_path(p: &Print, out: &Path) -> Result<(), RdyError> {
+pub(super) fn check_path(p: &Print, out: &Path) -> Result<(), RdyError> {
     let dir = out
         .parent()
         .filter(|d| !d.as_os_str().is_empty())

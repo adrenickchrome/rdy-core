@@ -1,0 +1,1053 @@
+//! The print as one PDF file (D-6SANB; RULING F1): written natively in Rust, with no browser.
+//!
+//! **The file (closed).** PDF 1.7. Each page of the layout ([`layout::lay_out`] on A4, O5) is a
+//! page, drawn as the layout places it. Each DejaVu face in use is a subset (`subsetter`),
+//! embedded as a CIDFontType2 font with Identity-H and a ToUnicode map; its glyphs are addressed
+//! by their ids in the subset. Courier is the standard font, with WinAnsiEncoding. Italic is the
+//! Sans subset, and Bold Italic the Bold one, with a 12° text matrix. Content streams, font files,
+//! ToUnicode maps and image data are Flate-compressed (`miniz_oxide`, level 6). Each layout
+//! outline entry is an outline item, nested by level. A link to a print page is a GoTo to its
+//! anchor's page and y (to the doc's first page when the anchor is None); an external link is a
+//! URI action. The document info holds `/Producer (rdy <version>)` and `/Title`, and no date, so
+//! the same print gives the same bytes (O15).
+use super::fonts::{Face, Fonts, SANS, SANS_BOLD};
+use super::image::{self, Pixels};
+use super::layout::{self, LItem, Laid, OutlineEntry, PageSpec};
+use super::{Href, PBlock, PageKind, Print, PrintSummary};
+use pdf_writer::types::{
+    ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap,
+};
+use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
+use rdy_engine::{RdyError, dump::place_file};
+use rdy_model::Hash;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+/// The slant of Italic and Bold Italic, in degrees.
+const SLANT: f32 = 12.0;
+/// The Flate level of every compressed stream.
+const LEVEL: u8 = 6;
+/// The resource names of the three fonts.
+const SANS_NAME: &[u8] = b"F0";
+const BOLD_NAME: &[u8] = b"F1";
+const MONO_NAME: &[u8] = b"F2";
+
+/// The layout the PDF draws: the print on A4 pages, with the figures whose images print
+/// ([`image::decode`]) at their size and every other figure as a line.
+pub fn lay_out(p: &Print, fonts: &Fonts) -> Laid {
+    lay_out_with(p, fonts, &decoded(p))
+}
+
+/// The PDF of `p`: its bytes, its number of pages and its warnings. The warnings are the build's,
+/// then one per figure that does not print, in print order, then one for the characters with no
+/// glyph. The same print gives the same bytes.
+pub fn pdf_bytes(p: &Print, fonts: &Fonts) -> (Vec<u8>, usize, Vec<String>) {
+    let r = render(p, fonts);
+    (r.bytes, r.pages, r.warnings)
+}
+
+/// Writes the print as one PDF file at `out`. O29's path rules come first: the directory of `out`
+/// must exist and must not be in the project's `.rdy` directory. `out` must not exist; the file is
+/// placed whole or not at all (`rdy_engine::dump::place_file`).
+pub fn write_pdf(p: &Print, out: &Path) -> Result<PrintSummary, RdyError> {
+    super::single::check_path(p, out)?;
+    let r = render(p, &Fonts::load());
+    let n = place_file(out, &r.bytes, "rdy export")?;
+    let count = |k: PageKind| p.docs.iter().filter(|d| d.kind == k).count();
+    Ok(PrintSummary {
+        out: out.display().to_string(),
+        format: "pdf",
+        docs: count(PageKind::Doc),
+        folders: count(PageKind::Folder),
+        assets: r.images,
+        pages: Some(r.pages),
+        bytes: n,
+        warnings: r.warnings,
+    })
+}
+
+/// A written PDF: its bytes, pages, warnings and the number of images it holds.
+struct Rendered {
+    bytes: Vec<u8>,
+    pages: usize,
+    warnings: Vec<String>,
+    images: usize,
+}
+
+/// The print's figure images that print, by blob.
+fn decoded(p: &Print) -> BTreeMap<Hash, Pixels> {
+    p.blobs
+        .iter()
+        .filter_map(|(h, b)| image::decode(&b.media_type, &b.bytes).map(|px| (*h, px)))
+        .collect()
+}
+
+fn lay_out_with(p: &Print, fonts: &Fonts, images: &BTreeMap<Hash, Pixels>) -> Laid {
+    layout::lay_out(p, fonts, &PageSpec::A4, &|h: &Hash| {
+        images.get(h).map(Pixels::size)
+    })
+}
+
+/// The warnings of the PDF of `p`, in their order.
+fn warnings(p: &Print, images: &BTreeMap<Hash, Pixels>, laid: &Laid) -> Vec<String> {
+    fn figures(
+        p: &Print,
+        images: &BTreeMap<Hash, Pixels>,
+        blocks: &[PBlock],
+        out: &mut Vec<String>,
+    ) {
+        for b in blocks {
+            match b {
+                PBlock::Figure {
+                    blob: Some(h), alt, ..
+                } => {
+                    if let Some(blob) = p.blobs.get(h)
+                        && !images.contains_key(h)
+                    {
+                        out.push(format!(
+                            "the figure {alt:?} is a {} image, which does not print in a PDF; \
+                             the HTML and Markdown exports show it",
+                            blob.media_type
+                        ));
+                    }
+                }
+                PBlock::List { items, .. } => {
+                    for i in items {
+                        figures(p, images, i, out);
+                    }
+                }
+                PBlock::Callout { blocks, .. } => figures(p, images, blocks, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = p.warnings.clone();
+    for d in &p.docs {
+        figures(p, images, &d.blocks, &mut out);
+    }
+    if !laid.missing.is_empty() {
+        let first: Vec<String> = laid.missing.iter().take(10).map(char::to_string).collect();
+        out.push(format!(
+            "{} characters have no glyph in the PDF fonts and print as ?: {}",
+            laid.missing.len(),
+            first.join(" ")
+        ));
+    }
+    out
+}
+
+fn flate(data: &[u8]) -> Vec<u8> {
+    miniz_oxide::deflate::compress_to_vec_zlib(data, LEVEL)
+}
+
+/// A DejaVu face in the file: the glyphs it draws, each with the first character drawn with it.
+#[derive(Default)]
+struct Subset {
+    glyphs: BTreeMap<u16, char>,
+}
+
+/// The DejaVu subset a face draws with: 0 for Sans and Italic, 1 for Bold and Bold Italic; None
+/// for Courier.
+fn slot(face: Face) -> Option<usize> {
+    match face {
+        Face::Sans | Face::Italic => Some(0),
+        Face::Bold | Face::BoldItalic => Some(1),
+        Face::Mono => None,
+    }
+}
+
+fn font_name(face: Face) -> &'static [u8] {
+    match slot(face) {
+        Some(0) => SANS_NAME,
+        Some(_) => BOLD_NAME,
+        None => MONO_NAME,
+    }
+}
+
+/// The glyph `face` draws `c` with; `?`'s when it has none (the layout has already put `?` there).
+fn glyph(fonts: &Fonts, face: Face, c: char) -> u16 {
+    fonts
+        .glyph(face, c)
+        .or_else(|| fonts.glyph(face, '?'))
+        .unwrap_or(0)
+}
+
+/// A six-letter subset tag that depends only on the face and its glyphs.
+fn subset_tag(face: &str, glyphs: &[u16]) -> String {
+    // FNV-1a, 64-bit
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in face
+        .bytes()
+        .chain(glyphs.iter().flat_map(|g| g.to_be_bytes()))
+    {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    (0..6)
+        .map(|_| {
+            let c = char::from(b'A' + (h % 26) as u8);
+            h /= 26;
+            c
+        })
+        .collect()
+}
+
+/// Writes one DejaVu subset: its Type0 font, CID font, descriptor, font file and ToUnicode map.
+/// Returns the old glyph id → subset glyph id map.
+fn write_font(
+    pdf: &mut Pdf,
+    next: &mut Ref,
+    font_ref: Ref,
+    fonts: &Fonts,
+    i: usize,
+    subset: &Subset,
+) -> BTreeMap<u16, u16> {
+    let (data, base, face) = if i == 0 {
+        (SANS, "DejaVuSans", Face::Sans)
+    } else {
+        (SANS_BOLD, "DejaVuSans-Bold", Face::Bold)
+    };
+    let old: Vec<u16> = subset.glyphs.keys().copied().collect();
+    let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(&old);
+    let file = subsetter::subset(data, 0, &remapper).expect("the compiled-in DejaVu font subsets");
+    let map: BTreeMap<u16, u16> = old
+        .iter()
+        .map(|g| (*g, remapper.get(*g).unwrap_or(0)))
+        .collect();
+    let name = format!("{}+{base}", subset_tag(base, &old));
+    let (cid_ref, desc_ref, file_ref, cmap_ref) =
+        (next.bump(), next.bump(), next.bump(), next.bump());
+    let info = SystemInfo {
+        registry: Str(b"Adobe"),
+        ordering: Str(b"Identity"),
+        supplement: 0,
+    };
+
+    pdf.type0_font(font_ref)
+        .base_font(Name(name.as_bytes()))
+        .encoding_predefined(Name(b"Identity-H"))
+        .descendant_font(cid_ref)
+        .to_unicode(cmap_ref);
+
+    let mut cid = pdf.cid_font(cid_ref);
+    cid.subtype(CidFontType::Type2)
+        .base_font(Name(name.as_bytes()))
+        .system_info(info)
+        .font_descriptor(desc_ref)
+        .default_width(0.0)
+        .cid_to_gid_map_predefined(Name(b"Identity"));
+    {
+        // each run of consecutive subset ids, with its widths in 1/1000 of the size
+        let mut runs: Vec<(u16, Vec<f32>)> = vec![];
+        for (g, c) in &subset.glyphs {
+            let (id, width) = (map[g], fonts.advance(face, *c, 1000.0));
+            match runs.last_mut() {
+                Some((start, ws)) if usize::from(*start) + ws.len() == usize::from(id) => {
+                    ws.push(width);
+                }
+                _ => runs.push((id, vec![width])),
+            }
+        }
+        let mut w = cid.widths();
+        for (start, ws) in runs {
+            w.consecutive(start, ws);
+        }
+    }
+    cid.finish();
+
+    let ttf = ttf_parser::Face::parse(data, 0).expect("the compiled-in DejaVu font parses");
+    let unit = 1000.0 / f32::from(ttf.units_per_em());
+    let bb = ttf.global_bounding_box();
+    let cap = ttf.capital_height().unwrap_or(ttf.ascender());
+    pdf.font_descriptor(desc_ref)
+        .name(Name(name.as_bytes()))
+        .flags(FontFlags::NON_SYMBOLIC)
+        .bbox(Rect::new(
+            f32::from(bb.x_min) * unit,
+            f32::from(bb.y_min) * unit,
+            f32::from(bb.x_max) * unit,
+            f32::from(bb.y_max) * unit,
+        ))
+        .italic_angle(0.0)
+        .ascent(fonts.ascent(face, 1000.0))
+        .descent(fonts.descent(face, 1000.0))
+        .cap_height(f32::from(cap) * unit)
+        .stem_v(if i == 0 { 80.0 } else { 140.0 })
+        .font_file2(file_ref);
+
+    let packed = flate(&file);
+    let length1 = i32::try_from(file.len()).unwrap_or(i32::MAX);
+    pdf.stream(file_ref, &packed)
+        .filter(Filter::FlateDecode)
+        .pair(Name(b"Length1"), length1);
+
+    let mut cmap = UnicodeCmap::new(Name(b"Custom"), info);
+    for (g, c) in &subset.glyphs {
+        cmap.pair(map[g], *c);
+    }
+    let cmap = flate(&cmap.finish().into_vec());
+    pdf.stream(cmap_ref, &cmap).filter(Filter::FlateDecode);
+    map
+}
+
+/// The XObject resource name of the `i`th image.
+fn image_name(i: usize) -> String {
+    format!("Im{i}")
+}
+
+fn render(p: &Print, fonts: &Fonts) -> Rendered {
+    let images = decoded(p);
+    let laid = lay_out_with(p, fonts, &images);
+    let warnings = warnings(p, &images, &laid);
+
+    // the glyphs each DejaVu subset draws, whether Courier draws, and the images drawn
+    let mut subsets = [Subset::default(), Subset::default()];
+    let mut mono = false;
+    let mut drawn: BTreeSet<Hash> = BTreeSet::new();
+    for item in laid.pages.iter().flat_map(|pg| &pg.items) {
+        match item {
+            LItem::Text { face, text, .. } => match slot(*face) {
+                Some(s) => {
+                    for c in text.chars() {
+                        subsets[s].glyphs.entry(glyph(fonts, *face, c)).or_insert(c);
+                    }
+                }
+                None => mono = true,
+            },
+            LItem::Image { blob, .. } => {
+                drawn.insert(*blob);
+            }
+            _ => {}
+        }
+    }
+    let image_index: BTreeMap<Hash, usize> =
+        drawn.iter().enumerate().map(|(i, h)| (*h, i)).collect();
+
+    let mut pdf = Pdf::new();
+    let mut next = Ref::new(1);
+    let catalog_ref = next.bump();
+    let tree_ref = next.bump();
+    let info_ref = next.bump();
+
+    // the fonts
+    let mut font_refs: BTreeMap<&'static [u8], Ref> = BTreeMap::new();
+    let mut maps: [BTreeMap<u16, u16>; 2] = [BTreeMap::new(), BTreeMap::new()];
+    for (i, subset) in subsets.iter().enumerate() {
+        if subset.glyphs.is_empty() {
+            continue;
+        }
+        let r = next.bump();
+        font_refs.insert(if i == 0 { SANS_NAME } else { BOLD_NAME }, r);
+        maps[i] = write_font(&mut pdf, &mut next, r, fonts, i, subset);
+    }
+    if mono {
+        let r = next.bump();
+        font_refs.insert(MONO_NAME, r);
+        pdf.type1_font(r)
+            .base_font(Name(b"Courier"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+    }
+
+    // the images
+    let mut image_refs = vec![];
+    for h in &drawn {
+        let r = next.bump();
+        image_refs.push(r);
+        match &images[h] {
+            Pixels::Jpeg {
+                w,
+                h,
+                components,
+                bytes,
+            } => {
+                let mut x = pdf.image_xobject(r, bytes);
+                x.width(dim(*w))
+                    .height(dim(*h))
+                    .color_space_name(Name(if *components == 1 {
+                        b"DeviceGray"
+                    } else {
+                        b"DeviceRGB"
+                    }))
+                    .bits_per_component(8)
+                    .filter(Filter::DctDecode);
+            }
+            Pixels::Raw {
+                w,
+                h,
+                gray,
+                color,
+                alpha,
+            } => {
+                let mask = alpha.as_ref().map(|a| (next.bump(), flate(a)));
+                let packed = flate(color);
+                let mut x = pdf.image_xobject(r, &packed);
+                x.width(dim(*w))
+                    .height(dim(*h))
+                    .color_space_name(Name(if *gray { b"DeviceGray" } else { b"DeviceRGB" }))
+                    .bits_per_component(8)
+                    .filter(Filter::FlateDecode);
+                if let Some((m, _)) = &mask {
+                    x.s_mask(*m);
+                }
+                x.finish();
+                if let Some((m, packed)) = &mask {
+                    pdf.image_xobject(*m, packed)
+                        .width(dim(*w))
+                        .height(dim(*h))
+                        .color_space_name(Name(b"DeviceGray"))
+                        .bits_per_component(8)
+                        .filter(Filter::FlateDecode);
+                }
+            }
+        }
+    }
+
+    // the pages
+    let page_refs: Vec<Ref> = laid.pages.iter().map(|_| next.bump()).collect();
+    let spec = PageSpec::A4;
+    let slant = SLANT.to_radians().tan();
+    for (i, page) in laid.pages.iter().enumerate() {
+        let content_ref = next.bump();
+        let mut c = Content::new();
+        let mut used_fonts: BTreeSet<&'static [u8]> = BTreeSet::new();
+        let mut used_images: BTreeSet<usize> = BTreeSet::new();
+        let mut links: Vec<(Ref, &[f32; 4], &Href)> = vec![];
+        for item in &page.items {
+            match item {
+                LItem::Text {
+                    x,
+                    y,
+                    face,
+                    size,
+                    text,
+                } => {
+                    let name = font_name(*face);
+                    used_fonts.insert(name);
+                    let bytes: Vec<u8> = match slot(*face) {
+                        Some(s) => text
+                            .chars()
+                            .flat_map(|ch| {
+                                let g = glyph(fonts, *face, ch);
+                                maps[s].get(&g).copied().unwrap_or(0).to_be_bytes()
+                            })
+                            .collect(),
+                        None => text
+                            .chars()
+                            .map(|ch| {
+                                fonts
+                                    .glyph(Face::Mono, ch)
+                                    .and_then(|g| u8::try_from(g).ok())
+                                    .unwrap_or(b'?')
+                            })
+                            .collect(),
+                    };
+                    let k = if matches!(face, Face::Italic | Face::BoldItalic) {
+                        slant
+                    } else {
+                        0.0
+                    };
+                    c.begin_text()
+                        .set_font(Name(name), *size)
+                        .set_text_matrix([1.0, 0.0, k, 1.0, *x, *y])
+                        .show(Str(&bytes))
+                        .end_text();
+                }
+                LItem::Rule {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                } => {
+                    c.set_line_width(*width)
+                        .move_to(*x1, *y1)
+                        .line_to(*x2, *y2)
+                        .stroke();
+                }
+                LItem::Image { x, y, w, h, blob } => {
+                    let Some(n) = image_index.get(blob) else {
+                        continue;
+                    };
+                    used_images.insert(*n);
+                    c.save_state()
+                        .transform([*w, 0.0, 0.0, *h, *x, *y])
+                        .x_object(Name(image_name(*n).as_bytes()))
+                        .restore_state();
+                }
+                LItem::Link { rect, href } => links.push((next.bump(), rect, href)),
+            }
+        }
+        let content = flate(&c.finish().into_vec());
+        pdf.stream(content_ref, &content)
+            .filter(Filter::FlateDecode);
+
+        let mut annots = vec![];
+        for (r, rect, href) in links {
+            // a link to a print page goes to its anchor, else to the page's start; a page the
+            // layout does not hold gets no link
+            let goto = match href {
+                Href::Page { page, anchor } => {
+                    let at = anchor
+                        .as_ref()
+                        .and_then(|a| laid.anchors.get(&(page.clone(), Some(a.clone()))))
+                        .or_else(|| laid.anchors.get(&(page.clone(), None)));
+                    let Some(at) = at else { continue };
+                    Some(*at)
+                }
+                Href::External(_) => None,
+            };
+            let mut a = pdf.annotation(r);
+            a.subtype(AnnotationType::Link)
+                .rect(Rect::new(rect[0], rect[1], rect[2], rect[3]))
+                .border(0.0, 0.0, 0.0, None);
+            let mut action = a.action();
+            match (goto, href) {
+                (Some((pg, y)), _) => {
+                    action
+                        .action_type(ActionType::GoTo)
+                        .destination()
+                        .page(page_refs[pg])
+                        .xyz(0.0, y, None);
+                }
+                (None, Href::External(u)) => {
+                    action.action_type(ActionType::Uri).uri(Str(u.as_bytes()));
+                }
+                (None, Href::Page { .. }) => {}
+            }
+            action.finish();
+            a.finish();
+            annots.push(r);
+        }
+
+        let mut pg = pdf.page(page_refs[i]);
+        pg.parent(tree_ref)
+            .media_box(Rect::new(0.0, 0.0, spec.width, spec.height))
+            .contents(content_ref);
+        if !annots.is_empty() {
+            pg.annotations(annots);
+        }
+        let mut res = pg.resources();
+        if !used_fonts.is_empty() {
+            let mut f = res.fonts();
+            for name in &used_fonts {
+                if let Some(r) = font_refs.get(name) {
+                    f.pair(Name(name), *r);
+                }
+            }
+        }
+        if !used_images.is_empty() {
+            let mut x = res.x_objects();
+            for n in &used_images {
+                x.pair(Name(image_name(*n).as_bytes()), image_refs[*n]);
+            }
+        }
+    }
+    pdf.pages(tree_ref)
+        .kids(page_refs.iter().copied())
+        .count(i32::try_from(page_refs.len()).unwrap_or(i32::MAX));
+
+    // the outline
+    let outline_ref = write_outline(&mut pdf, &mut next, &laid.outline, &page_refs);
+    let mut catalog = pdf.catalog(catalog_ref);
+    catalog.pages(tree_ref);
+    if let Some(o) = outline_ref {
+        catalog.outlines(o);
+    }
+    catalog.finish();
+    pdf.document_info(info_ref)
+        .producer(TextStr(&format!("rdy {}", env!("CARGO_PKG_VERSION"))))
+        .title(TextStr(&p.title));
+
+    Rendered {
+        bytes: pdf.finish(),
+        pages: laid.pages.len(),
+        warnings,
+        images: drawn.len(),
+    }
+}
+
+/// An image dimension as the PDF writes it.
+fn dim(n: u32) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// The outline: one item per entry, each the child of the nearest entry before it with a lower
+/// level. Each item is closed; it opens on its children. None when there is no entry.
+fn write_outline(
+    pdf: &mut Pdf,
+    next: &mut Ref,
+    entries: &[OutlineEntry],
+    page_refs: &[Ref],
+) -> Option<Ref> {
+    if entries.is_empty() {
+        return None;
+    }
+    let root = next.bump();
+    let refs: Vec<Ref> = entries.iter().map(|_| next.bump()).collect();
+    // each entry's parent (None: the root)
+    let mut parent: Vec<Option<usize>> = vec![];
+    let mut stack: Vec<usize> = vec![];
+    for (i, e) in entries.iter().enumerate() {
+        while let Some(&top) = stack.last() {
+            if entries[top].level < e.level {
+                break;
+            }
+            stack.pop();
+        }
+        parent.push(stack.last().copied());
+        stack.push(i);
+    }
+    // each entry's children in order, and the root's (the last list)
+    // and each entry's place among its siblings
+    let mut kids_of: Vec<Vec<usize>> = vec![vec![]; entries.len() + 1];
+    let mut place = vec![0; entries.len()];
+    for (i, p) in parent.iter().enumerate() {
+        let kids = &mut kids_of[p.unwrap_or(entries.len())];
+        place[i] = kids.len();
+        kids.push(i);
+    }
+    let children = |of: Option<usize>| -> &[usize] { &kids_of[of.unwrap_or(entries.len())] };
+    let top = children(None);
+    let mut o = pdf.outline(root);
+    o.first(refs[top[0]])
+        .last(refs[top[top.len() - 1]])
+        .count(i32::try_from(top.len()).unwrap_or(i32::MAX));
+    o.finish();
+    for (i, e) in entries.iter().enumerate() {
+        let (siblings, at) = (children(parent[i]), place[i]);
+        let kids = children(Some(i));
+        let mut item = pdf.outline_item(refs[i]);
+        item.title(TextStr(&e.title))
+            .parent(parent[i].map_or(root, |p| refs[p]));
+        if at > 0 {
+            item.prev(refs[siblings[at - 1]]);
+        }
+        if let Some(n) = siblings.get(at + 1) {
+            item.next(refs[*n]);
+        }
+        if let (Some(f), Some(l)) = (kids.first(), kids.last()) {
+            item.first(refs[*f])
+                .last(refs[*l])
+                .count(-i32::try_from(kids.len()).unwrap_or(i32::MAX));
+        }
+        item.dest().page(page_refs[e.page]).xyz(0.0, e.y, None);
+    }
+    Some(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::print::layout::LItem;
+    use crate::print::{PBlock, PageKind, PrintDoc, Run};
+    use std::collections::BTreeMap;
+
+    /// One indirect object of a PDF: its dictionary's text and its stream's bytes.
+    struct Obj {
+        dict: String,
+        stream: Option<Vec<u8>>,
+    }
+
+    fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+        hay[from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|i| from + i)
+    }
+
+    /// Every object, read where the cross-reference table says it starts.
+    fn objects(pdf: &[u8]) -> BTreeMap<u32, Obj> {
+        let sx = find(pdf, b"startxref\n", pdf.len() - 64).expect("startxref") + 10;
+        let end = find(pdf, b"\n", sx).unwrap();
+        let xref: usize = std::str::from_utf8(&pdf[sx..end]).unwrap().parse().unwrap();
+        let table = std::str::from_utf8(&pdf[xref..sx]).unwrap();
+        let mut tokens = table.split_whitespace();
+        assert_eq!(tokens.next(), Some("xref"));
+        assert_eq!(tokens.next(), Some("0"));
+        let n: u32 = tokens.next().unwrap().parse().unwrap();
+        let mut out = BTreeMap::new();
+        let length = regex::Regex::new(r"/Length (\d+)").unwrap();
+        for id in 0..n {
+            let offset: usize = tokens.next().unwrap().parse().unwrap();
+            let _gen = tokens.next().unwrap();
+            if tokens.next().unwrap() != "n" {
+                continue;
+            }
+            let head = format!("{id} 0 obj\n");
+            assert_eq!(&pdf[offset..offset + head.len()], head.as_bytes());
+            let start = offset + head.len();
+            let endobj = find(pdf, b"\nendobj", start).unwrap();
+            let obj = match find(pdf, b">>\nstream\n", start) {
+                Some(s) if s < endobj => {
+                    let dict = String::from_utf8(pdf[start..s + 2].to_vec()).unwrap();
+                    let len: usize = length.captures(&dict).expect("a stream's length")[1]
+                        .parse()
+                        .unwrap();
+                    let data = s + 10;
+                    Obj {
+                        dict,
+                        stream: Some(pdf[data..data + len].to_vec()),
+                    }
+                }
+                _ => Obj {
+                    dict: String::from_utf8(pdf[start..endobj].to_vec()).unwrap(),
+                    stream: None,
+                },
+            };
+            out.insert(id, obj);
+        }
+        out
+    }
+
+    fn inflate(o: &Obj) -> Vec<u8> {
+        let data = o.stream.as_ref().expect("a stream");
+        assert!(o.dict.contains("/Filter /FlateDecode"), "{}", o.dict);
+        miniz_oxide::inflate::decompress_to_vec_zlib(data).expect("the stream inflates")
+    }
+
+    fn refs(dict: &str, pattern: &str) -> Vec<(String, u32)> {
+        regex::Regex::new(pattern)
+            .unwrap()
+            .captures_iter(dict)
+            .map(|c| (c[1].to_string(), c[2].parse().unwrap()))
+            .collect()
+    }
+
+    fn one_ref(dict: &str, key: &str) -> u32 {
+        refs(dict, &format!(r"/({key}) (\d+) 0 R"))
+            .first()
+            .unwrap_or_else(|| panic!("{key} in {dict}"))
+            .1
+    }
+
+    /// The page objects in order: the catalog's page tree's kids.
+    fn page_ids(objs: &BTreeMap<u32, Obj>) -> Vec<u32> {
+        let catalog = objs
+            .values()
+            .find(|o| o.dict.contains("/Type /Catalog"))
+            .expect("a catalog");
+        let pages = &objs[&one_ref(&catalog.dict, "Pages")].dict;
+        let kids = regex::Regex::new(r"/Kids \[([^\]]*)\]")
+            .unwrap()
+            .captures(pages)
+            .unwrap()[1]
+            .to_string();
+        regex::Regex::new(r"(\d+) 0 R")
+            .unwrap()
+            .captures_iter(&kids)
+            .map(|c| c[1].parse().unwrap())
+            .collect()
+    }
+
+    /// A content stream's tokens: names, numbers, strings (as bytes) and operators.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Tok {
+        Name(String),
+        Num(f32),
+        Str(Vec<u8>),
+        Op(String),
+    }
+
+    fn tokens(c: &[u8]) -> Vec<Tok> {
+        let mut out = vec![];
+        let mut i = 0;
+        while i < c.len() {
+            let b = c[i];
+            if b.is_ascii_whitespace() {
+                i += 1;
+            } else if b == b'/' {
+                let s = i + 1;
+                i = s;
+                while i < c.len() && !c[i].is_ascii_whitespace() && !b"/[]<>()".contains(&c[i]) {
+                    i += 1;
+                }
+                out.push(Tok::Name(String::from_utf8(c[s..i].to_vec()).unwrap()));
+            } else if b == b'<' {
+                let e = find(c, b">", i).unwrap();
+                let hex: Vec<u8> = c[i + 1..e]
+                    .iter()
+                    .copied()
+                    .filter(|b| !b.is_ascii_whitespace())
+                    .collect();
+                let bytes = hex
+                    .chunks(2)
+                    .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+                    .collect();
+                out.push(Tok::Str(bytes));
+                i = e + 1;
+            } else if b == b'(' {
+                let mut depth = 1;
+                let mut s = vec![];
+                i += 1;
+                while depth > 0 {
+                    let b = c[i];
+                    i += 1;
+                    match b {
+                        b'\\' => {
+                            let e = c[i];
+                            i += 1;
+                            match e {
+                                b'n' => s.push(b'\n'),
+                                b'r' => s.push(b'\r'),
+                                b't' => s.push(b'\t'),
+                                b'b' => s.push(8),
+                                b'f' => s.push(12),
+                                b'0'..=b'7' => {
+                                    let mut v = u32::from(e - b'0');
+                                    for _ in 0..2 {
+                                        if (b'0'..=b'7').contains(&c[i]) {
+                                            v = v * 8 + u32::from(c[i] - b'0');
+                                            i += 1;
+                                        }
+                                    }
+                                    s.push(v as u8);
+                                }
+                                other => s.push(other),
+                            }
+                        }
+                        b'(' => {
+                            depth += 1;
+                            s.push(b);
+                        }
+                        b')' => {
+                            depth -= 1;
+                            if depth > 0 {
+                                s.push(b);
+                            }
+                        }
+                        _ => s.push(b),
+                    }
+                }
+                out.push(Tok::Str(s));
+            } else if b == b'-' || b == b'.' || b.is_ascii_digit() {
+                let s = i;
+                i += 1;
+                while i < c.len() && (c[i] == b'.' || c[i].is_ascii_digit()) {
+                    i += 1;
+                }
+                out.push(Tok::Num(
+                    std::str::from_utf8(&c[s..i]).unwrap().parse().unwrap(),
+                ));
+            } else {
+                let s = i;
+                while i < c.len() && !c[i].is_ascii_whitespace() && !b"/[]<>()".contains(&c[i]) {
+                    i += 1;
+                }
+                if i == s {
+                    i += 1;
+                    continue;
+                }
+                out.push(Tok::Op(String::from_utf8(c[s..i].to_vec()).unwrap()));
+            }
+        }
+        out
+    }
+
+    /// A ToUnicode map's code → text, from its `bfchar` entries.
+    fn to_unicode(cmap: &[u8]) -> BTreeMap<u16, String> {
+        let text = String::from_utf8(cmap.to_vec()).unwrap();
+        let mut out = BTreeMap::new();
+        let pair = regex::Regex::new(r"<([0-9A-Fa-f]{4})>\s*<([0-9A-Fa-f]+)>").unwrap();
+        for block in text.split("beginbfchar").skip(1) {
+            let block = &block[..block.find("endbfchar").unwrap()];
+            for c in pair.captures_iter(block) {
+                let code = u16::from_str_radix(&c[1], 16).unwrap();
+                let units: Vec<u16> = c[2]
+                    .as_bytes()
+                    .chunks(4)
+                    .map(|u| u16::from_str_radix(std::str::from_utf8(u).unwrap(), 16).unwrap())
+                    .collect();
+                out.insert(code, String::from_utf16(&units).unwrap());
+            }
+        }
+        out
+    }
+
+    fn run(text: &str, bold: bool, italic: bool, code: bool) -> Run {
+        Run {
+            text: text.into(),
+            bold,
+            italic,
+            code,
+            link: None,
+        }
+    }
+
+    fn sample() -> Print {
+        let blocks = vec![
+            PBlock::Heading {
+                level: 2,
+                anchor: Some("start".into()),
+                runs: vec![run("Arrows → and ≤ signs", false, false, false)],
+            },
+            PBlock::Para {
+                anchor: None,
+                runs: vec![
+                    run("Plain words, é and α; ", false, false, false),
+                    run("bold words ", true, false, false),
+                    run("slanted words ", false, true, false),
+                    run("both at once ", true, true, false),
+                    run("code_here(1) ", false, false, true),
+                    run(
+                        "and 中 has no glyph, nor does ☃ in code: ",
+                        false,
+                        false,
+                        false,
+                    ),
+                    run("x → ☃ (é)", false, false, true),
+                ],
+            },
+            PBlock::Code {
+                anchor: None,
+                lang: Some("rust".into()),
+                text: "fn main() {\n\tlet s = \"(a) \\\\ b\";\n}\n".into(),
+            },
+            PBlock::List {
+                ordered: true,
+                start: 9,
+                items: vec![
+                    vec![PBlock::Para {
+                        anchor: None,
+                        runs: vec![run("ninth", false, false, false)],
+                    }],
+                    vec![PBlock::Para {
+                        anchor: None,
+                        runs: vec![run("tenth — last", false, false, false)],
+                    }],
+                ],
+            },
+        ];
+        Print {
+            title: "Readback “quoted”".into(),
+            description: Some("A print that reads back".into()),
+            label: "v1.0.0".into(),
+            scope: "canon".into(),
+            docs: vec![
+                PrintDoc {
+                    kind: PageKind::Doc,
+                    id: "d-1".into(),
+                    title: "First doc".into(),
+                    page: "first.html".into(),
+                    depth: 0,
+                    blocks: blocks.clone(),
+                },
+                PrintDoc {
+                    kind: PageKind::Doc,
+                    id: "d-2".into(),
+                    title: "Second doc".into(),
+                    page: "second.html".into(),
+                    depth: 0,
+                    blocks,
+                },
+            ],
+            blobs: BTreeMap::new(),
+            warnings: vec![],
+            rdy_dir: std::path::PathBuf::from("/nowhere/.rdy"),
+        }
+    }
+
+    #[test]
+    fn ec9_page_text_reads_back_through_to_unicode() {
+        let fonts = Fonts::load();
+        let p = sample();
+        let laid = lay_out(&p, &fonts);
+        let (pdf, pages, warnings) = pdf_bytes(&p, &fonts);
+        assert_eq!(pages, laid.pages.len());
+        assert!(pages >= 3, "the title part and two docs");
+        assert_eq!(
+            warnings,
+            vec!["3 characters have no glyph in the PDF fonts and print as ?: → ☃ 中".to_string()]
+        );
+        let objs = objects(&pdf);
+        let page_ids = page_ids(&objs);
+        assert_eq!(page_ids.len(), pages);
+        // Courier's WinAnsiEncoding: byte → character
+        let mut win_ansi = BTreeMap::new();
+        for c in (0u32..0x3000).filter_map(char::from_u32) {
+            if let Some(g) = fonts.glyph(Face::Mono, c) {
+                win_ansi.insert(u8::try_from(g).unwrap(), c);
+            }
+        }
+        let slant = 12f32.to_radians().tan();
+        let mut faces_seen = std::collections::BTreeSet::new();
+        for (i, id) in page_ids.iter().enumerate() {
+            let page = &objs[id].dict;
+            let fonts_of: BTreeMap<String, u32> =
+                refs(page, r"/(F\d+) (\d+) 0 R").into_iter().collect();
+            let content = inflate(&objs[&one_ref(page, "Contents")]);
+            let toks = tokens(&content);
+            let mut font = String::new();
+            let mut matrix = vec![];
+            let mut read = vec![];
+            for (k, t) in toks.iter().enumerate() {
+                match t {
+                    Tok::Op(op) if op == "Tf" => {
+                        let Tok::Name(n) = &toks[k - 2] else {
+                            panic!("Tf takes a name")
+                        };
+                        font = n.clone();
+                    }
+                    Tok::Op(op) if op == "Tm" => {
+                        matrix = toks[k - 6..k]
+                            .iter()
+                            .map(|t| match t {
+                                Tok::Num(n) => *n,
+                                other => panic!("{other:?}"),
+                            })
+                            .collect();
+                    }
+                    Tok::Op(op) if op == "Tj" => {
+                        let Tok::Str(bytes) = &toks[k - 1] else {
+                            panic!("Tj takes a string")
+                        };
+                        let f = &objs[&fonts_of[&font]].dict;
+                        let text: String = if f.contains("/Subtype /Type0") {
+                            assert!(f.contains("/Encoding /Identity-H"), "{f}");
+                            let map = to_unicode(&inflate(&objs[&one_ref(f, "ToUnicode")]));
+                            bytes
+                                .chunks(2)
+                                .map(|g| {
+                                    let g = u16::from_be_bytes([g[0], g[1]]);
+                                    map.get(&g)
+                                        .unwrap_or_else(|| panic!("glyph {g} is in ToUnicode"))
+                                        .clone()
+                                })
+                                .collect()
+                        } else {
+                            assert!(f.contains("/BaseFont /Courier"), "{f}");
+                            assert!(f.contains("/Encoding /WinAnsiEncoding"), "{f}");
+                            bytes.iter().map(|b| win_ansi[b]).collect()
+                        };
+                        read.push((text, matrix.clone(), f.contains("Bold")));
+                    }
+                    _ => {}
+                }
+            }
+            let want: Vec<(String, Face)> = laid.pages[i]
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    LItem::Text { text, face, .. } => Some((text.clone(), *face)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                read.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+                want.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
+                "page {i}"
+            );
+            // the face of each run: a slanted face has the 12° text matrix, a bold one the Bold
+            // font
+            for ((_, m, bold), (_, face)) in read.iter().zip(&want) {
+                faces_seen.insert(*face);
+                let slanted = matches!(face, Face::Italic | Face::BoldItalic);
+                let c = if slanted { slant } else { 0.0 };
+                assert!((m[2] - c).abs() < 1e-4, "{face:?}: {m:?}");
+                if *face != Face::Mono {
+                    assert_eq!(*bold, matches!(face, Face::Bold | Face::BoldItalic));
+                }
+            }
+        }
+        assert_eq!(faces_seen.len(), 5, "every face: {faces_seen:?}");
+    }
+}

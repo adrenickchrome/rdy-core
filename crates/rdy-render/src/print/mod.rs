@@ -8,9 +8,11 @@
 //! script, navigation, search, review mark, change summary, version pill or "Why?" trail
 //! (D-X61DT). A diagram prints as its source (O3). No id is shown (O4).
 pub mod fonts;
+pub mod image;
 pub mod ir;
 pub mod layout;
 pub mod md;
+pub mod pdf;
 pub mod single;
 
 use crate::page::{self, Kind};
