@@ -94,8 +94,8 @@ fn fits(w: u32, h: u32, channels: Option<u8>) -> bool {
 /// SOI; segments whose lengths fit the file; exactly one frame header, baseline (SOF0) or
 /// progressive (SOF2), of 8-bit samples, a non-zero size and 1 or 3 components, whose length
 /// matches its components; at least one scan after it, each with a header whose length matches
-/// its 1–4 components, and at least one with entropy-coded data; and EOI. Bytes after EOI are not
-/// read.
+/// its 1–4 components, and at least one with entropy-coded data (restart markers and fill bytes
+/// are not data); and EOI. Bytes after EOI are not read.
 fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, u8)> {
     if !bytes.starts_with(&[0xff, 0xd8]) {
         return None;
@@ -161,20 +161,27 @@ fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, u8)> {
                 {
                     return None;
                 }
-                // the entropy-coded data runs to the next marker that is not a stuffed 0xFF or a
-                // restart marker
-                let start = i;
+                // the entropy-coded data runs to the next marker that is not a restart marker. A
+                // 0xFF and its fill bytes are data when a stuffed 0x00 follows (as libjpeg reads
+                // them) and a restart marker when RST0–7 follows; neither a restart marker nor
+                // its fill bytes count as data.
                 loop {
-                    if *bytes.get(i)? == 0xff {
-                        match *bytes.get(i + 1)? {
-                            0x00 | 0xd0..=0xd7 => i += 2,
-                            _ => break,
-                        }
-                    } else {
+                    if *bytes.get(i)? != 0xff {
+                        scan_data = true;
                         i += 1;
+                        continue;
                     }
+                    let mut next = i + 1;
+                    while *bytes.get(next)? == 0xff {
+                        next += 1;
+                    }
+                    match *bytes.get(next)? {
+                        0x00 => scan_data = true,
+                        0xd0..=0xd7 => {}
+                        _ => break,
+                    }
+                    i = next + 1;
                 }
-                scan_data |= i > start;
             }
             _ => {}
         }
@@ -749,6 +756,79 @@ pub(crate) mod tests {
         let mut more = BASELINE_GRAY.to_vec();
         more.extend_from_slice(b"trailing");
         assert!(decode("image/jpeg", &more).is_some());
+    }
+
+    /// A real JPEG of 16 × 8 pixels (Pillow, 4:4:4, a restart interval of one MCU): one RST0
+    /// between its two MCUs.
+    pub(crate) const RESTART_RGB: &[u8] = include_bytes!("testdata/restart-rgb.jpg");
+
+    /// The offset of the first restart marker in a JPEG's entropy-coded data.
+    fn first_restart(bytes: &[u8]) -> usize {
+        let sos = after_segment(bytes, 0xda);
+        sos + bytes[sos..]
+            .windows(2)
+            .position(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+            .expect("a restart marker")
+    }
+
+    #[test]
+    fn ec9_a_jpeg_scan_of_only_restart_markers_does_not_decode() {
+        // the finding's case: a real JPEG cut after its scan header, then RST0 and EOI
+        for (name, bytes) in [
+            ("baseline RGB", BASELINE_RGB),
+            ("baseline gray", BASELINE_GRAY),
+            ("progressive RGB", PROGRESSIVE_RGB),
+            ("restart RGB", RESTART_RGB),
+        ] {
+            let mut bad = bytes[..after_segment(bytes, 0xda)].to_vec();
+            bad.extend_from_slice(&[0xff, 0xd0, 0xff, 0xd9]);
+            assert_eq!(decode("image/jpeg", &bad), None, "{name}: RST0 only");
+            // fill bytes and every restart marker are still no data
+            let mut bad = bytes[..after_segment(bytes, 0xda)].to_vec();
+            for rst in 0xd0..=0xd7 {
+                bad.extend_from_slice(&[0xff, 0xff, rst]);
+            }
+            bad.extend_from_slice(&[0xff, 0xd9]);
+            assert_eq!(decode("image/jpeg", &bad), None, "{name}: RST0-7 only");
+        }
+    }
+
+    #[test]
+    fn ec9_a_jpeg_with_restart_markers_and_fill_bytes_passes_through() {
+        let rst = first_restart(RESTART_RGB);
+        let whole = |bytes: &[u8]| Pixels::Jpeg {
+            w: 16,
+            h: 8,
+            components: 3,
+            bytes: bytes.to_vec(),
+        };
+        assert_eq!(
+            decode("image/jpeg", RESTART_RGB),
+            Some(whole(RESTART_RGB)),
+            "as Pillow wrote it"
+        );
+        // the finding's case: a fill byte before the restart marker (Pillow decodes it to the
+        // same pixels)
+        for fill in 1..=3 {
+            let mut filled = RESTART_RGB[..rst].to_vec();
+            filled.extend(std::iter::repeat_n(0xff, fill));
+            filled.extend_from_slice(&RESTART_RGB[rst..]);
+            assert_eq!(
+                decode("image/jpeg", &filled),
+                Some(whole(&filled)),
+                "{fill} fill bytes before RST0"
+            );
+        }
+        // fill bytes before the end
+        let mut filled = RESTART_RGB[..RESTART_RGB.len() - 2].to_vec();
+        filled.extend_from_slice(&[0xff, 0xff, 0xd9]);
+        assert_eq!(
+            decode("image/jpeg", &filled),
+            Some(whole(&filled)),
+            "fill before EOI"
+        );
+        // the guard: a cut just after the restart marker has no end
+        assert_eq!(decode("image/jpeg", &RESTART_RGB[..rst + 2]), None);
     }
 
     #[test]
