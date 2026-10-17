@@ -3171,6 +3171,25 @@ fn segment_bytes(proj: &std::path::Path) -> u64 {
         .sum()
 }
 
+/// The frames the redaction scanner walks: every frame of the log up to the published end, batch
+/// markers included (the scanner's counting domain, and the one `segment_bytes` sums). Counted
+/// with the scanner's own record walker; `verify_report().frames` leaves the markers out.
+fn scan_frame_count(r: &Rdy) -> u64 {
+    let origin = rdy_store::segment::Location {
+        segment: 0,
+        offset: 0,
+    };
+    let mut n: u64 = 0;
+    r.store()
+        .reader()
+        .for_each_record_from(origin, r.read().seq(), |_, _, _| {
+            n += 1;
+            Ok(())
+        })
+        .expect("walk the log");
+    n
+}
+
 /// `redaction_report`, `redaction_land`, `redaction_open` and `redaction_dump`: the cost of
 /// removing every version of block `target` (plan Redaction, Task 16; D-6B1W1, D-3M81W). Each
 /// run works on its own copy of the closed project `proj`, made under `parent` and removed
@@ -3203,7 +3222,7 @@ fn tier_redaction(
         copy_project(proj, &work);
         let scanned_bytes = segment_bytes(&work);
         let mut r = Rdy::open(&work).expect("open the copy");
-        let scanned_frames = r.store().verify_report().expect("verify").frames;
+        let scanned_frames = scan_frame_count(&r);
         // the complete report
         let s = Instant::now();
         let report = r.read().redaction_report(&input).expect("report");
@@ -5244,6 +5263,28 @@ mod tests {
             body("fn run_large_tier(")
                 .contains("tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);")
         );
+    }
+
+    /// Task 16 fix 1: the scanned-frame count uses the scanner's domain, batch markers included.
+    /// The tree is landed, so its log holds committed batches: the count exceeds the verify
+    /// report's data-frame count by at least one marker per batch, and agrees with the report.
+    #[test]
+    fn rdx16_scanned_frames_count_batch_markers() {
+        rdy_model::seed_ids_for_tests(0x7264_7833);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (proj, claim) = rdx16_small_tree(dir.path());
+        let r = Rdy::open(&proj).expect("open");
+        let data = r.store().verify_report().expect("verify").frames as u64;
+        let scanned = scan_frame_count(&r);
+        let input = rdy_engine::redaction::RedactInput {
+            targets: vec![claim.to_string()],
+            reason_class: "secret".to_string(),
+            reason: "perf".to_string(),
+            dry_run: false,
+        };
+        r.read().redaction_report(&input).expect("report");
+        rdy_model::unseed_ids_for_tests();
+        assert!(scanned > data, "markers are counted: {scanned} vs {data}");
     }
 
     /// Task 16: the tier erases content only in copies it makes and removes: the source project's
