@@ -10,7 +10,7 @@ mod redaction_fixture;
 use rdy_model::redaction::{CONTENT_REMOVED, DropSpan, RedactTarget};
 use rdy_model::*;
 use rdy_store::kinds::{self, BATCH_COMMIT, BLOB_CHUNK, BLOCK, CHANGE};
-use rdy_store::redaction_io::{FailAction, Failpoint, arm_failpoint};
+use rdy_store::redaction_io::{FailAction, Failpoint, arm_failpoint, arm_failpoint_nth};
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
 use redaction_fixture::{
@@ -916,29 +916,491 @@ fn rdx4_a_torn_tail_still_uses_the_existing_quarantine_rule() {
     drop(s);
     assert_eq!(segment_bytes(&setup.path), erased);
 
-    // a removal interrupted after one zero write, then a torn tail: the partly zeroed span is
-    // authorized work, never mistaken for the tail
+    // a removal interrupted inside the 1 MiB chunk's payload, then a torn tail: the partly
+    // zeroed span is authorized work, never mistaken for the tail
     let setup = Setup::new();
     let f = setup.apply(&FixtureOptions::approved(Proof::local_human()));
     let spans2 = spans_of(&f);
     let full = segment_bytes(&setup.path);
-    arm_failpoint(Some((Failpoint::AfterZeroWrite, FailAction::Fail)));
+    let (nth, chunk) = inside_the_big_chunk(&spans2, 3);
+    arm_failpoint_nth(Failpoint::AfterZeroWrite, FailAction::Fail, nth);
     assert!(matches!(
         Store::open(&setup.path).err(),
         Some(StoreError::RedactionPending)
     ));
     arm_failpoint(None);
+    assert_partly_zeroed(&setup.path, &full, &spans2, &chunk, 3);
     let last = full.keys().last().unwrap().clone();
     let file = setup.path.join("segments").join(&last);
     let mut bytes = std::fs::read(&file).unwrap();
     let cut = bytes.len();
     bytes.extend_from_slice(&tail[..100]);
     std::fs::write(&file, &bytes).unwrap();
-    let s = Store::open(&setup.path).unwrap();
+    let mut s = Store::open(&setup.path).unwrap();
     assert_eq!(s.log_end().offset, cut as u64);
     assert_eq!(s.open_report().quarantined.len(), 1);
     assert_removed(&s, &setup, &f);
+    assert_eq!(
+        s.finish_redactions().unwrap().checked_payloads,
+        0,
+        "the reopen zeroed the rest of the chunk"
+    );
     drop(s);
     assert_eq!(segment_bytes(&setup.path), zeroed(&full, &spans2));
     assert!(!spans.is_empty());
+}
+
+/// The erase buffer: one zero write covers at most this many bytes.
+const BUFFER: u64 = 65_536;
+
+/// The zero-write count at which an erasure of `spans` (in `(segment, offset)` order) is `k`
+/// buffers into the first span larger than one buffer, and that span.
+fn inside_the_big_chunk(spans: &[DropSpan], k: u32) -> (u32, DropSpan) {
+    let mut sorted = spans.to_vec();
+    sorted.sort_by_key(|s| (s.place.segment, s.place.offset));
+    let mut before = 0u32;
+    for s in sorted {
+        if u64::from(s.len) > BUFFER * u64::from(k) {
+            return (before + k, s);
+        }
+        before += u64::from(s.len).div_ceil(BUFFER) as u32;
+    }
+    panic!("no span is longer than {k} buffers");
+}
+
+/// After an erasure failed `k` buffers into `chunk`: every span before it is zero, the first `k`
+/// buffers of its payload are zero and the rest is the original, and every later span is intact.
+fn assert_partly_zeroed(
+    path: &Path,
+    full: &BTreeMap<String, Vec<u8>>,
+    spans: &[DropSpan],
+    chunk: &DropSpan,
+    k: u32,
+) {
+    let now = segment_bytes(path);
+    let at = |s: &DropSpan| (s.place.segment, s.place.offset);
+    let before: Vec<DropSpan> = spans
+        .iter()
+        .filter(|s| at(s) < at(chunk))
+        .cloned()
+        .collect();
+    assert!(
+        !before.is_empty() && spans.iter().any(|s| at(s) > at(chunk)),
+        "spans on both sides"
+    );
+    let name = seg_name(chunk.place.segment);
+    let start = chunk.place.offset as usize + HEADER;
+    let cut = (BUFFER * u64::from(k)) as usize;
+    let payload = &now[&name][start..start + chunk.len as usize];
+    assert!(
+        payload[..cut].iter().all(|b| *b == 0),
+        "the first buffers are zero"
+    );
+    assert_eq!(
+        &payload[cut..],
+        &full[&name][start + cut..start + chunk.len as usize],
+        "the rest of the chunk is untouched"
+    );
+    assert!(
+        payload[cut..].iter().any(|b| *b != 0),
+        "the chunk is partly zero"
+    );
+    // the earlier spans are erased and the later ones intact: the log is the original with
+    // only the earlier spans and the chunk's first buffers zeroed
+    let mut want = zeroed(full, &before);
+    want.get_mut(&name).unwrap()[start..start + cut].fill(0);
+    assert_eq!(
+        now, want,
+        "only the earlier spans and the chunk's first buffers changed"
+    );
+}
+
+fn frame_bytes(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = (payload.len() as u32).to_le_bytes().to_vec();
+    out.push(kind);
+    out.extend_from_slice(&Hash::of(payload).0);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Appends raw bytes to segment file `seg` of the closed store at `path` (creating it), and
+/// returns the offset they start at.
+fn append_raw(path: &Path, seg: u32, bytes: &[u8]) -> u64 {
+    use std::io::Write as _;
+    let file = path.join("segments").join(seg_name(seg));
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .unwrap();
+    let at = f.metadata().unwrap().len();
+    f.write_all(bytes).unwrap();
+    f.sync_all().unwrap();
+    at
+}
+
+/// Appends `items` as one sealed batch, raw, to segment `seg` of the closed store at `path`;
+/// returns the location of each data frame.
+fn append_raw_batch(path: &Path, seg: u32, items: &[(u8, Vec<u8>)]) -> Vec<Location> {
+    let mut at = std::fs::metadata(path.join("segments").join(seg_name(seg)))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let start = Location {
+        segment: seg,
+        offset: at,
+    };
+    let mut bytes = vec![];
+    let mut locs = vec![];
+    for (kind, payload) in items {
+        locs.push(Location {
+            segment: seg,
+            offset: at,
+        });
+        let frame = frame_bytes(*kind, payload);
+        at += frame.len() as u64;
+        bytes.extend(frame);
+    }
+    let hashes: Vec<Hash> = items.iter().map(|(_, p)| Hash::of(p)).collect();
+    let marker = kinds::BatchCommit {
+        start,
+        frames: items.len() as u32,
+        digest: kinds::batch_digest(&hashes),
+    };
+    bytes.extend(frame_bytes(
+        BATCH_COMMIT,
+        &postcard::to_allocvec(&marker).unwrap(),
+    ));
+    append_raw(path, seg, &bytes);
+    locs
+}
+
+/// The location and payload length of the `kind` frame with hash `hash` in segment `seg`.
+fn frame_of(path: &Path, seg: u32, kind: u8, hash: Hash) -> (Location, u32) {
+    let bytes = std::fs::read(path.join("segments").join(seg_name(seg))).unwrap();
+    let (offset, _, _, len) = headers(&bytes)
+        .into_iter()
+        .find(|(_, k, h, _)| *k == kind && *h == hash)
+        .unwrap();
+    (
+        Location {
+            segment: seg,
+            offset,
+        },
+        len,
+    )
+}
+
+/// Overwrites `len` payload bytes of the frame at `loc` with `byte`.
+fn fill_payload(path: &Path, loc: Location, len: u32, byte: u8) {
+    let file = path.join("segments").join(seg_name(loc.segment));
+    let mut bytes = std::fs::read(&file).unwrap();
+    let start = loc.offset as usize + HEADER;
+    bytes[start..start + len as usize].fill(byte);
+    std::fs::write(&file, bytes).unwrap();
+}
+
+/// Rolls the closed store at `path` to a new segment with one ordinary sealed write.
+fn roll(path: &Path) {
+    let mut s = Store::open(path).unwrap();
+    let seg = s.log_end().segment;
+    s.set_segment_max(1);
+    s.put_blob(b"rdx4 a later segment").unwrap();
+    assert_eq!(s.log_end().segment, seg + 1, "the write rolled");
+}
+
+/// The landing batch's items with the apply's payload grown by `extra` zero bytes.
+fn padded_apply(items: &[(u8, Vec<u8>)], extra: usize) -> Vec<(u8, Vec<u8>)> {
+    let mut items = items.to_vec();
+    let apply = items
+        .iter_mut()
+        .find(|(k, _)| *k == kinds::REDACTION_APPLY)
+        .unwrap();
+    apply.1.extend(std::iter::repeat_n(0u8, extra));
+    items
+}
+
+/// Fix round 1, finding 1 (P1): a batch marker that does not match its batch in a sealed
+/// segment, before the landing and apply batch. The header pass cannot see past it, so the open
+/// refuses: no replay may index an apply that the bootstrap never validated.
+#[test]
+fn rdx4_a_broken_marker_in_a_sealed_segment_refuses_the_open() {
+    let setup = Setup::new();
+    let sp = split(&setup, &FixtureOptions::approved(Proof::local_human()));
+    assert_eq!(sp.fixture.landing_start.unwrap().segment, 0);
+    let forged = kinds::BatchCommit {
+        start: Location {
+            segment: 0,
+            offset: 0,
+        },
+        frames: 999,
+        digest: Hash::of(b"rdx4 no such batch"),
+    };
+    let bad = append_raw(
+        &sp.prep,
+        0,
+        &frame_bytes(BATCH_COMMIT, &postcard::to_allocvec(&forged).unwrap()),
+    );
+    append_raw_batch(&sp.prep, 0, &sp.items);
+    append_raw_batch(&sp.prep, 1, &[(BLOB_CHUNK, b"rdx4 segment one".to_vec())]);
+    let before = segment_bytes(&sp.prep);
+    let e = Store::open(&sp.prep)
+        .err()
+        .expect("a broken marker in a sealed segment refuses the open");
+    let StoreError::Io(io) = &e else {
+        panic!("damage, not a redaction verdict: {e:?}");
+    };
+    assert_eq!(io.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    assert!(
+        e.to_string().contains("segment 0") && e.to_string().contains(&format!("offset {bad}")),
+        "{e}"
+    );
+    assert_eq!(
+        segment_bytes(&sp.prep),
+        before,
+        "the refused open changes no byte"
+    );
+}
+
+/// Fix round 1, finding 1 (P3): an apply over 16777216 bytes behind a valid prefix, in a sealed
+/// batch of the last segment. The marker rule's scan accepts the frame, so the header pass must
+/// not stop at it: the apply is refused as a broken record. So is an apply with trailing bytes
+/// (not its own canonical encoding).
+#[test]
+fn rdx4_an_oversized_or_padded_apply_is_corruption() {
+    for extra in [16_777_217usize, 10] {
+        let setup = Setup::new();
+        let sp = split(&setup, &FixtureOptions::approved(Proof::local_human()));
+        let items = padded_apply(&sp.items, extra);
+        let locs = append_raw_batch(&sp.prep, 0, &items);
+        let apply_at = locs[items
+            .iter()
+            .position(|(k, _)| *k == kinds::REDACTION_APPLY)
+            .unwrap()];
+        let before = segment_bytes(&sp.prep);
+        let e = Store::open(&sp.prep).err();
+        assert!(
+            matches!(
+                e,
+                Some(StoreError::RedactionCorrupt { segment, offset })
+                    if segment == apply_at.segment && offset == apply_at.offset
+            ),
+            "{extra}: {e:?}"
+        );
+        assert_eq!(segment_bytes(&sp.prep), before, "{extra}: no byte changed");
+    }
+}
+
+/// Fix round 1, finding 1 (P3, marker): a batch marker longer than 64 bytes behind a valid
+/// prefix closes the landing batch. The marker rule's scan accepts it, so the header pass does
+/// too: both passes see the same apply, and the removal it authorizes finishes.
+#[test]
+fn rdx4_both_passes_agree_on_a_long_marker() {
+    let setup = Setup::new();
+    let sp = split(&setup, &FixtureOptions::approved(Proof::local_human()));
+    let spans = spans_of(&sp.fixture);
+    let start = Location {
+        segment: 0,
+        offset: std::fs::metadata(sp.prep.join("segments").join(seg_name(0)))
+            .unwrap()
+            .len(),
+    };
+    let mut bytes = vec![];
+    for (kind, payload) in &sp.items {
+        bytes.extend(frame_bytes(*kind, payload));
+    }
+    let hashes: Vec<Hash> = sp.items.iter().map(|(_, p)| Hash::of(p)).collect();
+    let mut marker = postcard::to_allocvec(&kinds::BatchCommit {
+        start,
+        frames: sp.items.len() as u32,
+        digest: kinds::batch_digest(&hashes),
+    })
+    .unwrap();
+    marker.resize(100, 0);
+    bytes.extend(frame_bytes(BATCH_COMMIT, &marker));
+    append_raw(&sp.prep, 0, &bytes);
+    let before = segment_bytes(&sp.prep);
+    let s = Store::open(&sp.prep).unwrap();
+    assert_eq!(
+        s.redaction_of(BLOCK, &setup.a.version_hash()).unwrap(),
+        Some(sp.fixture.requests[0].request)
+    );
+    drop(s);
+    assert_eq!(
+        segment_bytes(&sp.prep),
+        zeroed(&before, &spans),
+        "the apply both passes see is finished: its spans are zero"
+    );
+}
+
+/// Fix round 1, finding 1: a replay indexes only the applies the bootstrap validated. An apply
+/// frame the log's authorization does not hold is `RedactionCorrupt` at it, never a row.
+#[test]
+fn rdx4_replay_refuses_an_apply_the_bootstrap_did_not_validate() {
+    let setup = Setup::new();
+    let f = setup.apply(&FixtureOptions::approved(Proof::local_human()));
+    let apply = f.applies[0].0;
+    let (apply_at, _) = frame_of(&setup.path, 0, kinds::REDACTION_APPLY, apply);
+    let mut s = Store::open(&setup.path).unwrap();
+    s.forget_redaction_authorization_for_tests();
+    let e = s.reindex().err();
+    assert!(
+        matches!(
+            e,
+            Some(StoreError::RedactionCorrupt { segment, offset })
+                if segment == apply_at.segment && offset == apply_at.offset
+        ),
+        "{e:?}"
+    );
+}
+
+/// Fix round 1, finding 1: when the index's redaction rows differ from the log's, the open
+/// rebuilds the index and checks again; a difference that remains is corruption at the record
+/// the authorization does not hold, not a silent rebuild at every open.
+#[test]
+fn rdx4_a_redaction_index_mismatch_that_remains_is_corruption() {
+    let setup = Setup::new();
+    let f = setup.apply(&FixtureOptions::prepared_only());
+    let (request_at, _) = frame_of(&setup.path, 0, kinds::REDACTION, f.requests[0].request);
+    let mut s = Store::open(&setup.path).unwrap();
+    // a matching index passes as it is
+    s.check_redaction_index_for_tests().unwrap();
+    s.forget_redaction_authorization_for_tests();
+    let e = s.check_redaction_index_for_tests().err();
+    assert!(
+        matches!(
+            e,
+            Some(StoreError::RedactionCorrupt { segment, offset })
+                if segment == request_at.segment && offset == request_at.offset
+        ),
+        "{e:?}"
+    );
+}
+
+/// Fix round 1, finding 2 (P4): the live writer refuses a redaction record over 16777216 bytes
+/// before it writes anything, and validates a record exactly as the open does (an apply with
+/// trailing bytes is refused too). The store stays as it was, and opens.
+#[test]
+fn rdx4_the_live_writer_refuses_what_the_open_would_refuse() {
+    for (extra, limit) in [(16_777_217usize, true), (10, false)] {
+        let setup = Setup::new();
+        let sp = split(&setup, &FixtureOptions::approved(Proof::local_human()));
+        let before = segment_bytes(&sp.prep);
+        {
+            let mut s = Store::open(&sp.prep).unwrap();
+            let end = s.log_end();
+            let e = s
+                .seal_redaction_batch_for_tests(padded_apply(&sp.items, extra))
+                .err();
+            if limit {
+                assert!(
+                    matches!(
+                        e,
+                        Some(StoreError::RedactionLimit {
+                            limit: "16777216 bytes per record"
+                        })
+                    ),
+                    "{e:?}"
+                );
+                assert_eq!(
+                    e.unwrap().to_string(),
+                    "The redaction exceeds 16777216 bytes per record."
+                );
+            } else {
+                assert!(
+                    matches!(e, Some(StoreError::RedactionCorrupt { .. })),
+                    "{e:?}"
+                );
+            }
+            assert_eq!(s.log_end(), end, "{extra}: nothing was written");
+            assert_eq!(s.redaction_epoch(), 0);
+            assert_eq!(s.get_block(&setup.a.version_hash()).unwrap(), setup.a);
+        }
+        assert_eq!(segment_bytes(&sp.prep), before, "{extra}");
+        let s = Store::open(&sp.prep).unwrap();
+        assert_eq!(
+            s.redaction_of(BLOCK, &setup.a.version_hash()).unwrap(),
+            None
+        );
+        assert_eq!(s.get_block(&setup.a.version_hash()).unwrap(), setup.a);
+    }
+}
+
+/// Fix round 1, finding 3 (ruling task-4): the open verifies the tail it replays; reads and fsck
+/// catch the rest. An all-zero payload in a sealed segment that no redaction authorizes: the
+/// open succeeds, a read of it is `RedactionCorrupt`, and fsck names it the same way. A payload
+/// that is damaged but not all zero keeps the generic corruption error.
+#[test]
+fn rdx4_an_unknown_hole_in_a_sealed_segment_is_corruption_at_read_and_fsck() {
+    let setup = Setup::new();
+    roll(&setup.path);
+    let (a_at, a_len) = frame_of(&setup.path, 0, BLOCK, setup.a.version_hash());
+    fill_payload(&setup.path, a_at, a_len, 0);
+    let s = Store::open(&setup.path).unwrap();
+    let corrupt_at_a = |e: &StoreError| {
+        matches!(e, StoreError::RedactionCorrupt { segment, offset }
+            if *segment == a_at.segment && *offset == a_at.offset)
+    };
+    let e = s.get_block(&setup.a.version_hash()).unwrap_err();
+    assert!(corrupt_at_a(&e), "{e:?}");
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "The redaction record does not authorize the missing payload at 0:{}.",
+            a_at.offset
+        )
+    );
+    let e = s.get_raw(&setup.a.version_hash()).unwrap_err();
+    assert!(corrupt_at_a(&e), "{e:?}");
+    let e = s.verify_report().unwrap_err();
+    assert!(corrupt_at_a(&e), "fsck: {e:?}");
+    assert_eq!(s.get_block(&setup.b.version_hash()).unwrap(), setup.b);
+    drop(s);
+
+    // a damaged payload that is not all zero keeps today's error
+    let setup = Setup::new();
+    roll(&setup.path);
+    let (b_at, b_len) = frame_of(&setup.path, 0, BLOCK, setup.b.version_hash());
+    fill_payload(&setup.path, b_at, b_len, 7);
+    let s = Store::open(&setup.path).unwrap();
+    let e = s.get_block(&setup.b.version_hash()).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData)
+            && e.to_string().contains("corrupt or missing frame"),
+        "{e:?}"
+    );
+}
+
+/// Fix round 1, finding 3: the catch-up path. An unknown all-zero hole that the catch-up replays
+/// refuses the open with `RedactionCorrupt` at it.
+#[test]
+fn rdx4_an_unknown_hole_the_catch_up_replays_is_corruption() {
+    let setup = Setup::new();
+    roll(&setup.path);
+    let (a_at, a_len) = frame_of(&setup.path, 0, BLOCK, setup.a.version_hash());
+    fill_payload(&setup.path, a_at, a_len, 0);
+    std::fs::remove_file(setup.path.join("index.redb")).unwrap();
+    let e = Store::open(&setup.path).err();
+    assert!(
+        matches!(
+            e,
+            Some(StoreError::RedactionCorrupt { segment, offset })
+                if segment == a_at.segment && offset == a_at.offset
+        ),
+        "{e:?}"
+    );
+}
+
+/// Fix round 1, finding 3: an authorized span in a sealed segment reads as the stub, and fsck
+/// counts it as removed.
+#[test]
+fn rdx4_an_authorized_span_in_a_sealed_segment_reads_as_the_stub() {
+    let setup = Setup::new();
+    let f = setup.apply(&FixtureOptions::approved(Proof::local_human()));
+    drop(Store::open(&setup.path).unwrap());
+    roll(&setup.path);
+    let s = Store::open(&setup.path).unwrap();
+    assert!(s.log_end().segment >= 1);
+    assert_removed(&s, &setup, &f);
+    let r = s.verify_report().unwrap();
+    assert_eq!(r.redaction.unwrap().frames, spans_of(&f).len() as u64);
 }

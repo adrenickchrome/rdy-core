@@ -3,8 +3,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// An I/O failure. `From<io::Error>` turns a missing payload a read path carried inside an
+    /// `io::Error` (`segment::UnauthorizedHole`) into `RedactionCorrupt` instead.
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] std::io::Error),
     #[error("index error: {0}")]
     Db(String),
     #[error("cannot decode object: {0}")]
@@ -98,6 +100,18 @@ pub enum StoreError {
     /// A read projection (a stub or a residual change) offered to a writer (E_BAD_INPUT).
     #[error("A read projection cannot be written.")]
     ProjectedWrite,
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> StoreError {
+        if let Some(crate::segment::UnauthorizedHole(at)) = e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<crate::segment::UnauthorizedHole>())
+        {
+            return StoreError::corrupt_at(*at);
+        }
+        StoreError::Io(e)
+    }
 }
 
 impl StoreError {

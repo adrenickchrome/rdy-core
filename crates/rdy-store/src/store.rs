@@ -509,7 +509,11 @@ fn replay_into(
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
         }
-        // a removed payload's entries come from its residue: the validated stream
+        // the redaction rows come from the validated stream only: an apply the bootstrap did not
+        // validate is never a row, and a removed payload's entries come from its residue
+        if v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc) {
+            return Err(StoreError::corrupt_at(loc));
+        }
         entries.extend(match v.payload {
             Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload)?,
             None => auth.entries_for_hole(v.kind, v.hash, loc)?,
@@ -738,8 +742,7 @@ impl Store {
         }
         // the index's redaction rows must be the ones the log's validated records give: a
         // forged or forgotten row is rebuilt from the log, never trusted
-        if !store.redaction_index_matches(upto)? {
-            store.reindex()?;
+        if store.ensure_redaction_index(upto)? {
             store.report.index_rebuilt = true;
         }
         let caught_up = store.catch_up()?;
@@ -2467,6 +2470,59 @@ impl Store {
         Ok(want.redaction_rows()? == have)
     }
 
+    /// Makes the index's redaction rows the ones the log's validated records before `upto` give:
+    /// on any difference the index is rebuilt from the log and checked again. Returns whether it
+    /// was rebuilt. A difference that remains after the rebuild is corruption
+    /// (`RedactionCorrupt` at the redaction record the authorization does not hold), never a
+    /// silent rebuild at every open.
+    fn ensure_redaction_index(&mut self, upto: Location) -> Result<bool, StoreError> {
+        if self.redaction_index_matches(upto)? {
+            return Ok(false);
+        }
+        self.reindex()?;
+        let upto = self.index().indexed_upto()?;
+        if !self.redaction_index_matches(upto)? {
+            return Err(self.unexplained_redaction_rows());
+        }
+        Ok(true)
+    }
+
+    /// The refusal of redaction rows a rebuilt index still holds and the log's authorization
+    /// does not give: `RedactionCorrupt` at the first redaction request or apply frame of the log
+    /// that the authorization does not hold (else at its first record, or the log's start).
+    fn unexplained_redaction_rows(&self) -> StoreError {
+        let auth = Arc::clone(self.log.authorization());
+        let walked = self.log.for_each_view(ORIGIN, |loc, v, _| {
+            let held = match v.kind {
+                kinds::REDACTION => auth
+                    .requests
+                    .binary_search_by_key(&loc, |(l, _)| *l)
+                    .is_ok(),
+                kinds::REDACTION_APPLY => auth.holds_apply(loc),
+                _ => true,
+            };
+            if held {
+                Ok(())
+            } else {
+                Err(StoreError::corrupt_at(loc))
+            }
+        });
+        match walked {
+            Err(e) => e,
+            Ok(()) => {
+                let first = auth
+                    .requests
+                    .first()
+                    .map(|(l, _)| *l)
+                    .into_iter()
+                    .chain(auth.applies.first().map(|a| a.loc))
+                    .min()
+                    .unwrap_or(ORIGIN);
+                StoreError::corrupt_at(first)
+            }
+        }
+    }
+
     /// Finishes the removal an open found authorized, before the open returns. A failure is
     /// `RedactionPending` (the open is refused; the next one retries), except a proof the open
     /// finds broken, which stays `RedactionCorrupt`.
@@ -2580,6 +2636,7 @@ impl Store {
                 "a redaction apply batch holds at least one REDACTION_APPLY".into(),
             ));
         }
+        crate::redaction_io::refuse_oversized_records(&items)?;
         self.refuse_removed(&items)?;
         let (_, batch) = self.dedupe(items)?;
         let start = self.log.batch_start(&batch);
@@ -2659,6 +2716,7 @@ impl Store {
             Ok::<(), StoreError>(())
         })?;
         batch.extend(last.iter().cloned());
+        crate::redaction_io::refuse_oversized_records(&batch)?;
         let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;
         let epoch = self
             .shared
@@ -2761,6 +2819,24 @@ impl Store {
         };
         self.index()
             .forge_active_span_for_tests(&span, &apply, &request)
+    }
+
+    /// Test hook: makes the log's validated redaction authorization forget the log's requests
+    /// and applies; the authorized holes and their residues stay.
+    #[doc(hidden)]
+    pub fn forget_redaction_authorization_for_tests(&mut self) {
+        let mut auth = (**self.log.authorization()).clone();
+        auth.applies.clear();
+        auth.requests.clear();
+        self.log.set_authorization(Arc::new(auth));
+    }
+
+    /// Test hook: the open's check of the index's redaction rows against the log's validated
+    /// authorization, from the index's `indexed_upto`.
+    #[doc(hidden)]
+    pub fn check_redaction_index_for_tests(&mut self) -> Result<(), StoreError> {
+        let upto = self.index().indexed_upto()?;
+        self.ensure_redaction_index(upto).map(|_| ())
     }
 
     /// Test hook: empties the index's applied, active and span tables (an index that forgot the

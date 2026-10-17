@@ -20,9 +20,9 @@
 use crate::error::StoreError;
 use crate::index::IndexEntry;
 use crate::kinds::{self, BlobManifest};
-use crate::redaction::is_removable;
+use crate::redaction::{is_redaction_kind, is_removable};
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
-use crate::store::decode;
+use crate::store::{decode, encode};
 use rdy_model::redaction::{
     MAX_RECORD_BYTES, Redaction, RedactionApply, RedactionResidue, ResidualOp, record_buffer,
 };
@@ -109,21 +109,35 @@ pub enum FailAction {
 }
 
 thread_local! {
-    static ARMED: Cell<Option<(Failpoint, FailAction)>> = const { Cell::new(None) };
+    /// The armed failpoint, what it does, and at which of its hits (1 is the next one).
+    static ARMED: Cell<Option<(Failpoint, FailAction, u32)>> = const { Cell::new(None) };
 }
 
-/// Test hook: arms `p` for this thread (or disarms with None). An open or a write on this thread
-/// reaches it.
+/// Test hook: arms `p` for this thread (or disarms with None), to act at its next hit. An open
+/// or a write on this thread reaches it.
 #[doc(hidden)]
 pub fn arm_failpoint(p: Option<(Failpoint, FailAction)>) {
-    ARMED.with(|a| a.set(p));
+    ARMED.with(|a| a.set(p.map(|(p, action)| (p, action, 1))));
 }
 
-/// Reaches failpoint `p`: an injected error or an abort when it is armed, else nothing.
+/// Test hook: arms `p` for this thread to act at its `nth` hit (1 is the next one); the hits
+/// before it pass. `AfterZeroWrite` is hit once per zero buffer, so this fails or kills an
+/// erasure inside a payload longer than one buffer.
+#[doc(hidden)]
+pub fn arm_failpoint_nth(p: Failpoint, action: FailAction, nth: u32) {
+    ARMED.with(|a| a.set(Some((p, action, nth.max(1)))));
+}
+
+/// Reaches failpoint `p`: an injected error or an abort when it is armed for this hit, else
+/// nothing.
 pub(crate) fn hit(p: Failpoint) -> io::Result<()> {
     match ARMED.with(|a| a.get()) {
-        Some((armed, FailAction::Abort)) if armed == p => std::process::abort(),
-        Some((armed, FailAction::Fail)) if armed == p => {
+        Some((armed, action, n)) if armed == p && n > 1 => {
+            ARMED.with(|a| a.set(Some((armed, action, n - 1))));
+            Ok(())
+        }
+        Some((armed, FailAction::Abort, _)) if armed == p => std::process::abort(),
+        Some((armed, FailAction::Fail, _)) if armed == p => {
             ARMED.with(|a| a.set(None));
             Err(io::Error::other(format!(
                 "injected failure at redaction failpoint {}",
@@ -152,7 +166,7 @@ pub(crate) struct Applied {
 }
 
 /// What a log's validated redaction applies authorize, derived from the log alone.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Authorization {
     /// Every authorized span, by frame location: the holes of the log.
     pub(crate) holes: Holes,
@@ -169,6 +183,11 @@ impl Authorization {
     /// Whether an active redaction exists: a validated apply.
     pub(crate) fn is_active(&self) -> bool {
         !self.applies.is_empty()
+    }
+
+    /// Whether the apply frame at `loc` is one of the validated applies (kept in log order).
+    pub(crate) fn holds_apply(&self, loc: Location) -> bool {
+        self.applies.binary_search_by_key(&loc, |a| a.loc).is_ok()
     }
 
     /// The objects, frames and bytes of the authorized spans (`checked_payloads` zero).
@@ -315,14 +334,15 @@ impl Collected {
     }
 
     /// Notes one data frame of the current batch: its kind decides what is kept. An apply's
-    /// payload is given (already hash-checked).
+    /// payload is given when it is hash-checked; an apply noted without one (over the record
+    /// bound, or not matching its hash) is a broken record.
     fn note(&self, p: &mut Pending, loc: Location, kind: u8, hash: Hash, apply: Option<&[u8]>) {
         p.since.push((loc.offset, hash));
         match kind {
             kinds::REDACTION_APPLY => p.applies.push(ApplyFrame {
                 loc,
                 hash,
-                record: apply.and_then(|b| decode::<RedactionApply>(b).ok()),
+                record: apply.and_then(apply_record),
                 batch: self.batches,
                 landings: p.landings.clone(),
             }),
@@ -372,6 +392,32 @@ impl<'f> Window<'f> {
     }
 }
 
+/// The one structural check of an apply payload, shared by the open and the live writer: at most
+/// `MAX_RECORD_BYTES` bytes, and exactly the canonical encoding of the record it decodes to
+/// (postcard ignores trailing bytes, so a decode alone accepts a padded payload). None: no apply
+/// record.
+fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
+    if payload.len() > MAX_RECORD_BYTES {
+        return None;
+    }
+    let record = decode::<RedactionApply>(payload).ok()?;
+    (encode(&record) == payload).then_some(record)
+}
+
+/// Refuses, before anything is written, a redaction record among `items` over the record bound
+/// (`E_REDACTION_LIMIT`, `16777216 bytes per record`).
+pub(crate) fn refuse_oversized_records(items: &[(u8, Vec<u8>)]) -> Result<(), StoreError> {
+    if items
+        .iter()
+        .any(|(kind, payload)| is_redaction_kind(*kind) && payload.len() > MAX_RECORD_BYTES)
+    {
+        return Err(StoreError::RedactionLimit {
+            limit: crate::redaction::limit::RECORD,
+        });
+    }
+    Ok(())
+}
+
 /// Reads `len` payload bytes at `at` into a fallibly allocated buffer.
 fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
     let mut buf = Vec::new();
@@ -389,12 +435,20 @@ fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
 /// The header pass over every segment: frame headers with checked lengths and the batch markers.
 /// Only apply payloads and markers are read and hashed; the other records are noted by place and
 /// read when an apply needs them. A batch counts once its marker matches it (by the header
-/// hashes); a segment's walk stops at a torn header, a bad marker or a damaged apply payload, as
-/// the marker rule's scan stops.
+/// hashes).
+///
+/// It reads what the marker rule's scan reads, so the two passes never disagree on a batch:
+/// - a marker of any length counts when it matches its hash and its batch (as the scan has it);
+/// - an apply over `MAX_RECORD_BYTES`, or one that does not match its hash, is noted as a broken
+///   apply (never read past the bound), which refuses the open if the acknowledged log holds it;
+/// - a torn header or a marker that does not match ends the walk of the last segment, where the
+///   scan stops too. In a sealed segment (one a later segment follows) it is damage and refuses
+///   the open (`segment::sealed_damage`): the frames behind it could not be validated.
 fn collect(readers: &[File]) -> Result<Collected, StoreError> {
     let mut c = Collected::default();
-    for (seg, f) in readers.iter().enumerate() {
-        let seg = seg as u32;
+    let last = readers.len().saturating_sub(1);
+    for (i, f) in readers.iter().enumerate() {
+        let seg = i as u32;
         let file_len = f.metadata()?.len();
         let mut w = Window::new(f, file_len);
         let mut p = Pending::default();
@@ -415,31 +469,32 @@ fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                 offset,
             };
             if kind == kinds::BATCH_COMMIT {
-                if u64::from(len) > segment::MARKER_MAX {
-                    break;
-                }
-                let payload = w.get(payload_start, len as usize)?.to_vec();
-                if Hash::of(&payload) != hash || !segment::marker_matches(seg, &p.since, &payload) {
-                    break;
-                }
-                c.seal(std::mem::take(&mut p));
-            } else if kind == kinds::REDACTION_APPLY {
-                if len as usize > MAX_RECORD_BYTES {
-                    break;
-                }
                 let payload = if len as usize <= ERASE_BUFFER {
                     w.get(payload_start, len as usize)?.to_vec()
                 } else {
                     read_payload(f, payload_start, len)?
                 };
-                if Hash::of(&payload) != hash {
+                if Hash::of(&payload) != hash || !segment::marker_matches(seg, &p.since, &payload) {
                     break;
                 }
-                c.note(&mut p, loc, kind, hash, Some(&payload));
+                c.seal(std::mem::take(&mut p));
+            } else if kind == kinds::REDACTION_APPLY {
+                let payload = if len as usize > MAX_RECORD_BYTES {
+                    None
+                } else if len as usize <= ERASE_BUFFER {
+                    Some(w.get(payload_start, len as usize)?.to_vec())
+                } else {
+                    Some(read_payload(f, payload_start, len)?)
+                };
+                let checked = payload.filter(|b| Hash::of(b) == hash);
+                c.note(&mut p, loc, kind, hash, checked.as_deref());
             } else {
                 c.note(&mut p, loc, kind, hash, None);
             }
             offset = end;
+        }
+        if i < last && offset < file_len {
+            return Err(segment::sealed_damage(f, seg, offset, file_len));
         }
     }
     Ok(c)

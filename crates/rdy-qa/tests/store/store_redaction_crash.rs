@@ -9,7 +9,7 @@ use rdy_model::redaction::{CONTENT_REMOVED, DropSpan, RedactTarget};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, Hash, Op, Provenance, Role};
 use rdy_store::Store;
 use rdy_store::kinds::{BATCH_COMMIT, BLOCK};
-use rdy_store::redaction_io::{FailAction, Failpoint, arm_failpoint};
+use rdy_store::redaction_io::{FailAction, Failpoint, arm_failpoint_nth};
 use redaction_fixture::{
     FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, segment_bytes,
 };
@@ -150,7 +150,8 @@ fn store_redaction_crash_child() {
     };
     let point = Failpoint::parse(&std::env::var("RDX4_POINT").unwrap()).expect("a failpoint");
     let items = std::env::var("RDX4_ITEMS").ok();
-    arm_failpoint(Some((point, FailAction::Abort)));
+    let nth = std::env::var("RDX4_NTH").map_or(1, |n| n.parse().unwrap());
+    arm_failpoint_nth(point, FailAction::Abort, nth);
     let path = PathBuf::from(dir);
     match items {
         // the open finishes the authorized batch the fixture wrote
@@ -167,8 +168,8 @@ fn store_redaction_crash_child() {
     out.flush().unwrap();
 }
 
-/// Runs the child on `path`; panics unless the failpoint killed it.
-fn kill_at(path: &Path, point: Failpoint, items: Option<&Path>) {
+/// Runs the child on `path`; panics unless the failpoint killed it (at its `nth` hit).
+fn kill_at(path: &Path, point: Failpoint, items: Option<&Path>, nth: u32) {
     let mut cmd = Command::new(std::env::current_exe().unwrap());
     cmd.args([
         &rdy_qa::test_name!("store_redaction_crash_child"),
@@ -180,6 +181,7 @@ fn kill_at(path: &Path, point: Failpoint, items: Option<&Path>) {
     ])
     .env("RDX4_DIR", path)
     .env("RDX4_POINT", point.name())
+    .env("RDX4_NTH", nth.to_string())
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
     if let Some(i) = items {
@@ -243,7 +245,7 @@ fn rdx4_kills_complete_the_authorized_erase() {
         );
         let spans = f.requests[0].draft.request.manifest.spans.clone();
         let full = segment_bytes(&path);
-        kill_at(&path, point, None);
+        kill_at(&path, point, None, 1);
         assert_finished(
             &path,
             f.landing,
@@ -282,7 +284,7 @@ fn rdx4_kills_complete_the_authorized_erase() {
             encode_items(&items_from(&full[&name], start.offset)),
         )
         .unwrap();
-        kill_at(&prep, point, Some(&items_file));
+        kill_at(&prep, point, Some(&items_file), 1);
         assert_finished(
             &prep,
             f.landing,
@@ -292,4 +294,57 @@ fn rdx4_kills_complete_the_authorized_erase() {
             point,
         );
     }
+
+    // a kill inside the 1 MiB chunk's payload: the chunk is partly zero, and the reopen zeroes
+    // the rest
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    content(&path);
+    let f = authorized_batch_fixture(
+        &path,
+        &[spec(&path)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let spans = f.requests[0].draft.request.manifest.spans.clone();
+    let full = segment_bytes(&path);
+    let mut sorted = spans.clone();
+    sorted.sort_by_key(|s| (s.place.segment, s.place.offset));
+    let big = sorted
+        .iter()
+        .position(|s| u64::from(s.len) > 3 * BUFFER)
+        .expect("a span longer than three buffers");
+    let nth = sorted[..big]
+        .iter()
+        .map(|s| u64::from(s.len).div_ceil(BUFFER) as u32)
+        .sum::<u32>()
+        + 3;
+    kill_at(&path, Failpoint::AfterZeroWrite, None, nth);
+    let chunk = &sorted[big];
+    let name = format!("seg-{:06}.log", chunk.place.segment);
+    let start = chunk.place.offset as usize + HEADER;
+    let cut = 3 * BUFFER as usize;
+    let mut want = zeroed(&full, &sorted[..big]);
+    want.get_mut(&name).unwrap()[start..start + cut].fill(0);
+    let now = segment_bytes(&path);
+    assert_eq!(
+        now, want,
+        "killed three buffers into the chunk: only the earlier spans and those buffers are zero"
+    );
+    assert!(
+        now[&name][start + cut..start + chunk.len as usize]
+            .iter()
+            .any(|b| *b != 0),
+        "the chunk is partly zero"
+    );
+    assert_finished(
+        &path,
+        f.landing,
+        f.requests[0].request,
+        &full,
+        &spans,
+        Failpoint::AfterZeroWrite,
+    );
 }
+
+/// The erase buffer: one zero write covers at most this many bytes.
+const BUFFER: u64 = 65_536;

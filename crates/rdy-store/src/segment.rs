@@ -319,6 +319,50 @@ fn corrupt_frame(loc: Location) -> io::Error {
     )
 }
 
+/// A whole frame whose payload is all zero at a location no redaction authorizes: a missing
+/// payload (E_REDACTION_CORRUPT). The read paths return `io::Error`s, so they carry it inside
+/// one (`refuse_frame`), with the exact `E_REDACTION_CORRUPT` text; `StoreError::from` turns it
+/// back into `StoreError::RedactionCorrupt` at that location.
+#[derive(Debug)]
+pub(crate) struct UnauthorizedHole(pub(crate) Location);
+
+impl std::fmt::Display for UnauthorizedHole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        StoreError::corrupt_at(self.0).fmt(f)
+    }
+}
+
+impl std::error::Error for UnauthorizedHole {}
+
+/// The refusal of a read of the frame at `loc` (file `f`, `file_len` bytes) that does not fit its
+/// file or match its hash: an all-zero payload (a hole no redaction authorizes; the caller read
+/// the authorized holes as holes) is `UnauthorizedHole`; any other damage is `otherwise`.
+fn refuse_frame(f: &File, loc: Location, file_len: u64, otherwise: io::Error) -> io::Error {
+    if zero_frame_at(f, loc.offset, file_len).unwrap_or(false) {
+        return io::Error::new(io::ErrorKind::InvalidData, UnauthorizedHole(loc));
+    }
+    otherwise
+}
+
+/// The refusal of damage the redaction bootstrap met at `offset` of sealed segment `seg` (a torn
+/// frame header, or a batch marker that does not match its batch): the frames behind it cannot
+/// be validated, so the open stops. A whole frame there with an all-zero payload is
+/// `RedactionCorrupt`, as any unauthorized hole is; other damage is an I/O refusal.
+pub(crate) fn sealed_damage(f: &File, seg: u32, offset: u64, file_len: u64) -> StoreError {
+    if zero_frame_at(f, offset, file_len).unwrap_or(false) {
+        return StoreError::RedactionCorrupt {
+            segment: seg,
+            offset,
+        };
+    }
+    StoreError::Io(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "corruption at offset {offset} in segment {seg} damages acknowledged data: a later segment was started, but a frame header or batch marker there is broken; restore the segment from backup, then reopen"
+        ),
+    ))
+}
+
 impl SegmentReader {
     /// A reader of the segments in `dir`. It opens nothing yet.
     pub fn open(dir: &Path) -> SegmentReader {
@@ -417,7 +461,7 @@ impl SegmentReader {
                     offset,
                 };
                 let frame = read_frame_or_hole(&file, loc, file_len, holes)?
-                    .ok_or_else(|| corrupt_frame(loc))?;
+                    .ok_or_else(|| refuse_frame(&file, loc, file_len, corrupt_frame(loc)))?;
                 let next = offset + HEADER + frame.payload_len();
                 if next > end {
                     return Err(corrupt_frame(loc).into());
@@ -457,8 +501,8 @@ impl SegmentReader {
 /// `SegmentLog::read_hashed` has it.
 fn read_frame_at(f: &File, loc: Location) -> io::Result<(u8, Hash, Vec<u8>, u64)> {
     let file_len = f.metadata()?.len();
-    let (kind, hash, payload) =
-        read_frame(f, loc.offset, file_len)?.ok_or_else(|| corrupt_frame(loc))?;
+    let (kind, hash, payload) = read_frame(f, loc.offset, file_len)?
+        .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))?;
     let next = loc.offset + HEADER + payload.len() as u64;
     Ok((kind, hash, payload, next))
 }
@@ -1292,7 +1336,8 @@ impl SegmentLog {
             .get(loc.segment as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
         let file_len = f.metadata()?.len();
-        read_frame(f, loc.offset, file_len)?.ok_or_else(|| corrupt_frame(loc))
+        read_frame(f, loc.offset, file_len)?
+            .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))
     }
 
     pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
@@ -1405,9 +1450,18 @@ impl SegmentLog {
                 f(loc, view, next)?;
             }
             if offset < file_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                return Err(refuse_frame(
+                    file,
+                    loc,
+                    file_len,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt frame in segment {seg} at offset {offset}"),
+                    ),
                 )
                 .into());
             }
@@ -1467,9 +1521,18 @@ impl SegmentLog {
                 offset = end;
             }
             if offset < file_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                return Err(refuse_frame(
+                    f,
+                    loc,
+                    file_len,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt frame in segment {seg} at offset {offset}"),
+                    ),
                 ));
             }
             if seg < self.current() && (file_len == 0 || !since.is_empty()) {
