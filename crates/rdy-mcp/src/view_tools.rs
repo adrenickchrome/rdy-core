@@ -1,4 +1,5 @@
-//! mview1: `rdy_view` (create, fork, include, exclude, compare, list, show, close, undo), the
+//! mview1: `rdy_view` (create, fork, include, exclude, compare, list, show, close, own, resolve,
+//! undo), the
 //! views paragraph of `rdy_schema`, and `rdy_log`. The request itself is run by
 //! `rdy_engine::view_api::run_view`, the dispatcher the daemon's `view` op shares.
 use crate::tools::{McpState, budget, check_tokens, session};
@@ -11,7 +12,7 @@ use serde_json::Value;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewParams {
-    /// create, fork, include, exclude, compare, list, show, close, own, undo. own and close with stale are a person's acts: relay their words with evidence.
+    /// create, fork, include, exclude, compare, list, show, close, own, resolve, undo. own and close with stale are a person's acts: relay their words with evidence.
     pub op: String,
     /// create and fork: the new view's name; close, own and show: the view.
     pub name: Option<String>,
@@ -21,7 +22,7 @@ pub struct ViewParams {
     pub base: Option<String>,
     /// create: pin the view to its base, so landings do not rebase it (default false).
     pub pin: Option<bool>,
-    /// include, exclude, undo, show: the view to act on (default: your own). You need to own it for include, exclude, close and undo.
+    /// include, exclude, resolve, undo, show: the view to act on (default: your own). You need to own it for include, exclude, resolve, close and undo.
     pub view: Option<String>,
     /// close: several views at once.
     pub views: Option<Vec<String>>,
@@ -45,6 +46,10 @@ pub struct ViewParams {
     pub none: Option<bool>,
     /// undo: the op to undo (default: your newest undoable op on the view).
     pub target: Option<String>,
+    /// resolve: the block whose conflict to resolve (id, key or path).
+    pub block: Option<String>,
+    /// resolve: true takes the landed side of a conflict on an accepted or rejected decision: the view then reads canon's frozen version (required).
+    pub landed: Option<bool>,
     /// own and close with stale: the person's words, quoted. Without them an agent session is refused (E_PERMISSION).
     pub evidence: Option<String>,
     /// own and close with stale: the question the person answered.
@@ -66,7 +71,7 @@ pub struct LogParams {
 }
 
 /// `rdy_schema`'s paragraph on views.
-pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {view, owner?, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}; own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want; rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
+pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {view, owner?, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}, resolve {block, landed: true, view?} (takes the landed side of a conflict on an accepted or rejected decision: the view reads canon's frozen version, and the change depends on every side); own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want (on an accepted or rejected decision, an edit is E_FROZEN: take the landed side with resolve); rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
 
 /// `rdy_view`: builds the request field by field and runs it for the session.
 pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
@@ -92,6 +97,8 @@ pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
         owner: p.owner,
         none: p.none,
         target: p.target,
+        block: p.block,
+        landed: p.landed,
         max_tokens: p.max_tokens,
         evidence: p.evidence,
         question: p.question,

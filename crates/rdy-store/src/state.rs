@@ -83,10 +83,13 @@ fn check_base(
 }
 
 /// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
-/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes.
+/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, and
+/// so does one that leaves the block as it is (cf1: the landed side of a conflict, taken).
 fn frozen_for(store: &StoreReader, base: &Block, new: Option<&Block>) -> bool {
     decision::is_frozen(base)
-        && !new.is_some_and(|n| decision::only_tracking_changed(base, n, store.tracking()))
+        && !new.is_some_and(|n| {
+            n == base || decision::only_tracking_changed(base, n, store.tracking())
+        })
 }
 
 impl StoreReader {
@@ -569,12 +572,16 @@ impl Store {
                         });
                     }
                     // the base is one of these: a frozen version anywhere in the conflict means
-                    // the write would change or drop an accepted or rejected decision
+                    // the write would change or drop an accepted or rejected decision, unless it
+                    // takes a side's version unchanged (cf1, D-X4GMH: the engine lets only the
+                    // landed side be taken that way, `rdy view resolve --landed`)
+                    let takes_side = matches!(op, Op::Update { block, .. } if block.version_hash() == *base)
+                        && c.sides.iter().any(|s| s.version == Some(*base));
                     let versions = c
                         .base
                         .iter()
                         .chain(c.sides.iter().filter_map(|s| s.version.as_ref()));
-                    for v in versions {
+                    for v in versions.filter(|_| !takes_side) {
                         if decision::is_frozen(&self.get_block(v)?) {
                             return Err(StoreError::Frozen(id.clone()));
                         }

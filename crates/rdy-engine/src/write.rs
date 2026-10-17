@@ -942,6 +942,7 @@ fn drop_rekey_op(
 /// The conflicts of the view a write goes to, and the changes it includes: an `E_FROZEN` hint
 /// names a side's change only when the view includes it (msw1).
 pub(crate) struct ViewConflicts<'a> {
+    pub view: &'a str,
     pub list: &'a [Conflict],
     pub included: &'a [Hash],
 }
@@ -976,7 +977,7 @@ fn current_for_edit<'b>(
         ));
     }
     if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
-        let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts.included)?;
+        let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts)?;
         check_not_frozen(id, &cur)?;
         return Ok((b, cur));
     }
@@ -1014,11 +1015,11 @@ fn conflicted_for_edit<'b>(
     base: &Option<String>,
     c: &Conflict,
     store: &rdy_store::Store,
-    included: &[Hash],
+    conflicts: &ViewConflicts<'_>,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     let cid = c.id.short();
     let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
-    frozen_in_conflict(id, c, store, included)?;
+    frozen_in_conflict(conflicts.view, id, c, store, conflicts.included)?;
     let Some(b) = parse_base(base)? else {
         let side_list = sides
             .iter()
@@ -1060,13 +1061,16 @@ fn conflicted_for_edit<'b>(
 }
 
 /// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
-/// from any version: the edit would change or drop an accepted or rejected decision. The way out
-/// is to drop a side's change from the view or to supersede the decision. msw1 (#1165): the hint
-/// names only the sides' changes the view can exclude, the ones it includes (`included`), frozen
-/// or not. A landed change is in a view only when the view is pinned (a pinned view is never
-/// rebased), and then it can be excluded too. The check reads the blocks first and the landings
-/// only when something is frozen, so a plain conflict never reads the landed index.
-fn frozen_in_conflict(
+/// from any version: the edit would change or drop an accepted or rejected decision. The ways out
+/// are, first, to take the landed side when the conflict has one (cf1, D-X4GMH: `rdy view
+/// resolve <view> <id> --landed`, `landed_side`), then to drop a side's change from the view or
+/// to supersede the decision. msw1 (#1165): the hint names only the sides' changes the view can
+/// exclude, the ones it includes (`included`), frozen or not. A landed change is in a view only
+/// when the view is pinned (a pinned view is never rebased), and then it can be excluded too.
+/// The check reads the blocks first and the landings only when something is frozen, so a plain
+/// conflict never reads the landed index.
+pub(crate) fn frozen_in_conflict(
+    view: &str,
     id: &BlockId,
     c: &Conflict,
     store: &rdy_store::Store,
@@ -1115,7 +1119,7 @@ fn frozen_in_conflict(
         }
     }
     let supersede = format!("write a new decision that supersedes or revokes {id}");
-    let fix = match excludable.as_slice() {
+    let others = match excludable.as_slice() {
         [] => supersede,
         [one] => {
             format!("exclude the change {one} from the view (rdy view exclude), or {supersede}")
@@ -1125,6 +1129,12 @@ fn frozen_in_conflict(
             many.join(", ")
         ),
     };
+    let fix = match landed_side(c, store)? {
+        Some(_) => {
+            format!("take the landed side (rdy view resolve {view} {id} --landed), or {others}")
+        }
+        None => others,
+    };
     Err(RdyError::new(
         E_FROZEN,
         format!(
@@ -1132,6 +1142,51 @@ fn frozen_in_conflict(
         ),
         fix,
     ))
+}
+
+/// Whether any version in conflict `c`, its base or a side, is a frozen decision.
+pub(crate) fn conflict_has_frozen(
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<bool, RdyError> {
+    for v in c
+        .base
+        .iter()
+        .chain(c.sides.iter().filter_map(|s| s.version.as_ref()))
+    {
+        if decision::is_frozen(&store.get_block(v)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// cf1 (D-X4GMH): the landed side of conflict `c`, the version a landing froze: the one version
+/// held by the sides that are frozen decisions and in canon, each written by a landed change or
+/// coming from canon's snapshot (no change). None when no side is, or when such sides disagree.
+pub(crate) fn landed_side(
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<Option<Hash>, RdyError> {
+    let mut found: Option<Hash> = None;
+    for s in &c.sides {
+        let Some(v) = s.version else { continue };
+        if !decision::is_frozen(&store.get_block(&v)?) {
+            continue;
+        }
+        let landed = match s.change {
+            Some(ch) => store.landing_of(&ch)?.is_some(),
+            None => true,
+        };
+        if !landed {
+            continue;
+        }
+        match found {
+            Some(f) if f != v => return Ok(None),
+            _ => found = Some(v),
+        }
+    }
+    Ok(found)
 }
 
 /// The refusal of a tracking edit with no editorial reason (`rdy edit` gives its own fix).
@@ -2641,6 +2696,7 @@ impl Rdy {
             session,
             req.ops,
             &ViewConflicts {
+                view: &req.view,
                 list: &conflicts,
                 included: &included,
             },

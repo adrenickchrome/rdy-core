@@ -110,7 +110,7 @@ pub use version::{
 pub use view_query::{
     ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, ViewDetail, ViewSummary,
 };
-pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
+pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ResolveResult, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{
     LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult, editorial_class,

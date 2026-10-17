@@ -361,3 +361,39 @@ fn logj1_rdy_log_lists_landings_with_their_approval_fields() {
         top["relayed_by"].is_null() && top["evidence"].is_null() && top["relay_evidence"].is_null()
     );
 }
+
+/// cf1 (D-X4GMH): rdy_view resolve takes the landed side of a frozen conflict; the view then
+/// reads canon's frozen version. A block with no conflict is refused; `landed` is required.
+#[test]
+fn cf1_rdy_view_resolve_takes_the_landed_side_of_a_frozen_conflict() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let (d, section) = frozen_conflict(&mut r);
+    r.close().unwrap();
+    let mut b = McpClient::start_proxy(&s);
+    session(&mut b, "agent:b", "r1");
+    let e = b.call(
+        "rdy_view",
+        json!({"op": "resolve", "view": "b", "block": d}),
+    );
+    assert_eq!(e.code(), Some("E_BAD_INPUT"), "landed is required: {e:?}");
+    let e = b.call(
+        "rdy_view",
+        json!({"op": "resolve", "view": "b", "block": section, "landed": true}),
+    );
+    assert_eq!(e.code(), Some("E_BAD_INPUT"), "{e:?}");
+    let v = b
+        .call(
+            "rdy_view",
+            json!({"op": "resolve", "view": "b", "block": d, "landed": true}),
+        )
+        .ok();
+    assert_eq!(v["view"], "b", "{v}");
+    assert_eq!(v["block"], d.as_str(), "{v}");
+    assert!(
+        v["change"].is_string() && v["deps"].as_array().is_some_and(|a| a.len() >= 2),
+        "{v}"
+    );
+    let show = b.call("rdy_view", json!({"op": "show", "view": "b"})).ok();
+    assert_eq!(show["conflicts"], json!([]), "{show}");
+}

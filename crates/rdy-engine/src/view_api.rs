@@ -30,6 +30,10 @@ pub struct ViewRequest {
     pub owner: Option<String>,
     pub none: Option<bool>,
     pub target: Option<String>,
+    /// resolve: the conflicted block (id, key or path).
+    pub block: Option<String>,
+    /// resolve: take the landed side (cf1, D-X4GMH); required, the one side resolve takes.
+    pub landed: Option<bool>,
     /// include, exclude and undo: cut the consequences to about this many tokens.
     pub max_tokens: Option<usize>,
     /// own and close with stale: the person's words, quoted, when an agent relays the act.
@@ -210,6 +214,22 @@ pub fn run_view(
                 r.view_own_as(&s, &person, &relay, &view, owner.as_deref())
             })
         }
+        "resolve" => {
+            let block = req.block.clone().ok_or_else(|| {
+                needs(
+                    "resolve needs block",
+                    "pass block: the conflicted block, and landed: true",
+                )
+            })?;
+            if req.landed != Some(true) {
+                return Err(needs(
+                    "resolve needs landed: true",
+                    "pass landed: true to take the landed side of a conflict on an accepted or rejected decision",
+                ));
+            }
+            let view = view();
+            write_typed(engine, move |r| r.view_resolve_landed(&s, &view, &block))
+        }
         "undo" => {
             let (view, target, cascade) =
                 (view(), req.target.clone(), req.cascade.unwrap_or(false));
@@ -221,7 +241,7 @@ pub fn run_view(
         op => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown view op {op:?}"),
-            "use create, fork, include, exclude, compare, list, show, close, own or undo",
+            "use create, fork, include, exclude, compare, list, show, close, own, resolve or undo",
         )),
     }
 }
