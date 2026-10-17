@@ -751,3 +751,42 @@ fn rdx1_residue_link_hashes_are_full_lowercase_hex() {
         residue
     );
 }
+
+#[test]
+fn rdx1_residue_links_omitted_intent_reads_as_none() {
+    use serde_yaml_ng::{Mapping, Value};
+    let mut residue = ChangeResidue::of(&change());
+    residue.links = ChangeLinks::default();
+    let value = serde_yaml_ng::to_value(&residue).unwrap();
+
+    // Omitted keys read as None, as ChangeLinks's own derive reads them.
+    let mut omitted = value.clone();
+    omitted["links"] = Value::Mapping(Mapping::new());
+    assert_eq!(
+        serde_yaml_ng::from_value::<ChangeResidue>(omitted).unwrap(),
+        residue
+    );
+    let mut only_nonce = value.clone();
+    only_nonce["links"] = Value::Mapping(Mapping::new());
+    only_nonce["links"]["client_nonce"] = Value::String("n".into());
+    let decoded = serde_yaml_ng::from_value::<ChangeResidue>(only_nonce).unwrap();
+    assert_eq!(decoded.links.intent, None);
+    assert_eq!(decoded.links.client_nonce.as_deref(), Some("n"));
+
+    // An explicit null intent also reads as None.
+    let mut null = value;
+    null["links"] = Value::Mapping(Mapping::new());
+    null["links"]["intent"] = Value::Null;
+    assert_eq!(
+        serde_yaml_ng::from_value::<ChangeResidue>(null).unwrap(),
+        residue
+    );
+
+    // Postcard still delegates to ChangeLinks's own bytes.
+    let bytes = enc(&residue);
+    assert!(bytes.ends_with(&enc(&ChangeLinks::default())));
+    assert_eq!(
+        postcard::from_bytes::<ChangeResidue>(&bytes).unwrap(),
+        residue
+    );
+}

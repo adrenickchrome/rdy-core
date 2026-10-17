@@ -602,7 +602,9 @@ mod hex {
         #[derive(Deserialize)]
         #[serde(rename = "ChangeLinks")]
         struct LinksIn {
-            #[serde(with = "super::opt")]
+            // `default`: an omitted key reads as None, as in ChangeLinks's own derive; a
+            // field-level `with` alone would make the key mandatory.
+            #[serde(default, with = "super::opt")]
             intent: Option<Hash>,
             alternative: Option<AltIn>,
             client_nonce: Option<String>,
