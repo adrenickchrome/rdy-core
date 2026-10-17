@@ -15,6 +15,7 @@ use crate::site::http::{
 };
 use crate::site::live::resolve;
 use crate::site::{LanOverride, SiteInfo, addr, sse};
+use rdy_engine::E_REDACTED_STATE;
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
 use rdy_engine::serve_config;
 use std::io;
@@ -356,8 +357,15 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
         }
     };
     let head_only = request.method == Method::Head;
+    // the one entry check (D-CC90E): while the published state predates a removal
+    // (E_REDACTED_STATE), no page, file or stream is served; the existing Busy answer stands until
+    // the writer publishes the fresh state. The state is not held past the check.
+    let state = ctx.shared.state.load_full();
+    let current = state.ensure_current_epoch().is_ok();
+    drop(state);
     let response = match ctx.guard.check(&request) {
         Err(f) => refusal(f),
+        Ok(_) if !current => refusal(Refusal::Busy),
         Ok(Route::LiveJs) => Response {
             status: 200,
             headers: vec![("Content-Type", content_type("live.js").to_string())],
@@ -380,7 +388,9 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
                     // the hold before the head: once the reader has the head, the page (in
                     // view: live.js closes the stream of a hidden page) holds the daemon
                     let hold = ctx.handle.hold();
-                    sse::serve(stream, sub, hold, ctx.handle.stopped(), now_secs()).await;
+                    let sh = Arc::clone(&ctx.shared);
+                    let epoch = Box::new(move || sh.state.load().reader().redaction_epoch());
+                    sse::serve(stream, sub, hold, ctx.handle.stopped(), epoch, now_secs()).await;
                     return;
                 }
                 Ok(Err(_busy)) => refusal(Refusal::Busy),
@@ -402,6 +412,8 @@ async fn page(ctx: &Ctx, scope: ScopeRef, path: String) -> Response {
         }
         let build = match sh.site.refresh(&sh, &scope) {
             Ok(b) => b,
+            // a removal since the entry check: the build of the old state was discarded
+            Err(e) if e.code == E_REDACTED_STATE => return Err(Refusal::Busy),
             // a scope that does not resolve names no view or proposal: not found (the versions
             // page never resolves, and a failed build of it is broken, not missing)
             Err(_)

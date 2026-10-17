@@ -289,5 +289,6 @@ pub fn build_versions(
         label_rev: rev(&[0u8; 16]),
         label_at: BTreeMap::new(),
         warnings: vec![],
+        epoch: st.redaction_epoch(),
     })
 }

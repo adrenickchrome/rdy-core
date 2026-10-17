@@ -20,11 +20,19 @@
 //! (`rdy_render::menu::menu_key`) and its own build: a view commit rebuilds it and never canon.
 //! The number of docs each view or proposal version changes is cached by what it reads, so one
 //! view commit recounts one view.
+//!
+//! Every build, cache key and doc count belongs to one redaction epoch (D-CC90E: "every view that
+//! holds the content shows the stub"). A build is published only while the store's epoch is
+//! still the one its state captured, checked right before publication; a build of an older
+//! epoch is discarded and never served, and a cached build of an older epoch is never served to
+//! a new request. After a removal, each open page of a rebuilt scope that was opened in an older
+//! epoch gets `Reload`, which carries nothing. No response lease or drain holds a removal back:
+//! a response begun before it may complete as an outside copy.
 use crate::daemon::log;
 use crate::shared::Shared;
 use crate::site::guard::ScopeRef;
 use crate::writer::panic_text;
-use rdy_engine::{RdyError, ReadState, Scope};
+use rdy_engine::{E_REDACTED_STATE, RdyError, ReadState, Scope};
 use rdy_model::Hash;
 use rdy_render::live::{LiveBuild, build_live, diff, inputs_key};
 use rdy_render::menu::{build_versions, docs_changed, menu_key};
@@ -56,6 +64,13 @@ pub const MAX_COUNTS: usize = 256;
 /// What counts the docs a view or proposal version changes: `rdy_render::menu::docs_changed`, or
 /// a test's hook ([`LiveSite::set_docs_changed`]).
 pub type DocsChanged = Box<dyn Fn(&ReadState, &Scope) -> Result<usize, RdyError> + Send + Sync>;
+
+/// A test's barrier at the publication check of a build ([`LiveSite::set_before_publish`]): it
+/// runs with the scope after the build and before the epoch check that may discard it.
+pub type BeforePublish = Box<dyn Fn(&ScopeRef) + Send + Sync>;
+
+/// A [`BeforePublish`] as the site keeps it: cloned out of its lock before it runs.
+type Barrier = Arc<dyn Fn(&ScopeRef) + Send + Sync>;
 
 /// What a stream sends an open page: the closed set of the site's events.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +109,10 @@ struct Stream {
     /// The page's revision and the label's when the stream opened.
     rev: String,
     label_rev: String,
+    /// The redaction epoch the page was compared in: the epoch of the build it was compared
+    /// with on subscribe, else the store's epoch when it opened. A build of another epoch sends
+    /// it `Reload`.
+    epoch: u64,
     /// The stream was compared with a build of its scope (on subscribe, or by a fan-out since).
     /// Until it is, the next build is compared with `rev` and `label_rev`, not diffed.
     checked: bool,
@@ -121,8 +140,8 @@ impl Stream {
 #[derive(Default)]
 struct ScopeState {
     build: Option<Arc<LiveBuild>>,
-    /// The input key of `build`.
-    key: Option<Hash>,
+    /// The input key of `build`, with the redaction epoch its state captured.
+    key: Option<(u64, Hash)>,
     /// The publish count the build (or a check that found the same key) read.
     seen: u64,
     /// When the scope was last used, on `Inner::clock`.
@@ -208,6 +227,8 @@ pub struct LiveSite {
     counts: Mutex<BTreeMap<(ScopeRef, Hash), usize>>,
     /// Test hook: counts in place of `rdy_render::menu::docs_changed`.
     docs_changed: Mutex<Option<DocsChanged>>,
+    /// Test hook: the barrier at each build's publication check.
+    before_publish: Mutex<Option<Barrier>>,
 }
 
 /// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
@@ -219,6 +240,8 @@ pub struct LiveSite {
 /// count to cache.
 fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef, Hash)> {
     let mut k = generation.to_le_bytes().to_vec();
+    // a count belongs to the redaction epoch of the state it read, as a build does
+    k.extend_from_slice(&st.redaction_epoch().to_le_bytes());
     let at = |k: &mut Vec<u8>, h: Option<Hash>| match h {
         Some(h) => {
             k.push(1);
@@ -258,8 +281,18 @@ fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef
 pub struct Subscription {
     pub id: u64,
     pub rx: mpsc::Receiver<LiveEvent>,
+    /// The redaction epoch the stream was compared in (see `Stream::epoch`).
+    epoch: u64,
     scope: ScopeRef,
     inner: Weak<Mutex<Inner>>,
+}
+
+impl Subscription {
+    /// The redaction epoch the stream was compared in: an event sent while the store's epoch is
+    /// another one goes out as `Reload` ([`crate::site::sse::serve`]).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 impl Drop for Subscription {
@@ -285,6 +318,7 @@ impl LiveSite {
             builds: AtomicU64::new(0),
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
+            before_publish: Mutex::new(None),
         })
     }
 
@@ -292,6 +326,14 @@ impl LiveSite {
     #[doc(hidden)]
     pub fn set_docs_changed(&self, f: DocsChanged) {
         *lock(&self.docs_changed) = Some(f);
+    }
+
+    /// Test hook: from now on, each build runs `f` with its scope at its publication check, after
+    /// the build and before the epoch check (`None` removes it). A barrier in `f` holds the build
+    /// there; the build runs on the thread that refreshes, holding the one-build lock.
+    #[doc(hidden)]
+    pub fn set_before_publish(&self, f: Option<BeforePublish>) {
+        *lock(&self.before_publish) = f.map(Arc::from);
     }
 
     /// The docs `scope` changes, from the cache when what it reads is unchanged.
@@ -350,13 +392,18 @@ impl LiveSite {
         // the count before the state: a publish after this load counts past `now`, so the next
         // refresh reads it
         let now = self.published.load(Ordering::SeqCst);
+        // the store's epoch now: a cached build of another epoch is never served (a removal
+        // between a build's check and its insertion leaves it in the cache, unused)
+        let current = sh.state.load().reader().redaction_epoch();
         // an unknown scope leaves no state: nothing is touched before the scope resolves and
         // builds (or finds its build)
         let cached = |inner: &mut Inner, fresh: &dyn Fn(&ScopeState) -> bool| {
-            let hit = inner
-                .scopes
-                .get(scope)
-                .and_then(|s| s.build.as_ref().filter(|_| fresh(s)).map(Arc::clone))?;
+            let hit = inner.scopes.get(scope).and_then(|s| {
+                s.build
+                    .as_ref()
+                    .filter(|b| b.epoch == current && fresh(s))
+                    .map(Arc::clone)
+            })?;
             let s = inner.touch(scope);
             s.seen = now;
             Some(hit)
@@ -369,6 +416,8 @@ impl LiveSite {
         // generation with a newer state only builds once more, to the same pages)
         let generation = sh.pack_gen.load(Ordering::SeqCst);
         let st = sh.state.load_full();
+        // a state older than a removal builds nothing: the writer publishes the fresh one next
+        st.ensure_current_epoch()?;
         // the versions page is not a read scope: it has its own key and its own build
         let (resolved, key) = match scope {
             ScopeRef::Versions => (None, menu_key(&st, generation)),
@@ -378,6 +427,7 @@ impl LiveSite {
                 (Some(resolved), key)
             }
         };
+        let key = (st.redaction_epoch(), key);
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.key == Some(key)) {
             return Ok((b, false));
         }
@@ -386,7 +436,14 @@ impl LiveSite {
             None => build_versions(&st, &mut |s| self.docs_changed(&st, s, generation))?,
         });
         self.builds.fetch_add(1, Ordering::SeqCst);
+        let hook = lock(&self.before_publish).clone();
+        if let Some(hook) = hook {
+            hook(scope);
+        }
         let mut inner = lock(&self.inner);
+        // the publication check, under the lock that publishes: a build whose state a removal
+        // made old is discarded, and the last build stays (never served in the new epoch)
+        st.ensure_current_epoch()?;
         let s = inner.touch(scope);
         // the render's warnings, logged once each when a build of the scope first has them
         // (FW-UX1: the person hears of them through the agent's `rdy_site` too)
@@ -397,6 +454,9 @@ impl LiveSite {
         let change = s.build.as_ref().map(|old| diff(old, &new));
         s.streams.retain_mut(|stream| {
             let event = match &change {
+                // a page compared in another epoch (opened before a removal) loads again: the
+                // event carries nothing, and the page it loads is this epoch's
+                _ if stream.epoch != new.epoch => Some(LiveEvent::Reload),
                 // the fan-out rule: what changed between the two builds
                 Some(change) if stream.checked => {
                     if change.reload.contains(&stream.page) {
@@ -447,6 +507,9 @@ impl LiveSite {
                     built += usize::from(did);
                     s.failing = false;
                 }
+                // a build of an older epoch was discarded: the fresh state's publish wakes the
+                // worker again, and that build fans out
+                Err(e) if e.code == E_REDACTED_STATE => {}
                 Err(e) => {
                     if !s.failing {
                         s.failing = true;
@@ -481,6 +544,7 @@ impl LiveSite {
             }
         }
         let refreshed = self.refresh(sh, scope).is_ok();
+        let current = sh.state.load().reader().redaction_epoch();
         let mut inner = lock(&self.inner);
         if inner.closed || inner.streams() >= MAX_STREAMS {
             return Err(SiteBusy);
@@ -494,21 +558,28 @@ impl LiveSite {
             page: page.to_string(),
             rev: rev.to_string(),
             label_rev: label_rev.to_string(),
+            epoch: current,
             checked: false,
             tx,
         };
         // compared with the scope's build as it stands now: a build since the refresh above
-        // fanned out without this stream. With no comparison, the scope's next build compares.
-        if refreshed && let Some(b) = &s.build {
+        // fanned out without this stream. With no comparison, the scope's next build compares;
+        // a build of an older epoch is never compared with (the epoch check before each event)
+        if refreshed
+            && let Some(b) = &s.build
+            && b.epoch == current
+        {
             if let Some(event) = stream.against(b) {
                 let _ = stream.tx.try_send(event);
             }
             stream.checked = true;
         }
+        let epoch = stream.epoch;
         s.streams.push(stream);
         Ok(Subscription {
             id,
             rx,
+            epoch,
             scope: scope.clone(),
             inner: Arc::downgrade(&self.inner),
         })

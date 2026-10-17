@@ -6,6 +6,10 @@
 //! The page keeps its stream open only while it is in view (`live.js`, ruling task-6), so a page
 //! in a background tab neither holds the daemon nor takes one of the browser's few connections
 //! to the site.
+//!
+//! Before it writes each event, the stream checks the store's redaction epoch: a stream compared
+//! in another epoch (its page opened before a removal) gets `reload`, which carries nothing, in
+//! place of the event (D-CC90E).
 use crate::daemon::IdleHold;
 use crate::site::http::{BASE_HEADERS, http_date};
 use crate::site::live::{LiveEvent, Subscription};
@@ -49,13 +53,28 @@ pub fn frame(event: &LiveEvent) -> Vec<u8> {
     }
 }
 
+/// The store's redaction epoch now, as a stream reads it before each event.
+pub type EpochNow = Box<dyn Fn() -> u64 + Send + Sync>;
+
+/// The frame `sub` sends for `event` while the store's epoch is `now`: the event's own, or
+/// `reload` when the stream was compared in another epoch.
+pub fn frame_in(sub: &Subscription, event: &LiveEvent, now: u64) -> Vec<u8> {
+    if sub.epoch() == now {
+        frame(event)
+    } else {
+        frame(&LiveEvent::Reload)
+    }
+}
+
 /// Writes the stream of `sub` to `conn` until it ends (see the module docs). `hold` keeps the
-/// daemon up meanwhile; `stopped` turns true when the daemon stops.
+/// daemon up meanwhile; `stopped` turns true when the daemon stops; `epoch` reads the store's
+/// redaction epoch before each event.
 pub async fn serve(
     mut conn: TcpStream,
     mut sub: Subscription,
     hold: IdleHold,
     mut stopped: watch::Receiver<bool>,
+    epoch: EpochNow,
     now_secs: i64,
 ) {
     let _hold = hold;
@@ -80,7 +99,7 @@ pub async fn serve(
                 continue;
             }
             event = sub.rx.recv() => match event {
-                Some(event) => frame(&event),
+                Some(event) => frame_in(&sub, &event, epoch()),
                 None => return,
             },
             () = &mut quiet => KEEP_ALIVE.to_vec(),
