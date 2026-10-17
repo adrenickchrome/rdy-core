@@ -11,6 +11,7 @@ fn claim(body: &str) -> Block {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 

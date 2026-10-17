@@ -291,7 +291,8 @@ fn export_level(
             export_level(m, Some(&b.id), level + 1, &sub, summary, blobs, pack)?;
             continue;
         }
-        if b.field_str("name").is_none() {
+        // a removed doc's stub is named by its id (D-3M81W); it is no doc from M1
+        if b.field_str("name").is_none() && !b.is_redacted() {
             summary.warnings.push(format!(
                 "doc {} has no stored name: exported as {name}.yaml; importing it stores that name, so its version hash changes once",
                 b.id
@@ -639,6 +640,7 @@ pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<(Block, Vec<KeyedLink>), 
             .into_iter()
             .map(|(k, v)| Ok((k, v.parse::<Hash>().map_err(|e| bad(e.to_string()))?)))
             .collect::<Result<_, RdyError>>()?,
+        read_identity: None,
     };
     Ok((block, keyed))
 }
@@ -810,10 +812,15 @@ impl ReadState {
             if !self.reader().has_blob(h)? {
                 return Err(not_found());
             }
-            let bytes = self.reader().get_blob(h).map_err(|e| match e {
-                rdy_store::StoreError::NotFound(_) => not_found(),
-                other => other.into(),
-            })?;
+            let bytes = match self.reader().get_blob(h) {
+                Ok(bytes) => bytes,
+                // O20: a blob that lost a chunk to a redaction (its own or one it shares) no
+                // longer reads; it gets no file, the summary does not count it, and the export
+                // goes on. Every other error keeps its text.
+                Err(rdy_store::StoreError::Redacted { .. }) => continue,
+                Err(rdy_store::StoreError::NotFound(_)) => return Err(not_found()),
+                Err(other) => return Err(other.into()),
+            };
             std::fs::write(out.join("blobs").join(h.to_string()), bytes).map_err(io_err)?;
             summary.blobs += 1;
         }
@@ -1133,13 +1140,15 @@ impl Rdy {
         // lpin1: every pin is recomputed from the imported content, as a write's create pins
         // it: each cited target (reference or link) to its content hash, the incoming block
         // with that id first, else the view's. A block is never pinned to itself. Pins in the
-        // files are ignored.
+        // files are ignored. A removed version's stub in the view gets no pin: its tracking
+        // hash cannot be recomputed, and its recorded hash would be a false one (D-3M81W).
         let tracking = self.store.tracking();
         let content = |id: &BlockId| {
             incoming
                 .get(id)
                 .copied()
                 .or_else(|| existing.get(id))
+                .filter(|t| !t.is_redacted())
                 .map(|t| t.content_hash_with(tracking))
         };
         let pins: Vec<BTreeMap<BlockId, Hash>> = blocks
@@ -1242,6 +1251,7 @@ impl Rdy {
                         imported_by: Some(importer.clone()),
                         ..ChangeLinks::default()
                     },
+                    read_identity: None,
                 }
             })
             .collect();

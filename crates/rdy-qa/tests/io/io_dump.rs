@@ -8,9 +8,10 @@ use rdy_qa::every_kind;
 use rdy_qa::fixtures::{land, write, writer};
 use rdy_qa::inbox::on;
 use rdy_qa::packs::qa_project;
-use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader};
+use rdy_store::dump::{DUMP_FORMAT, DumpBatch, DumpHeader, DumpItem, DumpReader};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds::{self, BatchCommit};
+use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use serde_json::json;
 use std::path::Path;
@@ -25,7 +26,7 @@ const ORIGIN: Location = Location {
 fn read_back(path: &Path) -> (DumpHeader, Vec<DumpItem>) {
     let f = std::io::BufReader::new(std::fs::File::open(path).unwrap());
     let (mut r, format, header) = DumpReader::open(f).unwrap();
-    assert_eq!(format, 1);
+    assert_eq!(format, DUMP_FORMAT);
     let mut items = vec![];
     while let Some(item) = r.next().unwrap() {
         items.push(item);
@@ -90,10 +91,13 @@ fn dl5_a_dump_holds_every_sealed_batch_of_the_published_state() {
 
     // the last batch ends at the header's log_end, which is seq()
     assert_eq!(header.log_end, st.seq());
+    // the record walker: the every-kind project holds payloads a removal dropped (rdx15)
     let mut last = None;
     st.reader()
-        .for_each_frame_from(ORIGIN, st.seq(), |_, kind, _, payload, next| {
-            last = Some((kind, payload.to_vec(), next));
+        .for_each_record_from(ORIGIN, st.seq(), |_, f, next| {
+            if let StoredFrame::Present { kind, payload, .. } = f {
+                last = Some((kind, payload.to_vec(), next));
+            }
             Ok(())
         })
         .unwrap();
@@ -317,7 +321,7 @@ fn dl5_the_header_names_the_rdy_that_wrote_it() {
     let (header, _) = read_back(&out);
     assert_eq!(header.rdy, env!("CARGO_PKG_VERSION"));
     assert_eq!(header.store_format, STORE_FORMAT);
-    assert_eq!(summary.dump_format, 1);
+    assert_eq!(summary.dump_format, 2);
     assert_eq!(summary.store_format, STORE_FORMAT);
 }
 

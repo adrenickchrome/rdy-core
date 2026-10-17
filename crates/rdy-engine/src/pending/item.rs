@@ -1,7 +1,10 @@
 //! The queue item (D-JV6Z8): one shape on every surface.
 
 use crate::error::{E_BAD_INPUT, RdyError};
+use rdy_model::Hash;
+use rdy_model::redaction::ReasonClass;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 /// What the person is asked to do.
@@ -137,6 +140,34 @@ pub struct Item {
     pub exception: Option<ExceptionKind>,
     pub card: String,
     pub card_hash: String,
+    /// The removal requests the version carries, one card each, by request hash (D-CC90E,
+    /// D-6B1W1). None for every other item; omitted from JSON then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removal: Option<Vec<RemovalCard>>,
+    /// The quarantine names each report of `removal` lists, by report hash. Presentation only:
+    /// never serialized and not in a card's encoding; the card text it decides is bound.
+    #[serde(skip)]
+    pub removal_reports: BTreeMap<Hash, Vec<String>>,
+}
+
+/// The facts of one removal request a version carries, as its approval card shows and binds
+/// them: the request, the hash of the complete report it binds, the counts and the reason. These
+/// nine fields, in this order, are the card digest's encoding. The report's quarantine names are
+/// not on the card: the report hash binds them, and the card text shows their warning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovalCard {
+    #[serde(with = "rdy_store::transition::hex::one")]
+    pub request: Hash,
+    #[serde(with = "rdy_store::transition::hex::one")]
+    pub report: Hash,
+    pub versions: u64,
+    pub blobs: u64,
+    pub shared_blobs: u64,
+    pub payloads: u64,
+    pub bytes: u64,
+    pub reason_class: ReasonClass,
+    pub reason: String,
 }
 
 const DAY_MS: i64 = 86_400_000;

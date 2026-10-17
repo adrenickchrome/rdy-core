@@ -6,6 +6,7 @@
 //! the file never shows.
 
 use crate::error::{E_FILE_FORMAT, E_IO, E_PATH_CLASH, E_WC_INVALID, W_WC_UNSTAGED_MOVE};
+use crate::lint::is_notice_entry;
 use crate::query::field_json;
 use crate::tree_io::{Diagnostic, FOLDER_FILE};
 use crate::wc::ignore::Ignore;
@@ -205,6 +206,25 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     let commit = commit.map_err(|diags| WcInvalid { diags })?;
     let mut commit = commit;
     let mut diags = lint_tree(&mut commit, pack, None, Some(&place.root));
+    if let Ok(base) = &base
+        && commit.blocks.iter().any(|b| is_notice_entry(&b.block))
+    {
+        let diff = Diff {
+            place,
+            st,
+            pack,
+            base: Indexed::of(base),
+            commit: Indexed::of(&commit),
+            base_tree: base,
+            commit_tree: &commit,
+            staged: &staged,
+        };
+        let spots = unchanged_notices(&diff);
+        diags.retain(|d| {
+            !(UNAVAILABLE.contains(&d.code.as_str())
+                && spots.contains(&(d.file.as_str(), (d.line, d.column))))
+        });
+    }
     diags.extend(unread(&commit, st, &staged));
     diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
     if diags.iter().any(|d| d.severity == Severity::Error) {
@@ -237,6 +257,42 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     }
     .run(&mut plan);
     Ok(plan)
+}
+
+/// The checks a removed version's stub cannot meet (D-3M81W): its fields are gone, its body is
+/// the notice, and a removed doc or folder is named by its id.
+const UNAVAILABLE: [&str; 4] = [
+    "E_FIELD_REQUIRED",
+    "E_BODY_REQUIRED",
+    "E_BODY_FORBIDDEN",
+    "E_BAD_NAME",
+];
+
+/// Where the commit tree holds an entry that rdy wrote for a removed version's stub, exactly as
+/// the base has it (each entry's place and its `body` key), and for which the complete diff
+/// against the base names no op (placements included). Such an entry is no new source, so the
+/// checks of what removal made unavailable do not refuse the commit. An edited or moved notice
+/// entry gets an op and every check.
+fn unchanged_notices<'a>(diff: &Diff<'a>) -> BTreeSet<(&'a str, (usize, usize))> {
+    let with_op = diff.op_ids();
+    diff.commit_tree
+        .blocks
+        .iter()
+        .filter(|b| {
+            let id = &b.block.id;
+            is_notice_entry(&b.block)
+                && !with_op.contains(id)
+                // the first entry of its id, the one the diff reads
+                && diff.commit.by_id.get(id).is_some_and(|f| std::ptr::eq(*f, *b))
+                && diff.base.by_id.get(id).is_some_and(|x| x.block == b.block)
+        })
+        .flat_map(|b| {
+            [Some(b.at), b.keys.get("body").copied()]
+                .into_iter()
+                .flatten()
+                .map(move |at| (b.file.as_str(), at))
+        })
+        .collect()
 }
 
 fn io_diag(file: &str, what: &str, e: impl std::fmt::Display) -> Diagnostic {
@@ -688,6 +744,21 @@ struct Diff<'a> {
 }
 
 impl<'a> Diff<'a> {
+    /// The ids of the commit tree's blocks that `run` gives a create or an update, its
+    /// placements included.
+    fn op_ids(&self) -> BTreeSet<&'a BlockId> {
+        let placed = self.placements();
+        self.commit
+            .by_id
+            .iter()
+            .filter(|(id, b)| match self.base.by_id.get(*id) {
+                Some(old) => self.update(old, b, placed.get(*id)).is_some(),
+                None => true,
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     fn run(&self, plan: &mut CommitPlan) {
         let placed = self.placements();
         for b in self.commit.pre_order(self.commit_tree) {

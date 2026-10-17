@@ -2,11 +2,15 @@
 use crate::answer::relay::{RelayInput, relayed};
 use crate::error::*;
 use crate::{Rdy, ReadState, Scope, Session};
-use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Role, Tag};
+use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Op, Role, Tag};
+use rdy_schema::Pack;
 use rdy_store::StoreError;
+use rdy_store::kinds::{self, BlobManifest};
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// How many as-of (`tag:`/`landing:`) snapshots, with their graphs, stay cached at once.
 pub const AS_OF_CACHE_ENTRIES: usize = 4;
@@ -28,10 +32,38 @@ pub(crate) enum VposScope {
 /// scope. Every input is in the key, so the cache is shared by all states and never stale.
 type VposKey = (Option<Hash>, usize, VposScope);
 
-/// The cached positions, shared by every published state (see `VposKey`).
+/// What the cached tag markers are for: the canon head, the tag count and the redaction epoch
+/// of the state that asked. Tags are immutable and only added, and an apply lands with its
+/// request's carrier, so these name one set of markers under one pack.
+type MarkKey = (Option<Hash>, usize, u64);
+
+/// The pack a cached marker entry was read under: which types are assets decides which `blob`
+/// fields are followed. Compared by pointer; the entry holds the `Arc`, so the address is never
+/// reused while the entry lives (a state held from before a pack reload keeps the old pack).
+#[derive(Clone)]
+struct PackId(Arc<Pack>);
+
+impl PackId {
+    fn is(&self, pack: &Arc<Pack>) -> bool {
+        Arc::ptr_eq(&self.0, pack)
+    }
+}
+
+/// Each landing's own requests (see `ReadState::landing_requests`), by landing hash, for one
+/// redaction epoch and one pack: the active mask of an epoch never changes, and a landing never
+/// changes.
+type LandingMarks = (u64, PackId, Arc<HashMap<Hash, Vec<Hash>>>);
+
+/// The tag markers of one state (see `MarkKey`), with the pack they were read under.
+type TagMarks = (MarkKey, PackId, Arc<Vec<Vec<Hash>>>);
+
+/// The cached positions, shared by every published state (see `VposKey`), the tag markers of one
+/// state (see `MarkKey`) and the per-landing requests they are built from (see `LandingMarks`).
 #[derive(Default)]
 pub(crate) struct VposCache {
     entries: HashMap<VposKey, VersionPosition>,
+    marks: Option<TagMarks>,
+    landings: Option<LandingMarks>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -44,6 +76,14 @@ pub struct VersionInfo {
     pub message: Option<String>,
     pub tagged_by: String,
     pub at_ms: i64,
+    /// rdx6: true when the version's history (its landing, the landings before it and the
+    /// changes they carried) holds content a redaction removed; absent otherwise. The tag record
+    /// itself never changes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub redacted: bool,
+    /// rdx6: the requests that removed that content (full hashes, ascending); absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redactions: Vec<String>,
 }
 
 /// What `Rdy::tag_as` wrote: the version, and for a relayed tag the agent that relayed it and
@@ -65,7 +105,17 @@ fn info(t: &Tag) -> VersionInfo {
         message: t.message.clone(),
         tagged_by: t.tagged_by.actor.clone(),
         at_ms: t.tagged_by.at_ms,
+        redacted: false,
+        redactions: vec![],
     }
+}
+
+/// `info(t)` with the markers of the requests in `marks` (ascending).
+fn marked(t: &Tag, marks: &[Hash]) -> VersionInfo {
+    let mut v = info(t);
+    v.redacted = !marks.is_empty();
+    v.redactions = marks.iter().map(Hash::to_string).collect();
+    v
 }
 
 /// The most bytes a new version name may hold, and the longest name the live site serves.
@@ -305,7 +355,7 @@ impl Rdy {
         let tag = self.new_tag(s, name, landing, message)?;
         self.store.put_tag(&tag)?;
         self.publish(crate::Delta::Tags)?;
-        Ok(info(&tag))
+        self.read().version_info(&tag)
     }
 
     /// `tag` under the relay table (`answer::relay::relayed`, D-HA7YZ, D-KQ4CA). `person` is the
@@ -361,7 +411,7 @@ impl Rdy {
             .map_err(answer_write_error)?;
         self.publish(crate::Delta::Tags)?;
         Ok(TagInfo {
-            version: info(&tag),
+            version: self.read().version_info(&tag)?,
             relayed_by: Some(relay.by),
             answer: Some(answer.to_string()),
         })
@@ -497,8 +547,162 @@ impl ReadState {
     }
 
     /// Every version, oldest first (precedence order, which the order rules make canon order).
+    /// A version whose history holds removed content carries `redacted` and `redactions`.
     pub fn versions(&self) -> Result<Vec<VersionInfo>, RdyError> {
-        Ok(self.version_tags()?.iter().map(|(_, t)| info(t)).collect())
+        let tags = self.version_tags()?;
+        let marks = self.tag_marks(&tags)?;
+        Ok(tags
+            .iter()
+            .zip(marks.iter())
+            .map(|((_, t), m)| marked(t, m))
+            .collect())
+    }
+
+    /// The version `tag` as `versions` lists it, after a publish that wrote it.
+    fn version_info(&self, tag: &Tag) -> Result<VersionInfo, RdyError> {
+        let id = tag.id().to_string();
+        Ok(self
+            .versions()?
+            .into_iter()
+            .find(|v| v.tag == id)
+            .unwrap_or_else(|| info(tag)))
+    }
+
+    /// For each of `tags` (in order), the requests that removed content its history holds,
+    /// ascending and without repeats: the union of `landing_requests` over the tag's landing and
+    /// every landing before it. Read once per canon head, tag count, redaction epoch and pack,
+    /// then kept in the cache every state shares; each landing's own requests are kept per epoch
+    /// and pack, so a new landing reads only its own changes.
+    fn tag_marks(&self, tags: &[(semver::Version, Tag)]) -> Result<Arc<Vec<Vec<Hash>>>, RdyError> {
+        if tags.is_empty() {
+            return Ok(Arc::new(vec![]));
+        }
+        let epoch = self.reader.captured_redaction_epoch();
+        let key = (self.canon_head, tags.len(), epoch);
+        let lock = || self.vpos.lock().unwrap_or_else(|e| e.into_inner());
+        let known = {
+            let cache = lock();
+            if let Some((k, p, marks)) = &cache.marks
+                && *k == key
+                && p.is(&self.pack)
+            {
+                return Ok(Arc::clone(marks));
+            }
+            match &cache.landings {
+                Some((e, p, known)) if *e == epoch && p.is(&self.pack) => Arc::clone(known),
+                _ => Arc::new(HashMap::new()),
+            }
+        };
+        // canon's landings, head first; a landing not read in this epoch yet reads its changes
+        let mut chain: Vec<Hash> = vec![];
+        let mut fresh: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        let mut blobs: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        for landing in self.landing_walk() {
+            let (h, rec) = landing?;
+            if !known.contains_key(&h) && !fresh.contains_key(&h) {
+                fresh.insert(h, self.landing_requests(&rec, &mut blobs)?);
+            }
+            chain.push(h);
+        }
+        // oldest first, the requests found so far, kept at each tagged landing
+        let tagged: HashSet<Hash> = tags.iter().map(|(_, t)| t.landing).collect();
+        let mut at: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        for h in chain.iter().rev() {
+            if let Some(found) = known.get(h).or_else(|| fresh.get(h)) {
+                seen.extend(found.iter().copied());
+            }
+            if tagged.contains(h) {
+                at.insert(*h, seen.iter().copied().collect());
+            }
+        }
+        let marks: Arc<Vec<Vec<Hash>>> = Arc::new(
+            tags.iter()
+                .map(|(_, t)| at.get(&t.landing).cloned().unwrap_or_default())
+                .collect(),
+        );
+        let mut cache = lock();
+        let pack = PackId(Arc::clone(&self.pack));
+        if !fresh.is_empty() {
+            let mut all = (*known).clone();
+            all.extend(fresh);
+            cache.landings = Some((epoch, pack.clone(), Arc::new(all)));
+        }
+        cache.marks = Some((key, pack, Arc::clone(&marks)));
+        Ok(marks)
+    }
+
+    /// The requests whose applied masks remove something landing `rec` carried, ascending and
+    /// without repeats. For each change: the request that holds the change itself; the request
+    /// named by each block version it writes, read through the store's projection (a removed
+    /// version reads as its stub, so a sibling removed later by another request is found too);
+    /// and, for a written version whose type has the pack's `asset` trait, the requests that hold
+    /// the manifest or a chunk of the blob its `blob` field names (on any other type that field
+    /// is plain text). `blobs` keeps each blob's requests across the landings of one read.
+    fn landing_requests(
+        &self,
+        rec: &LandingRecord,
+        blobs: &mut HashMap<Hash, Vec<Hash>>,
+    ) -> Result<Vec<Hash>, RdyError> {
+        let mut found: BTreeSet<Hash> = BTreeSet::new();
+        for c in &rec.changes {
+            if let Some(request) = self.reader.redaction_of(kinds::CHANGE, c)? {
+                found.insert(request);
+            }
+            let change = match self.reader.change(c) {
+                Ok(change) => change,
+                // a removed change that no residue reads: its request is the whole answer
+                Err(StoreError::Redacted { request }) => {
+                    found.insert(request);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            for op in &change.ops {
+                let (Op::Create { block } | Op::Update { block, .. }) = op else {
+                    continue;
+                };
+                if let Some(request) = block.redaction() {
+                    found.insert(request);
+                }
+                // only an asset's `blob` field names a blob; on any other type it is plain text
+                if !self.pack.is_asset(&block.block_type) {
+                    continue;
+                }
+                let Some(h) = block.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) else {
+                    continue;
+                };
+                let requests = match blobs.entry(h) {
+                    Entry::Occupied(e) => e.into_mut(),
+                    Entry::Vacant(e) => e.insert(self.blob_requests(&h)?),
+                };
+                found.extend(requests.iter().copied());
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
+    /// The requests whose applied masks hold blob `h`'s manifest or any of its chunks, ascending
+    /// and without repeats; none when `h` names no blob.
+    fn blob_requests(&self, h: &Hash) -> Result<Vec<Hash>, RdyError> {
+        let mut found: BTreeSet<Hash> = BTreeSet::new();
+        if let Some(request) = self.reader.redaction_of(kinds::BLOB_MANIFEST, h)? {
+            found.insert(request);
+        }
+        let manifest: BlobManifest = match self.reader.get_typed(kinds::BLOB_MANIFEST, h) {
+            Ok(m) => m,
+            // not a blob, or a selected manifest (its request is already found)
+            Err(StoreError::NotFound(_) | StoreError::Redacted { .. }) => {
+                return Ok(found.into_iter().collect());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        for c in &manifest.chunks {
+            if let Some(request) = self.reader.redaction_of(kinds::BLOB_CHUNK, c)? {
+                found.insert(request);
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 
     /// A landing in canon's chain, by full hash or unique prefix of at least 6 hex characters.

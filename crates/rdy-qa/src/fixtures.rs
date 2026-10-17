@@ -240,6 +240,7 @@ pub fn raw(
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 
@@ -260,6 +261,7 @@ pub fn raw_commit(r: &mut Rdy, view: &str, blocks: Vec<Block>) {
                 justification: None,
                 message: "raw".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .expect("raw commit");

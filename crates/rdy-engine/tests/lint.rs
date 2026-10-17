@@ -282,6 +282,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                read_identity: None,
             },
         })
         .collect();
@@ -296,6 +297,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
                 justification: None,
                 message: "m1".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();

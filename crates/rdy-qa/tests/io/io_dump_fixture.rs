@@ -217,10 +217,10 @@ fn dl8_the_v1_fixture_loads_with_every_hash() {
     for b in batches {
         for f in b.frames {
             assert!(
-                r.store().has_kind(f.kind, &f.hash).unwrap(),
+                r.store().has_kind(f.kind(), f.hash()).unwrap(),
                 "kind {} {} is gone",
-                f.kind,
-                f.hash
+                f.kind(),
+                f.hash()
             );
         }
     }
@@ -272,7 +272,11 @@ fn dl8_the_v1_fixture_spans_segments_and_holds_a_batch_past_the_limit() {
             let len: u64 = b
                 .frames
                 .iter()
-                .map(|f| FRAME_HEADER + f.payload.len() as u64)
+                .map(|f| {
+                    let payload = f.present_payload();
+                    assert!(payload.is_some(), "a format-1 frame holds its payload");
+                    FRAME_HEADER + payload.unwrap().len() as u64
+                })
                 .sum();
             b.start.offset + len > max
         }),

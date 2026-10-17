@@ -17,6 +17,28 @@ pub(crate) fn io(e: std::io::Error) -> RdyError {
     RdyError::new(E_IO, e.to_string(), "check file permissions and disk space")
 }
 
+/// The caches every state of one redaction epoch shares with the writer: the as-of and proposal
+/// entries, the version positions, the blocks each proposal version writes, and canon's version
+/// steps. A content removal starts a new set (plan Redaction, Task 10); no entry crosses epochs.
+pub(crate) struct EpochCaches {
+    pub(crate) as_of: Arc<AsOfCache>,
+    pub(crate) vpos: Arc<Mutex<version::VposCache>>,
+    pub(crate) proposal_touched: inflight::ProposalTouched,
+    pub(crate) canon_step_cache: Arc<crate::history::StepCache>,
+}
+
+impl EpochCaches {
+    /// An empty set.
+    pub(crate) fn new() -> EpochCaches {
+        EpochCaches {
+            as_of: Arc::default(),
+            vpos: Arc::default(),
+            proposal_touched: inflight::ProposalTouched::default(),
+            canon_step_cache: Arc::default(),
+        }
+    }
+}
+
 impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
         let dot = project.join(".rdy");
@@ -113,10 +135,12 @@ impl Rdy {
         store.set_held(true)?;
         let areas = Arc::new(pack.area_matcher());
         let pack = Arc::new(pack);
-        let as_of = Arc::new(AsOfCache::default());
-        let vpos: Arc<Mutex<version::VposCache>> = Default::default();
-        let proposal_touched = inflight::ProposalTouched::default();
-        let canon_step_cache: Arc<crate::history::StepCache> = Arc::default();
+        let EpochCaches {
+            as_of,
+            vpos,
+            proposal_touched,
+            canon_step_cache,
+        } = EpochCaches::new();
         let (name, description) = site_identity(project, &cfg);
         let require_up_to_date = cfg.require_up_to_date();
         let idle_days = cfg.idle_days();
@@ -263,6 +287,31 @@ impl Rdy {
     /// The current published state: what every read reads. Cheap; a held state never changes.
     pub fn read(&self) -> Arc<ReadState> {
         self.state.load_full()
+    }
+
+    /// The caches the writer shares with the states it publishes in the current epoch.
+    pub(crate) fn epoch_caches(&self) -> EpochCaches {
+        EpochCaches {
+            as_of: Arc::clone(&self.as_of),
+            vpos: Arc::clone(&self.vpos),
+            proposal_touched: Arc::clone(&self.proposal_touched),
+            canon_step_cache: Arc::clone(&self.canon_step_cache),
+        }
+    }
+
+    /// Starts a new, empty set of shared caches: after a content removal (or its failure past
+    /// authorization) no state of the new epoch reuses an entry built from the old one.
+    pub(crate) fn renew_epoch_caches(&mut self) {
+        let EpochCaches {
+            as_of,
+            vpos,
+            proposal_touched,
+            canon_step_cache,
+        } = EpochCaches::new();
+        self.as_of = as_of;
+        self.vpos = vpos;
+        self.proposal_touched = proposal_touched;
+        self.canon_step_cache = canon_step_cache;
     }
 
     /// Test hook: every state published from now on runs `d` in place of the registry's

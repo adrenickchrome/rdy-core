@@ -129,7 +129,8 @@ fn node(
         name,
         id: b.id.to_string(),
         block_type: b.block_type.clone(),
-        title: b.field_str("title").map(String::from),
+        // a removed doc or folder is named by its id and labelled with the notice (D-3M81W)
+        title: m.label_of(&b.id).map(String::from),
         doc_type: b.field_str("doc_type").map(String::from),
         lifecycle: b.field_str("lifecycle").map(String::from),
         children,

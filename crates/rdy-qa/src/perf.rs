@@ -204,6 +204,12 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "dump" => "no spec target: the whole project as one dump stream (reported)",
         "load" => "no spec target: rebuild from a dump, with the index build and fsck (reported)",
+        "redaction_report" => "no spec target: the complete redaction report (reported)",
+        "redaction_land" => {
+            "no spec target: approved removal through durable completion (reported)"
+        }
+        "redaction_open" => "no spec target: open a store after content removal (reported)",
+        "redaction_dump" => "no spec target: dump with removed payload records (reported)",
         "export_md" => "no spec target: the scope printed as md, written whole (reported)",
         "export_html" => "no spec target: the scope printed as html, written whole (reported)",
         "export_pdf" => "no spec target: the scope laid out and written as PDF (reported)",
@@ -753,6 +759,7 @@ fn claim_op(section: &BlockId) -> Op {
             body: "Incremental.".into(),
             links: Default::default(),
             pins: Default::default(),
+            read_identity: None,
         },
     }
 }
@@ -3156,6 +3163,121 @@ fn tier_dump(
     }));
 }
 
+/// The bytes of the log's segment files: what a full scan of the log reads, framing included.
+fn segment_bytes(proj: &std::path::Path) -> u64 {
+    std::fs::read_dir(proj.join(".rdy/store/segments"))
+        .expect("segments")
+        .map(|e| e.expect("entry").metadata().expect("metadata").len())
+        .sum()
+}
+
+/// The frames the redaction scanner walks: every frame of the log up to the published end, batch
+/// markers included (the scanner's counting domain, and the one `segment_bytes` sums). Counted
+/// with the scanner's own record walker; `verify_report().frames` leaves the markers out.
+fn scan_frame_count(r: &Rdy) -> u64 {
+    let origin = rdy_store::segment::Location {
+        segment: 0,
+        offset: 0,
+    };
+    let mut n: u64 = 0;
+    r.store()
+        .reader()
+        .for_each_record_from(origin, r.read().seq(), |_, _, _| {
+            n += 1;
+            Ok(())
+        })
+        .expect("walk the log");
+    n
+}
+
+/// `redaction_report`, `redaction_land`, `redaction_open` and `redaction_dump`: the cost of
+/// removing every version of block `target` (plan Redaction, Task 16; D-6B1W1, D-3M81W). Each
+/// run works on its own copy of the closed project `proj`, made under `parent` and removed
+/// again, so the project (and every other tier that reads it) never loses content. Reported
+/// only: no spec ceiling and no baseline (D-PACK3, O14).
+///
+/// Per run, outside every timer: the copy, the handle, the recorded request and its proposal
+/// (before `redaction_land`), the completed removal (before `redaction_open` and
+/// `redaction_dump`) and the removal of the copy. `redaction_land` times the person's approval
+/// through the erasure and its publication. The scanned frames and bytes, and the dropped frames
+/// and bytes, go to the ledger beside the raw results.
+fn tier_redaction(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    target: &BlockId,
+    sfx: &str,
+    runs: usize,
+) {
+    use rdy_engine::redaction::RedactInput;
+    let input = RedactInput {
+        targets: vec![target.to_string()],
+        reason_class: "secret".to_string(),
+        reason: "perf: remove one block".to_string(),
+        dry_run: false,
+    };
+    let mut t: [Vec<Duration>; 4] = Default::default();
+    for i in 0..runs {
+        let work = parent.join(format!("rx{sfx}-{i}"));
+        copy_project(proj, &work);
+        let scanned_bytes = segment_bytes(&work);
+        let mut r = Rdy::open(&work).expect("open the copy");
+        let scanned_frames = scan_frame_count(&r);
+        // the complete report
+        let s = Instant::now();
+        let report = r.read().redaction_report(&input).expect("report");
+        t[0].push(s.elapsed());
+        // the recorded request and its proposal, then the approval through the erasure
+        r.redact_in(&writer(), "redact", input.clone())
+            .expect("record the request");
+        let prop = r
+            .propose(&writer(), "redact", "Remove one block", None)
+            .expect("propose");
+        let s = Instant::now();
+        r.land(&approver(), &prop.id).expect("land the removal");
+        t[1].push(s.elapsed());
+        let dropped = r
+            .store()
+            .verify_report()
+            .expect("verify")
+            .redaction
+            .expect("the removal is active");
+        eprintln!(
+            "redaction{sfx}: scanned {scanned_frames} frames, {scanned_bytes} bytes; \
+             report names {} frames, {} bytes; dropped {} frames, {} bytes",
+            report.drop_frames, report.drop_bytes, dropped.frames, dropped.bytes
+        );
+        drop(r);
+        // a store after content removal: opened and read once
+        let s = Instant::now();
+        let r = Rdy::open(&work).expect("open the redacted copy");
+        r.read().materialized(&Scope::Canon).expect("canon");
+        t[2].push(s.elapsed());
+        // a dump with removed payload records
+        let file = parent.join(format!("rx{sfx}-{i}.rdydump"));
+        let s = Instant::now();
+        r.read().dump(&file).expect("dump");
+        t[3].push(s.elapsed());
+        drop(r);
+        std::fs::remove_file(&file).expect("remove the dump");
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+    }
+    for (name, times) in [
+        "redaction_report",
+        "redaction_land",
+        "redaction_open",
+        "redaction_dump",
+    ]
+    .into_iter()
+    .zip(t)
+    {
+        let mut times = times.into_iter();
+        out.push(measure_timed(&format!("{name}{sfx}"), runs, |_| {
+            times.next().expect("one time per run")
+        }));
+    }
+}
+
 /// `export_md`, `export_html` and `export_pdf`: canon printed whole at a new path (D-9QV85). Run
 /// with the project closed. The handle is opened outside the timer; each output (a tree for
 /// Markdown, a file for the others) is removed outside it.
@@ -3663,6 +3785,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, "", 5);
     tier_render_cold(&mut out, &proj, dir.path(), "", 5);
     tier_dump(&mut out, &proj, dir.path(), "", 5);
+    tier_redaction(&mut out, &proj, dir.path(), &fx.claim, "", 5);
     tier_export(&mut out, &proj, dir.path(), 5);
     tier_clone(&mut out, &proj, dir.path(), "", 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
@@ -4418,6 +4541,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
     tier_dump(&mut out, &proj, parent, sfx, 3);
+    tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);
     tier_clone(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
@@ -5068,6 +5192,158 @@ mod tests {
             assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
         }
         assert!(spec_target("load_50k").is_some());
+    }
+
+    /// A landed, closed small tree for the redaction tier: its project path and the first claim.
+    fn rdx16_small_tree(dir: &std::path::Path) -> (std::path::PathBuf, BlockId) {
+        let proj = dir.join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let claim = fixture(&r, &docs).claim;
+        drop(r);
+        (proj, claim)
+    }
+
+    /// The segment files of a project with the hash of each, and the length of the log.
+    fn rdx16_segments(proj: &std::path::Path) -> (BTreeMap<String, Hash>, u64) {
+        let mut out = BTreeMap::new();
+        let mut len = 0;
+        for e in std::fs::read_dir(proj.join(".rdy/store/segments")).expect("segments") {
+            let p = e.expect("entry").path();
+            let bytes = std::fs::read(&p).expect("read a segment");
+            len += bytes.len() as u64;
+            out.insert(
+                p.file_name().expect("name").to_string_lossy().into_owned(),
+                Hash::of(&bytes),
+            );
+        }
+        (out, len)
+    }
+
+    const RDX16_OPS: [&str; 4] = [
+        "redaction_report",
+        "redaction_land",
+        "redaction_open",
+        "redaction_dump",
+    ];
+
+    /// Task 16: the four redaction operations exist in both runners under their names, run at
+    /// least once, and carry no spec ceiling. The test asserts no duration.
+    #[test]
+    fn rdx16_redaction_ops_are_reported() {
+        rdy_model::seed_ids_for_tests(0x7264_7831);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (proj, claim) = rdx16_small_tree(dir.path());
+        for sfx in ["", LARGE_SUFFIX] {
+            let mut out = vec![];
+            tier_redaction(&mut out, &proj, dir.path(), &claim, sfx, 2);
+            let names: Vec<String> = out.iter().map(|m| m.op.clone()).collect();
+            let want: Vec<String> = RDX16_OPS.iter().map(|o| format!("{o}{sfx}")).collect();
+            assert_eq!(names, want);
+            for m in &out {
+                assert!(m.runs >= 2, "{m:?}");
+                assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
+                assert!(spec_target(&m.op).is_some(), "{} has no target", m.op);
+            }
+        }
+        rdy_model::unseed_ids_for_tests();
+        // both runners call the tier with their own suffix and run count
+        let src = include_str!("perf.rs");
+        let body = |name: &str| {
+            let from = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(
+            body("pub fn run_workload(")
+                .contains("tier_redaction(&mut out, &proj, dir.path(), &fx.claim, \"\", 5);")
+        );
+        assert!(
+            body("fn run_large_tier(")
+                .contains("tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);")
+        );
+    }
+
+    /// Task 16 fix 1: the scanned-frame count uses the scanner's domain, batch markers included.
+    /// The tree is landed, so its log holds committed batches: the count exceeds the verify
+    /// report's data-frame count by at least one marker per batch, and agrees with the report.
+    #[test]
+    fn rdx16_scanned_frames_count_batch_markers() {
+        rdy_model::seed_ids_for_tests(0x7264_7833);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (proj, claim) = rdx16_small_tree(dir.path());
+        let r = Rdy::open(&proj).expect("open");
+        let data = r.store().verify_report().expect("verify").frames as u64;
+        let scanned = scan_frame_count(&r);
+        let input = rdy_engine::redaction::RedactInput {
+            targets: vec![claim.to_string()],
+            reason_class: "secret".to_string(),
+            reason: "perf".to_string(),
+            dry_run: false,
+        };
+        r.read().redaction_report(&input).expect("report");
+        rdy_model::unseed_ids_for_tests();
+        assert!(scanned > data, "markers are counted: {scanned} vs {data}");
+    }
+
+    /// Task 16: the tier erases content only in copies it makes and removes: the source project's
+    /// segment hashes and log length stay, and nothing is left in the parent directory.
+    #[test]
+    fn rdx16_redaction_ops_use_isolated_projects() {
+        rdy_model::seed_ids_for_tests(0x7264_7832);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (proj, claim) = rdx16_small_tree(dir.path());
+        let before = rdx16_segments(&proj);
+        let entries = |d: &std::path::Path| {
+            let mut v: Vec<_> = std::fs::read_dir(d)
+                .expect("read_dir")
+                .map(|e| e.expect("entry").file_name())
+                .collect();
+            v.sort();
+            v
+        };
+        let tree_before = entries(dir.path());
+        let mut out = vec![];
+        tier_redaction(&mut out, &proj, dir.path(), &claim, "", 2);
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(out.len(), 4);
+        assert_eq!(rdx16_segments(&proj), before, "the source log is unchanged");
+        assert_eq!(entries(dir.path()), tree_before, "no copy is left behind");
+        // the claim still reads in the source project
+        let r = Rdy::open(&proj).expect("open the source");
+        let b = r.read().block(&Scope::Canon, &claim).expect("claim");
+        assert_ne!(b.body, "Content removed.");
+    }
+
+    /// Task 16: the operations are information only (D-PACK3, O14): no ceiling, the exact target
+    /// texts in operation order, and no entry in the baseline file.
+    #[test]
+    fn rdx16_reported_ops_have_no_correctness_time_limit() {
+        let texts = [
+            "no spec target: the complete redaction report (reported)",
+            "no spec target: approved removal through durable completion (reported)",
+            "no spec target: open a store after content removal (reported)",
+            "no spec target: dump with removed payload records (reported)",
+        ];
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for (op, text) in RDX16_OPS.iter().zip(texts) {
+            let large = format!("{op}{LARGE_SUFFIX}");
+            for name in [op.to_string(), large] {
+                // the large tier's name carries the shared large-tier note after the same text
+                let want = if name.ends_with(LARGE_SUFFIX) {
+                    format!("{text}{LARGE_TIER_NOTE}")
+                } else {
+                    text.to_string()
+                };
+                assert_eq!(spec_target(&name), Some(want), "{name}");
+                assert_eq!(spec_ceiling_ms(&name), None, "{name}");
+                for class in baseline["classes"].as_object().expect("classes").values() {
+                    assert!(class["ops"].get(&name).is_none(), "{name} is not baselined");
+                }
+            }
+        }
     }
 
     /// The export and clone ops run end to end on a small tree: the project is landed and closed,

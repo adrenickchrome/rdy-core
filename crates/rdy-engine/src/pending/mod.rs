@@ -18,6 +18,6 @@ pub mod queue;
 mod snooze;
 mod tensions;
 
-pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render};
-pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};
+pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render, render_checked};
+pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, RemovalCard, age};
 pub use queue::{NotReady, Pending, PendingCounts, PendingQuery};

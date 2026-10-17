@@ -174,4 +174,61 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "a decision or question lacks its card words, or they are too long",
         "add a short title, a one-line why and, for a question, two to four options",
     ),
+    // plan Redaction: the shared texts, the message as when; the warnings have empty fixes
+    (
+        E_REDACTION_TARGET,
+        "Cannot redact {target}: {cause}.",
+        REDACTION_TARGET_FIX,
+    ),
+    (
+        E_REDACTION_LIMIT,
+        "The redaction exceeds {limit}.",
+        REDACTION_LIMIT_FIX,
+    ),
+    (
+        E_REDACTION_REASON,
+        REDACTION_REASON_MESSAGE,
+        REDACTION_REASON_FIX,
+    ),
+    (
+        E_REDACTION_STALE,
+        "The redaction report changed after the request was recorded.",
+        REDACTION_STALE_FIX,
+    ),
+    (
+        E_REDACTION_HUMAN,
+        "Content removal needs a person's approval.",
+        REDACTION_HUMAN_FIX,
+    ),
+    (
+        E_REDACTION_PENDING,
+        "Content removal was authorized but has not finished.",
+        REDACTION_PENDING_FIX,
+    ),
+    (
+        E_REDACTION_CORRUPT,
+        "The redaction record does not authorize the missing payload at {segment}:{offset}.",
+        REDACTION_CORRUPT_FIX,
+    ),
+    (
+        E_REDACTED_STATE,
+        "This read state predates content removal.",
+        REDACTED_STATE_FIX,
+    ),
+    (
+        E_REDACTED,
+        "Content removed by redaction {hash}.",
+        REDACTED_FIX,
+    ),
+    (
+        E_REDACTION_BUDGET,
+        REDACTION_BUDGET_MESSAGE,
+        REDACTION_BUDGET_FIX,
+    ),
+    (W_REDACTION_COPIES, W_REDACTION_COPIES_MESSAGE, ""),
+    (W_REDACTION_INVENTORY, W_REDACTION_INVENTORY_MESSAGE, ""),
+    (W_REDACTION_QUOTES, W_REDACTION_QUOTES_MESSAGE, ""),
+    (W_REDACTION_REUSE, W_REDACTION_REUSE_MESSAGE, ""),
+    (W_REDACTION_QUARANTINE, W_REDACTION_QUARANTINE_MESSAGE, ""),
+    (W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE, ""),
 ];

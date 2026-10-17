@@ -194,10 +194,20 @@ impl StoreReader {
             offset: 0,
         };
         let mut n = 0;
-        self.for_each_frame_from(origin, upto, |at, kind, h, payload, _| {
-            if kind != kinds::ANSWER {
-                return Ok(());
-            }
+        self.for_each_record_from(origin, upto, |at, frame, _| {
+            let (h, payload) = match frame {
+                crate::redaction::StoredFrame::Present {
+                    kind: kinds::ANSWER,
+                    hash,
+                    payload,
+                } => (hash, payload),
+                // an answer is never removable: a dropped one is damage
+                crate::redaction::StoredFrame::Dropped {
+                    kind: kinds::ANSWER,
+                    ..
+                } => return Err(StoreError::corrupt_at(at)),
+                _ => return Ok(()),
+            };
             let a: Answer = postcard::from_bytes(payload)
                 .map_err(|_| StoreError::Decode(damage(&h, "it does not decode")))?;
             if let Some(rule) = invalid(&a) {

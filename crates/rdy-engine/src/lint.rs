@@ -4,8 +4,11 @@ use crate::error::*;
 use crate::io::KeyedLink;
 use crate::keys::{Keys, key_of};
 use crate::tree_io::{Diagnostic, read_file, read_tree};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
-use rdy_schema::{Pack, Severity, skeleton_gaps, validate_block, validate_prefix};
+use rdy_model::redaction::CONTENT_REMOVED;
+use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans, tree};
+use rdy_schema::{
+    Issue, Pack, Severity, skeleton_gaps, validate_block, validate_prefix, validate_read_block,
+};
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -18,6 +21,44 @@ fn field_tokens(v: &FieldValue, out: &mut Vec<String>) {
         FieldValue::List(items) => items.iter().for_each(|i| field_tokens(i, out)),
         FieldValue::Map(m) => m.values().for_each(|i| field_tokens(i, out)),
         _ => {}
+    }
+}
+
+/// Whether a file entry has the shape rdy writes for a removed version's stub (D-3M81W): the
+/// notice as its body, and no field, link or pin, except the name a doc's or folder's file
+/// gives it, which is then its id.
+pub(crate) fn is_notice_entry(b: &Block) -> bool {
+    b.body == CONTENT_REMOVED
+        && b.links.is_empty()
+        && b.pins.is_empty()
+        && b.fields.iter().all(|(k, v)| {
+            k == "name" && tree::is_tree_type(&b.block_type) && v.as_str() == Some(b.id.as_str())
+        })
+}
+
+/// The schema issues of a file entry. An entry that is exactly `view`'s stub of a removed version
+/// (its type, parent and order, with the notice) is checked as that trusted read projection;
+/// every other entry gets the write schema.
+fn entry_issues(
+    pack: &Pack,
+    view: Option<&Materialized>,
+    b: &Block,
+    parent: Option<&Block>,
+) -> Vec<Issue> {
+    let stub = view.and_then(|m| m.get(&b.id)).filter(|s| {
+        s.is_redacted()
+            && is_notice_entry(b)
+            && s.block_type == b.block_type
+            && s.parent == b.parent
+            && s.order == b.order
+    });
+    match stub {
+        Some(s) => {
+            let mut trusted = b.clone();
+            trusted.read_identity = s.read_identity.clone();
+            validate_read_block(pack, &trusted, parent)
+        }
+        None => validate_block(pack, b, parent),
     }
 }
 
@@ -104,7 +145,12 @@ pub fn check_path(
     if let Some(m) = canon {
         let nameless: Vec<&BlockId> = m
             .iter()
-            .filter(|b| b.block_type == rdy_model::tree::DOC && b.field_str("name").is_none())
+            // a removed doc is named by its id, not a doc from M1 (D-3M81W)
+            .filter(|b| {
+                b.block_type == rdy_model::tree::DOC
+                    && b.field_str("name").is_none()
+                    && !b.is_redacted()
+            })
             .map(|b| &b.id)
             .collect();
         // one summary, not one warning per doc on every check
@@ -118,7 +164,7 @@ pub fn check_path(
             diags.push(Diagnostic {
                 file: "canon".into(), line: 1, column: 1, code: "W_NAMELESS_DOC".into(),
                 message: format!("{n} {docs} in canon {have} no stored name (from M1, e.g. {first}); the first export→import or write of each stores one"),
-                fix: "write to each once (any edit) to store its name; rdy export lists them".into(),
+                fix: "write to each once (any edit) to store its name".into(),
                 severity: Severity::Warning,
             });
         }
@@ -214,7 +260,7 @@ pub(crate) fn lint_blocks(
         let parent = b.parent.as_ref().and_then(lookup);
         for i in validate_prefix(pack, b)
             .into_iter()
-            .chain(validate_block(pack, b, parent))
+            .chain(entry_issues(pack, view, b, parent))
             .filter(|i| l.check_order || i.code != "E_ORDER_KEY")
         {
             let at = issue_at(l, i.code, &i.message);

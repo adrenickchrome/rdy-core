@@ -1,7 +1,8 @@
 //! The site's shape: which page every folder, doc and block lives on, where on the page, and
 //! the order a reader walks the docs in.
 use crate::inline::{self, Form};
-use rdy_engine::Materialized;
+use rdy_engine::{E_PATH_CLASH, Materialized, RdyError};
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, RefMode, decision, entity, tree};
 use rdy_schema::Pack;
 use regex::Regex;
@@ -89,6 +90,82 @@ pub struct GlossaryGroup {
 /// The page the generated glossary owns: a top-level doc of this name has no place on the site.
 pub const GLOSSARY_NAME: &str = "glossary";
 
+/// Two siblings whose names match ignoring case: their pages would be one file on a file system
+/// that ignores case. Names are unique ignoring case among siblings, but a removed doc or folder
+/// is named by its id (D-3M81W), which a sibling's name may match. As checkout does, a build that
+/// writes files refuses with `E_PATH_CLASH`, and the fix names the sibling a person can rename:
+/// the removed one has no name to change.
+#[derive(Clone, Debug)]
+struct PathClash {
+    /// The removed doc or folder of the pair, if one is.
+    removed: Option<(BlockId, bool)>,
+    /// The sibling the fix names (the second of the pair when neither is removed).
+    other: BlockId,
+    /// The first of the pair, when neither is removed.
+    first: BlockId,
+    /// The name of `other`.
+    name: String,
+}
+
+impl PathClash {
+    fn of(
+        m: &Materialized,
+        names: &BTreeMap<BlockId, String>,
+        first: &BlockId,
+        second: &BlockId,
+    ) -> PathClash {
+        let removed = |id: &BlockId| {
+            m.get(id)
+                .filter(|b| b.is_redacted())
+                .map(|b| (b.id.clone(), b.block_type == tree::FOLDER))
+        };
+        let (removed, other) = match (removed(first), removed(second)) {
+            (Some(r), _) => (Some(r), second),
+            (None, Some(r)) => (Some(r), first),
+            (None, None) => (None, second),
+        };
+        PathClash {
+            removed,
+            other: other.clone(),
+            first: first.clone(),
+            name: names.get(other).cloned().unwrap_or_default(),
+        }
+    }
+
+    fn error(&self, verb: &str) -> RdyError {
+        let PathClash {
+            removed,
+            other,
+            first,
+            name,
+        } = self;
+        match removed {
+            Some((id, folder)) => {
+                let (what, file) = match folder {
+                    true => ("folder", "directory"),
+                    false => ("doc", "file"),
+                };
+                RdyError::new(
+                    E_PATH_CLASH,
+                    format!(
+                        "{other} is named {name:?}, which matches the {file} name of redacted {what} {id} (ignoring case), so they cannot both be written as files"
+                    ),
+                    format!(
+                        "rename {other} (a redacted {what}'s {file} is named by its id), then {verb} again"
+                    ),
+                )
+            }
+            None => RdyError::new(
+                E_PATH_CLASH,
+                format!(
+                    "{first} and {other} are both named {name:?} (ignoring case) under the same parent, so they cannot both be written as files"
+                ),
+                format!("rename one of them, then {verb} again"),
+            ),
+        }
+    }
+}
+
 pub struct Site<'a> {
     pub m: &'a Materialized,
     /// Every folder's and doc's tree path.
@@ -125,6 +202,9 @@ pub struct Site<'a> {
     glossary_docs: Vec<BlockId>,
     /// The project's name: the label of the glossary's group of top-level docs.
     project: String,
+    /// The first two siblings, in tree order, whose names match ignoring case (see
+    /// [`Site::path_clash`]).
+    path_clash: Option<PathClash>,
     /// The navigation's lists, computed once: every folder's children that have a page, in
     /// order, under `Some(folder)`; the top-level docs that have a page under `None`.
     nav_lists: BTreeMap<Option<BlockId>, Vec<&'a Block>>,
@@ -174,15 +254,24 @@ impl<'a> Site<'a> {
             order: &mut Vec<BlockId>,
             tree_order: &mut Vec<BlockId>,
             dropped: &mut Vec<BlockId>,
+            clash: &mut Option<PathClash>,
         ) {
             if level > tree::MAX_FOLDER_DEPTH {
                 return;
             }
             let names = m.names_under(parent);
+            let mut used: BTreeMap<String, &BlockId> = BTreeMap::new();
             for b in m.children(parent) {
                 let Some(name) = names.get(&b.id) else {
                     continue;
                 };
+                // two siblings whose names match ignoring case would be one file where case is
+                // ignored: the first such pair in tree order refuses a build that writes files
+                if let Some(other) = used.insert(name.to_ascii_lowercase(), &b.id)
+                    && clash.is_none()
+                {
+                    *clash = Some(PathClash::of(m, &names, other, &b.id));
+                }
                 // the generated glossary owns `glossary.html`: a top-level doc of that name, in
                 // any case (names and many file systems ignore case), has no page, no place in
                 // the navigation, and its blocks are not linked
@@ -210,6 +299,7 @@ impl<'a> Site<'a> {
                         order,
                         tree_order,
                         dropped,
+                        clash,
                     );
                 } else if b.block_type == tree::DOC {
                     order.push(b.id.clone());
@@ -220,6 +310,7 @@ impl<'a> Site<'a> {
         let mut order = vec![];
         let mut tree_order = vec![];
         let mut dropped = vec![];
+        let mut path_clash = None;
         walk(
             m,
             None,
@@ -229,6 +320,7 @@ impl<'a> Site<'a> {
             &mut order,
             &mut tree_order,
             &mut dropped,
+            &mut path_clash,
         );
         let (mut nav_lists, mut top_folders, mut nav_pos) =
             (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
@@ -286,6 +378,7 @@ impl<'a> Site<'a> {
             term_groups: vec![],
             glossary_doc_dropped: !dropped.is_empty(),
             glossary_docs: dropped,
+            path_clash,
             project: project.to_string(),
             nav_lists,
             top_folders,
@@ -637,6 +730,12 @@ impl<'a> Site<'a> {
         self.page_owner.contains_key(page)
     }
 
+    /// The refusal of a build that writes the site's pages as files, when two siblings' names
+    /// match ignoring case (see [`PathClash`]); `verb` is the command to run again.
+    pub fn path_clash(&self, verb: &str) -> Option<RdyError> {
+        self.path_clash.as_ref().map(|c| c.error(verb))
+    }
+
     /// The page of a folder or doc.
     pub fn page(&self, id: &BlockId) -> Option<String> {
         let p = self.paths.get(id)?;
@@ -771,6 +870,10 @@ impl<'a> Site<'a> {
     }
 
     fn label_uncached(&self, b: &Block, depth: usize) -> String {
+        // a removed block is called by the notice, never by its id path or old words (D-3M81W)
+        if b.is_redacted() {
+            return CONTENT_REMOVED.to_string();
+        }
         if let Some(v) = entity::value_text(b) {
             return v;
         }
@@ -827,9 +930,10 @@ impl<'a> Site<'a> {
         })
     }
 
-    /// `text` as plain words in `form` ([`inline::plain_refs`]): a reference with no display text reads as `ref_words`
-    /// says (the target's key when typed as one and the target has one, else its label), or as
-    /// `unresolved(token)` when it leads nowhere.
+    /// `text` as plain words in `form` ([`inline::plain_refs_every`]): a reference reads as
+    /// `ref_text` says (the notice for a removed target, else its display text, else the target's
+    /// key when typed as one and the target has one, else its label), or as `unresolved(token)`
+    /// when it leads nowhere.
     pub fn plain(
         &self,
         text: &str,
@@ -838,8 +942,8 @@ impl<'a> Site<'a> {
         depth: usize,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs(text, mode, form, &|span| {
-            self.ref_words(span, depth, unresolved)
+        inline::plain_refs_every(text, mode, form, &|span| {
+            self.ref_text(span, depth, unresolved)
         })
     }
 
@@ -853,9 +957,27 @@ impl<'a> Site<'a> {
         form: Form,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs_coded(text, mode, form, &|span| {
-            self.ref_words(span, 0, unresolved)
-        })
+        inline::plain_refs_coded(text, mode, form, &|span| self.ref_text(span, 0, unresolved))
+    }
+
+    /// What a reference reads as in plain words: the notice when its target is removed, whatever
+    /// display text the author gave (D-3M81W); else its display text; else [`Site::ref_words`].
+    fn ref_text(
+        &self,
+        span: &rdy_model::RefSpan,
+        depth: usize,
+        unresolved: &dyn Fn(&str) -> String,
+    ) -> String {
+        let target = BlockId::parse(&span.token)
+            .ok()
+            .and_then(|id| self.m.get(&id));
+        if target.is_some_and(|t| t.is_redacted()) {
+            return CONTENT_REMOVED.to_string();
+        }
+        match &span.display {
+            Some(d) => d.clone(),
+            None => self.ref_words(span, depth, unresolved),
+        }
     }
 
     /// The words a reference with no display text reads as: its target's current key when typed
@@ -902,6 +1024,9 @@ impl<'a> Site<'a> {
     }
 
     fn summary_words_uncached(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        if b.is_redacted() {
+            return CONTENT_REMOVED.to_string();
+        }
         let unresolved_of = |token: &str| match keep_token {
             true => token.to_string(),
             false => crate::html::UNRESOLVED.to_string(),
@@ -933,7 +1058,7 @@ impl<'a> Site<'a> {
                 "code" | "diagram" | "figure" => {
                     let mode = RefMode::for_body(&b.block_type);
                     let words = inline::source_plain(&b.body, mode, &|span| {
-                        self.ref_words(span, depth, &unresolved_of)
+                        self.ref_text(span, depth, &unresolved_of)
                     });
                     words.split_whitespace().collect::<Vec<_>>().join(" ")
                 }

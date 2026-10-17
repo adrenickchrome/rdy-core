@@ -7,6 +7,7 @@ mod daemon_crash_m2;
 mod daemon_followups;
 mod daemon_notify;
 mod daemon_pack_reads;
+mod daemon_redaction_reads;
 mod daemon_reload;
 mod daemon_serve;
 mod daemon_short_socket;

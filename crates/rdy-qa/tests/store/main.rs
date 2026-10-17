@@ -17,5 +17,6 @@ mod store_m2_kinds;
 mod store_open;
 mod store_pver;
 mod store_reader;
+mod store_redaction_crash;
 mod store_resolve;
 mod store_viewops;

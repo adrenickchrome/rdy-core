@@ -54,7 +54,7 @@ fn set(views: &[&str]) -> AltSet {
 fn cfmt1_kinds_15_and_16_and_format_10() {
     assert_eq!(kinds::INTENT, 15);
     assert_eq!(kinds::ALT_SET, 16);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 12);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 13);
 }
 
 #[test]
@@ -146,6 +146,7 @@ fn cfmt1_fsck_counts_and_checks_coordination_objects() {
             client_nonce: None,
             imported_by: None,
         },
+        read_identity: None,
     };
     let block = Block {
         id: BlockId::parse("c-AAAAA").unwrap(),
@@ -156,6 +157,7 @@ fn cfmt1_fsck_counts_and_checks_coordination_objects() {
         body: "x".into(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     };
     ch.ops.push(Op::Create { block });
     s.commit_to_view("a", ch.clone()).unwrap();
@@ -190,6 +192,7 @@ fn claim(id: &str, body: &str) -> Block {
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 fn commit_create(s: &mut Store, view: &str, id: &str) -> Hash {
@@ -205,6 +208,7 @@ fn commit_create(s: &mut Store, view: &str, id: &str) -> Hash {
             justification: None,
             message: String::new(),
             links: ChangeLinks::default(),
+            read_identity: None,
         },
     )
     .unwrap()

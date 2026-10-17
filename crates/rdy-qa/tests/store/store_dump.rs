@@ -1,5 +1,5 @@
-//! dl1: the dump stream (format 1): header, project files, sealed batches copied byte for byte,
-//! trailer; every record verified on read.
+//! dl1: the dump stream (the current format, 2): header, project files, sealed batches copied
+//! byte for byte, trailer; every record verified on read.
 use rdy_model::Hash;
 use rdy_store::dump::*;
 use rdy_store::format::STORE_FORMAT;
@@ -75,9 +75,13 @@ fn dl1_for_each_batch_walks_every_sealed_batch_in_order() {
         assert!(
             b.frames
                 .iter()
-                .all(|f| f.kind != rdy_store::kinds::BATCH_COMMIT)
+                .all(|f| f.kind() != rdy_store::kinds::BATCH_COMMIT)
         );
-        assert!(b.frames.iter().all(|f| f.hash == Hash::of(&f.payload)));
+        assert!(
+            b.frames
+                .iter()
+                .all(|f| *f.hash() == Hash::of(f.present_payload().unwrap()))
+        );
     }
     assert!(batches.windows(2).all(|w| w[0].start < w[1].start));
 }
@@ -91,11 +95,11 @@ fn dl1_a_stream_round_trips_header_files_and_batches() {
         (".rdyignore", b"*.draft.yaml\n"),
     ];
     let bytes = stream(&s, &batches, &files);
-    assert!(bytes.starts_with(b"RDYDUMP\n\x01\x00\x00\x00"));
+    assert!(bytes.starts_with(b"RDYDUMP\n\x02\x00\x00\x00"));
     let (mut r, format, h) = DumpReader::open(&bytes[..]).unwrap();
     assert_eq!(
         (format, h.store_format, h.log_end),
-        (1, STORE_FORMAT, s.log_end())
+        (DUMP_FORMAT, STORE_FORMAT, s.log_end())
     );
     let mut got_files = vec![];
     let mut got_batches = vec![];
@@ -119,7 +123,7 @@ fn dl1_a_stream_round_trips_header_files_and_batches() {
             a.frames
                 .iter()
                 .zip(&b.frames)
-                .all(|(x, y)| x.kind == y.kind && x.payload == y.payload)
+                .all(|(x, y)| x.kind() == y.kind() && x.present_payload() == y.present_payload())
         );
     }
     let t = r.totals();
@@ -196,11 +200,11 @@ fn dl1_an_unknown_magic_or_format_is_refused() {
         damaged(read_all(&bad).unwrap_err()),
         "it does not start with RDYDUMP"
     );
-    let mut v2 = good.clone();
-    v2[8] = 2;
+    let mut v3 = good.clone();
+    v3[8] = 3;
     assert_eq!(
-        damaged(read_all(&v2).unwrap_err()),
-        "dump format 2 is not one this rdy reads"
+        damaged(read_all(&v3).unwrap_err()),
+        "dump format 3 is not one this rdy reads"
     );
     // the writer refuses this header (dl1_a_writer_refuses_a_store_format_it_cannot_read), so
     // the stream is forged: a batch-less dump whose header names the next store format
@@ -211,7 +215,7 @@ fn dl1_an_unknown_magic_or_format_is_refused() {
     assert_eq!(
         damaged(read_all(&bytes).unwrap_err()),
         format!(
-            "store format {} in a dump of format 1 is not one this rdy reads",
+            "store format {} in a dump of format 2 is not one this rdy reads",
             STORE_FORMAT + 1
         )
     );
@@ -231,7 +235,7 @@ fn dl1_a_writer_refuses_a_store_format_it_cannot_read() {
         assert_eq!(
             e.to_string(),
             StoreError::Refused(format!(
-                "store format {store_format} in a dump of format 1 is not one this rdy reads"
+                "store format {store_format} in a dump of format 2 is not one this rdy reads"
             ))
             .to_string()
         );
@@ -250,9 +254,9 @@ fn dl1_each_reader_refusal_has_its_kind() {
     bad[0] = b'X';
     assert_eq!(DumpRefusal::of(&what(&bad)), DumpRefusal::NotADump);
     assert_eq!(DumpRefusal::of(&what(&[])), DumpRefusal::NotADump);
-    let mut v2 = good.clone();
-    v2[8] = 2;
-    assert_eq!(DumpRefusal::of(&what(&v2)), DumpRefusal::FormatNotRead);
+    let mut v3 = good.clone();
+    v3[8] = 3;
+    assert_eq!(DumpRefusal::of(&what(&v3)), DumpRefusal::FormatNotRead);
     let mut recs = records(&stream(&s, &[], &[]));
     recs[0].1[..4].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
     reseal(&mut recs);
@@ -310,7 +314,7 @@ fn dl1_a_record_out_of_place_is_refused() {
     assert!(w.file(".rdy.yaml", b"x").is_err());
     // a batch marker frame inside a batch
     let mut b = batches[1].clone();
-    b.frames.push(Frame {
+    b.frames.push(Frame::Present {
         kind: rdy_store::kinds::BATCH_COMMIT,
         hash: Hash::of(b""),
         payload: vec![],
@@ -353,7 +357,8 @@ fn records(good: &[u8]) -> Vec<(u8, Vec<u8>)> {
 
 /// A stream of `recs` with hash-valid records, the prelude in front.
 fn forge(recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
-    let mut out = b"RDYDUMP\n\x01\x00\x00\x00".to_vec();
+    let mut out = b"RDYDUMP\n".to_vec();
+    out.extend_from_slice(&DUMP_FORMAT.to_le_bytes());
     for (k, p) in recs {
         out.extend(record(*k, p));
     }
@@ -551,8 +556,12 @@ fn dl1_an_unassigned_kind_is_refused() {
     let (_b, s, batches) = store_and_batches();
     assert_eq!(
         frame_kinds(DUMP_FORMAT, STORE_FORMAT),
-        Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19][..]),
-        "exactly the kinds store format 12 assigns"
+        Some(
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19, 20, 21, 22
+            ][..]
+        ),
+        "exactly the kinds store format 13 assigns"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
@@ -571,7 +580,9 @@ fn dl1_an_unassigned_kind_is_refused() {
         );
         // the writer
         let mut b = batches[1].clone();
-        b.frames[0].kind = k;
+        if let Frame::Present { kind, .. } = &mut b.frames[0] {
+            *kind = k;
+        }
         let mut w = DumpWriter::new(Vec::new(), &header(&s)).unwrap();
         match w.batch(&b) {
             Err(StoreError::Refused(m)) => {

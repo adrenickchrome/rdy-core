@@ -290,7 +290,13 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
                     .and_then(|v| v["status"].as_str().map(String::from))
                     .unwrap_or_default()
             });
+            // a source read: a stub of removed content reads as its id and the neutral source
+            // stub, `Content removed.` and then the line that names its redaction (rdx6, rdx12),
+            // before any type's own formatter (which reads fields a stub does not have)
             let markdown = || {
+                if b.is_redacted() {
+                    return format!("`{}` {}", b.id, rdy_engine::source_body(b));
+                }
                 crate::markdown::block_markdown(
                     b,
                     &m,

@@ -23,31 +23,9 @@ pub(super) struct CheckArgs {
     view: Option<String>,
 }
 
-/// The quarantine files an open left behind: torn segment tails (`segments/<name>`) and
-/// damaged indexes, sorted. A missing directory contributes nothing.
-pub fn quarantine(root: &Path) -> Vec<String> {
-    let store = root.join(".rdy/store");
-    let names = |dir: &Path| -> Vec<String> {
-        std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok()?.file_name().into_string().ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let mut out: Vec<String> = names(&store.join("segments"))
-        .into_iter()
-        .filter(|n| n.contains(".torn-"))
-        .map(|n| format!("segments/{n}"))
-        .collect();
-    out.extend(
-        names(&store)
-            .into_iter()
-            .filter(|n| n.starts_with("index.redb.damaged-")),
-    );
-    out.sort();
-    out
-}
+/// The quarantine files an open left behind: torn segment tails (`segments/<name>`) and damaged
+/// indexes, sorted (the engine's listing, shared with the redaction report).
+pub use rdy_engine::quarantine::names as quarantine;
 
 /// What `clean_quarantine` did: the names it removed and the ones it left, with why.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

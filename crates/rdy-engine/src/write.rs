@@ -1807,6 +1807,7 @@ fn build_ops(
                     body,
                     links: res.links(links)?,
                     pins: BTreeMap::new(),
+                    read_identity: None,
                 };
                 if tree::is_tree_type(&block.block_type) && !block.fields.contains_key("name") {
                     let base = tree::default_name(block.field_str("title"), &block.id);
@@ -1856,6 +1857,9 @@ fn build_ops(
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
+                // the content of a removed version's projection as the edit found it: an edit
+                // that changes it authors a normal version (below)
+                let projected = cur.read_identity.is_some().then(|| block.clone());
                 let retyped = block_type.filter(|t| *t != cur.block_type);
                 let edits = retyped.is_some()
                     || !fields.is_empty()
@@ -1895,6 +1899,22 @@ fn build_ops(
                             block.links.insert(kind, targets);
                         }
                     }
+                }
+                // final review finding 3: a person's fresh type, fields, body or links over a
+                // removed version's projection is new content, not the projection: it is
+                // written as a normal version (no read identity, its own version hash, the
+                // projection's version as its base). The frozen and schema checks below still
+                // compare it with the projection (`cur`), and an edit that leaves the projected
+                // content as it was keeps the read identity, so the store's and the engine's
+                // input boundaries refuse it (`E_REDACTED`), as they refuse a version hash a
+                // redaction removed.
+                if let Some(p) = &projected
+                    && (block.block_type != p.block_type
+                        || block.fields != p.fields
+                        || block.body != p.body
+                        || block.links != p.links)
+                {
+                    block.read_identity = None;
                 }
                 let moves = move_to.is_some();
                 let mut rekeys = Rekeys::new();
@@ -2751,6 +2771,7 @@ impl Rdy {
             req.justification.as_ref(),
             rdy_keys,
         )?;
+        refuse_removed_content(&self.store, &ops)?;
         let change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
@@ -2759,6 +2780,7 @@ impl Rdy {
             justification: req.justification,
             message: req.message,
             links,
+            read_identity: None,
         };
         let id = self.store.commit_to_view_resolving(
             &req.view,
@@ -2812,6 +2834,26 @@ impl Rdy {
             warnings,
         })
     }
+}
+
+/// The engine's input boundary for removed content (plan Redaction): a block that `ops` write
+/// and that is a read projection of a removed version (a stub, with its recorded identity), or
+/// whose version hash a redaction removed, is refused with `E_REDACTED` naming that redaction,
+/// before anything is written. The store repeats both checks on every write.
+fn refuse_removed_content(reader: &rdy_store::StoreReader, ops: &[Op]) -> Result<(), RdyError> {
+    for op in ops {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        let request = match &block.read_identity {
+            Some(id) => Some(id.request),
+            None => reader.redaction_of(rdy_store::kinds::BLOCK, &block.version_hash())?,
+        };
+        if let Some(request) = request {
+            return Err(rdy_store::StoreError::Redacted { request }.into());
+        }
+    }
+    Ok(())
 }
 
 /// May `s` do `action` on `view`? The view must be writable at all (`writable_view`; a proposal

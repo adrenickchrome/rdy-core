@@ -80,6 +80,7 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                read_identity: None,
             },
         })
         .collect();
@@ -94,6 +95,7 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
                 justification: None,
                 message: "raw".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();

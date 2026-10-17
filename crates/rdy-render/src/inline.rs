@@ -6,6 +6,7 @@
 //! links and emphasis (`*` and `**` only: an underscore is always literal, FW-F1a). A body is
 //! grouped into paragraphs and lists. Anything else is text, escaped.
 use crate::html::{Link, UNRESOLVED, escape};
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{BlockId, RefMode, RefSpan, ref_spans};
 
 /// How a text's references and relative links are read on the page being written.
@@ -89,7 +90,27 @@ pub fn plain_refs(
     form: Form,
     label: &dyn Fn(&RefSpan) -> String,
 ) -> String {
-    plain_refs_in(text, mode, form, label, false)
+    plain_refs_in(text, mode, form, &|span| display_or(span, label), false)
+}
+
+/// A reference's display text, else what `label` says.
+fn display_or(span: &RefSpan, label: &dyn Fn(&RefSpan) -> String) -> String {
+    match &span.display {
+        Some(d) => d.clone(),
+        None => label(span),
+    }
+}
+
+/// As [`plain_refs`], but `words` is called for every reference, one with display text too, and
+/// says all it reads as: a reference to a removed block reads as the notice, whatever display
+/// text the author gave (D-3M81W).
+pub(crate) fn plain_refs_every(
+    text: &str,
+    mode: RefMode,
+    form: Form,
+    words: &dyn Fn(&RefSpan) -> String,
+) -> String {
+    plain_refs_in(text, mode, form, words, false)
 }
 
 /// Opens a code span in the text of [`plain_refs_coded`].
@@ -112,27 +133,29 @@ pub(crate) fn code_escape(t: &str) -> String {
     out
 }
 
-/// As [`plain_refs`], but each code span's text stands between [`CODE_OPEN`] and [`CODE_CLOSE`]:
-/// a word diff reads it so that a code span stays code (the task-6 ruling). The encoding is
-/// reversible: an authored mark character (and [`CODE_ESC`]) is written after [`CODE_ESC`]
-/// ([`code_escape`]), so no authored character is lost and only a code span writes a bare mark.
+/// As [`plain_refs_every`] (`words` reads every reference, one with display text too), but each
+/// code span's text stands between [`CODE_OPEN`] and [`CODE_CLOSE`]: a word diff reads it so
+/// that a code span stays code (the task-6 ruling). The encoding is reversible: an authored mark
+/// character (and [`CODE_ESC`]) is written after [`CODE_ESC`] ([`code_escape`]), so no authored
+/// character is lost and only a code span writes a bare mark.
 pub(crate) fn plain_refs_coded(
     text: &str,
     mode: RefMode,
     form: Form,
-    label: &dyn Fn(&RefSpan) -> String,
+    words: &dyn Fn(&RefSpan) -> String,
 ) -> String {
-    plain_refs_in(text, mode, form, label, true)
+    plain_refs_in(text, mode, form, words, true)
 }
 
+/// `words` reads every reference, one with display text too.
 fn plain_refs_in(
     text: &str,
     mode: RefMode,
     form: Form,
-    label: &dyn Fn(&RefSpan) -> String,
+    words: &dyn Fn(&RefSpan) -> String,
     coded: bool,
 ) -> String {
-    let words = |t: &str, label_form: bool| {
+    let read = |t: &str, label_form: bool| {
         let (toks, refs) = tokens(t, mode);
         let nodes = if label_form {
             parse_label(&toks)
@@ -140,19 +163,19 @@ fn plain_refs_in(
             parse_spans(&toks, false)
         };
         let mut out = String::new();
-        render_plain(&nodes, &refs, label, coded, &mut out);
+        render_plain(&nodes, &refs, words, coded, &mut out);
         out
     };
     match form {
-        Form::Label => words(text, true),
-        Form::Spans => words(text, false),
+        Form::Label => read(text, true),
+        Form::Spans => read(text, false),
         Form::Body => parse_body(text)
             .iter()
             .map(|b| match b {
-                Block::Para(p) => words(p, false),
+                Block::Para(p) => read(p, false),
                 Block::List(l) => {
                     let mut lines = vec![];
-                    list_plain(l, &|t| words(t, false), &mut lines);
+                    list_plain(l, &|t| read(t, false), &mut lines);
                     lines.join("\n")
                 }
             })
@@ -168,21 +191,19 @@ pub(crate) fn is_one_paragraph(text: &str) -> bool {
 }
 
 /// Source that is not Markdown (a diagram's, a figure's) as plain words: each reference in `mode`
-/// reads as its display text, else as `label` says (called only for one with none), each rdy
-/// escape `\{{` as `{{`, and nothing else changes. In [`RefMode::Off`] it is the text unescaped.
+/// reads as `words` says (called for every reference, one with display text too, as
+/// [`plain_refs_every`]), each rdy escape `\{{` as `{{`, and nothing else changes. In
+/// [`RefMode::Off`] it is the text unescaped.
 pub(crate) fn source_plain(
     text: &str,
     mode: RefMode,
-    label: &dyn Fn(&RefSpan) -> String,
+    words: &dyn Fn(&RefSpan) -> String,
 ) -> String {
     let mut out = String::new();
     let mut last = 0;
     for span in ref_spans(text, mode) {
         out.push_str(&unescape_braces(&text[last..span.range.start]));
-        match &span.display {
-            Some(d) => out.push_str(d),
-            None => out.push_str(&label(&span)),
-        }
+        out.push_str(&words(&span));
         last = span.range.end;
     }
     out.push_str(&unescape_braces(&text[last..]));
@@ -654,10 +675,14 @@ fn href(target: &str, doc_page: &str) -> Option<(String, bool)> {
 
 // ---- output -------------------------------------------------------------------------------
 
-/// What a reference reads as in words: its display text, the target's key when the author typed
-/// a key and the target still has one, else the target's label (the unresolved marker's words
-/// when it leads nowhere, unless the author gave display text).
+/// What a reference reads as in words: the notice when its target is removed (whatever display
+/// text the author gave, D-3M81W), its display text, the target's key when the author typed a
+/// key and the target still has one, else the target's label (the unresolved marker's words when
+/// it leads nowhere, unless the author gave display text).
 fn ref_words(span: &RefSpan, link: Option<&Link>) -> String {
+    if link.is_some_and(|l| l.removed) {
+        return CONTENT_REMOVED.to_string();
+    }
     if let Some(d) = &span.display {
         return d.clone();
     }
@@ -748,6 +773,7 @@ fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: 
     }
 }
 
+/// `label` reads every reference, one with display text too.
 fn render_plain(
     nodes: &[Node],
     refs: &[RefSpan],
@@ -766,13 +792,7 @@ fn render_plain(
     for n in nodes {
         match n {
             Node::Text(t) => push(out, t),
-            Node::Ref(k) => {
-                let span = &refs[*k];
-                match &span.display {
-                    Some(d) => push(out, d),
-                    None => push(out, &label(span)),
-                }
-            }
+            Node::Ref(k) => push(out, &label(&refs[*k])),
             Node::Code(c) if coded => {
                 out.push(CODE_OPEN);
                 render_plain(c, refs, label, coded, out);

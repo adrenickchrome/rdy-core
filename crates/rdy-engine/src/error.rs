@@ -84,6 +84,121 @@ pub const E_INTENT_EXPIRED: &str = "E_INTENT_EXPIRED";
 /// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.
 pub const PAGE_STALE_FIX: &str = "the read, briefing or search moved; start again without a cursor";
 
+/// A redaction target that is not a block id, `id@full-version-hash` or `blob:full-manifest-hash`,
+/// or that names nothing removable (plan Redaction). Built by [`redaction_target`].
+pub const E_REDACTION_TARGET: &str = "E_REDACTION_TARGET";
+/// A redaction over one of its fixed bounds. Built by [`redaction_limit`].
+pub const E_REDACTION_LIMIT: &str = "E_REDACTION_LIMIT";
+/// A redaction without a valid reason class or a reason of 1 to 4096 UTF-8 bytes.
+pub const E_REDACTION_REASON: &str = "E_REDACTION_REASON";
+/// The report a redaction request binds changed after the request was recorded.
+pub const E_REDACTION_STALE: &str = "E_REDACTION_STALE";
+/// A content removal without a person's approval: policy and agent-only approval refuse.
+pub const E_REDACTION_HUMAN: &str = "E_REDACTION_HUMAN";
+/// An authorized content removal that has not finished.
+pub const E_REDACTION_PENDING: &str = "E_REDACTION_PENDING";
+/// A missing payload that no stored redaction record authorizes.
+pub const E_REDACTION_CORRUPT: &str = "E_REDACTION_CORRUPT";
+/// A read state taken before a content removal.
+pub const E_REDACTED_STATE: &str = "E_REDACTED_STATE";
+/// Content a redaction removed.
+pub const E_REDACTED: &str = "E_REDACTED";
+/// An output budget too small for the redaction warning.
+pub const E_REDACTION_BUDGET: &str = "E_REDACTION_BUDGET";
+
+/// The fix of `E_REDACTION_TARGET`.
+pub const REDACTION_TARGET_FIX: &str =
+    "Use a block id, id@full-version-hash, or blob:full-manifest-hash.";
+/// The fix of `E_REDACTION_LIMIT`.
+pub const REDACTION_LIMIT_FIX: &str = "Select fewer targets, then run the dry run again.";
+/// The message of `E_REDACTION_REASON`.
+pub const REDACTION_REASON_MESSAGE: &str = "The redaction needs a reason and a reason class.";
+/// The fix of `E_REDACTION_REASON`.
+pub const REDACTION_REASON_FIX: &str =
+    "Use secret, personal, legal, or retraction, with a reason of 1 to 4096 UTF-8 bytes.";
+/// The fix of `E_REDACTION_STALE`.
+pub const REDACTION_STALE_FIX: &str =
+    "Record a new request, show its report, and ask for approval again.";
+/// The fix of `E_REDACTION_HUMAN`.
+pub const REDACTION_HUMAN_FIX: &str =
+    "Show the redaction card and relay the person's answer, or approve from the CLI as a human.";
+/// The fix of `E_REDACTION_PENDING`.
+pub const REDACTION_PENDING_FIX: &str =
+    "Close the project and reopen it to finish the removal. Do not delete the log.";
+/// The fix of `E_REDACTION_CORRUPT`.
+pub const REDACTION_CORRUPT_FIX: &str = "Keep the store unchanged and inspect it with rdy fsck.";
+/// The fix of `E_REDACTED_STATE`.
+pub const REDACTED_STATE_FIX: &str = "Read the project again.";
+/// The fix of `E_REDACTED`.
+pub const REDACTED_FIX: &str = "Read the redaction details in the source history.";
+/// The message of `E_REDACTION_BUDGET`.
+pub const REDACTION_BUDGET_MESSAGE: &str =
+    "The output budget is too small for the redaction warning.";
+/// The fix of `E_REDACTION_BUDGET`.
+pub const REDACTION_BUDGET_FIX: &str =
+    "Increase max_tokens, or propose fewer redaction requests at once.";
+
+/// The causes of `E_REDACTION_TARGET`, exactly.
+pub const REDACTION_CAUSE_INVALID: &str = "invalid selector";
+pub const REDACTION_CAUSE_UNKNOWN: &str = "unknown target";
+pub const REDACTION_CAUSE_OTHER_BLOCK: &str = "version belongs to another block";
+pub const REDACTION_CAUSE_NOT_BLOB: &str = "target is not a blob manifest";
+pub const REDACTION_CAUSE_METADATA: &str = "metadata is not content";
+
+/// The redaction warnings, in their report order; each has an empty fix.
+pub const W_REDACTION_COPIES: &str = "W_REDACTION_COPIES";
+pub const W_REDACTION_INVENTORY: &str = "W_REDACTION_INVENTORY";
+pub const W_REDACTION_QUOTES: &str = "W_REDACTION_QUOTES";
+pub const W_REDACTION_REUSE: &str = "W_REDACTION_REUSE";
+/// Only with a nonempty quarantine list.
+pub const W_REDACTION_QUARANTINE: &str = "W_REDACTION_QUARANTINE";
+/// Only for reason class secret.
+pub const W_REDACTION_SECRET: &str = "W_REDACTION_SECRET";
+pub const W_REDACTION_COPIES_MESSAGE: &str = "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.";
+pub const W_REDACTION_INVENTORY_MESSAGE: &str = "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.";
+pub const W_REDACTION_QUOTES_MESSAGE: &str = "Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review findings, tension advice, and answer notes are not erased.";
+pub const W_REDACTION_REUSE_MESSAGE: &str = "This store will refuse these object and chunk hashes on later writes. This can block an identical restore or a file that shares a removed chunk.";
+pub const W_REDACTION_QUARANTINE_MESSAGE: &str = "Quarantine files may hold the content. Redaction does not remove them. A person can run rdy fsck --clean-quarantine.";
+pub const W_REDACTION_SECRET_MESSAGE: &str =
+    "Rotate or revoke the secret. Redaction does not undo its exposure.";
+
+/// `E_REDACTION_TARGET` for `target` (its normalized spelling, or `[]` for no targets) and one of
+/// the `REDACTION_CAUSE_*` texts.
+pub fn redaction_target(target: &str, cause: &str) -> RdyError {
+    RdyError::new(
+        E_REDACTION_TARGET,
+        format!("Cannot redact {target}: {cause}."),
+        REDACTION_TARGET_FIX,
+    )
+}
+
+/// `E_REDACTION_LIMIT` for one of `rdy_store::redaction::limit::ALL`.
+pub fn redaction_limit(limit: &str) -> RdyError {
+    RdyError::new(
+        E_REDACTION_LIMIT,
+        format!("The redaction exceeds {limit}."),
+        REDACTION_LIMIT_FIX,
+    )
+}
+
+/// `E_REDACTION_REASON`.
+pub fn redaction_reason() -> RdyError {
+    RdyError::new(
+        E_REDACTION_REASON,
+        REDACTION_REASON_MESSAGE,
+        REDACTION_REASON_FIX,
+    )
+}
+
+/// `E_REDACTION_BUDGET`.
+pub fn redaction_budget() -> RdyError {
+    RdyError::new(
+        E_REDACTION_BUDGET,
+        REDACTION_BUDGET_MESSAGE,
+        REDACTION_BUDGET_FIX,
+    )
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {
     pub code: &'static str,
@@ -268,6 +383,44 @@ impl From<StoreError> for RdyError {
                 format!(
                     "include or exclude the change directly instead: rdy view include|exclude {view} <change> (MCP: rdy_view include/exclude)"
                 ),
+            ),
+            StoreError::Redacted { request } => RdyError::new(
+                E_REDACTED,
+                format!("Content removed by redaction {request}."),
+                REDACTED_FIX,
+            ),
+            StoreError::RedactedState => RdyError::new(
+                E_REDACTED_STATE,
+                "This read state predates content removal.",
+                REDACTED_STATE_FIX,
+            ),
+            StoreError::RedactionHuman => RdyError::new(
+                E_REDACTION_HUMAN,
+                "Content removal needs a person's approval.",
+                REDACTION_HUMAN_FIX,
+            ),
+            StoreError::RedactionPending => RdyError::new(
+                E_REDACTION_PENDING,
+                "Content removal was authorized but has not finished.",
+                REDACTION_PENDING_FIX,
+            ),
+            StoreError::RedactionStale => RdyError::new(
+                E_REDACTION_STALE,
+                "The redaction report changed after the request was recorded.",
+                REDACTION_STALE_FIX,
+            ),
+            StoreError::RedactionCorrupt { segment, offset } => RdyError::new(
+                E_REDACTION_CORRUPT,
+                format!(
+                    "The redaction record does not authorize the missing payload at {segment}:{offset}."
+                ),
+                REDACTION_CORRUPT_FIX,
+            ),
+            StoreError::RedactionLimit { limit } => redaction_limit(limit),
+            StoreError::ProjectedWrite => RdyError::new(
+                E_BAD_INPUT,
+                "A read projection cannot be written.",
+                "Write a new block version from source content.",
             ),
             StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(
                 E_IO,

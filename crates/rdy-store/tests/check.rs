@@ -13,6 +13,7 @@ fn block(id: &str) -> Block {
         body: "x".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 
@@ -34,6 +35,7 @@ fn create(view: &str, id: &str) -> Change {
         justification: None,
         message: String::new(),
         links: ChangeLinks::default(),
+        read_identity: None,
     }
 }
 

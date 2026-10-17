@@ -5,6 +5,7 @@ use crate::site::{Site, rel};
 use rdy_engine::Materialized;
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
 use rdy_model::decision::{self, AFFECTS, ANSWERS, DECIDED_BY, IMPLEMENTS, REVOKES, SUPERSEDES};
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::reference::{format_ref, head, snippet};
 use rdy_model::{Block, BlockId, FieldValue};
 use regex::Regex;
@@ -133,6 +134,10 @@ impl Cx<'_> {
 
     /// The statement as a reader sees it: a revocation shows its reason, not the id it names.
     fn statement(&self, d: &Block) -> String {
+        // a removed decision's statement is the notice (D-3M81W)
+        if d.is_redacted() {
+            return CONTENT_REMOVED.to_string();
+        }
         let raw = d.field_str("statement").unwrap_or("");
         if self.links_out(&d.id, REVOKES) {
             capitalised(&REVOKE_PREFIX.replace(raw, ""))
@@ -355,6 +360,7 @@ fn link_in<'a>(
             label: site.summary(b),
             title: String::new(),
             key: crate::site::typed_key(b).map(String::from),
+            removed: b.is_redacted(),
         })
     }
 }
@@ -401,7 +407,10 @@ pub fn for_block(b: &Block, g: &Graph, m: &Materialized, site: &Site, from: &str
                 sort_key: None,
                 text: format!(
                     "Question: {}",
-                    cx.html(q, q.field_str("prompt").unwrap_or(""))
+                    match q.is_redacted() {
+                        true => CONTENT_REMOVED.to_string(),
+                        false => cx.html(q, q.field_str("prompt").unwrap_or("")),
+                    }
                 ),
                 open: true,
             },

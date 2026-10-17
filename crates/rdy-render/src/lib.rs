@@ -20,12 +20,14 @@ mod version;
 
 pub use html::{Link, escape, text_html};
 
-use rdy_engine::{E_IO, RdyError, ReadState, Scope};
-use rdy_model::{Hash, tree};
+use rdy_engine::{E_IO, E_REDACTED, Materialized, RdyError, ReadState, Scope};
+use rdy_model::redaction::BlockResidue;
+use rdy_model::{Block, Hash, Op, tree};
 use serde::Serialize;
 use site::Site;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RenderSummary {
@@ -574,9 +576,12 @@ struct ScopeRead<'a> {
     versions: Vec<rdy_engine::VersionInfo>,
     /// When each version's landing was approved, by landing hash (hex).
     landed_ms: BTreeMap<String, i64>,
+    /// The scope's blocks, each figure whose blob lost content read as removed
+    /// ([`FigureBlobs::project`]).
     m: &'a rdy_engine::Materialized,
-    /// The figure blobs the store holds, with their bytes.
-    blobs: BTreeMap<Hash, Vec<u8>>,
+    /// The figure blobs the store holds, with their bytes, and those a redaction removed content
+    /// of.
+    blobs: FigureBlobs,
     site_name: String,
     description: Option<String>,
     pack: rdy_schema::Pack,
@@ -604,17 +609,10 @@ fn read_scope<R>(
             Some((v.landing.clone(), rec.approved_by.at_ms))
         })
         .collect();
-    let m = rdy.materialized(scope)?;
-    // the figure blobs the store holds (read before `g` borrows `rdy`)
-    let mut blobs: BTreeMap<Hash, Vec<u8>> = BTreeMap::new();
-    for b in m.iter().filter(|b| b.block_type == "figure") {
-        if let Some(h) = b.field_str("blob").and_then(|h| h.parse::<Hash>().ok())
-            && !blobs.contains_key(&h)
-            && rdy.reader().has_blob(&h).unwrap_or(false)
-        {
-            blobs.insert(h, rdy.reader().get_blob(&h)?);
-        }
-    }
+    // the figure blobs the store holds (read before `g` borrows `rdy`); a figure whose blob lost
+    // content reads as removed from here on, so no page, summary or print reads its file or words
+    let mut blobs = FigureBlobs::default();
+    let m = blobs.side(rdy, scope, true)?;
     let site_name = rdy.project_name();
     let description = rdy.project_description();
     let pack = rdy.pack().clone();
@@ -633,6 +631,99 @@ fn read_scope<R>(
         g,
         site,
     })
+}
+
+/// The figure blobs a build reads (D-3M81W): the bytes of each readable blob of the scope, and
+/// the blobs a redaction removed a chunk of, by the first request that removed one. A removed
+/// blob's bytes are never read, so they never reach an asset file or the print's image decoder.
+#[derive(Default)]
+pub(crate) struct FigureBlobs {
+    pub bytes: BTreeMap<Hash, Vec<u8>>,
+    pub removed: BTreeMap<Hash, Hash>,
+    /// The blobs of another side (a change summary's) that read whole; their bytes are not kept.
+    readable: BTreeSet<Hash>,
+}
+
+impl FigureBlobs {
+    /// The blocks of `scope`, each figure whose blob lost content read as removed. `keep` keeps
+    /// the bytes of each readable blob (the scope a build pages); a change summary's other side
+    /// only learns which blobs lost content.
+    fn side(
+        &mut self,
+        rdy: &ReadState,
+        scope: &Scope,
+        keep: bool,
+    ) -> Result<Arc<Materialized>, RdyError> {
+        let m = rdy.materialized(scope)?;
+        for b in m.iter() {
+            let Some(h) = figure_blob(b) else { continue };
+            if self.bytes.contains_key(&h)
+                || self.removed.contains_key(&h)
+                || self.readable.contains(&h)
+                || !rdy.reader().has_blob(&h).unwrap_or(false)
+            {
+                continue;
+            }
+            match rdy.reader().get_blob(&h).map_err(RdyError::from) {
+                Ok(bytes) if keep => {
+                    self.bytes.insert(h, bytes);
+                }
+                Ok(_) => {
+                    self.readable.insert(h);
+                }
+                Err(e) => match removed_by(&e) {
+                    Some(request) => {
+                        self.removed.insert(h, request);
+                    }
+                    None => return Err(e),
+                },
+            }
+        }
+        Ok(self.project(m))
+    }
+
+    /// `m` with each figure whose blob lost content read as a removed block: its id, type,
+    /// parent and order, the notice, no fields, and its own recorded version (Task 3's
+    /// projection). Its alt text, caption and file name are never read again.
+    fn project(&self, m: Arc<Materialized>) -> Arc<Materialized> {
+        let ops: Vec<Op> = m
+            .iter()
+            .filter_map(|b| {
+                let request = self.removed.get(&figure_blob(b)?)?;
+                Some(Op::Update {
+                    base: b.version_hash(),
+                    block: BlockResidue::of(b).stub(*request),
+                })
+            })
+            .collect();
+        if ops.is_empty() {
+            m
+        } else {
+            Arc::new(m.with(&ops))
+        }
+    }
+}
+
+/// The blob a figure shows; none for any other block, and for a removed figure (it has no
+/// fields).
+fn figure_blob(b: &Block) -> Option<Hash> {
+    if b.block_type != "figure" || b.is_redacted() {
+        return None;
+    }
+    b.field_str("blob")?.parse().ok()
+}
+
+/// The request an `E_REDACTED` refusal names (`Content removed by redaction {hash}.`); none for
+/// any other error.
+fn removed_by(e: &RdyError) -> Option<Hash> {
+    if e.code != E_REDACTED {
+        return None;
+    }
+    e.message
+        .strip_prefix("Content removed by redaction ")?
+        .strip_suffix('.')?
+        .parse()
+        .ok()
 }
 
 /// The render's warning about a top-level doc named `glossary`, when the site has one (D-Y4884).
@@ -716,6 +807,12 @@ fn build_site_from(
         g,
         site,
     } = read;
+    // a static site is written as files: two siblings that would be one file refuse before
+    // anything is built, so the last rendered site stays as it was (a live site's pages are not
+    // files)
+    if let (Mode::Static, Some(e)) = (&mode, site.path_clash("render")) {
+        return Err(e);
+    }
     let env = env()?;
     // what the scope changes: its chip, its change summary, the home page's list and the
     // menu's count all read it (O12). A proposal version with no base here (made on the empty
@@ -752,7 +849,7 @@ fn build_site_from(
     let mut inline_diffs: BTreeMap<rdy_model::BlockId, String> = BTreeMap::new();
     if let (Some(r), Some(rv)) = (&reviewed, listed.as_ref()) {
         let (diff, from) = match &base {
-            Some(b) => (Some(rdy.diff(b, scope)?), rdy.materialized(b)?),
+            Some(b) => (Some(rdy.diff(b, scope)?), blobs.side(rdy, b, false)?),
             None => (None, Default::default()),
         };
         let sides = changes::Sides {
@@ -785,9 +882,11 @@ fn build_site_from(
     {
         let rv = review::between(rdy, &tag, &to)?;
         let diff = rdy.diff(&tag, &to)?;
-        let from = rdy.materialized(&tag)?;
+        let from = blobs.side(rdy, &tag, false)?;
         // both sides read against the `to` side's site (O4)
-        let to_m = (to != *scope).then(|| rdy.materialized(&to)).transpose()?;
+        let to_m = (to != *scope)
+            .then(|| blobs.side(rdy, &to, false))
+            .transpose()?;
         let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
         let sides = changes::Sides {
             from: &from,
@@ -818,7 +917,8 @@ fn build_site_from(
         description: description.as_deref(),
         versions: &versions,
         landed_ms: &landed_ms,
-        blobs: &blobs,
+        blobs: &blobs.bytes,
+        removed_blobs: &blobs.removed,
         review,
         listed: listed.as_ref(),
         reviewed: reviewed.clone(),
@@ -952,9 +1052,9 @@ fn build_site_from(
         let left = uses.get_mut(h).expect("counted above");
         *left -= 1;
         let bytes = if *left == 0 {
-            blobs.remove(h)
+            blobs.bytes.remove(h)
         } else {
-            blobs.get(h).cloned()
+            blobs.bytes.get(h).cloned()
         };
         files.insert(path.clone(), bytes.expect("a used blob is held"));
         summary.assets += 1;

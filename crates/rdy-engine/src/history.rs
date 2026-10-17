@@ -1,5 +1,7 @@
 //! A block's history: the versions it has had, each with the change that wrote it, who wrote it,
-//! why, and the landing that carried it into canon (hist1).
+//! why, and the landing that carried it into canon (hist1). A version whose content a redaction
+//! removed keeps its entry: the original version, change and landing hashes, the change's
+//! provenance and message (read through the change's residue), and the request that removed it.
 use crate::error::*;
 use crate::{Materialized, ReadState, Scope};
 use rdy_model::{
@@ -84,6 +86,10 @@ pub struct HistoryEntry {
     pub message: String,
     pub justification: Option<JustificationInfo>,
     pub landing: Option<LandingRef>,
+    /// The redaction request that removed this version's content (its full hash); absent for a
+    /// version whose content stays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<String>,
 }
 
 /// A block's versions, newest first. `more` is true when older versions were left out.
@@ -266,18 +272,20 @@ impl<'a> Memo<'a> {
         id: &BlockId,
     ) -> Result<(HistoryEntry, Option<Hash>), RdyError> {
         let change = self.change(&c)?;
-        let (op, prev) = change
+        // the op's block is the store's projection: a removed version reads as its stub, which
+        // names the request that removed it
+        let (op, prev, redaction) = change
             .ops
             .iter()
             .rev()
             .find_map(|op| match op {
                 Op::Create { block } if block.id == *id && block.version_hash() == *version => {
-                    Some(("create", None))
+                    Some(("create", None, block.redaction()))
                 }
                 Op::Update { base, block }
                     if block.id == *id && block.version_hash() == *version =>
                 {
-                    Some(("update", Some(*base)))
+                    Some(("update", Some(*base), block.redaction()))
                 }
                 _ => None,
             })
@@ -302,6 +310,7 @@ impl<'a> Memo<'a> {
             message: change.message.clone(),
             justification: change.justification.as_ref().map(justification),
             landing,
+            redaction: redaction.map(|h| h.to_string()),
         };
         Ok((entry, prev))
     }

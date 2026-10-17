@@ -15,6 +15,7 @@ fn block(id: &str, body: &str) -> Block {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn change(view: &str, ops: Vec<Op>, by: &Provenance) -> Change {
         justification: None,
         message: String::new(),
         links: ChangeLinks::default(),
+        read_identity: None,
     }
 }
 
@@ -67,8 +69,8 @@ fn owner(a: &str) -> Owner {
 }
 
 #[test]
-fn vop1_the_store_format_is_12() {
-    assert_eq!(rdy_store::format::STORE_FORMAT, 12);
+fn vop1_the_store_format_is_13() {
+    assert_eq!(rdy_store::format::STORE_FORMAT, 13);
 }
 
 #[test]

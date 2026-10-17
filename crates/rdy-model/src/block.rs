@@ -74,11 +74,19 @@ pub struct Block {
     pub body: String,
     pub links: BTreeMap<String, Vec<Link>>,
     pub pins: BTreeMap<BlockId, Hash>,
+    /// The transient read identity of a removed version (redaction): never serialized, `None`
+    /// on every normal block and after decoding. Built only by [`Block::redacted`].
+    #[serde(skip)]
+    pub read_identity: Option<crate::redaction::RedactedBlockIdentity>,
 }
 
 impl Block {
+    /// The hash of the block's encoding. A redacted projection returns its recorded version.
     pub fn version_hash(&self) -> Hash {
-        hash_of(self)
+        match &self.read_identity {
+            Some(r) => r.version,
+            None => hash_of(self),
+        }
     }
 
     /// lpin1 (FW-LP1): the hash a pin records. It covers the block's id, type, parent, order,
@@ -92,7 +100,14 @@ impl Block {
     /// trk1: [`Block::content_hash`] that also leaves out the tracking fields of the block's
     /// type, so a change to a tracking field makes no pin stale. With an empty [`Tracking`] it
     /// equals [`Block::content_hash`] byte for byte.
+    ///
+    /// A redacted projection returns its recorded default content hash for any [`Tracking`]: a
+    /// tracking hash of removed content cannot be recomputed, so a tracking-sensitive comparison
+    /// must check [`Block::is_redacted`] first and report removed content.
     pub fn content_hash_with(&self, t: &Tracking) -> Hash {
+        if let Some(r) = &self.read_identity {
+            return r.content_hash;
+        }
         let tracking = t.fields(&self.block_type);
         let content = Content {
             id: &self.id,

@@ -33,6 +33,7 @@ fn block() -> Block {
             }],
         )]),
         pins: BTreeMap::from([(BlockId::parse("t-MEDGR").unwrap(), Hash::of(b"pinned"))]),
+        read_identity: None,
     }
 }
 
@@ -61,6 +62,7 @@ fn change(justification: Option<Justification>) -> Change {
         justification,
         message: "golden".into(),
         links: ChangeLinks::default(),
+        read_identity: None,
     }
 }
 

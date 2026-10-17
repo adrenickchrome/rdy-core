@@ -175,6 +175,7 @@ fn spec_11_targets_at_100k_blocks() {
             body: "incremental".into(),
             links: Default::default(),
             pins: Default::default(),
+            read_identity: None,
         },
     }];
     let mut incremental = vec![];

@@ -112,7 +112,7 @@ proptest! {
         body in "\\PC{0,40}",
     ) {
         let pack = PackSet::with_builtin().resolve("rdy-standard").unwrap();
-        let mk = |ty: &str, parent: Option<BlockId>| Block { id: BlockId::parse("c-AAAAA").unwrap(), block_type: ty.into(), parent, order: order.clone(), fields: fields.clone(), body: body.clone(), links: Default::default(), pins: Default::default() };
+        let mk = |ty: &str, parent: Option<BlockId>| Block { id: BlockId::parse("c-AAAAA").unwrap(), block_type: ty.into(), parent, order: order.clone(), fields: fields.clone(), body: body.clone(), links: Default::default(), pins: Default::default(), read_identity: None };
         let p = mk(parent_ty, None);
         let b = mk(ty, has_parent.then(|| BlockId::parse("s-AAAAA").unwrap()));
         let _ = validate_block(&pack, &b, has_parent.then_some(&p));

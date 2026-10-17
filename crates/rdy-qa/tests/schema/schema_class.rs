@@ -129,6 +129,7 @@ fn tcls1_reflects_is_refused_on_a_type_classed_supporting() {
         body: "x".into(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     };
     let issues = validate_block(&p, &b, None);
     assert!(

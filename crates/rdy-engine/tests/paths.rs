@@ -34,6 +34,7 @@ fn raw_create(r: &mut Rdy, block: Block) {
                 justification: None,
                 message: "raw".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();
@@ -52,6 +53,7 @@ fn raw(id: &str, ty: &str, parent: Option<&str>, fields: &[(&str, &str)]) -> Blo
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     }
 }
 

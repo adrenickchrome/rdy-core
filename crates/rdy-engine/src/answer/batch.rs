@@ -20,6 +20,13 @@
 //! check for every approval path (Task 17), so an answer's approval gets it there, and nothing
 //! is written. A decision the person rejected never lands, exception or not (F1): `land_with`
 //! refuses it with the issue the queue's readiness gives.
+//!
+//! # Content removal (D-CC90E)
+//!
+//! An `approve` item that carries removal requests is answered here like any other, one item at
+//! a time, as the person (local) or by a relay of the person's words: its card hash is the
+//! removal digest, so an approval binds each request and the hash of its complete report. A batch
+//! of recommended answers never reaches it (`Rdy::answer_all_recommended` refuses the whole call).
 use super::{AnswerInfo, Bound};
 use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
 use crate::gate::LandOptions;

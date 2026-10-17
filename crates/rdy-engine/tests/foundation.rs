@@ -12,6 +12,7 @@ fn blk(id: &str, parent: Option<&str>, order: &str) -> Block {
         body: "x".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        read_identity: None,
     }
 }
 

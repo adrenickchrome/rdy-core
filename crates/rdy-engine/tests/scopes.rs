@@ -62,6 +62,7 @@ fn legacy_view(r: &mut Rdy, name: &str) -> BlockId {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        read_identity: None,
     };
     r.store_mut()
         .commit_to_view(
@@ -74,6 +75,7 @@ fn legacy_view(r: &mut Rdy, name: &str) -> BlockId {
                 justification: None,
                 message: "m1".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();

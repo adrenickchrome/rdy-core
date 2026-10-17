@@ -1,13 +1,15 @@
 //! Publishing read states and the event bus: what every write runs after it lands.
 
 use crate::config::site_identity;
+use crate::handle::EpochCaches;
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::semantic::state::SemanticState;
 use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, Rdy, RdyError, ReadState, events, transitions};
-use rdy_model::{Hash, Op, Verdict};
+use rdy_model::{Hash, Op, Tag, Verdict};
 use rdy_store::segment::Location;
-use rdy_store::transition::Cause;
+use rdy_store::transition::{Cause, Transitions};
+use rdy_store::{StoreError, StoreReader};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 
@@ -116,44 +118,13 @@ impl Rdy {
         recheck: Option<Cause>,
     ) -> Result<Option<usize>, RdyError> {
         let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
-        let reader = self.store.reader();
-        // `None`: nothing to compute; `Some(None)`: the batch's own cause; `Some(Some(c))`: c
-        let cause = if !frames.is_empty() && transitions::can_move(&reader, &frames) {
-            Some(None)
-        } else {
-            match recheck {
-                Some(Cause::Recheck) if self.logged.is_none() => None,
-                Some(c) => Some(Some(c)),
-                None => None,
-            }
-        };
-        let Some(cause) = cause else {
+        let Some(cause) = self.batch_cause(&frames, recheck) else {
             self.store.seal(vec![])?;
             return Ok(None);
         };
-        let logged = self.logged.as_deref();
-        let computed = catch_unwind(AssertUnwindSafe(|| match logged {
-            Some(base) => transitions::moves(base, next, &frames, cause),
-            // the batch's own moves take `cause`; the moves since open, `reopened`
-            None => transitions::reconcile_moves(next, Some(prev), &frames, cause),
-        }));
-        let rec = match computed {
-            Ok(Ok(rec)) => rec,
-            Ok(Err(e)) => return self.seal_without_moves(e),
-            Err(p) => {
-                let text = match p.downcast_ref::<&str>() {
-                    Some(s) => (*s).to_string(),
-                    None => p
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .unwrap_or_else(|| "a panic with no message".to_string()),
-                };
-                return self.seal_without_moves(RdyError::new(
-                    crate::E_INTERNAL,
-                    format!("internal error: {text}"),
-                    "report this as a bug in rdy",
-                ));
-            }
+        let rec = match self.compute_moves(prev, next, &frames, cause) {
+            Ok(rec) => rec,
+            Err(e) => return self.seal_without_moves(e),
         };
         if rec.is_empty() {
             self.store.seal(vec![])?;
@@ -163,6 +134,55 @@ impl Rdy {
         }
         self.transition_error = None;
         Ok(Some(transitions::count(&rec)))
+    }
+
+    /// Which moves a batch of `frames` logs, by the closed rule of `seal_with_moves`: `None`,
+    /// nothing to compute; `Some(None)`, the batch's own cause; `Some(Some(c))`, cause `c`.
+    fn batch_cause(&self, frames: &[(u8, Hash)], recheck: Option<Cause>) -> Option<Option<Cause>> {
+        if !frames.is_empty() && transitions::can_move(&self.store.reader(), frames) {
+            Some(None)
+        } else {
+            match recheck {
+                Some(Cause::Recheck) if self.logged.is_none() => None,
+                Some(c) => Some(Some(c)),
+                None => None,
+            }
+        }
+    }
+
+    /// The moves between the logged state (or, with nothing logged since open, the store's
+    /// open-move tables) and `next`, for a batch of `frames` under `cause`. A panic of the
+    /// computation is an `E_INTERNAL` error.
+    fn compute_moves(
+        &self,
+        prev: &ReadState,
+        next: &ReadState,
+        frames: &[(u8, Hash)],
+        cause: Option<Cause>,
+    ) -> Result<Transitions, RdyError> {
+        let logged = self.logged.as_deref();
+        let computed = catch_unwind(AssertUnwindSafe(|| match logged {
+            Some(base) => transitions::moves(base, next, frames, cause),
+            // the batch's own moves take `cause`; the moves since open, `reopened`
+            None => transitions::reconcile_moves(next, Some(prev), frames, cause),
+        }));
+        match computed {
+            Ok(r) => r,
+            Err(p) => {
+                let text = match p.downcast_ref::<&str>() {
+                    Some(s) => (*s).to_string(),
+                    None => p
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .unwrap_or_else(|| "a panic with no message".to_string()),
+                };
+                Err(RdyError::new(
+                    crate::E_INTERNAL,
+                    format!("internal error: {text}"),
+                    "report this as a bug in rdy",
+                ))
+            }
+        }
     }
 
     /// Seals the open batch with no record after the moves could not be computed (`e`).
@@ -243,18 +263,22 @@ impl Rdy {
     }
 
     fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
+        // a full publish (open, invalidate, reindex, a pack reload) reads everything again
+        if matches!(delta, Delta::Full) {
+            return self.full_state(
+                prev,
+                self.store.reader(),
+                &prev.coord_heads,
+                self.epoch_caches(),
+            );
+        }
         let seq = self.store.log_end();
         let canon_head = self.store.canon_head()?;
         // fix round 2 (FW-PF2): a first coverage read may carry the coverage the state before
         // memoised (the carry checks what it read); a full publish starts over
-        let coverage_memo = match delta {
-            Delta::Full => crate::coverage::CoverageMemo::default(),
-            _ => crate::coverage::CoverageMemo::after(&prev.coverage_memo),
-        };
-        // a full publish (open, invalidate, reindex, a pack reload) takes the name, description
-        // and review rules from the config loaded at open or by the last successful reload, never
-        // from the files again: a broken file must not turn the review gate off (#832). Every
-        // other publish carries them from the previous state.
+        let coverage_memo = crate::coverage::CoverageMemo::after(&prev.coverage_memo);
+        // every publish but a full one carries the name, description and review rules from the
+        // previous state
         let (
             name,
             description,
@@ -264,37 +288,21 @@ impl Rdy {
             (propose_cadence, propose_changes),
             decisions_home,
             lease_ttl_ms,
-        ) = match delta {
-            Delta::Full => {
-                let cfg = &self.config;
-                let (name, description) = site_identity(&prev.root, cfg);
-                (
-                    name,
-                    description,
-                    cfg.require_up_to_date(),
-                    cfg.idle_days(),
-                    cfg.coverage_target(),
-                    (cfg.propose_cadence(), cfg.propose_changes()),
-                    cfg.decisions_home(),
-                    i64::from(cfg.lease_ttl_minutes()) * 60_000,
-                )
-            }
-            _ => (
-                Arc::clone(&prev.name),
-                prev.description.clone(),
-                prev.require_up_to_date,
-                prev.idle_days,
-                prev.coverage_target,
-                (prev.propose_cadence, prev.propose_changes),
-                prev.decisions_home.clone(),
-                prev.lease_ttl_ms,
-            ),
-        };
+        ) = (
+            Arc::clone(&prev.name),
+            prev.description.clone(),
+            prev.require_up_to_date,
+            prev.idle_days,
+            prev.coverage_target,
+            (prev.propose_cadence, prev.propose_changes),
+            prev.decisions_home.clone(),
+            prev.lease_ttl_ms,
+        );
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
         // landing moves them only when it closed members of a set or chose an alternative (its
         // record says so; altg1)
         let coord_moved = match &delta {
-            Delta::Full | Delta::Coord { .. } => true,
+            Delta::Coord { .. } => true,
             Delta::Landed {
                 landing, closed, ..
             } => !closed.is_empty() || self.store.landing(landing)?.chosen.is_some(),
@@ -363,7 +371,6 @@ impl Rdy {
         // the verdicts and semantic tensions: re-read by a full publish, the written pairs re-read
         // by a verdict, else carried
         let semantic = match &delta {
-            Delta::Full => Arc::new(SemanticState::read(&self.store.reader())?),
             Delta::Verdict { keys, .. } => {
                 Arc::new(prev.semantic.reread(&self.store.reader(), keys)?)
             }
@@ -371,7 +378,6 @@ impl Rdy {
         };
         // the dismissals: re-read by a full publish, one added by a dismissal, else carried
         let dismissals = match &delta {
-            Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
             Delta::Dismissed { reviews } => {
                 let mut map = (*prev.dismissals).clone();
                 for (vkey, review) in reviews {
@@ -384,15 +390,6 @@ impl Rdy {
         // the dismissed mentions: re-read by a full publish (only the pairs whose latest review
         // dismisses), one changed by a mention review, else carried
         let mention_dismissals = match &delta {
-            Delta::Full => {
-                let mut map = imbl::OrdMap::new();
-                for (block, entity, review) in self.store.mention_reviews()? {
-                    if self.store.review(&review)?.verdict == Verdict::Dismiss {
-                        map.insert((block, entity), review);
-                    }
-                }
-                Arc::new(map)
-            }
             Delta::MentionReviewed {
                 block,
                 entity,
@@ -409,22 +406,7 @@ impl Rdy {
             _ => Arc::clone(&prev.mention_dismissals),
         };
         let (canon, views, tags, inflight_cell) = match delta {
-            Delta::Full => {
-                let mut views = imbl::HashMap::new();
-                for (name, _) in self.store.refs_with_prefix("view/")? {
-                    let name = name.strip_prefix("view/").unwrap_or(&name).to_string();
-                    if let Some(e) = self.view_entry(&name)? {
-                        views.insert(name, Arc::new(e));
-                    }
-                }
-                let canon = Entry::new(None, canon_head, None, Arc::new(vec![]));
-                (
-                    Arc::new(canon),
-                    views,
-                    Arc::new(self.version_tags()?),
-                    Arc::default(),
-                )
-            }
+            Delta::Full => unreachable!("a full publish is built by full_state"),
             Delta::Commit { view, change, ops } => {
                 let mut views = prev.views.clone();
                 match self.view_entry(&view)? {
@@ -803,16 +785,230 @@ impl Rdy {
     /// An unbuilt entry for view `name` as the store holds it now (head and set read together);
     /// None if the view has no ref.
     fn view_entry(&self, name: &str) -> Result<Option<Entry>, RdyError> {
-        let Some(head) = self.store.view_head(name)? else {
+        view_entry_in(&self.store, name)
+    }
+
+    /// The full builder behind every `Delta::Full` publish: a state read entirely from `reader`
+    /// (canon's head, every view's head and set, the tags, the coordination refs, the verdicts
+    /// and semantic tensions, the dismissals), with every cell empty, the shared caches `caches`,
+    /// and the open-set index carried from `coord_from` for every set that did not move. The
+    /// name, description and review rules come from the config loaded at open or by the last
+    /// successful reload, never from the files again: a broken file must not turn the review
+    /// gate off (#832).
+    ///
+    /// An ordinary full publish reads through the store's reader with the writer's caches and
+    /// `prev`'s coordination heads; a removal's private preview and the state after a removal
+    /// pass a reader of their own, new caches and no coordination heads, so nothing built from
+    /// another epoch is shared (plan Redaction, Task 10).
+    fn full_state(
+        &self,
+        prev: &ReadState,
+        reader: StoreReader,
+        coord_from: &CoordHeads,
+        caches: EpochCaches,
+    ) -> Result<ReadState, RdyError> {
+        let seq = self.store.log_end();
+        let canon_head = reader.canon_head()?;
+        let cfg = &self.config;
+        let (name, description) = site_identity(&prev.root, cfg);
+        let coord_heads = Arc::new(CoordHeads::read(
+            &reader,
+            coord_from,
+            reader.intent_heads()?.into_iter().collect(),
+            reader.alt_heads()?.into_iter().collect(),
+        )?);
+        let semantic = Arc::new(SemanticState::read(&reader)?);
+        let dismissals = Arc::new(reader.dismissals()?.into_iter().collect());
+        // only the pairs whose latest review dismisses
+        let mut mention_dismissals = imbl::OrdMap::new();
+        for (block, entity, review) in reader.mention_reviews()? {
+            if reader.review(&review)?.verdict == Verdict::Dismiss {
+                mention_dismissals.insert((block, entity), review);
+            }
+        }
+        let mut views = imbl::HashMap::new();
+        for (name, _) in reader.refs_with_prefix("view/")? {
+            let name = name.strip_prefix("view/").unwrap_or(&name).to_string();
+            if let Some(e) = view_entry_in(&reader, &name)? {
+                views.insert(name, Arc::new(e));
+            }
+        }
+        let canon = Entry::new(None, canon_head, None, Arc::new(vec![]));
+        let tags = tags_in(&reader)?;
+        Ok(ReadState {
+            seq,
+            canon_head,
+            canon: Arc::new(canon),
+            views,
+            tags: Arc::new(tags),
+            pack: Arc::clone(&self.pack),
+            areas: Arc::clone(&self.areas),
+            root: Arc::clone(&prev.root),
+            name,
+            description,
+            require_up_to_date: cfg.require_up_to_date(),
+            idle_days: cfg.idle_days(),
+            coverage_target: cfg.coverage_target(),
+            propose_cadence: cfg.propose_cadence(),
+            propose_changes: cfg.propose_changes(),
+            decisions_home: cfg.decisions_home(),
+            reader,
+            as_of: caches.as_of,
+            vpos: caches.vpos,
+            proposal_touched: caches.proposal_touched,
+            canon_step_cache: caches.canon_step_cache,
+            inflight_cell: Arc::default(),
+            coord_heads,
+            coord: OnceLock::new(),
+            tensions: Arc::default(),
+            dismissals,
+            mention_dismissals: Arc::new(mention_dismissals),
+            semantic,
+            lease_ttl_ms: i64::from(cfg.lease_ttl_minutes()) * 60_000,
+            coverage_memo: crate::coverage::CoverageMemo::default(),
+            detectors: self.detectors,
+            error: None,
+        })
+    }
+
+    /// The private masked preview of a removal (plan Redaction, Task 10): the state as it will
+    /// read once the recorded requests `requests` are applied, built by the full builder from
+    /// `Store::redaction_preview_reader`, with new caches and nothing copied from a published
+    /// state. It is never published: the writer computes the authorizing batch's moves against
+    /// it before the seal, and publishes a state read again after the removal instead.
+    pub(crate) fn redaction_preview(&self, requests: &[Hash]) -> Result<ReadState, RdyError> {
+        crate::redaction::preview_fault()?;
+        let reader = self.store.redaction_preview_reader(requests)?;
+        let prev = self.state.load_full();
+        self.full_state(&prev, reader, &CoordHeads::default(), EpochCaches::new())
+    }
+
+    /// Publishes the open landing batch that applies the requests `requests` (D-CC90E; plan
+    /// Redaction, Task 10). Before authorization: the private preview is built and the batch's
+    /// tension and suspect moves are computed against it; a failure of either abandons the batch
+    /// (`Store::abandon_open_batch`: nothing is sealed, the handle needs a reopen) and publishes
+    /// nothing. There is no fallback that seals without the moves. Then the landing, its applies
+    /// and its TRANSITION (the last data frame) are sealed together: the synced apply advances
+    /// the epoch and the store erases the payloads. Last, every shared cache is replaced and an
+    /// equivalent state is read again from a fresh reader of the new epoch and published; the
+    /// preview's pre-seal reader is never published. A failure after the seal publishes a state
+    /// that serves no content and returns its error (`E_REDACTION_PENDING` when the erasure did
+    /// not finish; the reopen finishes it).
+    pub(crate) fn publish_removal(&mut self, requests: &[Hash]) -> Result<(), RdyError> {
+        let recheck = self.recheck.take();
+        let prev = self.state.load_full();
+        let rec = match self.removal_moves(&prev, requests, recheck) {
+            Ok(rec) => rec,
+            Err(e) => {
+                self.store.abandon_open_batch();
+                return Err(e);
+            }
+        };
+        let last = match &rec {
+            Some(r) if !r.is_empty() => {
+                debug_assert_eq!(r.invalid(), None, "{r:?}");
+                vec![r.frame()]
+            }
+            _ => vec![],
+        };
+        if let Err(e) = self.store.seal(last) {
+            // a batch still open was refused before authorization: nothing may seal it later
+            // without its moves (a batch that failed after its sync is no longer open)
+            self.store.abandon_open_batch();
+            if matches!(e, StoreError::RedactionPending) {
+                let e = RdyError::from(e);
+                self.publish_contentless(&prev, e.clone());
+                return Err(e);
+            }
+            return Err(e.into());
+        }
+        // authorized and erased: nothing built in the old epoch is reused
+        self.renew_epoch_caches();
+        self.logged = None;
+        match self.full_state(
+            &prev,
+            self.store.reader(),
+            &CoordHeads::default(),
+            self.epoch_caches(),
+        ) {
+            Ok(mut next) => {
+                next.seq = self.store.log_end();
+                let next = Arc::new(next);
+                if rec.is_some() {
+                    // the sealed moves fold the log to this state (the preview's equivalent)
+                    self.logged = Some(Arc::clone(&next));
+                    self.transition_error = None;
+                }
+                self.state.store(next);
+                self.emit_last_batch();
+                Ok(())
+            }
+            Err(e) => {
+                self.publish_contentless(&prev, e.clone());
+                self.emit_last_batch();
+                Err(e)
+            }
+        }
+    }
+
+    /// The moves of the open removal batch, computed against the private preview of `requests`
+    /// (`None` when the batch computes none). Any error, or a panic, is returned: the caller
+    /// abandons the batch.
+    fn removal_moves(
+        &self,
+        prev: &ReadState,
+        requests: &[Hash],
+        recheck: Option<Cause>,
+    ) -> Result<Option<Transitions>, RdyError> {
+        let preview = self.redaction_preview(requests)?;
+        let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
+        let Some(cause) = self.batch_cause(&frames, recheck) else {
             return Ok(None);
         };
-        let included = self.store.included_at(name, &head)?;
-        Ok(Some(Entry::new(
-            Some(name.to_string()),
-            head.base,
-            Some(head),
-            included,
-        )))
+        self.compute_moves(prev, &preview, &frames, cause).map(Some)
+    }
+
+    /// Publishes a state that holds error `e` and nothing else: no entry, no build and no cache
+    /// of an earlier state, so no read of it serves content. The shared caches start over and
+    /// the logged state is dropped.
+    fn publish_contentless(&mut self, prev: &ReadState, e: RdyError) {
+        self.renew_epoch_caches();
+        self.logged = None;
+        let caches = self.epoch_caches();
+        self.state.store(Arc::new(ReadState {
+            seq: self.store.log_end(),
+            canon_head: None,
+            canon: Arc::new(Entry::new(None, None, None, Arc::new(vec![]))),
+            views: imbl::HashMap::new(),
+            tags: Arc::new(vec![]),
+            pack: Arc::clone(&self.pack),
+            areas: Arc::clone(&self.areas),
+            root: Arc::clone(&prev.root),
+            name: Arc::clone(&prev.name),
+            description: prev.description.clone(),
+            require_up_to_date: prev.require_up_to_date,
+            idle_days: prev.idle_days,
+            coverage_target: prev.coverage_target,
+            propose_cadence: prev.propose_cadence,
+            propose_changes: prev.propose_changes,
+            decisions_home: prev.decisions_home.clone(),
+            reader: self.store.reader(),
+            as_of: caches.as_of,
+            vpos: caches.vpos,
+            proposal_touched: caches.proposal_touched,
+            canon_step_cache: caches.canon_step_cache,
+            inflight_cell: Arc::default(),
+            coord_heads: Arc::default(),
+            coord: OnceLock::new(),
+            tensions: Arc::default(),
+            dismissals: Arc::default(),
+            mention_dismissals: Arc::default(),
+            semantic: Arc::default(),
+            lease_ttl_ms: prev.lease_ttl_ms,
+            coverage_memo: Default::default(),
+            detectors: self.detectors,
+            error: Some(e),
+        }));
     }
 
     /// Republishes a state with every cell empty (`Delta::Full`). Never fails: an error in
@@ -858,6 +1054,37 @@ impl Rdy {
         self.recheck = Some(Cause::Recheck);
         self.publish(Delta::Full)
     }
+}
+
+/// An unbuilt entry for view `name` as `reader` holds it (head and set read together); None if
+/// the view has no ref.
+fn view_entry_in(reader: &StoreReader, name: &str) -> Result<Option<Entry>, RdyError> {
+    let Some(head) = reader.view_head(name)? else {
+        return Ok(None);
+    };
+    let included = reader.included_at(name, &head)?;
+    Ok(Some(Entry::new(
+        Some(name.to_string()),
+        head.base,
+        Some(head),
+        included,
+    )))
+}
+
+/// The version tags `reader` holds, in version order: each `tag/` ref whose record names a
+/// version (as `Rdy::version_tags` reads them).
+fn tags_in(reader: &StoreReader) -> Result<Vec<(semver::Version, Tag)>, RdyError> {
+    let mut out: Vec<(semver::Version, Tag)> = reader
+        .refs_with_prefix("tag/")?
+        .into_iter()
+        .filter_map(|(_, value)| {
+            let bytes = <[u8; 32]>::try_from(value.as_slice()).ok()?;
+            let t = reader.read_tag(&Hash(bytes)).ok()?;
+            crate::version::parse_version(&t.name).ok().map(|v| (v, t))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+    Ok(out)
 }
 
 /// Whether one of `ops` writes a block that `conflicts` (a merge's, in block-id order) holds a

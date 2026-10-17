@@ -357,3 +357,163 @@ fn ls2_a_new_label_goes_only_into_the_recorded_ranges() {
         assert!(!text.contains("\nand a newline"), "{f}: {text}");
     }
 }
+
+/// A page for `live.js`: its script tag, the document's visibility, the window's events, a fake
+/// `EventSource` and fake timers that the cases run by hand (no real wait).
+const LIVE_DOM: &str = r##"
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+function setup() {
+  const log = { streams: [], timers: [], reloads: 0 };
+  const on = (o) => { o.listeners = {}; o.addEventListener = (t, f) => { (o.listeners[t] = o.listeners[t] || []).push(f); }; return o; };
+  const script = { getAttribute: (n) => n === 'data-events' ? '/_rdy/events?scope=canon&page=index.html&rev=1&label=2' : null };
+  const document = on({ currentScript: script, visibilityState: 'visible', querySelectorAll: () => [] });
+  const win = on({});
+  function EventSource(url) { on(this); this.url = url; this.readyState = 0; this.closed = false; log.streams.push(this); }
+  EventSource.prototype.close = function () { this.closed = true; this.readyState = 2; };
+  EventSource.CONNECTING = 0; EventSource.OPEN = 1; EventSource.CLOSED = 2;
+  win.EventSource = EventSource;
+  const setTimeout = (f, ms) => { log.timers.push({ f, ms, done: false }); return log.timers.length; };
+  const clearTimeout = (id) => { if (id && log.timers[id - 1]) log.timers[id - 1].done = true; };
+  const location = { pathname: '/index.html', reload: () => { log.reloads += 1; } };
+  const store = {}; const sessionStorage = { getItem: (k) => k in store ? store[k] : null, setItem: (k, v) => { store[k] = v; }, removeItem: (k) => { delete store[k]; } };
+  new Function('window', 'document', 'EventSource', 'addEventListener', 'location', 'sessionStorage',
+    'scrollTo', 'scrollY', 'setTimeout', 'clearTimeout', src)(
+    win, document, EventSource, win.addEventListener, location, sessionStorage,
+    () => {}, 0, setTimeout, clearTimeout);
+  const fire = (o, t, e) => { (o.listeners[t] || []).forEach((f) => f(e || {})); if (o['on' + t]) o['on' + t](e || {}); };
+  const last = () => log.streams[log.streams.length - 1];
+  // the server answers the stream with a non-200 status (Busy): the browser fails the connection
+  const refuse = (es) => { es = es || last(); es.readyState = 2; fire(es, 'error'); };
+  // the timers still due, with their delays
+  const due = () => log.timers.filter((t) => !t.done).map((t) => t.ms);
+  // runs the timers due now, as the clock would
+  const run = () => log.timers.filter((t) => !t.done).forEach((t) => { t.done = true; t.f(); });
+  const open = () => log.streams.filter((s) => !s.closed).length;
+  const visibility = (v) => { document.visibilityState = v; fire(document, 'visibilitychange'); };
+  return { log, fire, last, refuse, due, run, open, visibility };
+}
+"##;
+
+const LIVE_CASES: &str = r##"
+const out = {};
+// a refused stream is closed and opened again after a delay, with the page's revisions
+const a = setup();
+out.first = { streams: a.log.streams.length, url: a.last().url };
+a.refuse();
+out.refused = { open: a.open(), closed: a.log.streams[0].closed, due: a.due() };
+a.run();
+out.reopened = { streams: a.log.streams.length, open: a.open(), url: a.last().url, due: a.due() };
+// each refusal in a row waits longer, up to a cap
+const delays = [];
+for (let i = 0; i < 7; i++) { a.refuse(); delays.push(a.due()); a.run(); }
+out.delays = delays;
+// a stream that opens resets the delay
+a.fire(a.last(), 'open');
+a.refuse();
+out.after_open = a.due();
+a.run();
+// a dropped stream the browser reconnects itself (still CONNECTING) is left to the browser
+a.last().readyState = 0; a.fire(a.last(), 'error');
+out.connecting = { open: a.open(), due: a.due(), streams: a.log.streams.length };
+// a late error of a stream already replaced does nothing
+const before = a.log.streams.length;
+a.refuse(a.log.streams[0]);
+out.stale = { due: a.due(), streams: a.log.streams.length - before };
+// a hidden page does not reopen; it opens once when shown again
+const b = setup();
+b.refuse();
+b.visibility('hidden');
+b.run();
+out.hidden = { streams: b.log.streams.length, open: b.open(), due: b.due() };
+b.visibility('visible');
+b.run();
+out.shown = { streams: b.log.streams.length, open: b.open(), due: b.due() };
+// a refusal while hidden schedules nothing
+const c = setup();
+const s = c.last();
+c.visibility('hidden');
+c.refuse(s);
+out.hidden_refusal = { due: c.due(), streams: c.log.streams.length };
+// the reload event still reloads the page
+const d = setup();
+d.fire(d.last(), 'reload');
+out.reload = { reloads: d.log.reloads, open: d.open(), due: d.due() };
+console.log(JSON.stringify(out));
+"##;
+
+#[test]
+fn rdx14_the_live_script_reopens_a_refused_stream() {
+    // fix round (14.promoted): while the published state predates a removal the events route
+    // answers Busy; EventSource fails such a connection for good, so live.js opens it again
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "rdx14_the_live_script_reopens_a_refused_stream",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
+        );
+        return;
+    }
+    let js = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rdy-render/theme/rdy-standard/js/live.js"
+    );
+    let o = std::process::Command::new("node")
+        .args(["-e", &format!("{LIVE_DOM}{LIVE_CASES}"), "--", js])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let url = "/_rdy/events?scope=canon&page=index.html&rev=1&label=2";
+    assert_eq!(v["first"], json!({"streams": 1, "url": url}), "{v}");
+    assert_eq!(
+        v["refused"],
+        json!({"open": 0, "closed": true, "due": [1000]}),
+        "a refused stream is closed and a reopen is due in a second: {v}"
+    );
+    assert_eq!(
+        v["reopened"],
+        json!({"streams": 2, "open": 1, "url": url, "due": []}),
+        "the reopen asks with the page's revisions: {v}"
+    );
+    assert_eq!(
+        v["delays"],
+        json!([[2000], [4000], [8000], [16000], [30000], [30000], [30000]]),
+        "refusals in a row back off to a 30 s cap: {v}"
+    );
+    assert_eq!(
+        v["after_open"],
+        json!([1000]),
+        "an open stream resets the delay: {v}"
+    );
+    assert_eq!(
+        v["connecting"],
+        json!({"open": 1, "due": [], "streams": 10}),
+        "the browser's own reconnect is left alone: {v}"
+    );
+    assert_eq!(
+        v["stale"],
+        json!({"due": [], "streams": 0}),
+        "a replaced stream's error does nothing: {v}"
+    );
+    assert_eq!(
+        v["hidden"],
+        json!({"streams": 1, "open": 0, "due": []}),
+        "a hidden page does not reopen: {v}"
+    );
+    assert_eq!(
+        v["shown"],
+        json!({"streams": 2, "open": 1, "due": []}),
+        "a page shown again opens one stream: {v}"
+    );
+    assert_eq!(
+        v["hidden_refusal"],
+        json!({"due": [], "streams": 1}),
+        "a refusal of a hidden page schedules nothing: {v}"
+    );
+    assert_eq!(
+        v["reload"],
+        json!({"reloads": 1, "open": 0, "due": []}),
+        "{v}"
+    );
+}

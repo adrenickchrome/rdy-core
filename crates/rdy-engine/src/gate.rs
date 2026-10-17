@@ -1737,6 +1737,7 @@ impl Rdy {
             justification: None,
             message: format!("new keys rdy derived, as another block holds the old ones: {names}"),
             links: ChangeLinks::default(),
+            read_identity: None,
         };
         change.deps = self.store.change_deps(&change, Some(view))?;
         if let Some(d) = change.deps.iter().find(|d| !ids.contains(d)) {
@@ -2319,6 +2320,16 @@ impl Rdy {
         Ok(())
     }
 
+    /// Whether the proposal version `proposal` names carries a content removal request. Any
+    /// read error is false: the caller's own refusal stands.
+    fn carries_removal(&self, proposal: &str) -> bool {
+        let st = self.read();
+        resolve_in(&st, proposal)
+            .and_then(|pref| Ok(st.reader().proposal(&pref.version)?))
+            .and_then(|p| crate::redaction::requests_carried(&st, &p.changes))
+            .is_ok_and(|r| !r.is_empty())
+    }
+
     /// Lands a proposal; returns the landing id.
     pub fn land(&mut self, s: &Session, proposal: &str) -> Result<String, RdyError> {
         self.land_report(s, proposal).map(|l| l.landing)
@@ -2338,6 +2349,10 @@ impl Rdy {
         opts: LandOptions,
     ) -> Result<LandInfo, RdyError> {
         if !s.role.can_land() {
+            // D-CC90E: an agent that asks to land a content removal is told who must approve it
+            if !s.is_human() && self.carries_removal(proposal) {
+                return Err(rdy_store::StoreError::RedactionHuman.into());
+            }
             return Err(RdyError::new(
                 E_PERMISSION,
                 format!("role {:?} cannot land proposals", s.role),
@@ -2349,6 +2364,12 @@ impl Rdy {
         let evidence = relay_evidence_kind(s, proposal, &pref, &opts)?;
         let pid = pref.version;
         let p = st.reader().proposal(&pid)?;
+        // D-CC90E: content removal lands only with a person's approval, local or relayed; an
+        // agent session never approves it, whatever role it claims
+        let requests = crate::redaction::requests_carried(&st, &p.changes)?;
+        if !requests.is_empty() && !s.is_human() {
+            return Err(rdy_store::StoreError::RedactionHuman.into());
+        }
         // land1: a landed change is already in canon; replaying it would only fail obscurely
         if let Some(landing) = landed_as(&st, &p)? {
             return Err(RdyError::new(
@@ -2530,6 +2551,7 @@ impl Rdy {
                     _ => format!("accept decisions and give new keys in {}", p.title),
                 },
                 links: ChangeLinks::default(),
+                read_identity: None,
             };
             change.deps = self.store.change_deps(&change, Some(&p.view))?;
             Some(change)
@@ -2549,6 +2571,14 @@ impl Rdy {
         let keyed_at = earlier_landing(&st, view_base, p.canon_at)?;
         issues.extend(self.rekeyed_warnings(&st, keyed_at, &all)?);
         let landed_ops = applied_ops(&all, &order);
+        // D-6B1W1, D-14SAY: the complete report of each request the version carries is computed
+        // again here, under the writer, and must match the one the request recorded and the card
+        // showed; a stale one is refused, never refreshed. The acceptance change is not in the
+        // log yet: one that would copy or quote the content outside the approved removal (a new
+        // version of an all-versions target) is stale too, never a silently grown removal
+        for r in &requests {
+            crate::redaction::check_fresh(&st, r, accept.as_slice())?;
+        }
 
         // 4. land in one write (atom1): the acceptance change, the final proposal version, the
         // snapshot, the landing, the view's rebase and the refs. A failed landing writes nothing,
@@ -2567,8 +2597,13 @@ impl Rdy {
             }
             Err(e) => return Err(approver_stale(e, &p.view)),
         };
-        // 5. publish canon incrementally: the previous canon with the landed ops (snap1)
-        if let Err(e) = self.publish(Delta::Landed {
+        // 5. publish canon incrementally: the previous canon with the landed ops (snap1). A
+        // landing that applies removal requests seals its batch with the moves computed against
+        // the masked preview, then publishes a state read again in the new epoch; its failures
+        // never fall back to an ordinary publish
+        if !requests.is_empty() {
+            self.publish_removal(&requests)?;
+        } else if let Err(e) = self.publish(Delta::Landed {
             landing: out.landing,
             view: p.view.clone(),
             ops: landed_ops,

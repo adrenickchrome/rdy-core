@@ -77,7 +77,11 @@ pub fn menu(
             // a stored name over the site's bound has no page: the row is text only
             href: tag_name_ok(&v.name)
                 .then(|| format!("/{}", ScopeRef::Tag(v.name.clone()).path_prefix())),
-            meta: when.into_iter().chain(message).collect(),
+            meta: when
+                .into_iter()
+                .chain(message)
+                .chain(v.redacted.then(|| "redacted".to_string()))
+                .collect(),
         });
     }
 
@@ -285,5 +289,6 @@ pub fn build_versions(
         label_rev: rev(&[0u8; 16]),
         label_at: BTreeMap::new(),
         warnings: vec![],
+        epoch: st.redaction_epoch(),
     })
 }

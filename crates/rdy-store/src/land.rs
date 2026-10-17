@@ -2,7 +2,9 @@
 //! snapshot, the landing, a `Rebase` op for every view the landing rebases (reb1) and the refs go
 //! into the log as one batch, so a kill or a failed write leaves either all of them or none. A
 //! landing that chooses an alternative (altw1) adds the set's chosen version and a `Close` op for
-//! each other open member view to the same batch.
+//! each other open member view to the same batch. A landing that lands redaction carriers ends
+//! the same batch with one REDACTION_APPLY per request (D-CC90E: "It lands only with a human
+//! approval"; D-600CW: the removal record stays in the log).
 use crate::Store;
 use crate::coord::{ALT_REF, chosen_reason};
 use crate::error::StoreError;
@@ -81,6 +83,20 @@ impl Store {
     /// version named must still be the set's latest and open; the landing records the choice, the
     /// set's next version is `Chosen` by it, and each member view in `alt.close` other than the
     /// proposing one is closed (when open, pinned or empty too) instead of rebased (altw1).
+    ///
+    /// When the landing lands redaction carriers (changes the carrier-to-request map names), the
+    /// store checks them before anything is written (`prepare_redaction_apply`): a person's
+    /// approval (`RedactionHuman` otherwise), each carrier in the proposing view's history
+    /// (`Refused`), each request's targets against its frozen manifest (`Refused`), each span and
+    /// residue (`RedactionCorrupt`), and every physical copy of the selected content covered: an
+    /// unlisted copy before the request is `RedactionCorrupt`, one written after it
+    /// `RedactionStale`. The batch then ends with one REDACTION_APPLY per request, in
+    /// request-hash order, after the landing and the refs. Unheld, the checked apply writer seals
+    /// it and finishes the removal before this returns; a failure after its sync never truncates
+    /// the batch and leaves the handle pending. Held, the frames join the open batch, which
+    /// takes no more writes; no mask is active and nothing is erased until its seal, which may
+    /// append the TRANSITION last. A pre-seal preview reads through
+    /// `Store::redaction_preview_reader`.
     pub fn land_atomic(&mut self, req: LandRequest) -> Result<LandOutcome, StoreError> {
         // 1. the proposal, and the version check: the request names its stable's latest version
         let p = self.proposal(&req.proposal)?;
@@ -191,6 +207,9 @@ impl Store {
             rebased_from: vec![],
             evidence: req.evidence,
         };
+        // 6a. the redaction applies of the carriers it lands, checked before anything is written
+        let applies =
+            self.prepare_redaction_apply(&p.view, &included, &landing, accept_change.as_ref())?;
         let lbytes = encode(&landing);
         let lid = Hash::of(&lbytes);
         items.push((kinds::LANDING, lbytes));
@@ -383,8 +402,24 @@ impl Store {
             refs.push((open, vec![]));
         }
         items.extend(self.ref_items_pub(refs));
-        // 9. one write
-        self.write(items)?;
+        // 9. one write. With applies, one REDACTION_APPLY per request (in request-hash order)
+        // ends the data frames. Unheld, the checked apply writer validates the batch with the log,
+        // seals it and finishes the removal before it returns; held, the frames join the open
+        // batch without activating their masks, and its seal (which may add the TRANSITION last)
+        // validates, activates and finishes.
+        match applies {
+            Some(applies) => {
+                items.extend(applies.frames(lid));
+                if self.held() {
+                    self.write_guarded(items)?;
+                } else {
+                    self.seal_apply_batch(items)?;
+                }
+            }
+            None => {
+                self.write(items)?;
+            }
+        }
         Ok(LandOutcome {
             landing: lid,
             proposal: final_id,

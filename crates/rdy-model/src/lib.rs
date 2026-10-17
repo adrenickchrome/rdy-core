@@ -9,6 +9,7 @@ mod hash;
 mod id;
 pub mod key;
 mod order;
+pub mod redaction;
 pub mod repo_id;
 pub mod tree;
 mod value;
@@ -29,6 +30,12 @@ pub use id::{BlockId, CROCKFORD, IdError};
 pub use id::{seed_ids_for_tests, unseed_ids_for_tests};
 pub use order::{
     MAX_ORDER_KEY_LEN, OrderError, order_between, order_run, rebalance_keys, valid_order_key,
+};
+pub use redaction::{
+    AssessmentSupport, BlockResidue, ChangeResidue, CopyKind, CopyRow, CopyStatus, DropSpan,
+    FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
+    RedactedBlockIdentity, Redaction, RedactionApply, RedactionManifest, RedactionResidue,
+    RedactionWarning, ResidualOp,
 };
 pub use repo_id::RepoId;
 pub use value::FieldValue;

@@ -1,7 +1,10 @@
+use crate::error::StoreError;
 use crate::fsutil::sync_dir;
 use crate::kinds::{self, BatchCommit};
 use crate::pio;
+use crate::redaction_io::{self, Authorization, ERASE_BUFFER, Failpoint};
 use rdy_model::Hash;
+use rdy_model::redaction::DropSpan;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -11,7 +14,7 @@ use std::sync::{Arc, RwLock};
 
 pub(crate) const HEADER: u64 = 4 + 1 + 32;
 /// An upper bound on the encoded `BatchCommit` payload, used to size a batch before it is written.
-const MARKER_MAX: u64 = 64;
+pub(crate) const MARKER_MAX: u64 = 64;
 
 /// Where a test child process dies (`std::process::abort`) during a write or a checkpoint.
 #[doc(hidden)]
@@ -65,6 +68,56 @@ pub struct Location {
     pub offset: u64,
 }
 
+/// A frame whose payload an authorized redaction removes: the facts its header keeps. A scan
+/// accepts the frame at its location when its header still says exactly this, without reading
+/// or hashing its payload (which is zero, partly zero, or not yet erased).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hole {
+    pub kind: u8,
+    pub hash: Hash,
+    pub len: u32,
+}
+
+/// The authorized holes of a log, by frame location.
+pub type Holes = BTreeMap<Location, Hole>;
+
+/// No holes: a log no redaction apply authorizes anything in.
+pub(crate) static NO_HOLES: Holes = BTreeMap::new();
+
+/// One frame as a hole-aware read sees it.
+pub(crate) enum FrameRead {
+    /// A frame whose payload matches its hash.
+    Whole(u8, Hash, Vec<u8>),
+    /// An authorized hole: kind, hash and payload length from its header; the payload is not read.
+    Hole(u8, Hash, u32),
+}
+
+impl FrameRead {
+    fn payload_len(&self) -> u64 {
+        match self {
+            FrameRead::Whole(_, _, p) => p.len() as u64,
+            FrameRead::Hole(_, _, len) => u64::from(*len),
+        }
+    }
+
+    fn kind_hash(&self) -> (u8, Hash) {
+        match self {
+            FrameRead::Whole(k, h, _) | FrameRead::Hole(k, h, _) => (*k, *h),
+        }
+    }
+}
+
+/// One frame handed to a hole-aware walk: its header facts and, unless it is an authorized hole,
+/// its payload.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameView<'a> {
+    pub kind: u8,
+    pub hash: Hash,
+    pub len: u32,
+    /// None for an authorized hole: its payload is never read nor handed out.
+    pub payload: Option<&'a [u8]>,
+}
+
 pub struct SegmentLog {
     dir: PathBuf,
     readers: Vec<File>,
@@ -76,6 +129,9 @@ pub struct SegmentLog {
     fail_partial: Option<usize>,
     /// Test hook: the armed crash point (see `crash_at`).
     crash: Option<CrashPoint>,
+    /// What the log's validated redaction applies authorize: the holes every scan and walk of
+    /// this log reads as frames (`redaction_io::bootstrap`).
+    auth: Arc<Authorization>,
 }
 
 /// The path of segment `id` in `dir`.
@@ -156,6 +212,49 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     Ok(Some((kind, hash, payload)))
 }
 
+/// The header of the frame at `offset` (payload length, kind, hash), if the header and the
+/// payload it claims fit before `file_len` (checked arithmetic); None for a torn frame.
+pub(crate) fn header_at(
+    f: &File,
+    offset: u64,
+    file_len: u64,
+) -> io::Result<Option<(u32, u8, Hash)>> {
+    let Some(payload_start) = offset.checked_add(HEADER).filter(|end| *end <= file_len) else {
+        return Ok(None);
+    };
+    let mut header = [0u8; HEADER as usize];
+    pio::read_exact_at(f, &mut header, offset)?;
+    let len = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    if payload_start
+        .checked_add(u64::from(len))
+        .is_none_or(|end| end > file_len)
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        len,
+        header[4],
+        Hash(header[5..37].try_into().unwrap()),
+    )))
+}
+
+/// Reads the frame at `loc` as `read_frame` does, except that an authorized hole whose header
+/// still names its kind, hash and length is returned as a hole, with its payload neither read nor
+/// hashed. None for a torn or corrupt frame.
+fn read_frame_or_hole(
+    f: &File,
+    loc: Location,
+    file_len: u64,
+    holes: &Holes,
+) -> io::Result<Option<FrameRead>> {
+    if let Some(h) = holes.get(&loc)
+        && header_at(f, loc.offset, file_len)? == Some((h.len, h.kind, h.hash))
+    {
+        return Ok(Some(FrameRead::Hole(h.kind, h.hash, h.len)));
+    }
+    Ok(read_frame(f, loc.offset, file_len)?.map(|(k, h, p)| FrameRead::Whole(k, h, p)))
+}
+
 /// A sealed segment (one the log has rolled past) that does not end at a batch marker: the log
 /// rolls only between batches, so frames at its end are missing.
 fn unsealed(seg: u32) -> io::Error {
@@ -220,6 +319,50 @@ fn corrupt_frame(loc: Location) -> io::Error {
     )
 }
 
+/// A whole frame whose payload is all zero at a location no redaction authorizes: a missing
+/// payload (E_REDACTION_CORRUPT). The read paths return `io::Error`s, so they carry it inside
+/// one (`refuse_frame`), with the exact `E_REDACTION_CORRUPT` text; `StoreError::from` turns it
+/// back into `StoreError::RedactionCorrupt` at that location.
+#[derive(Debug)]
+pub(crate) struct UnauthorizedHole(pub(crate) Location);
+
+impl std::fmt::Display for UnauthorizedHole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        StoreError::corrupt_at(self.0).fmt(f)
+    }
+}
+
+impl std::error::Error for UnauthorizedHole {}
+
+/// The refusal of a read of the frame at `loc` (file `f`, `file_len` bytes) that does not fit its
+/// file or match its hash: an all-zero payload (a hole no redaction authorizes; the caller read
+/// the authorized holes as holes) is `UnauthorizedHole`; any other damage is `otherwise`.
+fn refuse_frame(f: &File, loc: Location, file_len: u64, otherwise: io::Error) -> io::Error {
+    if zero_frame_at(f, loc.offset, file_len).unwrap_or(false) {
+        return io::Error::new(io::ErrorKind::InvalidData, UnauthorizedHole(loc));
+    }
+    otherwise
+}
+
+/// The refusal of damage the redaction bootstrap met at `offset` of sealed segment `seg` (a torn
+/// frame header, or a batch marker that does not match its batch): the frames behind it cannot
+/// be validated, so the open stops. A whole frame there with an all-zero payload is
+/// `RedactionCorrupt`, as any unauthorized hole is; other damage is an I/O refusal.
+pub(crate) fn sealed_damage(f: &File, seg: u32, offset: u64, file_len: u64) -> StoreError {
+    if zero_frame_at(f, offset, file_len).unwrap_or(false) {
+        return StoreError::RedactionCorrupt {
+            segment: seg,
+            offset,
+        };
+    }
+    StoreError::Io(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "corruption at offset {offset} in segment {seg} damages acknowledged data: a later segment was started, but a frame header or batch marker there is broken; restore the segment from backup, then reopen"
+        ),
+    ))
+}
+
 impl SegmentReader {
     /// A reader of the segments in `dir`. It opens nothing yet.
     pub fn open(dir: &Path) -> SegmentReader {
@@ -270,6 +413,21 @@ impl SegmentReader {
         upto: Location,
         mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.for_each_view_from(from, upto, &NO_HOLES, |loc, v, next| match v.payload {
+            Some(p) => f(loc, v.kind, v.hash, p, next),
+            None => unreachable!("a walk with no holes reads every payload"),
+        })
+    }
+
+    /// `for_each_from`, reading each frame of `holes` whose header still names its kind, hash and
+    /// length as a [`FrameView`] with no payload: its payload is neither read nor hashed.
+    pub(crate) fn for_each_view_from<E: From<io::Error>>(
+        &self,
+        from: Location,
+        upto: Location,
+        holes: &Holes,
+        mut f: impl FnMut(Location, FrameView<'_>, Location) -> Result<(), E>,
+    ) -> Result<(), E> {
         if from >= upto {
             return Ok(());
         }
@@ -296,12 +454,15 @@ impl SegmentReader {
             if sealed && offset == 0 && end == 0 {
                 return Err(unsealed(seg).into());
             }
+            let file_len = file.metadata()?.len();
             while offset < end {
                 let loc = Location {
                     segment: seg,
                     offset,
                 };
-                let (kind, hash, payload, next) = read_frame_at(&file, loc)?;
+                let frame = read_frame_or_hole(&file, loc, file_len, holes)?
+                    .ok_or_else(|| refuse_frame(&file, loc, file_len, corrupt_frame(loc)))?;
+                let next = offset + HEADER + frame.payload_len();
                 if next > end {
                     return Err(corrupt_frame(loc).into());
                 }
@@ -309,10 +470,25 @@ impl SegmentReader {
                     segment: seg,
                     offset: next,
                 };
+                let (kind, hash) = frame.kind_hash();
                 if sealed && next.offset == end && kind != kinds::BATCH_COMMIT {
                     return Err(unsealed(seg).into());
                 }
-                f(loc, kind, hash, &payload, next)?;
+                let view = match &frame {
+                    FrameRead::Whole(_, _, p) => FrameView {
+                        kind,
+                        hash,
+                        len: p.len() as u32,
+                        payload: Some(p),
+                    },
+                    FrameRead::Hole(_, _, len) => FrameView {
+                        kind,
+                        hash,
+                        len: *len,
+                        payload: None,
+                    },
+                };
+                f(loc, view, next)?;
                 offset = next.offset;
             }
         }
@@ -325,8 +501,8 @@ impl SegmentReader {
 /// `SegmentLog::read_hashed` has it.
 fn read_frame_at(f: &File, loc: Location) -> io::Result<(u8, Hash, Vec<u8>, u64)> {
     let file_len = f.metadata()?.len();
-    let (kind, hash, payload) =
-        read_frame(f, loc.offset, file_len)?.ok_or_else(|| corrupt_frame(loc))?;
+    let (kind, hash, payload) = read_frame(f, loc.offset, file_len)?
+        .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))?;
     let next = loc.offset + HEADER + payload.len() as u64;
     Ok((kind, hash, payload, next))
 }
@@ -359,8 +535,6 @@ fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
 /// taken; an existing quarantine file is never overwritten) and fsyncs it and the directory.
 /// Returns the path it wrote.
 fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<PathBuf> {
-    let mut buf = vec![0u8; (file_len - offset) as usize];
-    pio::read_exact_at(f, &mut buf, offset)?;
     let base = format!(
         "{}.torn-{offset}",
         seg.file_name().unwrap().to_string_lossy()
@@ -379,7 +553,15 @@ fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> i
             Err(e) => return Err(e),
         }
     };
-    pio::write_all_at(&q, &buf, 0)?;
+    // the tail is copied through one fixed buffer, whatever its length
+    let mut buf = vec![0u8; ERASE_BUFFER];
+    let mut at = offset;
+    while at < file_len {
+        let n = (file_len - at).min(ERASE_BUFFER as u64) as usize;
+        pio::read_exact_at(f, &mut buf[..n], at)?;
+        pio::write_all_at(&q, &buf[..n], at - offset)?;
+        at += n as u64;
+    }
     q.sync_all()?;
     sync_dir(dir)?;
     Ok(path)
@@ -391,7 +573,7 @@ fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> i
 /// Frames before the marker's `start` are allowed: a marker vouches only for its own batch. A
 /// store write never leaves such frames (a failed write is truncated away or poisons the store);
 /// `append` does.
-fn marker_matches(seg: u32, since: &[(u64, Hash)], payload: &[u8]) -> bool {
+pub(crate) fn marker_matches(seg: u32, since: &[(u64, Hash)], payload: &[u8]) -> bool {
     let Ok(m) = postcard::from_bytes::<BatchCommit>(payload) else {
         return false;
     };
@@ -414,22 +596,33 @@ struct Scan {
     stop: u64,
 }
 
-fn scan_marked(f: &File, seg: u32, file_len: u64) -> io::Result<Scan> {
+/// The marker rule's scan of segment `seg`. An authorized hole (`holes`) is a frame like any
+/// other: its header's hash enters the batch digest, and its payload is not hashed.
+fn scan_marked(f: &File, seg: u32, file_len: u64, holes: &Holes) -> io::Result<Scan> {
     let mut offset = 0;
     let mut boundary = None;
     let mut since: Vec<(u64, Hash)> = vec![];
-    while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
-        if kind == kinds::BATCH_COMMIT {
-            if !marker_matches(seg, &since, &payload) {
-                break;
+    while let Some(frame) = read_frame_or_hole(
+        f,
+        Location {
+            segment: seg,
+            offset,
+        },
+        file_len,
+        holes,
+    )? {
+        let end = offset + HEADER + frame.payload_len();
+        match frame {
+            FrameRead::Whole(kind, _, payload) if kind == kinds::BATCH_COMMIT => {
+                if !marker_matches(seg, &since, &payload) {
+                    break;
+                }
+                since.clear();
+                boundary = Some(end);
             }
-            since.clear();
-            offset += HEADER + payload.len() as u64;
-            boundary = Some(offset);
-        } else {
-            since.push((offset, hash));
-            offset += HEADER + payload.len() as u64;
+            other => since.push((offset, other.kind_hash().1)),
         }
+        offset = end;
     }
     Ok(Scan {
         boundary,
@@ -464,7 +657,23 @@ enum Step {
 
 /// Reads the frame at `offset` for the tail check. Its header is read first, and its payload is
 /// read and hashed only if the frame ends at or before `bound`, at most once per `memo`.
-fn tail_frame(f: &File, offset: u64, bound: u64, memo: &mut TailMemo) -> io::Result<Step> {
+fn tail_frame(
+    f: &File,
+    seg: u32,
+    offset: u64,
+    bound: u64,
+    memo: &mut TailMemo,
+    holes: &Holes,
+) -> io::Result<Step> {
+    if let Some(h) = holes.get(&Location {
+        segment: seg,
+        offset,
+    }) && let Some((len, kind, hash)) = header_at(f, offset, bound)?
+        && (len, kind, hash) == (h.len, h.kind, h.hash)
+    {
+        // an authorized hole: its header is the frame; its payload is never hashed
+        return Ok(Step::Frame(kind, hash, offset + HEADER + u64::from(len)));
+    }
     if let Some(known) = memo.frames.get(&offset) {
         return Ok(match *known {
             Some((kind, hash, end)) if end <= bound => Step::Frame(kind, hash, end),
@@ -505,6 +714,7 @@ fn closes_a_real_batch(
     marker_at: u64,
     payload: &[u8],
     memo: &mut TailMemo,
+    holes: &Holes,
 ) -> io::Result<bool> {
     let Ok(m) = postcard::from_bytes::<BatchCommit>(payload) else {
         return Ok(false);
@@ -522,7 +732,7 @@ fn closes_a_real_batch(
         if since.len() >= m.frames as usize {
             return Ok(false);
         }
-        match tail_frame(f, offset, marker_at, memo)? {
+        match tail_frame(f, seg, offset, marker_at, memo, holes)? {
             Step::Frame(kind, hash, end) if kind != kinds::BATCH_COMMIT => {
                 since.push((offset, hash));
                 offset = end;
@@ -548,6 +758,7 @@ fn acknowledged_batch_follows(
     boundary: u64,
     stop: u64,
     file_len: u64,
+    holes: &Holes,
 ) -> io::Result<bool> {
     let mut buf = vec![0u8; (file_len - stop) as usize];
     pio::read_exact_at(f, &mut buf, stop)?;
@@ -570,7 +781,7 @@ fn acknowledged_batch_follows(
         }
         if let Ok(m) = postcard::from_bytes::<BatchCommit>(payload)
             && m.start.offset > boundary
-            && closes_a_real_batch(f, seg, stop + pos as u64, payload, &mut memo)?
+            && closes_a_real_batch(f, seg, stop + pos as u64, payload, &mut memo, holes)?
         {
             return Ok(true);
         }
@@ -600,6 +811,7 @@ fn check_tail(
     scan: &Scan,
     file_len: u64,
     floor: Option<Location>,
+    holes: &Holes,
 ) -> io::Result<Option<PathBuf>> {
     let b = scan.boundary.unwrap_or(0);
     if b >= file_len {
@@ -611,11 +823,73 @@ fn check_tail(
         offset: b,
     };
     if floor.is_some_and(|fl| fl > end_of_good)
-        || acknowledged_batch_follows(f, seg, b, scan.stop, file_len)?
+        || acknowledged_batch_follows(f, seg, b, scan.stop, file_len, holes)?
     {
         return Err(damaged_error(scan.stop, &path));
     }
     quarantine(f, dir, &path, b, file_len).map(Some)
+}
+
+/// The end of the acknowledged log under the marker rule, reading `holes` as frames: the end of
+/// the last segment's last batch marker that matches its batch; with no such marker, the end of
+/// the segment before it (or the start of the log). Reads only; the open does the same scan
+/// before it quarantines anything.
+pub(crate) fn acknowledged_end(readers: &[File], holes: &Holes) -> io::Result<Location> {
+    let last = (readers.len() - 1) as u32;
+    let f = &readers[last as usize];
+    let scan = scan_marked(f, last, f.metadata()?.len(), holes)?;
+    Ok(match scan.boundary {
+        Some(offset) => Location {
+            segment: last,
+            offset,
+        },
+        None if last > 0 => Location {
+            segment: last - 1,
+            offset: readers[last as usize - 1].metadata()?.len(),
+        },
+        None => Location {
+            segment: 0,
+            offset: 0,
+        },
+    })
+}
+
+/// True if the frame at `offset` is whole by its header and its payload is all zero bytes: what an
+/// erased payload looks like.
+fn zero_frame_at(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
+    let Some((len, _, _)) = header_at(f, offset, file_len)? else {
+        return Ok(false);
+    };
+    Ok(len > 0 && payload_is_zero(f, offset + HEADER, u64::from(len))?)
+}
+
+/// True if the `len` bytes at `start` of `f` are all zero, read through one fixed buffer.
+pub(crate) fn payload_is_zero(f: &File, start: u64, len: u64) -> io::Result<bool> {
+    let mut buf = vec![0u8; ERASE_BUFFER];
+    let mut at = start;
+    let end = start + len;
+    while at < end {
+        let n = (end - at).min(ERASE_BUFFER as u64) as usize;
+        pio::read_exact_at(f, &mut buf[..n], at)?;
+        if buf[..n].iter().any(|b| *b != 0) {
+            return Ok(false);
+        }
+        at += n as u64;
+    }
+    Ok(true)
+}
+
+/// The refusal of damage at `stop` of segment `seg`. A missing payload no redaction authorizes
+/// (a whole frame whose payload is all zero) is `RedactionCorrupt` at that frame; other damage
+/// keeps its refusal.
+fn damage_refusal(e: io::Error, f: &File, seg: u32, stop: u64, file_len: u64) -> StoreError {
+    if e.kind() == io::ErrorKind::InvalidData && zero_frame_at(f, stop, file_len).unwrap_or(false) {
+        return StoreError::RedactionCorrupt {
+            segment: seg,
+            offset: stop,
+        };
+    }
+    StoreError::Io(e)
 }
 
 /// Opens every segment file in `dir` for reading, creating `dir` and an empty segment 0 if there
@@ -664,7 +938,8 @@ pub fn log_has_marker(dir: &Path) -> io::Result<bool> {
             }
             offset += HEADER + payload.len() as u64;
         }
-        if offset < file_len && acknowledged_batch_follows(&f, seg, 0, offset, file_len)? {
+        if offset < file_len && acknowledged_batch_follows(&f, seg, 0, offset, file_len, &NO_HOLES)?
+        {
             return Ok(true);
         }
     }
@@ -724,6 +999,7 @@ impl SegmentLog {
             fail_roll: false,
             fail_partial: None,
             crash: None,
+            auth: Arc::default(),
         };
         Ok(log)
     }
@@ -742,14 +1018,34 @@ impl SegmentLog {
         max_len: u64,
         floor: Option<Location>,
     ) -> io::Result<(SegmentLog, Vec<PathBuf>)> {
+        SegmentLog::open_authorized(dir, max_len, floor).map_err(|e| match e {
+            StoreError::Io(e) => e,
+            other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
+        })
+    }
+
+    /// `open_marked`, with the redaction bootstrap's typed refusals. The open makes two passes
+    /// and never consults the index for authorization: the first reads frame headers and markers
+    /// and validates every sealed redaction apply with its request, residues and same-batch human
+    /// landing (`redaction_io::bootstrap`); the second is the marker rule's scan, which hashes
+    /// every payload it reads except the authorized holes. A whole frame with an all-zero payload
+    /// that no apply authorizes is `RedactionCorrupt` at it; a forged or broken apply is
+    /// `RedactionCorrupt` too. Nothing is erased here: `Store::finish_redactions` does that.
+    pub(crate) fn open_authorized(
+        dir: &Path,
+        max_len: u64,
+        floor: Option<Location>,
+    ) -> Result<(SegmentLog, Vec<PathBuf>), StoreError> {
         let mut readers = open_readers(dir)?;
+        let auth = Arc::new(redaction_io::bootstrap(&readers)?);
+        let holes = &auth.holes;
         let mut last = (readers.len() - 1) as u32;
         let mut writer = OpenOptions::new()
             .read(true)
             .write(true)
             .open(seg_path(dir, last))?;
         let file_len = writer.metadata()?.len();
-        let scan = scan_marked(&writer, last, file_len)?;
+        let scan = scan_marked(&writer, last, file_len, holes)?;
         let mut quarantined = vec![];
         let len;
         if scan.boundary.is_none() && last > 0 {
@@ -757,16 +1053,20 @@ impl SegmentLog {
             let prev_path = seg_path(dir, last - 1);
             let prev = File::open(&prev_path)?;
             let prev_len = prev.metadata()?.len();
-            if scan_marked(&prev, last - 1, prev_len)?.boundary != Some(prev_len) {
+            if scan_marked(&prev, last - 1, prev_len, holes)?.boundary != Some(prev_len) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
                         "{} does not end at a batch marker, but a later segment was started: the log is damaged; restore it from backup, then reopen",
                         prev_path.display()
                     ),
-                ));
+                )
+                .into());
             }
-            quarantined.extend(check_tail(&writer, dir, last, &scan, file_len, floor)?);
+            quarantined.extend(
+                check_tail(&writer, dir, last, &scan, file_len, floor, holes)
+                    .map_err(|e| damage_refusal(e, &writer, last, scan.stop, file_len))?,
+            );
             drop(writer);
             std::fs::remove_file(seg_path(dir, last))?;
             sync_dir(dir)?;
@@ -776,7 +1076,9 @@ impl SegmentLog {
             len = prev_len;
         } else {
             let b = scan.boundary.unwrap_or(0);
-            if let Some(q) = check_tail(&writer, dir, last, &scan, file_len, floor)? {
+            if let Some(q) = check_tail(&writer, dir, last, &scan, file_len, floor, holes)
+                .map_err(|e| damage_refusal(e, &writer, last, scan.stop, file_len))?
+            {
                 quarantined.push(q);
                 writer.set_len(b)?;
             }
@@ -795,6 +1097,7 @@ impl SegmentLog {
             fail_roll: false,
             fail_partial: None,
             crash: None,
+            auth,
         };
         Ok((log, quarantined))
     }
@@ -984,6 +1287,113 @@ impl SegmentLog {
         Ok(placed)
     }
 
+    /// Writes one data frame of a loaded batch at the end of the current segment, with no roll
+    /// and no sync: the ingest rolls only where the source rolled (`crate::ingest`). It
+    /// allocates nothing (`write_parts`). Returns where it went and its payload's hash.
+    pub(crate) fn append_unrolled(
+        &mut self,
+        kind: u8,
+        payload: &[u8],
+    ) -> io::Result<(Location, Hash)> {
+        let len = u32::try_from(payload.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload too large"))?;
+        let hash = Hash::of(payload);
+        let loc = self.write_parts(len, kind, &hash, payload)?;
+        Ok((loc, hash))
+    }
+
+    /// Writes the `BATCH_COMMIT` marker of a loaded batch whose first data frame is at `start`,
+    /// of `frames` data frames whose batch digest is `digest`, with no sync. It allocates
+    /// nothing: the marker is encoded into a fixed buffer of `MARKER_MAX` bytes. The bytes are
+    /// those `append_marker` writes for the same batch.
+    pub(crate) fn append_marker_digest(
+        &mut self,
+        start: Location,
+        frames: u32,
+        digest: Hash,
+    ) -> io::Result<()> {
+        let marker = BatchCommit {
+            start,
+            frames,
+            digest,
+        };
+        let mut buf = [0u8; MARKER_MAX as usize];
+        let bytes = postcard::to_slice(&marker, &mut buf)
+            .map_err(|_| io::Error::other("a marker over its bound"))?;
+        let hash = Hash::of(bytes);
+        self.write_parts(bytes.len() as u32, kinds::BATCH_COMMIT, &hash, bytes)?;
+        Ok(())
+    }
+
+    /// Writes one frame (`len`, `kind`, `hash`, then `payload`) at the end of the current
+    /// segment with no roll and no sync, and allocates nothing: a frame of at most
+    /// `SMALL_FRAME` bytes goes through one buffer on the stack in one write, a longer one as
+    /// its header and then its payload.
+    fn write_parts(
+        &mut self,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+        payload: &[u8],
+    ) -> io::Result<Location> {
+        const SMALL_FRAME: usize = 4096;
+        let loc = Location {
+            segment: self.current(),
+            offset: self.len,
+        };
+        let head_len = HEADER as usize;
+        let frame_len = head_len + payload.len();
+        let mut small = [0u8; SMALL_FRAME];
+        small[0..4].copy_from_slice(&len.to_le_bytes());
+        small[4] = kind;
+        small[5..head_len].copy_from_slice(&hash.0);
+        if frame_len <= SMALL_FRAME {
+            small[head_len..frame_len].copy_from_slice(payload);
+            pio::write_all_at(&self.writer, &small[..frame_len], self.len)?;
+        } else {
+            pio::write_all_at(&self.writer, &small[..head_len], self.len)?;
+            pio::write_all_at(&self.writer, payload, self.len + HEADER)?;
+        }
+        self.len += frame_len as u64;
+        Ok(loc)
+    }
+
+    /// Writes a loaded frame whose payload a redaction removed, at the end of the current
+    /// segment with no roll and no sync: its original header (`len`, `kind`, `hash`), then `len`
+    /// zero bytes through one fixed buffer of `ERASE_BUFFER` bytes, by positioned writes. So the
+    /// frame takes its original place and length, as an erased frame of the source does.
+    /// Returns where it went.
+    pub(crate) fn append_dropped(
+        &mut self,
+        kind: u8,
+        hash: &Hash,
+        len: u32,
+    ) -> io::Result<Location> {
+        static ZEROS: [u8; ERASE_BUFFER] = [0; ERASE_BUFFER];
+        let loc = Location {
+            segment: self.current(),
+            offset: self.len,
+        };
+        let end = self
+            .len
+            .checked_add(HEADER)
+            .and_then(|e| e.checked_add(u64::from(len)))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
+        let mut head = [0u8; HEADER as usize];
+        head[0..4].copy_from_slice(&len.to_le_bytes());
+        head[4] = kind;
+        head[5..37].copy_from_slice(&hash.0);
+        pio::write_all_at(&self.writer, &head, self.len)?;
+        let mut at = self.len + HEADER;
+        while at < end {
+            let n = (end - at).min(ERASE_BUFFER as u64) as usize;
+            pio::write_all_at(&self.writer, &ZEROS[..n], at)?;
+            at += n as u64;
+        }
+        self.len = end;
+        Ok(loc)
+    }
+
     /// Writes the `BATCH_COMMIT` marker of the batch whose first data frame is at `start` and
     /// whose data frames have `hashes`, in order. It does not sync.
     pub fn append_marker<'a>(
@@ -1033,7 +1443,8 @@ impl SegmentLog {
             .get(loc.segment as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
         let file_len = f.metadata()?.len();
-        read_frame(f, loc.offset, file_len)?.ok_or_else(|| corrupt_frame(loc))
+        read_frame(f, loc.offset, file_len)?
+            .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))
     }
 
     pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
@@ -1065,13 +1476,32 @@ impl SegmentLog {
     /// the log, in order, reading each frame once; `next` is the location just past the frame. A
     /// `from` at the end of its segment continues with the next segment. A torn or corrupt frame
     /// is `InvalidData`, as is a `from` past the end of its segment and a sealed segment (one
-    /// before the current) that does not end at a batch marker. An error from `f` stops the walk
-    /// and is returned.
+    /// before the current) that does not end at a batch marker. An authorized hole is
+    /// `InvalidData` too: this walk hands out only original payloads (`for_each_view` walks past
+    /// holes). An error from `f` stops the walk and is returned.
     pub fn for_each_from<E: From<io::Error>>(
         &self,
         from: Location,
         mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.for_each_view(from, |loc, v, next| match v.payload {
+            Some(p) => f(loc, v.kind, v.hash, p, next),
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the payload of the frame at {loc:?} was removed by a redaction"),
+            )
+            .into()),
+        })
+    }
+
+    /// `for_each_from`, handing each frame as a [`FrameView`]: an authorized hole of this log
+    /// comes with its header facts and no payload, which is neither read nor hashed.
+    pub fn for_each_view<E: From<io::Error>>(
+        &self,
+        from: Location,
+        mut f: impl FnMut(Location, FrameView<'_>, Location) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let holes = &self.auth.holes;
         for seg in from.segment..=self.current() {
             let file = &self.readers[seg as usize];
             let file_len = file.metadata()?.len();
@@ -1088,25 +1518,57 @@ impl SegmentLog {
             if sealed && offset == 0 && file_len == 0 {
                 return Err(unsealed(seg).into());
             }
-            while let Some((kind, hash, payload)) = read_frame(file, offset, file_len)? {
+            while let Some(frame) = read_frame_or_hole(
+                file,
+                Location {
+                    segment: seg,
+                    offset,
+                },
+                file_len,
+                holes,
+            )? {
                 let loc = Location {
                     segment: seg,
                     offset,
                 };
-                offset += HEADER + payload.len() as u64;
+                offset += HEADER + frame.payload_len();
                 let next = Location {
                     segment: seg,
                     offset,
                 };
+                let (kind, hash) = frame.kind_hash();
                 if sealed && offset == file_len && kind != kinds::BATCH_COMMIT {
                     return Err(unsealed(seg).into());
                 }
-                f(loc, kind, hash, &payload, next)?;
+                let view = match &frame {
+                    FrameRead::Whole(_, _, p) => FrameView {
+                        kind,
+                        hash,
+                        len: p.len() as u32,
+                        payload: Some(p),
+                    },
+                    FrameRead::Hole(_, _, len) => FrameView {
+                        kind,
+                        hash,
+                        len: *len,
+                        payload: None,
+                    },
+                };
+                f(loc, view, next)?;
             }
             if offset < file_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                return Err(refuse_frame(
+                    file,
+                    loc,
+                    file_len,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt frame in segment {seg} at offset {offset}"),
+                    ),
                 )
                 .into());
             }
@@ -1118,43 +1580,183 @@ impl SegmentLog {
     /// that every sealed segment (one before the current) ends at a batch marker. Returns the
     /// number of non-marker frames.
     pub fn verify_frames(&self) -> io::Result<usize> {
+        Ok(self.verify_frames_counted()?.0)
+    }
+
+    /// `verify_frames`, reading the log's authorized holes as frames whose payloads are neither
+    /// read nor hashed. Returns the non-marker frames and, of them, the holes.
+    pub(crate) fn verify_frames_counted(&self) -> io::Result<(usize, usize)> {
+        let holes = &self.auth.holes;
         let mut count = 0;
+        let mut dropped = 0;
         for seg in 0..=self.current() {
             let f = &self.readers[seg as usize];
             let file_len = f.metadata()?.len();
             let mut offset = 0;
             // the frames read since the previous valid marker of this segment
             let mut since: Vec<(u64, Hash)> = vec![];
-            while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
-                if kind == kinds::BATCH_COMMIT {
-                    let mismatch = || {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "batch marker in segment {seg} at offset {offset} does not match its batch"
-                            ),
-                        )
-                    };
-                    if !marker_matches(seg, &since, &payload) {
-                        return Err(mismatch());
+            while let Some(frame) = read_frame_or_hole(
+                f,
+                Location {
+                    segment: seg,
+                    offset,
+                },
+                file_len,
+                holes,
+            )? {
+                let end = offset + HEADER + frame.payload_len();
+                match frame {
+                    FrameRead::Whole(kind, _, payload) if kind == kinds::BATCH_COMMIT => {
+                        if !marker_matches(seg, &since, &payload) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "batch marker in segment {seg} at offset {offset} does not match its batch"
+                                ),
+                            ));
+                        }
+                        since.clear();
                     }
-                    since.clear();
-                } else {
-                    since.push((offset, hash));
-                    count += 1;
+                    other => {
+                        if matches!(other, FrameRead::Hole(..)) {
+                            dropped += 1;
+                        }
+                        since.push((offset, other.kind_hash().1));
+                        count += 1;
+                    }
                 }
-                offset += HEADER + payload.len() as u64;
+                offset = end;
             }
             if offset < file_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                return Err(refuse_frame(
+                    f,
+                    loc,
+                    file_len,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt frame in segment {seg} at offset {offset}"),
+                    ),
                 ));
             }
             if seg < self.current() && (file_len == 0 || !since.is_empty()) {
                 return Err(unsealed(seg));
             }
         }
-        Ok(count)
+        Ok((count, dropped))
+    }
+
+    /// What the log's validated redaction applies authorize.
+    pub(crate) fn authorization(&self) -> &Arc<Authorization> {
+        &self.auth
+    }
+
+    /// Replaces the authorization, once a newly sealed apply batch is durable.
+    pub(crate) fn set_authorization(&mut self, auth: Arc<Authorization>) {
+        self.auth = auth;
+    }
+
+    /// The readers of every segment, in order (for the redaction bootstrap of a pending batch).
+    pub(crate) fn readers(&self) -> &[File] {
+        &self.readers
+    }
+
+    /// True if a frame (or an authorized hole) starts at `loc`.
+    pub(crate) fn frame_readable(&self, loc: Location) -> io::Result<bool> {
+        let Some(f) = self.readers.get(loc.segment as usize) else {
+            return Ok(false);
+        };
+        Ok(read_frame_or_hole(f, loc, f.metadata()?.len(), &self.auth.holes)?.is_some())
+    }
+
+    /// Where `append_batch` would put the first frame of `frames`: the end of the log, or the start
+    /// of the next segment when the batch and its marker do not fit in the current one.
+    pub(crate) fn batch_start(&self, frames: &[(u8, Vec<u8>)]) -> Location {
+        let size = frames
+            .iter()
+            .map(|(_, p)| HEADER + p.len() as u64)
+            .sum::<u64>()
+            + HEADER
+            + MARKER_MAX;
+        if self.len > 0 && self.len + size > self.max_len {
+            Location {
+                segment: self.current() + 1,
+                offset: 0,
+            }
+        } else {
+            self.end()
+        }
+    }
+
+    /// The state of the payload of hole `loc`: all zero (`Some(true)` erased), intact and matching
+    /// its hash (`Some(false)`), or neither (`None`: partly erased).
+    pub(crate) fn hole_state(&self, loc: Location, hole: &Hole) -> io::Result<Option<bool>> {
+        let f = self
+            .readers
+            .get(loc.segment as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
+        let start = loc.offset + HEADER;
+        if payload_is_zero(f, start, u64::from(hole.len))? {
+            return Ok(Some(true));
+        }
+        let intact = read_frame(f, loc.offset, f.metadata()?.len())?.is_some_and(|(k, h, p)| {
+            k == hole.kind && h == hole.hash && p.len() == hole.len as usize
+        });
+        Ok(intact.then_some(false))
+    }
+
+    /// Overwrites the payload of the frame `span` names with zeros, through one fixed buffer of
+    /// `ERASE_BUFFER` bytes, by positioned writes. It first checks that the frame's header still
+    /// holds the span's kind, hash and length and that the payload ends inside the file (checked
+    /// arithmetic); anything else is `RedactionCorrupt` at the span, and nothing is written. The
+    /// header is never rewritten and the file never truncated. It does not sync
+    /// (`sync_segments`).
+    pub fn zero_payload(&mut self, span: &DropSpan) -> Result<(), StoreError> {
+        static ZEROS: [u8; ERASE_BUFFER] = [0; ERASE_BUFFER];
+        let loc = Location {
+            segment: span.place.segment,
+            offset: span.place.offset,
+        };
+        let corrupt = || StoreError::corrupt_at(loc);
+        if loc.segment > self.current() {
+            return Err(corrupt());
+        }
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(seg_path(&self.dir, loc.segment))?;
+        let file_len = f.metadata()?.len();
+        if header_at(&f, loc.offset, file_len)? != Some((span.len, span.kind, span.hash)) {
+            return Err(corrupt());
+        }
+        let start = loc.offset.checked_add(HEADER).ok_or_else(corrupt)?;
+        let end = start
+            .checked_add(u64::from(span.len))
+            .filter(|e| *e <= file_len)
+            .ok_or_else(corrupt)?;
+        let mut at = start;
+        while at < end {
+            let n = (end - at).min(ERASE_BUFFER as u64) as usize;
+            pio::write_all_at(&f, &ZEROS[..n], at)?;
+            at += n as u64;
+            redaction_io::hit(Failpoint::AfterZeroWrite)?;
+        }
+        Ok(())
+    }
+
+    /// Makes the payload writes to `segments` durable: one sync of each segment, then of the
+    /// segments directory.
+    pub(crate) fn sync_segments(&self, segments: &BTreeSet<u32>) -> io::Result<()> {
+        for seg in segments {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(seg_path(&self.dir, *seg))?
+                .sync_all()?;
+        }
+        sync_dir(&self.dir)
     }
 }
