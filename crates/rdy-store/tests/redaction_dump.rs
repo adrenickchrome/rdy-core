@@ -1351,6 +1351,19 @@ fn rdx9_a_load_refuses_an_inconsistent_request() {
             }),
             &no_change,
         ),
+        // fix round 2, finding 2: a dropped change whose residue pairs the sibling's stored
+        // version with another id
+        (
+            "the dropped change's residue gives the sibling's version another id",
+            Box::new(sibling_with_another_id),
+            &all,
+        ),
+        (
+            "the dropped change's residue gives the sibling's version another id, the block and \
+             chunks intact",
+            Box::new(sibling_with_another_id),
+            &[CHANGE],
+        ),
     ];
     for (name, hook, dropped) in cases {
         let raw = raw_source(move |d, a, b, blob| hook(d, a, b, blob));
@@ -1359,4 +1372,22 @@ fn rdx9_a_load_refuses_an_inconsistent_request() {
         assert_eq!(what(e), NO_AUTHORIZATION, "{name}");
         assert!(no_store(&to), "{name}: the target holds no store");
     }
+}
+
+/// A draft hook whose change residue pairs the sibling's (`b`'s) stored version with an id that
+/// is not its block's.
+fn sibling_with_another_id(d: &mut redaction_fixture::Draft, _: &Block, b: &Block, _: Hash) {
+    for r in &mut d.residues {
+        if let rdy_model::redaction::RedactionResidue::Change(c) = r {
+            for op in &mut c.ops {
+                if let rdy_model::redaction::ResidualOp::Create { id, version } = op
+                    && *version == b.version_hash()
+                {
+                    *id = BlockId::parse("b-00003").unwrap();
+                }
+            }
+        }
+    }
+    let residues = d.residues.clone();
+    redaction_fixture::relink(&mut d.request, &residues);
 }

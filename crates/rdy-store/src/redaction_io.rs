@@ -28,8 +28,8 @@ use crate::error::StoreError;
 use crate::index::IndexEntry;
 use crate::kinds::{self, BlobManifest};
 use crate::redaction::{
-    check_bounds, is_redaction_kind, is_removable, manifest_in_order, residual_versions,
-    residue_matches, targets_agree,
+    check_bounds, is_redaction_kind, is_removable, manifest_in_order, residual_refs,
+    residual_versions, residue_matches, targets_agree,
 };
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
 use crate::store::{decode, encode};
@@ -870,29 +870,15 @@ fn for_each_seen(
     Ok(())
 }
 
-/// Whether any authorized hole still holds payload bytes that are not zero: erasure has work
-/// left (a sealed apply not yet finished, or one a kill interrupted).
-fn unfinished(readers: &[File], holes: &Holes) -> Result<bool, StoreError> {
-    for (loc, h) in holes {
-        let Some(f) = readers.get(loc.segment as usize) else {
-            return Err(StoreError::corrupt_at(*loc));
-        };
-        if !segment::payload_is_zero(f, loc.offset + HEADER, u64::from(h.len))? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// The meaning of the validated applies against the log, which no index takes part in. Two
 /// passes over the frame headers before `upto` (then the frames of `memory`, a batch not yet
-/// written):
+/// written), both run whenever an apply exists, whatever the erasure has done (final review
+/// fix round 2, findings 1 and 2: a span list that is empty or already zero proves nothing):
 ///
-/// 1. Always: every authorized span is a frame start, every manifest blob has its manifest
-///    before its request, and every chunk span is a chunk of one of its request's blobs. This
-///    pass stops at the last request and keeps no location per content frame.
-/// 2. When `full` (before any zero write: an unfinished erasure, an import, the live writer):
-///    the request means exactly what its manifest removes, and the removal destroys nothing
+/// 1. Every authorized span is a frame start, every manifest blob has its manifest before its
+///    request, and every chunk span is a chunk of one of its request's blobs. This pass stops at
+///    the last request and keeps no location per content frame.
+/// 2. The request means exactly what its manifest removes, and the removal destroys nothing
 ///    else, as the checked apply path proves it (`Store::check_selection`, `check_spans`,
 ///    `check_coverage`; final review findings 1 and 2):
 ///    - every manifest version is a stored version of the id it is listed with (read from its
@@ -900,7 +886,9 @@ fn unfinished(readers: &[File], holes: &Holes) -> Result<bool, StoreError> {
 ///    - an all-versions target lists every version of its id stored before its apply;
 ///    - every intact payload of a span is exactly what its residue records: a block's identity,
 ///      a change's id, audit fields, dependencies and every op in order;
-///    - every version a change residue keeps by reference has a stored block before its apply;
+///    - every `(id, version)` a change residue keeps by reference is a stored block of that id
+///      before its apply: an intact block frame whose payload has that id, or a span an apply
+///      authorized whose block residue has it;
 ///    - no intact frame outside the authorized spans holds selected content: a block of a
 ///      selected version, a change that embeds one, or a chunk of a selected blob (each
 ///      physical copy is a span);
@@ -913,7 +901,6 @@ fn check_log(
     auth: &Authorization,
     sel: &[Selected],
     upto: Location,
-    full: bool,
 ) -> Result<(), StoreError> {
     if sel.is_empty() {
         return Ok(());
@@ -961,9 +948,6 @@ fn check_log(
         }
         sel_chunks.push(set);
     }
-    if !full {
-        return Ok(());
-    }
 
     // pass 2: the request's meaning, and every physical copy
     let sel_versions: Vec<HashSet<Hash>> = sel
@@ -978,9 +962,9 @@ fn check_log(
         }
     }
     let selected_chunks: HashSet<Hash> = sel_chunks.iter().flatten().copied().collect();
-    // the versions each change residue keeps by reference, with the earliest apply that needs
-    // a stored block of it
-    let mut kept: HashMap<Hash, Location> = HashMap::new();
+    // the (id, version) pairs each change residue keeps by reference, with the earliest apply
+    // that needs a stored block of it
+    let mut kept: HashMap<(BlockId, Hash), Location> = HashMap::new();
     for (i, s) in sel.iter().enumerate() {
         for (loc, kind, _) in &s.spans {
             if *kind != kinds::CHANGE {
@@ -990,24 +974,25 @@ fn check_log(
             let Some(RedactionResidue::Change(c)) = residue else {
                 return Err(StoreError::corrupt_at(*loc));
             };
-            for v in residual_versions(c).filter(|v| !sel_versions[i].contains(*v)) {
-                let need = kept.entry(*v).or_insert(s.apply);
+            for (id, v) in residual_refs(c).filter(|(_, v)| !sel_versions[i].contains(*v)) {
+                let need = kept.entry((id.clone(), *v)).or_insert(s.apply);
                 *need = (*need).min(s.apply);
             }
         }
     }
+    let kept_versions: HashSet<Hash> = kept.keys().map(|(_, v)| *v).collect();
     let mut id_of: HashMap<Hash, BlockId> = HashMap::new();
-    let mut kept_found: HashSet<Hash> = HashSet::new();
+    let mut kept_found: HashSet<(BlockId, Hash)> = HashSet::new();
     let mut seen_chunks: HashSet<Hash> = HashSet::new();
     let residue_of = |loc: &Location| auth.spans[loc].residue.and_then(|r| auth.residues.get(&r));
     for_each_seen(readers, upto, memory, |f| {
         let hole = auth.holes.contains_key(&f.loc);
         match f.kind {
             kinds::BLOCK => {
-                if kept.get(&f.hash).is_some_and(|need| f.loc < *need) {
-                    kept_found.insert(f.hash);
-                }
-                if !selected_versions.contains(&f.hash) && by_id.is_empty() {
+                if !selected_versions.contains(&f.hash)
+                    && !kept_versions.contains(&f.hash)
+                    && by_id.is_empty()
+                {
                     return Ok(());
                 }
                 let id = match (hole, f.intact()?) {
@@ -1034,9 +1019,16 @@ fn check_log(
                             Err(_) => return Ok(()),
                         }
                     }
-                    // a damaged payload outside the holes: the payload scan refuses it
+                    // a damaged payload outside the holes: the payload scan refuses it, and it
+                    // keeps no reference
                     (false, None) => return Ok(()),
                 };
+                if kept_versions.contains(&f.hash) {
+                    let key = (id.clone(), f.hash);
+                    if kept.get(&key).is_some_and(|need| f.loc < *need) {
+                        kept_found.insert(key);
+                    }
+                }
                 if selected_versions.contains(&f.hash) {
                     id_of.entry(f.hash).or_insert_with(|| id.clone());
                 }
@@ -1084,39 +1076,20 @@ fn check_log(
             return Err(StoreError::corrupt_at(s.apply));
         }
     }
-    if let Some((_, need)) = kept.iter().find(|(v, _)| !kept_found.contains(*v)) {
+    if let Some((_, need)) = kept.iter().find(|(r, _)| !kept_found.contains(*r)) {
         return Err(StoreError::corrupt_at(*need));
     }
     Ok(())
-}
-
-/// How much of the applies' meaning a bootstrap checks against the log ([`check_log`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Depth {
-    /// The full semantic pass only when an authorized span still holds payload bytes (work an
-    /// erasure has not finished): every open, before its first zero write.
-    BeforeErasure,
-    /// Always the full semantic pass (an import).
-    Full,
 }
 
 /// The authorization bootstrap of an open: the header pass, then the validation of every apply
 /// the acknowledged log holds. Which applies that is depends on the holes they authorize (the
 /// marker rule's scan reads them as frames), so the scan's end is found with the applies'
 /// unchecked holes and applies past it are left out until it is stable; the applies left are
-/// validated and checked against the log (`check_log`, its full pass whenever an erasure has
-/// work left), and any failure refuses the open. The index plays no part.
+/// validated and checked against the log (`check_log`, both its passes, whatever the erasure has
+/// done), and any failure refuses the open. The index plays no part. A load checks a complete
+/// ingested log with it before it finishes the store.
 pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
-    bootstrap_to(readers, Depth::BeforeErasure)
-}
-
-/// [`bootstrap`] with the full semantic pass whatever the holes hold: a load checks a complete
-/// ingested log before it finishes the store.
-pub(crate) fn bootstrap_full(readers: &[File]) -> Result<Authorization, StoreError> {
-    bootstrap_to(readers, Depth::Full)
-}
-
-fn bootstrap_to(readers: &[File], depth: Depth) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
     if c.applies.is_empty() && c.requests.is_empty() {
         return Ok(Authorization::default());
@@ -1132,8 +1105,7 @@ fn bootstrap_to(readers: &[File], depth: Depth) -> Result<Authorization, StoreEr
         }
     };
     let (mut auth, sel) = validate(&c, readers, &applies, None)?;
-    let full = depth == Depth::Full || unfinished(readers, &auth.holes)?;
-    check_log(readers, &c.memory, &auth, &sel, end, full)?;
+    check_log(readers, &c.memory, &auth, &sel, end)?;
     auth.requests = c
         .requests
         .iter()
@@ -1145,8 +1117,8 @@ fn bootstrap_to(readers: &[File], depth: Depth) -> Result<Authorization, StoreEr
 
 /// The authorization of a log whose every batch is whole (a load's ingest checked each batch
 /// against its digest before it wrote its marker): the header pass, then the validation of every
-/// apply of its sealed batches, as `bootstrap` validates them, with the full semantic pass over
-/// the sealed batches. Frames after the last marker (a batch not yet sealed) play no part. A log
+/// apply of its sealed batches, as `bootstrap` validates them, and checked against the sealed
+/// batches (`check_log`). Frames after the last marker (a batch not yet sealed) play no part. A log
 /// with no apply authorizes nothing. Any failed apply refuses it, as it refuses an open.
 pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
@@ -1159,16 +1131,16 @@ pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreE
         segment: 0,
         offset: 0,
     });
-    check_log(readers, &BTreeMap::new(), &auth, &sel, upto, true)?;
+    check_log(readers, &BTreeMap::new(), &auth, &sel, upto)?;
     Ok(auth)
 }
 
 /// The bootstrap of a batch the live writer is about to seal: the header pass over the open log
 /// (an open held batch on disk has no marker yet and does not count), then `batch` as one sealed
 /// batch whose first frame goes at `start`, then the validation of every apply and its check
-/// against the log up to `start` and the batch (`check_log`, its full pass: the new apply's
-/// spans are intact). Refuses before anything is written: `RedactionHuman` for a new apply no
-/// person approved, `RedactionCorrupt` for any other failure.
+/// against the log up to `start` and the batch (`check_log`). Refuses before anything is
+/// written: `RedactionHuman` for a new apply no person approved, `RedactionCorrupt` for any
+/// other failure.
 pub(crate) fn bootstrap_pending(
     readers: &[File],
     start: Location,
@@ -1186,8 +1158,7 @@ pub(crate) fn bootstrap_pending(
     c.seal(p);
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
-    let full = unfinished(readers, &auth.holes)?;
-    check_log(readers, &c.memory, &auth, &sel, start, full)?;
+    check_log(readers, &c.memory, &auth, &sel, start)?;
     auth.requests = c.requests.clone();
     Ok(auth)
 }

@@ -110,9 +110,9 @@ fn result_lines(r: &RedactResult) -> Vec<String> {
 
 /// `result` as text within `max_tokens` (256 to 20000; a token is 4 UTF-8 bytes, rounded down).
 /// When the whole report does not fit, its row sections are replaced by one line, the targets
-/// are listed while they fit (the rest named by one line with the report hash), and `truncated`
-/// is set; when the lines that never truncate do not fit, `E_REDACTION_BUDGET`. No warning is
-/// ever dropped.
+/// are listed while they fit, the report hash follows them (in the line that names the targets
+/// left out, or alone when none is), and `truncated` is set; when the lines that never truncate
+/// do not fit, `E_REDACTION_BUDGET`. No warning is ever dropped.
 pub fn report_text(result: &RedactResult, max_tokens: usize) -> Result<ReportText, RdyError> {
     check_budget(max_tokens)?;
     let rep = &result.report;
@@ -192,10 +192,12 @@ pub fn report_text(result: &RedactResult, max_tokens: usize) -> Result<ReportTex
             truncated: false,
         });
     }
-    // the shortened form (ruling final): the title, the counts, the row-list line, the
-    // assessment, the reason, every warning and the result never truncate; the targets are
-    // listed in canonical order while they fit, then one line names how many are left out and
-    // the report hash that binds them all (the JSON report lists them)
+    // the shortened form (ruling final): the title, the counts, the report hash, the row-list
+    // line, the assessment, the reason, every warning and the result never truncate; the
+    // targets are listed in canonical order while they fit. The report hash line follows them:
+    // one line that names how many are left out and the report hash that binds them all (the
+    // JSON report lists them), or, when every target is shown, the report hash alone (final
+    // review fix round 2, finding 5)
     let (title, rest) = head.split_first().expect("a title");
     let (targets, counts) = rest.split_at(rep.targets.len());
     let mut fixed = vec![title.clone()];
@@ -203,13 +205,18 @@ pub fn report_text(result: &RedactResult, max_tokens: usize) -> Result<ReportTex
     fixed.push(ROWS_OMITTED.to_string());
     fixed.extend(tail.iter().cloned());
     // the length of the text with the first `k` targets: the fixed lines, the targets and
-    // their newlines, and the omitted-targets line while any is left out
+    // their newlines, and the report hash line
     let fixed_len = fixed.iter().map(String::len).sum::<usize>() + fixed.len() - 1;
-    let more = |n: usize| more_targets(n, &rep.report_hash.to_string());
-    let len_with = |k: usize, shown: usize| {
-        let left = targets.len() - k;
-        shown + k + if left > 0 { more(left).len() + 1 } else { 0 } + fixed_len
+    let hash = rep.report_hash.to_string();
+    let hash_line = |left: usize| {
+        if left > 0 {
+            more_targets(left, &hash)
+        } else {
+            report_line(&hash)
+        }
     };
+    let len_with =
+        |k: usize, shown: usize| shown + k + hash_line(targets.len() - k).len() + 1 + fixed_len;
     let mut shown = 0usize;
     let mut best = None;
     for k in 0..=targets.len() {
@@ -225,9 +232,7 @@ pub fn report_text(result: &RedactResult, max_tokens: usize) -> Result<ReportTex
     };
     let mut lines = vec![title.clone()];
     lines.extend(targets[..k].iter().cloned());
-    if k < targets.len() {
-        lines.push(more(targets.len() - k));
-    }
+    lines.push(hash_line(targets.len() - k));
     lines.extend(fixed.into_iter().skip(1));
     let short = lines.join("\n");
     debug_assert!(fits(&short));
@@ -242,6 +247,12 @@ fn more_targets(n: usize, report_hash: &str) -> String {
     format!(
         "… and {n} more targets; the full list is in the JSON report (--json) and bound by report {report_hash}"
     )
+}
+
+/// The line of a shortened text that shows every target: the report hash that binds the full
+/// report (ruling final: the hash never truncates).
+fn report_line(report_hash: &str) -> String {
+    format!("Report: {report_hash}.")
 }
 
 /// Whether the text of `dry`, as a recorded request with the same report, fits `max_tokens`: the

@@ -1523,18 +1523,67 @@ fn inconsistent_cases(setup: &Setup) -> Vec<Inconsistent> {
         },
         Inconsistent {
             name: "the change residue renames the sibling's version",
+            opts: with_draft(renamed_sibling_version),
+            zero_kinds: &[],
+        },
+        // fix round 2, finding 1: coverage holds whatever the erasure has done
+        Inconsistent {
+            name: "the manifest lists no span, every payload intact",
             opts: with_draft(|d| {
-                if let rdy_model::redaction::ResidualOp::Create { version, .. } =
-                    &mut change_residue(d).ops[1]
-                {
-                    *version = Hash::of(b"rdx4 a version never stored");
-                }
-                let residues = d.residues.clone();
-                redaction_fixture::relink(&mut d.request, &residues);
+                d.request.manifest.spans.clear();
+                d.residues.clear();
             }),
             zero_kinds: &[],
         },
+        Inconsistent {
+            name: "the manifest omits the change, and every listed span is already zero",
+            opts: with_draft(|d| {
+                d.request.manifest.spans.retain(|s| s.kind != CHANGE);
+                d.residues
+                    .retain(|r| matches!(r, rdy_model::redaction::RedactionResidue::Block(_)));
+            }),
+            zero_kinds: &[BLOCK, BLOB_CHUNK],
+        },
+        // fix round 2, finding 2: every kept reference names a stored (id, version)
+        Inconsistent {
+            name: "the change residue gives the sibling's version another id, and the change \
+                   span is already zero",
+            opts: with_draft(sibling_with_another_id),
+            zero_kinds: &[CHANGE],
+        },
+        Inconsistent {
+            name: "the change residue gives the sibling's version another id, and every span is \
+                   already zero",
+            opts: with_draft(sibling_with_another_id),
+            zero_kinds: &[BLOCK, CHANGE, BLOB_CHUNK],
+        },
+        Inconsistent {
+            name: "the change residue renames the sibling's version, and every span is already \
+                   zero",
+            opts: with_draft(renamed_sibling_version),
+            zero_kinds: &[BLOCK, CHANGE, BLOB_CHUNK],
+        },
     ]
+}
+
+/// A draft whose change residue writes, in the sibling's op, a version that was never stored.
+fn renamed_sibling_version(d: &mut redaction_fixture::Draft) {
+    if let rdy_model::redaction::ResidualOp::Create { version, .. } = &mut change_residue(d).ops[1]
+    {
+        *version = Hash::of(b"rdx4 a version never stored");
+    }
+    let residues = d.residues.clone();
+    redaction_fixture::relink(&mut d.request, &residues);
+}
+
+/// A draft whose change residue pairs the sibling's stored version with an id that is not its
+/// block's.
+fn sibling_with_another_id(d: &mut redaction_fixture::Draft) {
+    if let rdy_model::redaction::ResidualOp::Create { id, .. } = &mut change_residue(d).ops[1] {
+        *id = BlockId::parse("b-00003").unwrap();
+    }
+    let residues = d.residues.clone();
+    redaction_fixture::relink(&mut d.request, &residues);
 }
 
 /// Final review fix round 1, findings 1 and 2: recovery shares the checked apply path's
@@ -1542,7 +1591,9 @@ fn inconsistent_cases(setup: &Setup) -> Vec<Inconsistent> {
 /// its manifest removes, whose manifest omits a physical copy of the selected content (the
 /// embedding change, a chunk), or whose change residue does not replay the original change
 /// exactly, is refused by the open with `RedactionCorrupt` before any zero write, whatever the
-/// index holds. No byte changes, and the original change keeps both its operations.
+/// index holds. No byte changes, and the original change keeps both its operations. Fix round
+/// 2: this holds whatever the erasure has done (a span list that is empty, or whose spans are
+/// already zero), and a kept reference must name a stored block of its own id.
 #[test]
 fn rdx4_recovery_refuses_an_inconsistent_request_before_any_zero_write() {
     let probe = Setup::new();

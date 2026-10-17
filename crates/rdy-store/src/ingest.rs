@@ -266,8 +266,8 @@ impl Ingest {
 
     /// Checks the log's redaction applies and every dropped frame against the complete log,
     /// before the store is finished. It runs when a frame was dropped or an apply was ingested:
-    /// the store's authorization bootstrap with its full semantic pass
-    /// (`redaction_io::bootstrap_full`: a request selects exactly what its manifest removes, every
+    /// the store's authorization bootstrap with its semantic pass
+    /// (`redaction_io::bootstrap`: a request selects exactly what its manifest removes, every
     /// physical copy of selected content is a span, and every intact span is what its residue
     /// records) must accept the log, and must hold each dropped frame's location as an
     /// authorized span with its original kind, hash and length, from the first valid apply that
@@ -281,7 +281,7 @@ impl Ingest {
             return Ok(());
         }
         let refuse = |what: &str| Err(dump_error(what.into()));
-        let auth = match redaction_io::bootstrap_full(self.log.readers()) {
+        let auth = match redaction_io::bootstrap(self.log.readers()) {
             Ok(auth) => auth,
             Err(StoreError::Io(e)) => return Err(StoreError::Io(e)),
             Err(StoreError::RedactionCorrupt { segment, offset }) => {

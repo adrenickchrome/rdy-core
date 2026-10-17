@@ -2522,6 +2522,51 @@ fn rdx5_the_shortened_text_lists_targets_while_they_fit() {
     assert_eq!(e.code, E_REDACTION_BUDGET);
 }
 
+/// Final review fix round 2, finding 5 (ruling final): the report hash is a mandatory line of
+/// every shortened text. When every target fits, the line after the targets is
+/// `Report: {report_hash}.`; when some are left out, the omitted-targets line names it. Either
+/// line is budgeted before any optional target.
+#[test]
+fn rdx5_the_shortened_text_always_holds_the_report_hash() {
+    use rdy_engine::redaction::presentation::ROWS_OMITTED;
+    // every target fits: rows give way, the report hash stays
+    let big = sample_result(true, false, ReasonClass::Legal, 400);
+    let hash = big.report.report_hash.to_string();
+    let full = report_text(&big, 20_000).unwrap();
+    assert!(!full.text.contains(&hash), "the full text has no hash line");
+    let short = report_text(&big, full.text.len() / 4 - 1).unwrap();
+    assert!(short.truncated);
+    let lines: Vec<&str> = short.text.lines().collect();
+    let targets = lines.iter().filter(|l| l.starts_with("Target: ")).count();
+    assert_eq!(targets, big.report.targets.len(), "{}", short.text);
+    assert_eq!(
+        lines[targets + 1],
+        format!("Report: {hash}."),
+        "{}",
+        short.text
+    );
+    assert!(lines[targets + 2].starts_with("Versions: "));
+    assert!(lines.contains(&ROWS_OMITTED));
+    assert_eq!(short.text.matches(&hash).count(), 1);
+    // a smaller budget leaves targets out: the omitted-targets line names the hash instead
+    let need = short.text.len() / 4;
+    let below = (256..need)
+        .rev()
+        .map(|t| report_text(&big, t))
+        .find_map(|r| r.ok().filter(|r| r.text.contains(" more targets;")))
+        .expect("a budget that leaves a target out");
+    assert!(below.truncated);
+    assert!(
+        below.text.contains(&format!(
+            "more targets; the full list is in the JSON report (--json) and bound by report {hash}"
+        )),
+        "{}",
+        below.text
+    );
+    assert!(!below.text.contains(&format!("Report: {hash}.")));
+    assert_eq!(below.text.matches(&hash).count(), 1);
+}
+
 /// Final review fix round 1, finding 7: the validation order of the brief ("reason; expansion;
 /// scan"): an unknown all-versions id and a selection over the selected-object bound are found
 /// before the scan, so lowered scan bounds never mask them; with valid targets the scan bound
@@ -2566,5 +2611,56 @@ fn rdx5_expansion_errors_precede_the_scan_bounds() {
         let e = st.redaction_report(&input(&one, true)).unwrap_err();
         assert_eq!(e.code, E_REDACTION_LIMIT);
         assert!(e.message.contains("scanned"), "{e}");
+    }
+}
+
+/// Final review fix round 2, finding 7 and the bare-id breakage: the pre-scan expansion reads
+/// every stored BLOCK version, as the walk's expansion does, never only the versions a change
+/// produced. A bare id whose only block no change produced (a standalone or imported BLOCK frame)
+/// selects it as its `id@hash` form does; an id with a second, unproduced version expands to
+/// both, and that selection over the selected-object bound is found before a lowered scan bound.
+#[test]
+fn rdx5_the_pre_scan_expansion_reads_every_stored_version() {
+    let mut p = base();
+    let cur =
+        p.r.read()
+            .block(&Scope::View("work".into()), &p.prose)
+            .unwrap();
+    let mut second = cur.clone();
+    second.body = "A version no change produced.".into();
+    let v2 = p.r.store_mut().put(kinds::BLOCK, &second).unwrap();
+    let mut lone = cur.clone();
+    lone.id = id("p-ABCDE");
+    lone.body = "A block no change produced.".into();
+    let lv = p.r.store_mut().put(kinds::BLOCK, &lone).unwrap();
+    p.r.invalidate();
+    let st = p.r.read();
+    assert!(st.reader().producers(&lv).unwrap().is_empty());
+    assert!(st.reader().producers(&v2).unwrap().is_empty());
+    // bare-id and explicit-version parity
+    for sel in ["p-ABCDE".to_string(), format!("p-ABCDE@{lv}")] {
+        let res = dry_run(&st, &input(std::slice::from_ref(&sel), true))
+            .unwrap_or_else(|e| panic!("{sel}: {e}"));
+        assert_eq!(res.report.versions, vec![(lone.id.clone(), lv)], "{sel}");
+    }
+    // the prose's id selects both its versions
+    let res = dry_run(&st, &input(&[p.prose.to_string()], true)).unwrap();
+    let mut want = vec![(p.prose.clone(), cur.version_hash()), (p.prose.clone(), v2)];
+    want.sort();
+    assert_eq!(res.report.versions, want);
+    // two selected objects over a bound of one: the selected-object error, before the scan's
+    let d = Limits::default();
+    for (frames, bytes) in [(1, d.bytes), (d.frames, 1)] {
+        let _g = override_limits_for_tests(Limits {
+            frames,
+            bytes,
+            selected: 1,
+            ..d
+        });
+        let e = st
+            .redaction_report(&input(&[p.prose.to_string()], true))
+            .unwrap_err();
+        assert_eq!(e.code, E_REDACTION_LIMIT, "{e}");
+        assert_eq!(e.message, "The redaction exceeds 100000 selected objects.");
     }
 }

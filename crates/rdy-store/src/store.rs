@@ -2254,13 +2254,15 @@ impl StoreReader {
         self.index().producers(version)
     }
 
-    /// Calls `f` with every block version some change produced, once each, in ascending hash
-    /// order, from the index (no log walk).
-    pub fn for_each_produced_version(
+    /// Calls `f` with the hash of every stored object of `kind` (every BLOCK version, whether a
+    /// change produced it or not), once each, in ascending hash order, from the index (no log
+    /// walk).
+    pub fn for_each_object_of(
         &self,
+        kind: u8,
         f: impl FnMut(Hash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.index().for_each_produced_version(f)
+        self.index().for_each_object_of(kind, f)
     }
 
     /// The changes with an op that deletes `block`, ascending.

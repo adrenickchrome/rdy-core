@@ -628,9 +628,18 @@ fn rdx13_budgets_never_change_the_manifest() {
             "No request was recorded.",
         ]
     );
+    // final review fix round 2, finding 5 (ruling final): the shortened text adds one mandatory
+    // line after its targets, the report hash; every other head line is the full report's
+    let report_line = format!("Report: {}.", text(&full["report"]["report_hash"]));
+    assert_eq!(lines[2], report_line, "{short_text}");
+    let head: Vec<&str> = lines[..at]
+        .iter()
+        .copied()
+        .filter(|l| *l != report_line)
+        .collect();
     assert_eq!(
-        lines[..at],
-        full_text.lines().take(at).collect::<Vec<_>>()[..],
+        head[..],
+        full_text.lines().take(at - 1).collect::<Vec<_>>()[..],
         "the head is the full report's"
     );
     // the CLI text is the same text

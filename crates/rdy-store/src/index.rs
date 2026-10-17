@@ -782,23 +782,28 @@ impl Index {
         Ok(out)
     }
 
-    /// Calls `f` with every version hash some change produced, once each, in ascending hash
-    /// order: one read of the producers table, no log walk.
-    pub fn for_each_produced_version(
+    /// Calls `f` with the hash of every stored object of `kind`, once each, in ascending hash
+    /// order: one read of the typed table, no log walk. An object whose payload a redaction
+    /// removed is still stored (its frame and hash remain).
+    pub fn for_each_object_of(
         &self,
+        kind: u8,
         mut f: impl FnMut(Hash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         let r = self.db.begin_read().map_err(db)?;
-        let t = r.open_table(PRODUCERS).map_err(db)?;
-        let mut last: Option<Hash> = None;
+        let t = r.open_table(TYPED).map_err(db)?;
         for item in t.iter().map_err(db)? {
             let (k, _) = item.map_err(db)?;
             let key = k.value();
-            // every key is a version and a change, 64 bytes; anything shorter is damage
-            let v = hash_from(key.get(..32).unwrap_or(key), "producer entry")?;
-            if last != Some(v) {
-                last = Some(v);
-                f(v)?;
+            // every key is a hash and a kind byte, 33 bytes; anything else is damage
+            if key.len() != 33 {
+                return Err(StoreError::Decode(format!(
+                    "typed entry is {} bytes, expected 33",
+                    key.len()
+                )));
+            }
+            if key[32] == kind {
+                f(hash_from(&key[..32], "typed entry")?)?;
             }
         }
         Ok(())

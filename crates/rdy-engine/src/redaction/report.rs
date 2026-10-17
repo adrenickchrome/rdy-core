@@ -440,10 +440,11 @@ fn check_known(reader: &StoreReader, targets: &[RedactTarget]) -> Result<(), Rdy
 /// The expansion's checks, before the scan (the brief's validation order: "reason; expansion;
 /// scan"; final review finding 7): every all-versions target has a stored version (else
 /// `unknown target`, in target order), and the objects the targets select, leaving out a target
-/// wholly removed already, stay within the selected-object bound. It reads the index's
-/// producers and the blocks and manifests the targets name, never the log walk, so lowered or
-/// reached scan bounds cannot mask these errors. The report's own expansion, from the walk,
-/// stays the authority and repeats both checks.
+/// wholly removed already, stay within the selected-object bound. It reads every stored BLOCK
+/// version from the index (whether a change produced it or not, as the walk's expansion counts
+/// them; final review fix round 2) and the blocks and manifests the targets name, never the log
+/// walk, so lowered or reached scan bounds cannot mask these errors. The report's own
+/// expansion, from the walk, stays the authority and repeats both checks.
 fn check_expansion(
     reader: &StoreReader,
     targets: &[RedactTarget],
@@ -461,7 +462,7 @@ fn check_expansion(
         })
         .collect();
     if !ids.is_empty() {
-        reader.for_each_produced_version(|v| {
+        reader.for_each_object_of(kinds::BLOCK, |v| {
             let b = reader.get_block(&v)?;
             if let Some((n, all)) = ids.get_mut(&b.id) {
                 *n += 1;

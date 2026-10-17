@@ -832,6 +832,16 @@ pub(crate) fn residual_versions(c: &ChangeResidue) -> impl Iterator<Item = &Hash
     })
 }
 
+/// The `(id, version)` pairs a change residue's ops write (creates and updates), in op order.
+pub(crate) fn residual_refs(c: &ChangeResidue) -> impl Iterator<Item = (&BlockId, &Hash)> {
+    c.ops.iter().filter_map(|op| match op {
+        ResidualOp::Create { id, version } | ResidualOp::Update { id, version, .. } => {
+            Some((id, version))
+        }
+        ResidualOp::Delete { .. } => None,
+    })
+}
+
 /// A manifest's versions and blobs are each in strictly ascending (canonical) order.
 pub(crate) fn manifest_in_order(m: &rdy_model::redaction::RedactionManifest) -> bool {
     !(m.versions.windows(2).any(|w| w[0] >= w[1]) || m.blobs.windows(2).any(|w| w[0] >= w[1]))
