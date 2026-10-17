@@ -435,11 +435,36 @@ fn check_known(reader: &StoreReader, targets: &[RedactTarget]) -> Result<(), Rdy
 }
 
 /// A zeroed buffer of `n` bytes, allocated fallibly (`E_REDACTION_LIMIT` on failure).
-fn buffer(n: usize) -> Result<Vec<u8>, RdyError> {
+pub(super) fn buffer(n: usize) -> Result<Vec<u8>, RdyError> {
     let mut buf = Vec::new();
     buf.try_reserve_exact(n).map_err(|_| over(limit::RECORD))?;
     buf.resize(n, 0);
     Ok(buf)
+}
+
+/// A recorded request's own records, which its approval-time recomputation leaves out (plan
+/// Redaction, Task 10): its carrier change and the view op that committed it, the request record
+/// itself, and every proposal version that holds the carrier. Its residues report under their
+/// original identity in every computation, and its apply is written only by the landing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Own {
+    pub(crate) carrier: Hash,
+    pub(crate) request: Hash,
+}
+
+impl Own {
+    /// Whether the frame `(kind, hash)` is one of the request's own records. Proposals and view
+    /// ops are matched by what they name (`changes`), so a later version of the proposal is one
+    /// too.
+    fn holds(&self, kind: u8, h: &Hash, changes: &[Hash]) -> bool {
+        match kind {
+            kinds::CHANGE => *h == self.carrier,
+            kinds::REDACTION => *h == self.request,
+            kinds::PROPOSAL => changes.contains(&self.carrier),
+            kinds::VIEW_OP => changes == [self.carrier],
+            _ => false,
+        }
+    }
 }
 
 /// The report, the manifest it hashes, the residues a request records and the request's own
@@ -448,6 +473,18 @@ pub(crate) fn compute(
     state: &ReadState,
     input: &RedactInput,
     quarantine: &[String],
+) -> Result<Full, RdyError> {
+    compute_excluding(state, input, quarantine, None)
+}
+
+/// [`compute`], leaving out the records of `own` (a recorded request recomputed at its approval):
+/// they are neither searched for quotes nor followed as references, so recording, proposing and
+/// re-proposing the request never stale it. Every other record counts as in [`compute`].
+pub(crate) fn compute_excluding(
+    state: &ReadState,
+    input: &RedactInput,
+    quarantine: &[String],
+    own: Option<&Own>,
 ) -> Result<Full, RdyError> {
     super::count_computation();
     if let Some(e) = &state.error {
@@ -752,6 +789,9 @@ pub(crate) fn compute(
         }
         let h = f.hash;
         let rec = h.to_string();
+        if own.is_some_and(|o| o.holds(f.kind, &h, &[])) {
+            continue;
+        }
         match f.kind {
             kinds::BLOCK => {
                 if !f.present || versions.contains(&h) {
@@ -796,6 +836,9 @@ pub(crate) fn compute(
             }
             kinds::PROPOSAL => {
                 let p: Proposal = reader.get_typed(kinds::PROPOSAL, &h)?;
+                if own.is_some_and(|o| o.holds(kinds::PROPOSAL, &h, &p.changes)) {
+                    continue;
+                }
                 quotes.scan(ImpactKind::Proposal, &rec, false, &p)?;
                 proposals.push((h, p.changes));
             }
@@ -817,8 +860,13 @@ pub(crate) fn compute(
             }
             kinds::VIEW_OP => {
                 let op: ViewOp = reader.get_typed(kinds::VIEW_OP, &h)?;
-                quotes.scan(audit, &rec, false, &op)?;
                 let named = view_op_changes(&op);
+                if matches!(op.op, ViewOpKind::Commit { .. })
+                    && own.is_some_and(|o| o.holds(kinds::VIEW_OP, &h, &named))
+                {
+                    continue;
+                }
+                quotes.scan(audit, &rec, false, &op)?;
                 view_refs.push((op.view, named));
             }
             kinds::REVIEW => {

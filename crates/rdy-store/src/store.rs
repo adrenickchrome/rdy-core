@@ -2466,6 +2466,24 @@ impl Store {
         }
     }
 
+    /// Abandons the open held batch without sealing it, as a failed seal does: the log is cut
+    /// back to the batch's start, nothing of the batch is acknowledged, and nothing it holds is
+    /// authorized (no marker and no sync were written, so no redaction apply in it takes effect
+    /// and the epoch does not move). The index already holds entries of the abandoned frames, so
+    /// the store is poisoned until reopen; the close removes the index and the next open
+    /// rebuilds it from the log. Does nothing when no batch is open.
+    ///
+    /// The engine calls it when a batch that holds a redaction apply cannot be sealed with the
+    /// moves it computed (a preview or move failure before authorization).
+    pub fn abandon_open_batch(&mut self) {
+        let Some(open) = self.open.take() else {
+            return;
+        };
+        self.poison();
+        self.stale_index = true;
+        self.roll_back(open.start);
+    }
+
     /// The rollback of a batch that failed before its sync: the log is cut back to `to`; a
     /// rollback that fails poisons the store.
     fn roll_back(&mut self, to: Location) {

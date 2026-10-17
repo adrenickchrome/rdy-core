@@ -99,6 +99,29 @@ impl Default for Limits {
 thread_local! {
     static LIMITS: Cell<Option<Limits>> = const { Cell::new(None) };
     static COMPUTATIONS: Cell<u64> = const { Cell::new(0) };
+    static PREVIEW_FAULTS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Tests only: the next `n` removal previews on this thread fail (`E_INTERNAL`), before the
+/// batch that would authorize the removal is sealed.
+#[doc(hidden)]
+pub fn fail_next_redaction_previews_for_tests(n: u32) {
+    PREVIEW_FAULTS.with(|c| c.set(n));
+}
+
+/// The injected preview failure, if one is armed on this thread (it disarms one).
+pub(crate) fn preview_fault() -> Result<(), RdyError> {
+    PREVIEW_FAULTS.with(|c| match c.get() {
+        0 => Ok(()),
+        n => {
+            c.set(n - 1);
+            Err(RdyError::new(
+                crate::E_INTERNAL,
+                "internal error: injected redaction preview failure",
+                "report this as a bug in rdy",
+            ))
+        }
+    })
 }
 
 /// Tests only: how many complete reports this thread has computed, so a test can check that a
@@ -316,6 +339,50 @@ impl Rdy {
         }
         Ok(result)
     }
+}
+
+/// The requests that the changes `changes` carry (each change that is a request's carrier),
+/// sorted and distinct: what landing those changes would authorize.
+pub(crate) fn requests_carried(st: &ReadState, changes: &[Hash]) -> Result<Vec<Hash>, RdyError> {
+    let mut out = vec![];
+    for c in changes {
+        if let Some(r) = st.reader().redaction_for_carrier(c)? {
+            out.push(r);
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// The approval-time freshness check of recorded request `request` (plan Redaction, Task 10):
+/// its complete report is computed again from `st`, through the one report path with the
+/// project's current quarantine names, leaving out only the request's own records
+/// ([`report::Own`]). A manifest hash or a target set that differs from the recorded one is
+/// `E_REDACTION_STALE`; nothing is refreshed. The caller holds the writer.
+pub(crate) fn check_fresh(st: &ReadState, request: &Hash) -> Result<(), RdyError> {
+    let r = st.reader().redaction_request(request)?;
+    let input = RedactInput {
+        targets: r.targets.iter().map(targets::selector_text).collect(),
+        reason_class: targets::reason_class_name(r.reason_class).to_string(),
+        reason: r.reason.clone(),
+        dry_run: false,
+    };
+    let own = report::Own {
+        carrier: r.carrier,
+        request: *request,
+    };
+    let names = crate::quarantine::names(st.root());
+    let full = report::compute_excluding(st, &input, &names, Some(&own))?;
+    let mut buf = report::buffer(limits().record)?;
+    let bound = r
+        .manifest
+        .report_hash(&mut buf)
+        .map_err(|_| crate::error::redaction_limit(rdy_store::redaction::limit::RECORD))?;
+    if full.report.report_hash != bound || full.request_targets != r.targets {
+        return Err(StoreError::RedactionStale.into());
+    }
+    Ok(())
 }
 
 impl ReadState {

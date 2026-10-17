@@ -2648,6 +2648,7 @@ impl Rdy {
             req.justification.as_ref(),
             rdy_keys,
         )?;
+        refuse_removed_content(&self.store, &ops)?;
         let change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
@@ -2710,6 +2711,26 @@ impl Rdy {
             warnings,
         })
     }
+}
+
+/// The engine's input boundary for removed content (plan Redaction): a block that `ops` write
+/// and that is a read projection of a removed version (a stub, with its recorded identity), or
+/// whose version hash a redaction removed, is refused with `E_REDACTED` naming that redaction,
+/// before anything is written. The store repeats both checks on every write.
+fn refuse_removed_content(reader: &rdy_store::StoreReader, ops: &[Op]) -> Result<(), RdyError> {
+    for op in ops {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        let request = match &block.read_identity {
+            Some(id) => Some(id.request),
+            None => reader.redaction_of(rdy_store::kinds::BLOCK, &block.version_hash())?,
+        };
+        if let Some(request) = request {
+            return Err(rdy_store::StoreError::Redacted { request }.into());
+        }
+    }
+    Ok(())
 }
 
 /// May `s` do `action` on `view`? The view must be writable at all (`writable_view`; a proposal

@@ -1146,3 +1146,6 @@ impl ReadState {
         self.description.as_deref().map(str::to_string)
     }
 }
+
+#[cfg(test)]
+mod redaction_tests;
