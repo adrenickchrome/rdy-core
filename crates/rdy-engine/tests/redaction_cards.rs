@@ -7,16 +7,18 @@
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::pending::{
-    CARD_MAX_TOKENS, Item, ItemKind, PendingQuery, RemovalCard, card_hash, render, render_checked,
+    CARD_MAX_TOKENS, Item, ItemKind, ItemOption, PendingQuery, RemovalCard, card_hash, render,
+    render_checked,
 };
 use rdy_engine::redaction::{RedactInput, RedactResult};
 use rdy_engine::{
-    DecisionInput, E_PROPOSAL_MOVED, E_REDACTION_BUDGET, E_REDACTION_HUMAN, ProposalInfo, Rdy,
-    RdyError, Session, WriteRequest, WriteResult, pin_clock,
+    DecisionInput, E_PROPOSAL_MOVED, E_REDACTION_BUDGET, E_REDACTION_HUMAN, E_REDACTION_STALE,
+    ProposalInfo, Rdy, RdyError, Session, WriteRequest, WriteResult, pin_clock,
 };
 use rdy_model::redaction::{ReasonClass, encode_into};
 use rdy_model::{AnswerAct, BlockId, Hash, Role};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const SECRET: &str = "The launch code is ZEBRA-7731.";
@@ -129,8 +131,8 @@ fn item_of(r: &Rdy, r#ref: &str) -> Item {
         .unwrap_or_else(|| panic!("{ref} is not in the queue"))
 }
 
-/// The card of `res` as its request and report give it.
-fn expected_card(res: &RedactResult, quarantine: bool) -> RemovalCard {
+/// The card of `res` as its request and report give it: the nine fields, no quarantine fact.
+fn expected_card(res: &RedactResult) -> RemovalCard {
     let rep = &res.report;
     RemovalCard {
         request: res.redaction.unwrap(),
@@ -142,12 +144,12 @@ fn expected_card(res: &RedactResult, quarantine: bool) -> RemovalCard {
         bytes: rep.drop_bytes,
         reason_class: res.reason_class,
         reason: res.reason.clone(),
-        quarantine,
     }
 }
 
-/// The mandatory lines of one request, as the card shows them.
-fn section(c: &RemovalCard) -> String {
+/// The mandatory lines of one request, as the card shows them; `quarantine` when the report the
+/// card names lists quarantine files.
+fn section(c: &RemovalCard, quarantine: bool) -> String {
     let class = match c.reason_class {
         ReasonClass::Secret => "secret",
         ReasonClass::Personal => "personal",
@@ -169,7 +171,7 @@ fn section(c: &RemovalCard) -> String {
         format!("  {QUOTES}"),
         format!("  {REUSE}"),
     ];
-    if c.quarantine {
+    if quarantine {
         lines.push(format!("  {QUARANTINE}"));
     }
     if c.reason_class == ReasonClass::Secret {
@@ -236,12 +238,12 @@ fn rdx8_local_and_relayed_cards_bind_the_complete_report() {
         // an individual approval item, bound to the request it carries
         assert_eq!(item.kind, ItemKind::Approve);
         assert_eq!(item.batch, None);
-        let want = expected_card(&res, false);
+        let want = expected_card(&res);
         assert_eq!(item.removal, Some(vec![want.clone()]));
         assert_eq!(want.reason, "a leaked code");
         assert!(want.versions >= 1 && want.payloads >= 2, "{want:?}");
         // the exact mandatory lines, then the irreversible consequence on approve
-        let text = section(&want);
+        let text = section(&want, false);
         assert!(item.card.contains(&text), "{}\n---\n{text}", item.card);
         assert!(!item.card.contains(INVENTORY), "{}", item.card);
         let approve = item.options.iter().find(|o| o.id == "approve").unwrap();
@@ -417,14 +419,13 @@ fn mixed() -> Mixed {
     }
 }
 
-#[test]
-fn rdx8_bulk_removal_refuses_the_whole_call() {
-    let _clock = pin_clock(1_000_000);
-    let mut m = mixed();
+/// Each order of `removal` among the confirm and the plain approval, for a local answer and a
+/// relayed one, is refused whole with E_REDACTION_HUMAN: nothing answered, written or landed.
+fn refuses_every_order(m: &mut Mixed, removal: &str) {
     let orders = [
-        vec![m.removal.clone(), m.confirm.clone(), m.plain.clone()],
-        vec![m.confirm.clone(), m.removal.clone(), m.plain.clone()],
-        vec![m.confirm.clone(), m.plain.clone(), m.removal.clone()],
+        vec![removal.to_string(), m.confirm.clone(), m.plain.clone()],
+        vec![m.confirm.clone(), removal.to_string(), m.plain.clone()],
+        vec![m.confirm.clone(), m.plain.clone(), removal.to_string()],
     ];
     for refs in orders {
         let end = m.p.r.store().log_end();
@@ -461,9 +462,86 @@ fn rdx8_bulk_removal_refuses_the_whole_call() {
             );
         }
     }
+}
+
+/// Writes one more doc into view `work`, so that the next proposal of it is a new version.
+fn grow_work(p: &mut P, name: &str) {
+    write(
+        &mut p.r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": name, "title": "More"}}
+        ]),
+    );
+}
+
+#[test]
+fn rdx8_bulk_removal_refuses_the_whole_call() {
+    let _clock = pin_clock(1_000_000);
+    let mut m = mixed();
+    let current = m.removal.clone();
+    refuses_every_order(&mut m, &current);
     // the removal card itself is still waiting for its own answer
     let item = item_of(&m.p.r, &m.removal);
     assert!(item.removal.is_some());
+
+    // a version that moved on still names its removal request: the call never reaches the
+    // version's own refusal (E_PROPOSAL_MOVED) after the ordinary answers before it
+    grow_work(&mut m.p, "more");
+    let moved = propose(&mut m.p, "work", "Remove the code");
+    assert_ne!(moved.r#ref, current, "a new version of the proposal");
+    assert!(moved.r#ref.ends_with("@2"), "{}", moved.r#ref);
+    refuses_every_order(&mut m, &current);
+
+    // a removal proposal that is not ready (no summary) is not in the queue, and still refuses:
+    // the call never reaches its own refusal (E_ITEM_MOVED) after the ordinary answers before it
+    let w = write(
+        &mut m.p.r,
+        "second",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "second", "title": "Second"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Second", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": "Another leaked code."}
+        ]),
+    );
+    m.p.r
+        .redact_in(
+            &writer(),
+            "second",
+            RedactInput {
+                targets: vec![w.created["$p"].clone()],
+                reason_class: "secret".into(),
+                reason: "another code".into(),
+                dry_run: false,
+            },
+        )
+        .unwrap();
+    let unready =
+        m.p.r
+            .propose(&writer(), "second", "Remove the other code", None)
+            .unwrap();
+    let st = m.p.r.read();
+    let q = st
+        .pending(&PendingQuery {
+            person: PERSON.into(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    assert!(
+        q.items.iter().all(|i| i.r#ref != unready.r#ref),
+        "the proposal without a summary is not in the queue"
+    );
+    assert!(
+        q.not_ready.iter().any(|n| n.r#ref == unready.r#ref),
+        "it is not ready"
+    );
+    drop(st);
+    let unready_ref = unready.r#ref.clone();
+    refuses_every_order(&mut m, &unready_ref);
+    refuses_every_order(&mut m, &current);
+
     // a call naming no removal keeps its ordered, stop-on-first-refusal behaviour (p-E975A)
     let done =
         m.p.r
@@ -482,11 +560,39 @@ fn rdx8_bulk_removal_refuses_the_whole_call() {
 }
 
 #[test]
+fn rdx8_bulk_removal_refuses_even_over_the_card_budget() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    let prose = p.prose.clone();
+    // 20 requests with distinct reasons of 4096 bytes: their mandatory lines exceed the card
+    for n in 0..20 {
+        let reason = format!("{n:02}{}", "x".repeat(4094));
+        assert_eq!(reason.len(), 4096);
+        redact(&mut p, &prose, "personal", &reason);
+    }
+    let prop = propose(&mut p, "work", "Remove twenty times");
+    let e = queue(&p.r, CARD_MAX_TOKENS).unwrap_err();
+    assert_eq!(e.code, E_REDACTION_BUDGET, "the card does not fit: {e}");
+    let end = p.r.store().log_end();
+    for (who, rel) in [(approver(), RelayInput::default()), (agent(), relay())] {
+        let e =
+            p.r.answer_all_recommended(&who, PERSON, std::slice::from_ref(&prop.r#ref), &[], rel)
+                .unwrap_err();
+        assert_eq!(e.code, E_REDACTION_HUMAN, "{e}");
+        assert_eq!(e.message, "Content removal needs a person's approval.");
+        // the card that does not fit is not attached, and never replaces the refusal
+        assert!(e.corrected.is_none(), "{:?}", e.corrected);
+        assert_eq!(p.r.store().log_end(), end, "nothing written");
+        assert!(p.r.read().canon_head().is_none(), "no landing");
+    }
+}
+
+#[test]
 fn rdx8_a_small_budget_cannot_hide_removal() {
     let _clock = pin_clock(1_000_000);
     let (p, res, prop) = removal_project();
     let item = item_of(&p.r, &prop.r#ref);
-    let text = section(&expected_card(&res, false));
+    let text = section(&expected_card(&res), false);
     let full = render(&item, CARD_MAX_TOKENS);
     assert!(full.contains(&text));
     // the smallest card keeps every mandatory line and cuts only facts and decisions
@@ -563,7 +669,7 @@ fn rdx8_ordinary_cards_keep_their_bytes() {
     assert_eq!(card["request"], res.redaction.unwrap().to_string());
     assert_eq!(card["report"], res.report.report_hash.to_string());
     assert_eq!(card["reason_class"], "secret");
-    assert_eq!(card["quarantine"], false);
+    assert!(card.get("quarantine").is_none(), "{card}");
     let keys: Vec<&str> = card
         .as_object()
         .unwrap()
@@ -580,7 +686,6 @@ fn rdx8_ordinary_cards_keep_their_bytes() {
         "bytes",
         "reason_class",
         "reason",
-        "quarantine",
     ];
     want.sort();
     let mut got = keys.clone();
@@ -609,13 +714,21 @@ fn rdx8_each_request_has_its_own_sorted_facts() {
     let b = redact(&mut p, &term, "personal", "a name");
     let prop = propose(&mut p, "work", "Remove two things");
     let item = item_of(&p.r, &prop.r#ref);
-    let mut want = vec![expected_card(&a, false), expected_card(&b, true)];
-    want.sort_by_key(|c| c.request);
+    let mut want = vec![(expected_card(&a), false), (expected_card(&b), true)];
+    want.sort_by_key(|(c, _)| c.request);
+    let quarantined: Vec<bool> = want.iter().map(|(_, q)| *q).collect();
+    let want: Vec<RemovalCard> = want.into_iter().map(|(c, _)| c).collect();
     assert_ne!(want[0].request, want[1].request);
     assert_eq!(item.removal.as_ref(), Some(&want));
     // one section per request, in request-hash order, each with its own warnings
-    let first = item.card.find(&section(&want[0])).expect("first section");
-    let second = item.card.find(&section(&want[1])).expect("second section");
+    let first = item
+        .card
+        .find(&section(&want[0], quarantined[0]))
+        .expect("first section");
+    let second = item
+        .card
+        .find(&section(&want[1], quarantined[1]))
+        .expect("second section");
     assert!(first < second, "{}", item.card);
     assert_eq!(item.card.matches("Content removal").count(), 2);
     assert_eq!(item.card.matches(COPIES).count(), 2);
@@ -624,9 +737,9 @@ fn rdx8_each_request_has_its_own_sorted_facts() {
     assert_eq!(item.card.matches(ROTATE).count(), 1);
     assert_eq!(item.card.matches(QUARANTINE).count(), 1);
     let secret = if want[0].reason_class == ReasonClass::Secret {
-        &section(&want[0])
+        &section(&want[0], quarantined[0])
     } else {
-        &section(&want[1])
+        &section(&want[1], quarantined[1])
     };
     assert!(secret.contains(ROTATE) && !secret.contains(QUARANTINE));
     // deterministic: the same state gives the same card and digest, and so does a reopen
@@ -643,4 +756,139 @@ fn rdx8_each_request_has_its_own_sorted_facts() {
     let mut swapped = item.clone();
     swapped.removal.as_mut().unwrap().swap(0, 1);
     assert_ne!(card_hash(&swapped), card_hash(&item));
+}
+
+/// One fixed nine-field card.
+fn fixed_card() -> RemovalCard {
+    RemovalCard {
+        request: Hash([1; 32]),
+        report: Hash([2; 32]),
+        versions: 1,
+        blobs: 2,
+        shared_blobs: 3,
+        payloads: 4,
+        bytes: 300,
+        reason_class: ReasonClass::Personal,
+        reason: "a name".into(),
+    }
+}
+
+/// One fixed approval item that carries `fixed_card`, its report listing no quarantine file.
+fn fixed_item() -> Item {
+    let option = |id: &str, label: &str, line: &str| ItemOption {
+        id: id.into(),
+        label: label.into(),
+        consequences: vec![line.into()],
+        recommended: None,
+    };
+    let mut approve = option("approve", "Approve", "Lands the proposal in canon.");
+    approve.consequences.push(IRREVERSIBLE.into());
+    approve.recommended = Some("Removes a name.".into());
+    Item {
+        r#ref: "P-0123456789ab@1".into(),
+        kind: ItemKind::Approve,
+        title: "Remove a name".into(),
+        why: "A proposal is waiting for approval.".into(),
+        blocking: false,
+        summary: Some("Removes a name.".into()),
+        summary_by: Some(PERSON.into()),
+        facts: vec![],
+        members: vec![],
+        options: vec![
+            approve,
+            option("reject", "Reject", "Closes the proposal."),
+            option("later", "Later", "Keeps it waiting."),
+        ],
+        raised_by: PERSON.into(),
+        raised_at: "2026-10-17T00:00:00Z".into(),
+        age: "0m".into(),
+        batch: None,
+        exception: None,
+        card: String::new(),
+        card_hash: String::new(),
+        removal: Some(vec![fixed_card()]),
+        removal_reports: BTreeMap::from([(Hash([2; 32]), vec![])]),
+    }
+}
+
+#[test]
+fn rdx8_the_card_encoding_is_fixed() {
+    // postcard: the list length, two raw 32-byte hashes, five varint counts, the class index,
+    // then the reason's length and bytes; no tenth field
+    let mut want = vec![1u8];
+    want.extend([1u8; 32]);
+    want.extend([2u8; 32]);
+    want.extend([1, 2, 3, 4, 0xac, 0x02]);
+    want.extend([1, 6]);
+    want.extend(b"a name");
+    let mut buf = [0u8; 256];
+    assert_eq!(
+        encode_into(&vec![fixed_card()], &mut buf).unwrap(),
+        &want[..]
+    );
+    // the v1 card hash of a fixed item: the domain, its full card, then those bytes
+    let item = fixed_item();
+    assert_eq!(card_hash(&item), digest(&item));
+    assert_eq!(
+        card_hash(&item).to_string(),
+        "b9ef383518dfbd8e4e1e031b6b104f8d8dfb5d5cc7c6ad568ae8babeba252271"
+    );
+    // a card with exactly the nine fields deserializes; a tenth field is refused
+    let nine = json!({
+        "request": Hash([1; 32]).to_string(),
+        "report": Hash([2; 32]).to_string(),
+        "versions": 1,
+        "blobs": 2,
+        "shared_blobs": 3,
+        "payloads": 4,
+        "bytes": 300,
+        "reason_class": "personal",
+        "reason": "a name"
+    });
+    assert_eq!(
+        serde_json::from_value::<RemovalCard>(nine.clone()).unwrap(),
+        fixed_card()
+    );
+    assert_eq!(serde_json::to_value(fixed_card()).unwrap(), nine);
+    let mut ten = nine.clone();
+    ten["quarantine"] = json!(false);
+    let e = serde_json::from_value::<RemovalCard>(ten).unwrap_err();
+    assert!(e.to_string().contains("unknown field"), "{e}");
+}
+
+#[test]
+fn rdx8_the_quarantine_warning_follows_the_named_report() {
+    let _clock = pin_clock(1_000_000);
+    let (p, res, prop) = removal_project();
+    let item = item_of(&p.r, &prop.r#ref);
+    let report = res.report.report_hash;
+    // the item carries the report's quarantine names by report hash, never on the wire
+    assert_eq!(item.removal_reports, BTreeMap::from([(report, vec![])]));
+    let v = serde_json::to_value(&item).unwrap();
+    assert!(v.get("removal_reports").is_none(), "{v}");
+    assert!(!item.card.contains(QUARANTINE), "{}", item.card);
+    // a report that lists quarantine files shows the warning
+    let mut listed = item.clone();
+    listed
+        .removal_reports
+        .insert(report, vec!["index.redb.damaged-1".into()]);
+    let card = render_checked(&listed, CARD_MAX_TOKENS).unwrap();
+    assert!(
+        card.contains(&section(&expected_card(&res), true)),
+        "{card}"
+    );
+    assert_ne!(
+        card_hash(&listed),
+        card_hash(&item),
+        "the card text is bound"
+    );
+    // a card whose report cannot be found refuses rather than renders without its lines
+    let mut lost = item.clone();
+    lost.removal_reports.clear();
+    let e = render_checked(&lost, CARD_MAX_TOKENS).unwrap_err();
+    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
+    let mut other = item.clone();
+    other.removal.as_mut().unwrap()[0].report = Hash([7; 32]);
+    let e = render_checked(&other, CARD_MAX_TOKENS).unwrap_err();
+    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
 }

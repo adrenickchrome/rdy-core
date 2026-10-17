@@ -161,10 +161,12 @@ impl Rdy {
     /// `corrected` then lists, under `done`, the answers given before it.
     ///
     /// Content removal is never approved in a batch (D-CC90E: "never under a policy"). Before it
-    /// answers anything, the call reads every ref of `refs` in the queue; if any names an item
-    /// that carries a removal request, the whole call is `E_REDACTION_HUMAN`, with that item's
-    /// card in `corrected`, and nothing is answered or landed, wherever the ref stands in the
-    /// list.
+    /// answers anything, the call resolves every proposal ref of `refs` to the version it names,
+    /// whether or not that version is ready, latest or in the queue, and reads its changes: if
+    /// any carries a removal request, the whole call is `E_REDACTION_HUMAN` and nothing is
+    /// answered or landed, wherever the ref stands in the list. The refusal never depends on the
+    /// card: `corrected` holds the queue's card of that proposal only when one renders within
+    /// [`CARD_MAX_TOKENS`].
     pub fn answer_all_recommended(
         &mut self,
         s: &Session,
@@ -185,17 +187,15 @@ impl Rdy {
             ));
         }
         let by = answerer(s, person, &relay)?;
-        let removal = self
-            .read()
-            .eligible(&PendingQuery {
-                person: person.to_string(),
-                session_ref: None,
-                max_tokens: CARD_MAX_TOKENS,
-            })?
-            .removal_among(refs)?;
-        if let Some(item) = removal {
-            return Err(RdyError::from(StoreError::RedactionHuman).with_corrected(card_of(&item)));
+        let st = self.read();
+        if let Some(r) = removal_ref(&st, refs)? {
+            let e = RdyError::from(StoreError::RedactionHuman);
+            return Err(match removal_card(&st, person, r) {
+                Some(item) => e.with_corrected(card_of(&item)),
+                None => e,
+            });
         }
+        drop(st);
         let mut done: Vec<AnswerInfo> = vec![];
         for (n, r) in refs.iter().enumerate() {
             let shown = card_hashes.get(n).map(String::as_str);
@@ -227,6 +227,44 @@ impl Rdy {
             (ItemKind::Answer, _) => question::act(self, by, person, bound, note),
             (ItemKind::Resolve, _) => resolve::act(self, by, bound, note),
         }
+    }
+}
+
+/// The first of `refs` that names a proposal version carrying a removal request (D-CC90E). It
+/// reads only, and resolves each proposal ref itself, so neither readiness nor a later version
+/// hides a removal request. A ref that does not resolve is left to its own answer, in its turn.
+fn removal_ref<'a>(st: &ReadState, refs: &'a [String]) -> Result<Option<&'a str>, RdyError> {
+    let reader = st.reader();
+    for r in refs {
+        if !(r.contains('@') && is_proposal_ref(r)) {
+            continue;
+        }
+        let Ok(pref) = resolve_in(st, r) else {
+            continue;
+        };
+        for h in &reader.proposal(&pref.version)?.changes {
+            if reader.redaction_for_carrier(h)?.is_some() {
+                return Ok(Some(r));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The queue's card of the proposal `r` names (its own version, else the version that stands
+/// there now), when it renders within [`CARD_MAX_TOKENS`]. It only decorates a refusal, so any
+/// error gives none.
+fn removal_card(st: &ReadState, person: &str, r: &str) -> Option<Item> {
+    let q = st
+        .eligible(&PendingQuery {
+            person: person.to_string(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .ok()?;
+    match q.items_of(r).ok()?.into_iter().next() {
+        Some(item) => Some(item),
+        None => fresh(&q, r).ok().flatten(),
     }
 }
 

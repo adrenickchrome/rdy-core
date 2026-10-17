@@ -172,17 +172,6 @@ impl Eligible {
             .transpose()
     }
 
-    /// The first item named in `refs`, in their order, that carries a removal request, its card
-    /// whole. Reads only: an answer to many refs asks it before it writes anything.
-    pub(crate) fn removal_among(&self, refs: &[String]) -> Result<Option<Item>, RdyError> {
-        for r in refs {
-            if let Some(i) = self.items().find(|i| &i.r#ref == r && i.removal.is_some()) {
-                return finish(i.clone(), CARD_MAX_TOKENS).map(Some);
-            }
-        }
-        Ok(None)
-    }
-
     fn items(&self) -> impl Iterator<Item = &Item> {
         self.groups.iter().flat_map(|g| &g.items)
     }
@@ -332,12 +321,18 @@ fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
     Ok(item)
 }
 
-/// The removal card of each request that a change of `changes` carries, by request hash; None
-/// when no change carries one. Each card is read from the request record: the report hash is the
-/// hash of the complete manifest the request binds, never of a shortened presentation.
-fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<Option<Vec<RemovalCard>>, RdyError> {
+/// The removal cards of a version, by request hash (None when no change carries a request),
+/// and the quarantine names of each report they name, by report hash.
+type RemovalFacts = (Option<Vec<RemovalCard>>, BTreeMap<Hash, Vec<String>>);
+
+/// The removal card of each request that a change of `changes` carries, by request hash, and
+/// the quarantine names of the report each card names. Each card is read from the request
+/// record: the report hash is the hash of the complete manifest the request binds, never of a
+/// shortened presentation, and the names are that manifest's.
+fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyError> {
     let reader = st.reader();
     let mut cards: Vec<RemovalCard> = vec![];
+    let mut reports: BTreeMap<Hash, Vec<String>> = BTreeMap::new();
     let mut buf: Option<Vec<u8>> = None;
     for h in changes {
         let Some(request) = reader.redaction_for_carrier(h)? else {
@@ -358,6 +353,7 @@ fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<Option<Vec<RemovalC
             .try_fold(0u64, |n, s| n.checked_add(u64::from(s.len)))
             .ok_or_else(|| redaction_limit(limit::BYTES))?;
         let n = |len: usize| u64::try_from(len).map_err(|_| redaction_limit(limit::SELECTED));
+        reports.insert(report, m.quarantine.clone());
         cards.push(RemovalCard {
             request,
             report,
@@ -368,12 +364,11 @@ fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<Option<Vec<RemovalC
             bytes,
             reason_class: req.reason_class,
             reason: req.reason,
-            quarantine: !m.quarantine.is_empty(),
         });
     }
     cards.sort_by_key(|c| c.request);
     cards.dedup_by_key(|c| c.request);
-    Ok((!cards.is_empty()).then_some(cards))
+    Ok(((!cards.is_empty()).then_some(cards), reports))
 }
 
 /// One batch and the items beside it, or one item on its own.
@@ -434,6 +429,8 @@ struct Version {
     tensions: Vec<Arc<Tension>>,
     /// The removal requests the version's changes carry, by request hash.
     removal: Option<Vec<RemovalCard>>,
+    /// The quarantine names of each report `removal` names, by report hash.
+    removal_reports: BTreeMap<Hash, Vec<String>>,
 }
 
 impl Version {
@@ -444,7 +441,7 @@ impl Version {
             .flat_map(|c| c.ops.iter().map(|o| o.block_id().clone()))
             .collect();
         let tensions = open_tensions(st, &p)?;
-        let removal = removal_cards(st, &p.changes)?;
+        let (removal, removal_reports) = removal_cards(st, &p.changes)?;
         // canon's graph first, so the prospective canon carries it instead of building another
         let canon_g = st.graph(&Scope::Canon)?;
         let built = candidate_build(st, &changes)?;
@@ -499,6 +496,7 @@ impl Version {
             decisions,
             tensions,
             removal,
+            removal_reports,
         })
     }
 
@@ -595,6 +593,7 @@ impl Version {
             approve.consequences.push(REMOVAL_IRREVERSIBLE.to_string());
         }
         it.removal.clone_from(&self.removal);
+        it.removal_reports.clone_from(&self.removal_reports);
         it.options = vec![
             approve,
             option(
@@ -931,6 +930,7 @@ pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
         card: String::new(),
         card_hash: String::new(),
         removal: None,
+        removal_reports: BTreeMap::new(),
     }
 }
 

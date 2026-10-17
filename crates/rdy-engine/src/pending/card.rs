@@ -24,10 +24,12 @@
 //!
 //! A version that carries removal requests (`removal`) shows one `Content removal` section for
 //! each, by request hash, after the summary: the request and report hashes, the counts, the reason
-//! class and reason, and the full warnings: copies, quotes and reuse always, quarantine when
-//! quarantine files may hold copies, and secret for the secret class. These lines are mandatory:
-//! the cut rule never removes them. [`render_checked`] refuses a budget they do not fit with
-//! `E_REDACTION_BUDGET`; [`render`] keeps them over any budget.
+//! class and reason, and the full warnings: copies, quotes and reuse always, quarantine when the
+//! report the card names lists quarantine files (`Item::removal_reports`, by report hash), and
+//! secret for the secret class. These lines are mandatory: the cut rule never removes them.
+//! [`render_checked`] refuses a card whose report the item does not hold with
+//! `E_REDACTION_STALE`, and a budget the lines do not fit with `E_REDACTION_BUDGET`; [`render`]
+//! keeps them over any budget.
 //!
 //! # The cut rule
 //!
@@ -55,6 +57,7 @@ use crate::error::{
 use crate::redaction::targets::reason_class_name;
 use rdy_model::Hash;
 use rdy_model::redaction::{ReasonClass, encode_into};
+use rdy_store::StoreError;
 
 /// The largest budget `rdy_pending` accepts, and the budget `card_hash` hashes at.
 pub const CARD_MAX_TOKENS: usize = 20_000;
@@ -103,10 +106,21 @@ pub fn render(item: &Item, max_tokens: usize) -> String {
     card
 }
 
-/// The card of `item` within `max_tokens`. A card with removal requests whose mandatory lines
-/// do not fit is `E_REDACTION_BUDGET`, never a card that hides them. Any other card is
-/// [`render`]'s, which may stay over a very small budget as before.
+/// The card of `item` within `max_tokens`. A card with removal requests whose report the item
+/// does not hold (`removal_reports`, by report hash) is `E_REDACTION_STALE`: its quarantine
+/// warning cannot be decided. One whose mandatory lines do not fit is `E_REDACTION_BUDGET`,
+/// never a card that hides them. Any other card is [`render`]'s, which may stay over a very
+/// small budget as before.
 pub fn render_checked(item: &Item, max_tokens: usize) -> Result<String, RdyError> {
+    let reports = &item.removal_reports;
+    if item
+        .removal
+        .iter()
+        .flatten()
+        .any(|c| !reports.contains_key(&c.report))
+    {
+        return Err(StoreError::RedactionStale.into());
+    }
     let card = render(item, max_tokens);
     if item.removal.is_some() && !fits(&card, max_tokens) {
         return Err(redaction_budget());
@@ -131,11 +145,11 @@ pub fn card_hash(item: &Item) -> Hash {
 
 /// The postcard bytes of `cards`. The first buffer is an upper bound of their encoding: the list
 /// length (at most 10 bytes), then for each card two 32-byte hashes, five varint counts (at most
-/// 10 bytes each), the class (at most 5), the reason with its length (at most 10 more) and the
-/// flag, 130 bytes plus the reason. A larger buffer is tried only if that bound were ever wrong.
+/// 10 bytes each), the class (at most 5) and the reason with its length (at most 10 more), 129
+/// bytes plus the reason. A larger buffer is tried only if that bound were ever wrong.
 fn encoded(cards: &[RemovalCard]) -> Vec<u8> {
     let mut n = cards.iter().fold(16usize, |n, c| {
-        n.saturating_add(136).saturating_add(c.reason.len())
+        n.saturating_add(129).saturating_add(c.reason.len())
     });
     loop {
         let mut buf = vec![0u8; n];
@@ -168,7 +182,7 @@ fn build(item: &Item, keep_facts: usize, keep_members: usize) -> String {
         sections.push(lines);
     }
     for c in item.removal.iter().flatten() {
-        sections.push(removal_lines(c));
+        sections.push(removal_lines(c, item.removal_reports.get(&c.report)));
     }
     if !item.members.is_empty() {
         let mut lines = vec!["In this batch".to_string()];
@@ -203,8 +217,11 @@ fn build(item: &Item, keep_facts: usize, keep_members: usize) -> String {
         .join("\n\n")
 }
 
-/// The mandatory lines of one removal request: never cut, one line each, warnings whole.
-fn removal_lines(c: &RemovalCard) -> Vec<String> {
+/// The mandatory lines of one removal request: never cut, one line each, warnings whole. The
+/// quarantine warning follows the quarantine names of the report the card names (`quarantine`):
+/// shown when it lists any, and when that report is unknown, so a card never hides it
+/// ([`render_checked`] refuses such a card).
+fn removal_lines(c: &RemovalCard, quarantine: Option<&Vec<String>>) -> Vec<String> {
     let mut lines = vec![
         REMOVAL_HEADING.to_string(),
         format!("  Request: {}", c.request),
@@ -222,7 +239,7 @@ fn removal_lines(c: &RemovalCard) -> Vec<String> {
         W_REDACTION_QUOTES_MESSAGE,
         W_REDACTION_REUSE_MESSAGE,
     ];
-    if c.quarantine {
+    if quarantine.is_none_or(|names| !names.is_empty()) {
         warnings.push(W_REDACTION_QUARANTINE_MESSAGE);
     }
     if c.reason_class == ReasonClass::Secret {
@@ -344,6 +361,7 @@ mod tests {
     use super::super::item::{ExceptionKind, Fact, ItemKind, ItemOption, age};
     use super::*;
     use crate::error::E_BAD_INPUT;
+    use std::collections::BTreeMap;
     use std::str::FromStr;
 
     const SUMMARY: &str = "Lets a visitor read a shared doc without an account. Adds one decision on access and updates Getting started and Sharing.";
@@ -384,6 +402,7 @@ mod tests {
             card: String::new(),
             card_hash: String::new(),
             removal: None,
+            removal_reports: BTreeMap::new(),
         }
     }
 
