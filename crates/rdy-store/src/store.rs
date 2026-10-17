@@ -1467,13 +1467,29 @@ impl Store {
     /// Writes `value` as one object of `kind` (see `write`). A block or change that is a read
     /// projection is refused before it is serialized: `Redacted` when its marker names a request
     /// that removed it, `ProjectedWrite` for a forged or unmatched marker.
+    ///
+    /// A `BLOCK` takes a `Block`, and a `CHANGE` takes a `Change`, bare, boxed or as a `'static`
+    /// reference. Any other value of those kinds is `Refused`, because its read identity cannot
+    /// be checked and serialization would drop it.
     pub fn put<T: Serialize + 'static>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {
         let any: &dyn std::any::Any = value;
-        if let Some(block) = any.downcast_ref::<Block>() {
-            self.refuse_block_projection(block)?;
-        }
-        if let Some(change) = any.downcast_ref::<Change>() {
-            self.refuse_projection(change)?;
+        match typed_record(any) {
+            TypedRecord::Block(block) => {
+                if kind == kinds::CHANGE {
+                    return Err(unchecked_put(kind));
+                }
+                self.refuse_block_projection(block)?;
+            }
+            TypedRecord::Change(change) => {
+                if kind == kinds::BLOCK {
+                    return Err(unchecked_put(kind));
+                }
+                self.refuse_projection(change)?;
+            }
+            TypedRecord::Other if kind == kinds::BLOCK || kind == kinds::CHANGE => {
+                return Err(unchecked_put(kind));
+            }
+            TypedRecord::Other => {}
         }
         Ok(self.write(vec![(kind, encode(value))])?[0])
     }
@@ -2311,6 +2327,46 @@ impl StoreReader {
         }
         Ok(slot.as_ref().expect("set above"))
     }
+}
+
+/// A `put` value seen as the block or change it serializes as, if `put` can check it.
+enum TypedRecord<'a> {
+    Block(&'a Block),
+    Change(&'a Change),
+    Other,
+}
+
+/// The block or change behind `any`: bare, boxed or a `'static` reference. Every wrapper `put`
+/// accepts for a `BLOCK` or a `CHANGE` is listed here; a wrapper not listed is `Other`.
+fn typed_record(any: &dyn std::any::Any) -> TypedRecord<'_> {
+    if let Some(b) = any.downcast_ref::<Block>() {
+        TypedRecord::Block(b)
+    } else if let Some(b) = any.downcast_ref::<Box<Block>>() {
+        TypedRecord::Block(b)
+    } else if let Some(b) = any.downcast_ref::<&'static Block>() {
+        TypedRecord::Block(b)
+    } else if let Some(c) = any.downcast_ref::<Change>() {
+        TypedRecord::Change(c)
+    } else if let Some(c) = any.downcast_ref::<Box<Change>>() {
+        TypedRecord::Change(c)
+    } else if let Some(c) = any.downcast_ref::<&'static Change>() {
+        TypedRecord::Change(c)
+    } else {
+        TypedRecord::Other
+    }
+}
+
+/// The refusal of a `put` value whose read identity cannot be checked for `kind`.
+fn unchecked_put(kind: u8) -> StoreError {
+    let want = if kind == kinds::BLOCK {
+        "Block"
+    } else {
+        "Change"
+    };
+    StoreError::Refused(format!(
+        "put of kind {kind} takes a {want}, bare, boxed or as a 'static reference: \
+         another value's read identity cannot be checked"
+    ))
 }
 
 #[cfg(test)]

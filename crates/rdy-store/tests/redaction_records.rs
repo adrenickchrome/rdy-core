@@ -1434,6 +1434,85 @@ fn rdx2_put_cannot_serialize_a_projection() {
     assert_eq!(s.get_block(&h).unwrap(), b);
 }
 
+/// The refusal of a value `put` cannot check as a block or a change.
+fn unchecked<T>(r: Result<T, StoreError>) -> bool {
+    matches!(r, Err(StoreError::Refused(_)))
+}
+
+#[test]
+fn rdx2_put_checks_every_typed_block_and_change() {
+    #[derive(serde::Serialize)]
+    #[serde(transparent)]
+    struct Wrapped<T>(T);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let a = block("b-00001", "claim", "boxed projection secret");
+    let (mut s, req, ca) = removed_block(&path, &a);
+    let end = s.log_end();
+    let stub = s.get_block(&a.version_hash()).unwrap();
+    assert!(stub.is_redacted());
+    let p = s.change(&ca).unwrap();
+    assert!(p.is_projection());
+    let with_stub = change(
+        "work",
+        vec![Op::Create {
+            block: stub.clone(),
+        }],
+    );
+    // a boxed known projection names its request, as the bare value does
+    assert!(removed(req, s.put(BLOCK, &Box::new(stub.clone()))));
+    assert!(removed(req, s.put(CHANGE, &Box::new(p.clone()))));
+    assert!(removed(req, s.put(CHANGE, &Box::new(with_stub.clone()))));
+    // a 'static reference is checked too
+    let leaked: &'static Block = Box::leak(Box::new(stub.clone()));
+    assert!(removed(req, s.put(BLOCK, &leaked)));
+    // an unmatched marker: a real request that did not remove this version
+    let other = block("b-00002", "claim", "never removed");
+    let unmatched = Block::redacted(
+        other.id.clone(),
+        "claim".into(),
+        None,
+        "V".into(),
+        RedactedBlockIdentity {
+            version: other.version_hash(),
+            content_hash: other.content_hash(),
+            frozen: false,
+            request: req,
+        },
+    );
+    assert!(projected(s.put(BLOCK, &unmatched)));
+    assert!(projected(s.put(BLOCK, &Box::new(unmatched.clone()))));
+    let unmatched_op = change(
+        "work",
+        vec![Op::Create {
+            block: unmatched.clone(),
+        }],
+    );
+    assert!(projected(s.put(CHANGE, &Box::new(unmatched_op))));
+    let mut fake = change("work", vec![]);
+    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    assert!(projected(s.put(CHANGE, &Box::new(fake))));
+    // a value put cannot see into is refused for BLOCK and CHANGE, even when it is ordinary
+    assert!(unchecked(s.put(BLOCK, &Wrapped(stub.clone()))));
+    assert!(unchecked(s.put(BLOCK, &Wrapped(other.clone()))));
+    assert!(unchecked(s.put(CHANGE, &Wrapped(p.clone()))));
+    assert!(unchecked(s.put(CHANGE, &Wrapped(change("work", vec![])))));
+    let cow: std::borrow::Cow<'static, Block> = std::borrow::Cow::Owned(stub.clone());
+    assert!(unchecked(s.put(BLOCK, &cow)));
+    // a block offered as a change, or a change as a block, is not that kind's type
+    assert!(unchecked(s.put(CHANGE, &other)));
+    assert!(unchecked(s.put(BLOCK, &change("work", vec![]))));
+    assert_eq!(s.log_end(), end, "no refused put left a frame");
+    // an ordinary boxed block and change still put, under the bare value's hash
+    let hb = s.put(BLOCK, &Box::new(other.clone())).unwrap();
+    assert_eq!(hb, other.version_hash());
+    assert_eq!(s.get_block(&hb).unwrap(), other);
+    let c = change("work", vec![]);
+    let hc = s.put(CHANGE, &Box::new(c.clone())).unwrap();
+    assert_eq!(hc, Hash::of(&enc(&c)));
+}
+
 #[test]
 fn rdx2_all_versions_rechecks_the_stored_versions() {
     let dir = tempfile::tempdir().unwrap();
