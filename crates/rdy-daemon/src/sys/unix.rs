@@ -410,30 +410,74 @@ fn unix_addr(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
 }
 
 /// A new non-blocking, close-on-exec Unix stream socket.
+///
+/// Where the platform has `SOCK_CLOEXEC`, the socket is close-on-exec from its creation, so a
+/// child that another thread forks at any moment never gets it. Elsewhere (macOS) the flag is set
+/// right after creation, as the standard library does there: such a platform has no atomic way.
 #[allow(unsafe_code)]
 fn nonblocking_unix_socket() -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
-    // SAFETY: `socket` takes three integers and touches no memory of ours.
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "illumos"
+    ))]
+    {
+        // SAFETY: `socket` takes three integers and touches no memory of ours.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a new descriptor that nothing else owns; the OwnedFd closes it.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        #[cfg(test)]
+        tests::after_agent_socket(fd.as_raw_fd());
+        Ok(fd)
     }
-    // SAFETY: `fd` is a new descriptor that nothing else owns; the OwnedFd closes it.
-    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-    // SAFETY: `fcntl` with F_SETFD takes the open descriptor and integers.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "illumos"
+    )))]
+    {
+        // SAFETY: `socket` takes three integers and touches no memory of ours.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a new descriptor that nothing else owns; the OwnedFd closes it.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        #[cfg(test)]
+        tests::after_agent_socket(fd.as_raw_fd());
+        // SAFETY: `fcntl` with F_SETFD takes the open descriptor and integers.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fcntl` with F_GETFL takes the open descriptor and touches no memory of ours.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fcntl` with F_SETFL takes the open descriptor and integers.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(fd)
     }
-    // SAFETY: `fcntl` with F_GETFL takes the open descriptor and touches no memory of ours.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `fcntl` with F_SETFL takes the open descriptor and integers.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(fd)
 }
 
 /// One `connect` of the socket `fd` to `addr` (`len` bytes long).
@@ -906,6 +950,75 @@ mod tests {
         server.join().unwrap();
         // no listener at a path: connect fails
         assert!(agent_connect(&d.path().join("none.sock"), &AgentCancel::new().unwrap()).is_err());
+    }
+
+    /// A step run on the agent socket's descriptor in a test.
+    type SocketHook = Box<dyn FnMut(std::os::fd::RawFd)>;
+
+    thread_local! {
+        /// Runs on this thread right after the agent socket is created, before anything else
+        /// is done to it.
+        static AFTER_AGENT_SOCKET: std::cell::RefCell<Option<SocketHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_agent_socket(fd: std::os::fd::RawFd) {
+        AFTER_AGENT_SOCKET.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(fd);
+            }
+        });
+    }
+
+    #[test]
+    fn sig3_agent_socket_is_non_blocking_and_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        let fd = super::nonblocking_unix_socket().unwrap();
+        // SAFETY: `fcntl` with F_GETFD and F_GETFL takes the open descriptor only.
+        #[allow(unsafe_code)]
+        let (fd_flags, fl_flags) = unsafe {
+            (
+                libc::fcntl(fd.as_raw_fd(), libc::F_GETFD),
+                libc::fcntl(fd.as_raw_fd(), libc::F_GETFL),
+            )
+        };
+        assert!(fd_flags >= 0 && fl_flags >= 0);
+        assert_ne!(fd_flags & libc::FD_CLOEXEC, 0, "close-on-exec");
+        assert_ne!(fl_flags & libc::O_NONBLOCK, 0, "non-blocking");
+    }
+
+    /// A child process started at any moment after the agent socket exists never gets it: the
+    /// socket is close-on-exec from its creation, not from a later step a concurrent fork can
+    /// come before.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn sig3_agent_socket_is_never_inherited_by_a_child_started_at_its_creation() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let inherited: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
+        AFTER_AGENT_SOCKET.with(|h| {
+            let inherited = Rc::clone(&inherited);
+            *h.borrow_mut() = Some(Box::new(move |fd| {
+                let link = fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+                let link = link.to_str().unwrap().to_owned();
+                assert!(link.starts_with("socket:"), "{link}");
+                // The child is a shell: it reports whether its own descriptor `fd` is this socket.
+                let status = Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("[ \"$(readlink /proc/$$/fd/{fd})\" = '{link}' ]"))
+                    .status()
+                    .unwrap();
+                inherited.set(Some(status.success()));
+            }));
+        });
+        let fd = super::nonblocking_unix_socket();
+        AFTER_AGENT_SOCKET.with(|h| *h.borrow_mut() = None);
+        drop(fd.unwrap());
+        assert_eq!(
+            inherited.get(),
+            Some(false),
+            "a child started right after the socket's creation holds the agent socket"
+        );
     }
 
     #[test]
