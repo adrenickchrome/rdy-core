@@ -362,8 +362,9 @@ fn ls10_the_generated_pages_pass_on_the_live_site() {
 
 #[test]
 fn ls10_the_live_script_is_small() {
+    // 1500 until the redaction fix round (14.promoted): the reopen of a refused stream needs ~300
     assert!(
-        LIVE_JS.len() < 1500,
+        LIVE_JS.len() < 1800,
         "the live script is {} bytes",
         LIVE_JS.len()
     );
