@@ -445,6 +445,57 @@ fn rdx9_a_forged_drop_preserves_the_target() {
     load(&same, &scratch.path().join("ok")).unwrap();
 }
 
+#[test]
+fn rdx9_a_drop_claim_over_the_frame_bound_preserves_the_target() {
+    let src = redacted();
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    let a = Rdy::open(src.dir.path()).unwrap();
+    a.read().dump(&file).unwrap();
+    a.close().unwrap();
+    let good = std::fs::read(&file).unwrap();
+    let recs = dump_records(&good);
+    let i = recs
+        .iter()
+        .position(|(k, p)| *k == rec::DROPPED && p[0] == kinds::BLOCK)
+        .unwrap();
+    let at = 12 + recs[..i].iter().map(|(_, p)| HEAD + p.len()).sum::<usize>();
+    // the dropped block claims one byte more than any stored payload holds
+    let mut r = recs.clone();
+    r[i].1[33..37].copy_from_slice(&(64u32 * 1024 * 1024 + 1).to_le_bytes());
+    let forged = scratch.path().join("claim.rdydump");
+    std::fs::write(&forged, forge(&r)).unwrap();
+    let to = scratch.path().join("to");
+    std::fs::create_dir(&to).unwrap();
+    std::fs::write(to.join("keep.txt"), b"mine").unwrap();
+    let before = tree(&to);
+    let e = load(&forged, &to).unwrap_err();
+    assert_eq!(e.code, E_DUMP, "{e:?}");
+    assert_eq!(
+        e.message,
+        format!(
+            "{} is damaged at byte {at}: a dropped frame claims 67108865 bytes; a frame holds at most 67108864",
+            forged.display()
+        )
+    );
+    assert_eq!(
+        e.fix,
+        "the dump is damaged or was not written by rdy; dump the source again"
+    );
+    assert_eq!(tree(&to), before, "the target is as it was");
+    // a clone of the forged dump refuses it the same way, and writes nothing
+    let c = scratch.path().join("clone");
+    let e = clone(CloneSource::File(&forged), &c, false).unwrap_err();
+    assert_eq!(e.code, E_DUMP);
+    assert!(
+        e.message
+            .ends_with(": a dropped frame claims 67108865 bytes; a frame holds at most 67108864"),
+        "clone: {}",
+        e.message
+    );
+    assert!(!c.exists(), "the clone wrote nothing");
+}
+
 /// The value of `const <name>: &str = "<value>";` in a guard's source.
 fn guard_const(source: &str, name: &str) -> String {
     let at = source

@@ -58,6 +58,8 @@
 //! - `original_kind` is BLOCK, CHANGE or BLOB_CHUNK; no other kind is removable.
 //! - `has_residue` is 0 or 1. With 0, `residue_hash` is 32 zero bytes; with 1, it names the
 //!   residue of the frame. BLOCK and CHANGE have a residue; BLOB_CHUNK has none.
+//! - `original_len` is at most `MAX_BLOB_BYTES` (64 MiB): no stored payload of any kind is
+//!   longer. A longer claim is refused when the record is read, before anything is written.
 //! - The record's own hash covers its 102 bytes, as for any record.
 //! - The frame's place in the source log is implicit: the batch's start plus the original sizes
 //!   (`37 + original_len`) of the frames before it. A dropped record counts as one source frame.
@@ -67,13 +69,18 @@
 //! The apply that authorizes a dropped frame comes later in the stream than the frame. So the
 //! reader checks only the record's own rules; the ingest checks the authorization against the
 //! complete stream before it finishes the store (`crate::ingest`).
+//!
+//! The reader allocates only by fallible growth: a payload in chunks of at most `ERASE_BUFFER`
+//! bytes, each frame slot, the trailer chain, both batch digests and each project file. A refused
+//! allocation is the dump refusal `record allocation failed`, never an abort.
 use crate::error::StoreError;
 use crate::kinds::{self, BatchCommit, batch_digest};
 use crate::redaction::StoredFrame;
 use crate::redaction_io::ERASE_BUFFER;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
-use crate::store::StoreReader;
+use crate::store::{MAX_BLOB_BYTES, StoreReader};
 use rdy_model::Hash;
+use std::borrow::Cow;
 use std::io::{self, Read, Write};
 
 /// The 8 bytes every dump starts with.
@@ -188,31 +195,50 @@ pub(crate) mod drop_text {
     pub const NO_AUTHORIZATION: &str = "dropped frame has no valid authorization";
     pub const SPAN: &str = "dropped frame does not match its authorized span";
     pub const ALLOCATION: &str = "record allocation failed";
+    /// The start of the refusal of a dropped frame that claims more than a frame holds.
+    pub(crate) const CLAIM_WORDS: &str = "a dropped frame claims ";
+    /// More bytes of dropped frames wait for their authorization than the ingest's bound
+    /// (`crate::ingest::MAX_UNAUTHORIZED_BYTES`).
+    pub const BUDGET: &str =
+        "dropped frames claim more than 1073741824 bytes before their authorization";
+
+    /// The refusal of a dropped frame that claims `len` bytes, over `MAX_BLOB_BYTES`.
+    pub fn claim(len: u32) -> String {
+        format!(
+            "{CLAIM_WORDS}{len} bytes; a frame holds at most {}",
+            super::MAX_BLOB_BYTES
+        )
+    }
 }
 
 /// The record rules of a dropped frame, shared by the writer and the reader: a removable kind,
-/// and the residue its kind needs (BLOCK and CHANGE one, BLOB_CHUNK none).
-fn check_dropped(kind: u8, residue: Option<&Hash>) -> Result<(), &'static str> {
+/// the residue its kind needs (BLOCK and CHANGE one, BLOB_CHUNK none), and an original length
+/// of at most `MAX_BLOB_BYTES`.
+fn check_dropped(kind: u8, residue: Option<&Hash>, len: u32) -> Result<(), Cow<'static, str>> {
     let needs_residue = match kind {
         kinds::BLOCK | kinds::CHANGE => true,
         kinds::BLOB_CHUNK => false,
-        _ => return Err(drop_text::INVALID_KIND),
+        _ => return Err(drop_text::INVALID_KIND.into()),
     };
     if residue.is_some() != needs_residue {
-        return Err(drop_text::INVALID_RESIDUE);
+        return Err(drop_text::INVALID_RESIDUE.into());
+    }
+    if u64::from(len) > MAX_BLOB_BYTES {
+        return Err(drop_text::claim(len).into());
     }
     Ok(())
 }
 
 /// Decodes the payload of a `DROPPED` record: exactly 102 bytes, a removable kind, a residue flag
-/// of 0 (with a zero hash) or 1, and the residue its kind needs.
-pub(crate) fn parse_dropped(p: &[u8]) -> Result<Frame, &'static str> {
+/// of 0 (with a zero hash) or 1, the residue its kind needs, and an original length of at most
+/// `MAX_BLOB_BYTES`.
+pub(crate) fn parse_dropped(p: &[u8]) -> Result<Frame, Cow<'static, str>> {
     if p.len() != DROPPED_LEN {
-        return Err(drop_text::WRONG_LENGTH);
+        return Err(drop_text::WRONG_LENGTH.into());
     }
     let kind = p[0];
     if !crate::redaction::is_removable(kind) {
-        return Err(drop_text::INVALID_KIND);
+        return Err(drop_text::INVALID_KIND.into());
     }
     let hash = Hash(p[1..33].try_into().expect("32 bytes"));
     let len = u32::from_le_bytes(p[33..37].try_into().expect("4 bytes"));
@@ -221,9 +247,9 @@ pub(crate) fn parse_dropped(p: &[u8]) -> Result<Frame, &'static str> {
     let residue = match p[69] {
         0 if residue_hash.0 == [0u8; 32] => None,
         1 => Some(residue_hash),
-        _ => return Err(drop_text::INVALID_RESIDUE),
+        _ => return Err(drop_text::INVALID_RESIDUE.into()),
     };
-    check_dropped(kind, residue.as_ref())?;
+    check_dropped(kind, residue.as_ref(), len)?;
     Ok(Frame::Dropped {
         kind,
         hash,
@@ -400,21 +426,57 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
 }
 
 /// The `BATCH` record's `kinds`: `Hash::of` over each frame's (original) `kind || hash`, in
-/// order.
-fn kinds_digest(frames: &[Frame]) -> Hash {
-    let mut b = Vec::with_capacity(frames.len() * 33);
+/// order. None when its buffer cannot be allocated.
+fn kinds_digest(frames: &[Frame]) -> Option<Hash> {
+    let mut b = Vec::new();
+    b.try_reserve_exact(frames.len().checked_mul(33)?).ok()?;
     for f in frames {
         b.push(f.kind());
         b.extend_from_slice(&f.hash().0);
     }
-    Hash::of(&b)
+    Some(Hash::of(&b))
 }
 
-/// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`.
-fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) {
+/// `kinds::batch_digest` of `hashes`, with its buffer taken by fallible allocation. None when it
+/// cannot be allocated.
+pub(crate) fn try_batch_digest<'a>(
+    hashes: impl ExactSizeIterator<Item = &'a Hash>,
+) -> Option<Hash> {
+    let mut b = Vec::new();
+    b.try_reserve_exact(hashes.len().checked_mul(32)?).ok()?;
+    for h in hashes {
+        b.extend_from_slice(&h.0);
+    }
+    Some(Hash::of(&b))
+}
+
+/// The bytes one record adds to the trailer chain.
+const LINK_LEN: usize = 1 + 8 + 32;
+
+/// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its
+/// growth is fallible: None when it cannot be allocated.
+fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) -> Option<()> {
+    chain.try_reserve(LINK_LEN).ok()?;
     chain.push(kind);
     chain.extend_from_slice(&len.to_le_bytes());
     chain.extend_from_slice(&hash.0);
+    Some(())
+}
+
+/// A copy of `b` in a fallibly allocated buffer.
+fn try_copy(b: &[u8]) -> Option<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(b.len()).ok()?;
+    v.extend_from_slice(b);
+    Some(v)
+}
+
+/// A copy of `s` in a fallibly allocated string.
+fn try_string(s: &str) -> Option<String> {
+    let mut o = String::new();
+    o.try_reserve_exact(s.len()).ok()?;
+    o.push_str(s);
+    Some(o)
 }
 
 fn cannot_stand(kind: u8) -> String {
@@ -439,23 +501,28 @@ fn header_payload(h: &DumpHeader) -> Vec<u8> {
     p
 }
 
-fn parse_header(p: &[u8]) -> Option<DumpHeader> {
+/// Parses the header payload. Err: the refusal (it does not parse, or its text cannot be
+/// allocated).
+fn parse_header(p: &[u8]) -> Result<DumpHeader, &'static str> {
+    const NO_PARSE: &str = "the header does not parse";
     let mut c = Cursor(p);
-    let store_format = c.u32()?;
-    let segment = c.u32()?;
-    let offset = c.u64()?;
-    let rdy_len = c.u16()? as usize;
-    if rdy_len > MAX_RDY_BYTES {
-        return None;
-    }
-    let rdy = String::from_utf8(c.take(rdy_len)?.to_vec()).ok()?;
-    if !c.0.is_empty() {
-        return None;
-    }
-    Some(DumpHeader {
+    let fields = (|| {
+        let store_format = c.u32()?;
+        let segment = c.u32()?;
+        let offset = c.u64()?;
+        let rdy_len = c.u16()? as usize;
+        if rdy_len > MAX_RDY_BYTES {
+            return None;
+        }
+        let rdy = std::str::from_utf8(c.take(rdy_len)?).ok()?;
+        c.0.is_empty()
+            .then_some((store_format, segment, offset, rdy))
+    })();
+    let (store_format, segment, offset, rdy) = fields.ok_or(NO_PARSE)?;
+    Ok(DumpHeader {
         store_format,
         log_end: Location { segment, offset },
-        rdy,
+        rdy: try_string(rdy).ok_or(drop_text::ALLOCATION)?,
     })
 }
 
@@ -592,11 +659,13 @@ impl<W: Write> DumpWriter<W> {
                         ));
                     }
                 }
-                Frame::Dropped { kind, residue, .. } => {
+                Frame::Dropped {
+                    kind, residue, len, ..
+                } => {
                     if !drops_allowed(DUMP_FORMAT) {
                         return Err(StoreError::Refused(drop_text::NOT_ALLOWED.into()));
                     }
-                    check_dropped(*kind, residue.as_ref())
+                    check_dropped(*kind, residue.as_ref(), *len)
                         .map_err(|what| StoreError::Refused(what.into()))?;
                     dropped = true;
                 }
@@ -605,11 +674,15 @@ impl<W: Write> DumpWriter<W> {
         if dropped && batch_end(b.start.offset, &b.frames).is_none() {
             return Err(StoreError::Refused(drop_text::SPAN.into()));
         }
-        if batch_digest(b.frames.iter().map(|f| f.hash())) != b.digest {
+        let refused_allocation = || StoreError::Refused(drop_text::ALLOCATION.into());
+        if try_batch_digest(b.frames.iter().map(|f| f.hash())).ok_or_else(refused_allocation)?
+            != b.digest
+        {
             return Err(StoreError::Refused(format!(
                 "batch {n} does not match its digest"
             )));
         }
+        let kinds = kinds_digest(&b.frames).ok_or_else(refused_allocation)?;
         let count = u32::try_from(b.frames.len()).map_err(|_| {
             StoreError::Refused(format!(
                 "batch {n} holds {} frames, and its record says {}",
@@ -622,7 +695,7 @@ impl<W: Write> DumpWriter<W> {
         p.extend_from_slice(&b.start.offset.to_le_bytes());
         p.extend_from_slice(&count.to_le_bytes());
         p.extend_from_slice(&b.digest.0);
-        p.extend_from_slice(&kinds_digest(&b.frames).0);
+        p.extend_from_slice(&kinds.0);
         self.record(rec::BATCH, &p)?;
         for f in &b.frames {
             match f {
@@ -677,7 +750,8 @@ impl<W: Write> DumpWriter<W> {
         self.w.write_all(&hash.0)?;
         self.w.write_all(payload)?;
         if kind != rec::TRAILER {
-            link(&mut self.chain, kind, payload.len() as u64, &hash);
+            link(&mut self.chain, kind, payload.len() as u64, &hash)
+                .ok_or_else(|| StoreError::Refused(drop_text::ALLOCATION.into()))?;
         }
         self.totals.bytes += FRAME_HEADER + payload.len() as u64;
         Ok(())
@@ -746,12 +820,16 @@ pub enum DumpRefusal {
     FormatNotRead,
     /// Damage at a byte.
     Damaged,
+    /// Damage at a byte: dropped frames claim more bytes than rdy writes for them, one frame
+    /// over `MAX_BLOB_BYTES` or all those that wait for their authorization over the ingest's
+    /// bound. Its fix differs: such a dump may not be rdy's at all.
+    Claim,
 }
 
 impl DumpRefusal {
     /// The kind of the reader's refusal `what`. It reads the texts this module writes
-    /// (`NOT_A_DUMP`, `dump_format_not_read`, `store_format_not_read`), so a text and its kind
-    /// change together.
+    /// (`NOT_A_DUMP`, `dump_format_not_read`, `store_format_not_read`, `drop_text::claim`,
+    /// `drop_text::BUDGET`), so a text and its kind change together.
     pub fn of(what: &str) -> DumpRefusal {
         if what == NOT_A_DUMP {
             DumpRefusal::NotADump
@@ -759,6 +837,8 @@ impl DumpRefusal {
             && (what.starts_with(DUMP_FORMAT_WORDS) || what.starts_with(STORE_FORMAT_WORDS))
         {
             DumpRefusal::FormatNotRead
+        } else if what.starts_with(drop_text::CLAIM_WORDS) || what == drop_text::BUDGET {
+            DumpRefusal::Claim
         } else {
             DumpRefusal::Damaged
         }
@@ -797,11 +877,18 @@ impl<R: Read> DumpReader<R> {
             chain: Vec::new(),
             totals: DumpTotals::default(),
         };
-        let mut magic = Vec::with_capacity(MAGIC.len());
-        (&mut me.r)
-            .take(MAGIC.len() as u64)
-            .read_to_end(&mut magic)?;
-        if magic != MAGIC {
+        // the magic, or as much of it as the file holds: a shorter file is not a dump
+        let mut magic = [0u8; MAGIC.len()];
+        let mut got = 0;
+        while got < magic.len() {
+            match me.r.read(&mut magic[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if got < magic.len() || &magic != MAGIC {
             return Err(damaged(0, NOT_A_DUMP));
         }
         me.totals.bytes = MAGIC.len() as u64;
@@ -817,8 +904,7 @@ impl<R: Read> DumpReader<R> {
         if first.kind != rec::HEADER {
             return Err(damaged(first.at, cannot_stand(first.kind)));
         }
-        let header = parse_header(&first.payload)
-            .ok_or_else(|| damaged(first.at, "the header does not parse"))?;
+        let header = parse_header(&first.payload).map_err(|what| damaged(first.at, what))?;
         let Some(kinds) = READS
             .contains(&(format, header.store_format))
             .then(|| frame_kinds(format, header.store_format))
@@ -830,7 +916,7 @@ impl<R: Read> DumpReader<R> {
             ));
         };
         me.kinds = kinds;
-        me.link(&first);
+        me.link(&first)?;
         Ok((me, format, header))
     }
 
@@ -857,12 +943,12 @@ impl<R: Read> DumpReader<R> {
         match record.kind {
             rec::FILE if self.phase == ReadPhase::Files => {
                 let item = self.file(&record)?;
-                self.link(&record);
+                self.link(&record)?;
                 Ok(Some(item))
             }
             rec::BATCH => {
                 self.phase = ReadPhase::Batches;
-                self.link(&record);
+                self.link(&record)?;
                 self.batch(&record).map(|b| Some(DumpItem::Batch(b)))
             }
             rec::TRAILER => {
@@ -912,12 +998,14 @@ impl<R: Read> DumpReader<R> {
         if c.0.len() > MAX_FILE_BYTES {
             return Err(damaged(record.at, too_large(path)));
         }
-        self.last_path = Some(path.to_string());
+        let refused = || damaged(record.at, drop_text::ALLOCATION);
+        let item = DumpItem::File {
+            path: try_string(path).ok_or_else(refused)?,
+            bytes: try_copy(c.0).ok_or_else(refused)?,
+        };
+        self.last_path = Some(try_string(path).ok_or_else(refused)?);
         self.totals.files += 1;
-        Ok(DumpItem::File {
-            path: path.to_string(),
-            bytes: c.0.to_vec(),
-        })
+        Ok(item)
     }
 
     fn batch(&mut self, record: &Record) -> Result<DumpBatch, StoreError> {
@@ -952,7 +1040,7 @@ impl<R: Read> DumpReader<R> {
                 ));
             }
             // the trailer's digest covers the container record as it is
-            self.link(&f);
+            self.link(&f)?;
             let frame = if f.kind == rec::DROPPED {
                 dropped = true;
                 parse_dropped(&f.payload).map_err(|what| damaged(f.at, what))?
@@ -975,7 +1063,9 @@ impl<R: Read> DumpReader<R> {
         if dropped && batch_end(start.offset, &frames).is_none() {
             return Err(damaged(record.at, drop_text::SPAN));
         }
-        if batch_digest(frames.iter().map(|f| f.hash())) != digest || kinds_digest(&frames) != kinds
+        let refused = || damaged(record.at, drop_text::ALLOCATION);
+        if try_batch_digest(frames.iter().map(|f| f.hash())).ok_or_else(refused)? != digest
+            || kinds_digest(&frames).ok_or_else(refused)? != kinds
         {
             return Err(damaged(
                 record.at,
@@ -1025,9 +1115,11 @@ impl<R: Read> DumpReader<R> {
         Ok(())
     }
 
-    /// Adds a read record to the bytes the trailer's digest covers.
-    fn link(&mut self, r: &Record) {
-        link(&mut self.chain, r.kind, r.payload.len() as u64, &r.hash);
+    /// Adds a read record to the bytes the trailer's digest covers; a refused growth is
+    /// `record allocation failed` at the record.
+    fn link(&mut self, r: &Record) -> Result<(), StoreError> {
+        link(&mut self.chain, r.kind, r.payload.len() as u64, &r.hash)
+            .ok_or_else(|| damaged(r.at, drop_text::ALLOCATION))
     }
 
     /// Reads one record and checks its hash. The end of the file inside a record, or where a

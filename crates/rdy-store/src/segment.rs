@@ -1288,20 +1288,74 @@ impl SegmentLog {
     }
 
     /// Writes one data frame of a loaded batch at the end of the current segment, with no roll
-    /// and no sync: the ingest rolls only where the source rolled (`crate::ingest`). Returns
-    /// where it went and its payload's hash.
+    /// and no sync: the ingest rolls only where the source rolled (`crate::ingest`). It
+    /// allocates nothing (`write_parts`). Returns where it went and its payload's hash.
     pub(crate) fn append_unrolled(
         &mut self,
         kind: u8,
         payload: &[u8],
     ) -> io::Result<(Location, Hash)> {
-        if payload.len() > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "payload too large",
-            ));
+        let len = u32::try_from(payload.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload too large"))?;
+        let hash = Hash::of(payload);
+        let loc = self.write_parts(len, kind, &hash, payload)?;
+        Ok((loc, hash))
+    }
+
+    /// Writes the `BATCH_COMMIT` marker of a loaded batch whose first data frame is at `start`,
+    /// of `frames` data frames whose batch digest is `digest`, with no sync. It allocates
+    /// nothing: the marker is encoded into a fixed buffer of `MARKER_MAX` bytes. The bytes are
+    /// those `append_marker` writes for the same batch.
+    pub(crate) fn append_marker_digest(
+        &mut self,
+        start: Location,
+        frames: u32,
+        digest: Hash,
+    ) -> io::Result<()> {
+        let marker = BatchCommit {
+            start,
+            frames,
+            digest,
+        };
+        let mut buf = [0u8; MARKER_MAX as usize];
+        let bytes = postcard::to_slice(&marker, &mut buf)
+            .map_err(|_| io::Error::other("a marker over its bound"))?;
+        let hash = Hash::of(bytes);
+        self.write_parts(bytes.len() as u32, kinds::BATCH_COMMIT, &hash, bytes)?;
+        Ok(())
+    }
+
+    /// Writes one frame (`len`, `kind`, `hash`, then `payload`) at the end of the current
+    /// segment with no roll and no sync, and allocates nothing: a frame of at most
+    /// `SMALL_FRAME` bytes goes through one buffer on the stack in one write, a longer one as
+    /// its header and then its payload.
+    fn write_parts(
+        &mut self,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+        payload: &[u8],
+    ) -> io::Result<Location> {
+        const SMALL_FRAME: usize = 4096;
+        let loc = Location {
+            segment: self.current(),
+            offset: self.len,
+        };
+        let head_len = HEADER as usize;
+        let frame_len = head_len + payload.len();
+        let mut small = [0u8; SMALL_FRAME];
+        small[0..4].copy_from_slice(&len.to_le_bytes());
+        small[4] = kind;
+        small[5..head_len].copy_from_slice(&hash.0);
+        if frame_len <= SMALL_FRAME {
+            small[head_len..frame_len].copy_from_slice(payload);
+            pio::write_all_at(&self.writer, &small[..frame_len], self.len)?;
+        } else {
+            pio::write_all_at(&self.writer, &small[..head_len], self.len)?;
+            pio::write_all_at(&self.writer, payload, self.len + HEADER)?;
         }
-        self.write_frame(kind, payload)
+        self.len += frame_len as u64;
+        Ok(loc)
     }
 
     /// Writes a loaded frame whose payload a redaction removed, at the end of the current

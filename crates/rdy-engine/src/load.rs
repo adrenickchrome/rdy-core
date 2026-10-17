@@ -671,7 +671,7 @@ fn read_error(file: &Path, e: StoreError) -> RdyError {
                 format!("{}: {what}", file.display()),
                 "load it with the rdy that wrote it, or a later one",
             ),
-            DumpRefusal::Damaged => damaged(file, at, &what),
+            DumpRefusal::Damaged | DumpRefusal::Claim => damaged(file, at, &what),
         },
         StoreError::Io(e) => io_at(file, e),
         e => e.into(),
@@ -687,12 +687,19 @@ fn incomplete(what: String) -> RdyError {
     )
 }
 
-/// `file` is damaged at byte `at`.
+/// `file` is damaged at byte `at`. Dropped frames that claim more bytes than rdy writes for
+/// them (`DumpRefusal::Claim`, ruling task-9) may not be rdy's dump at all, and their fix says so.
 fn damaged(file: &Path, at: u64, what: &str) -> RdyError {
+    let fix = match DumpRefusal::of(what) {
+        DumpRefusal::Claim => {
+            "the dump is damaged or was not written by rdy; dump the source again"
+        }
+        _ => "dump the project again; rdy never repairs a dump",
+    };
     RdyError::new(
         E_DUMP,
         format!("{} is damaged at byte {at}: {what}", file.display()),
-        "dump the project again; rdy never repairs a dump",
+        fix,
     )
 }
 

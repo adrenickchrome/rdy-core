@@ -23,16 +23,27 @@
 //! them all in `finish`, against the complete log and before `FORMAT` is written: the store's
 //! own authorization bootstrap must authorize the frame's exact span, by the apply and with the
 //! residue the record names. A dangling or forged drop refuses the load, and no store is made.
-use crate::dump::{DROPPED_LEN, DumpBatch, Frame, drop_text, dropped_payload, parse_dropped};
+//!
+//! The zeros a dropped frame claims are bounded before they are written (ruling task-9, from
+//! tb-A4DAV): one frame claims at most `MAX_BLOB_BYTES` (the reader refuses more, and `batch`
+//! refuses more before its batch writes a byte), and the frames whose authorization has not yet
+//! been read claim at most `MAX_UNAUTHORIZED_BYTES` in all. A frame's bytes are released when
+//! an apply frame with the hash it names is written; the record at which they would pass the
+//! bound is refused before it is written. The ingest's own bookkeeping grows fallibly: a refused
+//! allocation is `record allocation failed`.
+use crate::dump::{
+    DROPPED_LEN, DumpBatch, Frame, drop_text, dropped_payload, parse_dropped, try_batch_digest,
+};
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
-use crate::kinds::{self, RefUpdate, batch_digest};
+use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_REPO_ID, encode_repo_id};
 use crate::redaction_io;
 use crate::segment::{Location, SegmentLog};
-use crate::store::encode;
-use rdy_model::RepoId;
+use crate::store::{MAX_BLOB_BYTES, encode};
+use rdy_model::{Hash, RepoId};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The directory of the log inside a store directory.
@@ -41,6 +52,10 @@ const SEGMENTS_DIR: &str = "segments";
 /// The most dropped frames one ingest holds for its final check (inclusive): the bound on
 /// scanned frames. One more is refused with `record allocation failed`.
 pub const MAX_PENDING_DROPS: usize = 1_000_000;
+
+/// The most zero bytes the ingest writes for dropped frames whose authorization it has not read
+/// yet (inclusive): 1 GiB. One byte more is refused with `drop_text::BUDGET`.
+pub const MAX_UNAUTHORIZED_BYTES: u64 = 1 << 30;
 
 /// A dropped frame waiting for its authorization: its 102 container bytes and its original
 /// location.
@@ -59,6 +74,11 @@ pub struct Ingest {
     has_repo_id: bool,
     /// The dropped frames so far, in log order, at most `MAX_PENDING_DROPS`.
     pending: Vec<PendingDrop>,
+    /// The zero bytes written for dropped frames whose apply has not been written yet, by the
+    /// apply hash they name.
+    waiting: HashMap<Hash, u64>,
+    /// Their sum, at most `MAX_UNAUTHORIZED_BYTES`.
+    unauthorized: u64,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -72,6 +92,10 @@ pub struct IngestReport {
 
 fn dump_error(what: String) -> StoreError {
     StoreError::Dump { at: 0, what }
+}
+
+fn refused_allocation() -> StoreError {
+    dump_error(drop_text::ALLOCATION.into())
 }
 
 impl Ingest {
@@ -97,6 +121,8 @@ impl Ingest {
             frames: 0,
             has_repo_id: false,
             pending: Vec::new(),
+            waiting: HashMap::new(),
+            unauthorized: 0,
         })
     }
 
@@ -106,9 +132,20 @@ impl Ingest {
     /// batch's start, so a batch at any other place is refused before the log rolls or takes a
     /// frame. A dropped frame is written as its original header and zeros of its original length,
     /// with its original hash, and kept for `finish` to check; more than `MAX_PENDING_DROPS` of
-    /// them is `record allocation failed`. The marker's digest must equal the batch's digest.
+    /// them is `record allocation failed`. A dropped frame that claims more than
+    /// `MAX_BLOB_BYTES` is refused before the batch writes anything; one whose claim would take
+    /// the bytes that wait for their authorization past `MAX_UNAUTHORIZED_BYTES` is refused
+    /// before it is written (`drop_text::BUDGET`). An apply frame releases the bytes of the
+    /// dropped frames that name its hash. The marker's digest must equal the batch's digest.
     /// Each failure is `StoreError::Dump`. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
+        for f in &b.frames {
+            if let Frame::Dropped { len, .. } = f
+                && u64::from(*len) > MAX_BLOB_BYTES
+            {
+                return Err(dump_error(drop_text::claim(*len)));
+            }
+        }
         let end = self.log.end();
         if b.start.segment == end.segment.wrapping_add(1) && b.start.offset == 0 && end.offset > 0 {
             self.log.roll()?;
@@ -123,13 +160,22 @@ impl Ingest {
         if b.frames.is_empty() {
             return Err(dump_error(format!("batch {n} has no frames")));
         }
-        let mut hashes = Vec::with_capacity(b.frames.len());
+        let mut hashes: Vec<Hash> = Vec::new();
+        hashes
+            .try_reserve_exact(b.frames.len())
+            .map_err(|_| refused_allocation())?;
         let mut sets_repo_id = false;
         for f in &b.frames {
             match f {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
+                    // the authorization is read: what waited for it is released
+                    if *kind == kinds::REDACTION_APPLY
+                        && let Some(bytes) = self.waiting.remove(&hash)
+                    {
+                        self.unauthorized -= bytes;
+                    }
                     sets_repo_id |= *kind == kinds::REF_UPDATE
                         && postcard::from_bytes::<RefUpdate>(payload)
                             .is_ok_and(|u| u.name == REF_REPO_ID);
@@ -141,24 +187,34 @@ impl Ingest {
                     apply,
                     residue,
                 } => {
+                    let unauthorized = self
+                        .unauthorized
+                        .checked_add(u64::from(*len))
+                        .filter(|u| *u <= MAX_UNAUTHORIZED_BYTES)
+                        .ok_or_else(|| dump_error(drop_text::BUDGET.into()))?;
                     if self.pending.len() >= MAX_PENDING_DROPS
                         || self.pending.try_reserve(1).is_err()
+                        || self.waiting.try_reserve(1).is_err()
                     {
-                        return Err(dump_error(drop_text::ALLOCATION.into()));
+                        return Err(refused_allocation());
                     }
                     let loc = self.log.append_dropped(*kind, hash, *len)?;
                     self.pending.push(PendingDrop {
                         record: dropped_payload(*kind, hash, *len, apply, residue.as_ref()),
                         loc,
                     });
+                    *self.waiting.entry(*apply).or_insert(0) += u64::from(*len);
+                    self.unauthorized = unauthorized;
                     hashes.push(*hash);
                 }
             }
         }
-        if batch_digest(&hashes) != b.digest {
+        let digest = try_batch_digest(hashes.iter()).ok_or_else(refused_allocation)?;
+        if digest != b.digest {
             return Err(dump_error(format!("batch {n} does not match its digest")));
         }
-        self.log.append_marker(b.start, hashes.iter())?;
+        self.log
+            .append_marker_digest(b.start, hashes.len() as u32, digest)?;
         self.has_repo_id |= sets_repo_id;
         self.batches += 1;
         self.frames += hashes.len() as u64;

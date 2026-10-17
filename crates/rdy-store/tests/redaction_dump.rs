@@ -43,6 +43,94 @@ const NO_AUTHORIZATION: &str = "dropped frame has no valid authorization";
 const SPAN: &str = "dropped frame does not match its authorized span";
 const ENDS_EARLY: &str = "the file ends before its trailer";
 const TRAILER_MISMATCH: &str = "the trailer's counts or digest do not match the dump";
+const ALLOCATION: &str = "record allocation failed";
+const BUDGET: &str = "dropped frames claim more than 1073741824 bytes before their authorization";
+/// The most bytes one dropped frame may claim: the store's payload bound (`MAX_BLOB_BYTES`).
+const FRAME_BOUND: u32 = 64 << 20;
+
+/// The refusal of a dropped frame that claims `len` bytes, over the frame bound.
+fn claim(len: u32) -> String {
+    format!("a dropped frame claims {len} bytes; a frame holds at most 67108864")
+}
+
+/// A global allocator that fails one chosen allocation of the armed thread, so a test can make
+/// any one allocation of the reader or the ingest fail, deterministically. Other threads, and
+/// the armed thread once its failure has fired, allocate as usual.
+mod failing_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Failing;
+
+    thread_local! {
+        /// Allocations of this thread until the one that fails; 0: none fails.
+        static LEFT: Cell<u64> = const { Cell::new(0) };
+        /// Whether the armed failure fired.
+        static FIRED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn fail_now() -> bool {
+        LEFT.try_with(|left| match left.get() {
+            0 => false,
+            1 => {
+                left.set(0);
+                FIRED.with(|f| f.set(true));
+                true
+            }
+            n => {
+                left.set(n - 1);
+                false
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    // SAFETY: every call goes to `System` with the caller's arguments unchanged, or returns null,
+    // which `GlobalAlloc` allows for a failed allocation.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Failing {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if fail_now() {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            if fail_now() {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc_zeroed` requires.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if fail_now() {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// Makes the `nth` allocation of this thread from now fail (1 is the next one).
+    pub fn arm(nth: u64) {
+        FIRED.with(|f| f.set(false));
+        LEFT.with(|l| l.set(nth));
+    }
+
+    /// Disarms this thread; returns whether the armed failure fired.
+    pub fn disarm() -> bool {
+        LEFT.with(|l| l.set(0));
+        FIRED.with(|f| f.get())
+    }
+}
+
+#[global_allocator]
+static ALLOC: failing_alloc::Failing = failing_alloc::Failing;
 
 fn block(id: &str, body: &str) -> Block {
     Block {
@@ -570,21 +658,35 @@ fn rdx9_forward_authorization_is_checked_before_placement() {
 /// A dump of `dump_format` whose header names `store_format`: one batch at the start of the log
 /// whose one data frame is a `DROPPED` record of a block, and its trailer.
 fn one_drop(dump_format: u32, store_format: u32) -> Vec<u8> {
-    let hash = Hash::of(b"a removed block");
-    let len = 15u32;
-    let drop = dropped_bytes(
+    drop_stream(
+        dump_format,
+        store_format,
         BLOCK,
-        hash,
-        len,
+        Hash::of(b"a removed block"),
+        15,
         Hash::of(b"apply"),
         Some(Hash::of(b"residue")),
-    );
+    )
+}
+
+/// A dump of `dump_format` whose header names `store_format`: one batch at the start of the log
+/// whose one data frame is a `DROPPED` record of `kind` that claims `len` bytes, and its trailer.
+fn drop_stream(
+    dump_format: u32,
+    store_format: u32,
+    kind: u8,
+    hash: Hash,
+    len: u32,
+    apply: Hash,
+    residue: Option<Hash>,
+) -> Vec<u8> {
+    let drop = dropped_bytes(kind, hash, len, apply, residue);
     let mut h = store_format.to_le_bytes().to_vec();
     h.extend_from_slice(&0u32.to_le_bytes());
     h.extend_from_slice(&(37 + u64::from(len)).to_le_bytes());
     h.extend_from_slice(&4u16.to_le_bytes());
     h.extend_from_slice(b"test");
-    let mut kinds = vec![BLOCK];
+    let mut kinds = vec![kind];
     kinds.extend_from_slice(&hash.0);
     let mut b = 0u32.to_le_bytes().to_vec();
     b.extend_from_slice(&0u64.to_le_bytes());
@@ -715,7 +817,8 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
                     *len = u32::MAX;
                 }
             },
-            "",
+            // the frame bound: no stored payload is longer than 64 MiB
+            "a dropped frame claims 4294967295 bytes; a frame holds at most 67108864",
         ),
     ];
     for (bend, want) in bad {
@@ -724,11 +827,6 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
         set_digest(&mut b);
         let mut w = DumpWriter::new(Vec::new(), &header(src.end)).unwrap();
         let r = w.batch(&b);
-        if want.is_empty() {
-            // a long original length is only a number: the writer takes it
-            assert!(r.is_ok());
-            continue;
-        }
         match r {
             Err(StoreError::Refused(m)) => assert_eq!(m, want),
             other => panic!("not refused: {other:?}"),
@@ -782,4 +880,241 @@ fn rdx9_current_output_is_only_pair_two_thirteen() {
     assert_eq!(&bytes[..12], b"RDYDUMP\n\x02\x00\x00\x00");
     let (format, h, _) = read_dump(&bytes).unwrap();
     assert_eq!((format, h.store_format), (2, 13));
+}
+
+/// The bytes of the log of the store directory `to`, in all its segments.
+fn log_bytes(to: &Path) -> u64 {
+    segment_bytes(to).values().map(|b| b.len() as u64).sum()
+}
+
+/// A dropped blob chunk of `len` bytes, the `i`-th of a test, that names `apply`.
+fn drop_chunk(i: u32, len: u32, apply: Hash) -> Frame {
+    Frame::Dropped {
+        kind: BLOB_CHUNK,
+        hash: Hash::of(format!("chunk {i}").as_bytes()),
+        len,
+        apply,
+        residue: None,
+    }
+}
+
+/// A batch of `frames` that starts where the log of `i` ends, with its true digest.
+fn batch_at(i: &Ingest, frames: Vec<Frame>) -> DumpBatch {
+    let mut b = DumpBatch {
+        start: i.end(),
+        digest: Hash([0u8; 32]),
+        frames,
+    };
+    set_digest(&mut b);
+    b
+}
+
+#[test]
+fn rdx9_reader_allocation_failure_is_a_refusal() {
+    let src = source();
+    // a project file, ordinary frames over many batches, and every kind of dropped record
+    let mut w = DumpWriter::new(Vec::new(), &header(src.end)).unwrap();
+    w.file(".rdy.yaml", b"project: t\n").unwrap();
+    for b in &src.batches {
+        w.batch(b).unwrap();
+    }
+    let bytes = w.finish().unwrap().0;
+    let read_all = |bytes: &[u8]| -> Result<u64, StoreError> {
+        let (mut r, _, _) = DumpReader::open(bytes)?;
+        let mut items = 0u64;
+        while r.next()?.is_some() {
+            items += 1;
+        }
+        Ok(items)
+    };
+    let items = read_all(&bytes).unwrap();
+    // each allocation of the read in turn fails: each is the dump refusal, never an abort
+    let mut refused = 0;
+    for nth in 1u64.. {
+        failing_alloc::arm(nth);
+        let got = read_all(&bytes);
+        if !failing_alloc::disarm() {
+            assert_eq!(got.unwrap(), items, "the read past its last allocation");
+            break;
+        }
+        assert_eq!(what(got.unwrap_err()), ALLOCATION, "allocation {nth}");
+        refused += 1;
+    }
+    assert!(refused > 0);
+}
+
+#[test]
+fn rdx9_ingest_allocation_failure_is_a_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    // a dropped frame, an ordinary frame, and the apply that the dropped frame names
+    let apply = b"an apply".to_vec();
+    let frames = vec![
+        drop_chunk(1, 100, Hash::of(&apply)),
+        Frame::Present {
+            kind: BLOB_CHUNK,
+            hash: Hash::of(b"a chunk"),
+            payload: b"a chunk".to_vec(),
+        },
+        Frame::Present {
+            kind: kinds::REDACTION_APPLY,
+            hash: Hash::of(&apply),
+            payload: apply.clone(),
+        },
+    ];
+    let mut refused = 0;
+    for nth in 1u64.. {
+        let mut i = Ingest::create(&dir.path().join(format!("to-{nth}"))).unwrap();
+        let b = batch_at(&i, frames.clone());
+        failing_alloc::arm(nth);
+        let got = i.batch(1, &b);
+        if !failing_alloc::disarm() {
+            got.unwrap();
+            break;
+        }
+        assert_eq!(what(got.unwrap_err()), ALLOCATION, "allocation {nth}");
+        refused += 1;
+    }
+    assert!(refused > 0);
+}
+
+#[test]
+fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    // the 416-byte stream: one dropped chunk claims 32 MiB and names an apply no stream holds
+    let len = 32 << 20;
+    let stream = drop_stream(
+        DUMP_FORMAT,
+        STORE_FORMAT,
+        BLOB_CHUNK,
+        Hash::of(b"a chunk"),
+        len,
+        Hash::of(b"no such apply"),
+        None,
+    );
+    assert_eq!(stream.len(), 416);
+    let (_, _, bs) = read_dump(&stream).unwrap();
+    let to = dir.path().join("claim");
+    let mut i = Ingest::create(&to).unwrap();
+    i.batch(1, &bs[0]).unwrap();
+    // it writes its one span and its marker, no more
+    assert!(
+        log_bytes(&to) <= HEAD as u64 + u64::from(len) + HEAD as u64 + 64,
+        "{} bytes",
+        log_bytes(&to)
+    );
+    i.upgrade(STORE_FORMAT).unwrap();
+    assert_eq!(what(i.finish().unwrap_err()), NO_AUTHORIZATION);
+    assert!(no_store(&to));
+
+    // over the frame bound: refused by the reader at the record, before anything is written
+    let over = |len: u32| {
+        drop_stream(
+            DUMP_FORMAT,
+            STORE_FORMAT,
+            BLOB_CHUNK,
+            Hash::of(b"a chunk"),
+            len,
+            Hash::of(b"an apply"),
+            None,
+        )
+    };
+    let e = read_dump(&over(FRAME_BOUND + 1)).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 22 + HEAD + 80) as u64),
+        "blamed on the dropped record: {e:?}"
+    );
+    assert_eq!(what(e), claim(FRAME_BOUND + 1));
+    assert_eq!(
+        what(read_dump(&over(u32::MAX)).unwrap_err()),
+        claim(u32::MAX)
+    );
+    // the bound itself reads
+    let (_, _, at_bound) = read_dump(&over(FRAME_BOUND)).unwrap();
+    assert_eq!(at_bound[0].frames[0].original_len(), FRAME_BOUND);
+    // and the ingest refuses it too, given a batch directly, before it writes a byte
+    let to = dir.path().join("over");
+    let mut i = Ingest::create(&to).unwrap();
+    let b = batch_at(
+        &i,
+        vec![drop_chunk(1, FRAME_BOUND + 1, Hash::of(b"an apply"))],
+    );
+    assert_eq!(what(i.batch(1, &b).unwrap_err()), claim(FRAME_BOUND + 1));
+    assert_eq!(
+        log_bytes(&to),
+        0,
+        "nothing of the refused claim was written"
+    );
+    drop(i);
+    assert!(no_store(&to));
+}
+
+#[test]
+fn rdx9_unauthorized_claims_are_bounded_in_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let apply_a = b"apply a".to_vec();
+    let a = Hash::of(&apply_a);
+    let b = Hash::of(b"apply b");
+    // 16 frames of 64 MiB: exactly 1 GiB waits for its authorization, which the bound allows
+    let full = |i: &Ingest, apply: Hash, from: u32| {
+        batch_at(
+            i,
+            (from..from + 16)
+                .map(|n| drop_chunk(n, FRAME_BOUND, apply))
+                .collect(),
+        )
+    };
+    {
+        let to = dir.path().join("crossing");
+        let mut i = Ingest::create(&to).unwrap();
+        let first = full(&i, a, 0);
+        i.batch(1, &first).unwrap();
+        let before = log_bytes(&to);
+        let spans = 16 * (HEAD as u64 + u64::from(FRAME_BOUND));
+        assert!(
+            before > spans + HEAD as u64 && before <= spans + HEAD as u64 + 64,
+            "16 spans and their marker: {before}"
+        );
+        // one more byte crosses it: refused at that record, before it is written
+        let crossing = batch_at(
+            &i,
+            vec![
+                Frame::Present {
+                    kind: BLOB_CHUNK,
+                    hash: Hash::of(b"x"),
+                    payload: b"x".to_vec(),
+                },
+                drop_chunk(16, 1, a),
+            ],
+        );
+        assert_eq!(what(i.batch(2, &crossing).unwrap_err()), BUDGET);
+        assert_eq!(
+            log_bytes(&to),
+            before + HEAD as u64 + 1,
+            "the frame before the crossing record, and nothing of it"
+        );
+        drop(i);
+        assert!(no_store(&to));
+    }
+    {
+        // the apply releases what it names: the next claim fits again
+        let to = dir.path().join("released");
+        let mut i = Ingest::create(&to).unwrap();
+        let first = full(&i, a, 0);
+        i.batch(1, &first).unwrap();
+        let apply = batch_at(
+            &i,
+            vec![Frame::Present {
+                kind: kinds::REDACTION_APPLY,
+                hash: a,
+                payload: apply_a.clone(),
+            }],
+        );
+        i.batch(2, &apply).unwrap();
+        let next = batch_at(&i, vec![drop_chunk(16, FRAME_BOUND, b)]);
+        i.batch(3, &next).unwrap();
+        // the forged applies authorize nothing: the load is refused, and no store is made
+        i.upgrade(STORE_FORMAT).unwrap();
+        assert_eq!(what(i.finish().unwrap_err()), NO_AUTHORIZATION);
+        assert!(no_store(&to));
+    }
 }
