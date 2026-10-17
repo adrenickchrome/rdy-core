@@ -96,8 +96,12 @@ impl Default for Limits {
     }
 }
 
+#[cfg(feature = "test-support")]
 thread_local! {
     static LIMITS: Cell<Option<Limits>> = const { Cell::new(None) };
+}
+
+thread_local! {
     static COMPUTATIONS: Cell<u64> = const { Cell::new(0) };
     static PREVIEW_FAULTS: Cell<u32> = const { Cell::new(0) };
 }
@@ -136,24 +140,32 @@ pub(crate) fn count_computation() {
     COMPUTATIONS.with(|c| c.set(c.get().wrapping_add(1)));
 }
 
-/// The bounds this thread computes reports under: the defaults, unless a test lowered them.
+/// The bounds this thread computes reports under: the fixed defaults (a build with the
+/// `test-support` feature lets a test replace them for its thread).
 pub fn limits() -> Limits {
-    LIMITS.with(|l| l.get()).unwrap_or_default()
+    #[cfg(feature = "test-support")]
+    if let Some(l) = LIMITS.with(Cell::get) {
+        return l;
+    }
+    Limits::default()
 }
 
-/// Tests only: computes this thread's reports under `l` until the guard drops, so a test can
-/// reach each bound and the bound plus one with a small store. The store's own record checks
-/// keep their fixed bounds.
+/// Tests only (the `test-support` feature, which no normal build enables): computes this
+/// thread's reports under `l` until the guard drops, so a test can reach each bound and the
+/// bound plus one with a small store. The store's own record checks keep their fixed bounds.
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn override_limits_for_tests(l: Limits) -> LimitsGuard {
     LimitsGuard(LIMITS.with(|c| c.replace(Some(l))))
 }
 
 /// Restores the bounds [`override_limits_for_tests`] replaced when dropped.
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[must_use = "the bounds are lowered only while the guard lives"]
 pub struct LimitsGuard(Option<Limits>);
 
+#[cfg(feature = "test-support")]
 impl Drop for LimitsGuard {
     fn drop(&mut self) {
         LIMITS.with(|c| c.set(self.0));

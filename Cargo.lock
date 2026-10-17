@@ -1304,6 +1304,7 @@ dependencies = [
  "criterion",
  "imbl",
  "proptest",
+ "rdy-engine",
  "rdy-graph",
  "rdy-model",
  "rdy-schema",

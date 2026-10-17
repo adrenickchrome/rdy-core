@@ -1404,3 +1404,233 @@ fn rdx4_an_authorized_span_in_a_sealed_segment_reads_as_the_stub() {
     let r = s.verify_report().unwrap();
     assert_eq!(r.redaction.unwrap().frames, spans_of(&f).len() as u64);
 }
+
+/// Fixture options that alter the request's draft (its targets, manifest or residues) before its
+/// preparation batch is encoded; the apply binds the altered request and its report hash.
+fn with_draft(f: impl Fn(&mut redaction_fixture::Draft) + 'static) -> FixtureOptions {
+    let mut o = FixtureOptions::approved(Proof::local_human());
+    o.on_draft = Some(Box::new(move |_, d| f(d)));
+    o
+}
+
+/// The change residue of a draft (the one change span's).
+fn change_residue(d: &mut redaction_fixture::Draft) -> &mut rdy_model::redaction::ChangeResidue {
+    d.residues
+        .iter_mut()
+        .find_map(|r| match r {
+            rdy_model::redaction::RedactionResidue::Change(c) => Some(c),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// One inconsistent authorization over intact (or partly erased) payloads: the fixture options
+/// and the spans to zero before the open (an erasure a kill interrupted).
+struct Inconsistent {
+    name: &'static str,
+    opts: FixtureOptions,
+    zero_kinds: &'static [u8],
+}
+
+/// The inconsistent requests of final review findings 1 and 2: each is a sealed, human-approved
+/// apply whose request, report hash and residue frames are hash-valid, but whose request does
+/// not select what its manifest removes, whose manifest omits a physical copy of the selected
+/// content, or whose change residue does not replay the original change.
+fn inconsistent_cases(setup: &Setup) -> Vec<Inconsistent> {
+    let (a, b, blob) = (setup.a.clone(), setup.b.clone(), setup.blob);
+    let (a2, b2) = (a.clone(), b.clone());
+    vec![
+        Inconsistent {
+            name: "the selector names another block",
+            opts: with_draft(move |d| {
+                d.request.targets = vec![version(&b), RedactTarget::Blob(blob)];
+            }),
+            zero_kinds: &[],
+        },
+        Inconsistent {
+            name: "the manifest relabels the version as another block's",
+            opts: with_draft(move |d| {
+                let v = a2.version_hash();
+                d.request.targets = vec![
+                    RedactTarget::Version {
+                        id: b2.id.clone(),
+                        version: v,
+                    },
+                    RedactTarget::Blob(blob),
+                ];
+                d.request.manifest.versions = vec![(b2.id.clone(), v)];
+            }),
+            zero_kinds: &[],
+        },
+        Inconsistent {
+            name: "the manifest omits the change that embeds the version",
+            opts: with_draft(|d| {
+                d.request.manifest.spans.retain(|s| s.kind != CHANGE);
+                d.residues
+                    .retain(|r| matches!(r, rdy_model::redaction::RedactionResidue::Block(_)));
+            }),
+            zero_kinds: &[],
+        },
+        Inconsistent {
+            name: "the manifest omits the change, and the block span is already zero",
+            opts: with_draft(|d| {
+                d.request.manifest.spans.retain(|s| s.kind != CHANGE);
+                d.residues
+                    .retain(|r| matches!(r, rdy_model::redaction::RedactionResidue::Block(_)));
+            }),
+            zero_kinds: &[BLOCK],
+        },
+        Inconsistent {
+            name: "the manifest omits a chunk of the blob",
+            opts: with_draft(|d| {
+                let i = d
+                    .request
+                    .manifest
+                    .spans
+                    .iter()
+                    .rposition(|s| s.kind == BLOB_CHUNK)
+                    .unwrap();
+                d.request.manifest.spans.remove(i);
+            }),
+            zero_kinds: &[],
+        },
+        Inconsistent {
+            name: "the change residue drops the sibling's op",
+            opts: with_draft(|d| {
+                change_residue(d).ops.truncate(1);
+                let residues = d.residues.clone();
+                redaction_fixture::relink(&mut d.request, &residues);
+            }),
+            zero_kinds: &[],
+        },
+        Inconsistent {
+            name: "the change residue drops the sibling's op, and the block span is already zero",
+            opts: with_draft(|d| {
+                change_residue(d).ops.truncate(1);
+                let residues = d.residues.clone();
+                redaction_fixture::relink(&mut d.request, &residues);
+            }),
+            zero_kinds: &[BLOCK],
+        },
+        Inconsistent {
+            name: "the change residue names other dependencies",
+            opts: with_draft(|d| {
+                change_residue(d).deps = vec![Hash::of(b"rdx4 another dependency")];
+                let residues = d.residues.clone();
+                redaction_fixture::relink(&mut d.request, &residues);
+            }),
+            zero_kinds: &[],
+        },
+        Inconsistent {
+            name: "the change residue renames the sibling's version",
+            opts: with_draft(|d| {
+                if let rdy_model::redaction::ResidualOp::Create { version, .. } =
+                    &mut change_residue(d).ops[1]
+                {
+                    *version = Hash::of(b"rdx4 a version never stored");
+                }
+                let residues = d.residues.clone();
+                redaction_fixture::relink(&mut d.request, &residues);
+            }),
+            zero_kinds: &[],
+        },
+    ]
+}
+
+/// Final review fix round 1, findings 1 and 2: recovery shares the checked apply path's
+/// semantic validation. A sealed, human-approved apply whose request selects other content than
+/// its manifest removes, whose manifest omits a physical copy of the selected content (the
+/// embedding change, a chunk), or whose change residue does not replay the original change
+/// exactly, is refused by the open with `RedactionCorrupt` before any zero write, whatever the
+/// index holds. No byte changes, and the original change keeps both its operations.
+#[test]
+fn rdx4_recovery_refuses_an_inconsistent_request_before_any_zero_write() {
+    let probe = Setup::new();
+    let mut accepted = vec![];
+    for case in inconsistent_cases(&probe) {
+        let setup = Setup::new();
+        let true_spans = setup.draft_spans();
+        let f = setup.apply(&case.opts);
+        assert!(f.landing.is_some(), "{}", case.name);
+        let zero: Vec<DropSpan> = true_spans
+            .iter()
+            .filter(|s| case.zero_kinds.contains(&s.kind))
+            .cloned()
+            .collect();
+        zero_in_files(&setup.path, &zero);
+        // with or without the derived index
+        for drop_index in [false, true] {
+            if drop_index {
+                let _ = std::fs::remove_file(setup.path.join("index.redb"));
+            }
+            let before = segment_bytes(&setup.path);
+            let Some(e) = Store::open(&setup.path).err() else {
+                accepted.push(case.name);
+                break;
+            };
+            assert!(
+                matches!(e, StoreError::RedactionCorrupt { .. }),
+                "{} (index dropped: {drop_index}): {e:?}",
+                case.name
+            );
+            assert_eq!(
+                segment_bytes(&setup.path),
+                before,
+                "{}: the refused open changes no byte",
+                case.name
+            );
+            assert!(torn_files(&setup.path).is_empty(), "{}", case.name);
+        }
+        if accepted.last() == Some(&case.name) {
+            continue;
+        }
+        // the original change's bytes, both operations, are still on disk
+        let bytes = segment_bytes(&setup.path);
+        let sibling = b"bravo stays";
+        assert!(
+            bytes
+                .values()
+                .any(|b| b.windows(sibling.len()).any(|w| w == sibling)),
+            "{}",
+            case.name
+        );
+    }
+    assert!(accepted.is_empty(), "the open accepted: {accepted:#?}");
+}
+
+/// Final review fix round 1, findings 1 and 2: the live apply writer validates its batch with
+/// the same semantic checks as the open, before anything is written.
+#[test]
+fn rdx4_the_live_writer_refuses_an_inconsistent_request() {
+    let probe = Setup::new();
+    let mut accepted = vec![];
+    for case in inconsistent_cases(&probe)
+        .into_iter()
+        .filter(|c| c.zero_kinds.is_empty())
+    {
+        let setup = Setup::new();
+        let sp = split(&setup, &case.opts);
+        let before = segment_bytes(&sp.prep);
+        {
+            let mut s = Store::open(&sp.prep).unwrap();
+            let end = s.log_end();
+            let e = s.seal_redaction_batch_for_tests(sp.items.clone()).err();
+            if e.is_none() {
+                accepted.push(case.name);
+                continue;
+            }
+            assert!(
+                matches!(e, Some(StoreError::RedactionCorrupt { .. })),
+                "{}: {e:?}",
+                case.name
+            );
+            assert_eq!(s.log_end(), end, "{}: nothing was written", case.name);
+            assert_eq!(s.redaction_epoch(), 0, "{}", case.name);
+        }
+        assert_eq!(segment_bytes(&sp.prep), before, "{}", case.name);
+    }
+    assert!(
+        accepted.is_empty(),
+        "the live writer accepted: {accepted:#?}"
+    );
+}

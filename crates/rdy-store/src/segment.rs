@@ -864,7 +864,7 @@ fn zero_frame_at(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
 }
 
 /// True if the `len` bytes at `start` of `f` are all zero, read through one fixed buffer.
-fn payload_is_zero(f: &File, start: u64, len: u64) -> io::Result<bool> {
+pub(crate) fn payload_is_zero(f: &File, start: u64, len: u64) -> io::Result<bool> {
     let mut buf = vec![0u8; ERASE_BUFFER];
     let mut at = start;
     let end = start + len;

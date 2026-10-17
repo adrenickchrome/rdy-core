@@ -6,7 +6,7 @@
 //! owns that flow).
 use rdy_daemon::{OpContext, dispatch};
 use rdy_engine::engine::Local;
-use rdy_engine::redaction::{RedactResult, report_text};
+use rdy_engine::redaction::{RedactInput, RedactResult, report_text};
 use rdy_engine::*;
 use rdy_model::Role;
 use rdy_qa::daemon::Served;
@@ -1044,4 +1044,76 @@ fn rdx13_show_text_prints_the_removal_card_or_its_error() {
     );
     assert!(!stdout.contains("Content removal"), "{stdout}");
     assert!(!stdout.contains("card hash:"), "{stdout}");
+}
+
+/// `rdy --project <dir> --json edit <id>` as the human, with `EDITOR` a shell script whose body
+/// is `body` (it edits the file named by `$1`).
+fn edit_with_script(s: &Served, id: &str, body: &str) -> std::process::Output {
+    use std::os::unix::fs::PermissionsExt;
+    let script = s.dir.path().join("ed.sh");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::process::Command::new(rdy_bin())
+        .args(["--project"])
+        .arg(s.dir.path())
+        .args(["--json", "edit", id])
+        .env("EDITOR", &script)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap()
+}
+
+/// Final review fix round 1, finding 3 (the CLI path; this test lands a removal, unlike the
+/// others here): after a person's approved removal, `rdy edit` that replaces the notice with
+/// fresh safe text writes a normal version; an edit that saves the notice unchanged is refused
+/// with `E_REDACTED`.
+#[test]
+fn rdx13_an_edit_replaces_the_removal_notice_with_fresh_text() {
+    let (s, id) = secret_served();
+    with_rdy(&s, |r| {
+        let base = r.propose(&writer(), "work", "Base", None).unwrap();
+        r.land(&approver(), &base.id).unwrap();
+        let v = version_of(r, &Scope::Canon, &id);
+        let res = r
+            .redact_in(
+                &writer(),
+                "redact",
+                RedactInput {
+                    targets: vec![format!("{id}@{v}")],
+                    reason_class: "secret".into(),
+                    reason: "a leaked code".into(),
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        assert!(res.redaction.is_some());
+        let p = r
+            .propose(&writer(), "redact", "Remove", Some("Removes the code."))
+            .unwrap();
+        r.land(&approver(), &p.id).unwrap();
+    });
+    let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["body"], rdy_model::redaction::CONTENT_REMOVED, "{v}");
+
+    // saving the notice unchanged: refused
+    let o = edit_with_script(&s, &id, "true\n");
+    let e = error_of(&o);
+    assert_eq!(e["code"], E_REDACTED, "{e}");
+
+    // the notice replaced with fresh safe text: a normal version
+    let o = edit_with_script(
+        &s,
+        &id,
+        "sed -i.bak 's/Content removed\\./Fresh safe text./' \"$1\"\n",
+    );
+    let (ok, stdout, stderr) = out(&o);
+    assert!(ok, "{stdout}\n{stderr}");
+    let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["body"], "Fresh safe text.", "{v}");
+    assert!(!stdout.contains(SECRET) && !stderr.contains(SECRET));
 }

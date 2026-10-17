@@ -437,6 +437,85 @@ fn check_known(reader: &StoreReader, targets: &[RedactTarget]) -> Result<(), Rdy
     Ok(())
 }
 
+/// The expansion's checks, before the scan (the brief's validation order: "reason; expansion;
+/// scan"; final review finding 7): every all-versions target has a stored version (else
+/// `unknown target`, in target order), and the objects the targets select, leaving out a target
+/// wholly removed already, stay within the selected-object bound. It reads the index's
+/// producers and the blocks and manifests the targets name, never the log walk, so lowered or
+/// reached scan bounds cannot mask these errors. The report's own expansion, from the walk,
+/// stays the authority and repeats both checks.
+fn check_expansion(
+    reader: &StoreReader,
+    targets: &[RedactTarget],
+    limits: &Limits,
+) -> Result<(), RdyError> {
+    let removed = |kind: u8, h: &Hash| -> Result<bool, RdyError> {
+        Ok(reader.redaction_of(kind, h)?.is_some())
+    };
+    // per all-versions id: how many versions it has, and whether every one is removed
+    let mut ids: BTreeMap<BlockId, (usize, bool)> = targets
+        .iter()
+        .filter_map(|t| match t {
+            RedactTarget::AllVersions(id) => Some((id.clone(), (0, true))),
+            _ => None,
+        })
+        .collect();
+    if !ids.is_empty() {
+        reader.for_each_produced_version(|v| {
+            let b = reader.get_block(&v)?;
+            if let Some((n, all)) = ids.get_mut(&b.id) {
+                *n += 1;
+                *all &= reader.redaction_of(kinds::BLOCK, &v)?.is_some();
+            }
+            Ok(())
+        })?;
+    }
+    for t in targets {
+        if let RedactTarget::AllVersions(id) = t
+            && ids.get(id).is_none_or(|(n, _)| *n == 0)
+        {
+            return Err(redaction_target(&selector_text(t), REDACTION_CAUSE_UNKNOWN));
+        }
+    }
+    // the selection of the targets not wholly removed: each live all-versions id's versions,
+    // each version of an id with no live all-versions target, each blob
+    let live_ids: BTreeSet<&BlockId> = ids
+        .iter()
+        .filter(|(_, (_, all))| !all)
+        .map(|(id, _)| id)
+        .collect();
+    let mut selected: usize = ids
+        .iter()
+        .filter(|(id, _)| live_ids.contains(id))
+        .map(|(_, (n, _))| *n)
+        .sum();
+    for t in targets {
+        let live = match t {
+            RedactTarget::AllVersions(_) => continue,
+            RedactTarget::Version { id, version } => {
+                !live_ids.contains(id) && !removed(kinds::BLOCK, version)?
+            }
+            RedactTarget::Blob(h) => {
+                let m: BlobManifest = reader.get_typed(kinds::BLOB_MANIFEST, h)?;
+                if m.chunks.is_empty() {
+                    !removed(kinds::BLOB_MANIFEST, h)?
+                } else {
+                    let mut all = true;
+                    for c in &m.chunks {
+                        all &= removed(kinds::BLOB_CHUNK, c)?;
+                    }
+                    !all
+                }
+            }
+        };
+        selected = selected.saturating_add(usize::from(live));
+    }
+    if selected > limits.selected {
+        return Err(over(limit::SELECTED));
+    }
+    Ok(())
+}
+
 /// A zeroed buffer of `n` bytes, allocated fallibly (`E_REDACTION_LIMIT` on failure).
 pub(super) fn buffer(n: usize) -> Result<Vec<u8>, RdyError> {
     let mut buf = Vec::new();
@@ -551,6 +630,7 @@ pub(crate) fn compute_excluding(
     quarantine.sort();
     quarantine.dedup();
     check_known(reader, &targets)?;
+    check_expansion(reader, &targets, &limits)?;
 
     // the walk, under the frame and byte bounds
     let frames = walk(reader, state.seq(), &limits)?;

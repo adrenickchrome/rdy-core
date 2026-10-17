@@ -767,7 +767,7 @@ impl Selection {
 
 /// The bounds a request's targets and selection keep: 1 to 256 targets, 256 bytes per selector,
 /// 100000 selected objects.
-fn check_bounds(request: &Redaction) -> Result<(), StoreError> {
+pub(crate) fn check_bounds(request: &Redaction) -> Result<(), StoreError> {
     if request.targets.is_empty() {
         return Err(refused(
             "a redaction request names at least one target".into(),
@@ -808,6 +808,84 @@ fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
     }
 }
 
+/// Whether residue `r` is exactly the residue the store derives from the intact payload
+/// `payload` of a frame of `kind`: a block's identity facts, or a change's id, audit fields,
+/// dependencies and every op in order, each naming its block by version. Shared by the checked
+/// preparation and apply (`check_spans`) and the open's authorization bootstrap, so no path
+/// accepts a residue that would replay other history than the original. A payload that does not
+/// decode, or is not its record's canonical encoding, has no residue.
+pub(crate) fn residue_matches(kind: u8, payload: &[u8], r: &RedactionResidue) -> bool {
+    match (kind, r) {
+        (kinds::BLOCK, RedactionResidue::Block(res)) => decode::<Block>(payload)
+            .is_ok_and(|b| encode(&b) == payload && *res == BlockResidue::of(&b)),
+        (kinds::CHANGE, RedactionResidue::Change(res)) => decode::<Change>(payload)
+            .is_ok_and(|c| encode(&c) == payload && *res == ChangeResidue::of(&c)),
+        _ => false,
+    }
+}
+
+/// The versions a change residue's ops write (creates and updates), in op order.
+pub(crate) fn residual_versions(c: &ChangeResidue) -> impl Iterator<Item = &Hash> {
+    c.ops.iter().filter_map(|op| match op {
+        ResidualOp::Create { version, .. } | ResidualOp::Update { version, .. } => Some(version),
+        ResidualOp::Delete { .. } => None,
+    })
+}
+
+/// A manifest's versions and blobs are each in strictly ascending (canonical) order.
+pub(crate) fn manifest_in_order(m: &rdy_model::redaction::RedactionManifest) -> bool {
+    !(m.versions.windows(2).any(|w| w[0] >= w[1]) || m.blobs.windows(2).any(|w| w[0] >= w[1]))
+}
+
+/// The selector expansion rule of a request, shared by the checked preparation and apply
+/// (`check_selection`) and the open's authorization bootstrap: every target selects something
+/// the manifest lists (an all-versions target a version of its id, a version target that
+/// version of its id, a blob target that blob), and every manifest version and blob is selected
+/// by a target. That every listed version is a stored version of its id, and that an
+/// all-versions target lists every stored version, each path checks against its own view of the
+/// log. The error is the refusal's text.
+pub(crate) fn targets_agree(request: &Redaction) -> Result<(), String> {
+    let m = &request.manifest;
+    for t in &request.targets {
+        let found = match t {
+            RedactTarget::AllVersions(id) => m.versions.iter().any(|(i, _)| i == id),
+            RedactTarget::Version { id, version } => {
+                m.versions.binary_search(&(id.clone(), *version)).is_ok()
+            }
+            RedactTarget::Blob(h) => m.blobs.binary_search(h).is_ok(),
+        };
+        if !found {
+            return Err(format!(
+                "a redaction target selects nothing the manifest lists: {t:?}"
+            ));
+        }
+    }
+    for (id, v) in &m.versions {
+        let covered = request.targets.iter().any(|t| match t {
+            RedactTarget::AllVersions(i) => i == id,
+            RedactTarget::Version { id: i, version } => i == id && version == v,
+            RedactTarget::Blob(_) => false,
+        });
+        if !covered {
+            return Err(format!(
+                "the manifest lists version {id}@{v}, which no target selects"
+            ));
+        }
+    }
+    for b in &m.blobs {
+        if !request
+            .targets
+            .iter()
+            .any(|t| matches!(t, RedactTarget::Blob(h) if h == b))
+        {
+            return Err(format!(
+                "the manifest lists blob {b}, which no target selects"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The immutable checks of a request's manifest, shared by preparation and apply.
 impl Store {
     /// The manifest's selection against the store, and its agreement with the targets: canonical
@@ -816,7 +894,7 @@ impl Store {
     /// target. Any failure is `Refused`.
     fn check_selection(&self, request: &Redaction) -> Result<Selection, StoreError> {
         let m = &request.manifest;
-        if m.versions.windows(2).any(|w| w[0] >= w[1]) || m.blobs.windows(2).any(|w| w[0] >= w[1]) {
+        if !manifest_in_order(m) {
             return Err(refused(
                 "the manifest's versions and blobs are not in canonical order".into(),
             ));
@@ -842,43 +920,7 @@ impl Store {
             let manifest: BlobManifest = self.get_typed(kinds::BLOB_MANIFEST, b)?;
             chunks.extend(manifest.chunks);
         }
-        for t in &request.targets {
-            let found = match t {
-                RedactTarget::AllVersions(id) => m.versions.iter().any(|(i, _)| i == id),
-                RedactTarget::Version { id, version } => {
-                    m.versions.binary_search(&(id.clone(), *version)).is_ok()
-                }
-                RedactTarget::Blob(h) => m.blobs.binary_search(h).is_ok(),
-            };
-            if !found {
-                return Err(refused(format!(
-                    "a redaction target selects nothing the manifest lists: {t:?}"
-                )));
-            }
-        }
-        for (id, v) in &m.versions {
-            let covered = request.targets.iter().any(|t| match t {
-                RedactTarget::AllVersions(i) => i == id,
-                RedactTarget::Version { id: i, version } => i == id && version == v,
-                RedactTarget::Blob(_) => false,
-            });
-            if !covered {
-                return Err(refused(format!(
-                    "the manifest lists version {id}@{v}, which no target selects"
-                )));
-            }
-        }
-        for b in &m.blobs {
-            if !request
-                .targets
-                .iter()
-                .any(|t| matches!(t, RedactTarget::Blob(h) if h == b))
-            {
-                return Err(refused(format!(
-                    "the manifest lists blob {b}, which no target selects"
-                )));
-            }
-        }
+        targets_agree(request).map_err(refused)?;
         let mut changes: HashSet<Hash> = HashSet::new();
         for v in &versions {
             changes.extend(self.producers(v)?);
@@ -951,23 +993,19 @@ impl Store {
                         return Err(corrupt());
                     }
                     match (span.kind, residue) {
-                        (kinds::BLOCK, Some(RedactionResidue::Block(res))) => {
-                            let block: Block = decode(&payload).map_err(|_| corrupt())?;
-                            // the residue keeps the frame's own hash: a payload that decodes but
-                            // is not its block's canonical encoding cannot be given one
-                            if *res != BlockResidue::of(&block) {
+                        // the residue keeps the frame's own hash: a payload that decodes but is
+                        // not its record's canonical encoding cannot be given one
+                        (kinds::BLOCK, Some(res @ RedactionResidue::Block(_))) => {
+                            if !residue_matches(span.kind, &payload, res) {
                                 return Err(corrupt());
                             }
                         }
-                        (kinds::CHANGE, Some(RedactionResidue::Change(res))) => {
-                            let change: Change = decode(&payload).map_err(|_| corrupt())?;
-                            if *res != ChangeResidue::of(&change) {
+                        (kinds::CHANGE, Some(res @ RedactionResidue::Change(c))) => {
+                            if !residue_matches(span.kind, &payload, res) {
                                 return Err(corrupt());
                             }
-                            for op in &res.ops {
-                                if let ResidualOp::Create { version, .. }
-                                | ResidualOp::Update { version, .. } = op
-                                    && !sel.versions.contains(version)
+                            for version in residual_versions(c) {
+                                if !sel.versions.contains(version)
                                     && !self.has_kind(kinds::BLOCK, version)?
                                 {
                                     return Err(corrupt());

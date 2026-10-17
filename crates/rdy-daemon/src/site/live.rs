@@ -229,6 +229,8 @@ pub struct LiveSite {
     docs_changed: Mutex<Option<DocsChanged>>,
     /// Test hook: the barrier at each build's publication check.
     before_publish: Mutex<Option<Barrier>>,
+    /// Test hook: the barrier of a subscribe after its refresh, before its stream is registered.
+    after_subscribe_refresh: Mutex<Option<Barrier>>,
 }
 
 /// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
@@ -319,6 +321,7 @@ impl LiveSite {
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
             before_publish: Mutex::new(None),
+            after_subscribe_refresh: Mutex::new(None),
         })
     }
 
@@ -334,6 +337,14 @@ impl LiveSite {
     #[doc(hidden)]
     pub fn set_before_publish(&self, f: Option<BeforePublish>) {
         *lock(&self.before_publish) = f.map(Arc::from);
+    }
+
+    /// Test hook: from now on, each subscribe runs `f` with its scope after its refresh returns
+    /// and before its stream is registered (`None` removes it). A barrier in `f` holds the
+    /// subscribe there, holding no lock.
+    #[doc(hidden)]
+    pub fn set_after_subscribe_refresh(&self, f: Option<BeforePublish>) {
+        *lock(&self.after_subscribe_refresh) = f.map(Arc::from);
     }
 
     /// The docs `scope` changes, from the cache when what it reads is unchanged.
@@ -549,11 +560,20 @@ impl LiveSite {
         // the build read a state that a removal made old: the stream is compared again below
         let stale = matches!(&first, Err(e) if e.code == E_REDACTED_STATE);
         let refreshed = first.is_ok();
-        let current = sh.state.load().reader().redaction_epoch();
+        let hook = lock(&self.after_subscribe_refresh).clone();
+        if let Some(hook) = hook {
+            hook(scope);
+        }
         let mut inner = lock(&self.inner);
         if inner.closed || inner.streams() >= MAX_STREAMS {
             return Err(SiteBusy);
         }
+        // the store's epoch, sampled under the lock a build's fan-out takes (final review
+        // finding 4): a removal whose epoch moved before this sample is seen here, so the
+        // scope's old build is never compared as current; one whose epoch moves after it
+        // publishes its fresh state after the stream below is registered, and the fan-out of
+        // that state's build finds the stream
+        let current = sh.state.load().reader().redaction_epoch();
         inner.next_id += 1;
         let id = inner.next_id;
         let (tx, rx) = mpsc::channel(STREAM_QUEUE);

@@ -930,24 +930,62 @@ fn rdx5_daemon_redact_reports_and_records() {
         json!({"targets": [id], "reason_class": "legal", "reason": "x", "dry_run": true, "max_tokens": 20000}),
     )
     .unwrap();
-    let need = full["text"].as_str().unwrap().len() / 4;
-    let short = dispatch(
+    // final review fix round 1, finding 6: one token short of the full text, the shortened
+    // text must fit (its one row-list line replaces six outside rows and the inside rows, far
+    // more than four bytes), so the reply is a truncated success, never a refusal
+    let full_text = full["text"].as_str().unwrap();
+    assert!(full.get("truncated").is_none(), "{full}");
+    let need = full_text.len() / 4;
+    assert!(
+        need > 256,
+        "the full text is over the smallest budget: {need}"
+    );
+    let rows = full["report"]["inside"].as_array().unwrap().len()
+        + full["report"]["outside"].as_array().unwrap().len();
+    assert!(rows >= 7, "the report has rows to omit: {full}");
+    let v = dispatch(
         &c,
         "redact",
         json!({"targets": [id], "reason_class": "legal", "reason": "x", "dry_run": true, "max_tokens": need - 1}),
+    )
+    .unwrap();
+    assert_eq!(v["truncated"], true, "{v}");
+    let short = v["text"].as_str().unwrap();
+    assert!(short.len() / 4 < need);
+    assert!(
+        short.contains("\nThe row list was omitted. Increase max_tokens to read it.\n"),
+        "{short}"
     );
-    match short {
-        Ok(v) => {
-            assert_eq!(v["truncated"], true);
-            assert!(
-                v["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("The row list was omitted.")
-            );
-        }
-        Err(err) => assert_eq!(err.code, rdy_engine::E_REDACTION_BUDGET),
+    assert!(
+        !short.contains("location unknown."),
+        "the rows are omitted: {short}"
+    );
+    let warnings = full["warnings"].as_array().unwrap();
+    assert!(!warnings.is_empty());
+    for w in warnings {
+        let line = format!(
+            "{}: {}",
+            w["code"].as_str().unwrap(),
+            w["message"].as_str().unwrap()
+        );
+        assert!(short.contains(&line), "every warning stays: {line}");
     }
+    assert_eq!(
+        v["report"], full["report"],
+        "the structured report is complete"
+    );
+    assert!(short.ends_with("\nNo request was recorded."), "{short}");
+    // a budget the lines that never truncate exceed (a 4096-byte reason at 256 tokens) is
+    // refused, and writes nothing
+    let end = e.read().seq();
+    let err = dispatch(
+        &c,
+        "redact",
+        json!({"targets": [id], "reason_class": "legal", "reason": "r".repeat(4096), "dry_run": true, "max_tokens": 256}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_REDACTION_BUDGET, "{err}");
+    assert_eq!(e.read().seq(), end);
     let end = e.read().seq();
     for bad in [255, 20_001] {
         let err = dispatch(

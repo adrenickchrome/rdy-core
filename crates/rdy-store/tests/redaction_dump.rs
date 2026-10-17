@@ -1175,3 +1175,188 @@ fn rdx9_only_a_valid_authorization_releases_its_claim() {
         assert!(no_store(&to));
     }
 }
+
+/// A closed store holding one change that creates the secret block `a` and the bystander block
+/// `b`, and a two-chunk blob, with one authorized request (altered by `on_draft`) written by the
+/// raw fixture and never opened since: its removal is not erased yet.
+struct Raw {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    fixture: Fixture,
+}
+
+fn raw_source(
+    on_draft: impl Fn(&mut redaction_fixture::Draft, &Block, &Block, Hash) + 'static,
+) -> Raw {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("raw");
+    let mut s = Store::create(&path).unwrap();
+    let a = block("b-00001", "canary alpha secret");
+    let b = block("b-00002", "bravo stays");
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![
+                Op::Create { block: a.clone() },
+                Op::Create { block: b.clone() },
+            ],
+        ),
+    )
+    .unwrap();
+    let mut bytes = b"blob canary ".repeat(100_000);
+    bytes.truncate(1024 * 1024 + 4096); // two chunks
+    let blob = s.put_blob(&bytes).unwrap();
+    drop(s);
+    let spec = RequestSpec::new(
+        "work",
+        vec![
+            RedactTarget::Version {
+                id: a.id.clone(),
+                version: a.version_hash(),
+            },
+            RedactTarget::Blob(blob),
+        ],
+    );
+    let mut opts = FixtureOptions::approved(Proof::local_human());
+    opts.on_draft = Some(Box::new(move |_, d| on_draft(d, &a, &b, blob)));
+    let fixture = authorized_batch_fixture(&path, &[spec], &opts);
+    Raw {
+        _dir: dir,
+        path,
+        fixture,
+    }
+}
+
+/// The batches of the closed store at `path`, read from its segment files (every frame present),
+/// and where each frame is: (location, batch index, frame index).
+fn raw_batches(path: &Path) -> (Vec<DumpBatch>, Vec<(Location, usize, usize)>) {
+    let mut out = vec![];
+    let mut places = vec![];
+    for (seg, (_, bytes)) in segment_bytes(path).iter().enumerate() {
+        let mut at = 0usize;
+        let mut start = None;
+        let mut frames = vec![];
+        while at + HEAD <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            let kind = bytes[at + 4];
+            let hash = Hash(bytes[at + 5..at + HEAD].try_into().unwrap());
+            let payload = bytes[at + HEAD..at + HEAD + len].to_vec();
+            let loc = Location {
+                segment: seg as u32,
+                offset: at as u64,
+            };
+            if kind == kinds::BATCH_COMMIT {
+                let mut b = DumpBatch {
+                    start: start.take().unwrap(),
+                    digest: Hash([0; 32]),
+                    frames: std::mem::take(&mut frames),
+                };
+                set_digest(&mut b);
+                out.push(b);
+            } else {
+                start.get_or_insert(loc);
+                places.push((loc, out.len(), frames.len()));
+                frames.push(Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                });
+            }
+            at += HEAD + len;
+        }
+        assert!(frames.is_empty(), "every batch of the raw store is sealed");
+    }
+    (out, places)
+}
+
+/// `batches` as a dump of a store that erased the request's spans of `kinds_dropped`: each such
+/// frame travels as a dropped record naming the apply and the span's residue.
+fn with_drops(raw: &Raw, kinds_dropped: &[u8]) -> Vec<DumpBatch> {
+    let (mut batches, places) = raw_batches(&raw.path);
+    let apply = raw.fixture.applies[0].0;
+    for span in &raw.fixture.requests[0].draft.request.manifest.spans {
+        if !kinds_dropped.contains(&span.kind) {
+            continue;
+        }
+        let loc = Location {
+            segment: span.place.segment,
+            offset: span.place.offset,
+        };
+        let (_, i, j) = places.iter().find(|(l, ..)| *l == loc).unwrap();
+        batches[*i].frames[*j] = Frame::Dropped {
+            kind: span.kind,
+            hash: span.hash,
+            len: span.len,
+            apply,
+            residue: span.residue,
+        };
+    }
+    batches
+}
+
+/// Final review fix round 1, findings 1 and 2, the imported case: a load checks the log's
+/// applies with the store's full semantic validation before it finishes the store. A dump whose
+/// request selects another block than its manifest removes, whose manifest omits the change
+/// that embeds the removed version (left intact in the dump), or whose change residue drops the
+/// sibling's op while the original change travels intact, is refused, and the target holds no
+/// store. A consistent dump, with all spans dropped or with an intact span still to erase,
+/// loads and opens.
+#[test]
+fn rdx9_a_load_refuses_an_inconsistent_request() {
+    let all = [BLOCK, CHANGE, BLOB_CHUNK];
+    let no_change = [BLOCK, BLOB_CHUNK];
+    // consistent: every span dropped, or the change span still intact
+    for (name, dropped) in [("all dropped", &all[..]), ("change intact", &no_change[..])] {
+        let raw = raw_source(|_, _, _, _| {});
+        let to = raw._dir.path().join("ok");
+        ingest(&to, &with_drops(&raw, dropped)).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let s = Store::open(&to).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        s.check_objects().unwrap();
+    }
+    type Hook = Box<dyn Fn(&mut redaction_fixture::Draft, &Block, &Block, Hash)>;
+    let cases: Vec<(&str, Hook, &[u8])> = vec![
+        (
+            "the selector names another block",
+            Box::new(|d, _, b, blob| {
+                d.request.targets = vec![
+                    RedactTarget::Version {
+                        id: b.id.clone(),
+                        version: b.version_hash(),
+                    },
+                    RedactTarget::Blob(blob),
+                ];
+            }),
+            &all,
+        ),
+        (
+            "the manifest omits the embedding change",
+            Box::new(|d, _, _, _| {
+                d.request.manifest.spans.retain(|s| s.kind != CHANGE);
+                d.residues
+                    .retain(|r| matches!(r, rdy_model::redaction::RedactionResidue::Block(_)));
+            }),
+            &no_change,
+        ),
+        (
+            "the change residue drops the sibling's op",
+            Box::new(|d, _, _, _| {
+                for r in &mut d.residues {
+                    if let rdy_model::redaction::RedactionResidue::Change(c) = r {
+                        c.ops.truncate(1);
+                    }
+                }
+                let residues = d.residues.clone();
+                redaction_fixture::relink(&mut d.request, &residues);
+            }),
+            &no_change,
+        ),
+    ];
+    for (name, hook, dropped) in cases {
+        let raw = raw_source(move |d, a, b, blob| hook(d, a, b, blob));
+        let to = raw._dir.path().join("refused");
+        let e = ingest(&to, &with_drops(&raw, dropped)).unwrap_err();
+        assert_eq!(what(e), NO_AUTHORIZATION, "{name}");
+        assert!(no_store(&to), "{name}: the target holds no store");
+    }
+}

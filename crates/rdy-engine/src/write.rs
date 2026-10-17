@@ -1754,6 +1754,9 @@ fn build_ops(
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
+                // the content of a removed version's projection as the edit found it: an edit
+                // that changes it authors a normal version (below)
+                let projected = cur.read_identity.is_some().then(|| block.clone());
                 let retyped = block_type.filter(|t| *t != cur.block_type);
                 let edits = retyped.is_some()
                     || !fields.is_empty()
@@ -1793,6 +1796,22 @@ fn build_ops(
                             block.links.insert(kind, targets);
                         }
                     }
+                }
+                // final review finding 3: a person's fresh type, fields, body or links over a
+                // removed version's projection is new content, not the projection: it is
+                // written as a normal version (no read identity, its own version hash, the
+                // projection's version as its base). The frozen and schema checks below still
+                // compare it with the projection (`cur`), and an edit that leaves the projected
+                // content as it was keeps the read identity, so the store's and the engine's
+                // input boundaries refuse it (`E_REDACTED`), as they refuse a version hash a
+                // redaction removed.
+                if let Some(p) = &projected
+                    && (block.block_type != p.block_type
+                        || block.fields != p.fields
+                        || block.body != p.body
+                        || block.links != p.links)
+                {
+                    block.read_identity = None;
                 }
                 let moves = move_to.is_some();
                 let mut rekeys = Rekeys::new();

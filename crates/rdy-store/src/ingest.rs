@@ -75,6 +75,9 @@ pub struct Ingest {
     frames: u64,
     /// Whether an ingested frame set `meta/repo_id`.
     has_repo_id: bool,
+    /// Whether an ingested frame is a `REDACTION_APPLY`: `finish` then checks the log's
+    /// authorization even when no frame was dropped.
+    has_apply: bool,
     /// The dropped frames so far, in log order, at most `MAX_PENDING_DROPS`.
     pending: Vec<PendingDrop>,
     /// The zero bytes written for dropped frames not yet released, at most
@@ -121,6 +124,7 @@ impl Ingest {
             batches: 0,
             frames: 0,
             has_repo_id: false,
+            has_apply: false,
             pending: Vec::new(),
             unauthorized: 0,
         })
@@ -171,6 +175,7 @@ impl Ingest {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
+                    self.has_apply |= *kind == kinds::REDACTION_APPLY;
                     sets_repo_id |= *kind == kinds::REF_UPDATE
                         && postcard::from_bytes::<RefUpdate>(payload)
                             .is_ok_and(|u| u.name == REF_REPO_ID);
@@ -259,8 +264,12 @@ impl Ingest {
         Ok(())
     }
 
-    /// Checks every dropped frame against the complete log, before the store is finished: the
-    /// store's authorization bootstrap (`redaction_io::bootstrap`) must hold its location as an
+    /// Checks the log's redaction applies and every dropped frame against the complete log,
+    /// before the store is finished. It runs when a frame was dropped or an apply was ingested:
+    /// the store's authorization bootstrap with its full semantic pass
+    /// (`redaction_io::bootstrap_full`: a request selects exactly what its manifest removes, every
+    /// physical copy of selected content is a span, and every intact span is what its residue
+    /// records) must accept the log, and must hold each dropped frame's location as an
     /// authorized span with its original kind, hash and length, from the first valid apply that
     /// authorizes it, which the record names, and with the residue the record names. Refusals
     /// (`StoreError::Dump`): a span the log's applies place elsewhere or with another header is
@@ -268,11 +277,11 @@ impl Ingest {
     /// apply than the record names, is `dropped frame has no valid authorization`; another
     /// residue is `dropped frame has an invalid residue`. An I/O error stays one.
     fn check_drops(&self) -> Result<(), StoreError> {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && !self.has_apply {
             return Ok(());
         }
         let refuse = |what: &str| Err(dump_error(what.into()));
-        let auth = match redaction_io::bootstrap(self.log.readers()) {
+        let auth = match redaction_io::bootstrap_full(self.log.readers()) {
             Ok(auth) => auth,
             Err(StoreError::Io(e)) => return Err(StoreError::Io(e)),
             Err(StoreError::RedactionCorrupt { segment, offset }) => {

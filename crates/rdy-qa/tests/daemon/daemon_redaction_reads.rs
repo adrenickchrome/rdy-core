@@ -626,3 +626,75 @@ fn rdx14_a_subscribe_across_removal_gets_the_refresh() {
     );
     assert!(!build_holds(&b, SECRET));
 }
+
+/// Holds each subscribe of `scope` after its refresh, before its stream is registered: returns
+/// the channel that says it is there and the one that lets it go on.
+fn hold_after_refresh(site: &LiveSite, scope: ScopeRef) -> (Receiver<()>, Sender<()>) {
+    let (at_tx, at_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let at_tx = Mutex::new(at_tx);
+    let go_rx = Mutex::new(go_rx);
+    site.set_after_subscribe_refresh(Some(Box::new(move |s: &ScopeRef| {
+        if *s == scope {
+            let _ = at_tx.lock().unwrap().send(());
+            let _ = go_rx.lock().unwrap().recv();
+        }
+    })));
+    (at_rx, go_tx)
+}
+
+/// Final review fix round 1, finding 4: a subscribe whose refresh succeeded (a build of the
+/// state before a removal) and that is paused before its stream is registered, while the
+/// removal is authorized, its fresh state published and the worker's step for that publish has
+/// run (with no stream to send to), still gets the refresh event: the comparison never uses the
+/// old build as current. The page is opened at the old build's exact revisions, so only the
+/// removal can make it reload.
+#[test]
+fn rdx14_a_successful_subscribe_refresh_across_removal_gets_the_refresh() {
+    let (h, ids) = host();
+    let sh = shared(&h);
+    let tag = ScopeRef::Tag("v1.0.0".into());
+    // a site with no worker: nothing refreshes the scope but the calls below
+    let site = LiveSite::new();
+    let p = request(&sh, &ids.secret, "redact");
+    let before = epoch(&sh);
+    // the build of the state before the removal, and the page of it that shows the secret
+    let old = site.refresh(&sh, &tag).unwrap();
+    assert_eq!(old.epoch, before);
+    let page = old
+        .revs
+        .keys()
+        .find(|k| {
+            old.files[*k]
+                .windows(SECRET.len())
+                .any(|w| w == SECRET.as_bytes())
+        })
+        .expect("a page shows the secret")
+        .clone();
+    let (rev, label_rev) = (old.revs[&page].clone(), old.label_rev.clone());
+    let (at, go) = hold_after_refresh(&site, tag.clone());
+    let opening = {
+        let (sh, site, tag, page) = (Arc::clone(&sh), Arc::clone(&site), tag.clone(), page);
+        std::thread::spawn(move || site.subscribe(&sh, &tag, &page, &rev, &label_rev))
+    };
+    // the subscribe's refresh succeeded with the old build; it waits before registering
+    at.recv().unwrap();
+    on_writer(&sh, move |r| approve(r, &p));
+    assert!(epoch(&sh) > before, "the removal advanced the epoch");
+    assert!(
+        sh.state.load().ensure_current_epoch().is_ok(),
+        "the fresh state is published"
+    );
+    assert_eq!(site.step(&sh), 0, "no open stream: the step builds nothing");
+    site.set_after_subscribe_refresh(None);
+    go.send(()).unwrap();
+    let mut sub = opening.join().unwrap().expect("the stream opens");
+    assert_eq!(
+        sub.rx.try_recv().ok(),
+        Some(LiveEvent::Reload),
+        "the page opened at the old build reloads"
+    );
+    let b = site.refresh(&sh, &tag).unwrap();
+    assert_eq!(b.epoch, epoch(&sh));
+    assert!(!build_holds(&b, SECRET));
+}

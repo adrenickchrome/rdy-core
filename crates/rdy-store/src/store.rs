@@ -2254,6 +2254,15 @@ impl StoreReader {
         self.index().producers(version)
     }
 
+    /// Calls `f` with every block version some change produced, once each, in ascending hash
+    /// order, from the index (no log walk).
+    pub fn for_each_produced_version(
+        &self,
+        f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.index().for_each_produced_version(f)
+    }
+
     /// The changes with an op that deletes `block`, ascending.
     pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
         self.index().deleters(block)

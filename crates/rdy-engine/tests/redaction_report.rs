@@ -2423,3 +2423,148 @@ fn rdx5_a_request_computes_its_report_once() {
         "a recorded request computes its report once, under the writer"
     );
 }
+
+/// Final review fix round 1, finding 5 (ruling final): the shortened presentation keeps the
+/// counts, every warning, the result, the reason and the report hash; the targets are listed in
+/// canonical order while they fit, then one line says how many more there are and where the
+/// full list is. 256 valid `id@hash` selectors fit the default 4000-token budget that way; the
+/// JSON report still lists all 256, and the manifest hash is the one a 20000-token text shows.
+#[test]
+fn rdx5_the_shortened_text_lists_targets_while_they_fit() {
+    use rdy_engine::redaction::presentation::{DEFAULT_TOKENS, MAX_TOKENS, ROWS_OMITTED};
+    use rdy_engine::redaction::report_text;
+    let mut p = base();
+    let ops: Vec<serde_json::Value> = (0..256)
+        .map(|i| {
+            json!({"op": "create", "type": "prose", "parent": p.section.to_string(), "body": format!("Paragraph {i} of the leak.")})
+        })
+        .collect();
+    let w = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        serde_json::Value::Array(ops),
+        "",
+    );
+    let targets: Vec<String> = w
+        .created
+        .values()
+        .map(|i| {
+            let b = id(i);
+            format!("{b}@{}", version(&p.r, "work", &b))
+        })
+        .collect();
+    assert_eq!(targets.len(), 256);
+    let res = rdy_engine::redaction::dry_run(&p.r.read(), &input(&targets, true)).unwrap();
+    assert_eq!(
+        res.report.targets.len(),
+        256,
+        "the JSON report lists every target"
+    );
+    let json = serde_json::to_value(&res).unwrap();
+    assert_eq!(json["report"]["targets"].as_array().unwrap().len(), 256);
+
+    let full = report_text(&res, MAX_TOKENS).unwrap();
+    assert!(!full.truncated);
+    assert_eq!(full.text.matches("\nTarget: ").count(), 256);
+
+    let short = report_text(&res, DEFAULT_TOKENS).unwrap();
+    assert!(short.truncated);
+    assert!(short.text.len() / 4 <= DEFAULT_TOKENS);
+    let lines: Vec<&str> = short.text.lines().collect();
+    assert_eq!(lines[0], "Redaction dry run");
+    let shown = lines.iter().filter(|l| l.starts_with("Target: ")).count();
+    assert!(shown > 0 && shown < 256, "{shown}");
+    // the shown targets are the first ones, in canonical order
+    let canonical: Vec<String> = full
+        .text
+        .lines()
+        .filter(|l| l.starts_with("Target: "))
+        .map(String::from)
+        .collect();
+    assert_eq!(lines[1..=shown], canonical[..shown]);
+    assert_eq!(
+        lines[shown + 1],
+        format!(
+            "… and {} more targets; the full list is in the JSON report (--json) and bound by report {}",
+            256 - shown,
+            res.report.report_hash
+        )
+    );
+    assert!(lines[shown + 2].starts_with("Versions: 256; blobs: 0;"));
+    assert!(lines[shown + 3].starts_with("Payloads: "));
+    assert_eq!(lines[shown + 4], ROWS_OMITTED);
+    // every mandatory line of the full text is in the shortened one
+    for l in full.text.lines().filter(|l| {
+        l.starts_with("Reason (")
+            || l.starts_with("W_REDACTION_")
+            || l.starts_with("Recorded assessments")
+    }) {
+        assert!(lines.contains(&l), "{l}");
+    }
+    assert_eq!(*lines.last().unwrap(), "No request was recorded.");
+    // one more target would not fit
+    let mut one_more = lines[..=shown].to_vec();
+    one_more.push(canonical[shown].as_str());
+    let longer = [one_more.as_slice(), &lines[shown + 1..]]
+        .concat()
+        .join("\n");
+    assert!(longer.len() / 4 > DEFAULT_TOKENS);
+    // the manifest is the same whatever the budget
+    let again = rdy_engine::redaction::dry_run(&p.r.read(), &input(&targets, true)).unwrap();
+    assert_eq!(again.report.report_hash, res.report.report_hash);
+
+    // the mandatory lines alone over the budget: refused, as before
+    let mut long = input(&targets, true);
+    long.reason = "r".repeat(4096);
+    let res = rdy_engine::redaction::dry_run(&p.r.read(), &long).unwrap();
+    let e = report_text(&res, 256).unwrap_err();
+    assert_eq!(e.code, E_REDACTION_BUDGET);
+}
+
+/// Final review fix round 1, finding 7: the validation order of the brief ("reason; expansion;
+/// scan"): an unknown all-versions id and a selection over the selected-object bound are found
+/// before the scan, so lowered scan bounds never mask them; with valid targets the scan bound
+/// still refuses.
+#[test]
+fn rdx5_expansion_errors_precede_the_scan_bounds() {
+    let p = base();
+    let st = p.r.read();
+    let d = Limits::default();
+    let tiny_scan = [
+        Limits { frames: 1, ..d },
+        Limits { bytes: 1, ..d },
+        Limits {
+            frames: 1,
+            bytes: 1,
+            selected: 0,
+            ..d
+        },
+    ];
+    for lim in tiny_scan {
+        let _g = override_limits_for_tests(lim);
+        // an unknown all-versions id, beside a valid target
+        let unknown = vec![p.prose.to_string(), "p-ZZZZZ".to_string()];
+        let e = st.redaction_report(&input(&unknown, true)).unwrap_err();
+        assert_eq!(e.code, E_REDACTION_TARGET, "{lim:?}: {e}");
+        assert_eq!(e.message, "Cannot redact p-ZZZZZ: unknown target.");
+    }
+    // over the selected-object bound, with the scan bounds too small as well
+    for (frames, bytes) in [(1, d.bytes), (d.frames, 1), (1, 1)] {
+        let _g = override_limits_for_tests(Limits {
+            frames,
+            bytes,
+            selected: 1,
+            ..d
+        });
+        let both = vec![p.prose.to_string(), p.term.to_string()];
+        let e = st.redaction_report(&input(&both, true)).unwrap_err();
+        assert_eq!(e.code, E_REDACTION_LIMIT, "{e}");
+        assert_eq!(e.message, "The redaction exceeds 100000 selected objects.");
+        // a selection within the bound meets the scan bound
+        let one = vec![p.prose.to_string()];
+        let e = st.redaction_report(&input(&one, true)).unwrap_err();
+        assert_eq!(e.code, E_REDACTION_LIMIT);
+        assert!(e.message.contains("scanned"), "{e}");
+    }
+}

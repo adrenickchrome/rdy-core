@@ -962,3 +962,194 @@ fn rdx10_own_ref_updates_never_stale_a_request() {
         assert_eq!(canon_prose(&p.r.read(), &p).body, body, "{body}");
     }
 }
+
+/// Lands the removal of the prose block's canon version, approved by the person.
+fn remove_prose(p: &mut P) {
+    let target = vec![version_target(p)];
+    request(p, &writer(), "redact", target);
+    let prop = propose(p, &writer(), "redact");
+    p.r.land(&approver(), &prop.id).unwrap();
+}
+
+fn update(r: &mut Rdy, view: &str, ops: serde_json::Value) -> Result<WriteResult, RdyError> {
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: view.into(),
+            ops: serde_json::from_value(ops).unwrap(),
+            justification: None,
+            message: format!("write to {view}"),
+        },
+    )
+}
+
+/// Final review fix round 1, finding 3: a person replaces the notice of a removed mutable block
+/// with fresh text. The write, the edit op the CLI's `rdy edit` sends and the working copy's
+/// commit each author a normal version (no read identity, a new version hash, the stub's version
+/// as its base). A write that leaves the projection unchanged, and one that would bring the
+/// erased bytes back, stay refused with `E_REDACTED`.
+#[test]
+fn rdx10_a_fresh_edit_of_a_removed_block_writes_a_normal_version() {
+    let _clock = pin_clock(3_000_000);
+    let mut p = landed();
+    remove_prose(&mut p);
+    let stub = canon_prose(&p.r.read(), &p);
+    assert_eq!(stub.body, CONTENT_REMOVED);
+    assert!(stub.read_identity.is_some());
+    let erased = stub.version_hash();
+    let prose = p.prose.to_string();
+    let fresh = |r: &Rdy, view: &str, body: &str| {
+        let b = r
+            .read()
+            .block(&Scope::View(view.into()), &BlockId::parse(&prose).unwrap())
+            .unwrap();
+        assert_eq!(b.body, body, "{view}");
+        assert!(b.read_identity.is_none(), "{view}: a normal version");
+        assert_ne!(b.version_hash(), erased, "{view}");
+        assert_eq!(b.parent, stub.parent, "{view}: the stub's place is kept");
+        assert_eq!(b.order, stub.order, "{view}");
+        b
+    };
+
+    // the write path
+    let w = update(
+        &mut p.r,
+        "fix",
+        json!([{"op": "update", "id": prose, "body": "New safe replacement text."}]),
+    )
+    .unwrap();
+    let b = fresh(&p.r, "fix", "New safe replacement text.");
+    let change = p.r.store().change(&w.change.parse().unwrap()).unwrap();
+    assert!(matches!(
+        &change.ops[0],
+        rdy_model::Op::Update { base, block } if *base == erased && block.version_hash() == b.version_hash()
+    ));
+    assert!(!on_disk(p.dir.path(), SECRET));
+
+    // the edit op (`rdy edit`, the daemon's edit_block): the stub's YAML with fresh text
+    let mut edited = stub.clone();
+    edited.read_identity = None;
+    edited.body = "Edited by a person.".into();
+    p.r.edit_block_with(&writer(), "edit", edited, None, None)
+        .unwrap();
+    fresh(&p.r, "edit", "Edited by a person.");
+
+    // the working copy's commit: a checkout writes the notice; the person replaces it
+    let pack = rdy_schema::PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .unwrap();
+    let m = p.r.read().materialized(&Scope::Canon).unwrap();
+    let proj = rdy_engine::wc::project::project_state(&m, &pack, "wc", "canon:test", None).unwrap();
+    let file = proj
+        .files
+        .iter()
+        .find(|f| f.text.contains(CONTENT_REMOVED))
+        .unwrap()
+        .path
+        .clone();
+    let wc = tempfile::tempdir().unwrap();
+    let place = rdy_engine::wc::state::Place::main(wc.path());
+    let mut wst = rdy_engine::wc::state::WcState::default();
+    let tree = rdy_engine::wc::layout::read_tree(
+        &place.root,
+        &rdy_engine::wc::ignore::Ignore::empty(),
+        &pack,
+    );
+    rdy_engine::wc::files::checkout(&place, &mut wst, &tree, &proj, false).unwrap();
+    let text = std::fs::read_to_string(place.root.join(&file)).unwrap();
+    let text = text.replacen(CONTENT_REMOVED, "Written in the working copy.", 1);
+    std::fs::write(place.root.join(&file), &text).unwrap();
+    let wst = rdy_engine::wc::state::WcState::load(&place).unwrap();
+    rdy_engine::wc::state::stage_put(&place, &file, text.as_bytes()).unwrap();
+    let plan = rdy_engine::wc::plan::plan_commit(&place, &wst, &pack)
+        .unwrap_or_else(|e| panic!("{:#?}", e.diags));
+    assert_eq!(plan.ops.len(), 1, "{:?}", plan.ops);
+    update(&mut p.r, "wc", serde_json::Value::Array(plan.ops.clone())).unwrap();
+    fresh(&p.r, "wc", "Written in the working copy.");
+
+    // an unchanged projection is refused: the edit op with the notice as it was
+    let mut same = stub.clone();
+    same.read_identity = None;
+    let e =
+        p.r.edit_block_with(&writer(), "same", same, None, None)
+            .unwrap_err();
+    assert_eq!(e.code, E_REDACTED, "{e}");
+    // and so is a move that keeps the notice
+    let e = update(
+        &mut p.r,
+        "moved",
+        json!([{"op": "move", "id": prose, "parent": stub.parent.as_ref().unwrap().to_string()}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_REDACTED, "{e}");
+    // the erased bytes stay refused
+    let e = update(
+        &mut p.r,
+        "restore",
+        json!([{"op": "update", "id": prose, "body": SECRET}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_REDACTED, "{e}");
+    assert!(!e.message.contains(SECRET));
+}
+
+/// Final review fix round 1, finding 3: a fresh edit of a removed accepted decision is still
+/// checked against the old projection's frozen fact: it is `E_FROZEN`, never a normal version.
+#[test]
+fn rdx10_a_fresh_edit_of_a_removed_frozen_decision_is_refused() {
+    let _clock = pin_clock(4_000_000);
+    let mut p = landed();
+    let section = canon_prose(&p.r.read(), &p).parent.unwrap();
+    let d =
+        p.r.decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: section.to_string(),
+                statement: "Ship weekly".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let dec = id(&d.created["$decision"]);
+    let prop =
+        p.r.propose(&writer(), "work", "Decide", Some("Decides the cadence."))
+            .unwrap();
+    // the person confirms the decision's exception card, then lands
+    let refs: Vec<String> = queue(&p.r)
+        .into_iter()
+        .filter(|i| i.batch.as_deref() == Some(prop.r#ref.as_str()))
+        .map(|i| i.r#ref)
+        .collect();
+    assert!(!refs.is_empty());
+    for r in refs {
+        answer(
+            &mut p.r,
+            &approver(),
+            &r,
+            "confirm",
+            None,
+            RelayInput::default(),
+        )
+        .unwrap();
+    }
+    p.r.land(&approver(), &prop.id).unwrap();
+    let v =
+        p.r.read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .version_of(&dec)
+            .unwrap();
+    request(&mut p, &writer(), "redact", vec![format!("{dec}@{v}")]);
+    let prop = propose(&mut p, &writer(), "redact");
+    p.r.land(&approver(), &prop.id).unwrap();
+    let stub = p.r.read().block(&Scope::Canon, &dec).unwrap();
+    assert!(stub.is_redacted() && rdy_model::decision::is_frozen(&stub));
+    let e = update(
+        &mut p.r,
+        "fix",
+        json!([{"op": "update", "id": dec.to_string(), "fields": {"statement": "Ship daily"}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_FROZEN, "{e}");
+}

@@ -1142,15 +1142,23 @@ fn deleted_words(html: &str) -> String {
 fn rdx11_a_neutral_path_that_matches_a_sibling_refuses_and_keeps_the_last_site() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let w = write(
+    write(
         &mut r,
         "w1",
         json!([
-            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "secret", "title": "CANARY doc title", "doc_type": "page"}},
-            {"op": "create", "type": "prose", "parent": "$a", "body": "Kept text of the removed doc."}
+            {"op": "create", "type": "doc", "id": "d-SECRT", "fields": {"name": "secret", "title": "CANARY doc title", "doc_type": "page"}}
         ]),
     );
-    let removed = bid(&w.created["$a"]);
+    // a fixed id with letters, so the case-folded name always differs from it (a random id
+    // can be all digits; final review fix round 1, finding 10)
+    let removed = bid("d-SECRT");
+    write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "prose", "parent": "d-SECRT", "body": "Kept text of the removed doc."}
+        ]),
+    );
     let lower = removed.to_string().to_ascii_lowercase();
     assert_ne!(lower, removed.to_string(), "the id has upper-case letters");
     let w = write(

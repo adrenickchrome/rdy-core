@@ -782,6 +782,28 @@ impl Index {
         Ok(out)
     }
 
+    /// Calls `f` with every version hash some change produced, once each, in ascending hash
+    /// order: one read of the producers table, no log walk.
+    pub fn for_each_produced_version(
+        &self,
+        mut f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(PRODUCERS).map_err(db)?;
+        let mut last: Option<Hash> = None;
+        for item in t.iter().map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            // every key is a version and a change, 64 bytes; anything shorter is damage
+            let v = hash_from(key.get(..32).unwrap_or(key), "producer entry")?;
+            if last != Some(v) {
+                last = Some(v);
+                f(v)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The ops of `view`'s chain, in ascending hash order.
     pub fn view_ops(&self, view: &str) -> Result<Vec<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;

@@ -14,19 +14,29 @@
 //! unknown hole, a damaged header, a missing residue, a broken marker or a missing apply is
 //! corruption (`StoreError::RedactionCorrupt`).
 //!
+//! Before any zero write (an erasure with work left, a load, the live writer) the bootstrap also
+//! checks each apply's meaning against the log as the checked apply path does ([`check_log`]):
+//! its request selects exactly what its manifest removes, every physical copy of the selected
+//! content is a span, and every intact span is exactly what its residue records, so a removal
+//! never erases unselected content, never leaves a readable copy and never changes the history
+//! a residue replays.
+//!
 //! The scope is the active store files. File-system snapshots, backups, responses already sent,
 //! old dumps and media remnants are outside it (`W_REDACTION_COPIES`); quarantine files are
 //! possible copies (F2(c)), and nothing here lists or removes them.
 use crate::error::StoreError;
 use crate::index::IndexEntry;
 use crate::kinds::{self, BlobManifest};
-use crate::redaction::{is_redaction_kind, is_removable};
+use crate::redaction::{
+    check_bounds, is_redaction_kind, is_removable, manifest_in_order, residual_versions,
+    residue_matches, targets_agree,
+};
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
 use crate::store::{decode, encode};
 use rdy_model::redaction::{
     MAX_RECORD_BYTES, Redaction, RedactionApply, RedactionResidue, ResidualOp, record_buffer,
 };
-use rdy_model::{Assurance, BlockId, Hash, LandingRecord, Role};
+use rdy_model::{Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Role};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -289,31 +299,32 @@ struct ApplyFrame {
     landings: Vec<(Location, Hash)>,
 }
 
-/// The records of one batch while its marker is not yet met.
+/// The records of one batch while its marker is not yet met. Only redaction records and the
+/// batch's landings are kept: a plain store's header pass retains nothing per content frame.
 #[derive(Default)]
 struct Pending {
     since: Vec<(u64, Hash)>,
     requests: Vec<(Location, Hash)>,
     residues: Vec<(Location, Hash)>,
-    manifests: Vec<(Location, Hash)>,
-    removable: Vec<Location>,
     landings: Vec<(Location, Hash)>,
     applies: Vec<ApplyFrame>,
 }
 
-/// What the header pass collected from the sealed batches, in log order.
+/// What the header pass collected from the sealed batches, in log order. It holds the redaction
+/// records and the landings of apply batches, never a location per content frame (final review
+/// finding 8): the spans' frame boundaries and the blob manifests are looked up by the log pass
+/// ([`check_log`]) only when an apply exists.
 #[derive(Default)]
 struct Collected {
     requests: Vec<(Location, Hash)>,
     request_at: HashMap<Hash, Location>,
     residue_at: HashMap<Hash, Location>,
-    manifest_at: HashMap<Hash, Location>,
-    /// The start of every removable frame (BLOCK, CHANGE, BLOB_CHUNK), sorted.
-    removable: Vec<Location>,
     applies: Vec<ApplyFrame>,
-    /// Payloads of a batch not yet written (the live writer's), by location.
-    memory: BTreeMap<Location, Vec<u8>>,
+    /// Frames of a batch not yet written (the live writer's): kind and payload, by location.
+    memory: BTreeMap<Location, (u8, Vec<u8>)>,
     batches: u64,
+    /// The end of the last batch whose marker matched it.
+    sealed_end: Option<Location>,
 }
 
 impl Collected {
@@ -325,10 +336,6 @@ impl Collected {
         for (loc, h) in p.residues {
             self.residue_at.entry(h).or_insert(loc);
         }
-        for (loc, h) in p.manifests {
-            self.manifest_at.entry(h).or_insert(loc);
-        }
-        self.removable.extend(p.removable);
         self.applies.extend(p.applies);
         self.batches += 1;
     }
@@ -349,8 +356,6 @@ impl Collected {
             kinds::LANDING => p.landings.push((loc, hash)),
             kinds::REDACTION => p.requests.push((loc, hash)),
             kinds::REDACTION_RESIDUE => p.residues.push((loc, hash)),
-            kinds::BLOB_MANIFEST => p.manifests.push((loc, hash)),
-            k if is_removable(k) => p.removable.push(loc),
             _ => {}
         }
     }
@@ -478,6 +483,10 @@ fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                     break;
                 }
                 c.seal(std::mem::take(&mut p));
+                c.sealed_end = Some(Location {
+                    segment: seg,
+                    offset: end,
+                });
             } else if kind == kinds::REDACTION_APPLY {
                 let payload = if len as usize > MAX_RECORD_BYTES {
                     None
@@ -505,13 +514,13 @@ fn collect(readers: &[File]) -> Result<Collected, StoreError> {
 /// its hash.
 fn read_record(
     readers: &[File],
-    memory: &BTreeMap<Location, Vec<u8>>,
+    memory: &BTreeMap<Location, (u8, Vec<u8>)>,
     loc: Location,
     kind: u8,
     hash: &Hash,
 ) -> Result<Option<Vec<u8>>, StoreError> {
-    if let Some(p) = memory.get(&loc) {
-        return Ok((Hash::of(p) == *hash).then(|| p.clone()));
+    if let Some((k, p)) = memory.get(&loc) {
+        return Ok((*k == kind && Hash::of(p) == *hash).then(|| p.clone()));
     }
     let Some(f) = readers.get(loc.segment as usize) else {
         return Ok(None);
@@ -572,15 +581,34 @@ fn candidate_holes(
     Ok(holes)
 }
 
+/// What one validated apply's request selects, kept for the log pass ([`check_log`]).
+struct Selected {
+    /// Where the apply and its request are.
+    apply: Location,
+    request: Location,
+    /// The manifest's versions, and the ids of its all-versions targets.
+    versions: Vec<(BlockId, Hash)>,
+    all_ids: Vec<BlockId>,
+    /// The manifest's blobs.
+    blobs: Vec<Hash>,
+    /// Each span: its place, kind and hash.
+    spans: Vec<(Location, u8, Hash)>,
+}
+
 /// Validates `applies` (in log order) against the collected records and returns what they
-/// authorize. Each apply needs: a record that decodes; in its batch, applies in strictly
-/// ascending request order; the LANDING it names earlier in its own batch, approved by a person
-/// (`human_approval`); its request sealed before it, whose carrier the landing landed and whose
-/// report hash it binds; and every span of that request valid: strictly ascending, before the
-/// request, a removable frame start whose header holds the span's kind, hash and length, a block
-/// span with the block residue of that version of a manifest version, a change span with the
-/// change residue of that change embedding a manifest version, a chunk span with no residue and
-/// a chunk of a manifest blob, and a frame an earlier apply authorized kept as it was.
+/// authorize, with what each one's request selects. Each apply needs: a record that decodes; in
+/// its batch, applies in strictly ascending request order; the LANDING it names earlier in its
+/// own batch, approved by a person (`human_approval`); its request sealed before it, whose
+/// carrier the landing landed and whose report hash it binds; the request's bounds, canonical
+/// order and selector expansion as the checked apply path has them (`check_bounds`,
+/// `manifest_in_order`, `targets_agree`); and every span of that request valid: strictly
+/// ascending, before the request, of a removable kind, a frame whose header holds the span's
+/// kind, hash and length, a block span with the block residue of that version of a manifest
+/// version, a change span with the change residue of that change embedding a manifest version,
+/// a chunk span with no residue, and a frame an earlier apply authorized kept as it was.
+///
+/// That each span is a frame start, each chunk span a chunk of a manifest blob, and the rest of
+/// the request's meaning against the log, are checked by [`check_log`].
 ///
 /// A failure is `RedactionCorrupt`: at the span for a span failure, else at the apply. For an
 /// apply at or after `pending_from` (a batch the live writer has not written yet), a landing no
@@ -590,8 +618,9 @@ fn validate(
     readers: &[File],
     applies: &[&ApplyFrame],
     pending_from: Option<Location>,
-) -> Result<Authorization, StoreError> {
+) -> Result<(Authorization, Vec<Selected>), StoreError> {
     let mut auth = Authorization::default();
+    let mut selected = Vec::with_capacity(applies.len());
     let mut report_buf: Option<Vec<u8>> = None;
     let mut prev_in_batch: Option<(u64, Hash)> = None;
     for a in applies {
@@ -624,6 +653,13 @@ fn validate(
         if !landing.changes.contains(&request.carrier) {
             return Err(at());
         }
+        // the selector expansion the checked apply path enforces (final review finding 1)
+        if check_bounds(&request).is_err()
+            || !manifest_in_order(&request.manifest)
+            || targets_agree(&request).is_err()
+        {
+            return Err(at());
+        }
         let buf = match &mut report_buf {
             Some(b) => b,
             None => report_buf.insert(record_buffer().map_err(|_| StoreError::RedactionLimit {
@@ -637,8 +673,8 @@ fn validate(
         let versions: BTreeSet<(BlockId, Hash)> =
             request.manifest.versions.iter().cloned().collect();
         let version_hashes: HashSet<Hash> = versions.iter().map(|(_, v)| *v).collect();
-        let mut chunks: Option<HashSet<Hash>> = None;
         let mut prev: Option<Location> = None;
+        let mut spans = Vec::with_capacity(request.manifest.spans.len());
         for span in &request.manifest.spans {
             let loc = Location {
                 segment: span.place.segment,
@@ -649,9 +685,6 @@ fn validate(
                 return Err(bad());
             }
             prev = Some(loc);
-            if c.removable.binary_search(&loc).is_err() {
-                return Err(bad());
-            }
             let f = readers.get(loc.segment as usize).ok_or_else(bad)?;
             if header_at(f, loc.offset, f.metadata()?.len())?
                 != Some((span.len, span.kind, span.hash))
@@ -680,13 +713,7 @@ fn validate(
                         RedactionResidue::Change(ch) => {
                             span.kind == kinds::CHANGE
                                 && ch.change == span.hash
-                                && ch.ops.iter().any(|op| match op {
-                                    ResidualOp::Create { version, .. }
-                                    | ResidualOp::Update { version, .. } => {
-                                        version_hashes.contains(version)
-                                    }
-                                    ResidualOp::Delete { .. } => false,
-                                })
+                                && residual_versions(ch).any(|v| version_hashes.contains(v))
                         }
                     };
                     if !fits {
@@ -696,24 +723,6 @@ fn validate(
                 }
                 _ => {
                     if span.residue.is_some() {
-                        return Err(bad());
-                    }
-                    if chunks.is_none() {
-                        let mut set = HashSet::new();
-                        for b in &request.manifest.blobs {
-                            let Some(mloc) = c.manifest_at.get(b) else {
-                                continue;
-                            };
-                            if let Some(p) =
-                                read_record(readers, &c.memory, *mloc, kinds::BLOB_MANIFEST, b)?
-                                && let Ok(m) = decode::<BlobManifest>(&p)
-                            {
-                                set.extend(m.chunks);
-                            }
-                        }
-                        chunks = Some(set);
-                    }
-                    if !chunks.as_ref().is_some_and(|s| s.contains(&span.hash)) {
                         return Err(bad());
                     }
                     None
@@ -745,22 +754,369 @@ fn validate(
                     }
                 }
             }
+            spans.push((loc, span.kind, span.hash));
         }
         auth.applies.push(Applied {
             loc: a.loc,
             hash: a.hash,
             record: record.clone(),
         });
+        selected.push(Selected {
+            apply: a.loc,
+            request: rloc,
+            all_ids: request
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    rdy_model::redaction::RedactTarget::AllVersions(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            versions: request.manifest.versions,
+            blobs: request.manifest.blobs,
+            spans,
+        });
     }
-    Ok(auth)
+    Ok((auth, selected))
+}
+
+/// One frame the log pass reads: its place, kind, hash and length, and how to read its payload.
+struct Seen<'a> {
+    loc: Location,
+    kind: u8,
+    hash: Hash,
+    len: u32,
+    source: Source<'a>,
+}
+
+/// Where a frame's payload is: in a segment file, or in a batch not yet written.
+enum Source<'a> {
+    File(&'a File),
+    Memory(&'a [u8]),
+}
+
+impl Seen<'_> {
+    /// The frame's payload, read through a fallibly allocated buffer.
+    fn payload(&self) -> Result<Vec<u8>, StoreError> {
+        match self.source {
+            Source::File(f) => read_payload(f, self.loc.offset + HEADER, self.len),
+            Source::Memory(p) => Ok(p.to_vec()),
+        }
+    }
+
+    /// The payload when it is intact (it matches the frame's hash); None for an erased, partly
+    /// erased or damaged one.
+    fn intact(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        let p = self.payload()?;
+        Ok((Hash::of(&p) == self.hash).then_some(p))
+    }
+}
+
+/// Calls `f` with every frame header of the log before `upto` (checked lengths; a torn frame
+/// ends a segment's walk), then with every frame of `memory`, in log order. Payloads are read
+/// only when `f` asks for them.
+fn for_each_seen(
+    readers: &[File],
+    upto: Location,
+    memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+    mut f: impl FnMut(&Seen<'_>) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    for (i, file) in readers.iter().enumerate() {
+        let seg = i as u32;
+        if seg > upto.segment {
+            break;
+        }
+        let file_len = file.metadata()?.len();
+        let stop = if seg == upto.segment {
+            upto.offset.min(file_len)
+        } else {
+            file_len
+        };
+        let mut w = Window::new(file, file_len);
+        let mut offset = 0u64;
+        while let Some(payload_start) = offset.checked_add(HEADER).filter(|e| *e <= stop) {
+            let h = w.get(offset, HEADER as usize)?;
+            let len = u32::from_le_bytes(h[0..4].try_into().expect("four bytes"));
+            let kind = h[4];
+            let hash = Hash(h[5..37].try_into().expect("32 bytes"));
+            let Some(end) = payload_start
+                .checked_add(u64::from(len))
+                .filter(|e| *e <= stop)
+            else {
+                break;
+            };
+            f(&Seen {
+                loc: Location {
+                    segment: seg,
+                    offset,
+                },
+                kind,
+                hash,
+                len,
+                source: Source::File(file),
+            })?;
+            offset = end;
+        }
+    }
+    for (loc, (kind, payload)) in memory {
+        f(&Seen {
+            loc: *loc,
+            kind: *kind,
+            hash: Hash::of(payload),
+            len: payload.len() as u32,
+            source: Source::Memory(payload),
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether any authorized hole still holds payload bytes that are not zero: erasure has work
+/// left (a sealed apply not yet finished, or one a kill interrupted).
+fn unfinished(readers: &[File], holes: &Holes) -> Result<bool, StoreError> {
+    for (loc, h) in holes {
+        let Some(f) = readers.get(loc.segment as usize) else {
+            return Err(StoreError::corrupt_at(*loc));
+        };
+        if !segment::payload_is_zero(f, loc.offset + HEADER, u64::from(h.len))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The meaning of the validated applies against the log, which no index takes part in. Two
+/// passes over the frame headers before `upto` (then the frames of `memory`, a batch not yet
+/// written):
+///
+/// 1. Always: every authorized span is a frame start, every manifest blob has its manifest
+///    before its request, and every chunk span is a chunk of one of its request's blobs. This
+///    pass stops at the last request and keeps no location per content frame.
+/// 2. When `full` (before any zero write: an unfinished erasure, an import, the live writer):
+///    the request means exactly what its manifest removes, and the removal destroys nothing
+///    else, as the checked apply path proves it (`Store::check_selection`, `check_spans`,
+///    `check_coverage`; final review findings 1 and 2):
+///    - every manifest version is a stored version of the id it is listed with (read from its
+///      intact payload, or from its block residue once erased);
+///    - an all-versions target lists every version of its id stored before its apply;
+///    - every intact payload of a span is exactly what its residue records: a block's identity,
+///      a change's id, audit fields, dependencies and every op in order;
+///    - every version a change residue keeps by reference has a stored block before its apply;
+///    - no intact frame outside the authorized spans holds selected content: a block of a
+///      selected version, a change that embeds one, or a chunk of a selected blob (each
+///      physical copy is a span);
+///    - every chunk of a selected blob has a frame.
+///
+/// A failure is `RedactionCorrupt`: at the frame or span for a frame failure, else at the apply.
+fn check_log(
+    readers: &[File],
+    memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+    auth: &Authorization,
+    sel: &[Selected],
+    upto: Location,
+    full: bool,
+) -> Result<(), StoreError> {
+    if sel.is_empty() {
+        return Ok(());
+    }
+    // pass 1: span boundaries and blob manifests, up to the last request
+    let last_request = sel.iter().map(|s| s.request).max().expect("an apply");
+    let blobs: HashSet<Hash> = sel.iter().flat_map(|s| s.blobs.iter().copied()).collect();
+    let mut chunks_of: HashMap<Hash, Vec<Hash>> = HashMap::new();
+    let mut at_frame: BTreeSet<Location> = BTreeSet::new();
+    for_each_seen(readers, last_request.min(upto), &BTreeMap::new(), |f| {
+        if auth.holes.contains_key(&f.loc) {
+            at_frame.insert(f.loc);
+        }
+        if f.kind == kinds::BLOB_MANIFEST
+            && blobs.contains(&f.hash)
+            && !chunks_of.contains_key(&f.hash)
+            && let Some(p) = f.intact()?
+            && let Ok(m) = decode::<BlobManifest>(&p)
+        {
+            chunks_of.insert(f.hash, m.chunks);
+        }
+        Ok(())
+    })?;
+    if let Some(loc) = auth.holes.keys().find(|l| !at_frame.contains(l)) {
+        return Err(StoreError::corrupt_at(*loc));
+    }
+    let mut sel_chunks: Vec<HashSet<Hash>> = Vec::with_capacity(sel.len());
+    for s in sel {
+        let mut set = HashSet::new();
+        for b in &s.blobs {
+            set.extend(
+                chunks_of
+                    .get(b)
+                    .ok_or_else(|| StoreError::corrupt_at(s.apply))?
+                    .iter()
+                    .copied(),
+            );
+        }
+        if let Some((loc, ..)) = s
+            .spans
+            .iter()
+            .find(|(_, kind, hash)| *kind == kinds::BLOB_CHUNK && !set.contains(hash))
+        {
+            return Err(StoreError::corrupt_at(*loc));
+        }
+        sel_chunks.push(set);
+    }
+    if !full {
+        return Ok(());
+    }
+
+    // pass 2: the request's meaning, and every physical copy
+    let sel_versions: Vec<HashSet<Hash>> = sel
+        .iter()
+        .map(|s| s.versions.iter().map(|(_, v)| *v).collect())
+        .collect();
+    let selected_versions: HashSet<Hash> = sel_versions.iter().flatten().copied().collect();
+    let mut by_id: HashMap<BlockId, Vec<usize>> = HashMap::new();
+    for (i, s) in sel.iter().enumerate() {
+        for id in &s.all_ids {
+            by_id.entry(id.clone()).or_default().push(i);
+        }
+    }
+    let selected_chunks: HashSet<Hash> = sel_chunks.iter().flatten().copied().collect();
+    // the versions each change residue keeps by reference, with the earliest apply that needs
+    // a stored block of it
+    let mut kept: HashMap<Hash, Location> = HashMap::new();
+    for (i, s) in sel.iter().enumerate() {
+        for (loc, kind, _) in &s.spans {
+            if *kind != kinds::CHANGE {
+                continue;
+            }
+            let residue = auth.spans[loc].residue.and_then(|r| auth.residues.get(&r));
+            let Some(RedactionResidue::Change(c)) = residue else {
+                return Err(StoreError::corrupt_at(*loc));
+            };
+            for v in residual_versions(c).filter(|v| !sel_versions[i].contains(*v)) {
+                let need = kept.entry(*v).or_insert(s.apply);
+                *need = (*need).min(s.apply);
+            }
+        }
+    }
+    let mut id_of: HashMap<Hash, BlockId> = HashMap::new();
+    let mut kept_found: HashSet<Hash> = HashSet::new();
+    let mut seen_chunks: HashSet<Hash> = HashSet::new();
+    let residue_of = |loc: &Location| auth.spans[loc].residue.and_then(|r| auth.residues.get(&r));
+    for_each_seen(readers, upto, memory, |f| {
+        let hole = auth.holes.contains_key(&f.loc);
+        match f.kind {
+            kinds::BLOCK => {
+                if kept.get(&f.hash).is_some_and(|need| f.loc < *need) {
+                    kept_found.insert(f.hash);
+                }
+                if !selected_versions.contains(&f.hash) && by_id.is_empty() {
+                    return Ok(());
+                }
+                let id = match (hole, f.intact()?) {
+                    (true, Some(p)) => {
+                        let r = residue_of(&f.loc).ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+                        if !residue_matches(f.kind, &p, r) {
+                            return Err(StoreError::corrupt_at(f.loc));
+                        }
+                        decode::<Block>(&p)
+                            .map_err(|_| StoreError::corrupt_at(f.loc))?
+                            .id
+                    }
+                    (true, None) => match residue_of(&f.loc) {
+                        Some(RedactionResidue::Block(b)) => b.id.clone(),
+                        _ => return Err(StoreError::corrupt_at(f.loc)),
+                    },
+                    (false, Some(p)) => {
+                        if selected_versions.contains(&f.hash) {
+                            // an intact copy of selected content that no span lists
+                            return Err(StoreError::corrupt_at(f.loc));
+                        }
+                        match decode::<Block>(&p) {
+                            Ok(b) => b.id,
+                            Err(_) => return Ok(()),
+                        }
+                    }
+                    // a damaged payload outside the holes: the payload scan refuses it
+                    (false, None) => return Ok(()),
+                };
+                if selected_versions.contains(&f.hash) {
+                    id_of.entry(f.hash).or_insert_with(|| id.clone());
+                }
+                for i in by_id.get(&id).into_iter().flatten() {
+                    if f.loc < sel[*i].apply && !sel_versions[*i].contains(&f.hash) {
+                        return Err(StoreError::corrupt_at(sel[*i].apply));
+                    }
+                }
+            }
+            kinds::CHANGE => {
+                if hole {
+                    if let Some(p) = f.intact()? {
+                        let r = residue_of(&f.loc).ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+                        if !residue_matches(f.kind, &p, r) {
+                            return Err(StoreError::corrupt_at(f.loc));
+                        }
+                    }
+                } else if let Some(p) = f.intact()?
+                    && let Ok(c) = decode::<Change>(&p)
+                    && c.ops.iter().any(|op| match op {
+                        Op::Create { block } | Op::Update { block, .. } => {
+                            selected_versions.contains(&block.version_hash())
+                        }
+                        Op::Delete { .. } => false,
+                    })
+                {
+                    // an intact change that embeds a selected version and no span lists
+                    return Err(StoreError::corrupt_at(f.loc));
+                }
+            }
+            kinds::BLOB_CHUNK if selected_chunks.contains(&f.hash) => {
+                seen_chunks.insert(f.hash);
+                if !hole {
+                    return Err(StoreError::corrupt_at(f.loc));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    for (i, s) in sel.iter().enumerate() {
+        let wrong = s.versions.iter().any(|(id, v)| id_of.get(v) != Some(id))
+            || sel_chunks[i].iter().any(|c| !seen_chunks.contains(c));
+        if wrong {
+            return Err(StoreError::corrupt_at(s.apply));
+        }
+    }
+    if let Some((_, need)) = kept.iter().find(|(v, _)| !kept_found.contains(*v)) {
+        return Err(StoreError::corrupt_at(*need));
+    }
+    Ok(())
+}
+
+/// How much of the applies' meaning a bootstrap checks against the log ([`check_log`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Depth {
+    /// The full semantic pass only when an authorized span still holds payload bytes (work an
+    /// erasure has not finished): every open, before its first zero write.
+    BeforeErasure,
+    /// Always the full semantic pass (an import).
+    Full,
 }
 
 /// The authorization bootstrap of an open: the header pass, then the validation of every apply
 /// the acknowledged log holds. Which applies that is depends on the holes they authorize (the
 /// marker rule's scan reads them as frames), so the scan's end is found with the applies'
 /// unchecked holes and applies past it are left out until it is stable; the applies left are
-/// validated, and any failure refuses the open. The index plays no part.
+/// validated and checked against the log (`check_log`, its full pass whenever an erasure has
+/// work left), and any failure refuses the open. The index plays no part.
 pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
+    bootstrap_to(readers, Depth::BeforeErasure)
+}
+
+/// [`bootstrap`] with the full semantic pass whatever the holes hold: a load checks a complete
+/// ingested log before it finishes the store.
+pub(crate) fn bootstrap_full(readers: &[File]) -> Result<Authorization, StoreError> {
+    bootstrap_to(readers, Depth::Full)
+}
+
+fn bootstrap_to(readers: &[File], depth: Depth) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
     if c.applies.is_empty() && c.requests.is_empty() {
         return Ok(Authorization::default());
@@ -775,7 +1131,9 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
             break end;
         }
     };
-    let mut auth = validate(&c, readers, &applies, None)?;
+    let (mut auth, sel) = validate(&c, readers, &applies, None)?;
+    let full = depth == Depth::Full || unfinished(readers, &auth.holes)?;
+    check_log(readers, &c.memory, &auth, &sel, end, full)?;
     auth.requests = c
         .requests
         .iter()
@@ -787,23 +1145,30 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
 
 /// The authorization of a log whose every batch is whole (a load's ingest checked each batch
 /// against its digest before it wrote its marker): the header pass, then the validation of every
-/// apply of its sealed batches, as `bootstrap` validates them. Frames after the last marker (a
-/// batch not yet sealed) play no part. A log with no apply authorizes nothing. Any failed apply
-/// refuses it, as it refuses an open.
+/// apply of its sealed batches, as `bootstrap` validates them, with the full semantic pass over
+/// the sealed batches. Frames after the last marker (a batch not yet sealed) play no part. A log
+/// with no apply authorizes nothing. Any failed apply refuses it, as it refuses an open.
 pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
     if c.applies.is_empty() {
         return Ok(Authorization::default());
     }
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
-    validate(&c, readers, &applies, None)
+    let (auth, sel) = validate(&c, readers, &applies, None)?;
+    let upto = c.sealed_end.unwrap_or(Location {
+        segment: 0,
+        offset: 0,
+    });
+    check_log(readers, &BTreeMap::new(), &auth, &sel, upto, true)?;
+    Ok(auth)
 }
 
 /// The bootstrap of a batch the live writer is about to seal: the header pass over the open log
 /// (an open held batch on disk has no marker yet and does not count), then `batch` as one sealed
-/// batch whose first frame goes at `start`, then the validation of every apply. Refuses before
-/// anything is written: `RedactionHuman` for a new apply no person approved, `RedactionCorrupt`
-/// for any other failure.
+/// batch whose first frame goes at `start`, then the validation of every apply and its check
+/// against the log up to `start` and the batch (`check_log`, its full pass: the new apply's
+/// spans are intact). Refuses before anything is written: `RedactionHuman` for a new apply no
+/// person approved, `RedactionCorrupt` for any other failure.
 pub(crate) fn bootstrap_pending(
     readers: &[File],
     start: Location,
@@ -815,12 +1180,14 @@ pub(crate) fn bootstrap_pending(
     for (kind, payload) in batch {
         let hash = Hash::of(payload);
         c.note(&mut p, at, *kind, hash, Some(payload));
-        c.memory.insert(at, payload.clone());
+        c.memory.insert(at, (*kind, payload.clone()));
         at.offset += HEADER + payload.len() as u64;
     }
     c.seal(p);
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
-    let mut auth = validate(&c, readers, &applies, Some(start))?;
+    let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
+    let full = unfinished(readers, &auth.holes)?;
+    check_log(readers, &c.memory, &auth, &sel, start, full)?;
     auth.requests = c.requests.clone();
     Ok(auth)
 }
