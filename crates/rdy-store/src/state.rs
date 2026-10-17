@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// The frames of one view commit (`Store::commit_parts`): the changes' frames, then the view ops
+/// and the head ref, and each change's id with the position of its `CHANGE` frame in `changes`.
+pub(crate) struct CommitParts {
+    pub(crate) changes: Frames,
+    pub(crate) views: Frames,
+    pub(crate) placed: Vec<(Hash, usize)>,
+}
+
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
 /// not stored; the view's chain and its `ViewHead` are (chain1).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +390,40 @@ impl Store {
         if changes.is_empty() {
             return Ok(vec![]);
         }
+        let parts = self.commit_parts(name, changes, current, conflicts, claim, committer)?;
+        let mut items = parts.changes;
+        items.extend(parts.views);
+        let written = self.write(items)?;
+        let mut ids = Vec::with_capacity(parts.placed.len());
+        for (cid, pos) in parts.placed {
+            let id = written[pos];
+            if id != cid {
+                return Err(StoreError::Decode(format!(
+                    "change id mismatch: view names {cid}, written {id}"
+                )));
+            }
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// The checks and frames of `commit_many`, which writes nothing: the changes' frames (each
+    /// change's `BLOCK` frames, then its `CHANGE` frame), then the view ops and the view's head
+    /// ref, and each change's id with the position of its `CHANGE` frame in `changes`. The one
+    /// view commit writer: the redaction writer puts its records around these frames.
+    pub(crate) fn commit_parts(
+        &self,
+        name: &str,
+        changes: Vec<Change>,
+        current: &dyn Fn(&BlockId) -> Option<Hash>,
+        conflicts: &[Conflict],
+        claim: Option<Owner>,
+        committer: &Provenance,
+    ) -> Result<CommitParts, StoreError> {
+        // a read projection is refused before any check reads it as a write
+        for change in &changes {
+            self.refuse_projection(change)?;
+        }
         // 0. the changes write disjoint blocks: each is checked against the state before them
         if changes.len() > 1 {
             let mut seen: BTreeSet<&BlockId> = BTreeSet::new();
@@ -443,6 +485,7 @@ impl Store {
             placed.push((cid, items.len() + pos));
             items.extend(frames);
         }
+        let mut views: Frames = vec![];
         let p = committer;
         let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
             view: name.to_string(),
@@ -474,7 +517,7 @@ impl Store {
                     },
                 ));
                 let id = Hash::of(&create);
-                items.push((kinds::VIEW_OP, create));
+                views.push((kinds::VIEW_OP, create));
                 (id, base, 0, first, false)
             }
         };
@@ -490,7 +533,7 @@ impl Store {
             ));
             prev = Hash::of(&rebase);
             base = canon;
-            items.push((kinds::VIEW_OP, rebase));
+            views.push((kinds::VIEW_OP, rebase));
         }
         if owner.is_none()
             && let Some(o) = claim
@@ -503,13 +546,13 @@ impl Store {
             ));
             prev = Hash::of(&own);
             owner = Some(o);
-            items.push((kinds::VIEW_OP, own));
+            views.push((kinds::VIEW_OP, own));
         }
         // 5. one commit op per change, in order: one write's commits sit in a row in the log
         for (cid, _) in &placed {
             let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: *cid }));
             prev = Hash::of(&commit);
-            items.push((kinds::VIEW_OP, commit));
+            views.push((kinds::VIEW_OP, commit));
         }
         let new_head = ViewHead {
             head: prev,
@@ -520,19 +563,12 @@ impl Store {
             closed: false,
             last_write_ms: p.at_ms,
         };
-        items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
-        let written = self.write(items)?;
-        let mut ids = Vec::with_capacity(placed.len());
-        for (cid, pos) in placed {
-            let id = written[pos];
-            if id != cid {
-                return Err(StoreError::Decode(format!(
-                    "change id mismatch: view names {cid}, written {id}"
-                )));
-            }
-            ids.push(id);
-        }
-        Ok(ids)
+        views.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
+        Ok(CommitParts {
+            changes: items,
+            views,
+            placed,
+        })
     }
 
     /// Step 2 of `commit_many` for one change: its ops against `current`, or for a block with a

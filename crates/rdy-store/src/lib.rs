@@ -15,6 +15,7 @@ pub mod layout;
 pub mod merge;
 pub mod meta;
 pub mod pio;
+pub mod redaction;
 pub mod review;
 pub mod segment;
 mod store;

@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,6 +72,11 @@ pub struct StoreReader {
     /// trk1: the project pack's tracking fields, which the freeze checks let change on a frozen
     /// decision. Empty until the engine calls [`Store::set_tracking`].
     tracking: Arc<Tracking>,
+    /// The redaction epoch of the reader family when this reader was taken (a clone keeps it).
+    epoch: u64,
+    /// The masks of recorded requests this reader reads as applied (`redaction_preview_reader`);
+    /// None for every other reader.
+    preview: Option<Arc<crate::redaction::Preview>>,
 }
 
 /// What every reader of one store shares, whatever index it holds.
@@ -86,6 +91,12 @@ struct ReaderShared {
     frames_read: AtomicU64,
     /// Ref entries read by `refs_with_prefix` and `open_proposal_refs` (a test hook).
     refs_read: AtomicU64,
+    /// The redaction epoch of this store family: zero at open; it advances once per newly synced
+    /// apply batch, before any payload is erased. A reader whose captured epoch is older reads a
+    /// state that predates content removal.
+    epoch: Arc<AtomicU64>,
+    /// The store's poisoned state, as its readers see it (`Store::poisoned`).
+    poisoned: AtomicBool,
 }
 
 pub struct Store {
@@ -350,7 +361,7 @@ pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
 }
 
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
     postcard::from_bytes(bytes).map_err(|e| StoreError::Decode(e.to_string()))
 }
 
@@ -402,6 +413,8 @@ fn entries_for_frame(
                 landing: hash,
             }));
         }
+        kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
+        kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
             let rec: Transitions = decode(payload)?;
             out.extend(
@@ -642,8 +655,12 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
+                epoch: Arc::new(AtomicU64::new(0)),
+                poisoned: AtomicBool::new(false),
             }),
             tracking: Arc::default(),
+            epoch: 0,
+            preview: None,
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -786,9 +803,32 @@ impl Store {
         &self.report
     }
 
-    /// A reader of this store: a clone of its own (rdr1).
+    /// A reader of this store: a clone of its own (rdr1), which captures the family's redaction
+    /// epoch now.
     pub fn reader(&self) -> StoreReader {
-        StoreReader::clone(self)
+        let mut r = StoreReader::clone(self);
+        r.epoch = r.shared.epoch.load(Ordering::Acquire);
+        r.preview = None;
+        r
+    }
+
+    /// A reader of this store that reads through `preview`'s masks too.
+    pub(crate) fn reader_with_preview(
+        &self,
+        preview: Arc<crate::redaction::Preview>,
+    ) -> StoreReader {
+        let mut r = self.reader();
+        r.preview = Some(preview);
+        r
+    }
+
+    /// Poisons the store: every later write fails until reopen, and its readers' epoch checks
+    /// fail.
+    fn poison(&mut self) {
+        self.poisoned = true;
+        if let Some(r) = &self.reader {
+            r.shared.poisoned.store(true, Ordering::Release);
+        }
     }
 
     /// The kind and hash of every data frame the last successful `write` appended, after dedupe
@@ -860,14 +900,14 @@ impl Store {
             Err(e) => {
                 self.open = None;
                 if was_open {
-                    self.poisoned = true;
+                    self.poison();
                     self.stale_index = true;
                 }
                 // as in `write`: a log that cannot be rolled back poisons the store
                 let rolled_back = !std::mem::take(&mut self.faults.rollback)
                     && self.log.truncate_to(start).is_ok();
                 if !rolled_back {
-                    self.poisoned = true;
+                    self.poison();
                 }
                 Err(e)
             }
@@ -893,8 +933,10 @@ impl Store {
             .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
         let mut placed_entries = vec![];
         for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
-            if let Some(IndexEntry::Object { loc, .. }) = frame.first_mut() {
-                *loc = *at;
+            for e in &mut frame {
+                if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } = e {
+                    *loc = *at;
+                }
             }
             placed_entries.extend(frame);
         }
@@ -953,6 +995,7 @@ impl Store {
                  index,
                  shared,
                  tracking,
+                 ..
              }| {
                 drop(index);
                 (shared, tracking)
@@ -962,10 +1005,13 @@ impl Store {
 
     /// Makes `index` the store's index, in a new reader that shares everything else with the old.
     fn set_index(&mut self, (shared, tracking): (Arc<ReaderShared>, Arc<Tracking>), index: Index) {
+        let epoch = shared.epoch.load(Ordering::Acquire);
         self.reader = Some(StoreReader {
             index: Arc::new(index),
             shared,
             tracking,
+            epoch,
+            preview: None,
         });
     }
 
@@ -1109,9 +1155,36 @@ impl Store {
 
     /// Writes `items` as one batch: one marker and one sync. With held batches on, the frames
     /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once.
+    ///
+    /// A redaction record (kinds 20 to 22) is refused: only the store's checked redaction writers
+    /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
+    /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
+    /// chunk. Nothing is written then.
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        if let Some((kind, _)) = items
+            .iter()
+            .find(|(k, _)| crate::redaction::is_redaction_kind(*k))
+        {
+            return Err(StoreError::Refused(format!(
+                "object kind {kind} is a redaction record: only the store's checked redaction writers write one"
+            )));
+        }
+        self.write_guarded(items)
+    }
+
+    /// `write` for the store's own checked writers: any kind, with the removed-hash refusal.
+    pub(crate) fn write_guarded(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
             return Err(poisoned_error());
+        }
+        if self.index().any_redaction_active() {
+            let hashes: Vec<Hash> = items.iter().map(|(_, p)| Hash::of(p)).collect();
+            if let Some((_, request)) = self.index().redaction_active_hit(&hashes)? {
+                return Err(StoreError::Redacted { request });
+            }
         }
         let start = self.log.end();
         let result = if self.held {
@@ -1133,7 +1206,7 @@ impl Store {
                 self.log.truncate_to(start)
             };
             if rollback.is_err() {
-                self.poisoned = true;
+                self.poison();
             }
         }
         result
@@ -1550,6 +1623,39 @@ impl StoreReader {
         &self.index
     }
 
+    /// The segments this reader reads by position.
+    pub(crate) fn segments(&self) -> &SegmentReader {
+        &self.shared.segments
+    }
+
+    /// The preview overlay of this reader, if it is a preview reader.
+    pub(crate) fn preview(&self) -> Option<&crate::redaction::Preview> {
+        self.preview.as_deref()
+    }
+
+    /// The redaction epoch of the reader family now (an Acquire load).
+    pub fn redaction_epoch(&self) -> u64 {
+        self.shared.epoch.load(Ordering::Acquire)
+    }
+
+    /// The redaction epoch this reader captured when it was taken.
+    pub fn captured_redaction_epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Whether this reader may serve a new response: its captured epoch is the family's
+    /// (`RedactedState` when a redaction was applied since it was taken), and the store is not
+    /// poisoned (the store's poisoned-handle error).
+    pub fn check_redaction_epoch(&self) -> Result<(), StoreError> {
+        if self.epoch != self.redaction_epoch() {
+            return Err(StoreError::RedactedState);
+        }
+        if self.shared.poisoned.load(Ordering::Acquire) {
+            return Err(poisoned_error());
+        }
+        Ok(())
+    }
+
     /// The cached (head, set) of view `name`, if `included` has read one.
     pub(crate) fn cached_set(&self, name: &str) -> Option<CachedSet> {
         self.shared
@@ -1572,18 +1678,36 @@ impl StoreReader {
     /// Calls `f(location, kind, hash, payload, next)` for every frame in `[from, upto)`, batch
     /// markers included, continuing through segment rolls. `upto` comes from the writer
     /// (`log_end()` or `last_batch_end()`), so the walk never meets a batch being appended.
+    ///
+    /// A frame whose payload an applied redaction removed stops the walk with `Redacted`: this
+    /// walk hands out only original payloads. `for_each_record_from` walks past such frames.
     pub fn for_each_frame_from(
         &self,
         from: Location,
         upto: Location,
-        f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), StoreError>,
+        mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.shared.segments.for_each_from(from, upto, f)
+        let spans = self.index().redaction_spans_in(from, upto)?;
+        if spans.is_empty() {
+            return self.shared.segments.for_each_from(from, upto, f);
+        }
+        self.shared
+            .segments
+            .for_each_from(from, upto, |loc, kind, hash, payload, next| {
+                if let Some(s) = spans.get(&loc) {
+                    return Err(StoreError::Redacted { request: s.request });
+                }
+                f(loc, kind, hash, payload, next)
+            })
     }
 
-    /// The first object written with hash `h`, whatever its kind, and that kind.
+    /// The first object written with hash `h`, whatever its kind, and that kind. A payload a
+    /// redaction removed is `Redacted`, never a valid object.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
         let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
+        if let Some(request) = self.mask_at(&loc)? {
+            return Err(StoreError::Redacted { request });
+        }
         self.read_object(h, loc)
     }
 
@@ -1599,12 +1723,16 @@ impl StoreReader {
         Ok((kind, payload))
     }
 
-    /// The payload of the object of `kind` with hash `h` (kind1).
+    /// The payload of the object of `kind` with hash `h` (kind1). A payload a redaction removed
+    /// is `Redacted`.
     pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
         let loc = self
             .index()
             .typed(kind, h)?
             .ok_or(StoreError::NotFound(*h))?;
+        if let Some(request) = self.mask_at(&loc)? {
+            return Err(StoreError::Redacted { request });
+        }
         let (found_kind, payload) = self.read_object(h, loc)?;
         if found_kind != kind {
             return Err(StoreError::Decode(format!(
@@ -1638,9 +1766,14 @@ impl StoreReader {
         }
     }
 
-    /// The change with id `h` (repr1).
+    /// The change with id `h` (repr1). A change a redaction removed reads as its projection: its
+    /// residue, with its original id, audit fields and op order, each op's block read by its
+    /// original version (the block, or its stub).
     pub fn change(&self, h: &Hash) -> Result<Change, StoreError> {
-        self.get_named(kinds::CHANGE, "change", h)
+        match self.get_named(kinds::CHANGE, "change", h) {
+            Err(StoreError::Redacted { request }) => self.change_projection(h, request),
+            r => r,
+        }
     }
 
     /// The proposal version with id `h` (repr1).
@@ -1682,8 +1815,14 @@ impl StoreReader {
         Ok(self.index().object(h)?.is_some())
     }
 
+    /// The block version `version`. A version a redaction removed reads as its stub: id, type,
+    /// parent, order and the recorded identity, body `Content removed.`.
     pub fn get_block(&self, version: &Hash) -> Result<Block, StoreError> {
-        self.get(version)
+        match self.get_raw(version) {
+            Ok((_, payload)) => decode(&payload),
+            Err(StoreError::Redacted { request }) => self.block_projection(version, request),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -1753,6 +1892,10 @@ impl StoreReader {
             return Err(StoreError::Decode(format!(
                 "{h} is not a canonical blob manifest"
             )));
+        }
+        // a blob a redaction selected, or one with a removed chunk, is unavailable
+        if let Some(e) = self.blob_mask(h, &m)? {
+            return Err(e);
         }
         // the chunk count `put_blob` would produce, checked before anything is allocated or read
         if m.chunks.len() as u64 != m.len.div_ceil(CHUNK as u64) {
@@ -2025,6 +2168,8 @@ impl Store {
         view: Option<&str>,
         conflicts: &[Conflict],
     ) -> Result<(Frames, usize), StoreError> {
+        // a read projection is never serialized as an original object
+        self.refuse_projection(change)?;
         change.deps = self.change_deps_resolving(change, view, conflicts)?;
         let mut items = vec![];
         for op in &change.ops {
