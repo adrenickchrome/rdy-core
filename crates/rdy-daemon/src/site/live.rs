@@ -527,7 +527,9 @@ impl LiveSite {
     /// Opens a stream for `page` of `scope`, which the reader has at revision `rev` with the
     /// label at `label_rev`. The scope is refreshed first. A page the build does not have, or
     /// has at another revision, gets `Reload` at once; else a page with another label gets the
-    /// label. When the scope does not build, the stream opens with no event. Past
+    /// label. When the scope does not build, the stream opens with no event. When a removal
+    /// makes the build old before it is compared, the stream is compared with a build of the
+    /// fresh state once registered (or by the worker's step for its publish). Past
     /// [`MAX_STREAMS`] open streams, and after `close`, the site is busy.
     pub fn subscribe(
         &self,
@@ -543,7 +545,10 @@ impl LiveSite {
                 return Err(SiteBusy);
             }
         }
-        let refreshed = self.refresh(sh, scope).is_ok();
+        let first = self.refresh(sh, scope);
+        // the build read a state that a removal made old: the stream is compared again below
+        let stale = matches!(&first, Err(e) if e.code == E_REDACTED_STATE);
+        let refreshed = first.is_ok();
         let current = sh.state.load().reader().redaction_epoch();
         let mut inner = lock(&self.inner);
         if inner.closed || inner.streams() >= MAX_STREAMS {
@@ -575,14 +580,56 @@ impl LiveSite {
             stream.checked = true;
         }
         let epoch = stream.epoch;
+        // not compared for want of a build of the current epoch (not for a scope that does not
+        // build): compared again once the stream is registered
+        let again = !stream.checked && (stale || refreshed);
         s.streams.push(stream);
-        Ok(Subscription {
+        drop(inner);
+        let sub = Subscription {
             id,
             rx,
             epoch,
             scope: scope.clone(),
             inner: Arc::downgrade(&self.inner),
-        })
+        };
+        // A removal came between the build and the comparison. Its fresh state may be
+        // published already, and the worker's step for that publish may have run before the
+        // stream was registered: nothing else would refresh the scope, so it is built and
+        // compared here. While the published state is still old, its publish comes after the
+        // registration above, so the worker's step for it finds the stream.
+        if again
+            && sh.state.load().ensure_current_epoch().is_ok()
+            && let Ok(b) = self.refresh(sh, scope)
+        {
+            self.compare(scope, id, &b);
+        }
+        Ok(sub)
+    }
+
+    /// Compares stream `id` of `scope` with `b` if no build has been compared with it yet (a
+    /// build's fan-out compares every registered stream): `Reload` when `b` is of another
+    /// epoch, else what [`Stream::against`] finds.
+    fn compare(&self, scope: &ScopeRef, id: u64, b: &LiveBuild) {
+        let mut inner = lock(&self.inner);
+        let Some(stream) = inner
+            .scopes
+            .get_mut(scope)
+            .and_then(|s| s.streams.iter_mut().find(|st| st.id == id))
+        else {
+            return;
+        };
+        if stream.checked {
+            return;
+        }
+        let event = if stream.epoch == b.epoch {
+            stream.against(b)
+        } else {
+            Some(LiveEvent::Reload)
+        };
+        if let Some(event) = event {
+            let _ = stream.tx.try_send(event);
+        }
+        stream.checked = true;
     }
 
     /// The open streams, across every scope.

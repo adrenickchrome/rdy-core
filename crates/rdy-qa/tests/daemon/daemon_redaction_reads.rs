@@ -7,6 +7,8 @@
 //! publication check: nothing here sleeps.
 use rdy_daemon::Shared;
 use rdy_daemon::site::guard::{Refusal, ScopeRef, refusal};
+use rdy_daemon::site::live::{LiveEvent, LiveSite};
+use rdy_daemon::site::sse::{self, EpochNow};
 use rdy_engine::engine::write_typed;
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::{E_REDACTED_STATE, Rdy};
@@ -179,18 +181,17 @@ fn get_or_head(url: &str) -> http::Response {
 /// A barrier at the publication check of every build of `scope`: the build reports it is there
 /// on the returned receiver, then waits until the returned sender releases it. Builds of other
 /// scopes pass.
-fn hold(sh: &Shared, scope: ScopeRef) -> (Receiver<()>, Sender<()>) {
+fn hold(site: &LiveSite, scope: ScopeRef) -> (Receiver<()>, Sender<()>) {
     let (at_tx, at_rx) = channel::<()>();
     let (go_tx, go_rx) = channel::<()>();
     let at_tx = Mutex::new(at_tx);
     let go_rx = Mutex::new(go_rx);
-    sh.site
-        .set_before_publish(Some(Box::new(move |s: &ScopeRef| {
-            if *s == scope {
-                let _ = at_tx.lock().unwrap().send(());
-                let _ = go_rx.lock().unwrap().recv();
-            }
-        })));
+    site.set_before_publish(Some(Box::new(move |s: &ScopeRef| {
+        if *s == scope {
+            let _ = at_tx.lock().unwrap().send(());
+            let _ = go_rx.lock().unwrap().recv();
+        }
+    })));
     (at_rx, go_tx)
 }
 
@@ -210,7 +211,7 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
     // a page build of canon reads the state before the removal and pauses at the check
     let p = request(&sh, &ids.secret, "redact-1");
     let before = epoch(&sh);
-    let (at, go) = hold(&sh, ScopeRef::Canon);
+    let (at, go) = hold(&sh.site, ScopeRef::Canon);
     let held = {
         let sh = Arc::clone(&sh);
         std::thread::spawn(move || {
@@ -250,7 +251,7 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
     sh.site.refresh(&sh, &ScopeRef::Versions).unwrap();
     let p = request(&sh, &ids.other, "redact-2");
     let before = epoch(&sh);
-    let (at, go) = hold(&sh, ScopeRef::Versions);
+    let (at, go) = hold(&sh.site, ScopeRef::Versions);
     let held = {
         let sh = Arc::clone(&sh);
         std::thread::spawn(move || sh.site.refresh(&sh, &ScopeRef::Versions).map(|b| b.epoch))
@@ -395,7 +396,7 @@ fn rdx14_a_prior_response_does_not_delay_erasure() {
     // and a request whose build read the state before the removal, paused at the check
     let p = request(&sh, &ids.secret, "redact");
     let before = epoch(&sh);
-    let (at, go) = hold(&sh, ScopeRef::Tag("v1.0.0".into()));
+    let (at, go) = hold(&sh.site, ScopeRef::Tag("v1.0.0".into()));
     let first = {
         let tag = tag.clone();
         std::thread::spawn(move || http::get(&tag))
@@ -425,4 +426,203 @@ fn rdx14_a_prior_response_does_not_delay_erasure() {
     assert_eq!(again.status, 200, "{}", again.head);
     assert!(!text(&again).contains(SECRET));
     drop(stream);
+}
+
+/// Reads the stream on `client` into `got` through the first `\n\n` at or after `from`: the
+/// next frame, or what came before the stream ended. Returns where it ends in `got`.
+fn next_frame(client: &mut TcpStream, got: &mut Vec<u8>, from: usize) -> usize {
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(at) = got[from..].windows(2).position(|w| w == b"\n\n") {
+            return from + at + 2;
+        }
+        match client.read(&mut chunk) {
+            Ok(0) | Err(_) => return got.len(),
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// Reads the stream's head and its reconnect delay ([`sse::RETRY`]) into `got`; returns where
+/// they end.
+fn stream_head(client: &mut TcpStream, got: &mut Vec<u8>) -> usize {
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(at) = got.windows(sse::RETRY.len()).position(|w| w == sse::RETRY) {
+            let head = String::from_utf8_lossy(&got[..at]);
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+            return at + sse::RETRY.len();
+        }
+        match client.read(&mut chunk) {
+            Ok(n) if n > 0 => got.extend_from_slice(&chunk[..n]),
+            _ => panic!("the stream ended before its head"),
+        }
+    }
+}
+
+/// A served event stream of `sub` over a loopback connection: the reader's end, the sender that
+/// stops it, and the receiver of each value the stream's epoch probe returned (the server's
+/// probe, [`sse::epoch_now`]), one per event it considered.
+fn serve(
+    h: &Hosted,
+    rt: &tokio::runtime::Runtime,
+    sub: rdy_daemon::site::live::Subscription,
+) -> (
+    TcpStream,
+    tokio::sync::watch::Sender<bool>,
+    Receiver<Option<u64>>,
+) {
+    let sh = shared(h);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(T)).unwrap();
+    let (conn, _) = listener.accept().unwrap();
+    conn.set_nonblocking(true).unwrap();
+    let real = sse::epoch_now(sh);
+    let (seen_tx, seen_rx) = channel();
+    let seen_tx = Mutex::new(seen_tx);
+    let probe: EpochNow = Box::new(move || {
+        let now = real();
+        let _ = seen_tx.lock().unwrap().send(now);
+        now
+    });
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let hold = h.run.as_ref().unwrap().handle().hold();
+    rt.spawn(async move {
+        let conn = tokio::net::TcpStream::from_std(conn).unwrap();
+        sse::serve(conn, sub, hold, stop_rx, probe, 0).await;
+    });
+    (client, stop_tx, seen_rx)
+}
+
+#[test]
+fn rdx14_a_queued_event_waits_for_the_fresh_state() {
+    let (h, ids) = host();
+    let sh = shared(&h);
+    let url = url(&h);
+    let rt = Hosted::rt();
+    // the request first: its publish is behind every build below, so no build after the
+    // streams open has anything new for them
+    let p = request(&sh, &ids.secret, "redact");
+    // two open pages of alpha at its current revision with an older label: each stream's
+    // queue holds a label event
+    let old = sh.site.refresh(&sh, &ScopeRef::Canon).unwrap();
+    assert!(build_holds(&old, SECRET));
+    let rev = old.revs["alpha.html"].clone();
+    let open = || {
+        sh.site
+            .subscribe(&sh, &ScopeRef::Canon, "alpha.html", &rev, "an-older-label")
+            .expect("the stream opens")
+    };
+    let (a, b) = (open(), open());
+
+    // the removal is authorized and erased; the writer has not published its state yet
+    let (landed_tx, landed_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let writer = {
+        let sh = Arc::clone(&sh);
+        std::thread::spawn(move || {
+            on_writer(&sh, move |r| {
+                approve(r, &p);
+                landed_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+            })
+        })
+    };
+    landed_rx.recv().unwrap();
+    assert!(
+        sh.state.load().ensure_current_epoch().is_err(),
+        "the published state predates the removal"
+    );
+
+    // stream a meets its queued label while the published state is stale, then stops: it
+    // wrote nothing after its head (a reload now would load the Busy answer)
+    let (mut ca, stop_a, seen_a) = serve(&h, &rt, a);
+    let mut got = Vec::new();
+    let retry = stream_head(&mut ca, &mut got);
+    seen_a
+        .recv_timeout(T)
+        .expect("stream a considered its label");
+    let _ = stop_a.send(true);
+    let end = next_frame(&mut ca, &mut got, retry);
+    assert_eq!(
+        String::from_utf8_lossy(&got[retry..end]),
+        "",
+        "stream a: no event while the published state is stale"
+    );
+
+    // stream b meets its queued label while the published state is stale and stays open
+    let (mut cb, stop_b, seen_b) = serve(&h, &rt, b);
+    let mut got = Vec::new();
+    let retry = stream_head(&mut cb, &mut got);
+    seen_b
+        .recv_timeout(T)
+        .expect("stream b considered its label");
+
+    // the writer publishes the fresh state: the stream gets the existing refresh event
+    go_tx.send(()).unwrap();
+    writer.join().unwrap();
+    let end = next_frame(&mut cb, &mut got, retry);
+    assert_eq!(
+        String::from_utf8_lossy(&got[retry..end]),
+        String::from_utf8_lossy(&sse::frame(&LiveEvent::Reload)),
+        "stream b: the refresh event after the fresh state was published"
+    );
+    assert_eq!(
+        seen_b.recv_timeout(T).unwrap(),
+        Some(epoch(&sh)),
+        "the refresh event went out while the published state was current"
+    );
+    // the page the reload loads is the fresh one
+    let page = http::get(&format!("{url}alpha.html"));
+    assert_eq!(page.status, 200, "{}", page.head);
+    assert!(!text(&page).contains(SECRET) && text(&page).contains(STUB));
+    let _ = stop_b.send(true);
+}
+
+#[test]
+fn rdx14_a_subscribe_across_removal_gets_the_refresh() {
+    let (h, ids) = host();
+    let sh = shared(&h);
+    let tag = ScopeRef::Tag("v1.0.0".into());
+    // a site with no worker: its publish count never moves, as the worker's does not without
+    // another publish, so nothing refreshes the scope after the step below
+    let site = LiveSite::new();
+    let p = request(&sh, &ids.secret, "redact");
+    let before = epoch(&sh);
+    // an old page of the tag opens its stream: the scope has no build, and the subscribe's
+    // build reads the state before the removal and pauses at the publication check
+    let (at, go) = hold(&site, tag.clone());
+    let opening = {
+        let (sh, site, tag) = (Arc::clone(&sh), Arc::clone(&site), tag.clone());
+        std::thread::spawn(move || {
+            site.subscribe(&sh, &tag, "alpha.html", "an-older-rev", "an-older-label")
+        })
+    };
+    at.recv().unwrap();
+    // the removal is authorized and the fresh state published
+    on_writer(&sh, move |r| approve(r, &p));
+    assert!(epoch(&sh) > before, "the removal advanced the epoch");
+    assert!(
+        sh.state.load().ensure_current_epoch().is_ok(),
+        "the fresh state is published"
+    );
+    // the worker's step for that publish runs before the stream is registered
+    assert_eq!(site.step(&sh), 0, "no open stream: the step builds nothing");
+    site.set_before_publish(None);
+    go.send(()).unwrap();
+    let mut sub = opening.join().unwrap().expect("the stream opens");
+    // the open page gets the existing refresh event, carrying nothing
+    assert_eq!(
+        sub.rx.try_recv().ok(),
+        Some(LiveEvent::Reload),
+        "the page opened before the removal reloads"
+    );
+    let b = site.refresh(&sh, &tag).unwrap();
+    assert_eq!(
+        b.epoch,
+        epoch(&sh),
+        "the scope's build is of the current epoch"
+    );
+    assert!(!build_holds(&b, SECRET));
 }

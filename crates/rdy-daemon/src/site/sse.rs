@@ -9,10 +9,13 @@
 //!
 //! Before it writes each event, the stream checks the store's redaction epoch: a stream compared
 //! in another epoch (its page opened before a removal) gets `reload`, which carries nothing, in
-//! place of the event (D-CC90E).
+//! place of the event (D-CC90E). While the published state is older than a removal, the stream
+//! writes no event and stays open: the fresh state's build sends it `Reload` once published.
 use crate::daemon::IdleHold;
+use crate::shared::Shared;
 use crate::site::http::{BASE_HEADERS, http_date};
 use crate::site::live::{LiveEvent, Subscription};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -53,22 +56,38 @@ pub fn frame(event: &LiveEvent) -> Vec<u8> {
     }
 }
 
-/// The store's redaction epoch now, as a stream reads it before each event.
-pub type EpochNow = Box<dyn Fn() -> u64 + Send + Sync>;
+/// What a stream reads before each event: the store's redaction epoch while the published state
+/// is of that epoch, or `None` while it is older (a removal whose fresh state the writer has not
+/// published yet; or a poisoned store, which serves nothing).
+pub type EpochNow = Box<dyn Fn() -> Option<u64> + Send + Sync>;
 
-/// The frame `sub` sends for `event` while the store's epoch is `now`: the event's own, or
-/// `reload` when the stream was compared in another epoch.
-pub fn frame_in(sub: &Subscription, event: &LiveEvent, now: u64) -> Vec<u8> {
-    if sub.epoch() == now {
+/// The [`EpochNow`] of the site's streams: it reads `sh`'s published state.
+pub fn epoch_now(sh: Arc<Shared>) -> EpochNow {
+    Box::new(move || {
+        let st = sh.state.load();
+        st.ensure_current_epoch()
+            .ok()
+            .map(|()| st.redaction_epoch())
+    })
+}
+
+/// The frame `sub` sends for `event` when its stream reads `now` ([`EpochNow`]): the event's
+/// own; `reload` when the stream was compared in another epoch; nothing while the published
+/// state is older than the store's epoch. A reload then would load the `Busy` answer, and the
+/// page would close its stream for it; the stream stays open, and the build of the fresh state
+/// sends it `Reload` once the writer publishes that state.
+pub fn frame_in(sub: &Subscription, event: &LiveEvent, now: Option<u64>) -> Option<Vec<u8>> {
+    let now = now?;
+    Some(if sub.epoch() == now {
         frame(event)
     } else {
         frame(&LiveEvent::Reload)
-    }
+    })
 }
 
 /// Writes the stream of `sub` to `conn` until it ends (see the module docs). `hold` keeps the
-/// daemon up meanwhile; `stopped` turns true when the daemon stops; `epoch` reads the store's
-/// redaction epoch before each event.
+/// daemon up meanwhile; `stopped` turns true when the daemon stops; `epoch` is read before each
+/// event ([`frame_in`]).
 pub async fn serve(
     mut conn: TcpStream,
     mut sub: Subscription,
@@ -99,7 +118,10 @@ pub async fn serve(
                 continue;
             }
             event = sub.rx.recv() => match event {
-                Some(event) => frame_in(&sub, &event, epoch()),
+                Some(event) => match frame_in(&sub, &event, epoch()) {
+                    Some(out) => out,
+                    None => continue,
+                },
                 None => return,
             },
             () = &mut quiet => KEEP_ALIVE.to_vec(),

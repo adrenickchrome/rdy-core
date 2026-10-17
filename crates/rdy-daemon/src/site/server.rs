@@ -388,8 +388,7 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
                     // the hold before the head: once the reader has the head, the page (in
                     // view: live.js closes the stream of a hidden page) holds the daemon
                     let hold = ctx.handle.hold();
-                    let sh = Arc::clone(&ctx.shared);
-                    let epoch = Box::new(move || sh.state.load().reader().redaction_epoch());
+                    let epoch = sse::epoch_now(Arc::clone(&ctx.shared));
                     sse::serve(stream, sub, hold, ctx.handle.stopped(), epoch, now_secs()).await;
                     return;
                 }
