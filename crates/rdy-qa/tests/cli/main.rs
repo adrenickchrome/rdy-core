@@ -20,6 +20,7 @@ mod cli_log;
 mod cli_output;
 mod cli_proposal;
 mod cli_quarantine;
+mod cli_redaction;
 mod cli_ref;
 mod cli_relay;
 mod cli_repo_id;

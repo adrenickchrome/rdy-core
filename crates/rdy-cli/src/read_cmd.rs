@@ -298,6 +298,11 @@ fn show_text(v: &Value) -> String {
         serde_json::to_string_pretty(&fields).unwrap_or_default(),
         text(&v["body"])
     ));
+    // rdx13 (Task 6): a stub names the request that removed its content, as the source text
+    // does after `Content removed.`
+    if let Some(h) = v["redaction"]["id"].as_str() {
+        out.push_str(&format!("\n\nRedaction: {h}."));
+    }
     if v["conflict"].is_object() {
         out.push('\n');
         out.push_str(&view_cmd::conflict_text(v));
@@ -456,6 +461,16 @@ fn tags_text(v: &Value) -> String {
             if Some(text(&t["name"])) == current {
                 line.push_str("  (current)");
             }
+            // rdx13 (Task 6): the requests that removed content in the version's history
+            let removed: Vec<&str> = t["redactions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !removed.is_empty() {
+                line.push_str(&format!("  redacted by {}", removed.join(", ")));
+            }
             line
         })
         .collect::<Vec<_>>()
@@ -464,8 +479,40 @@ fn tags_text(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_text, show_text, status_text};
+    use super::{log_text, show_text, status_text, tags_text};
     use serde_json::json;
+
+    /// rdx13 (Task 6): a source read of a stub names the request that removed its content, as
+    /// the source text does (`Redaction: {hash}.` after `Content removed.`); a version whose
+    /// history holds removed content lists its requests. Other blocks and versions print as
+    /// before.
+    #[test]
+    fn rdx13_source_reads_name_the_redaction() {
+        let h = "ab".repeat(32);
+        let v = json!({"id": "p-AAAAA", "block_type": "prose", "version": "cd".repeat(32),
+            "fields": {}, "body": "Content removed.", "redaction": {"id": h}});
+        let t = show_text(&v);
+        assert!(
+            t.ends_with(&format!("{{}}\nContent removed.\n\nRedaction: {h}.")),
+            "{t}"
+        );
+        let mut plain = v.clone();
+        plain.as_object_mut().unwrap().remove("redaction");
+        assert!(show_text(&plain).ends_with("{}\nContent removed."));
+        let tags = json!({"current": "v2", "versions": [
+            {"name": "v1", "landing": "12".repeat(32)},
+            {"name": "v2", "landing": "34".repeat(32), "message": "m", "redacted": true,
+             "redactions": ["ab".repeat(32), "cd".repeat(32)]}
+        ]});
+        assert_eq!(
+            tags_text(&tags),
+            format!(
+                "v1  121212121212\nv2  343434343434  m  (current)  redacted by {}, {}",
+                "ab".repeat(32),
+                "cd".repeat(32)
+            )
+        );
+    }
 
     /// cc15: a coverage read error is printed in place of the coverage lines.
     #[test]

@@ -1,8 +1,9 @@
 use crate::brief_text;
-use crate::conn::{Env, call};
+use crate::conn::{Conn, Env, call, human_session};
 use crate::output::{hash_short, new_keys_text, num, text};
 use rdy_daemon::ErrorReply;
 use rdy_engine::E_BAD_INPUT;
+use rdy_engine::pending::CARD_MAX_TOKENS;
 use serde_json::{Value, json};
 
 #[derive(clap::Args)]
@@ -203,6 +204,11 @@ fn propose_text(v: &Value) -> String {
     t
 }
 
+/// `rdy approve`: the approval op, through `land_with` (no switch of its own skips the person).
+/// A person approving, or an agent relaying a person, first reads the needs-you queue on the
+/// same session; when the version it names carries content removal (Task 8's card), the reply
+/// carries that card as `removal_card` and the text shows it whole before the landing lines
+/// (D-CC90E, D-6B1W1). An agent's own approval is refused as before, without the read.
 pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), ErrorReply> {
     let ApproveArgs {
         proposal,
@@ -212,20 +218,80 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
         session_ref,
         strict,
     } = a;
-    let v = call(
-        env,
-        "approve",
-        json!({
-            "proposal": proposal,
-            "relayed_by": relayed_by,
-            "evidence": evidence,
-            "question": question,
-            "session_ref": session_ref,
-            "strict": strict.then_some(true),
-        }),
-    )?;
-    let t = approve_text(&v);
+    let reads_card = human_session(env) || relayed_by.is_some();
+    let args = json!({
+        "proposal": proposal,
+        "relayed_by": relayed_by,
+        "evidence": evidence,
+        "question": question,
+        "session_ref": session_ref,
+        "strict": strict.then_some(true),
+    });
+    let mut c = Conn::open(env)?;
+    let out = (|| {
+        let card = if reads_card {
+            removal_card(&mut c, &proposal)?
+        } else {
+            None
+        };
+        Ok::<_, ErrorReply>((c.op("approve", args)?, card))
+    })();
+    c.close();
+    let (mut v, card) = out?;
+    let t = approve_text_with(&v, card.as_ref());
+    if let Some(card) = card {
+        v["removal_card"] = card;
+    }
     Ok((v, t))
+}
+
+/// The removal card of the version `proposal` names, as the queue holds it now (`ref`, `card`,
+/// `card_hash` and `removal`), read at the card's own budget so no mandatory line is cut; `None`
+/// when the queue holds no removal card for it.
+fn removal_card(c: &mut Conn, proposal: &str) -> Result<Option<Value>, ErrorReply> {
+    let q = c.op("pending", json!({"max_tokens": CARD_MAX_TOKENS}))?;
+    Ok(q["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| i["removal"].is_array() && names_item(proposal, text(&i["ref"])))
+        .map(|i| {
+            json!({
+                "ref": i["ref"],
+                "card": i["card"],
+                "card_hash": i["card_hash"],
+                "removal": i["removal"],
+            })
+        }))
+}
+
+/// Whether `named` (what `rdy approve` was given) names the queue item `item` (`P-<id>@<n>`):
+/// the same ref, or the same stable id (a prefix of at least 4 hex digits, either way round)
+/// with no version, which the queue lists at its latest. A version hash names no item.
+pub(crate) fn names_item(named: &str, item: &str) -> bool {
+    let split = |r: &str| -> Option<(String, Option<String>)> {
+        let rest = r.strip_prefix("P-")?;
+        let (id, n) = match rest.split_once('@') {
+            Some((id, n)) => (id, Some(n.to_string())),
+            None => (rest, None),
+        };
+        (id.len() >= 4 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| (id.to_ascii_lowercase(), n))
+    };
+    let (Some((nid, nn)), Some((iid, Some(inn)))) = (split(named), split(item)) else {
+        return false;
+    };
+    (nid.starts_with(&iid) || iid.starts_with(&nid)) && nn.is_none_or(|n| n == inn)
+}
+
+/// The approval text of reply `v`: the removal card the person approved, when there is one,
+/// then the landing lines ([`approve_text`]).
+pub(crate) fn approve_text_with(v: &Value, card: Option<&Value>) -> String {
+    let lines = approve_text(v);
+    match card.and_then(|c| c["card"].as_str()) {
+        Some(card) => format!("{card}\n\n{lines}"),
+        None => lines,
+    }
 }
 
 /// The landing lines of an approval, from its reply: the proposal, its summary, the landing,
@@ -329,6 +395,127 @@ pub(crate) fn tag(env: &Env, a: TagArgs) -> Result<(Value, String), ErrorReply> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdy_engine::pending::{
+        CARD_MAX_TOKENS, Item, ItemKind, ItemOption, RemovalCard, card_hash, render_checked,
+    };
+    use rdy_model::Hash;
+    use rdy_model::redaction::ReasonClass;
+    use std::collections::BTreeMap;
+
+    /// The queue's approve item of a version that carries one secret removal request, with its
+    /// card rendered whole and its digest, as the `pending` op serializes it.
+    fn removal_item() -> (Item, Value) {
+        let report = Hash([7; 32]);
+        let mut item = Item {
+            r#ref: "P-0123456789ab@1".into(),
+            kind: ItemKind::Approve,
+            title: "Remove the code".into(),
+            why: "ready to land: 1 changes".into(),
+            blocking: false,
+            summary: Some("Removes the leaked code.".into()),
+            summary_by: Some("agent:a".into()),
+            facts: vec![],
+            members: vec![],
+            options: vec![ItemOption {
+                id: "approve".into(),
+                label: "Approve P-0123456789ab@1".into(),
+                consequences: vec![
+                    "Lands the proposal in canon.".into(),
+                    "Approved content removal cannot be undone.".into(),
+                ],
+                recommended: Some("Removes the leaked code.".into()),
+            }],
+            raised_by: "agent:a".into(),
+            raised_at: "2026-10-17T00:00:00Z".into(),
+            age: "today".into(),
+            batch: None,
+            exception: None,
+            card: String::new(),
+            card_hash: String::new(),
+            removal: Some(vec![RemovalCard {
+                request: Hash([9; 32]),
+                report,
+                versions: 2,
+                blobs: 0,
+                shared_blobs: 0,
+                payloads: 3,
+                bytes: 640,
+                reason_class: ReasonClass::Secret,
+                reason: "a leaked code".into(),
+            }]),
+            removal_reports: BTreeMap::from([(report, vec![])]),
+        };
+        item.card = render_checked(&item, CARD_MAX_TOKENS).unwrap();
+        item.card_hash = card_hash(&item).to_string();
+        let v = serde_json::to_value(&item).unwrap();
+        (item, v)
+    }
+
+    /// rdx13 (D-CC90E, Task 8): a person's direct `rdy approve` of a version that carries a
+    /// removal request prints that version's whole removal card, every mandatory line, before
+    /// the landing lines; an ordinary approval prints what it always printed.
+    #[test]
+    fn rdx13_direct_approval_text_displays_the_complete_card() {
+        let (item, v) = removal_item();
+        let reply = json!({
+            "approved": "P-0123456789ab@1", "title": "Remove the code", "changes": 1,
+            "landing": "ab".repeat(32)
+        });
+        let plain = approve_text(&reply);
+        assert_eq!(approve_text_with(&reply, None), plain);
+        let t = approve_text_with(&reply, Some(&v));
+        assert_eq!(t, format!("{}\n\n{plain}", item.card));
+        let request = "09".repeat(32);
+        let report = "07".repeat(32);
+        for line in [
+            "Content removal".to_string(),
+            format!("  Request: {request}"),
+            format!("  Report: {report}"),
+            "  Versions: 2; blobs: 0; shared blobs: 0.".to_string(),
+            "  Payloads: 3; bytes: 640.".to_string(),
+            "  Reason class: secret.".to_string(),
+            "  Reason: a leaked code".to_string(),
+            format!("  {}", rdy_engine::W_REDACTION_COPIES_MESSAGE),
+            format!("  {}", rdy_engine::W_REDACTION_QUOTES_MESSAGE),
+            format!("  {}", rdy_engine::W_REDACTION_REUSE_MESSAGE),
+            format!("  {}", rdy_engine::W_REDACTION_SECRET_MESSAGE),
+            "Approved content removal cannot be undone.".to_string(),
+        ] {
+            assert!(
+                t.lines().any(|l| l.trim_end() == line || l.contains(&line)),
+                "{line}\n---\n{t}"
+            );
+        }
+        assert!(t.ends_with("approving P-0123456789ab@1: Remove the code (1 change(s))\nlanded abababababab (P-0123456789ab@1)"), "{t}");
+    }
+
+    /// rdx13: the queue item a `rdy approve <proposal>` names: its exact ref, or its stable id
+    /// (any prefix of at least 4 hex digits) at its latest version; a version hash names none.
+    #[test]
+    fn rdx13_the_queue_item_matches_the_named_version() {
+        let item = "P-0123456789ab@2";
+        for named in [
+            "P-0123456789ab@2",
+            "P-0123456789ab",
+            "P-0123@2",
+            "P-0123",
+            "P-0123456789abcdef@2",
+            "P-0123456789AB@2",
+        ] {
+            assert!(names_item(named, item), "{named}");
+        }
+        for named in [
+            "P-0123456789ab@1",
+            "P-0124",
+            "P-012",
+            "P-0123456789ab@",
+            "0123456789ab",
+            "P-xyz1@2",
+            "p-0123456789ab@2",
+        ] {
+            assert!(!names_item(named, item), "{named}");
+        }
+    }
 
     /// A propose reply that could not read its tensions or its coverage says so, as a write
     /// reply does (M2f-b), instead of printing nothing for them.
