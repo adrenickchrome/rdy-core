@@ -304,7 +304,16 @@ pub(crate) fn scope_of(
 }
 
 /// Runs the ctl op `op` with `args`. An unknown op is `E_BAD_INPUT` naming every op.
+///
+/// Every op is a new response, so it first checks the state the engine serves now: a state
+/// read before a content removal refuses with `E_REDACTED_STATE`, before any op parses or reads
+/// (plan Redaction: one response-check layer, no name allowlist). The CLI's direct route calls
+/// this function too. The acquired state marks where the response starts; an op may read a
+/// newer one.
 pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError> {
+    let state = cx.engine.read();
+    state.ensure_current_epoch()?;
+    drop(state);
     match op {
         "session" => Err(RdyError::new(
             E_BAD_INPUT,

@@ -161,7 +161,7 @@ pub(crate) fn unknown(uri: &str) -> McpError {
 /// A tool error as a protocol error. A missing doc, view or proposal is a missing resource; a
 /// fault in rdy is an internal error; any other error (a missing session, bad input) is an
 /// invalid request.
-fn refuse(e: RdyError) -> McpError {
+pub(crate) fn refuse(e: RdyError) -> McpError {
     let data = serde_json::to_value(&e).ok();
     match e.code {
         E_NOT_FOUND => McpError::resource_not_found(e.to_string(), data),

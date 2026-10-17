@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, WriteParams};
+use crate::tools::{self, RedactParams, WriteParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = write_router, vis = "pub(crate)")]
@@ -12,5 +12,12 @@ impl RdyServer {
     )]
     async fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
         self.run("rdy_write", p, tools::rdy_write).await
+    }
+
+    #[tool(
+        description = "Content removal (redaction). With dry_run true (any role) it reports the blast radius and records nothing: the targets, every version, blob and payload the removal drops, each record that embeds, references or quotes the content, the copies outside the store, and warnings. Show that report and its warnings to the person. Without dry_run it records the request in your view (default: your session's) and erases nothing; propose the view with rdy_propose, and only a person can approve it (rdy_pending shows the card). targets: a block id (every stored version), id@<full version hash>, or blob:<full manifest hash>. reason_class: secret, personal, legal or retraction. max_tokens (256 to 20000, default 4000) budgets text; the structured report stays complete."
+    )]
+    async fn rdy_redact(&self, Parameters(p): Parameters<RedactParams>) -> CallToolResult {
+        self.run("rdy_redact", p, tools::rdy_redact).await
     }
 }

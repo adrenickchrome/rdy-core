@@ -7,7 +7,9 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Call rdy_session first, then rdy_overview.",
     "Read and write through rdy's tools, not the working-copy files.",
     "Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>).",
-    "Write with rdy_write; propose with rdy_propose.",
+    // plan Redaction: four sentences in this element, so that the existing sentence guards
+    // (their count and their positions) hold
+    "Write with rdy_write; propose with rdy_propose. Before proposing content removal, call rdy_redact with dry_run true. Show its report and warnings. Record the request, then use rdy_propose and rdy_pending. Only a person can approve it.",
     "Work in your own view; include others' changes, never write into their views.",
     "Conflicts are recorded, not errors: resolve one by writing the block.",
     "When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan.",

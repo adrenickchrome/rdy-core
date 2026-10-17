@@ -218,6 +218,14 @@ impl ServerHandler for RdyServer {
         request: CallToolRequestParams,
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        // every tool call is a new response: a state read before a content removal refuses it
+        // before routing (plan Redaction: one response-check layer, no name allowlist); the tool
+        // may read a newer state
+        let state = self.engine.read();
+        if let Err(e) = state.ensure_current_epoch() {
+            return Ok(result(Err(e)).into());
+        }
+        drop(state);
         if request.name == REQUEST_TOO_LARGE {
             let mb = tools::MAX_REQUEST_BYTES / (1024 * 1024);
             return Ok(result(Err(RdyError::new(
@@ -252,6 +260,10 @@ impl ServerHandler for RdyServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<rmcp::RoleServer>,
     ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
+        // as `call_tool`: the state the engine serves is checked before the read routes
+        let state = self.engine.read();
+        state.ensure_current_epoch().map_err(resources::refuse)?;
+        drop(state);
         Ok(self.resources_read(request.uri).await?.into())
     }
 

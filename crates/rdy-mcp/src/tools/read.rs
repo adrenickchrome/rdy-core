@@ -290,13 +290,19 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
                     .and_then(|v| v["status"].as_str().map(String::from))
                     .unwrap_or_default()
             });
+            // a source read: a stub of removed content also names its redaction, after its
+            // `Content removed.` (rdx6, rdx12); renderer outputs never show that line
             let markdown = || {
-                crate::markdown::block_markdown(
+                let md = crate::markdown::block_markdown(
                     b,
                     &m,
                     crate::markdown::doc_depth(&m, b),
                     status.as_deref(),
-                )
+                );
+                match b.redaction() {
+                    Some(h) => format!("{md}\n\nRedaction: {h}."),
+                    None => md,
+                }
             };
             let entry = match format {
                 "yaml" | "markdown" => {
