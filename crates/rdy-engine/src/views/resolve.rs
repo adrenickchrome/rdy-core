@@ -81,6 +81,11 @@ impl Rdy {
         let claim = commit_claim(&st, s, view)?;
         let m = st.materialized(&scope)?;
         let block = self.store.get_block(&landed)?;
+        // a landed side a redaction removed reads as its stub: refused as removed content, before
+        // its missing fields are validated
+        if let Some(request) = block.redaction() {
+            return Err(rdy_store::StoreError::Redacted { request }.into());
+        }
         check_landed_block(&self.pack, &m, &block)?;
         let ops = vec![Op::Update {
             base: landed,

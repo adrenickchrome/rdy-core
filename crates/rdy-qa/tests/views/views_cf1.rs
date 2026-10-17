@@ -596,3 +596,96 @@ fn cf1_a_landed_side_that_would_make_a_parent_loop_is_refused() {
     assert_eq!(r.read().view_head("b").unwrap().head, head);
     check(&r, &view("b")).unwrap();
 }
+
+/// Removes canon's version of `d` (the frozen landed side) in another view, as a person
+/// approves it, and returns the request and the removed version.
+fn redact_canon_side(r: &mut Rdy, d: &str) -> (rdy_model::Hash, rdy_model::Hash) {
+    let id = rdy_model::BlockId::parse(d).unwrap();
+    let v = r.read().block(&Scope::Canon, &id).unwrap().version_hash();
+    let s = as_agent("agent:r", "r1");
+    let res = r
+        .redact(
+            &s,
+            rdy_engine::redaction::RedactInput {
+                targets: vec![format!("{d}@{v}")],
+                reason_class: "secret".into(),
+                reason: "a leaked code".into(),
+                dry_run: false,
+            },
+        )
+        .unwrap();
+    let p = r
+        .propose(&s, &s.default_view(), "Remove", Some("Removes the ruling."))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    let stub = r.store().get_block(&v).unwrap();
+    assert!(stub.is_redacted(), "{stub:?}");
+    (res.redaction.unwrap(), v)
+}
+
+/// After the landing: canon still reads `v` for `d`, removed by `request`, through a reopen and
+/// a reindex.
+fn assert_removed_side_lands(
+    dir: &std::path::Path,
+    d: &str,
+    v: rdy_model::Hash,
+    request: rdy_model::Hash,
+) {
+    let id = rdy_model::BlockId::parse(d).unwrap();
+    for reindex in [false, true] {
+        let mut r = Rdy::open(dir).unwrap();
+        if reindex {
+            r.reindex().unwrap();
+        }
+        let b = r.read().block(&Scope::Canon, &id).unwrap();
+        assert_eq!(b.version_hash(), v, "reindex {reindex}");
+        assert_eq!(b.redaction(), Some(request), "reindex {reindex}");
+        check(&r, &Scope::Canon).unwrap_or_else(|e| panic!("{e:#?}"));
+        r.close().unwrap();
+    }
+}
+
+/// review round 4: a view resolved to canon's frozen side lands after that side is removed in
+/// another view; the gate reads the unchanged stub with the read schema.
+#[test]
+fn cf1_a_resolved_view_lands_after_its_landed_side_is_redacted() {
+    let (dir, mut r, d, _s) = frozen_conflict();
+    let b = as_agent("agent:b", "r1");
+    r.view_resolve_landed(&b, "b", &d).unwrap();
+    let (request, v) = redact_canon_side(&mut r, &d);
+    land(&mut r, "b").unwrap();
+    r.close().unwrap();
+    assert_removed_side_lands(dir.path(), &d, v, request);
+}
+
+/// review round 4: the same, with the redaction between the proposal and its landing.
+#[test]
+fn cf1_a_resolved_views_proposal_lands_after_its_landed_side_is_redacted() {
+    let (dir, mut r, d, _s) = frozen_conflict();
+    let b = as_agent("agent:b", "r1");
+    r.view_resolve_landed(&b, "b", &d).unwrap();
+    let p = r
+        .propose(&writer(), "b", "b", Some("Takes the landed side."))
+        .unwrap();
+    let (request, v) = redact_canon_side(&mut r, &d);
+    r.land(&approver(), &p.id).unwrap();
+    r.close().unwrap();
+    assert_removed_side_lands(dir.path(), &d, v, request);
+}
+
+/// review round 4: taking a landed side that a redaction removed is E_REDACTED naming the
+/// request, and writes nothing.
+#[test]
+fn cf1_a_redacted_landed_side_is_e_redacted() {
+    let (_dir, mut r, d, _s) = frozen_conflict();
+    let (request, _v) = redact_canon_side(&mut r, &d);
+    let b = as_agent("agent:b", "r1");
+    let head = r.read().view_head("b").unwrap().head;
+    let before = r.read().views_with_changes();
+    let e = r.view_resolve_landed(&b, "b", &d).unwrap_err();
+    assert_eq!(e.code, E_REDACTED, "{e}");
+    assert!(e.message.contains(&request.to_string()), "{e}");
+    assert_eq!(r.read().view_head("b").unwrap().head, head);
+    assert_eq!(r.read().views_with_changes(), before);
+    assert_eq!(r.read().conflicts(&view("b")).unwrap().len(), 1);
+}
