@@ -407,6 +407,7 @@ impl Shared<'_> {
                 label: self.site.label(b),
                 title: String::new(),
                 key: crate::site::typed_key(b).map(String::from),
+                removed: b.is_redacted(),
             });
         };
         Some(Link {
@@ -416,6 +417,7 @@ impl Shared<'_> {
             // the hover describes where the link leads: for a decision, the block it governs
             title: self.hover(self.site.destination(id).unwrap_or(b), &url),
             key: crate::site::typed_key(b).map(String::from),
+            removed: b.is_redacted(),
         })
     }
 
@@ -1146,13 +1148,17 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
                 .get(id)
                 .cloned()
                 .unwrap_or_default(),
-            prompt: inline::spans_html(
-                b.field_str("prompt").unwrap_or(""),
-                &Ctx {
-                    link: &link,
-                    doc_page: &sh.doc_page(page, id),
-                },
-            ),
+            // a removed question's prompt is the notice (D-3M81W): its stub has no prompt
+            prompt: match b.is_redacted() {
+                true => crate::escape(CONTENT_REMOVED),
+                false => inline::spans_html(
+                    b.field_str("prompt").unwrap_or(""),
+                    &Ctx {
+                        link: &link,
+                        doc_page: &sh.doc_page(page, id),
+                    },
+                ),
+            },
             href: target.href_from(page),
             section_title,
         };

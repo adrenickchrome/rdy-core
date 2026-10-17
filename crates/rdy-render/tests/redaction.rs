@@ -180,6 +180,7 @@ struct World {
     removed_prose: BlockId,
     removed_term: BlockId,
     removed_figure: BlockId,
+    removed_question: BlockId,
     decision: BlockId,
     /// Blocks no request touches.
     plan: BlockId,
@@ -270,17 +271,18 @@ fn outputs(st: &ReadState) -> (BTreeMap<String, Outputs>, Print) {
 /// - landing L1 holds a folder `vault` (a canary title and description) with a kept doc; a doc
 ///   `secret` (a canary title) with a kept section; and the doc `plan`: a section with a canary
 ///   heading holding a canary prose and a readable sibling; a section of links to the removed
-///   section, the removed term and the kept doc; a term with a canary name; four figures (an
-///   image whose blob the request removes, a removed figure, a download whose blob shares a chunk
-///   with a removed blob, a plain image); and a decision with a canary statement that affects the
-///   sibling. It is tagged v1.0.0;
+///   section (once with a canary display text), the removed term and the kept doc; a question
+///   with a canary prompt; a term with a canary name; four figures (an image whose blob the
+///   request removes, a removed figure, a download whose blob shares a chunk with a removed blob,
+///   a plain image); and a decision with a canary statement that affects the sibling. It is
+///   tagged v1.0.0;
 /// - landing L2 edits the sibling and the canary prose again (canon counts one landing since
 ///   v1.0.0);
 /// - an open view `edit` rewrites the links and deletes the shared-chunk figure.
 ///
 /// Then one request removes every version of the folder, the doc `secret`, the canary section,
-/// the canary prose, the term, the removed figure and the decision, the image blob, and a blob
-/// whose only full chunk the download's blob shares.
+/// the canary prose, the term, the removed figure, the decision and the question, the image
+/// blob, and a blob whose only full chunk the download's blob shares.
 fn world() -> World {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
@@ -323,7 +325,8 @@ fn world() -> World {
             {"op": "create", "type": "prose", "id": "$p2", "parent": "$s", "body": "Readable sibling."},
             {"op": "create", "type": "section", "id": "$s2", "parent": "$d", "fields": {"title": "Links"}},
             {"op": "create", "type": "term", "id": "$t", "parent": "$s2", "fields": {"name": "CANARY term"}, "body": "A CANARY definition."},
-            {"op": "create", "type": "prose", "id": "$p3", "parent": "$s2", "body": "See {{$s}}, {{$t}} and {{$k}}."},
+            {"op": "create", "type": "prose", "id": "$p3", "parent": "$s2", "body": "See {{$s}}, {{$t}} and {{$k}}. Also {{$s|CANARY label}}."},
+            {"op": "create", "type": "question", "id": "$q", "parent": "$s2", "fields": {"prompt": "CANARY question?"}},
             {"op": "create", "type": "figure", "id": "$fi", "parent": "$s2", "fields": {"blob": image_blob.to_string(), "media_type": "image/png", "alt": "CANARY image alt"}},
             {"op": "create", "type": "figure", "id": "$fs", "parent": "$s2", "fields": {"blob": stub_blob.to_string(), "media_type": "image/png", "alt": "CANARY figure alt"}},
             {"op": "create", "type": "figure", "id": "$fh", "parent": "$s2", "fields": {"blob": shared_blob.to_string(), "media_type": "application/octet-stream", "alt": "CANARY download"}},
@@ -379,6 +382,7 @@ fn world() -> World {
         id("$fi"),
         id("$fh"),
         id("$fp"),
+        id("$q"),
     );
     let (before, before_print) = outputs(&r.read());
     r.close().unwrap();
@@ -394,6 +398,7 @@ fn world() -> World {
                 RedactTarget::AllVersions(world_ids.4.clone()),
                 RedactTarget::AllVersions(world_ids.5.clone()),
                 RedactTarget::AllVersions(decision.clone()),
+                RedactTarget::AllVersions(world_ids.12.clone()),
                 RedactTarget::Blob(image_blob),
                 RedactTarget::Blob(removed_blob),
             ],
@@ -424,6 +429,7 @@ fn world() -> World {
         image_figure: world_ids.9,
         shared_figure: world_ids.10,
         plain_figure: world_ids.11,
+        removed_question: world_ids.12,
         image_blob,
         stub_blob,
         shared_blob,
@@ -531,8 +537,18 @@ fn rdx11_all_outputs_use_the_one_removed_notice() {
     }
     // the decision has no place in the text; the sibling's trail no longer quotes it
     assert!(!plan.contains("Ruled:"), "{plan}");
-    // a reference to a removed block reads the notice as its text
-    assert!(plan.contains(">Content removed.</a>"), "{plan}");
+    // a reference to a removed block reads the notice as its text, even one the author gave
+    // display text
+    let before_plan = page(&w.before, "canon", "plan.html");
+    let also = |html: &str| {
+        let at = html.find("Also <a ").unwrap_or_else(|| panic!("{html}"));
+        html[at..at + html[at..].find("</a>").unwrap() + 4].to_string()
+    };
+    assert!(
+        also(&before_plan).ends_with(">CANARY label</a>"),
+        "{before_plan}"
+    );
+    assert!(also(&plan).ends_with(">Content removed.</a>"), "{plan}");
     // the readable blocks stay
     for kept in ["Readable sibling, edited.", "Kept page", "Plain picture"] {
         assert!(plan.contains(kept), "{kept}: {plan}");
@@ -547,6 +563,27 @@ fn rdx11_all_outputs_use_the_one_removed_notice() {
         let t = page(&after, scope, path);
         assert!(t.contains(CONTENT_REMOVED), "{scope} {path}: {t}");
     }
+    // the removed question reads the notice on the collected page and in the search
+    let questions = page(&after, "canon", "questions.html");
+    assert!(
+        questions.contains("<p><strong>Open question:</strong> Content removed.</p>"),
+        "{questions}"
+    );
+    assert!(
+        page(&w.before, "canon", "questions.html")
+            .contains("<p><strong>Open question:</strong> CANARY question?</p>")
+    );
+    let index: Value = serde_json::from_slice(&after["canon"]["search-index.json"]).unwrap();
+    let asked: Vec<&Value> = index["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "question")
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0]["title"], CONTENT_REMOVED, "{asked:?}");
+    assert_eq!(asked[0]["text"], CONTENT_REMOVED, "{asked:?}");
+    let _ = &w.removed_question;
     // the review's removed line of the shared-chunk figure is the notice
     let edit = page(&after, "view:edit", "plan.html");
     assert!(
@@ -1073,4 +1110,178 @@ fn rdx11_pdf_text_and_images_prove_removal() {
     assert!(text_after.contains("Readable sibling, edited."));
     assert!(text_after.contains("Kept child text."));
     assert_eq!(pdf_images(pdf), BTreeSet::from([(3, 2)]));
+}
+
+/// Every file under `dir`, by its path under `dir`.
+fn tree(dir: &Path) -> Outputs {
+    walk(dir)
+        .into_iter()
+        .map(|f| {
+            let name = f.strip_prefix(dir).unwrap().display().to_string();
+            let bytes = std::fs::read(&f).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+
+/// The words a change page marks as removed (`<del>`), the screen-reader word left out.
+fn deleted_words(html: &str) -> String {
+    Regex::new(r#"<del><span class="sr-word">removed: </span>(.*?)</del>"#)
+        .unwrap()
+        .captures_iter(html)
+        .map(|c| c[1].to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A removed doc is named by its id (Task 3). When a sibling's name is that id ignoring case,
+/// the two pages would be one file on a file system that ignores case: the render and the print
+/// refuse with E_PATH_CLASH, naming the sibling to rename, and the last rendered site stays as it
+/// was. Once the sibling is renamed, both docs' unaffected children have their pages.
+#[test]
+fn rdx11_a_neutral_path_that_matches_a_sibling_refuses_and_keeps_the_last_site() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "secret", "title": "CANARY doc title", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$a", "body": "Kept text of the removed doc."}
+        ]),
+    );
+    let removed = bid(&w.created["$a"]);
+    let lower = removed.to_string().to_ascii_lowercase();
+    assert_ne!(lower, removed.to_string(), "the id has upper-case letters");
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$b", "fields": {"name": lower, "title": "Neighbour", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$b", "body": "Neighbour text."}
+        ]),
+    );
+    let sibling = bid(&w.created["$b"]);
+    land(&mut r, "w1");
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("site");
+    rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap();
+    let last = tree(&out);
+    let secret = text(&last["secret.html"]);
+    assert!(secret.contains("Kept text of the removed doc."), "{secret}");
+    let neighbour = text(&last[&format!("{lower}.html")]);
+    assert!(neighbour.contains("Neighbour text."), "{neighbour}");
+    r.close().unwrap();
+    authorized_batch_fixture(
+        &dir.path().join(".rdy/store"),
+        &[RequestSpec::new(
+            "redact",
+            vec![RedactTarget::AllVersions(removed.clone())],
+        )],
+        &FixtureOptions::approved(Proof::relayed_human()),
+    );
+
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let message = format!(
+        "{sibling} is named {lower:?}, which matches the file name of redacted doc {removed} (ignoring case), so they cannot both be written as files"
+    );
+    let fix = |verb: &str| {
+        format!("rename {sibling} (a redacted doc's file is named by its id), then {verb} again")
+    };
+    let e = rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (E_PATH_CLASH, message.as_str(), fix("render").as_str())
+    );
+    // nothing was written: the last site, both unaffected children with it, is as it was
+    assert_eq!(tree(&out), last);
+    let e = build_site(&r.read(), &Scope::Canon, Mode::Static)
+        .err()
+        .expect("a refusal");
+    assert_eq!(e.code, E_PATH_CLASH);
+    let e = print::build(&r.read(), &Scope::Canon).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (E_PATH_CLASH, message.as_str(), fix("export").as_str())
+    );
+
+    // renamed, the sibling no longer matches: both docs and their children have pages
+    write(
+        &mut r,
+        "w2",
+        json!([{"op": "update", "id": sibling.to_string(), "fields": {"name": "neighbour"}}]),
+    );
+    land(&mut r, "w2");
+    rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap();
+    let now = tree(&out);
+    let stub = text(&now[&format!("{removed}.html")]);
+    assert!(stub.contains("<title>Content removed."), "{stub}");
+    assert!(stub.contains("Kept text of the removed doc."), "{stub}");
+    let neighbour = text(&now["neighbour.html"]);
+    assert!(neighbour.contains("Neighbour text."), "{neighbour}");
+    assert!(holding(&BTreeMap::from([("site".to_string(), now)]), CANARY).is_empty());
+    print::build(&r.read(), &Scope::Canon).unwrap();
+}
+
+/// A draft replaces a figure's file and its alt text; then a redaction removes the old file. The
+/// draft's change summary reads the old side as the notice (removed words), never as an empty
+/// figure or its old alt text.
+#[test]
+fn rdx11_an_edited_figure_whose_base_blob_was_removed_diffs_from_the_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let old_blob = r
+        .store_mut()
+        .put_blob(&rgb_png(7, 5, [200, 30, 30]))
+        .unwrap();
+    let new_blob = r
+        .store_mut()
+        .put_blob(&rgb_png(3, 2, [30, 30, 200]))
+        .unwrap();
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$d", "body": "Kept text."},
+            {"op": "create", "type": "figure", "id": "$f", "parent": "$d", "fields": {"blob": old_blob.to_string(), "media_type": "image/png", "alt": "CANARY old image"}}
+        ]),
+    );
+    let figure = bid(&w.created["$f"]);
+    land(&mut r, "w1");
+    write(
+        &mut r,
+        "edit",
+        json!([{"op": "update", "id": figure.to_string(), "fields": {"blob": new_blob.to_string(), "alt": "Safe new image"}}]),
+    );
+    let before = site(&r.read(), "view:edit");
+    let changes = text(&before["changes.html"]);
+    assert!(deleted_words(&changes).contains("CANARY"), "{changes}");
+    r.close().unwrap();
+    authorized_batch_fixture(
+        &dir.path().join(".rdy/store"),
+        &[RequestSpec::new(
+            "redact",
+            vec![RedactTarget::Blob(old_blob)],
+        )],
+        &FixtureOptions::approved(Proof::relayed_human()),
+    );
+
+    let r = Rdy::open(dir.path()).unwrap();
+    let after = site(&r.read(), "view:edit");
+    assert!(
+        holding(
+            &BTreeMap::from([("edit".to_string(), after.clone())]),
+            CANARY
+        )
+        .is_empty()
+    );
+    let changes = text(&after["changes.html"]);
+    assert!(
+        deleted_words(&changes).contains(CONTENT_REMOVED),
+        "the old figure reads the notice: {changes}"
+    );
+    assert!(changes.contains("Safe new image"), "{changes}");
+    let plan = text(&after["plan.html"]);
+    assert!(plan.contains("Safe new image"), "{plan}");
 }

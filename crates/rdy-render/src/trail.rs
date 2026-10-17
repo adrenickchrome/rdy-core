@@ -360,6 +360,7 @@ fn link_in<'a>(
             label: site.summary(b),
             title: String::new(),
             key: crate::site::typed_key(b).map(String::from),
+            removed: b.is_redacted(),
         })
     }
 }

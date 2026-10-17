@@ -4,6 +4,7 @@ use crate::inline::{Form, code_escape};
 use crate::page::PageContext;
 use crate::site::Site;
 use rdy_engine::Materialized;
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, entity, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -149,6 +150,11 @@ pub(crate) fn own_text_coded(b: &Block, site: &Site) -> String {
 }
 
 fn own_text_in(b: &Block, r: Read) -> String {
+    // a removed block of any other type says the notice, before its type's fields are read
+    // (D-3M81W); a decision, removed or not, has no place in the text
+    if b.is_redacted() && b.block_type != decision::DECISION {
+        return CONTENT_REMOVED.to_string();
+    }
     let body = || r.plain(&b.body, RefMode::for_body(&b.block_type), Form::Body);
     let list = |name: &str| match b.fields.get(name) {
         Some(FieldValue::List(l)) => l.clone(),
@@ -291,7 +297,11 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
                 add(entry("term", Some(item.anchor.clone()), title, text));
             }
             "question" => {
-                let prompt = clip(&field(b, "prompt", site), TEXT_MAX);
+                // a removed question's prompt is the notice: its stub has no prompt
+                let prompt = match b.is_redacted() {
+                    true => CONTENT_REMOVED.to_string(),
+                    false => clip(&field(b, "prompt", site), TEXT_MAX),
+                };
                 let url = site.url_of(&b.id);
                 let mut e = entry(
                     "question",

@@ -293,6 +293,11 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
         g,
         site,
     } = read;
+    // the Markdown tree writes a file per page: two siblings that would be one file refuse every
+    // format alike, before anything is built or written
+    if let Some(e) = site.path_clash("export") {
+        return Err(e);
+    }
     // the label as the colophon writes it, which names the view or proposal version a print of
     // one shows; the pages show no review mark
     let listed = review::listed(rdy, scope)?;

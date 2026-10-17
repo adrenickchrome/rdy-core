@@ -807,6 +807,12 @@ fn build_site_from(
         g,
         site,
     } = read;
+    // a static site is written as files: two siblings that would be one file refuse before
+    // anything is built, so the last rendered site stays as it was (a live site's pages are not
+    // files)
+    if let (Mode::Static, Some(e)) = (&mode, site.path_clash("render")) {
+        return Err(e);
+    }
     let env = env()?;
     // what the scope changes: its chip, its change summary, the home page's list and the
     // menu's count all read it (O12). A proposal version with no base here (made on the empty
