@@ -755,7 +755,16 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
 /// A project with an early landing tagged v0.1.0 (a doc that nothing removes), then one write in
 /// view `work` of `ops`, landed and tagged v1.0.0. Returns the open project and the write.
 fn tagged_world(dir: &Path, ops: impl FnOnce(&mut Rdy) -> Value) -> (Rdy, WriteResult) {
-    let mut r = Rdy::init(dir, "rdy-standard").unwrap();
+    tagged_world_in(dir, "rdy-standard", ops)
+}
+
+/// `tagged_world` under the pack named `pack` (a file in `.rdy/packs` or a built-in pack).
+fn tagged_world_in(
+    dir: &Path,
+    pack: &str,
+    ops: impl FnOnce(&mut Rdy) -> Value,
+) -> (Rdy, WriteResult) {
+    let mut r = Rdy::init(dir, pack).unwrap();
     write(
         &mut r,
         "work",
@@ -931,4 +940,63 @@ fn rdx6_tags_list_every_sibling_removal() {
         (json!(true), json!(want)),
         "both requests that removed the change's blocks"
     );
+}
+
+/// A pack whose `note` has a `blob` string field; `note_traits` are its traits. Only `figure`
+/// has the `asset` trait unless `note_traits` names it.
+fn blob_field_pack(note_traits: &str) -> String {
+    format!(
+        "name: plain\nversion: \"1\"\nblock_types:\n  doc: {{ prefix: d, traits: [structural], body: forbidden, children: [note, figure] }}\n  note: {{ prefix: n, traits: [{note_traits}], fields: {{ blob: {{ kind: str }} }} }}\n  figure: {{ prefix: fg, traits: [asset, informative], body: forbidden, fields: {{ blob: {{ kind: str, required: true }}, media_type: {{ kind: str, required: true }}, alt: {{ kind: str, required: true }} }} }}\ndoc_types:\n  page: {{ skeleton: [] }}\n"
+    )
+}
+
+#[test]
+fn rdx6_tags_ignore_a_blob_field_on_a_non_asset_block() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".rdy/packs")).unwrap();
+    let pack = dir.path().join(".rdy/packs/plain.yaml");
+    std::fs::write(&pack, blob_field_pack("informative")).unwrap();
+    let mut blob = Hash([0; 32]);
+    let (r, w) = tagged_world_in(dir.path(), "plain", |r| {
+        // a blob no figure names; the note's field holds its hash as plain text
+        blob = r.store_mut().put_blob(b"unrelated bytes").unwrap();
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "note", "id": "$n", "parent": "$d", "body": "A note.", "fields": {"blob": blob.to_string()}}
+        ])
+    });
+    let note = bid(&w.created["$n"]);
+    r.close().unwrap();
+    let request = authorize(dir.path(), "redact", 40, vec![RedactTarget::Blob(blob)]);
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    assert!(matches!(
+        st.reader().get_blob(&blob),
+        Err(rdy_store::StoreError::Redacted { request: q }) if q == request
+    ));
+    assert!(!st.block(&Scope::Canon, &note).unwrap().is_redacted());
+    let marks = markers_of(&st);
+    assert_eq!(marks["v0.1.0"], (Value::Null, Value::Null));
+    assert_eq!(
+        marks["v1.0.0"],
+        (Value::Null, Value::Null),
+        "a non-asset block's blob field names no asset: the tag holds no removed content"
+    );
+    // the same note under a pack that makes it an asset: its blob is a reference now
+    std::fs::write(&pack, blob_field_pack("asset, informative")).unwrap();
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
+    let asset = r.read();
+    let marked = (json!(true), json!([request.to_string()]));
+    assert_eq!(
+        markers_of(&asset)["v1.0.0"],
+        marked,
+        "the asset names a removed blob"
+    );
+    // a state held from the old pack keeps its own answer, and does not change the new one's
+    assert_eq!(
+        markers_of(&st)["v1.0.0"],
+        (Value::Null, Value::Null),
+        "the old pack's state reads under the old pack"
+    );
+    assert_eq!(markers_of(&asset)["v1.0.0"], marked);
 }

@@ -3,6 +3,7 @@ use crate::answer::relay::{RelayInput, relayed};
 use crate::error::*;
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Op, Role, Tag};
+use rdy_schema::Pack;
 use rdy_store::StoreError;
 use rdy_store::kinds::{self, BlobManifest};
 use serde::Serialize;
@@ -33,19 +34,35 @@ type VposKey = (Option<Hash>, usize, VposScope);
 
 /// What the cached tag markers are for: the canon head, the tag count and the redaction epoch
 /// of the state that asked. Tags are immutable and only added, and an apply lands with its
-/// request's carrier, so these name one set of markers.
+/// request's carrier, so these name one set of markers under one pack.
 type MarkKey = (Option<Hash>, usize, u64);
 
+/// The pack a cached marker entry was read under: which types are assets decides which `blob`
+/// fields are followed. Compared by pointer; the entry holds the `Arc`, so the address is never
+/// reused while the entry lives (a state held from before a pack reload keeps the old pack).
+#[derive(Clone)]
+struct PackId(Arc<Pack>);
+
+impl PackId {
+    fn is(&self, pack: &Arc<Pack>) -> bool {
+        Arc::ptr_eq(&self.0, pack)
+    }
+}
+
 /// Each landing's own requests (see `ReadState::landing_requests`), by landing hash, for one
-/// redaction epoch: the active mask of an epoch never changes, and a landing never changes.
-type LandingMarks = (u64, Arc<HashMap<Hash, Vec<Hash>>>);
+/// redaction epoch and one pack: the active mask of an epoch never changes, and a landing never
+/// changes.
+type LandingMarks = (u64, PackId, Arc<HashMap<Hash, Vec<Hash>>>);
+
+/// The tag markers of one state (see `MarkKey`), with the pack they were read under.
+type TagMarks = (MarkKey, PackId, Arc<Vec<Vec<Hash>>>);
 
 /// The cached positions, shared by every published state (see `VposKey`), the tag markers of one
 /// state (see `MarkKey`) and the per-landing requests they are built from (see `LandingMarks`).
 #[derive(Default)]
 pub(crate) struct VposCache {
     entries: HashMap<VposKey, VersionPosition>,
-    marks: Option<(MarkKey, Arc<Vec<Vec<Hash>>>)>,
+    marks: Option<TagMarks>,
     landings: Option<LandingMarks>,
 }
 
@@ -553,9 +570,9 @@ impl ReadState {
 
     /// For each of `tags` (in order), the requests that removed content its history holds,
     /// ascending and without repeats: the union of `landing_requests` over the tag's landing and
-    /// every landing before it. Read once per canon head, tag count and redaction epoch, then
-    /// kept in the cache every state shares; each landing's own requests are kept per epoch, so
-    /// a new landing reads only its own changes.
+    /// every landing before it. Read once per canon head, tag count, redaction epoch and pack,
+    /// then kept in the cache every state shares; each landing's own requests are kept per epoch
+    /// and pack, so a new landing reads only its own changes.
     fn tag_marks(&self, tags: &[(semver::Version, Tag)]) -> Result<Arc<Vec<Vec<Hash>>>, RdyError> {
         if tags.is_empty() {
             return Ok(Arc::new(vec![]));
@@ -565,13 +582,14 @@ impl ReadState {
         let lock = || self.vpos.lock().unwrap_or_else(|e| e.into_inner());
         let known = {
             let cache = lock();
-            if let Some((k, marks)) = &cache.marks
+            if let Some((k, p, marks)) = &cache.marks
                 && *k == key
+                && p.is(&self.pack)
             {
                 return Ok(Arc::clone(marks));
             }
             match &cache.landings {
-                Some((e, known)) if *e == epoch => Arc::clone(known),
+                Some((e, p, known)) if *e == epoch && p.is(&self.pack) => Arc::clone(known),
                 _ => Arc::new(HashMap::new()),
             }
         };
@@ -604,12 +622,13 @@ impl ReadState {
                 .collect(),
         );
         let mut cache = lock();
+        let pack = PackId(Arc::clone(&self.pack));
         if !fresh.is_empty() {
             let mut all = (*known).clone();
             all.extend(fresh);
-            cache.landings = Some((epoch, Arc::new(all)));
+            cache.landings = Some((epoch, pack.clone(), Arc::new(all)));
         }
-        cache.marks = Some((key, Arc::clone(&marks)));
+        cache.marks = Some((key, pack, Arc::clone(&marks)));
         Ok(marks)
     }
 
@@ -617,8 +636,9 @@ impl ReadState {
     /// without repeats. For each change: the request that holds the change itself; the request
     /// named by each block version it writes, read through the store's projection (a removed
     /// version reads as its stub, so a sibling removed later by another request is found too);
-    /// and the requests that hold the manifest or a chunk of each blob a written version names in
-    /// its `blob` field. `blobs` keeps each blob's requests across the landings of one read.
+    /// and, for a written version whose type has the pack's `asset` trait, the requests that hold
+    /// the manifest or a chunk of the blob its `blob` field names (on any other type that field
+    /// is plain text). `blobs` keeps each blob's requests across the landings of one read.
     fn landing_requests(
         &self,
         rec: &LandingRecord,
@@ -644,6 +664,10 @@ impl ReadState {
                 };
                 if let Some(request) = block.redaction() {
                     found.insert(request);
+                }
+                // only an asset's `blob` field names a blob; on any other type it is plain text
+                if !self.pack.is_asset(&block.block_type) {
+                    continue;
                 }
                 let Some(h) = block.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) else {
                     continue;
