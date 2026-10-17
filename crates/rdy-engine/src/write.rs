@@ -1178,10 +1178,37 @@ pub(crate) fn landed_side(
     Ok(decision::is_frozen(&store.get_block(&cv)?).then_some(cv))
 }
 
-/// cf1: the landed side's block `b` against view `m`, as a resolving write from a side is
-/// checked (cres1): the view reads the conflict's base, so another block may hold `b`'s key.
-pub(crate) fn check_landed_key(m: &Materialized, b: &Block) -> Result<(), RdyError> {
-    Resolver::new(m).check_key(b)
+/// cf1: the landed side's block `b` against view `m`, as a write of it is checked: the view
+/// reads the conflict's base, so since the landing another block may have taken `b`'s key, and
+/// the view may have deleted its parent, a link target or a block it cites (cres1).
+pub(crate) fn check_landed_block(pack: &Pack, m: &Materialized, b: &Block) -> Result<(), RdyError> {
+    Resolver::new(m).check_key(b)?;
+    let cited = b.links.values().flatten().map(|l| &l.target);
+    for target in cited.chain(b.pins.keys()) {
+        if *target != b.id && m.get(target).is_none() {
+            return Err(RdyError::new(
+                E_UNKNOWN_REF,
+                format!(
+                    "{} links to or cites {target}, which does not exist in this view",
+                    b.id
+                ),
+                format!(
+                    "bring {target} back into the view (exclude or undo the change that deleted it), then resolve again"
+                ),
+            ));
+        }
+    }
+    let issues = validate_block(pack, b, b.parent.as_ref().and_then(|p| m.get(p)));
+    if has_errors(&issues) {
+        let first = issues
+            .iter()
+            .find(|i| i.severity == rdy_schema::Severity::Error)
+            .expect("an error");
+        let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+        e.issues = issues;
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// The refusal of a tracking edit with no editorial reason (`rdy edit` gives its own fix).

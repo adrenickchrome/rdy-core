@@ -5,7 +5,7 @@
 //! resolving write does (res1).
 use super::{Action, check_view_op, commit_claim, no_view, strings};
 use crate::error::*;
-use crate::write::{check_landed_key, conflict_has_frozen, frozen_in_conflict, landed_side};
+use crate::write::{check_landed_block, conflict_has_frozen, frozen_in_conflict, landed_side};
 use crate::{Delta, Rdy, Scope, Session};
 use rdy_model::{AltChoice, Change, ChangeLinks, Op};
 use serde::Serialize;
@@ -81,7 +81,7 @@ impl Rdy {
         let claim = commit_claim(&st, s, view)?;
         let m = st.materialized(&scope)?;
         let block = self.store.get_block(&landed)?;
-        check_landed_key(&m, &block)?;
+        check_landed_block(&self.pack, &m, &block)?;
         let ops = vec![Op::Update {
             base: landed,
             block,

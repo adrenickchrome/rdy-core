@@ -574,13 +574,14 @@ impl Store {
                     // the base is one of these: a frozen version anywhere in the conflict means
                     // the write would change or drop an accepted or rejected decision, unless it
                     // takes the landed side unchanged: a side's version that is canon's version
-                    // of the block (cf1, D-X4GMH, `rdy view resolve --landed`)
+                    // of the block and frozen (cf1, D-X4GMH, `rdy view resolve --landed`)
                     let takes_side = match op {
                         Op::Update { block, .. }
                             if block.version_hash() == *base
                                 && c.sides.iter().any(|s| s.version == Some(*base)) =>
                         {
                             self.canon_state()?.blocks.get(id) == Some(base)
+                                && decision::is_frozen(block)
                         }
                         _ => false,
                     };
