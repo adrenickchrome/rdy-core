@@ -191,3 +191,71 @@ fn ec11_no_cli_path_writes_a_format_3_tree() {
         .collect();
     assert!(f3.is_empty(), "no format-3 manifest anywhere: {f3:?}");
 }
+
+/// ec11 fix round 1 (finding 1): with the project's `.rdy` a symlink to a physical store, no
+/// format writes into the store by either path, and the store still opens and checks clean.
+#[test]
+fn ec11_rdy_export_never_writes_into_a_symlinked_store() {
+    let s = Served::new();
+    let storage = short_tempdir();
+    let physical = storage.path().join("physical-store");
+    let rdy = s.dir.path().join(".rdy");
+    std::fs::rename(&rdy, &physical).unwrap();
+    rdy_qa::platform::symlink(&physical, &rdy).unwrap();
+    let segment = physical.join("store/segments/seg-000002.log");
+    let segment_arg = segment.to_str().unwrap();
+    let before = names(&physical);
+    for format in ["md", "html", "pdf"] {
+        for out in [".rdy/store/segments/seg-000002.log", segment_arg] {
+            let (ok, v) = s.json(&[
+                "--json",
+                "--no-daemon",
+                "export",
+                "--out",
+                out,
+                "--format",
+                format,
+            ]);
+            assert!(!ok, "{format} {out}: {v}");
+            assert_eq!(v["code"], "E_BAD_INPUT", "{format} {out}: {v}");
+            // a relative `out` is named as resolved against the working directory
+            let message = v["message"].as_str().unwrap();
+            assert!(
+                message.ends_with(&format!("{out} is inside the project .rdy directory")),
+                "{format}: {message}"
+            );
+            assert_eq!(v["fix"], "export to a path outside .rdy", "{format}");
+            let mut now = names(&physical);
+            let mut was = before.clone();
+            now.sort();
+            was.sort();
+            assert_eq!(now, was, "{format} {out}: no new file in the store");
+        }
+    }
+    let (ok, v) = s.json(&["--json", "--no-daemon", "fsck"]);
+    assert!(ok, "the store opens and checks clean: {v}");
+}
+
+/// ec11 fix round 1 (finding 4): an `out` with no file name gets O29's refusal in every format.
+#[test]
+fn ec11_rdy_export_refuses_an_out_with_no_file_name_in_every_format() {
+    let s = Served::new();
+    for format in ["md", "html", "pdf"] {
+        let (ok, v) = s.json(&[
+            "--json",
+            "--no-daemon",
+            "export",
+            "--out",
+            "/",
+            "--format",
+            format,
+        ]);
+        assert!(!ok, "{format}: {v}");
+        assert_eq!(v["code"], "E_BAD_INPUT", "{format}: {v}");
+        assert_eq!(v["message"], "/ does not name a directory", "{format}");
+        assert_eq!(
+            v["fix"], "pass a directory path such as ./docs-md",
+            "{format}"
+        );
+    }
+}

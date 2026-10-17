@@ -20,6 +20,7 @@ mod render_no_coverage;
 mod render_plain;
 mod render_presentational;
 mod render_print;
+mod render_print_export;
 mod render_print_html;
 mod render_print_md;
 mod render_print_pdf;

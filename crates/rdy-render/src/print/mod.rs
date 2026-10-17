@@ -19,7 +19,7 @@ pub use md::Layout;
 
 use crate::page::{self, Kind};
 use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
-use rdy_engine::{E_BAD_INPUT, RdyError, ReadState, Scope};
+use rdy_engine::{E_BAD_INPUT, E_IO, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,9 +37,10 @@ pub enum Format {
 }
 
 /// Prints `scope` as `format` at `out` (D-EVRNM: `rdy export` and `rdy_export`). A layout
-/// applies to the Markdown tree only; `None` lays it out plainly. Refuses `inflight`. The
-/// writer of the format applies O29's path rules and never overwrites: a file must not exist, a
-/// directory may be empty. It writes no format-3 tree (O12).
+/// applies to the Markdown tree only; `None` lays it out plainly. Refuses `inflight`. O29's path
+/// rules (`check_out`) come before the print is built, the same for every format. The writer of
+/// the format never overwrites: a file must not exist, a directory may be empty. It writes no
+/// format-3 tree (O12).
 pub fn export(
     rdy: &ReadState,
     scope: &Scope,
@@ -54,12 +55,71 @@ pub fn export(
             "drop --layout, or export with --format md",
         ));
     }
+    // O29 before the print is built: no format writes into the store
+    check_out(&rdy.root().join(".rdy"), out)?;
     let p = build(rdy, scope)?;
     match format {
         Format::Pdf => pdf::write_pdf(&p, out),
         Format::Html => single::write_single_html(&p, out),
         Format::Md => md::write_markdown(&p, out, layout.unwrap_or(Layout::Plain)),
     }
+}
+
+/// The directory `out` is written in (`.` for a bare name) and its file name. An `out` with no
+/// file name (`/`, `..`) is refused (O29).
+pub(crate) fn parent_and_name(out: &Path) -> Result<(&Path, &std::ffi::OsStr), RdyError> {
+    let name = out.file_name().ok_or_else(|| {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("{} does not name a directory", out.display()),
+            "pass a directory path such as ./docs-md",
+        )
+    })?;
+    let parent = out
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok((parent, name))
+}
+
+/// O29's path rules, the same for every format: `out` has a file name, its parent exists, and
+/// it is not in the project's `.rdy` directory `rdy_dir`, nor that directory itself. A file in
+/// the store can make it unopenable. The paths are compared resolved, so a symlink (the
+/// project's `.rdy` may be one), the store's physical path or `..` does not pass. A path named
+/// `.rdy` elsewhere is an ordinary path.
+pub(crate) fn check_out(rdy_dir: &Path, out: &Path) -> Result<(), RdyError> {
+    let (dir, name) = parent_and_name(out)?;
+    if !dir.exists() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{} does not exist", dir.display()),
+            "create the directory first, or pick another path",
+        ));
+    }
+    let io = |at: &Path, e: std::io::Error| {
+        RdyError::new(E_IO, format!("{}: {e}", at.display()), "check the path")
+    };
+    // a project with no `.rdy` directory has no store to protect
+    let rdy = match std::fs::canonicalize(rdy_dir) {
+        Ok(rdy) => rdy,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(rdy_dir, e)),
+    };
+    let mut target = std::fs::canonicalize(dir)
+        .map_err(|e| io(dir, e))?
+        .join(name);
+    // an `out` that is already there, a symlink to the store among them, is where it leads
+    if let Ok(resolved) = std::fs::canonicalize(&target) {
+        target = resolved;
+    }
+    if target.starts_with(&rdy) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{} is inside the project .rdy directory", out.display()),
+            "export to a path outside .rdy",
+        ));
+    }
+    Ok(())
 }
 
 /// A print of one scope.

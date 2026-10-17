@@ -482,27 +482,10 @@ fn put(path: &Path, bytes: &[u8]) -> Result<(), RdyError> {
     file.sync_all().map_err(|e| io(path, e))
 }
 
-/// The refusals of O29 and the Markdown export's own. `Ok(true)` when `out` is an empty
-/// directory, which the rename replaces.
-fn check_out(out: &Path, parent: &Path, name: &std::ffi::OsStr) -> Result<bool, RdyError> {
-    if !parent.exists() {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{} does not exist", parent.display()),
-            "create the directory first, or pick another path",
-        ));
-    }
-    // a file in `.rdy` can break the store: refuse `out` there and below it. The check reads the
-    // resolved path, so a symlink or `..` does not pass
-    let resolved = std::fs::canonicalize(parent).map_err(|e| io(parent, e))?;
-    let in_rdy = |s: &std::ffi::OsStr| s == ".rdy";
-    if resolved.iter().any(in_rdy) || in_rdy(name) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{} is inside the project .rdy directory", out.display()),
-            "export to a path outside .rdy",
-        ));
-    }
+/// The refusals of O29 (`super::check_out`) and the Markdown export's own. `Ok(true)` when
+/// `out` is an empty directory, which the rename replaces.
+fn check_out(p: &Print, out: &Path) -> Result<bool, RdyError> {
+    super::check_out(&p.rdy_dir, out)?;
     match std::fs::symlink_metadata(out) {
         Ok(md) if md.is_dir() => {
             if std::fs::read_dir(out)
@@ -534,18 +517,8 @@ fn check_out(out: &Path, parent: &Path, name: &std::ffi::OsStr) -> Result<bool, 
 /// Writes `p` as a Markdown tree at `out`: a directory that does not exist or is empty. The
 /// same print gives the same bytes (O15).
 pub fn write_markdown(p: &Print, out: &Path, layout: Layout) -> Result<PrintSummary, RdyError> {
-    let name = out.file_name().ok_or_else(|| {
-        RdyError::new(
-            E_BAD_INPUT,
-            format!("{} does not name a directory", out.display()),
-            "pass a directory path such as ./docs-md",
-        )
-    })?;
-    let parent = out
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let replaces_empty = check_out(out, parent, name)?;
+    let replaces_empty = check_out(p, out)?;
+    let (parent, name) = super::parent_and_name(out)?;
     // everything is written to a staging directory beside `out` and renamed into place at the
     // end: a failure leaves nothing behind. The directory is ours only if `create_dir` made it:
     // a path that is already there is somebody's (a file of the user's, or the staging of an

@@ -10,7 +10,7 @@
 //! so no two ids clash. An internal link is `#<page id>` or `#<page id>:<anchor>`. No block id
 //! is in the file (O4).
 use super::{Href, PBlock, PageKind, Print, PrintDoc, PrintSummary, Run};
-use rdy_engine::{E_BAD_INPUT, E_IO, RdyError, dump::place_file};
+use rdy_engine::{RdyError, dump::place_file};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -37,40 +37,10 @@ pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError
     })
 }
 
-/// O29's path rules for a file: the parent of `out` exists (`E_BAD_INPUT`), and `out` is not in
-/// the project's `.rdy` directory. A file there can break the store. Both paths are resolved
-/// before they are compared, so a symlink (the project's `.rdy` may be one), its physical path or
-/// `..` does not pass. A path named `.rdy` elsewhere is an ordinary path.
+/// O29's path rules for a file (`super::check_out`): `out` names a file, its parent exists, and
+/// it is not in the project's `.rdy` directory.
 pub(super) fn check_path(p: &Print, out: &Path) -> Result<(), RdyError> {
-    let dir = out
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    if !dir.exists() {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{} does not exist", dir.display()),
-            "create the directory first, or pick another path",
-        ));
-    }
-    let io = |at: &Path, e: std::io::Error| {
-        RdyError::new(E_IO, format!("{}: {e}", at.display()), "check the path")
-    };
-    let dir = std::fs::canonicalize(dir).map_err(|e| io(dir, e))?;
-    // a project with no `.rdy` directory has no store to protect
-    let rdy = match std::fs::canonicalize(&p.rdy_dir) {
-        Ok(rdy) => rdy,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(io(&p.rdy_dir, e)),
-    };
-    if dir.starts_with(&rdy) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{} is inside the project .rdy directory", out.display()),
-            "export to a path outside .rdy",
-        ));
-    }
-    Ok(())
+    super::check_out(&p.rdy_dir, out)
 }
 
 /// The bytes of the file. The same print gives the same bytes.

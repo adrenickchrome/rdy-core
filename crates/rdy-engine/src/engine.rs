@@ -65,6 +65,10 @@ pub struct ExportRequest {
     pub layout: Option<String>,
     /// The scope's text; canon when none.
     pub scope: Option<String>,
+    /// The asking session's view. A scope naming it needs no record yet (the session's first
+    /// write makes one), as for every read (`ReadState::resolve_read_scope`); another view with
+    /// no record is not found.
+    pub view: Option<String>,
 }
 
 /// Where the live site listens (D-N5NSN, D-FV6G9).

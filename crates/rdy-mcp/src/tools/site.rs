@@ -70,8 +70,9 @@ impl ExportLayout {
 }
 
 /// `rdy_export`: prints the docs at `out` for a person to read. A session is required, as for
-/// `rdy_site`. A relative `out` is under the project directory. The daemon prints; an engine
-/// with no daemon refuses (O35).
+/// `rdy_site`. A relative `out` is under the project directory. A scope reads as every tool reads
+/// it: the session's own view needs no record. The daemon prints; an engine with no daemon
+/// refuses (O35).
 pub fn rdy_export(st: &mut McpState, p: ExportParams) -> Result<Value, RdyError> {
     session(st)?;
     st.engine.export(ExportRequest {
@@ -79,5 +80,6 @@ pub fn rdy_export(st: &mut McpState, p: ExportParams) -> Result<Value, RdyError>
         format: p.format.as_str().to_string(),
         layout: p.layout.map(|l| l.as_str().to_string()),
         scope: p.scope,
+        view: Some(st.view.clone()),
     })
 }

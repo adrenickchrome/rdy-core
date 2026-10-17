@@ -605,7 +605,7 @@ fn ec6_mkdocs_layout_writes_mkdocs_yml_with_the_tree_as_nav() {
 
 #[test]
 fn ec6_a_non_empty_out_is_refused_and_untouched() {
-    let (_d, r, _ids) = project();
+    let (project_dir, r, _ids) = project();
     let p = print::build(&r.read(), &Scope::Canon).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let before = |out: &Path| {
@@ -659,7 +659,8 @@ fn ec6_a_non_empty_out_is_refused_and_untouched() {
     assert_eq!(e.code, E_BAD_INPUT);
     assert_eq!(e.message, "/ does not name a directory");
     assert_eq!(e.fix, "pass a directory path such as ./docs-md");
-    let (project_dir, _r2, _ids2) = project();
+    // the `.rdy` directory of the project the print is of (ec11 fix round 1: O29 is that
+    // project's store, not any directory named `.rdy`)
     let inside = project_dir.path().join(".rdy").join("md");
     let e = write_markdown(&p, &inside, Layout::Plain).expect_err("inside .rdy");
     assert_eq!(e.code, E_BAD_INPUT);
