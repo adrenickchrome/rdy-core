@@ -1214,7 +1214,8 @@ impl Store {
     }
 
     /// Writes `items` as one batch: one marker and one sync. With held batches on, the frames
-    /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once.
+    /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once;
+    /// a held batch that holds a redaction apply takes no more writes until its seal.
     ///
     /// A redaction record (kinds 20 to 22) is refused: only the store's checked redaction writers
     /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
@@ -1232,6 +1233,18 @@ impl Store {
     ) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
             return Err(self.poisoned_err());
+        }
+        // a held batch that holds a redaction apply takes only its seal: its TRANSITION is the
+        // last data frame, and no copy of the content it removes can join it before the seal
+        if self.held
+            && self
+                .open
+                .as_ref()
+                .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
+        {
+            return Err(StoreError::Refused(
+                "the held batch holds a redaction apply: seal it before writing more".into(),
+            ));
         }
         self.refuse_removed(&items)?;
         let start = self.log.end();
@@ -1285,7 +1298,8 @@ impl Store {
 
     /// A write of a held batch: its frames join the open batch (the first write of a batch
     /// opens it, and may roll the segment), with no marker and no sync, and are indexed at once
-    /// with a commit that is not durable.
+    /// with a commit that is not durable. A redaction apply's frame is indexed as an object, but
+    /// its mask is activated only by the seal (`seal_held_apply`), after the batch is synced.
     fn append_held(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         let (hashes, batch) = self.dedupe(items)?;
         if batch.is_empty() {
@@ -1298,7 +1312,14 @@ impl Store {
         let placed = self.log.append_frames(&batch, self.open.is_none())?;
         let mut entries = vec![];
         for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
-            entries.extend(entries_for_frame(*kind, *hash, *loc, payload)?);
+            // an apply's mask is not activated here: the shared index serves every reader, and
+            // the apply authorizes nothing before its seal syncs it (`seal_held_apply`
+            // activates it then)
+            entries.extend(
+                entries_for_frame(*kind, *hash, *loc, payload)?
+                    .into_iter()
+                    .filter(|e| !matches!(e, IndexEntry::RedactionApply { .. })),
+            );
         }
         if self.take_index_fault() {
             return Err(StoreError::Db("injected index failure".into()));
@@ -2706,15 +2727,22 @@ impl Store {
     /// before anything more is written; a refusal leaves the batch open and nothing poisoned.
     /// Then `last` and the marker are appended and synced; a failure there truncates the batch
     /// and poisons the store, as `seal` does. From the sync on, the removal is authorized: the
-    /// epoch advances once, `last` is indexed and `finish_redactions` runs; a failure poisons the
-    /// handle with `RedactionPending` and never truncates the batch.
+    /// epoch advances once, the batch's apply masks (which `append_held` kept out of the shared
+    /// index) and `last` are indexed, and `finish_redactions` runs; a failure poisons the handle
+    /// with `RedactionPending` and never truncates the batch.
     fn seal_held_apply(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<RedactionCounts, StoreError> {
         let start = self.open.as_ref().expect("a batch is open").start;
         let mut batch: Vec<(u8, Vec<u8>)> = vec![];
-        self.log.for_each_from(start, |_, kind, _, payload, _| {
-            batch.push((kind, payload.to_vec()));
-            Ok::<(), StoreError>(())
-        })?;
+        // the masks of the batch's applies, which `append_held` left out of the shared index
+        let mut activation: Vec<IndexEntry> = vec![];
+        self.log
+            .for_each_from(start, |loc, kind, hash, payload, _| {
+                if kind == kinds::REDACTION_APPLY {
+                    activation.push(crate::redaction::apply_entry(hash, loc, payload)?);
+                }
+                batch.push((kind, payload.to_vec()));
+                Ok::<(), StoreError>(())
+            })?;
         batch.extend(last.iter().cloned());
         crate::redaction_io::refuse_oversized_records(&batch)?;
         let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;
@@ -2757,7 +2785,10 @@ impl Store {
             Ok(placed_entries)
         })();
         let placed_entries = match synced {
-            Ok(e) => e,
+            Ok(e) => {
+                activation.extend(e);
+                activation
+            }
             Err(e) => {
                 // not synced: nothing is authorized, and the batch goes as a failed seal's does
                 self.open = None;
@@ -2788,8 +2819,8 @@ impl Store {
 
     /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the
     /// checked apply writer (`seal_apply_batch`): the batch is validated exactly as an open
-    /// validates a stored one, before anything is written. The store's own landing path will
-    /// call that writer; until then the tests drive it here.
+    /// validates a stored one, before anything is written. The store's own landing path
+    /// (`land_atomic`) calls that writer after its checks; this hook drives it directly.
     #[doc(hidden)]
     pub fn seal_redaction_batch_for_tests(
         &mut self,

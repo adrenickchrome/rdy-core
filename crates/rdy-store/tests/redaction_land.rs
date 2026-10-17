@@ -741,3 +741,357 @@ fn rdx7_direct_store_landing_finishes_before_return() {
         assert!(s.get_block(&w.a.version_hash()).unwrap().is_redacted());
     }
 }
+
+/// Appends `items` to the closed store at `path` as one sealed batch, raw through the segment
+/// log (as a dump load writes), and returns where the batch starts.
+fn raw_append(path: &Path, items: &[(u8, Vec<u8>)]) -> rdy_store::segment::Location {
+    let (mut log, quarantined) =
+        rdy_store::segment::SegmentLog::open_marked(&path.join("segments"), 64 * 1024 * 1024, None)
+            .unwrap();
+    assert!(quarantined.is_empty());
+    let start = log.append_batch(items).unwrap()[0].0;
+    log.sync().unwrap();
+    start
+}
+
+/// The first intact frame of `kind` with hash `hash` in the log: its location and payload.
+fn frame_of(s: &Store, kind: u8, hash: Hash) -> (rdy_store::segment::Location, Vec<u8>) {
+    frames(&s.reader(), s.log_end())
+        .into_iter()
+        .find(|f| f.kind == kind && f.hash == hash)
+        .map(|f| (f.loc, f.payload.expect("an intact frame")))
+        .expect("the frame")
+}
+
+fn corrupt_at(e: &StoreError) -> Option<(u32, u64)> {
+    match e {
+        StoreError::RedactionCorrupt { segment, offset } => Some((*segment, *offset)),
+        _ => None,
+    }
+}
+
+/// Lands the `work` proposal with a local human approval and asserts the landing refuses with
+/// `want`, unheld and held, writing nothing, activating nothing and leaving `canary` on disk.
+fn assert_land_refuses(
+    s: &mut Store,
+    path: &Path,
+    canary: &[u8],
+    want: &dyn Fn(&StoreError) -> bool,
+    case: &str,
+) {
+    let p = s.propose("work", "Remove content", writer()).unwrap();
+    let (end, writes) = (s.log_end(), s.write_count());
+    for held in [false, true] {
+        s.set_held(held).unwrap();
+        let e = s
+            .land_atomic(request(p, person(Role::Approver), false))
+            .unwrap_err();
+        assert!(want(&e), "{case}, held {held}: {e:?}");
+        assert!(
+            s.open_batch().is_none(),
+            "{case}: nothing joined a held batch"
+        );
+        s.set_held(false).unwrap();
+        assert_eq!(s.log_end(), end, "{case}: nothing appended");
+        assert_eq!(s.write_count(), writes, "{case}: no write");
+        assert!(no_apply(s), "{case}: no apply record");
+        assert!(on_disk(path, canary), "{case}: the payload is intact");
+    }
+}
+
+#[test]
+fn rdx7_every_physical_copy_must_be_covered() {
+    // a recorded request whose manifest leaves out the BLOCK frame of its target: the frame
+    // precedes the request, so the manifest is malformed
+    {
+        let (w, s) = World::new();
+        let block_at = frame_of(&s, BLOCK, w.a.version_hash()).0;
+        drop(s);
+        let hook: redaction_fixture::DraftHook = Box::new(|_, d: &mut Draft| {
+            d.request.manifest.spans.retain(|sp| sp.kind != BLOCK);
+            d.residues
+                .retain(|r| !matches!(r, RedactionResidue::Block(_)));
+        });
+        let opts = FixtureOptions {
+            on_draft: Some(hook),
+            ..FixtureOptions::prepared_only()
+        };
+        authorized_batch_fixture(&w.path, &[w.secret("work")], &opts);
+        let mut s = Store::open(&w.path).unwrap();
+        assert_land_refuses(
+            &mut s,
+            &w.path,
+            SECRET,
+            &|e| corrupt_at(e) == Some((block_at.segment, block_at.offset)),
+            "missing BLOCK span",
+        );
+        assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
+    }
+
+    // a blob request whose spans are cleared: its chunk frame is left out
+    {
+        let (w, s) = World::new();
+        let m: rdy_store::kinds::BlobManifest = s.get_typed(kinds::BLOB_MANIFEST, &w.blob).unwrap();
+        let chunk_at = frame_of(&s, kinds::BLOB_CHUNK, m.chunks[0]).0;
+        drop(s);
+        let hook: redaction_fixture::DraftHook = Box::new(|_, d: &mut Draft| {
+            d.request.manifest.spans.clear();
+            d.residues.clear();
+        });
+        let opts = FixtureOptions {
+            on_draft: Some(hook),
+            ..FixtureOptions::prepared_only()
+        };
+        authorized_batch_fixture(&w.path, &[w.blob_spec("work")], &opts);
+        let mut s = Store::open(&w.path).unwrap();
+        assert_land_refuses(
+            &mut s,
+            &w.path,
+            BLOB_CANARY,
+            &|e| corrupt_at(e) == Some((chunk_at.segment, chunk_at.offset)),
+            "cleared blob spans",
+        );
+        assert_eq!(s.get_blob(&w.blob).unwrap(), BLOB_CANARY.repeat(64));
+    }
+
+    // a valid request, then a duplicate frame of a selected object in a later marked batch:
+    // the copy is new since the request, so the request is stale. Each removable kind.
+    for kind in [BLOCK, kinds::CHANGE, kinds::BLOB_CHUNK] {
+        let (w, mut s) = World::new();
+        let (spec, canary, hash) = match kind {
+            BLOCK => (w.secret("work"), SECRET, w.a.version_hash()),
+            kinds::CHANGE => (w.secret("work"), SECRET, w.c1),
+            _ => {
+                let m: rdy_store::kinds::BlobManifest =
+                    s.get_typed(kinds::BLOB_MANIFEST, &w.blob).unwrap();
+                (w.blob_spec("work"), BLOB_CANARY, m.chunks[0])
+            }
+        };
+        record(&mut s, &spec);
+        let payload = frame_of(&s, kind, hash).1;
+        drop(s);
+        raw_append(&w.path, &[(kind, payload)]);
+        let mut s = Store::open(&w.path).unwrap();
+        assert_land_refuses(
+            &mut s,
+            &w.path,
+            canary,
+            &|e| matches!(e, StoreError::RedactionStale),
+            &format!("duplicate frame of kind {kind}"),
+        );
+        if kind == BLOCK {
+            assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
+        }
+    }
+}
+
+#[test]
+fn rdx7_apply_repeats_the_selection_checks() {
+    // a request for block a whose targets name block b instead: the manifest selects a, the
+    // targets select b, and the apply refuses before anything is written
+    let (w, s) = World::new();
+    drop(s);
+    let b = w.b.clone();
+    let hook: redaction_fixture::DraftHook = Box::new(move |_, d: &mut Draft| {
+        d.request.targets = vec![version(&b)];
+    });
+    let opts = FixtureOptions {
+        on_draft: Some(hook),
+        ..FixtureOptions::prepared_only()
+    };
+    let fx = authorized_batch_fixture(&w.path, &[w.secret("work")], &opts);
+    let mut s = Store::open(&w.path).unwrap();
+    assert_eq!(
+        s.redaction_request(&fx.requests[0].request)
+            .unwrap()
+            .targets,
+        vec![version(&w.b)]
+    );
+    assert_land_refuses(
+        &mut s,
+        &w.path,
+        SECRET,
+        &|e| matches!(e, StoreError::Refused(_)),
+        "targets and manifest disagree",
+    );
+    assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
+    assert_eq!(s.get_block(&w.b.version_hash()).unwrap(), w.b);
+}
+
+#[test]
+fn rdx7_apply_keeps_untargeted_blocks_reconstructible() {
+    // change `c2` embeds the secret block a and the bystander c, and c has no BLOCK frame of its
+    // own: zeroing c2 would destroy c's only payload, so the apply refuses at c2's span
+    let (w, s) = World::new();
+    drop(s);
+    let c = block("b-00004", "charlie only lives in the change");
+    let c2 = change(
+        "side",
+        vec![
+            Op::Create { block: w.a.clone() },
+            Op::Create { block: c.clone() },
+        ],
+    );
+    let c2_bytes = redaction_fixture::enc(&c2);
+    let c2_id = Hash::of(&c2_bytes);
+    let c2_at = raw_append(&w.path, &[(kinds::CHANGE, c2_bytes)]);
+    {
+        let s = Store::open(&w.path).unwrap();
+        assert!(!s.has_kind(BLOCK, &c.version_hash()).unwrap());
+        // preparation refuses the same request
+        let d = build_request(&s, &w.secret("work"));
+        assert!(
+            d.request
+                .manifest
+                .spans
+                .iter()
+                .any(|sp| sp.kind == kinds::CHANGE && sp.hash == c2_id)
+        );
+        let e = s
+            .prepare_redaction(&d.carrier, &d.request, &d.residues)
+            .unwrap_err();
+        assert_eq!(corrupt_at(&e), Some((c2_at.segment, c2_at.offset)), "{e:?}");
+    }
+    authorized_batch_fixture(
+        &w.path,
+        &[w.secret("work")],
+        &FixtureOptions::prepared_only(),
+    );
+    let mut s = Store::open(&w.path).unwrap();
+    assert_land_refuses(
+        &mut s,
+        &w.path,
+        b"charlie only lives in the change",
+        &|e| corrupt_at(e) == Some((c2_at.segment, c2_at.offset)),
+        "untargeted block with no BLOCK frame",
+    );
+    let read = s.change(&c2_id).unwrap();
+    assert_eq!(read.ops[1], Op::Create { block: c });
+}
+
+#[test]
+fn rdx7_held_apply_masks_nothing_before_seal() {
+    let transition = || {
+        Transitions {
+            at_ms: 60,
+            resolved: vec![],
+            opened: vec![],
+            gone: vec![],
+            new: vec![],
+        }
+        .frame()
+    };
+    // a reader retained across a held landing reads the original content until the seal
+    {
+        let (w, mut s) = World::new();
+        let d = record(&mut s, &w.secret("work"));
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        let retained = s.reader();
+        let epoch = s.redaction_epoch();
+        s.set_held(true).unwrap();
+        // an unrelated write earlier in the same held batch does not stale the request
+        s.commit_to_view(
+            "other",
+            change(
+                "other",
+                vec![Op::Create {
+                    block: block("b-00005", "unrelated"),
+                }],
+            ),
+        )
+        .unwrap();
+        s.land_atomic(request(p, person(Role::Approver), false))
+            .unwrap();
+        assert!(retained.check_redaction_epoch().is_ok());
+        assert_eq!(
+            retained.get_block(&w.a.version_hash()).unwrap(),
+            w.a,
+            "the retained reader reads the original before the seal"
+        );
+        assert_eq!(
+            retained.redaction_of(BLOCK, &w.a.version_hash()).unwrap(),
+            None
+        );
+        assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
+        assert_eq!(s.redaction_epoch(), epoch);
+        // the pre-seal preview reads through the explicit preview reader only
+        let preview = s.redaction_preview_reader(&[d.request_id()]).unwrap();
+        assert!(
+            preview
+                .get_block(&w.a.version_hash())
+                .unwrap()
+                .is_redacted()
+        );
+        // a held batch that holds an apply takes no more writes before its seal
+        let e = s
+            .commit_to_view(
+                "other",
+                change("other", vec![Op::Create { block: w.a.clone() }]),
+            )
+            .unwrap_err();
+        assert!(matches!(e, StoreError::Refused(_)), "{e:?}");
+        s.seal(vec![transition()]).unwrap();
+        assert!(matches!(
+            retained.check_redaction_epoch(),
+            Err(StoreError::RedactedState)
+        ));
+        assert!(s.get_block(&w.a.version_hash()).unwrap().is_redacted());
+        assert!(!on_disk(&w.path, SECRET));
+    }
+    // a copy of the target written earlier in the same held batch (after the request) stales
+    // it: the landing refuses and nothing more joins the batch
+    {
+        let (w, mut s) = World::new();
+        record(&mut s, &w.secret("work"));
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        s.set_held(true).unwrap();
+        s.commit_to_view(
+            "other",
+            change("other", vec![Op::Create { block: w.a.clone() }]),
+        )
+        .unwrap();
+        let open = s.open_batch().unwrap().to_vec();
+        let e = s
+            .land_atomic(request(p, person(Role::Approver), false))
+            .unwrap_err();
+        assert!(matches!(e, StoreError::RedactionStale), "{e:?}");
+        assert_eq!(
+            s.open_batch().unwrap(),
+            &open[..],
+            "nothing joined the batch"
+        );
+        s.seal(vec![]).unwrap();
+        assert!(no_apply(&s));
+        assert!(on_disk(&w.path, SECRET));
+    }
+    // an aborted held batch never activated a mask: the retained reader still reads the
+    // original, nothing is erased, and the reopen holds no apply
+    {
+        let (w, mut s) = World::new();
+        record(&mut s, &w.secret("work"));
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        let retained = s.reader();
+        let epoch = s.redaction_epoch();
+        s.set_held(true).unwrap();
+        s.land_atomic(request(p, person(Role::Approver), false))
+            .unwrap();
+        s.fail_next_append_after(4);
+        assert!(s.seal(vec![transition()]).is_err());
+        assert_eq!(
+            retained.get_block(&w.a.version_hash()).unwrap(),
+            w.a,
+            "the retained reader reads the original after the abort"
+        );
+        assert_eq!(
+            retained.redaction_of(BLOCK, &w.a.version_hash()).unwrap(),
+            None
+        );
+        assert_eq!(s.redaction_epoch(), epoch);
+        assert!(on_disk(&w.path, SECRET));
+        drop(retained);
+        drop(s);
+        let s = Store::open(&w.path).unwrap();
+        assert!(no_apply(&s));
+        assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
+    }
+}

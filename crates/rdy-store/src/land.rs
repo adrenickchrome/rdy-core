@@ -87,12 +87,16 @@ impl Store {
     /// When the landing lands redaction carriers (changes the carrier-to-request map names), the
     /// store checks them before anything is written (`prepare_redaction_apply`): a person's
     /// approval (`RedactionHuman` otherwise), each carrier in the proposing view's history
-    /// (`Refused`), each request, report hash, span and residue (`RedactionCorrupt`), and no copy
-    /// outside the spans (`RedactionStale`). The batch then ends with one REDACTION_APPLY per
-    /// request, in request-hash order, after the landing and the refs. Unheld, the checked apply
-    /// writer seals it and finishes the removal before this returns; a failure after its sync
-    /// never truncates the batch and leaves the handle pending. Held, the frames join the open
-    /// batch and nothing is erased until its seal, which may append the TRANSITION last.
+    /// (`Refused`), each request's targets against its frozen manifest (`Refused`), each span and
+    /// residue (`RedactionCorrupt`), and every physical copy of the selected content covered: an
+    /// unlisted copy before the request is `RedactionCorrupt`, one written after it
+    /// `RedactionStale`. The batch then ends with one REDACTION_APPLY per request, in
+    /// request-hash order, after the landing and the refs. Unheld, the checked apply writer seals
+    /// it and finishes the removal before this returns; a failure after its sync never truncates
+    /// the batch and leaves the handle pending. Held, the frames join the open batch, which
+    /// takes no more writes; no mask is active and nothing is erased until its seal, which may
+    /// append the TRANSITION last. A pre-seal preview reads through
+    /// `Store::redaction_preview_reader`.
     pub fn land_atomic(&mut self, req: LandRequest) -> Result<LandOutcome, StoreError> {
         // 1. the proposal, and the version check: the request names its stable's latest version
         let p = self.proposal(&req.proposal)?;
@@ -401,7 +405,8 @@ impl Store {
         // 9. one write. With applies, one REDACTION_APPLY per request (in request-hash order)
         // ends the data frames. Unheld, the checked apply writer validates the batch with the log,
         // seals it and finishes the removal before it returns; held, the frames join the open
-        // batch, and its seal (which may add the TRANSITION last) validates and finishes.
+        // batch without activating their masks, and its seal (which may add the TRANSITION last)
+        // validates, activates and finishes.
         match applies {
             Some(applies) => {
                 items.extend(applies.frames(lid));
