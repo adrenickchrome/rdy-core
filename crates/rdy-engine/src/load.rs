@@ -38,6 +38,7 @@ use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_IO, E_LOCKED, RdyErr
 use crate::fsck::FsckReport;
 use crate::wc::ignore::IGNORE_FILE;
 use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal};
+use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
 use rdy_store::layout::STORE_DIR;
@@ -290,10 +291,43 @@ fn check_target(project: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<Strin
 
 /// Refuses a target in a project's `.rdy` directory or below it (final ruling 3): a load there
 /// puts a `.rdy.yaml` or a store among that project's files, and the project no longer opens.
-/// Compares resolved paths, as `rdy dump` does, so a symlink or `..` does not pass. The part of
-/// the target that does not exist yet is taken as written, its `..` steps applied to the
-/// resolved part: the load creates it as plain directories.
+/// Compares resolved paths, as `rdy dump` does, so a symlink or `..` does not pass. A project's
+/// `.rdy` is known by its name as the target is written, then by its resolved place, and by its
+/// name or its store along the resolved target: a symlinked `.rdy` resolves to a directory of any
+/// name (final review C1).
 fn inside_rdy(project: &Path) -> Result<(), RdyError> {
+    let (abs, resolved) = resolve_target(project)?;
+    // each project .rdy the target names as written, at its resolved place
+    let guarded: Vec<PathBuf> = abs
+        .ancestors()
+        .filter(|dir| is_project_dot_rdy(dir))
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .collect();
+    let inside = guarded.iter().any(|g| resolved.starts_with(g))
+        || resolved
+            .ancestors()
+            .any(|dir| is_project_dot_rdy(dir) || holds_store(dir));
+    if inside {
+        return Err(inside_error(project));
+    }
+    Ok(())
+}
+
+/// Refuses a target in `dot`, the `.rdy` directory of a clone's source, or below it, comparing
+/// resolved paths (final review C1). The clone runs it before anything is read or written.
+pub(crate) fn inside_source_rdy(dot: &Path, project: &Path) -> Result<(), RdyError> {
+    let dot = std::fs::canonicalize(dot).map_err(|e| io_at(dot, e))?;
+    let (_, resolved) = resolve_target(project)?;
+    if resolved.starts_with(&dot) {
+        return Err(inside_error(project));
+    }
+    Ok(())
+}
+
+/// The target `project` made absolute as written, and resolved. The part of the target that does
+/// not exist yet is taken as written, its `..` steps applied to the resolved part: the load
+/// creates it as plain directories.
+fn resolve_target(project: &Path) -> Result<(PathBuf, PathBuf), RdyError> {
     let abs = std::path::absolute(project).map_err(|e| io_at(project, e))?;
     let mut base = abs.as_path();
     let mut rest = Vec::new();
@@ -324,18 +358,16 @@ fn inside_rdy(project: &Path) -> Result<(), RdyError> {
             _ => {}
         }
     }
-    let mut at = Some(resolved.as_path());
-    while let Some(dir) = at {
-        if is_project_dot_rdy(dir) {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("{} is inside a project's .rdy directory", project.display()),
-                "load into a new directory outside any .rdy, for example a sibling of the project",
-            ));
-        }
-        at = dir.parent();
-    }
-    Ok(())
+    Ok((abs, resolved))
+}
+
+/// The refusal of a target in a project's `.rdy`.
+fn inside_error(project: &Path) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("{} is inside a project's .rdy directory", project.display()),
+        "load into a new directory outside any .rdy, for example a sibling of the project",
+    )
 }
 
 /// Whether `dir` is a project's `.rdy` directory: named `.rdy`, with the project's `.rdy.yaml`
@@ -344,6 +376,12 @@ fn is_project_dot_rdy(dir: &Path) -> bool {
     dir.file_name() == Some(".rdy".as_ref())
         && (dir.with_file_name(PROJECT_FILE).is_file()
             || std::fs::symlink_metadata(dir.join(STORE_DIR)).is_ok())
+}
+
+/// Whether `dir`, under any name, holds a project's store: `store/FORMAT`. A symlinked `.rdy`
+/// resolves to such a directory.
+fn holds_store(dir: &Path) -> bool {
+    dir.join(STORE_DIR).join(FORMAT_FILE).is_file()
 }
 
 /// Steps 3 and 4: creates the project and its `.rdy` if missing, then streams every batch into

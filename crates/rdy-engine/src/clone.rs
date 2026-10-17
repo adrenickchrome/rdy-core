@@ -6,9 +6,10 @@
 //!
 //! The steps (closed):
 //! 1. `File`: a dump whose header names a store format before 12 is refused: it holds no repo id
-//!    (O10). The check reads the header of the one stream the load then consumes. `State`: read
-//!    the project files, then a spawned thread loads the pipe's reader while this thread writes
-//!    the dump into the pipe's writer (O14).
+//!    (O10). The check reads the header of the one stream the load then consumes. `State`: refuse
+//!    a target in the source's resolved `.rdy` (final review C1), read the project files, then a
+//!    spawned thread loads the pipe's reader while this thread writes the dump into the pipe's
+//!    writer (O14).
 //! 2. The load's steps 2 to 6, unchanged (`crate::load`).
 //! 3. After the open under the load's lock: the loaded store's meta refs pass the store's check
 //!    first, so a source that `rdy load` refuses is refused in its words, never written over
@@ -24,7 +25,7 @@ use crate::Rdy;
 use crate::config_levels::PROJECT_FILE;
 use crate::dump::project_files;
 use crate::error::{E_BAD_INPUT, E_DUMP, E_INTERNAL, E_IO, RdyError};
-use crate::load::{LoadSummary, Opened, load_opened, open_dump, open_stream};
+use crate::load::{LoadSummary, Opened, inside_source_rdy, load_opened, open_dump, open_stream};
 use crate::read_state::ReadState;
 use rdy_model::RepoId;
 use rdy_store::layout::STORE_DIR;
@@ -221,6 +222,8 @@ fn from_state(
     dir: &Path,
     fork: bool,
 ) -> Result<(LoadSummary, Origin, RepoId), RdyError> {
+    // the target must not be in the source's own .rdy, wherever a symlink puts it (C1)
+    inside_source_rdy(&st.root().join(".rdy"), dir)?;
     let files = project_files(st.root())?;
     let (reader, writer) = std::io::pipe().map_err(|e| {
         RdyError::new(

@@ -630,3 +630,89 @@ fn ec5_a_dump_replaced_after_its_header_check_is_never_cloned_from_the_new_bytes
     swapper.join().unwrap();
     outcome.unwrap();
 }
+
+/// Final review C1: a clone or fork into the source's own `.rdy`, reached through a symlinked
+/// `.rdy` whose resolved directory has another name, is refused before anything is written, from
+/// the open project and from a dump file alike. The source and the target keep their bytes, and
+/// the source still opens and passes `fsck`.
+#[test]
+fn ec5_a_clone_into_a_symlinked_source_dot_rdy_is_refused_and_both_are_untouched() {
+    let src = every_kind::project();
+    let scratch = tempfile::tempdir().unwrap();
+    // the source's .rdy lives elsewhere, under another name, behind a symlink
+    let physical = scratch.path().join("physical-store");
+    std::fs::rename(src.path().join(".rdy"), &physical).unwrap();
+    rdy_qa::platform::symlink(&physical, &src.path().join(".rdy")).unwrap();
+    // a second link to the source's .rdy, not named .rdy
+    let link = scratch.path().join("link");
+    rdy_qa::platform::symlink(&src.path().join(".rdy"), &link).unwrap();
+    let a = Rdy::open(src.path()).unwrap();
+    let file = scratch.path().join("p.rdydump");
+    a.read().dump(&file).unwrap();
+    let dot = src.path().join(".rdy");
+    let seg = std::fs::read_dir(dot.join("store/segments"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "log"))
+        .unwrap();
+    let targets = [
+        dot.join("store/segments/seg-999999.log"),
+        seg.clone(),
+        dot.join("store/new"),
+        dot.join("packs"),
+        dot.join("packs/new"),
+        dot.join("new/deeper"),
+        dot.clone(),
+        physical.join("packs/new"),
+        physical.join("store/new"),
+        link.join("packs/new"),
+    ];
+    let source_before = tree(&physical);
+    let log_before = log_bytes(src.path());
+    // a target's bytes: a file's own, or its tree
+    let snap = |to: &Path| {
+        (
+            std::fs::symlink_metadata(to).is_ok(),
+            std::fs::read(to).ok(),
+            to.is_dir().then(|| tree(to)),
+        )
+    };
+    for to in &targets {
+        let target_before = snap(to);
+        for fork in [false, true] {
+            let st = a.read();
+            for (what, from) in [
+                ("project", CloneSource::State(&st)),
+                ("file", CloneSource::File(&file)),
+            ] {
+                let e = clone(from, to, fork).unwrap_err();
+                assert_eq!(e.code, "E_BAD_INPUT", "{what} {fork} {to:?}: {e}");
+                assert_eq!(
+                    e.message,
+                    format!("{} is inside a project's .rdy directory", to.display()),
+                    "{what} {fork}"
+                );
+                assert_eq!(snap(to), target_before, "{what} {fork} {to:?}: the target");
+                assert_eq!(
+                    tree(&physical),
+                    source_before,
+                    "{what} {fork} {to:?}: the source"
+                );
+            }
+        }
+        let e = rdy_engine::load::load(&file, to).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "load {to:?}: {e}");
+        assert_eq!(tree(&physical), source_before, "load {to:?}: the source");
+    }
+    assert_eq!(log_bytes(src.path()), log_before);
+    a.close().unwrap();
+    // the source still opens and is clean
+    let again = Rdy::open(src.path()).unwrap();
+    again.fsck().expect("the source passes fsck");
+    again.close().unwrap();
+    // a sibling of the source still clones
+    let ok = scratch.path().join("sibling");
+    let st = Rdy::open(src.path()).unwrap();
+    clone_of(&st, &ok, true);
+    st.close().unwrap();
+}

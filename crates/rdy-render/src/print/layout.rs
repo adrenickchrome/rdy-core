@@ -14,8 +14,9 @@
 //! at most 60% of the page height, the caption below in Italic; callouts indented 10 pt with a
 //! 2 pt rule at the left and the label in Bold. The title part, each top-level folder and each doc
 //! start a new page. Each page has its number centred 10 mm from the bottom. A character with no
-//! glyph prints as `?` and is reported in [`Laid::missing`]. The spacing the rules do not name is
-//! the constants below (O32).
+//! glyph (`Fonts::glyph`, which gives none for a script that needs shaping, RULING F1) prints as
+//! `?` and is reported in [`Laid::missing`], before any measuring. The spacing the rules do not
+//! name is the constants below (O32).
 use super::fonts::{Face, Fonts};
 use super::{Href, PBlock, PageKind, Print, PrintDoc, Run};
 use rdy_model::Hash;
@@ -1201,6 +1202,96 @@ mod tests {
             .find(|t| t.4.starts_with("x "))
             .unwrap();
         assert_eq!((code.2, code.3), (Face::Mono, 9.0));
+    }
+
+    #[test]
+    fn ec8_a_script_that_needs_shaping_prints_as_question_marks_on_every_path() {
+        // RULING F1 (final review I1): DejaVu holds Arabic and Hebrew letters, but the writer
+        // neither joins them nor sets them right to left, so each prints as `?` and joins
+        // `missing`, in the title part, titles, headings, styled runs, tables, lists, captions,
+        // figure lines and callout labels alike
+        let fonts = Fonts::load();
+        let fig = Hash::of(b"fig");
+        let size = move |h: &Hash| (*h == fig).then_some((400, 300));
+        let mut p = print(vec![doc(
+            PageKind::Doc,
+            "a.html",
+            "باب",
+            vec![
+                heading(2, None, "Head ع"),
+                PBlock::Para {
+                    anchor: None,
+                    runs: vec![
+                        run("plain ح "),
+                        Run {
+                            bold: true,
+                            ..run("bold ش")
+                        },
+                        run(" "),
+                        Run {
+                            italic: true,
+                            ..run("it ب")
+                        },
+                    ],
+                },
+                PBlock::Table {
+                    anchor: None,
+                    head: vec![vec![run("head ج")]],
+                    rows: vec![vec![vec![run("cell ث")]]],
+                },
+                PBlock::List {
+                    ordered: false,
+                    start: 1,
+                    items: vec![vec![para(None, "item ש")]],
+                },
+                PBlock::Figure {
+                    anchor: None,
+                    blob: Some(fig),
+                    alt: "shown".into(),
+                    caption: vec![run("cap ة")],
+                },
+                PBlock::Figure {
+                    anchor: None,
+                    blob: None,
+                    alt: "alt ت".into(),
+                    caption: vec![],
+                },
+                PBlock::Callout {
+                    anchor: None,
+                    label: "ملاحظة".into(),
+                    blocks: vec![para(None, "inside ق")],
+                },
+            ],
+        )]);
+        p.title = "دليل".into();
+        let laid = lay_out(&p, &fonts, &a4(), &size);
+        let items: Vec<&LItem> = laid.pages.iter().flat_map(|pg| &pg.items).collect();
+        let has = |want: &str, face: Face| {
+            items.iter().any(
+                |i| matches!(i, LItem::Text { text, face: f, .. } if text == want && *f == face),
+            )
+        };
+        let shaped = |c: char| matches!(u32::from(c), 0x0590..=0x08FF);
+        for i in &items {
+            if let LItem::Text { text, .. } = i {
+                assert!(!text.chars().any(shaped), "{text:?} prints a shaped letter");
+            }
+        }
+        assert!(has("????", Face::Bold), "the title part");
+        assert!(has("???", Face::Bold), "the doc's title");
+        assert!(has("Head ?", Face::Bold), "a heading");
+        assert!(has("plain ?", Face::Sans), "a plain run");
+        assert!(has("bold ?", Face::Bold), "a bold run");
+        assert!(has("it ?", Face::Italic), "an italic run");
+        assert!(has("head ?", Face::Bold), "a table's head");
+        assert!(has("cell ?", Face::Sans), "a table cell");
+        assert!(has("item ?", Face::Sans), "a list item");
+        assert!(has("cap ?", Face::Italic), "a caption");
+        assert!(has("Figure: alt ?", Face::Italic), "a figure line");
+        assert!(has("??????", Face::Bold), "a callout label");
+        assert!(has("inside ?", Face::Sans), "a callout's text");
+        let want: BTreeSet<char> = "دليلبابعحشبجثשةتملاحظةق".chars().collect();
+        assert_eq!(laid.missing, want);
     }
 
     #[test]

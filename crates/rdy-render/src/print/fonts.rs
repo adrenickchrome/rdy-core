@@ -79,6 +79,45 @@ fn cp1252(c: char) -> Option<u8> {
     }
 }
 
+/// The scripts that need shaping (joined letters, conjuncts, reordered or stacked marks) or
+/// right-to-left layout, as code point ranges (closed). The writer sets each character on its own,
+/// left to right, so a letter of these scripts would print in the wrong form and order, even
+/// where DejaVu holds it (Hebrew, Arabic, NKo, Lao): RULING F1 prints them as `?`, with the glyph
+/// warning. Scripts that DejaVu lacks (CJK, most of the rest) print as `?` without this list.
+const SHAPED: [std::ops::RangeInclusive<u32>; 12] = [
+    // Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, the Arabic supplements and
+    // extensions: right to left, and Arabic, Syriac, NKo and Mandaic join their letters
+    0x0590..=0x08ff,
+    // the Indic scripts, Devanagari to Sinhala
+    0x0900..=0x0dff,
+    // Thai, up to its baht sign, which is a symbol and prints
+    0x0e00..=0x0e3e,
+    // the rest of Thai, Lao and Tibetan
+    0x0e40..=0x0fff,
+    // Myanmar
+    0x1000..=0x109f,
+    // Khmer and Mongolian
+    0x1780..=0x18af,
+    // Limbu, Tai Le, New Tai Lue, Khmer symbols, Buginese and Tai Tham
+    0x1900..=0x1aaf,
+    // Balinese, Sundanese, Batak and Lepcha
+    0x1b00..=0x1c4f,
+    // the Hebrew and Arabic presentation forms A
+    0xfb1d..=0xfdff,
+    // the Arabic presentation forms B (up to, not with, U+FEFF)
+    0xfe70..=0xfefe,
+    // the right-to-left scripts of the Supplementary Multilingual Plane
+    0x10800..=0x10fff,
+    // Mende Kikakui, Adlam and the Arabic mathematical letters
+    0x1e800..=0x1efff,
+];
+
+/// Whether `c` belongs to a script that needs shaping or right-to-left layout ([`SHAPED`]).
+fn needs_shaping(c: char) -> bool {
+    let n = u32::from(c);
+    SHAPED.iter().any(|r| r.contains(&n))
+}
+
 /// The two parsed DejaVu faces.
 pub struct Fonts {
     sans: ttf_parser::Face<'static>,
@@ -106,8 +145,13 @@ impl Fonts {
         }
     }
 
-    /// The glyph for `c` in `face`; None when the face has none (Mono: outside Windows-1252).
+    /// The glyph for `c` in `face`; None when the face has none (Mono: outside Windows-1252),
+    /// and for a character of a script that needs shaping or right-to-left layout
+    /// ([`needs_shaping`]), which the writer does not do (RULING F1): it prints as `?`.
     pub fn glyph(&self, face: Face, c: char) -> Option<u16> {
+        if needs_shaping(c) {
+            return None;
+        }
         match self.ttf(face) {
             Some(f) => f.glyph_index(c).map(|g| g.0).filter(|g| *g != 0),
             None => cp1252(c).map(u16::from),
@@ -271,6 +315,44 @@ mod tests {
             fonts.advance(Face::Sans, '中', 10.0),
             fonts.advance(Face::Sans, '?', 10.0)
         );
+    }
+
+    #[test]
+    fn ec8_a_script_that_needs_shaping_has_no_glyph_although_dejavu_draws_it() {
+        // RULING F1: the writer neither shapes nor lays text out right to left, so the scripts
+        // that need either print as `?`, even where DejaVu holds their letters (final review I1)
+        let fonts = Fonts::load();
+        let shaped = [
+            'ع',         // Arabic
+            'ش',         // Arabic
+            '\u{0660}',  // Arabic-Indic digit zero
+            'ש',         // Hebrew
+            '\u{07CA}',  // NKo
+            'ກ',         // Lao
+            '\u{FB52}',  // Arabic presentation form A
+            '\u{FEC9}',  // Arabic presentation form B
+            '\u{FB2A}',  // Hebrew presentation form
+            '\u{1EE01}', // Arabic mathematical letter
+        ];
+        for c in shaped {
+            assert!(
+                fonts.sans.glyph_index(c).is_some(),
+                "DejaVu Sans draws {c:?}: the test must name a letter it holds"
+            );
+            for face in [Face::Sans, Face::Bold, Face::Italic, Face::BoldItalic] {
+                assert_eq!(fonts.glyph(face, c), None, "{face:?} {c:?}");
+                assert_eq!(
+                    fonts.advance(face, c, 10.0),
+                    fonts.advance(face, '?', 10.0),
+                    "{face:?} {c:?} takes `?`'s place"
+                );
+            }
+        }
+        // the neighbours print: Armenian, Georgian, Greek, Cyrillic, Thai's baht sign, the
+        // Latin ligatures and the Armenian ones before the Hebrew presentation forms
+        for c in ['Ա', 'ა', 'α', 'Ж', '฿', '\u{FB01}', '\u{FB13}', '\u{058A}'] {
+            assert!(fonts.glyph(Face::Sans, c).is_some(), "{c:?}");
+        }
     }
 
     #[test]

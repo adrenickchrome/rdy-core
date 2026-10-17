@@ -1113,6 +1113,80 @@ mod tests {
     }
 
     #[test]
+    fn ec9_arabic_prints_as_question_marks_in_the_glyph_warning() {
+        // final review I1: RULING F1 prints the scripts that need shaping as `?` with the glyph
+        // warning, although DejaVu holds Arabic letters
+        let line = "Arabic: العربية. Devanagari: हिन्दी. Greek: αβγ. Cyrillic: Привет. CJK: 中文.";
+        let mut p = sample();
+        p.title = "العربية".into();
+        p.docs[0].title = "باب العربية".into();
+        p.docs[0].blocks = vec![
+            PBlock::Para {
+                anchor: None,
+                runs: vec![run(line, false, false, false)],
+            },
+            PBlock::Para {
+                anchor: None,
+                runs: vec![
+                    run("bold العربية ", true, false, false),
+                    run("slanted العربية", false, true, false),
+                ],
+            },
+            PBlock::Figure {
+                anchor: None,
+                blob: None,
+                alt: "صورة".into(),
+                caption: vec![],
+            },
+        ];
+        p.docs.truncate(1);
+        let fonts = Fonts::load();
+        let laid = lay_out(&p, &fonts);
+        let texts: Vec<&str> = laid
+            .pages
+            .iter()
+            .flat_map(|pg| &pg.items)
+            .filter_map(|it| match it {
+                LItem::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.contains(
+                &"Arabic: ???????. Devanagari: ??????. Greek: αβγ. Cyrillic: Привет. CJK: ??."
+            ),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"Figure: ????"), "{texts:?}");
+        let (pdf, _, warnings) = pdf_bytes(&p, &fonts);
+        // 17: nine Arabic letters, six Devanagari signs and two CJK; the ten lowest code points
+        // (O33) are the nine Arabic letters and Devanagari's द
+        assert_eq!(
+            warnings,
+            vec![
+                "17 characters have no glyph in the PDF fonts and print as ?: ا ب ة ر ص ع ل و ي द"
+                    .to_string()
+            ]
+        );
+        // no font of the file maps a glyph to an Arabic letter
+        let objs = objects(&pdf);
+        let mut maps = 0;
+        for o in objs.values().filter(|o| o.dict.contains("/ToUnicode")) {
+            let map = to_unicode(&inflate(&objs[&one_ref(&o.dict, "ToUnicode")]));
+            maps += 1;
+            for text in map.values() {
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| matches!(u32::from(c), 0x0590..=0x08FF)),
+                    "{text:?} is in a ToUnicode map"
+                );
+            }
+        }
+        assert!(maps > 0, "the file embeds a DejaVu font");
+    }
+
+    #[test]
     fn ec9_a_trns_colour_key_prints_as_a_soft_mask() {
         use crate::print::image::tests::{filter, png_with};
         let rgb = vec![
