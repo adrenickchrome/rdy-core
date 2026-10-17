@@ -245,8 +245,19 @@ fn cli2_check_inside_a_project_reads_canon_through_the_daemon() {
     let (ok, p) = s.json(&["--json", "propose", "--title", "t"]);
     assert!(ok, "{p}");
     s.json(&["--json", "approve", p["id"].as_str().unwrap()]);
-    let (ok, _) = s.json(&["--json", "export", "--out", "exp"]);
-    assert!(ok);
+    // no CLI path writes a format-3 tree (O12): the tree comes from canon as the oracle reads it
+    // (O13): rdy dump through the daemon, a load into a temp directory, the engine's export there
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("p.rdydump");
+    let (ok, d) = s.json(&["--json", "dump", "--out", file.to_str().unwrap()]);
+    assert!(ok, "{d}");
+    let loaded = tmp.path().join("project");
+    rdy_engine::load::load(&file, &loaded).unwrap();
+    let r = rdy_engine::Rdy::open(&loaded).unwrap();
+    r.read()
+        .export(&rdy_engine::Scope::Canon, &s.dir.path().join("exp"))
+        .unwrap();
+    r.close().unwrap();
     let out = s.rdy(&["check", "exp"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
     let _: Value = Value::Null;

@@ -1,8 +1,9 @@
 //! ls7: `rdy_site`. The reply is built by `rdy_engine::engine::site_reply`, which the daemon's
-//! `site_url` op shares.
+//! `site_url` op shares. ec11: `rdy_export`, the print, through `Engine::export` (O35: this crate
+//! has no edge to the renderer).
 use super::*;
 use rdy_engine::RdyError;
-use rdy_engine::engine::site_reply;
+use rdy_engine::engine::{ExportRequest, site_reply};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,4 +20,64 @@ pub struct SiteParams {
 pub fn rdy_site(st: &mut McpState, p: SiteParams) -> Result<Value, RdyError> {
     session(st)?;
     site_reply(&*st.engine, p.scope.as_deref())
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExportParams {
+    /// The file (pdf, html) or directory (md) to write: absolute, or relative to the project directory. It must not exist; a directory may be empty.
+    pub out: String,
+    /// pdf, html or md.
+    pub format: ExportFormat,
+    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. Only with md.
+    pub layout: Option<ExportLayout>,
+    /// canon (the default), a view, tag:<version>, landing:<id> or proposal:P-<id>@<n>.
+    pub scope: Option<String>,
+}
+
+/// The print formats, in lower case.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Pdf,
+    Html,
+    Md,
+}
+
+impl ExportFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            ExportFormat::Pdf => "pdf",
+            ExportFormat::Html => "html",
+            ExportFormat::Md => "md",
+        }
+    }
+}
+
+/// The Markdown tree's layouts, in lower case.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportLayout {
+    Mkdocs,
+}
+
+impl ExportLayout {
+    fn as_str(self) -> &'static str {
+        match self {
+            ExportLayout::Mkdocs => "mkdocs",
+        }
+    }
+}
+
+/// `rdy_export`: prints the docs at `out` for a person to read. A session is required, as for
+/// `rdy_site`. A relative `out` is under the project directory. The daemon prints; an engine
+/// with no daemon refuses (O35).
+pub fn rdy_export(st: &mut McpState, p: ExportParams) -> Result<Value, RdyError> {
+    session(st)?;
+    st.engine.export(ExportRequest {
+        out: st.engine.root().join(&p.out),
+        format: p.format.as_str().to_string(),
+        layout: p.layout.map(|l| l.as_str().to_string()),
+        scope: p.scope,
+    })
 }

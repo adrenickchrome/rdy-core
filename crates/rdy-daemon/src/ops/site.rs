@@ -1,15 +1,58 @@
-//! The site ops: render, export and import.
+//! The site ops: render, export (a print, D-EVRNM) and import.
 use super::*;
 use rdy_engine::consequence::write_and_report_as;
-use rdy_engine::{RdyError, Scope};
+use rdy_engine::{RdyError, ReadState, Scope};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::Path;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OutArgs {
     out: String,
     scope: Option<String>,
+}
+
+/// The print arguments of the `export` op (O1): `format` is `pdf`, `html` or `md`; `layout` is
+/// `mkdocs`, with `md` only.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExportArgs {
+    out: String,
+    format: String,
+    layout: Option<String>,
+    scope: Option<String>,
+}
+
+/// The shape of the `export` op's arguments.
+pub(super) const EXPORT_SHAPE: &str = "{out, format, layout?, scope?}";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FormatArg {
+    Pdf,
+    Html,
+    Md,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LayoutArg {
+    Mkdocs,
+}
+
+/// `text` as one of the closed set `T` names; anything else is the op's argument error.
+fn closed<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, RdyError> {
+    use serde::de::IntoDeserializer;
+    T::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(text)).map_err(
+        |e| {
+            RdyError::new(
+                rdy_engine::E_BAD_INPUT,
+                format!("export: {e}"),
+                format!("args for export: {EXPORT_SHAPE}"),
+            )
+        },
+    )
 }
 
 #[derive(Deserialize)]
@@ -26,10 +69,41 @@ pub(super) fn render(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
     Ok(to_json(&s))
 }
 
-pub(super) fn export(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
+pub(super) fn export(cx: &OpContext, a: ExportArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
-    Ok(to_json(&st.export(&scope, &resolve_path(cx.cwd, &a.out))?))
+    export_print(
+        &st,
+        &scope,
+        &resolve_path(cx.cwd, &a.out),
+        &a.format,
+        a.layout.as_deref(),
+    )
+}
+
+/// Prints `scope` at `out` as `format` (`pdf`, `html` or `md`) and `layout` (`mkdocs`), and
+/// replies with the print's summary. The `export` op and the daemon's `Engine::export`
+/// (`rdy_export`) both print through it.
+pub(crate) fn export_print(
+    st: &ReadState,
+    scope: &Scope,
+    out: &Path,
+    format: &str,
+    layout: Option<&str>,
+) -> Result<Value, RdyError> {
+    use rdy_render::print::{Format, Layout};
+    let format = match closed::<FormatArg>(format)? {
+        FormatArg::Pdf => Format::Pdf,
+        FormatArg::Html => Format::Html,
+        FormatArg::Md => Format::Md,
+    };
+    let layout = layout
+        .map(closed::<LayoutArg>)
+        .transpose()?
+        .map(|LayoutArg::Mkdocs| Layout::Mkdocs);
+    Ok(to_json(&rdy_render::print::export(
+        st, scope, out, format, layout,
+    )?))
 }
 
 /// Sets `coverage` and `onboarding` on the import reply. Set here, so it replaces any `coverage`

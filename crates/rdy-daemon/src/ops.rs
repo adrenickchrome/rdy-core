@@ -38,7 +38,8 @@ pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use search::search;
-use site::{export, import, render};
+pub(crate) use site::export_print;
+use site::{EXPORT_SHAPE, export, import, render};
 use site_url::site_url;
 pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
@@ -335,7 +336,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
-        "export" => export(cx, parse(op, args, "{out, scope?}")?),
+        "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out}")?),
         "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),

@@ -200,7 +200,10 @@ fn agent_over_mcp_then_human_approves() {
     );
     let ex = dir.path().join("export");
     assert_eq!(
-        rdy(dir.path(), &["export", "--out", ex.to_str().unwrap()])["docs"],
+        rdy(
+            dir.path(),
+            &["export", "--out", ex.to_str().unwrap(), "--format", "md"]
+        )["docs"],
         1
     );
     assert_eq!(rdy(dir.path(), &["fsck"])["landings"], 1);

@@ -15,12 +15,52 @@ pub mod md;
 pub mod pdf;
 pub mod single;
 
+pub use md::Layout;
+
 use crate::page::{self, Kind};
 use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
-use rdy_engine::{RdyError, ReadState, Scope};
+use rdy_engine::{E_BAD_INPUT, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+/// The print formats an export writes (O1).
+#[derive(Clone, Copy, Debug)]
+pub enum Format {
+    /// One PDF file.
+    Pdf,
+    /// One HTML file.
+    Html,
+    /// A Markdown tree.
+    Md,
+}
+
+/// Prints `scope` as `format` at `out` (D-EVRNM: `rdy export` and `rdy_export`). A layout
+/// applies to the Markdown tree only; `None` lays it out plainly. Refuses `inflight`. The
+/// writer of the format applies O29's path rules and never overwrites: a file must not exist, a
+/// directory may be empty. It writes no format-3 tree (O12).
+pub fn export(
+    rdy: &ReadState,
+    scope: &Scope,
+    out: &Path,
+    format: Format,
+    layout: Option<Layout>,
+) -> Result<PrintSummary, RdyError> {
+    if layout.is_some() && !matches!(format, Format::Md) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "--layout mkdocs applies to the md format only",
+            "drop --layout, or export with --format md",
+        ));
+    }
+    let p = build(rdy, scope)?;
+    match format {
+        Format::Pdf => pdf::write_pdf(&p, out),
+        Format::Html => single::write_single_html(&p, out),
+        Format::Md => md::write_markdown(&p, out, layout.unwrap_or(Layout::Plain)),
+    }
+}
 
 /// A print of one scope.
 #[derive(Clone, Debug, PartialEq, Eq)]

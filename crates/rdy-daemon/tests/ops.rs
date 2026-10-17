@@ -3,8 +3,8 @@
 //! ctl2, the read half: each op reads one snapshot; paths resolve against the session cwd;
 //! status reports the open and quarantine files; errors carry the M1 shape.
 use rdy_daemon::{ErrorReply, OPS, OpContext, clean_quarantine, dispatch, quarantine};
-use rdy_engine::engine::{Local, write_typed};
-use rdy_engine::{E_BAD_INPUT, Rdy, RdyError, Session, WriteRequest};
+use rdy_engine::engine::{Engine, Local, write_typed};
+use rdy_engine::{E_BAD_INPUT, Rdy, RdyError, Scope, Session, WriteRequest};
 use rdy_model::Role;
 use serde_json::{Value, json};
 
@@ -147,19 +147,28 @@ fn ctl2_render_export_and_check_resolve_relative_paths_against_the_session_cwd()
     .unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let c = cx(&e, &s, cwd.path());
-    let v = dispatch(&c, "export", json!({"out": "exp"})).unwrap();
+    let v = dispatch(&c, "export", json!({"out": "exp", "format": "md"})).unwrap();
     assert_eq!(v["docs"], 1);
     assert!(cwd.path().join("exp").is_dir(), "export went to cwd/exp");
     let v = dispatch(&c, "render", json!({"out": "site"})).unwrap();
     assert!(v["pages"].as_u64().unwrap() >= 1, "{v}");
     assert!(cwd.path().join("site").is_dir());
-    let v = dispatch(&c, "check", json!({"path": "exp"})).unwrap();
+    // no op writes a format-3 tree (O12): the engine writes the one check lints
+    e.read()
+        .export(&Scope::Canon, &cwd.path().join("exp3"))
+        .unwrap();
+    let v = dispatch(&c, "check", json!({"path": "exp3"})).unwrap();
     assert!(
         v.as_array().unwrap().is_empty(),
         "a fresh export lints clean: {v}"
     );
     let abs = d.path().join("exp2");
-    dispatch(&c, "export", json!({"out": abs.to_string_lossy()})).unwrap();
+    dispatch(
+        &c,
+        "export",
+        json!({"out": abs.to_string_lossy(), "format": "md"}),
+    )
+    .unwrap();
     assert!(abs.is_dir(), "an absolute path is used as given");
 }
 
@@ -303,13 +312,13 @@ fn ctl2_import_reindex_and_fsck_run_and_fsck_reports_the_open() {
     dispatch(&c, "approve", json!({"proposal": p["id"]})).unwrap();
     let other = tempfile::tempdir().unwrap();
     let o = Local::new(Rdy::init(other.path(), "rdy-standard").unwrap());
+    let dir = other.path().join("exp");
     {
         let oc = cx(&o, &s, other.path());
         dispatch(&oc, "new_doc", json!({"path": "b"})).unwrap();
-        dispatch(&oc, "export", json!({"out": "exp", "scope": "work"})).unwrap();
+        o.read().export(&Scope::View("work".into()), &dir).unwrap();
     }
     o.close().unwrap();
-    let dir = other.path().join("exp");
     let v = dispatch(
         &c,
         "import",
