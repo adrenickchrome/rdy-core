@@ -49,6 +49,7 @@ pub mod search;
 pub mod section;
 pub mod semantic;
 mod session;
+pub mod signing_crypto;
 pub mod site_scope;
 pub mod suggest;
 pub mod tensions;

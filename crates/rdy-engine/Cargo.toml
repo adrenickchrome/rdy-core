@@ -18,6 +18,8 @@ saphyr-parser.workspace = true
 imbl.workspace = true
 arc-swap.workspace = true
 regex.workspace = true
+ssh-key.workspace = true
+ssh-encoding.workspace = true
 
 [features]
 # Test hooks that lower the redaction report's bounds for a test thread
@@ -31,6 +33,7 @@ tempfile.workspace = true
 rdy-graph.workspace = true
 proptest.workspace = true
 criterion.workspace = true
+ed25519-dalek.workspace = true
 
 [[bench]]
 name = "core"

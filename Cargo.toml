@@ -44,6 +44,12 @@ ttf-parser = "0.25"
 pdf-writer = "0.15"
 subsetter = { version = "0.2", default-features = false }
 miniz_oxide = "0.9"
+# SSH signatures: public-key decoding, fingerprints, SSHSIG encoding and verification. No private-key
+# parser, reader or generator is used by product code.
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519"] }
+ssh-encoding = { version = "=0.2.0", default-features = false, features = ["std", "base64"] }
+# Test-only: the in-memory software signer of the signing tests.
+ed25519-dalek = { version = "=2.2.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

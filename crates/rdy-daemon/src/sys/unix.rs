@@ -299,6 +299,29 @@ impl StopSignals {
     }
 }
 
+// 7. The caller's SSH agent
+
+/// A blocking connection to the caller's SSH agent (the socket its `SSH_AUTH_SOCK` names). It
+/// is used only on a request's blocking worker, never on the daemon's writer, and lives for one
+/// signing call.
+pub type AgentStream = std::os::unix::net::UnixStream;
+
+/// Connects to the SSH agent socket at `path`.
+pub fn agent_connect(path: &Path) -> io::Result<AgentStream> {
+    AgentStream::connect(path)
+}
+
+/// A second handle on `stream`, so another thread can close it while a read waits.
+pub fn agent_handle(stream: &AgentStream) -> io::Result<AgentStream> {
+    stream.try_clone()
+}
+
+/// Closes `stream` both ways: a read or write that waits on it, through any handle, ends. An
+/// error (the stream is already closed) is ignored.
+pub fn agent_close(stream: &AgentStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sys::{
@@ -545,6 +568,39 @@ mod tests {
         assert_eq!(exit_code(ExitStatus::from_raw(libc::SIGTERM)), 128 + 15);
         assert_eq!(exit_code(ExitStatus::from_raw(3 << 8)), 3);
         assert_eq!(exit_code(ExitStatus::from_raw(0)), 0);
+    }
+
+    #[test]
+    fn sig3_agent_stream_connects_and_close_wakes_a_blocked_read() {
+        use crate::sys::{agent_close, agent_connect, agent_handle};
+        use std::io::{Read, Write};
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("agent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (got_tx, got_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut req = [0u8; 5];
+            conn.read_exact(&mut req).unwrap();
+            got_tx.send(req).unwrap();
+            // hold the connection open without replying until the client closes it
+            let mut rest = Vec::new();
+            conn.read_to_end(&mut rest).unwrap();
+        });
+        let mut stream = agent_connect(&path).unwrap();
+        let handle = agent_handle(&stream).unwrap();
+        stream.write_all(&[0, 0, 0, 1, 11]).unwrap();
+        assert_eq!(got_rx.recv().unwrap(), [0, 0, 0, 1, 11]);
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4];
+            stream.read(&mut buf)
+        });
+        // closing through the second handle ends the blocked read: no reply arrives
+        agent_close(&handle);
+        assert!(matches!(reader.join().unwrap(), Ok(0) | Err(_)));
+        server.join().unwrap();
+        // no listener at a path: connect fails
+        assert!(agent_connect(&d.path().join("none.sock")).is_err());
     }
 
     #[test]

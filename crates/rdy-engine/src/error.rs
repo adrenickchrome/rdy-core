@@ -199,6 +199,185 @@ pub fn redaction_budget() -> RdyError {
     )
 }
 
+/// A signing act with no configured key: `signing.key` (a person) or `signing.agent_key` (an
+/// agent) is unset. Built by [`signing_key_missing`].
+pub const E_SIGNING_KEY_MISSING: &str = "E_SIGNING_KEY_MISSING";
+/// A signing key of a type other than `ssh-ed25519` and `sk-ssh-ed25519@openssh.com`. Built by
+/// [`signing_key_type`].
+pub const E_SIGNING_KEY_TYPE: &str = "E_SIGNING_KEY_TYPE";
+/// The caller's SSH agent could not sign; the cause is one of [`NoAgentCause`]. Built by
+/// [`no_agent`].
+pub const E_NO_AGENT: &str = "E_NO_AGENT";
+/// A stored signature that is malformed or fails its cryptographic check. Built by
+/// [`sig_invalid`].
+pub const E_SIG_INVALID: &str = "E_SIG_INVALID";
+/// A valid signature whose statement does not match its subject. Built by
+/// [`sig_object_mismatch`].
+pub const E_SIG_OBJECT_MISMATCH: &str = "E_SIG_OBJECT_MISMATCH";
+/// A valid signature by a key that the allowed-signers file does not trust for its principal and
+/// namespace. Built by [`sig_unknown_key`].
+pub const W_SIG_UNKNOWN_KEY: &str = "W_SIG_UNKNOWN_KEY";
+/// An act saved without its automatic signatures. Built by [`signing_failed`].
+pub const W_SIGNING_FAILED: &str = "W_SIGNING_FAILED";
+
+/// The fix of `E_SIGNING_KEY_TYPE`.
+pub const SIGNING_KEY_TYPE_FIX: &str = "set an ssh-ed25519 or sk-ssh-ed25519@openssh.com key";
+/// The fix of `E_NO_AGENT`.
+pub const NO_AGENT_FIX: &str = "check SSH_AUTH_SOCK and the configured key, then try again";
+/// The fix of `E_SIG_INVALID`.
+pub const SIG_INVALID_FIX: &str = "check the source of this signature; it may be damaged or forged";
+/// The fix of `E_SIG_OBJECT_MISMATCH`.
+pub const SIG_OBJECT_MISMATCH_FIX: &str = "run rdy sign for this subject, or refuse the record";
+/// The fix of `W_SIG_UNKNOWN_KEY`.
+pub const SIG_UNKNOWN_KEY_FIX: &str = "add the key and principal to signing.allowed_signers";
+/// The fix of `W_SIGNING_FAILED`.
+pub const SIGNING_FAILED_FIX: &str = "fix the signing error, then run rdy sign";
+/// The fix of the signing `E_LIMIT` ([`signing_limit`]).
+pub const SIGNING_LIMIT_FIX: &str = "reduce the input to the stated limit";
+
+/// Why the caller's SSH agent could not sign: the closed list of `E_NO_AGENT` causes. Every
+/// surface reports one of these texts and never an agent's own comment, path or error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoAgentCause {
+    /// The calling process has no `SSH_AUTH_SOCK`.
+    Unset,
+    /// The agent socket could not be reached, or it closed before a whole reply.
+    ConnectionFailed,
+    /// The agent holds no identity for the selected key.
+    NotHeld,
+    /// The agent answered with a failure (reply type 5, 30 or 102).
+    Refused,
+    /// The agent's reply is malformed, of the wrong type, or over a decoded bound.
+    InvalidReply,
+    /// The agent's reply packet is over 262144 bytes.
+    ReplyTooLarge,
+    /// The caller cancelled the request.
+    Cancelled,
+}
+
+impl NoAgentCause {
+    /// Every cause, in the order the error table lists them.
+    pub const ALL: [NoAgentCause; 7] = [
+        NoAgentCause::Unset,
+        NoAgentCause::ConnectionFailed,
+        NoAgentCause::NotHeld,
+        NoAgentCause::Refused,
+        NoAgentCause::InvalidReply,
+        NoAgentCause::ReplyTooLarge,
+        NoAgentCause::Cancelled,
+    ];
+
+    /// The exact cause text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoAgentCause::Unset => "SSH_AUTH_SOCK is not set",
+            NoAgentCause::ConnectionFailed => "connection failed",
+            NoAgentCause::NotHeld => "key is not held",
+            NoAgentCause::Refused => "request refused",
+            NoAgentCause::InvalidReply => "invalid reply",
+            NoAgentCause::ReplyTooLarge => "reply exceeds 262144 bytes",
+            NoAgentCause::Cancelled => "request cancelled",
+        }
+    }
+
+    /// The cause whose exact text is `text`; `None` for any other text.
+    pub fn parse(text: &str) -> Option<NoAgentCause> {
+        NoAgentCause::ALL.into_iter().find(|c| c.as_str() == text)
+    }
+}
+
+impl fmt::Display for NoAgentCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `E_SIGNING_KEY_MISSING` for `setting`: exactly `signing.key` or `signing.agent_key`.
+pub fn signing_key_missing(setting: &str) -> RdyError {
+    RdyError::new(
+        E_SIGNING_KEY_MISSING,
+        format!("{setting} is not set"),
+        format!("set {setting} in the user config or .rdy/local.yaml"),
+    )
+}
+
+/// `E_SIGNING_KEY_TYPE` for the key `key` (its fingerprint) of type `key_type`.
+pub fn signing_key_type(key: &str, key_type: &str) -> RdyError {
+    RdyError::new(
+        E_SIGNING_KEY_TYPE,
+        format!("{key} has unsupported signing key type {key_type}"),
+        SIGNING_KEY_TYPE_FIX,
+    )
+}
+
+/// `E_NO_AGENT` with one of the closed causes.
+pub fn no_agent(cause: NoAgentCause) -> RdyError {
+    RdyError::new(
+        E_NO_AGENT,
+        format!("the SSH agent could not sign: {cause}"),
+        NO_AGENT_FIX,
+    )
+}
+
+/// `E_SIG_INVALID` for the signature record `hash`.
+pub fn sig_invalid(hash: &str) -> RdyError {
+    RdyError::new(
+        E_SIG_INVALID,
+        format!("signature {hash} is invalid"),
+        SIG_INVALID_FIX,
+    )
+}
+
+/// `E_SIG_OBJECT_MISMATCH` for the signature record `hash`.
+pub fn sig_object_mismatch(hash: &str) -> RdyError {
+    RdyError::new(
+        E_SIG_OBJECT_MISMATCH,
+        format!("signature {hash} does not match its subject"),
+        SIG_OBJECT_MISMATCH_FIX,
+    )
+}
+
+/// `W_SIG_UNKNOWN_KEY` for `key` (a fingerprint), `principal` and `namespace`.
+pub fn sig_unknown_key(key: &str, principal: &str, namespace: &str) -> RdyError {
+    RdyError::new(
+        W_SIG_UNKNOWN_KEY,
+        format!("key {key} is not trusted for {principal} in {namespace}"),
+        SIG_UNKNOWN_KEY_FIX,
+    )
+}
+
+/// `W_SIGNING_FAILED`, embedding the exact code and message of the first signing error.
+pub fn signing_failed(first: &RdyError) -> RdyError {
+    RdyError::new(
+        W_SIGNING_FAILED,
+        format!(
+            "the act was saved without signatures: {}: {}",
+            first.code, first.message
+        ),
+        SIGNING_FAILED_FIX,
+    )
+}
+
+/// `E_LIMIT` for a signing input over `limit`: the numeric limit and its unit, such as
+/// `16384 bytes`, `1024 identities` or `4096 signatures per subject`.
+pub fn signing_limit(limit: &str) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("signing input exceeds {limit}"),
+        SIGNING_LIMIT_FIX,
+    )
+}
+
+/// `E_BAD_INPUT` for a configured key selector of `setting` that is neither a public-key line nor
+/// a canonical SHA256 fingerprint.
+pub fn signing_selector(setting: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("{setting} is not a public key or SHA256 fingerprint"),
+        format!("set {setting} to a public key line or its SHA256 fingerprint"),
+    )
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {
     pub code: &'static str,
