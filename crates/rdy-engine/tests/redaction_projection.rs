@@ -13,6 +13,7 @@ use rdy_engine::wc::plan::plan_commit;
 use rdy_engine::wc::project::{Projection, project_state};
 use rdy_engine::wc::state::{Place, WcState, stage_put};
 use rdy_engine::worddiff::{Op as PieceOp, Piece};
+use rdy_engine::{Diagnostic, check_wc};
 use rdy_graph::Graph;
 use rdy_model::decision::{self, is_frozen};
 use rdy_model::redaction::{BlockResidue, CONTENT_REMOVED, ChangeResidue};
@@ -20,7 +21,7 @@ use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, Provenance, Role, Tracking,
     hash_of,
 };
-use rdy_schema::{Pack, PackSet, validate_block, validate_read_block};
+use rdy_schema::{Pack, PackSet, Severity, validate_block, validate_read_block};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -525,6 +526,236 @@ fn rdx3_working_copy_update_is_safe_and_old_files_are_reported() {
         ),
         Ok(p) => panic!("an edited section stub passed the lint: {:?}", p.ops),
     }
+
+    // removed docs and folders: their files are named by their ids, and the copy still reads,
+    // checks and updates; an edit of a child beside the stubs commits only that edit
+    structural_stubs_round_trip(&pack);
+}
+
+fn errors(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+    diags
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect()
+}
+
+fn structural_stubs_round_trip(pack: &Pack) {
+    let f = with_fields(
+        blk("fd-F0DR2", "folder", None, "V", ""),
+        &[("name", "secret-notes"), ("title", "Secret notes")],
+    );
+    let kept = doc("d-D0C22", Some("fd-F0DR2"), "kept", "Kept");
+    let ks = section("s-SECT2", "d-D0C22", "Kept heading");
+    let kp = blk("p-PR0S3", "prose", Some("s-SECT2"), "V", "Kept prose.");
+    let gone = with_fields(
+        blk("d-D0C33", "doc", None, "W", ""),
+        &[
+            ("name", "secret-plan"),
+            ("title", "Secret plan"),
+            ("doc_type", "page"),
+        ],
+    );
+    let gs = section("s-SECT3", "d-D0C33", "Child heading");
+    let gp = blk("p-PR0S4", "prose", Some("s-SECT3"), "V", "Child prose.");
+    let all = [&f, &kept, &ks, &kp, &gone, &gs, &gp];
+    let before = state(&all, &[]);
+    let after = state(&all, &["fd-F0DR2", "d-D0C33"]);
+    let theirs = project(&after);
+    let paths: BTreeSet<&str> = theirs.files.iter().map(|x| x.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        BTreeSet::from([
+            "d-D0C33.yaml",
+            "fd-F0DR2/_folder.yaml",
+            "fd-F0DR2/kept.yaml"
+        ])
+    );
+    assert!(!json(&theirs).contains("ecret"), "{}", json(&theirs));
+
+    // a copy checked out before the removal updates to the neutral paths
+    let dir = tempfile::tempdir().unwrap();
+    let place = Place::main(dir.path());
+    let mut st = WcState::default();
+    let tree = read_tree(&place.root, &Ignore::empty(), pack);
+    checkout(&place, &mut st, &tree, &project(&before), false).unwrap();
+    assert!(place.root.join("secret-plan.yaml").exists());
+    let st = WcState::load(&place).unwrap();
+    let tree = read_tree(&place.root, &Ignore::empty(), pack);
+    let plan = plan_update(&place, &st, &tree, &theirs, pack).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+    let mut st = st;
+    apply_update(&place, &mut st, &plan, &theirs).unwrap();
+    for rel in &paths {
+        assert!(place.root.join(rel).exists(), "{rel}");
+    }
+    assert!(!place.root.join("secret-plan.yaml").exists());
+    assert!(!place.root.join("secret-notes").exists());
+
+    // a fresh checkout of the removal writes the same files
+    let fresh = tempfile::tempdir().unwrap();
+    let fresh_place = Place::main(fresh.path());
+    let mut fresh_st = WcState::default();
+    let fresh_tree = read_tree(&fresh_place.root, &Ignore::empty(), pack);
+    checkout(&fresh_place, &mut fresh_st, &fresh_tree, &theirs, false).unwrap();
+
+    for root in [&place.root, &fresh_place.root] {
+        // the reader reads the neutral paths, and the check against the view passes
+        let tree = read_tree(root, &Ignore::empty(), pack);
+        assert!(errors(&tree.diags).is_empty(), "{:#?}", tree.diags);
+        let checked = check_wc(pack, &after, root, None).unwrap();
+        assert!(errors(&checked).is_empty(), "{checked:#?}");
+        for rel in ["d-D0C33.yaml", "fd-F0DR2/_folder.yaml", ""] {
+            let one = check_path(pack, Some(&after), &root.join(rel)).unwrap();
+            assert!(errors(&one).is_empty(), "{rel:?}: {one:#?}");
+        }
+        // a name that looks like an id is trusted only for the view's stub of that id: against
+        // the state before the removal, the same files keep the write-name check
+        let untrusted = check_wc(pack, &before, root, None).unwrap();
+        for rel in ["d-D0C33.yaml", "fd-F0DR2/_folder.yaml"] {
+            assert!(
+                untrusted
+                    .iter()
+                    .any(|d| d.code == "E_BAD_NAME" && d.file == rel),
+                "{rel}: {untrusted:#?}"
+            );
+        }
+    }
+
+    // updating again finds nothing to write
+    let st = WcState::load(&place).unwrap();
+    let tree = read_tree(&place.root, &Ignore::empty(), pack);
+    let again = plan_update(&place, &st, &tree, &theirs, pack).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(again.writes.is_empty(), "{:?}", again.writes);
+    assert!(again.conflicts.is_empty(), "{:?}", again.conflicts);
+
+    // edits of children of a removed doc and folder commit only those edits
+    for (rel, from, to) in [
+        ("d-D0C33.yaml", "Child prose.", "Child prose, edited."),
+        ("fd-F0DR2/kept.yaml", "Kept prose.", "Kept prose, edited."),
+    ] {
+        let text = read(&place.root, rel);
+        let edited = text.replace(from, to);
+        assert_ne!(edited, text);
+        std::fs::write(place.root.join(rel), &edited).unwrap();
+        stage_put(&place, rel, edited.as_bytes()).unwrap();
+    }
+    let plan = plan_commit(&place, &st, pack).unwrap_or_else(|e| panic!("{:#?}", e.diags));
+    let ops: BTreeSet<(&str, &str)> = plan
+        .ops
+        .iter()
+        .map(|o| (o["op"].as_str().unwrap(), o["id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        ops,
+        BTreeSet::from([("update", "p-PR0S3"), ("update", "p-PR0S4")]),
+        "{:?}",
+        plan.ops
+    );
+}
+
+#[test]
+fn rdx3_a_moved_stub_gets_every_check() {
+    let pack = pack();
+    let d = doc("d-D0C11", None, "plan", "Plan");
+    let a = section("s-AAAAA", "d-D0C11", "First");
+    let mut b = section("s-BBBBB", "d-D0C11", "Secret second");
+    b.order = "W".into();
+    let m = state(&[&d, &a, &b], &["s-BBBBB"]);
+    let dir = tempfile::tempdir().unwrap();
+    let place = Place::main(dir.path());
+    let mut st = WcState::default();
+    let tree = read_tree(&place.root, &Ignore::empty(), &pack);
+    checkout(&place, &mut st, &tree, &project(&m), false).unwrap();
+    let file = "plan.yaml";
+    let text = read(&place.root, file);
+
+    // swap the two sections' entries, each keeping its order: the stub moves before s-AAAAA, so
+    // it is no unchanged entry and gets every check
+    let mut items: Vec<serde_yaml_ng::Value> = serde_yaml_ng::from_str(&text).unwrap();
+    assert_eq!(items[1]["id"].as_str(), Some("s-AAAAA"));
+    assert_eq!(items[2]["id"].as_str(), Some("s-BBBBB"));
+    items.swap(1, 2);
+    let swapped = serde_yaml_ng::to_string(&items).unwrap();
+    std::fs::write(place.root.join(file), &swapped).unwrap();
+    let st = WcState::load(&place).unwrap();
+    stage_put(&place, file, swapped.as_bytes()).unwrap();
+    match plan_commit(&place, &st, &pack) {
+        Err(e) => assert!(
+            e.diags
+                .iter()
+                .any(|d| d.code == "E_FIELD_REQUIRED" && d.file == file),
+            "{:#?}",
+            e.diags
+        ),
+        Ok(p) => panic!("a moved section stub passed the lint: {:?}", p.ops),
+    }
+}
+
+#[test]
+fn rdx3_a_redacted_doc_path_clashes_with_a_sibling_name() {
+    let pack = pack();
+    let secret = doc("d-AAAAA", None, "secret", "Secret");
+    let mut sib = doc("d-BBBBB", None, "d-aaaaa", "Sibling");
+    sib.order = "W".into();
+    let checks_out = |m: &Materialized| {
+        let p = project_state(m, &pack, "work", "canon:test", None)?;
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::main(dir.path());
+        let mut st = WcState::default();
+        let tree = read_tree(&place.root, &Ignore::empty(), &pack);
+        checkout(&place, &mut st, &tree, &p, false)?;
+        let files: BTreeMap<String, String> = p
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), read(&place.root, &f.path)))
+            .collect();
+        Ok::<_, rdy_engine::RdyError>(files)
+    };
+
+    // before the removal both docs check out
+    let files = checks_out(&state(&[&secret, &sib], &[])).unwrap();
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    assert_eq!(names, vec!["d-aaaaa.yaml", "secret.yaml"]);
+
+    // after it, the redacted doc's file name matches the sibling's name ignoring case
+    let e = checks_out(&state(&[&secret, &sib], &["d-AAAAA"])).unwrap_err();
+    assert_eq!(e.code, "E_PATH_CLASH");
+    assert_eq!(
+        e.message,
+        "d-BBBBB is named \"d-aaaaa\", which matches the file name of redacted doc d-AAAAA (ignoring case), so they cannot be checked out as files"
+    );
+    assert_eq!(
+        e.fix,
+        "rename d-BBBBB (a redacted doc's file is named by its id), then check out again"
+    );
+
+    // once the sibling is renamed, the copy checks out and shows the stub
+    let renamed = with_fields(sib.clone(), &[("name", "sibling")]);
+    let files = checks_out(&state(&[&secret, &renamed], &["d-AAAAA"])).unwrap();
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    assert_eq!(names, vec!["d-AAAAA.yaml", "sibling.yaml"]);
+    let stub = &files["d-AAAAA.yaml"];
+    assert!(stub.contains(CONTENT_REMOVED), "{stub}");
+    assert!(!stub.contains("ecret"), "{stub}");
+
+    // a redacted folder's directory is named by its id in the same way
+    let folder = with_fields(
+        blk("fd-F0DR1", "folder", None, "V", ""),
+        &[("name", "secret")],
+    );
+    let mut sib2 = sib.clone();
+    sib2.fields
+        .insert("name".into(), FieldValue::Str("FD-f0dr1".into()));
+    let e = checks_out(&state(&[&folder, &sib2], &["fd-F0DR1"])).unwrap_err();
+    assert_eq!(e.code, "E_PATH_CLASH");
+    assert_eq!(
+        e.message,
+        "d-BBBBB is named \"FD-f0dr1\", which matches the directory name of redacted folder fd-F0DR1 (ignoring case), so they cannot be checked out as files"
+    );
+    assert_eq!(
+        e.fix,
+        "rename d-BBBBB (a redacted folder's directory is named by its id), then check out again"
+    );
 }
 
 #[test]

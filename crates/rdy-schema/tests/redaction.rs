@@ -200,3 +200,50 @@ fn rdx3_stubs_pass_read_schema_but_incomplete_writes_fail() {
         );
     }
 }
+
+#[test]
+fn rdx3_a_stub_named_by_its_id_passes_only_the_read_schema() {
+    let p = pack();
+    let folder = folder();
+    let named = |mut s: Block, name: &str| {
+        s.fields.insert("name".into(), FieldValue::Str(name.into()));
+        s
+    };
+    // a working copy names a removed doc's file and a removed folder's directory by the id
+    for (s, parent) in [
+        (
+            named(stub("d-D0C22", "doc", Some("fd-F0DR1"), false), "d-D0C22"),
+            Some(&folder),
+        ),
+        (
+            named(stub("fd-F0DR2", "folder", None, false), "fd-F0DR2"),
+            None,
+        ),
+    ] {
+        let read = validate_read_block(&p, &s, parent);
+        assert!(read.is_empty(), "{}: {read:?}", s.id);
+        // the write schema keeps the name rule
+        assert!(
+            validate_block(&p, &s, parent)
+                .iter()
+                .any(|i| i.code == "E_BAD_NAME"),
+            "{}",
+            s.id
+        );
+    }
+    // only the stub's own id is that neutral name
+    let other = named(stub("d-D0C33", "doc", None, false), "d-D0C44");
+    assert_eq!(
+        codes(&validate_read_block(&p, &other, None)),
+        ["E_BAD_NAME"]
+    );
+    // a normal doc named by its id keeps the name rule on the read schema too
+    let mut written = doc();
+    written
+        .fields
+        .insert("name".into(), FieldValue::Str("d-D0C11".into()));
+    assert_eq!(
+        codes(&validate_read_block(&p, &written, None)),
+        ["E_BAD_NAME"]
+    );
+}

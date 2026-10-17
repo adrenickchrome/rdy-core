@@ -152,6 +152,52 @@ pub fn project_state(
     })
 }
 
+/// Two siblings whose names match ignoring case cannot both be files. When one is a removed doc
+/// or folder, named by its id (D-3M81W, which [`Materialized::names_under`] gives path resolution
+/// too), it has no name to change: the fix names the other.
+fn path_clash(
+    m: &Materialized,
+    names: &BTreeMap<BlockId, String>,
+    first: &BlockId,
+    second: &BlockId,
+) -> RdyError {
+    let removed = |id: &BlockId| m.get(id).filter(|b| b.is_redacted());
+    let pair = match (removed(first), removed(second)) {
+        (Some(r), _) => Some((r, second)),
+        (None, Some(r)) => Some((r, first)),
+        (None, None) => None,
+    };
+    let name = |id: &BlockId| names.get(id).map(String::as_str).unwrap_or_default();
+    match pair {
+        Some((r, sibling)) => {
+            let (what, file) = if r.block_type == tree::FOLDER {
+                ("folder", "directory")
+            } else {
+                ("doc", "file")
+            };
+            RdyError::new(
+                E_PATH_CLASH,
+                format!(
+                    "{sibling} is named {:?}, which matches the {file} name of redacted {what} {} (ignoring case), so they cannot be checked out as files",
+                    name(sibling),
+                    r.id
+                ),
+                format!(
+                    "rename {sibling} (a redacted {what}'s {file} is named by its id), then check out again"
+                ),
+            )
+        }
+        None => RdyError::new(
+            E_PATH_CLASH,
+            format!(
+                "{first} and {second} are both named {:?} (ignoring case) under the same parent, so they cannot be checked out as files",
+                name(second)
+            ),
+            "rename one of them, then check out again",
+        ),
+    }
+}
+
 struct Projector<'a> {
     m: &'a Materialized,
     pack: &'a Pack,
@@ -193,14 +239,7 @@ impl Projector<'_> {
                 continue;
             };
             if let Some(other) = used.insert(name.to_ascii_lowercase(), &b.id) {
-                return Err(RdyError::new(
-                    E_PATH_CLASH,
-                    format!(
-                        "{other} and {} are both named {name:?} (ignoring case) under the same parent, so they cannot be checked out as files",
-                        b.id
-                    ),
-                    "rename one of them, then check out again",
-                ));
+                return Err(path_clash(m, &names, other, &b.id));
             }
             if self.supporting(b) {
                 continue;

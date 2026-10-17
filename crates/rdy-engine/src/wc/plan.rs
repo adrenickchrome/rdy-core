@@ -13,7 +13,7 @@ use crate::wc::ignore::Ignore;
 use crate::wc::layout::{WcBlock, WcTree, read_tree};
 use crate::wc::lint::lint_tree;
 use crate::wc::state::{Place, WcState, stage_paths};
-use rdy_model::{Block, BlockId, FieldValue, tree};
+use rdy_model::{BlockId, FieldValue, tree};
 use rdy_schema::{Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, Severity, TypeClass};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -206,8 +206,20 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     let commit = commit.map_err(|diags| WcInvalid { diags })?;
     let mut commit = commit;
     let mut diags = lint_tree(&mut commit, pack, None, Some(&place.root));
-    if let Ok(base) = &base {
-        let spots = unchanged_notices(&commit, base);
+    if let Ok(base) = &base
+        && commit.blocks.iter().any(|b| is_notice_entry(&b.block))
+    {
+        let diff = Diff {
+            place,
+            st,
+            pack,
+            base: Indexed::of(base),
+            commit: Indexed::of(&commit),
+            base_tree: base,
+            commit_tree: &commit,
+            staged: &staged,
+        };
+        let spots = unchanged_notices(&diff);
         diags.retain(|d| {
             !(UNAVAILABLE.contains(&d.code.as_str())
                 && spots.contains(&(d.file.as_str(), (d.line, d.column))))
@@ -247,24 +259,32 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     Ok(plan)
 }
 
-/// The checks a removed version's stub cannot meet (D-3M81W): its fields are gone and its body is
-/// the notice.
-const UNAVAILABLE: [&str; 3] = ["E_FIELD_REQUIRED", "E_BODY_REQUIRED", "E_BODY_FORBIDDEN"];
+/// The checks a removed version's stub cannot meet (D-3M81W): its fields are gone, its body is
+/// the notice, and a removed doc or folder is named by its id.
+const UNAVAILABLE: [&str; 4] = [
+    "E_FIELD_REQUIRED",
+    "E_BODY_REQUIRED",
+    "E_BODY_FORBIDDEN",
+    "E_BAD_NAME",
+];
 
 /// Where the commit tree holds an entry that rdy wrote for a removed version's stub, exactly as
-/// the base has it (each entry's place and its `body` key). Such an entry is no new source: the
-/// diff against the base names no op for it, so the checks of what removal made unavailable do
-/// not refuse the commit. An edited notice entry differs from the base and gets every check.
-fn unchanged_notices<'a>(commit: &'a WcTree, base: &WcTree) -> BTreeSet<(&'a str, (usize, usize))> {
-    let mut in_base: BTreeMap<&BlockId, &Block> = BTreeMap::new();
-    for b in &base.blocks {
-        in_base.entry(&b.block.id).or_insert(&b.block);
-    }
-    commit
+/// the base has it (each entry's place and its `body` key), and for which the complete diff
+/// against the base names no op (placements included). Such an entry is no new source, so the
+/// checks of what removal made unavailable do not refuse the commit. An edited or moved notice
+/// entry gets an op and every check.
+fn unchanged_notices<'a>(diff: &Diff<'a>) -> BTreeSet<(&'a str, (usize, usize))> {
+    let with_op = diff.op_ids();
+    diff.commit_tree
         .blocks
         .iter()
         .filter(|b| {
-            is_notice_entry(&b.block) && in_base.get(&b.block.id).is_some_and(|x| **x == b.block)
+            let id = &b.block.id;
+            is_notice_entry(&b.block)
+                && !with_op.contains(id)
+                // the first entry of its id, the one the diff reads
+                && diff.commit.by_id.get(id).is_some_and(|f| std::ptr::eq(*f, *b))
+                && diff.base.by_id.get(id).is_some_and(|x| x.block == b.block)
         })
         .flat_map(|b| {
             [Some(b.at), b.keys.get("body").copied()]
@@ -724,6 +744,21 @@ struct Diff<'a> {
 }
 
 impl<'a> Diff<'a> {
+    /// The ids of the commit tree's blocks that `run` gives a create or an update, its
+    /// placements included.
+    fn op_ids(&self) -> BTreeSet<&'a BlockId> {
+        let placed = self.placements();
+        self.commit
+            .by_id
+            .iter()
+            .filter(|(id, b)| match self.base.by_id.get(*id) {
+                Some(old) => self.update(old, b, placed.get(*id)).is_some(),
+                None => true,
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     fn run(&self, plan: &mut CommitPlan) {
         let placed = self.placements();
         for b in self.commit.pre_order(self.commit_tree) {
