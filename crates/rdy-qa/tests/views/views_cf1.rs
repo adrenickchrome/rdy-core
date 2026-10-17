@@ -12,11 +12,17 @@ fn view(v: &str) -> Scope {
 
 /// The frozen conflict of cres1 (`fixtures::frozen_conflict`), d conflicted in view b.
 fn frozen_conflict() -> (tempfile::TempDir, Rdy, String, String) {
+    let (dir, r, d, s, _cc) = frozen_conflict_c();
+    (dir, r, d, s)
+}
+
+/// `frozen_conflict`, with agent:c's stale edit of d (in no other view).
+fn frozen_conflict_c() -> (tempfile::TempDir, Rdy, String, String, String) {
     let (dir, mut r) = project();
-    let (d, s) = rdy_qa::fixtures::frozen_conflict(&mut r);
+    let (d, s, cc) = rdy_qa::fixtures::frozen_conflict(&mut r);
     let id = rdy_model::BlockId::parse(&d).unwrap();
     assert!(r.read().conflict_info(&view("b"), &id).unwrap().is_some());
-    (dir, r, d, s)
+    (dir, r, d, s, cc)
 }
 
 #[test]
@@ -222,4 +228,209 @@ fn cf1_e_frozen_names_the_resolution_first() {
         e.fix.contains("rdy view exclude") && e.fix.contains("supersedes or revokes"),
         "the other ways out follow: {e}"
     );
+}
+
+/// Review round 1 (finding 1): the store takes a side unchanged through a frozen conflict only
+/// when that side is canon's frozen version; the unlanded side is refused, so it can never land
+/// over the accepted decision.
+#[test]
+fn cf1_the_store_refuses_taking_an_unlanded_side_unchanged() {
+    use rdy_model::{Change, ChangeLinks, Op};
+    let (_dir, mut r, d, _s) = frozen_conflict();
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    let canon = version_of(&r, &Scope::Canon, &d);
+    let info = r.read().conflict_info(&view("b"), &id).unwrap().unwrap();
+    let unlanded: rdy_model::Hash = info
+        .sides
+        .iter()
+        .filter_map(|s| s.version.clone())
+        .find(|v| *v != canon)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let block = r.read().reader().get_block(&unlanded).unwrap();
+    let conflicts = r.read().conflicts(&view("b")).unwrap().as_ref().clone();
+    let m = r.read().materialized(&view("b")).unwrap();
+    let b = as_agent("agent:b", "r1");
+    let e = r
+        .store_mut()
+        .commit_to_view_resolving(
+            "b",
+            Change {
+                view: "b".into(),
+                ops: vec![Op::Update {
+                    base: unlanded,
+                    block,
+                }],
+                deps: vec![],
+                provenance: b.provenance(),
+                justification: None,
+                message: "take b's side".into(),
+                links: ChangeLinks::default(),
+            },
+            &|x| m.version_of(x),
+            &conflicts,
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(e, rdy_store::StoreError::Frozen(_)), "{e:?}");
+}
+
+/// Review round 1 (finding 2): after a resolution, including another stale edit conflicts d
+/// again, with the resolution as the frozen side; its version is canon's, so it resolves again.
+#[test]
+fn cf1_a_second_conflict_after_a_resolution_resolves_again() {
+    let (_dir, mut r, d, _s, cc) = frozen_conflict_c();
+    let b = as_agent("agent:b", "r1");
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    let canon = r.read().block(&Scope::Canon, &id).unwrap();
+    r.view_resolve_landed(&b, "b", &d).unwrap();
+    r.view_include(&b, "b", std::slice::from_ref(&cc)).unwrap();
+    assert!(
+        r.read().conflict_info(&view("b"), &id).unwrap().is_some(),
+        "c's stale edit conflicts d again"
+    );
+    r.view_resolve_landed(&b, "b", &d).unwrap();
+    assert!(r.read().conflicts(&view("b")).unwrap().is_empty());
+    assert_eq!(r.read().block(&view("b"), &id).unwrap(), canon);
+}
+
+/// Review round 1 (finding 4): the landed side's key is checked against the view, as a
+/// resolving write from a side is (cres1): the view reads the base, whose key another block may
+/// have taken since.
+#[test]
+fn cf1_the_landed_sides_key_is_checked_against_the_view() {
+    let (_dir, mut r) = project();
+    let seeded = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}}
+    ]))
+    .unwrap();
+    let s = seeded.created["$s"].clone();
+    land(&mut r, "seed").unwrap();
+    let (a, b) = (as_agent("agent:a", "r1"), as_agent("agent:b", "r1"));
+    let d = write_as(
+        &mut r,
+        &a,
+        "a",
+        json!([{"op": "create", "type": "decision", "id": "$x", "parent": s,
+        "fields": {"statement": "D", "status": "proposed"}}]),
+    )
+    .unwrap()
+    .created["$x"]
+        .clone();
+    let vd = version_of(&r, &view("a"), &d);
+    r.view_fork(&b, "a", "b").unwrap();
+    write_as(
+        &mut r,
+        &b,
+        "b",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by b"}}]),
+    )
+    .unwrap();
+    // a gives d the key KK after the fork, then lands: the landed side carries KK
+    write_as(
+        &mut r,
+        &a,
+        "a",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"key": "KK"}}]),
+    )
+    .unwrap();
+    land(&mut r, "a").unwrap();
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    assert!(r.read().conflict_info(&view("b"), &id).unwrap().is_some());
+    // the view reads d without KK, so another block takes it
+    write_as(
+        &mut r,
+        &b,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": s, "fields": {"key": "KK"}, "body": "z"}]),
+    )
+    .unwrap();
+    let e = r.view_resolve_landed(&b, "b", &d).unwrap_err();
+    assert_eq!(e.code, E_KEY_CLASH, "{e}");
+    assert_eq!(r.read().conflicts(&view("b")).unwrap().len(), 1);
+}
+
+const TRK_PACK: &str = "\
+name: trk
+version: \"1\"
+extends: rdy-standard
+block_types:
+  decision:
+    prefix: D
+    traits: [normative]
+    fields:
+      disposition: { kind: str }
+    tracking: [disposition]
+";
+
+/// Review round 1 (finding 3): the landed side is canon's version. In a pinned view, a landed
+/// tracking edit that canon has since moved past is not the landed side: E_FROZEN, as an edit
+/// gets, without the resolution.
+#[test]
+fn cf1_a_landed_side_that_canon_moved_past_is_not_taken() {
+    use rdy_model::{EditorialClass, Justification};
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    let d = r
+        .decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: section,
+                statement: "Ship weekly".into(),
+                fields: [("disposition".to_string(), json!("first"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "seed").unwrap();
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    let track = |r: &mut Rdy, v: &str, disposition: &str| {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: v.into(),
+                ops: serde_json::from_value(
+                    json!([{"op": "update", "id": d, "fields": {"disposition": disposition}}]),
+                )
+                .unwrap(),
+                justification: Some(Justification::Editorial {
+                    class: EditorialClass::Clarify,
+                    reason: "track".into(),
+                }),
+                message: String::new(),
+            },
+        )
+        .unwrap()
+        .change
+    };
+    r.view_create(&writer(), "b", None, true).unwrap();
+    track(&mut r, "b", "view b");
+    let y = track(&mut r, "y", "old canon");
+    r.view_include(&writer(), "b", std::slice::from_ref(&y))
+        .unwrap();
+    land(&mut r, "y").unwrap();
+    track(&mut r, "z", "new canon");
+    land(&mut r, "z").unwrap();
+    assert_eq!(
+        r.read()
+            .block(&Scope::Canon, &id)
+            .unwrap()
+            .field_str("disposition"),
+        Some("new canon")
+    );
+    assert!(r.read().conflict_info(&view("b"), &id).unwrap().is_some());
+    let e = r.view_resolve_landed(&writer(), "b", &d).unwrap_err();
+    assert_eq!(e.code, E_FROZEN, "{e}");
+    assert!(!e.fix.contains("rdy view resolve"), "{e}");
 }

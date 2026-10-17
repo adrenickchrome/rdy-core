@@ -1161,32 +1161,27 @@ pub(crate) fn conflict_has_frozen(
     Ok(false)
 }
 
-/// cf1 (D-X4GMH): the landed side of conflict `c`, the version a landing froze: the one version
-/// held by the sides that are frozen decisions and in canon, each written by a landed change or
-/// coming from canon's snapshot (no change). None when no side is, or when such sides disagree.
+/// cf1 (D-X4GMH): the landed side of conflict `c`, the version the landing froze: canon's
+/// version of the block, when a side holds it and it is a frozen decision. None otherwise (canon
+/// moved past every side, or its version is not frozen). Reads canon's state, so call it only
+/// for a conflict that holds something frozen.
 pub(crate) fn landed_side(
     c: &Conflict,
     store: &rdy_store::Store,
 ) -> Result<Option<Hash>, RdyError> {
-    let mut found: Option<Hash> = None;
-    for s in &c.sides {
-        let Some(v) = s.version else { continue };
-        if !decision::is_frozen(&store.get_block(&v)?) {
-            continue;
-        }
-        let landed = match s.change {
-            Some(ch) => store.landing_of(&ch)?.is_some(),
-            None => true,
-        };
-        if !landed {
-            continue;
-        }
-        match found {
-            Some(f) if f != v => return Ok(None),
-            _ => found = Some(v),
-        }
+    let Some(cv) = store.canon_state()?.blocks.get(&c.block).copied() else {
+        return Ok(None);
+    };
+    if !c.sides.iter().any(|s| s.version == Some(cv)) {
+        return Ok(None);
     }
-    Ok(found)
+    Ok(decision::is_frozen(&store.get_block(&cv)?).then_some(cv))
+}
+
+/// cf1: the landed side's block `b` against view `m`, as a resolving write from a side is
+/// checked (cres1): the view reads the conflict's base, so another block may hold `b`'s key.
+pub(crate) fn check_landed_key(m: &Materialized, b: &Block) -> Result<(), RdyError> {
+    Resolver::new(m).check_key(b)
 }
 
 /// The refusal of a tracking edit with no editorial reason (`rdy edit` gives its own fix).

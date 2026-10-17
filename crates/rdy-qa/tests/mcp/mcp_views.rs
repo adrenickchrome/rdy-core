@@ -368,7 +368,7 @@ fn logj1_rdy_log_lists_landings_with_their_approval_fields() {
 fn cf1_rdy_view_resolve_takes_the_landed_side_of_a_frozen_conflict() {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
-    let (d, section) = frozen_conflict(&mut r);
+    let (d, section, _) = frozen_conflict(&mut r);
     r.close().unwrap();
     let mut b = McpClient::start_proxy(&s);
     session(&mut b, "agent:b", "r1");

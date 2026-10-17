@@ -144,8 +144,9 @@ pub fn seed_doc(r: &mut Rdy, view: &str) -> (String, String, String) {
 /// cf1: a frozen conflict, cres1's. agent:a (run r1) proposes decision d in view a; agent:b
 /// (run r1) forks view b from a and edits d's statement; a lands, so the gate accepts d, and the
 /// landing rebases b, leaving d conflicted in b between b's edit and the landed acceptance.
-/// Returns d's id and its section's.
-pub fn frozen_conflict(r: &mut Rdy) -> (String, String) {
+/// agent:c (run r1) also forks view c from a and edits d before the landing: its change is a
+/// stale edit of d that no other view includes. Returns d's id, its section's and c's change.
+pub fn frozen_conflict(r: &mut Rdy) -> (String, String, String) {
     let seeded = write(r, "seed", serde_json::json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}}
@@ -173,8 +174,18 @@ pub fn frozen_conflict(r: &mut Rdy) -> (String, String) {
         serde_json::json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by b"}}]),
     )
     .unwrap();
+    let c = as_agent("agent:c", "r1");
+    r.view_fork(&c, "a", "c").unwrap();
+    let cc = write_as(
+        r,
+        &c,
+        "c",
+        serde_json::json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by c"}}]),
+    )
+    .unwrap()
+    .change;
     land(r, "a").unwrap();
-    (d, s)
+    (d, s, cc)
 }
 
 /// Proposes `view` as a writer (with a summary when it writes a decision,
