@@ -364,7 +364,6 @@ const F8_WORDS: &[&str] = &[
     "blocking",
     "local",
     "relayed",
-    "authoritative",
     "policy",
 ];
 const F9_WORDS: &[&str] = &[

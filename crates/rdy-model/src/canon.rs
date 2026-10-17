@@ -71,7 +71,6 @@ pub enum Assurance {
     Policy,
     Relayed,
     Local,
-    Authoritative,
 }
 
 impl Assurance {
@@ -80,7 +79,6 @@ impl Assurance {
             Assurance::Policy => "policy",
             Assurance::Relayed => "relayed",
             Assurance::Local => "local",
-            Assurance::Authoritative => "authoritative",
         }
     }
 }
