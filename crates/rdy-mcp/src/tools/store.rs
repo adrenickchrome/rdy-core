@@ -1,7 +1,8 @@
-//! dl7: `rdy_dump` and `rdy_load` (D-FR0C4 F4, F6 and F7). Any session may call them. Relative
-//! paths resolve against the project directory.
+//! dl7: `rdy_dump` and `rdy_load` (D-FR0C4 F4, F6 and F7); ec12: `rdy_clone` (D-9QV85, D-D2NPN;
+//! O6). Any session may call them. Relative paths resolve against the project directory.
 use super::*;
-use rdy_engine::RdyError;
+use rdy_engine::clone::{CloneSource, SourceKind, clone, source_kind};
+use rdy_engine::{E_BAD_INPUT, RdyError};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,6 +22,17 @@ pub struct LoadParams {
     pub file: String,
     /// The directory to load into: absolute, or relative to the project directory. It must have no rdy store.
     pub dir: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CloneParams {
+    /// The directory to clone into: absolute, or relative to the project directory. It must have no rdy store.
+    pub dir: String,
+    /// A dump file to clone, absolute or relative to the project directory. Leave it out to clone this project.
+    pub file: Option<String>,
+    /// true: the clone gets a new repo id and records forked_from.
+    pub fork: Option<bool>,
 }
 
 /// `p` as given when absolute, else under the project directory `root` (`join` replaces the
@@ -43,4 +55,49 @@ pub fn rdy_load(st: &mut McpState, p: LoadParams) -> Result<Value, RdyError> {
     let root = st.engine.root();
     let summary = rdy_engine::load::load(&under(&root, &p.file), &under(&root, &p.dir))?;
     Ok(serde_json::to_value(summary).expect("a reply serializes"))
+}
+
+/// `rdy_clone`: clones this project, or the dump `file`, into `dir`, a directory with no store.
+/// It runs in this process (the daemon's, or the server's with `--no-daemon`) and opens and
+/// closes the new project itself. A session is required, as for `rdy_dump`.
+pub fn rdy_clone(st: &mut McpState, p: CloneParams) -> Result<Value, RdyError> {
+    session(st)?;
+    let root = st.engine.root();
+    let dir = under(&root, &p.dir);
+    let fork = p.fork.unwrap_or(false);
+    let summary = match p.file {
+        None => clone(CloneSource::State(&st.engine.read()), &dir, fork)?,
+        Some(file) => {
+            let file = dump_file(&root, &file)?;
+            clone(CloneSource::File(&file), &dir, fork)?
+        }
+    };
+    Ok(serde_json::to_value(summary).expect("a reply serializes"))
+}
+
+/// The dump file `rdy_clone {file}` names (O39): a regular file. A directory is refused, since
+/// this tool clones only this project or a dump; any other path follows the clone sources (O7).
+/// A URL is checked as given, so its text names it without the project directory.
+fn dump_file(root: &Path, given: &str) -> Result<std::path::PathBuf, RdyError> {
+    let path = if given.contains("://") {
+        std::path::PathBuf::from(given)
+    } else {
+        under(root, given)
+    };
+    if path.is_dir() {
+        return Err(not_a_dump(&path));
+    }
+    match source_kind(&path)? {
+        SourceKind::File => Ok(path),
+        // `source_kind` names only a directory a project, and a directory is refused above
+        SourceKind::Project => Err(not_a_dump(&path)),
+    }
+}
+
+fn not_a_dump(path: &Path) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("{} is not a dump file", path.display()),
+        "to clone another project, call rdy_dump on its own server, then pass the file here",
+    )
 }

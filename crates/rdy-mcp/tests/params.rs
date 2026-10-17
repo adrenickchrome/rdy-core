@@ -117,6 +117,18 @@ fn dl7_rdy_dump_refuses_an_unknown_key() {
     assert!(message.contains("out"), "{message}");
 }
 
+/// ec12: `rdy_clone` takes `dir`, `file` and `fork` and nothing else.
+#[test]
+fn ec12_rdy_clone_refuses_an_unknown_key() {
+    let (code, message, _) = refusal::<CloneParams>("rdy_clone", json!({"dirs": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("dir"), "{message}");
+    let (code, message, _) =
+        refusal::<CloneParams>("rdy_clone", json!({"dir": "x", "forks": true}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("fork"), "{message}");
+}
+
 /// ec11: `rdy_export` takes `out`, `format`, `layout` and `scope` and nothing else; `format` and
 /// `layout` are closed sets.
 #[test]
@@ -256,7 +268,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 41 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 42 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
     // `RelayParams`, `RecommendedParams`).
     check!(
@@ -268,6 +280,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         AnswerParams,
         AssetParams,
         BriefParams,
+        CloneParams,
         CoverageParams,
         DecideParams,
         DismissParams,

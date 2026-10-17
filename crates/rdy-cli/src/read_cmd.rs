@@ -200,7 +200,7 @@ fn coverage_lines(c: &Value) -> String {
 /// The lines after the pack line (ec10, D-DAGNB): `repo <id>`, then the origin when there is
 /// one: `cloned from <id> at version <tag>`, or `… at landing <12 hex digits>` when it has no
 /// tag, or `cloned from <id>` with neither; a fork says `forked from`. Each ends in a newline.
-fn repo_lines(v: &Value) -> String {
+pub(crate) fn repo_lines(v: &Value) -> String {
     let mut out = format!("repo {}\n", text(&v["repo_id"]));
     let (word, o) = if v["forked_from"].is_object() {
         ("forked from", &v["forked_from"])

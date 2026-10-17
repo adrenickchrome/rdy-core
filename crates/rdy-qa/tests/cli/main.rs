@@ -4,6 +4,7 @@
 mod cli;
 mod cli_alts;
 mod cli_blame;
+mod cli_clone;
 mod cli_config;
 mod cli_config_file;
 mod cli_coverage;

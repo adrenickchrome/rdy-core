@@ -38,10 +38,11 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 39);
+    assert_eq!(OPS.len(), 40);
     assert_eq!(OPS[0], "session");
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
+    assert_eq!(OPS[export + 2], "clone", "ec12: clone follows dump");
     let (d, e) = project();
     let s = human();
     let err = dispatch(&cx(&e, &s, d.path()), "frobnicate", json!({})).unwrap_err();
