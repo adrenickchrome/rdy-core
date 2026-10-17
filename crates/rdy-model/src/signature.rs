@@ -15,6 +15,7 @@
 //! allocates.
 use crate::{Answer, AnswerAct, Assurance, Hash, LandingRecord, Provenance, RepoId, Role, Tag};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 /// The longest statement, in bytes.
 pub const MAX_STATEMENT: usize = 16384;
@@ -550,22 +551,30 @@ fn approval_fields(landing: &LandingRecord) -> (String, String) {
 }
 
 /// The relayer's actor, then `/` and the run when one is present. An actor that already holds
-/// `/` is kept as it is.
-fn join_relayer(actor: &str, run: Option<&str>) -> Result<String, StatementError> {
-    let Some(run) = run else {
-        return Ok(actor.to_string());
+/// `/` is kept as it is. The length is checked before anything is copied: an actor alone is
+/// borrowed, and a joined value is built with fallible growth bounded by the value limit.
+fn join_relayer<'a>(actor: &'a str, run: Option<&str>) -> Result<Cow<'a, str>, StatementError> {
+    let len = match run {
+        None => actor.len(),
+        Some(run) => actor
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_add(run.len()))
+            .ok_or(StatementError::Limit(MAX_VALUE))?,
     };
-    let len = actor
-        .len()
-        .checked_add(1)
-        .and_then(|n| n.checked_add(run.len()))
-        .filter(|n| *n <= MAX_VALUE)
-        .ok_or(StatementError::Limit(MAX_VALUE))?;
-    let mut out = String::with_capacity(len);
+    if len > MAX_VALUE {
+        return Err(StatementError::Limit(MAX_VALUE));
+    }
+    let Some(run) = run else {
+        return Ok(Cow::Borrowed(actor));
+    };
+    let mut out = String::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| StatementError::Limit(MAX_VALUE))?;
     out.push_str(actor);
     out.push('/');
     out.push_str(run);
-    Ok(out)
+    Ok(Cow::Owned(out))
 }
 
 /// Writes the header, the kind and each `layout` field with its value, checking every value

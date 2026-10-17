@@ -7,6 +7,83 @@ use rdy_model::signature::{
 };
 use rdy_model::*;
 
+/// A global allocator that records the allocation requests of the observing thread, so a test
+/// can see what a call allocates before it returns an error. Other threads, and the observing
+/// thread outside [`alloc_probe::observe`], allocate as usual and are not recorded.
+mod alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Probe;
+
+    thread_local! {
+        /// Whether this thread's requests are recorded.
+        static ON: Cell<bool> = const { Cell::new(false) };
+        /// The largest single request (bytes) while recording.
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+        /// The sum of every request (bytes) while recording.
+        static TOTAL: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn note(size: usize) {
+        let _ = ON.try_with(|on| {
+            if on.get() {
+                LARGEST.with(|l| l.set(l.get().max(size)));
+                TOTAL.with(|t| t.set(t.get().saturating_add(size)));
+            }
+        });
+    }
+
+    // SAFETY: every call goes to `System` with the caller's arguments unchanged; recording only
+    // touches const-initialised thread-locals, which never allocate.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Probe {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc_zeroed` requires.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// What one observed call requested: the largest single request and the sum, in bytes.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Seen {
+        pub largest: usize,
+        pub total: usize,
+    }
+
+    /// Runs `f` with this thread's requests recorded.
+    pub fn observe<T>(f: impl FnOnce() -> T) -> (T, Seen) {
+        LARGEST.with(|l| l.set(0));
+        TOTAL.with(|t| t.set(0));
+        ON.with(|on| on.set(true));
+        let out = f();
+        ON.with(|on| on.set(false));
+        let seen = Seen {
+            largest: LARGEST.with(Cell::get),
+            total: TOTAL.with(Cell::get),
+        };
+        (out, seen)
+    }
+}
+
+#[global_allocator]
+static ALLOC: alloc_probe::Probe = alloc_probe::Probe;
+
 const REPO: RepoId = RepoId([0xab; 16]);
 const KEY: &str = "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s";
 
@@ -996,4 +1073,114 @@ fn sig1_hostile_lengths_are_checked_before_allocation() {
         parse_statement(many_lines.as_bytes()).err(),
         Some(StatementError::Syntax)
     );
+
+    // Allocation order: a length prefix that the remaining input cannot satisfy, or that is over
+    // its limit, allocates nothing for its field. Each earlier field holds fewer bytes than the
+    // claimed length, so a request of the claimed size can only be that field's.
+    for (field, at) in [
+        ("namespace", 0),
+        ("statement", 1),
+        ("sig", 2),
+        ("actor", 3),
+        ("run", 4),
+    ] {
+        let limit = [64, 16384, 16384, 4096, 4096][at];
+        let earlier: [&[u8]; 4] = [b"ns", b"st3", b"sig4", b"actor"];
+        let mut prefix = vec![1u8; 32];
+        for v in &earlier[..at.min(4)] {
+            prefix.extend_from_slice(&varint(v.len() as u64));
+            prefix.extend_from_slice(v);
+        }
+        if at == 4 {
+            prefix.push(1); // run: Some
+        }
+        let earlier_bytes: usize = earlier[..at.min(4)].iter().map(|v| v.len()).sum();
+        let cases = [
+            ("unsatisfied, no bytes", limit, 0),
+            ("unsatisfied, one byte", limit, 1),
+            ("unsatisfied, one byte short", limit, limit - 1),
+            ("small claim, one byte", 64, 1),
+            ("over the limit", limit + 1, limit + 1),
+        ];
+        for (what, claim, present) in cases {
+            let mut input = prefix.clone();
+            input.extend_from_slice(&varint(claim as u64));
+            input.resize(input.len() + present, b'a');
+            let (got, seen) = alloc_probe::observe(|| decode_signature(&input));
+            let want = if claim > limit {
+                StatementError::Limit(limit)
+            } else {
+                StatementError::Syntax
+            };
+            assert_eq!(got, Err(want), "{field}: {what}");
+            assert!(
+                seen.largest < claim,
+                "{field}: {what}: requested {} bytes for a claim of {claim}",
+                seen.largest
+            );
+            assert!(
+                seen.total <= earlier_bytes,
+                "{field}: {what}: requested {} bytes in all; the earlier fields hold {earlier_bytes}",
+                seen.total
+            );
+        }
+    }
+}
+
+/// A canonical postcard (LEB128) varint.
+fn varint(mut n: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            return out;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+#[test]
+fn sig1_oversized_relayer_is_refused_before_copy() {
+    // A relayer actor over the value limit, with or without a run, is refused before it is
+    // copied: the refusal allocates nothing in proportion to the actor, in both relay forms.
+    for len in [4097, 8 << 20] {
+        let actor = "r".repeat(len);
+        for run in [None, Some("run-7")] {
+            let landing = LandingRecord {
+                relayed_by: Some(relayer(&actor, run)),
+                ..relay_landing()
+            };
+            let mut a = answer();
+            a.relayed_by = Some(relayer(&actor, run));
+            let t = tag();
+            let sources = [
+                ("relay approval", StatementSource::RelayApproval(&landing)),
+                (
+                    "tag relay",
+                    StatementSource::RelayTag {
+                        hash: h(5),
+                        tag: &t,
+                        answer_hash: h(6),
+                        answer: &a,
+                    },
+                ),
+            ];
+            for (what, source) in sources {
+                let (got, seen) = alloc_probe::observe(|| statement(source, Some(REPO), KEY));
+                assert_eq!(
+                    got,
+                    Err(StatementError::Limit(4096)),
+                    "{what}, {len}, {run:?}"
+                );
+                assert!(
+                    seen.largest <= 4096 && seen.total <= 4096,
+                    "{what}, actor of {len} bytes, run {run:?}: largest request {}, total {}",
+                    seen.largest,
+                    seen.total
+                );
+            }
+        }
+    }
 }
