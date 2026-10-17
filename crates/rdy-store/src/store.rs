@@ -914,7 +914,8 @@ impl Store {
     /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
     ///
     /// Like `write`, it refuses a redaction record (kinds 20 to 22) and an item that would bring
-    /// back a removed hash, before anything is appended.
+    /// back a removed hash, before anything is appended. If the batch holds a redaction apply,
+    /// `last` must be empty or one TRANSITION frame (`Refused` otherwise, the batch still open).
     ///
     /// A failure truncates the log to the batch's start. If a batch was open, it also poisons the
     /// store: the index already holds entries of frames that are gone, so every later write and
@@ -2722,15 +2723,25 @@ impl Store {
         }
     }
 
-    /// The seal hook of a held batch that holds REDACTION_APPLY records: the batch (its frames
-    /// read back from the log, then `last`) is validated as the open validates a stored one
-    /// before anything more is written; a refusal leaves the batch open and nothing poisoned.
-    /// Then `last` and the marker are appended and synced; a failure there truncates the batch
-    /// and poisons the store, as `seal` does. From the sync on, the removal is authorized: the
-    /// epoch advances once, the batch's apply masks (which `append_held` kept out of the shared
-    /// index) and `last` are indexed, and `finish_redactions` runs; a failure poisons the handle
-    /// with `RedactionPending` and never truncates the batch.
+    /// The seal hook of a held batch that holds REDACTION_APPLY records. `last` must be empty or
+    /// the one final TRANSITION; anything else is `Refused`. Then the batch (its frames read
+    /// back from the log, then `last`) is validated as the open validates a stored one. Both
+    /// checks run before anything more is written; a refusal leaves the batch open and nothing
+    /// poisoned. Then `last` and the marker are appended and synced; a failure there truncates
+    /// the batch and poisons the store, as `seal` does. From the sync on, the removal is
+    /// authorized: the epoch advances once, the batch's apply masks (which `append_held` kept
+    /// out of the shared index) and `last` are indexed, and `finish_redactions` runs; a failure
+    /// poisons the handle with `RedactionPending` and never truncates the batch.
     fn seal_held_apply(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<RedactionCounts, StoreError> {
+        // `land_atomic` checked the applies against the log as it stood then, and their masks
+        // are not active yet: a BLOCK, CHANGE or BLOB_CHUNK in the tail could add a copy of the
+        // removed content that no span covers. So the tail holds the TRANSITION only.
+        if !(last.is_empty() || (last.len() == 1 && last[0].0 == kinds::TRANSITION)) {
+            return Err(StoreError::Refused(
+                "a held batch that holds a redaction apply seals with nothing or one TRANSITION"
+                    .into(),
+            ));
+        }
         let start = self.open.as_ref().expect("a batch is open").start;
         let mut batch: Vec<(u8, Vec<u8>)> = vec![];
         // the masks of the batch's applies, which `append_held` left out of the shared index

@@ -1095,3 +1095,129 @@ fn rdx7_held_apply_masks_nothing_before_seal() {
         assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
     }
 }
+
+#[test]
+fn rdx7_held_apply_seal_takes_only_its_transition() {
+    let transition = || {
+        Transitions {
+            at_ms: 60,
+            resolved: vec![],
+            opened: vec![],
+            gone: vec![],
+            new: vec![],
+        }
+        .frame()
+    };
+    // the seal's tail of a held batch that holds an apply is empty or the one final TRANSITION:
+    // a duplicate BLOCK or BLOB_CHUNK frame, or a new CHANGE that embeds the selected block, is
+    // refused with the batch still open, nothing appended, nothing authorized and nothing
+    // poisoned; the same batch then seals with its TRANSITION and erases the content
+    #[derive(Debug, Clone, Copy)]
+    enum Tail {
+        Block,
+        Chunk,
+        NewChange,
+        BlockThenTransition,
+        TransitionThenBlock,
+        TwoTransitions,
+    }
+    for tail in [
+        Tail::Block,
+        Tail::Chunk,
+        Tail::NewChange,
+        Tail::BlockThenTransition,
+        Tail::TransitionThenBlock,
+        Tail::TwoTransitions,
+    ] {
+        let case = format!("{tail:?}");
+        let (w, mut s) = World::new();
+        let blob = matches!(tail, Tail::Chunk);
+        let (spec, canary) = if blob {
+            (w.blob_spec("work"), BLOB_CANARY)
+        } else {
+            (w.secret("work"), SECRET)
+        };
+        let block_frame = (BLOCK, frame_of(&s, BLOCK, w.a.version_hash()).1);
+        let m: rdy_store::kinds::BlobManifest = s.get_typed(kinds::BLOB_MANIFEST, &w.blob).unwrap();
+        let chunk_frame = (
+            kinds::BLOB_CHUNK,
+            frame_of(&s, kinds::BLOB_CHUNK, m.chunks[0]).1,
+        );
+        let new_change = (
+            kinds::CHANGE,
+            redaction_fixture::enc(&change("other", vec![Op::Create { block: w.a.clone() }])),
+        );
+        let bad = match tail {
+            Tail::Block => vec![block_frame],
+            Tail::Chunk => vec![chunk_frame],
+            Tail::NewChange => vec![new_change.clone()],
+            Tail::BlockThenTransition => vec![block_frame, transition()],
+            Tail::TransitionThenBlock => vec![transition(), block_frame],
+            Tail::TwoTransitions => vec![transition(), transition()],
+        };
+        record(&mut s, &spec);
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        let retained = s.reader();
+        let epoch = s.redaction_epoch();
+        s.set_held(true).unwrap();
+        s.land_atomic(request(p, person(Role::Approver), false))
+            .unwrap();
+        let open = s.open_batch().unwrap().to_vec();
+        let (end, writes) = (s.log_end(), s.write_count());
+        let e = s.seal(bad).unwrap_err();
+        assert!(matches!(e, StoreError::Refused(_)), "{case}: {e:?}");
+        assert_eq!(
+            s.open_batch().unwrap(),
+            &open[..],
+            "{case}: batch still open"
+        );
+        assert_eq!(s.log_end(), end, "{case}: nothing appended");
+        assert_eq!(s.write_count(), writes, "{case}: no write");
+        assert_eq!(s.redaction_epoch(), epoch, "{case}: nothing authorized");
+        assert!(retained.check_redaction_epoch().is_ok(), "{case}");
+        assert!(on_disk(&w.path, canary), "{case}: nothing erased");
+        if blob {
+            assert_eq!(s.get_blob(&w.blob).unwrap(), BLOB_CANARY.repeat(64));
+        } else {
+            assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
+        }
+        // the batch still seals with its TRANSITION, and the removal completes
+        s.seal(vec![transition()]).unwrap();
+        assert!(matches!(
+            retained.check_redaction_epoch(),
+            Err(StoreError::RedactedState)
+        ));
+        assert!(!on_disk(&w.path, canary), "{case}: erased after the seal");
+        let (batch, marked) = last_logged_batch(&s);
+        assert!(marked, "{case}");
+        assert_eq!(
+            &batch[..open.len()],
+            &open[..],
+            "{case}: the batch the landing held"
+        );
+        assert_eq!(
+            batch[open.len()..]
+                .iter()
+                .map(|(k, _)| *k)
+                .collect::<Vec<_>>(),
+            vec![kinds::TRANSITION],
+            "{case}: the seal added only the transition"
+        );
+        drop(retained);
+        drop(s);
+        let s = Store::open(&w.path).unwrap();
+        if blob {
+            assert!(
+                !matches!(s.get_blob(&w.blob), Ok(b) if b == BLOB_CANARY.repeat(64)),
+                "{case}: the blob is removed"
+            );
+        } else {
+            assert!(s.get_block(&w.a.version_hash()).unwrap().is_redacted());
+            // the new CHANGE never joined the log
+            assert!(
+                !s.has_kind(kinds::CHANGE, &Hash::of(&new_change.1)).unwrap(),
+                "{case}: the new change is not stored"
+            );
+        }
+    }
+}
