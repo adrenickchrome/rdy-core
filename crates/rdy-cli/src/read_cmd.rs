@@ -197,6 +197,31 @@ fn coverage_lines(c: &Value) -> String {
     out
 }
 
+/// The lines after the pack line (ec10, D-DAGNB): `repo <id>`, then the origin when there is
+/// one: `cloned from <id> at version <tag>`, or `… at landing <12 hex digits>` when it has no
+/// tag, or `cloned from <id>` with neither; a fork says `forked from`. Each ends in a newline.
+fn repo_lines(v: &Value) -> String {
+    let mut out = format!("repo {}\n", text(&v["repo_id"]));
+    let (word, o) = if v["forked_from"].is_object() {
+        ("forked from", &v["forked_from"])
+    } else if v["origin"].is_object() {
+        ("cloned from", &v["origin"])
+    } else {
+        return out;
+    };
+    out.push_str(&format!("{word} {}", text(&o["repo_id"])));
+    if let Some(tag) = o["tag"].as_str() {
+        out.push_str(&format!(" at version {tag}"));
+    } else if let Some(landing) = o["landing"].as_str() {
+        out.push_str(&format!(
+            " at landing {}",
+            landing.chars().take(12).collect::<String>()
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 fn status_text(v: &Value) -> String {
     let views = v["views"]
         .as_array()
@@ -212,8 +237,9 @@ fn status_text(v: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let mut out = format!(
-        "pack {}\ncanon: {} ({} landings, {} suspects){}\nviews:\n{views}",
+        "pack {}\n{}canon: {} ({} landings, {} suspects){}\nviews:\n{views}",
         text(&v["pack"]),
+        repo_lines(v),
         text(&v["version_position"]["label"]),
         num(&v["landings"]),
         num(&v["suspects"]),

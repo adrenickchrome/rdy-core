@@ -187,9 +187,13 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
     let mut c = McpClient::start(dir.path());
     session(&mut c, "agent:o");
     let o = c.call("rdy_overview", json!({})).ok();
-    assert_eq!(
-        o["project"],
-        json!({"name": "Edit loop", "description": "One line about it."})
+    // ec10: the project also names its repo id, 32 hex digits (O34)
+    assert_eq!(o["project"]["name"], "Edit loop");
+    assert_eq!(o["project"]["description"], "One line about it.");
+    let id = o["project"]["repo_id"].as_str().unwrap();
+    assert!(
+        id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{id}"
     );
     let sch = c.call("rdy_schema", json!({})).ok();
     for code in ["E_BRIEF_REQUIRED", "E_BRIEF_STALE", "W_BRIEF_STALE"] {

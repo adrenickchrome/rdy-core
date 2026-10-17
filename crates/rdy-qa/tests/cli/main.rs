@@ -20,6 +20,7 @@ mod cli_proposal;
 mod cli_quarantine;
 mod cli_ref;
 mod cli_relay;
+mod cli_repo_id;
 mod cli_search;
 mod cli_search_filters;
 mod cli_semantic;

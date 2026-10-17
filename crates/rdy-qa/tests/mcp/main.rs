@@ -27,6 +27,7 @@ mod mcp_reach;
 mod mcp_read;
 mod mcp_read_paging;
 mod mcp_ref;
+mod mcp_repo_id;
 mod mcp_resources;
 mod mcp_reviews;
 mod mcp_schema;

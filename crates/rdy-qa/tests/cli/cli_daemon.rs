@@ -38,7 +38,14 @@ fn cli2_text_output_is_unchanged_and_status_reports_the_open() {
     assert!(text.starts_with("created doc wallets/tx (d-"), "{text}");
     let out = s.rdy(&["status"]);
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.starts_with("pack rdy-standard\ncanon: "), "{text}");
+    // ec10: the repo line follows the pack line (O34)
+    assert!(text.starts_with("pack rdy-standard\nrepo "), "{text}");
+    assert!(
+        text.lines()
+            .nth(2)
+            .is_some_and(|l| l.starts_with("canon: ")),
+        "{text}"
+    );
     assert!(text.contains("\nviews:\n  work: "), "{text}");
     assert!(!text.contains("quarantine"), "{text}");
     s.stop();

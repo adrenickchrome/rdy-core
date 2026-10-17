@@ -42,6 +42,7 @@ mod publish;
 mod query;
 mod read_state;
 pub mod related;
+pub mod repo;
 pub mod search;
 pub mod section;
 pub mod semantic;
