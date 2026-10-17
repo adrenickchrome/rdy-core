@@ -1,4 +1,5 @@
 use imbl::{OrdMap, OrdSet};
+use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, Hash, Op, StateSnapshot, tree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -35,6 +36,16 @@ impl Clone for DerivedCache {
     }
 }
 
+/// The name a doc or folder has in the store: its `name` field, or for a removed version's stub
+/// (D-3M81W) its id, a neutral segment that keeps what lies below it reachable. `None` for a doc
+/// from M1 without a stored name.
+fn stored_name(b: &Block) -> Option<&str> {
+    if b.is_redacted() {
+        return Some(b.id.as_str());
+    }
+    b.field_str("name")
+}
+
 /// One state's blocks and the maps derived from them, held in persistent maps so that a clone is
 /// cheap and `with` copies only the paths to the entries it changes.
 #[derive(Clone, Debug, Default)]
@@ -42,7 +53,8 @@ pub struct Materialized {
     blocks: OrdMap<BlockId, Arc<Block>>,
     versions: OrdMap<BlockId, Hash>,
     children: OrdMap<Option<BlockId>, OrdSet<(String, BlockId)>>,
-    /// Docs and folders with a stored name, by (parent, lower-cased name).
+    /// Docs and folders with a stored name (a removed one's: its id), by (parent, lower-cased
+    /// name).
     names: OrdMap<(Option<BlockId>, String), OrdSet<BlockId>>,
     /// How many docs without a stored name (from M1) each parent holds.
     nameless: OrdMap<Option<BlockId>, usize>,
@@ -95,7 +107,7 @@ impl Materialized {
             .insert((b.order.clone(), b.id.clone()));
         if tree::is_tree_type(&b.block_type) {
             self.derived.forget(&b.parent);
-            match b.field_str("name") {
+            match stored_name(&b) {
                 Some(n) => {
                     self.names
                         .entry((b.parent.clone(), n.to_ascii_lowercase()))
@@ -116,7 +128,7 @@ impl Materialized {
             }
             if tree::is_tree_type(&old.block_type) {
                 self.derived.forget(&old.parent);
-                match old.field_str("name") {
+                match stored_name(&old) {
                     Some(n) => {
                         let key = (old.parent.clone(), n.to_ascii_lowercase());
                         if let Some(set) = self.names.get_mut(&key) {
@@ -220,12 +232,12 @@ impl Materialized {
             .collect();
         let mut taken: BTreeSet<String> = kids
             .iter()
-            .filter_map(|b| b.field_str("name"))
+            .filter_map(|b| stored_name(b))
             .map(|n| n.to_ascii_lowercase())
             .collect();
         let mut nameless: Vec<&Block> = kids
             .into_iter()
-            .filter(|b| b.field_str("name").is_none())
+            .filter(|b| stored_name(b).is_none())
             .collect();
         nameless.sort_by(|a, b| a.id.cmp(&b.id));
         let mut d = Derived::default();
@@ -255,7 +267,7 @@ impl Materialized {
             .into_iter()
             .filter(|b| tree::is_tree_type(&b.block_type))
             .filter_map(|b| {
-                let n = match b.field_str("name") {
+                let n = match stored_name(b) {
                     Some(n) => n.to_string(),
                     None => derived.by_id.get(&b.id)?.clone(),
                 };
@@ -269,7 +281,7 @@ impl Materialized {
         if !tree::is_tree_type(&b.block_type) {
             return None;
         }
-        match b.field_str("name") {
+        match stored_name(b) {
             Some(n) => Some(n.to_string()),
             None => self.derived(b.parent.as_ref()).by_id.get(id).cloned(),
         }
@@ -286,6 +298,16 @@ impl Materialized {
             out.push(id.clone());
         }
         out
+    }
+
+    /// The label readers show for a block: its `title`, or `Content removed.` for a removed
+    /// version's stub (D-3M81W), never a title of the removed version.
+    pub fn label_of(&self, id: &BlockId) -> Option<&str> {
+        let b = self.get(id)?;
+        if b.is_redacted() {
+            return Some(CONTENT_REMOVED);
+        }
+        b.field_str("title")
     }
 
     pub fn path_of(&self, id: &BlockId) -> Option<String> {

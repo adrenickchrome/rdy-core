@@ -96,48 +96,60 @@ impl ReadState {
                 self.canon_head().map(|h| h.to_string()).unwrap_or_default()
             )
         });
-        let mut missing = vec![];
-        let wanted = ids.map(|ids| {
-            let mut heads = BTreeSet::new();
-            for id in ids {
-                let head = m.get(id).and_then(|b| {
-                    if tree::is_tree_type(&b.block_type) {
-                        Some(b.id.clone())
-                    } else {
-                        m.doc_of(id).map(|d| d.id.clone())
-                    }
-                });
-                match head {
-                    Some(h) => {
-                        heads.insert(h);
-                    }
-                    None => missing.push(id.to_string()),
-                }
-            }
-            heads
-        });
-        let mut p = Projector {
-            m: &m,
-            pack: self.pack(),
-            wanted,
-            files: vec![],
-            blocks: BTreeMap::new(),
-            blobs: BTreeMap::new(),
-        };
-        p.level(None, 0, "")?;
-        Ok(Projection {
-            view,
-            head,
-            files: p.files,
-            blocks: p.blocks,
-            blobs: p
-                .blobs
-                .into_iter()
-                .map(|(hash, name)| ProjectedBlob { hash, name })
-                .collect(),
-            missing,
-        })
+        project_state(&m, self.pack(), &view, &head, ids)
     }
+}
+
+/// wcco1: the state `m` as files, for `view` at `head` ([`ReadState::wc_project`] of a state given
+/// as blocks).
+pub fn project_state(
+    m: &Materialized,
+    pack: &Pack,
+    view: &str,
+    head: &str,
+    ids: Option<&[BlockId]>,
+) -> Result<Projection, RdyError> {
+    let mut missing = vec![];
+    let wanted = ids.map(|ids| {
+        let mut heads = BTreeSet::new();
+        for id in ids {
+            let head = m.get(id).and_then(|b| {
+                if tree::is_tree_type(&b.block_type) {
+                    Some(b.id.clone())
+                } else {
+                    m.doc_of(id).map(|d| d.id.clone())
+                }
+            });
+            match head {
+                Some(h) => {
+                    heads.insert(h);
+                }
+                None => missing.push(id.to_string()),
+            }
+        }
+        heads
+    });
+    let mut p = Projector {
+        m,
+        pack,
+        wanted,
+        files: vec![],
+        blocks: BTreeMap::new(),
+        blobs: BTreeMap::new(),
+    };
+    p.level(None, 0, "")?;
+    Ok(Projection {
+        view: view.to_string(),
+        head: head.to_string(),
+        files: p.files,
+        blocks: p.blocks,
+        blobs: p
+            .blobs
+            .into_iter()
+            .map(|(hash, name)| ProjectedBlob { hash, name })
+            .collect(),
+        missing,
+    })
 }
 
 struct Projector<'a> {

@@ -291,7 +291,8 @@ fn export_level(
             export_level(m, Some(&b.id), level + 1, &sub, summary, blobs, pack)?;
             continue;
         }
-        if b.field_str("name").is_none() {
+        // a removed doc's stub is named by its id (D-3M81W); it is no doc from M1
+        if b.field_str("name").is_none() && !b.is_redacted() {
             summary.warnings.push(format!(
                 "doc {} has no stored name: exported as {name}.yaml; importing it stores that name, so its version hash changes once",
                 b.id
@@ -1134,13 +1135,15 @@ impl Rdy {
         // lpin1: every pin is recomputed from the imported content, as a write's create pins
         // it: each cited target (reference or link) to its content hash, the incoming block
         // with that id first, else the view's. A block is never pinned to itself. Pins in the
-        // files are ignored.
+        // files are ignored. A removed version's stub in the view gets no pin: its tracking
+        // hash cannot be recomputed, and its recorded hash would be a false one (D-3M81W).
         let tracking = self.store.tracking();
         let content = |id: &BlockId| {
             incoming
                 .get(id)
                 .copied()
                 .or_else(|| existing.get(id))
+                .filter(|t| !t.is_redacted())
                 .map(|t| t.content_hash_with(tracking))
         };
         let pins: Vec<BTreeMap<BlockId, Hash>> = blocks

@@ -6,13 +6,14 @@
 //! the file never shows.
 
 use crate::error::{E_FILE_FORMAT, E_IO, E_PATH_CLASH, E_WC_INVALID, W_WC_UNSTAGED_MOVE};
+use crate::lint::is_notice_entry;
 use crate::query::field_json;
 use crate::tree_io::{Diagnostic, FOLDER_FILE};
 use crate::wc::ignore::Ignore;
 use crate::wc::layout::{WcBlock, WcTree, read_tree};
 use crate::wc::lint::lint_tree;
 use crate::wc::state::{Place, WcState, stage_paths};
-use rdy_model::{BlockId, FieldValue, tree};
+use rdy_model::{Block, BlockId, FieldValue, tree};
 use rdy_schema::{Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, Severity, TypeClass};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -205,6 +206,13 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     let commit = commit.map_err(|diags| WcInvalid { diags })?;
     let mut commit = commit;
     let mut diags = lint_tree(&mut commit, pack, None, Some(&place.root));
+    if let Ok(base) = &base {
+        let spots = unchanged_notices(&commit, base);
+        diags.retain(|d| {
+            !(UNAVAILABLE.contains(&d.code.as_str())
+                && spots.contains(&(d.file.as_str(), (d.line, d.column))))
+        });
+    }
     diags.extend(unread(&commit, st, &staged));
     diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
     if diags.iter().any(|d| d.severity == Severity::Error) {
@@ -237,6 +245,34 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     }
     .run(&mut plan);
     Ok(plan)
+}
+
+/// The checks a removed version's stub cannot meet (D-3M81W): its fields are gone and its body is
+/// the notice.
+const UNAVAILABLE: [&str; 3] = ["E_FIELD_REQUIRED", "E_BODY_REQUIRED", "E_BODY_FORBIDDEN"];
+
+/// Where the commit tree holds an entry that rdy wrote for a removed version's stub, exactly as
+/// the base has it (each entry's place and its `body` key). Such an entry is no new source: the
+/// diff against the base names no op for it, so the checks of what removal made unavailable do
+/// not refuse the commit. An edited notice entry differs from the base and gets every check.
+fn unchanged_notices<'a>(commit: &'a WcTree, base: &WcTree) -> BTreeSet<(&'a str, (usize, usize))> {
+    let mut in_base: BTreeMap<&BlockId, &Block> = BTreeMap::new();
+    for b in &base.blocks {
+        in_base.entry(&b.block.id).or_insert(&b.block);
+    }
+    commit
+        .blocks
+        .iter()
+        .filter(|b| {
+            is_notice_entry(&b.block) && in_base.get(&b.block.id).is_some_and(|x| **x == b.block)
+        })
+        .flat_map(|b| {
+            [Some(b.at), b.keys.get("body").copied()]
+                .into_iter()
+                .flatten()
+                .map(move |at| (b.file.as_str(), at))
+        })
+        .collect()
 }
 
 fn io_diag(file: &str, what: &str, e: impl std::fmt::Display) -> Diagnostic {
