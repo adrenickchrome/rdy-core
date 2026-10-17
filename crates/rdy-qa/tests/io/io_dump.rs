@@ -11,6 +11,7 @@ use rdy_qa::packs::qa_project;
 use rdy_store::dump::{DUMP_FORMAT, DumpBatch, DumpHeader, DumpItem, DumpReader};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds::{self, BatchCommit};
+use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use serde_json::json;
 use std::path::Path;
@@ -90,10 +91,13 @@ fn dl5_a_dump_holds_every_sealed_batch_of_the_published_state() {
 
     // the last batch ends at the header's log_end, which is seq()
     assert_eq!(header.log_end, st.seq());
+    // the record walker: the every-kind project holds payloads a removal dropped (rdx15)
     let mut last = None;
     st.reader()
-        .for_each_frame_from(ORIGIN, st.seq(), |_, kind, _, payload, next| {
-            last = Some((kind, payload.to_vec(), next));
+        .for_each_record_from(ORIGIN, st.seq(), |_, f, next| {
+            if let StoredFrame::Present { kind, payload, .. } = f {
+                last = Some((kind, payload.to_vec(), next));
+            }
             Ok(())
         })
         .unwrap();

@@ -152,6 +152,11 @@ fn ec5_a_clone_keeps_every_hash_ref_and_landing_of_the_every_kind_project() {
     fa["objects"][&ru] = (n + 1).into();
     let frames = fa["fsck"]["frames"].as_u64().unwrap();
     fa["fsck"]["frames"] = (frames + 1).into();
+    // rdx15: the every-kind project holds a removal, so fsck also counts the payloads it hashed;
+    // the origin frame is one more
+    if let Some(n) = fa["fsck"]["checked_payloads"].as_u64() {
+        fa["fsck"]["checked_payloads"] = (n + 1).into();
+    }
     assert_eq!(fb, fa, "refs, objects, landings, fsck");
     let (la, lb) = (log_bytes(src.path()), log_bytes(&to));
     assert!(

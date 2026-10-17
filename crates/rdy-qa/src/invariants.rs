@@ -1,10 +1,17 @@
 //! The invariant checker (spec §3): what must always hold in canon or a view.
+//!
+//! A block whose content an approved removal erased reads as its authorized projection (its id,
+//! type, parent, order and recorded identity; body `Content removed.`; no fields, links or pins).
+//! The checker keeps every structure rule for it (parent, cycle, depth, placement, order key,
+//! references) and checks that its absence has exact active authorization; it never validates
+//! the stub's missing fields as content (D-600CW, D-3M81W).
 use rdy_engine::{Rdy, ReadState, Scope};
+use rdy_model::redaction::RedactedBlockIdentity;
 use rdy_model::{
-    Block, BlockId, FieldValue, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
+    Block, BlockId, FieldValue, Hash, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
 };
 use rdy_schema::{Severity, validate_block, validate_prefix};
-use rdy_store::{Conflict, ViewOpKind, kinds};
+use rdy_store::{Conflict, StoreReader, ViewOpKind, kinds};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +80,12 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
     };
     let pack = st.pack();
     for b in m.iter() {
+        // an authorized projection: its absence must have exact active authorization
+        if let Some(ident) = &b.read_identity
+            && let Err(d) = authorized(st.reader(), &b.id, ident)
+        {
+            out.push(v("redaction", Some(&b.id), d));
+        }
         // parent exists; walk the chain for cycles and folder depth
         let parent = b.parent.as_ref().and_then(|p| m.get(p));
         if let Some(p) = &b.parent
@@ -155,6 +168,10 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
                 ));
             }
         }
+        // schema, of content only: a removed block's stub holds no fields to validate
+        if b.is_redacted() {
+            continue;
+        }
         // schema; nameless M1 docs are validated with their effective name, as the gate does
         let mut checked: Block = b.clone();
         if b.block_type == tree::DOC
@@ -203,47 +220,177 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
     if out.is_empty() { Ok(()) } else { Err(out) }
 }
 
+/// Whether the removed version `ident` of block `id` has exact active authorization: the store's
+/// active mask names the stub's own request for that BLOCK version, and that request's manifest
+/// selects exactly that id and version. The reason it has not, otherwise.
+fn authorized(
+    reader: &StoreReader,
+    id: &BlockId,
+    ident: &RedactedBlockIdentity,
+) -> Result<(), String> {
+    match reader.redaction_of(kinds::BLOCK, &ident.version) {
+        Ok(Some(q)) if q == ident.request => {}
+        Ok(other) => {
+            return Err(format!(
+                "removed version {} reads as removed by {}, but the active removal is {other:?}",
+                ident.version, ident.request
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "cannot read the removal of version {}: {e}",
+                ident.version
+            ));
+        }
+    }
+    let req = reader
+        .redaction_request(&ident.request)
+        .map_err(|e| format!("cannot read request {}: {e}", ident.request))?;
+    if !req
+        .manifest
+        .versions
+        .iter()
+        .any(|(i, h)| i == id && *h == ident.version)
+    {
+        return Err(format!(
+            "request {} does not select version {} of {id}",
+            ident.request, ident.version
+        ));
+    }
+    Ok(())
+}
+
+/// A frozen decision whose content comparison is unavailable: a compared version (its first
+/// frozen version, a later one, or both) was erased by an authorized removal. The checker
+/// verified each erased version's exact active authorization instead; it never counts this as
+/// a successful comparison.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Unavailable {
+    pub block: BlockId,
+    /// The first frozen version.
+    pub first: Hash,
+    /// The later version that differs from it.
+    pub later: Hash,
+    /// The requests that removed the compared versions, sorted.
+    pub requests: Vec<Hash>,
+}
+
+/// What the frozen rule found: its violations, and the comparisons a removal made unavailable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrozenReport {
+    pub violations: Vec<Violation>,
+    pub unavailable: Vec<Unavailable>,
+}
+
 /// Accepted and rejected decisions never change once landed, except in the pack's tracking
 /// fields (trk1): each later canon version equals the first frozen one, or differs from it only
 /// in tracking fields.
 fn frozen(r: &Rdy) -> Vec<Violation> {
-    let mut out = vec![];
+    frozen_report(r).violations
+}
+
+/// The frozen rule, read from `r`'s landings oldest first. A decision is frozen from the first
+/// snapshot whose version is accepted or rejected; a removed version answers with its stub's
+/// recorded frozen fact. Each later version that differs is compared in content with the first
+/// frozen version: it must equal it or differ only in tracking fields.
+///
+/// Where an authorized removal erased a compared version, that comparison is unavailable: each
+/// erased version must have exact active authorization (else a `frozen` violation), and the
+/// case is listed in `unavailable`, never counted as a successful comparison. When the first
+/// frozen version is erased, the first later version that reads in full becomes the base the
+/// next versions are compared with, so a later unremoved change still fails.
+pub fn frozen_report(r: &Rdy) -> FrozenReport {
+    let mut out = FrozenReport::default();
     let Ok(mut chain) = r.store().landings() else {
-        return vec![v("frozen", None, "cannot read landings")];
+        out.violations
+            .push(v("frozen", None, "cannot read landings"));
+        return out;
     };
     chain.reverse(); // oldest first
-    let tracking = r.store().tracking();
-    let mut fixed: BTreeMap<BlockId, (rdy_model::Hash, Block)> = BTreeMap::new();
+    let store = r.store();
+    let reader: &StoreReader = store;
+    let tracking = store.tracking();
+    let changed = |id: &BlockId| {
+        v(
+            "frozen",
+            Some(id),
+            "a frozen decision changed after it landed",
+        )
+    };
+    // per frozen decision: its first frozen version, that block, and the base later versions
+    // are compared with (the first block itself, unless a removal erased it)
+    let mut fixed: BTreeMap<BlockId, (Hash, Block, Option<Block>)> = BTreeMap::new();
+    let mut unavailable: BTreeSet<Unavailable> = BTreeSet::new();
     for (_, rec) in chain {
         let rec: LandingRecord = rec;
-        let Ok(snap) = r.store().get::<StateSnapshot>(&rec.state) else {
+        let Ok(snap) = store.get::<StateSnapshot>(&rec.state) else {
             continue;
         };
-        for (id, (h, first)) in &fixed {
-            if let Some(now) = snap.blocks.get(id)
-                && now != h
-                && !r.store().get_block(now).is_ok_and(|b| {
-                    b == *first || decision::only_tracking_changed(first, &b, tracking)
-                })
+        for (id, (h, first, base)) in fixed.iter_mut() {
+            let Some(now) = snap.blocks.get(id) else {
+                continue;
+            };
+            if now == h {
+                continue;
+            }
+            let Ok(later) = store.get_block(now) else {
+                out.violations.push(changed(id));
+                continue;
+            };
+            if let Some(b) = base.as_ref()
+                && !later.is_redacted()
             {
-                out.push(v(
-                    "frozen",
-                    Some(id),
-                    "a frozen decision changed after it landed",
-                ));
+                if later != *b && !decision::only_tracking_changed(b, &later, tracking) {
+                    out.violations.push(changed(id));
+                }
+                continue;
+            }
+            // the comparison needs erased fields: verify each erased version's coverage
+            let mut requests = vec![];
+            let mut covered = true;
+            for b in [&*first, &later] {
+                let Some(ident) = &b.read_identity else {
+                    continue;
+                };
+                match authorized(reader, id, ident) {
+                    Ok(()) => requests.push(ident.request),
+                    Err(d) => {
+                        covered = false;
+                        out.violations.push(v(
+                            "frozen",
+                            Some(id),
+                            format!("a frozen decision's version is missing: {d}"),
+                        ));
+                    }
+                }
+            }
+            if covered {
+                requests.sort();
+                requests.dedup();
+                unavailable.insert(Unavailable {
+                    block: id.clone(),
+                    first: *h,
+                    later: *now,
+                    requests,
+                });
+                if base.is_none() && !later.is_redacted() {
+                    *base = Some(later);
+                }
             }
         }
         for (id, h) in &snap.blocks {
             if fixed.contains_key(id) {
                 continue;
             }
-            if let Ok(b) = r.store().get_block(h)
+            if let Ok(b) = store.get_block(h)
                 && decision::is_frozen(&b)
             {
-                fixed.insert(id.clone(), (*h, b));
+                let base = (!b.is_redacted()).then(|| b.clone());
+                fixed.insert(id.clone(), (*h, b, base));
             }
         }
     }
+    out.unavailable = unavailable.into_iter().collect();
     out
 }
 
