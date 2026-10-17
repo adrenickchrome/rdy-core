@@ -1180,7 +1180,8 @@ pub(crate) fn landed_side(
 
 /// cf1: the landed side's block `b` against view `m`, as a write of it is checked: the view
 /// reads the conflict's base, so since the landing another block may have taken `b`'s key, and
-/// the view may have deleted its parent, a link target or a block it cites (cres1).
+/// the view may have deleted its parent, a link target or a block it cites, or moved its parent
+/// under it (cres1).
 pub(crate) fn check_landed_block(pack: &Pack, m: &Materialized, b: &Block) -> Result<(), RdyError> {
     Resolver::new(m).check_key(b)?;
     let cited = b.links.values().flatten().map(|l| &l.target);
@@ -1196,6 +1197,31 @@ pub(crate) fn check_landed_block(pack: &Pack, m: &Materialized, b: &Block) -> Re
                     "bring {target} back into the view (exclude or undo the change that deleted it), then resolve again"
                 ),
             ));
+        }
+    }
+    // the parents above the landed parent, as the view holds them, must not reach `b` (a damaged
+    // store may hold a loop of its own: never walk more steps than there are blocks)
+    if let Some(p) = &b.parent {
+        let mut walk = Some(p.clone());
+        let mut steps = 0;
+        while let Some(w) = walk {
+            if w == b.id {
+                return Err(bad(
+                    format!(
+                        "the landed side puts {} under {p}, which this view holds under {}: that would make a parent loop",
+                        b.id, b.id
+                    ),
+                    format!(
+                        "move {p} out from under {} in this view, then resolve again",
+                        b.id
+                    ),
+                ));
+            }
+            steps += 1;
+            if steps > m.len() {
+                break;
+            }
+            walk = m.get(&w).and_then(|x| x.parent.clone());
         }
     }
     let issues = validate_block(pack, b, b.parent.as_ref().and_then(|p| m.get(p)));

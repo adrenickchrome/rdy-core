@@ -518,3 +518,78 @@ fn cf1_a_landed_side_whose_parent_the_view_deleted_is_refused() {
     assert_eq!(r.read().conflicts(&view("b")).unwrap().len(), 1);
     check(&r, &view("b")).unwrap();
 }
+
+const CYCLE_PACK: &str = "\
+name: cyc
+version: \"1\"
+extends: rdy-standard
+block_types:
+  decision:
+    prefix: D
+    traits: [normative]
+    children: [section]
+";
+
+/// Review round 3: the landed block's parent chain is checked against the view. A landing moved
+/// d under section B; the view, which reads d under A, moved B under d; taking the landed side
+/// would make the loop d -> B -> d: refused, and the view is left as it was.
+#[test]
+fn cf1_a_landed_side_that_would_make_a_parent_loop_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(dir.path().join(".rdy/packs/cyc.yaml"), CYCLE_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: cyc\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let seeded = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$a", "parent": "$d", "fields": {"title": "A"}},
+        {"op": "create", "type": "section", "id": "$b", "parent": "$d", "fields": {"title": "B"}}
+    ]))
+    .unwrap();
+    let (sa, sb) = (seeded.created["$a"].clone(), seeded.created["$b"].clone());
+    land(&mut r, "seed").unwrap();
+    let (a, b) = (as_agent("agent:a", "r1"), as_agent("agent:b", "r1"));
+    let d = write_as(
+        &mut r,
+        &a,
+        "a",
+        json!([{"op": "create", "type": "decision", "id": "$x", "parent": sa,
+        "fields": {"statement": "D", "status": "proposed"}}]),
+    )
+    .unwrap()
+    .created["$x"]
+        .clone();
+    let vd = version_of(&r, &view("a"), &d);
+    r.view_fork(&b, "a", "b").unwrap();
+    write_as(
+        &mut r,
+        &b,
+        "b",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by b"}}]),
+    )
+    .unwrap();
+    write_as(
+        &mut r,
+        &a,
+        "a",
+        json!([{"op": "move", "id": d, "base": vd, "parent": sb}]),
+    )
+    .unwrap();
+    land(&mut r, "a").unwrap();
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    assert!(r.read().conflict_info(&view("b"), &id).unwrap().is_some());
+    let vb = version_of(&r, &view("b"), &sb);
+    write_as(
+        &mut r,
+        &b,
+        "b",
+        json!([{"op": "move", "id": sb, "base": vb, "parent": d}]),
+    )
+    .unwrap();
+    let head = r.read().view_head("b").unwrap().head;
+    let e = r.view_resolve_landed(&b, "b", &d).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(e.message.contains("loop") && e.fix.contains(&sb), "{e}");
+    assert_eq!(r.read().view_head("b").unwrap().head, head);
+    check(&r, &view("b")).unwrap();
+}
