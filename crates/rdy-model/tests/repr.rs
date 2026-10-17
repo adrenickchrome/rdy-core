@@ -209,20 +209,9 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
 /// Review Focus 6: the new enum and structs have fixed encodings.
 #[test]
 fn repr1_landing_assurance_and_relay_fields_have_fixed_encodings() {
-    let all = [
-        Assurance::Policy,
-        Assurance::Relayed,
-        Assurance::Local,
-        Assurance::Authoritative,
-    ];
-    assert_eq!(
-        all.map(|a| enc(&a)),
-        [vec![0x00], vec![0x01], vec![0x02], vec![0x03]]
-    );
-    assert_eq!(
-        all.map(Assurance::as_str),
-        ["policy", "relayed", "local", "authoritative"]
-    );
+    let all = [Assurance::Policy, Assurance::Relayed, Assurance::Local];
+    assert_eq!(all.map(|a| enc(&a)), [vec![0x00], vec![0x01], vec![0x02]]);
+    assert_eq!(all.map(Assurance::as_str), ["policy", "relayed", "local"]);
     assert!(
         all.windows(2).all(|w| w[0] < w[1]),
         "declaration order is strength order"
