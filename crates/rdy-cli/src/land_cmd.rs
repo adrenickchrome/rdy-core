@@ -2,9 +2,10 @@ use crate::brief_text;
 use crate::conn::{Conn, Env, call, human_session};
 use crate::output::{hash_short, new_keys_text, num, text};
 use rdy_daemon::ErrorReply;
-use rdy_engine::E_BAD_INPUT;
-use rdy_engine::pending::CARD_MAX_TOKENS;
+use rdy_engine::{E_BAD_INPUT, E_INTERNAL, is_proposal_ref};
+use rdy_model::Hash;
 use serde_json::{Value, json};
+use std::io::Write;
 
 #[derive(clap::Args)]
 pub(crate) struct ProposeArgs {
@@ -205,11 +206,45 @@ fn propose_text(v: &Value) -> String {
 }
 
 /// `rdy approve`: the approval op, through `land_with` (no switch of its own skips the person).
-/// A person approving, or an agent relaying a person, first reads the needs-you queue on the
-/// same session; when the version it names carries content removal (Task 8's card), the reply
-/// carries that card as `removal_card` and the text shows it whole before the landing lines
-/// (D-CC90E, D-6B1W1). An agent's own approval is refused as before, without the read.
-pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), ErrorReply> {
+/// A person approving, or an agent relaying a person, first reads the version the argument
+/// names with the shared resolver (`show`, which takes the approval's own spellings: a full
+/// hash, `P-<id>@<n>` or `P-<id>`), with that version's removal card when it carries content
+/// removal (Task 8's card, read for that version alone: D-CC90E, D-6B1W1). The card is shown
+/// whole before the approval op runs: as text on stdout at once, so a refused or interrupted
+/// approval still showed it; as JSON in the reply (`removal_card`), or in the error when the
+/// approval is refused. The approval then names that exact version, so a version proposed after
+/// the card was read moves it (`E_PROPOSAL_MOVED`) instead of landing unseen. An agent's own
+/// approval is refused as before, without the read.
+pub(crate) fn approve(
+    env: &Env,
+    a: ApproveArgs,
+    as_json: bool,
+) -> Result<(Value, String), ErrorReply> {
+    let reads_card = human_session(env) || a.relayed_by.is_some();
+    let mut c = Conn::open(env)?;
+    let out = approve_on(&mut |op, args| c.op(op, args), reads_card, a, &mut |t| {
+        if !as_json {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(t.as_bytes());
+            let _ = out.flush();
+        }
+    });
+    c.close();
+    out
+}
+
+/// Runs one op on the approval's session.
+type OpFn<'a> = dyn FnMut(&str, Value) -> Result<Value, ErrorReply> + 'a;
+
+/// The approval on one session: `op` runs an op, `emit` shows text to the person at once. With
+/// `reads_card`, the version is read and bound first ([`approve`]); the text returned is the
+/// landing lines alone, after the card `emit` showed.
+fn approve_on(
+    op: &mut OpFn<'_>,
+    reads_card: bool,
+    a: ApproveArgs,
+    emit: &mut dyn FnMut(&str),
+) -> Result<(Value, String), ErrorReply> {
     let ApproveArgs {
         proposal,
         relayed_by,
@@ -218,80 +253,82 @@ pub(crate) fn approve(env: &Env, a: ApproveArgs) -> Result<(Value, String), Erro
         session_ref,
         strict,
     } = a;
-    let reads_card = human_session(env) || relayed_by.is_some();
+    let bound = if reads_card && binds(&proposal, relayed_by.is_some()) {
+        Some(bound_version(op, &proposal)?)
+    } else {
+        None
+    };
+    let card = bound.as_ref().and_then(|b| b.card.clone());
+    if let Some(text) = card.as_ref().and_then(|c| c["card"].as_str()) {
+        emit(&format!("{text}\n\n"));
+    }
     let args = json!({
-        "proposal": proposal,
+        "proposal": bound.as_ref().map_or(proposal.as_str(), |b| b.version.as_str()),
         "relayed_by": relayed_by,
         "evidence": evidence,
         "question": question,
         "session_ref": session_ref,
         "strict": strict.then_some(true),
     });
-    let mut c = Conn::open(env)?;
-    let out = (|| {
-        let card = if reads_card {
-            removal_card(&mut c, &proposal)?
-        } else {
-            None
-        };
-        Ok::<_, ErrorReply>((c.op("approve", args)?, card))
-    })();
-    c.close();
-    let (mut v, card) = out?;
-    let t = approve_text_with(&v, card.as_ref());
-    if let Some(card) = card {
-        v["removal_card"] = card;
+    match op("approve", args) {
+        Ok(mut v) => {
+            let t = approve_text(&v);
+            if let Some(card) = card {
+                v["removal_card"] = card;
+            }
+            Ok((v, t))
+        }
+        Err(mut e) => {
+            if let Some(card) = card {
+                e.extra.insert("removal_card".into(), card);
+            }
+            Err(e)
+        }
     }
-    Ok((v, t))
 }
 
-/// The removal card of the version `proposal` names, as the queue holds it now (`ref`, `card`,
-/// `card_hash` and `removal`), read at the card's own budget so no mandatory line is cut; `None`
-/// when the queue holds no removal card for it.
-fn removal_card(c: &mut Conn, proposal: &str) -> Result<Option<Value>, ErrorReply> {
-    let q = c.op("pending", json!({"max_tokens": CARD_MAX_TOKENS}))?;
-    Ok(q["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|i| i["removal"].is_array() && names_item(proposal, text(&i["ref"])))
-        .map(|i| {
-            json!({
-                "ref": i["ref"],
-                "card": i["card"],
-                "card_hash": i["card_hash"],
-                "removal": i["removal"],
-            })
-        }))
+/// Whether the approval of `proposal` reads and binds its version first: when the text has a
+/// proposal's shape (`P-<id>[@<n>]` or a full hash). Any other text never resolves, so the
+/// approval refuses it as before. A relay must name the exact version: an unversioned relay goes
+/// to the approval unchanged, which refuses it before anything is written.
+fn binds(proposal: &str, relayed: bool) -> bool {
+    let hash = proposal.parse::<Hash>().is_ok();
+    let shaped = is_proposal_ref(proposal);
+    hash || (shaped && (proposal.contains('@') || !relayed))
 }
 
-/// Whether `named` (what `rdy approve` was given) names the queue item `item` (`P-<id>@<n>`):
-/// the same ref, or the same stable id (a prefix of at least 4 hex digits, either way round)
-/// with no version, which the queue lists at its latest. A version hash names no item.
-pub(crate) fn names_item(named: &str, item: &str) -> bool {
-    let split = |r: &str| -> Option<(String, Option<String>)> {
-        let rest = r.strip_prefix("P-")?;
-        let (id, n) = match rest.split_once('@') {
-            Some((id, n)) => (id, Some(n.to_string())),
-            None => (rest, None),
-        };
-        (id.len() >= 4 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| (id.to_ascii_lowercase(), n))
-    };
-    let (Some((nid, nn)), Some((iid, Some(inn)))) = (split(named), split(item)) else {
-        return false;
-    };
-    (nid.starts_with(&iid) || iid.starts_with(&nid)) && nn.is_none_or(|n| n == inn)
+/// The version an approval binds: its full hash, and its removal card (`ref`, `card`,
+/// `card_hash`, `removal`) when it carries one.
+struct Bound {
+    version: String,
+    card: Option<Value>,
 }
 
-/// The approval text of reply `v`: the removal card the person approved, when there is one,
-/// then the landing lines ([`approve_text`]).
-pub(crate) fn approve_text_with(v: &Value, card: Option<&Value>) -> String {
-    let lines = approve_text(v);
-    match card.and_then(|c| c["card"].as_str()) {
-        Some(card) => format!("{card}\n\n{lines}"),
-        None => lines,
+/// Reads the version `proposal` names (`show`, the shared resolver) and its removal card. A
+/// version whose card cannot be read is refused with that error: the approval never runs
+/// without the card it must show.
+fn bound_version(op: &mut OpFn<'_>, proposal: &str) -> Result<Bound, ErrorReply> {
+    let v = op("show", json!({"id": proposal}))?;
+    let p = &v["proposal"];
+    if let Some(e) = p.get("removal_card_error") {
+        return Err(ErrorReply::new(
+            text(&e["code"]),
+            text(&e["message"]),
+            text(&e["fix"]),
+        ));
     }
+    let version = text(&p["id"]);
+    if version.parse::<Hash>().is_err() {
+        return Err(ErrorReply::new(
+            E_INTERNAL,
+            format!("the show of {proposal} names no version hash"),
+            "report this as a bug in rdy",
+        ));
+    }
+    Ok(Bound {
+        version: version.to_string(),
+        card: p.get("removal_card").cloned(),
+    })
 }
 
 /// The landing lines of an approval, from its reply: the proposal, its summary, the landing,
@@ -402,6 +439,16 @@ mod tests {
     use rdy_model::redaction::ReasonClass;
     use std::collections::BTreeMap;
 
+    /// What a person reads on stdout for reply `v`: the removal card shown before the approval, when
+    /// there is one, then the landing lines ([`approve_text`]).
+    fn approve_text_with(v: &Value, card: Option<&Value>) -> String {
+        let lines = approve_text(v);
+        match card.and_then(|c| c["card"].as_str()) {
+            Some(card) => format!("{card}\n\n{lines}"),
+            None => lines,
+        }
+    }
+
     /// The queue's approve item of a version that carries one secret removal request, with its
     /// card rendered whole and its digest, as the `pending` op serializes it.
     fn removal_item() -> (Item, Value) {
@@ -489,32 +536,189 @@ mod tests {
         assert!(t.ends_with("approving P-0123456789ab@1: Remove the code (1 change(s))\nlanded abababababab (P-0123456789ab@1)"), "{t}");
     }
 
-    /// rdx13: the queue item a `rdy approve <proposal>` names: its exact ref, or its stable id
-    /// (any prefix of at least 4 hex digits) at its latest version; a version hash names none.
+    /// `rdy approve <proposal>` args for a person.
+    fn args(proposal: &str, strict: bool) -> ApproveArgs {
+        ApproveArgs {
+            proposal: proposal.into(),
+            relayed_by: None,
+            evidence: None,
+            question: None,
+            session_ref: None,
+            strict,
+        }
+    }
+
+    /// rdx13 fix round 1 (findings 2 and 4): the whole removal card is shown before the approval
+    /// op runs, and a refused approval keeps it (the error carries it as `removal_card`). The op
+    /// here observes what was shown at the moment it runs: the mutation boundary. The card is
+    /// read for the named version alone: any other op (the queue) panics.
     #[test]
-    fn rdx13_the_queue_item_matches_the_named_version() {
-        let item = "P-0123456789ab@2";
-        for named in [
-            "P-0123456789ab@2",
-            "P-0123456789ab",
-            "P-0123@2",
-            "P-0123",
-            "P-0123456789abcdef@2",
-            "P-0123456789AB@2",
-        ] {
-            assert!(names_item(named, item), "{named}");
-        }
-        for named in [
-            "P-0123456789ab@1",
-            "P-0124",
-            "P-012",
-            "P-0123456789ab@",
-            "0123456789ab",
-            "P-xyz1@2",
-            "p-0123456789ab@2",
-        ] {
-            assert!(!names_item(named, item), "{named}");
-        }
+    fn rdx13_the_card_is_shown_before_the_approval_runs() {
+        let (item, v) = removal_item();
+        let version = "ab".repeat(32);
+        let shown_card = json!({
+            "ref": item.r#ref, "card": item.card, "card_hash": item.card_hash,
+            "removal": v["removal"],
+        });
+        let show = json!({"proposal": {
+            "ref": item.r#ref, "id": version, "state": "open", "removal_card": shown_card,
+        }});
+        let mut at_approval: Option<(Vec<String>, Value)> = None;
+        let shown = std::cell::RefCell::new(vec![]);
+        let err = approve_on(
+            &mut |op, a| match op {
+                "show" => Ok(show.clone()),
+                "approve" => {
+                    at_approval = Some((shown.borrow().clone(), a));
+                    Err(ErrorReply::new(
+                        "E_PROPOSAL_MOVED",
+                        "canon moved",
+                        "approve without --strict",
+                    ))
+                }
+                other => panic!("unexpected op {other}"),
+            },
+            true,
+            args("P-0123456789ab", true),
+            &mut |t| shown.borrow_mut().push(t.to_string()),
+        )
+        .unwrap_err();
+        let (seen, sent) = at_approval.expect("the approval ran");
+        assert_eq!(
+            seen,
+            vec![format!("{}\n\n", item.card)],
+            "the card was shown before the op"
+        );
+        assert_eq!(*shown.borrow(), seen, "and nothing after it");
+        assert_eq!(sent["proposal"], version.as_str(), "the exact version");
+        assert_eq!(sent["strict"], true);
+        assert_eq!(err.code, "E_PROPOSAL_MOVED");
+        assert_eq!(err.extra.get("removal_card"), Some(&shown_card));
+        // an approval that runs prints the landing lines after the card it showed
+        let reply = json!({
+            "approved": item.r#ref, "title": "Remove the code", "changes": 1,
+            "landing": "cd".repeat(32)
+        });
+        let shown = std::cell::RefCell::new(vec![]);
+        let (v2, t) = approve_on(
+            &mut |op, _| match op {
+                "show" => Ok(show.clone()),
+                "approve" => Ok(reply.clone()),
+                other => panic!("unexpected op {other}"),
+            },
+            true,
+            args("P-0123456789ab@1", false),
+            &mut |t| shown.borrow_mut().push(t.to_string()),
+        )
+        .unwrap();
+        assert_eq!(t, approve_text(&reply));
+        assert_eq!(
+            format!("{}{t}", shown.borrow().concat()),
+            approve_text_with(&reply, Some(&shown_card))
+        );
+        assert_eq!(v2["removal_card"], shown_card);
+    }
+
+    /// A new project in `dir` whose view `work` holds a doc with one prose block; returns the
+    /// block's id.
+    fn project_with_prose(dir: &std::path::Path) -> String {
+        let mut r = rdy_engine::Rdy::init(dir, "rdy-standard").unwrap();
+        let ops = rdy_engine::parse_ops(vec![
+            json!({"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}}),
+            json!({"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}}),
+            json!({"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The code is ZEBRA-7731."}),
+        ])
+        .unwrap();
+        let w = r
+            .write(
+                &rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer),
+                rdy_engine::WriteRequest {
+                    view: "work".into(),
+                    ops,
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        r.close().unwrap();
+        w.created["$p"].clone()
+    }
+
+    /// rdx13 fix round 1 (finding 3): an approval is bound to the exact version whose card was
+    /// shown. Another writer records a second request and proposes version 2 between the card's
+    /// read and the approval: `rdy approve P-<id>` (no version) shows version 1's card, approves
+    /// version 1 and is refused because it moved; nothing lands.
+    #[test]
+    fn rdx13_an_approval_binds_the_version_whose_card_was_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = project_with_prose(dir.path());
+        let local = rdy_engine::engine::Local::open(dir.path()).unwrap();
+        let session = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer);
+        let cwd = dir.path().to_path_buf();
+        let cx = rdy_daemon::OpContext {
+            engine: &local,
+            session: &session,
+            human: "human:qa",
+            cwd: &cwd,
+        };
+        let run = |op: &str, a: Value| rdy_daemon::dispatch(&cx, op, a).map_err(ErrorReply::from);
+        let redact = |reason: &str| {
+            run(
+                "redact",
+                json!({"targets": [id], "reason_class": "secret", "reason": reason}),
+            )
+            .unwrap()
+        };
+        let propose = || {
+            run(
+                "propose",
+                json!({"title": "Remove", "view": "work", "summary": "Removes the code."}),
+            )
+            .unwrap()
+        };
+        redact("first");
+        let p1 = propose();
+        let stable = p1["ref"]
+            .as_str()
+            .unwrap()
+            .split('@')
+            .next()
+            .unwrap()
+            .to_string();
+        use rdy_engine::engine::Engine as _;
+        let landings = || local.read().log_page(None, None).unwrap().len();
+        let before = landings();
+        let shown = std::cell::RefCell::new(vec![]);
+        let mut moved = false;
+        let err = approve_on(
+            &mut |op, a| {
+                let out = run(op, a);
+                if op != "approve" && !moved {
+                    // the other writer, between the card's read and the approval
+                    moved = true;
+                    redact("second");
+                    let p2 = propose();
+                    assert!(p2["ref"].as_str().unwrap().ends_with("@2"), "{p2}");
+                }
+                out
+            },
+            true,
+            args(&stable, false),
+            &mut |t| shown.borrow_mut().push(t.to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_PROPOSAL_MOVED", "{err:?}");
+        let shown = shown.borrow().concat();
+        assert_eq!(
+            shown.matches("  Request: ").count(),
+            1,
+            "version 1's card: {shown}"
+        );
+        assert!(shown.contains("  Reason: first"), "{shown}");
+        assert!(!shown.contains("  Reason: second"), "{shown}");
+        assert_eq!(err.extra["removal_card"]["ref"], p1["ref"], "{err:?}");
+        assert_eq!(landings(), before, "nothing landed");
+        local.close().unwrap();
     }
 
     /// A propose reply that could not read its tensions or its coverage says so, as a write

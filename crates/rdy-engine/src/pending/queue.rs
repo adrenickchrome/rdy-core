@@ -305,6 +305,39 @@ pub(crate) fn approval_holds(st: &ReadState, pref: &ProposalRef) -> Result<Holds
     })
 }
 
+/// The `approve` item of version `pref` (whose record is `p`) with its card whole at
+/// [`CARD_MAX_TOKENS`], when a change of the version carries a removal request; `None` when none
+/// does (D-CC90E). It reads that version alone: neither readiness, an answer, a snooze nor the
+/// queue's cap hides it, and no other version's card is rendered, so another card's budget never
+/// refuses it. The item is the one the queue builds; a version that is not ready says why in its
+/// `why` line instead of `ready to land`. A card whose mandatory removal lines do not fit is
+/// `E_REDACTION_BUDGET` ([`render_checked`]). A direct approval shows this card before it lands.
+pub(crate) fn removal_item(
+    st: &ReadState,
+    pref: ProposalRef,
+    p: Proposal,
+) -> Result<Option<Item>, RdyError> {
+    let reader = st.reader();
+    let mut carries = false;
+    for h in &p.changes {
+        if reader.redaction_for_carrier(h)?.is_some() {
+            carries = true;
+            break;
+        }
+    }
+    if !carries {
+        return Ok(None);
+    }
+    let v = Version::read(st, pref, p)?;
+    let mut item = v.batch_item(st, now_ms());
+    let issues = v.readiness(st)?;
+    if !issues.is_empty() {
+        let why: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
+        item.why = format!("not ready to land: {}", why.join("; "));
+    }
+    finish(item, CARD_MAX_TOKENS).map(Some)
+}
+
 /// Whether the latest answer to `item` is of act `act`.
 pub(super) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<bool, RdyError> {
     Ok(st

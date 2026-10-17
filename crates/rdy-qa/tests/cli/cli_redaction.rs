@@ -720,3 +720,195 @@ fn rdx13_budgets_never_change_the_manifest() {
 fn text(v: &Value) -> &str {
     v.as_str().unwrap_or_default()
 }
+
+/// Records one secret request for `id` in `work` through the CLI and proposes `work` (with
+/// `summary`, when given); returns the propose reply.
+fn propose_removal(s: &Served, id: &str, summary: Option<&str>) -> Value {
+    let (ok, rec) = s.json(&[
+        "--json",
+        "redact",
+        id,
+        "--reason-class",
+        "secret",
+        "--reason",
+        "a leaked code",
+    ]);
+    assert!(ok, "{rec}");
+    let mut args = vec!["--json", "propose", "--title", "Remove the code"];
+    if let Some(summary) = summary {
+        args.extend(["--summary", summary]);
+    }
+    let (ok, p) = s.json(&args);
+    assert!(ok, "{p}");
+    p
+}
+
+/// Lands an unrelated view `side` as the approver, so that a later `--strict` approval of any
+/// other version is refused before it lands (canon moved since that version was proposed).
+fn land_unrelated(s: &Served) {
+    with_rdy(s, |r| {
+        seed_doc(r, "side");
+        land(r, "side").unwrap();
+    });
+}
+
+/// The number of landings in the log.
+fn landings(s: &Served) -> usize {
+    with_rdy(s, |r| r.read().log_page(None, None).unwrap().len())
+}
+
+/// rdx13 fix round 1 (findings 1 and 2): `rdy approve` resolves the proposal it is given with the
+/// shared resolver and shows that version's removal card for every spelling the approval accepts
+/// (a full version hash, `P-<id>@01`, `P-<id>@1`, `P-<id>`), before the approval runs: a refused
+/// approval still showed the whole card, on stdout as text and in the error as JSON.
+#[test]
+fn rdx13_every_spelling_shows_the_card_before_the_approval_runs() {
+    let (s, id) = secret_served();
+    let p = propose_removal(&s, &id, Some("Removes the leaked code."));
+    let pref = p["ref"].as_str().unwrap().to_string();
+    let hash = p["id"].as_str().unwrap().to_string();
+    let stable = pref
+        .strip_prefix("P-")
+        .and_then(|r| r.split_once('@'))
+        .unwrap()
+        .0
+        .to_string();
+    land_unrelated(&s);
+    // the card the queue holds for the version now, whole
+    let q = op_as(&s, &human(), "pending", json!({"max_tokens": 20000})).unwrap();
+    let item = q["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["ref"] == pref.as_str())
+        .unwrap_or_else(|| panic!("{pref}: {q}"))
+        .clone();
+    let card = item["card"].as_str().unwrap().to_string();
+    assert!(card.contains("Content removal"), "{card}");
+    let before = landings(&s);
+    for named in [
+        hash.clone(),
+        format!("P-{stable}@01"),
+        format!("P-{stable}@1"),
+        format!("P-{stable}"),
+    ] {
+        let o = s.rdy(&["approve", &named, "--strict"]);
+        let (ok, stdout, err) = out(&o);
+        assert!(!ok, "{named}: --strict refuses after the unrelated landing");
+        assert!(err.contains("error E_PROPOSAL_MOVED"), "{named}: {err}");
+        assert_eq!(
+            stdout,
+            format!("{card}\n\n"),
+            "{named}: the whole card, shown before the refusal"
+        );
+        let e = error_of(&s.rdy(&["--json", "approve", &named, "--strict"]));
+        assert_eq!(e["code"], "E_PROPOSAL_MOVED", "{named}: {e}");
+        assert_eq!(
+            e["removal_card"],
+            json!({"ref": pref, "card": card, "card_hash": item["card_hash"], "removal": item["removal"]}),
+            "{named}"
+        );
+    }
+    assert_eq!(landings(&s), before, "nothing landed");
+}
+
+/// rdx13 fix round 1 (finding 1): a version the queue does not list (here it has no summary, so
+/// it is not ready) still shows its removal card when a person approves it directly.
+#[test]
+fn rdx13_a_version_the_queue_omits_still_shows_its_card() {
+    let (s, id) = secret_served();
+    let p = propose_removal(&s, &id, None);
+    let pref = p["ref"].as_str().unwrap().to_string();
+    let q = op_as(&s, &human(), "pending", json!({"max_tokens": 20000})).unwrap();
+    assert!(
+        !q["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["ref"] == pref.as_str()),
+        "the queue omits {pref}: {q}"
+    );
+    land_unrelated(&s);
+    let before = landings(&s);
+    let o = s.rdy(&["approve", &pref, "--strict"]);
+    let (ok, stdout, err) = out(&o);
+    assert!(!ok && err.contains("error E_PROPOSAL_MOVED"), "{err}");
+    for line in [
+        "Content removal".to_string(),
+        "  Reason class: secret.".to_string(),
+        "  Reason: a leaked code".to_string(),
+        format!("  {COPIES}"),
+        format!("  {QUOTES}"),
+        format!("  {REUSE}"),
+        format!("  {ROTATE}"),
+        IRREVERSIBLE.to_string(),
+    ] {
+        assert!(stdout.contains(&line), "{line}\n---\n{stdout}");
+    }
+    assert!(!stdout.contains("ZEBRA"), "{stdout}");
+    let e = error_of(&s.rdy(&["--json", "approve", &pref, "--strict"]));
+    assert_eq!(e["removal_card"]["ref"], pref.as_str(), "{e}");
+    assert!(e["removal_card"]["removal"].is_array(), "{e}");
+    assert_eq!(landings(&s), before, "nothing landed");
+}
+
+/// rdx13 fix round 1 (finding 4): an approval renders only its own version's card. A removal
+/// proposal elsewhere whose card does not fit any budget blocks neither the queue-free approval
+/// of an ordinary proposal nor anything but its own approval, which it refuses before running.
+#[test]
+fn rdx13_an_oversized_card_elsewhere_never_blocks_an_approval() {
+    let (s, id) = secret_served();
+    let long = "r".repeat(4096);
+    let record = |reason: &str| {
+        op_as(
+            &s,
+            &human(),
+            "redact",
+            json!({"targets": [id], "reason_class": "secret", "reason": reason}),
+        )
+        .unwrap()
+    };
+    record("a leaked code");
+    for _ in 0..17 {
+        record(&long);
+    }
+    let (ok, big) = s.json(&[
+        "--json",
+        "propose",
+        "--title",
+        "Remove the code",
+        "--summary",
+        "Removes the leaked code.",
+    ]);
+    assert!(ok, "{big}");
+    let big = big["ref"].as_str().unwrap().to_string();
+    let e = op_as(&s, &human(), "pending", json!({"max_tokens": 20000})).unwrap_err();
+    assert_eq!(
+        e.code, "E_REDACTION_BUDGET",
+        "the queue cannot show the card"
+    );
+    let ordinary = with_rdy(&s, |r| {
+        seed_doc(r, "side");
+        r.propose(&writer(), "side", "Seed", Some("Adds the seed doc."))
+            .unwrap()
+            .r#ref
+    });
+    let before = landings(&s);
+    let (ok, v) = s.json(&["--json", "approve", &ordinary]);
+    assert!(ok, "the ordinary approval lands: {v}");
+    assert_eq!(v["approved"], ordinary.as_str(), "{v}");
+    assert!(v.get("removal_card").is_none(), "{v}");
+    assert_eq!(landings(&s), before + 1);
+    // the oversized card's own approval is refused before it runs
+    let before = seq(&s);
+    let e = error_of(&s.rdy(&["--json", "approve", &big]));
+    assert_eq!(
+        (e["code"].as_str(), e["message"].as_str()),
+        (
+            Some("E_REDACTION_BUDGET"),
+            Some("The output budget is too small for the redaction warning.")
+        ),
+        "{e}"
+    );
+    assert_eq!(seq(&s), before, "the refusal wrote nothing");
+}

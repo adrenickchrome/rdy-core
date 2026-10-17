@@ -160,6 +160,7 @@ enum Cmd {
 }
 
 fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
+    let as_json = cli.json;
     match cli.cmd {
         Cmd::Config(a) => config_cmd::run(&env.project, a.show_origin),
         Cmd::Wc(c) => wc::run(c, env),
@@ -178,7 +179,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Suspects(a) => read_cmd::suspects(env, a),
         Cmd::Propose(a) => land_cmd::propose(env, a),
         Cmd::Redact(a) => redact_cmd::redact(env, a),
-        Cmd::Approve(a) => land_cmd::approve(env, a),
+        Cmd::Approve(a) => land_cmd::approve(env, a, as_json),
         Cmd::View { cmd } => view_cmd::view(env, cmd),
         Cmd::Alt { cmd } => alt_cmd::alt(env, cmd),
         Cmd::Intent { cmd } => intent_cmd::intent(env, cmd),

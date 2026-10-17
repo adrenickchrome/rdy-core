@@ -6,6 +6,8 @@ use crate::gate::{
     RelayedByRow, blocking_conflicts, changes_of, landed_as, latest_version, resolve_in,
     version_number, withdrawn,
 };
+use crate::pending::queue::removal_item;
+use crate::pending::{Item, RemovalCard};
 use crate::semantic::accept_advice::advised_digest;
 use crate::session::rfc3339;
 use crate::tensions::info::FindingInfo;
@@ -83,6 +85,35 @@ pub struct ProposalShow {
     /// The digest of `advised`, which an acceptance passes back (as the propose reply's).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advised_digest: Option<String>,
+    /// The approval card of this version when it is `open` or `withdrawn` and a change of it
+    /// carries a content removal request (D-CC90E): read for this version alone, whatever the
+    /// queue lists. A direct approval (`rdy approve`) shows it before the approval runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removal_card: Option<RemovalCardShow>,
+    /// Why the removal card could not be read (`E_REDACTION_BUDGET` when its mandatory lines do
+    /// not fit [`crate::pending::CARD_MAX_TOKENS`]); the rest of the show stands, and a direct
+    /// approval refuses with this error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removal_card_error: Option<ErrorRow>,
+}
+
+/// The approval card of a version that carries content removal: the queue item's ref, its card
+/// whole, the card's hash and its removal facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemovalCardShow {
+    /// `P-<stable short>@<version>`.
+    pub r#ref: String,
+    pub card: String,
+    pub card_hash: String,
+    pub removal: Vec<RemovalCard>,
+}
+
+/// An error as a read carries it beside its other parts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ErrorRow {
+    pub code: String,
+    pub message: String,
+    pub fix: String,
 }
 
 /// An advised semantic tension of a proposal version: the reviewer, the advice and findings,
@@ -192,6 +223,24 @@ impl ReadState {
                 conflicts.len()
             ));
         }
+        // a landed or superseded version never lands again (the approval refuses it before
+        // anything else), so only an open version, or one a close withdrew (an undo can reopen
+        // its view), has a removal card to show before an approval
+        let (removal_card, removal_card_error) = if matches!(state, "open" | "withdrawn") {
+            match removal_item(self, pref, p.clone()) {
+                Ok(item) => (item.map(removal_card_show), None),
+                Err(e) => (
+                    None,
+                    Some(ErrorRow {
+                        code: e.code.to_string(),
+                        message: e.message,
+                        fix: e.fix,
+                    }),
+                ),
+            }
+        } else {
+            (None, None)
+        };
         let (advised, advised_digest, advised_error) = if state == "open" {
             match self.advised_rows(&p.view, &p.changes) {
                 Ok((rows, digest)) => (rows, digest, None),
@@ -224,6 +273,8 @@ impl ReadState {
             advised,
             advised_error,
             advised_digest,
+            removal_card,
+            removal_card_error,
         })
     }
 
@@ -258,6 +309,16 @@ impl ReadState {
             })
             .collect::<Result<Vec<_>, RdyError>>()?;
         Ok((rows, digest))
+    }
+}
+
+/// The show of a removal item ([`removal_item`]).
+fn removal_card_show(item: Item) -> RemovalCardShow {
+    RemovalCardShow {
+        r#ref: item.r#ref,
+        card: item.card,
+        card_hash: item.card_hash,
+        removal: item.removal.unwrap_or_default(),
     }
 }
 
