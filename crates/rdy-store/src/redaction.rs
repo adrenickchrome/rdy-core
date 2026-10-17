@@ -46,6 +46,17 @@ pub fn is_redaction_kind(kind: u8) -> bool {
     )
 }
 
+/// Refuses a redaction record among `items` offered to a public writer (`write`, `put`, `seal`):
+/// only the store's checked redaction writers write one.
+pub(crate) fn refuse_redaction_kinds(items: &[(u8, Vec<u8>)]) -> Result<(), StoreError> {
+    match items.iter().find(|(k, _)| is_redaction_kind(*k)) {
+        Some((kind, _)) => Err(StoreError::Refused(format!(
+            "object kind {kind} is a redaction record: only the store's checked redaction writers write one"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The `limit` texts of [`StoreError::RedactionLimit`]: exactly these, in this order.
 pub mod limit {
     pub const TARGETS: &str = "256 targets";
@@ -369,23 +380,58 @@ impl StoreReader {
             });
         }
         for op in &change.ops {
-            if let rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } = op
-                && let Some(id) = &block.read_identity
-            {
-                let named = self
-                    .index()
-                    .redaction_requests_naming(kinds::BLOCK, &id.version)?
-                    .contains(&id.request);
-                return Err(if named {
-                    StoreError::Redacted {
-                        request: id.request,
-                    }
-                } else {
-                    StoreError::ProjectedWrite
-                });
+            if let rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } = op {
+                self.refuse_block_projection(block)?;
             }
         }
         Ok(())
+    }
+
+    /// Refuses a block that is a read projection, before it is serialized: `Redacted` when its
+    /// marker names a request that removed that version, `ProjectedWrite` otherwise.
+    pub(crate) fn refuse_block_projection(&self, block: &Block) -> Result<(), StoreError> {
+        let Some(id) = &block.read_identity else {
+            return Ok(());
+        };
+        let named = self
+            .index()
+            .redaction_requests_naming(kinds::BLOCK, &id.version)?
+            .contains(&id.request);
+        Err(if named {
+            StoreError::Redacted {
+                request: id.request,
+            }
+        } else {
+            StoreError::ProjectedWrite
+        })
+    }
+
+    /// Refuses `items` when one would bring back what the active mask removed (`Redacted`, naming
+    /// the request): an item whose hash the mask holds under any kind, or a `CHANGE` that embeds
+    /// a removed block version, with or without its own `BLOCK` frame. Reads nothing when the
+    /// mask is empty. A `CHANGE` payload that does not decode is refused as the index would
+    /// refuse it.
+    pub(crate) fn refuse_removed(&self, items: &[(u8, Vec<u8>)]) -> Result<(), StoreError> {
+        if !self.index().any_redaction_active() {
+            return Ok(());
+        }
+        let mut hashes: Vec<Hash> = items.iter().map(|(_, p)| Hash::of(p)).collect();
+        for (kind, payload) in items {
+            if *kind == kinds::CHANGE {
+                let change: Change = decode(payload)?;
+                for op in &change.ops {
+                    if let rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } =
+                        op
+                    {
+                        hashes.push(block.version_hash());
+                    }
+                }
+            }
+        }
+        match self.index().redaction_active_hit(&hashes)? {
+            Some((_, request)) => Err(StoreError::Redacted { request }),
+            None => Ok(()),
+        }
     }
 
     /// Calls `callback(location, frame, next)` for every frame in `[from, upto)`, batch markers
@@ -465,7 +511,7 @@ impl Store {
         request: &Redaction,
         residues: &[RedactionResidue],
     ) -> Result<PreparedRedaction, StoreError> {
-        let checked = self.check_redaction(carrier, request, residues)?;
+        let checked = self.check_redaction(carrier, request, residues, false)?;
         // the view takes the commit (a closed view refuses it), checked now as at commit
         let c = &checked.carrier;
         self.commit_parts(
@@ -485,7 +531,7 @@ impl Store {
     /// is written. Removes nothing. Returns the request's hash.
     pub fn commit_redaction(&mut self, prepared: PreparedRedaction) -> Result<Hash, StoreError> {
         let p = prepared.checked;
-        let checked = match self.check_redaction(&p.carrier, &p.request, &p.residues) {
+        let checked = match self.check_redaction(&p.carrier, &p.request, &p.residues, true) {
             Err(StoreError::RedactionCorrupt { .. }) => return Err(StoreError::RedactionStale),
             r => r?,
         };
@@ -555,12 +601,15 @@ impl Store {
         Ok(self.reader_with_preview(Arc::new(preview)))
     }
 
-    /// The checks of `prepare_redaction`, and the encoded records.
+    /// The checks of `prepare_redaction`, and the encoded records. `at_commit` is the recheck of
+    /// `commit_redaction`: a target set that grew since preparation is `RedactionStale` there,
+    /// where preparation refuses an incomplete one.
     fn check_redaction(
         &self,
         carrier: &Change,
         request: &Redaction,
         residues: &[RedactionResidue],
+        at_commit: bool,
     ) -> Result<Checked, StoreError> {
         // 1. the carrier
         if carrier.is_projection() {
@@ -763,13 +812,15 @@ impl Store {
                     match (span.kind, residue) {
                         (kinds::BLOCK, Some(RedactionResidue::Block(res))) => {
                             let block: Block = decode(&payload).map_err(|_| corrupt())?;
-                            if *res != BlockResidue::of(&block) {
+                            // the residue keeps the frame's own hash: a payload that decodes but
+                            // is not its block's canonical encoding cannot be given one
+                            if res.version != span.hash || *res != BlockResidue::of(&block) {
                                 return Err(corrupt());
                             }
                         }
                         (kinds::CHANGE, Some(RedactionResidue::Change(res))) => {
                             let change: Change = decode(&payload).map_err(|_| corrupt())?;
-                            if *res != ChangeResidue::of(&change) {
+                            if res.change != span.hash || *res != ChangeResidue::of(&change) {
                                 return Err(corrupt());
                             }
                             for op in &res.ops {
@@ -795,10 +846,22 @@ impl Store {
         if let Some(h) = supplied.keys().find(|h| !named.contains(h)) {
             return Err(refused(format!("residue {h} is named by no span")));
         }
-        // 5. every intact frame of a selected object is listed, and every chunk has a frame
+        // 5. every intact frame of a selected object is listed, every listed span is a frame of
+        // the log (never a place inside one), every chunk has a frame, and an all-versions target
+        // lists every stored version of its id
+        let all_ids: HashSet<&BlockId> = request
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                RedactTarget::AllVersions(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let mut stored: BTreeSet<(BlockId, Hash)> = BTreeSet::new();
         let mut frames = 0u64;
         let mut bytes = 0u64;
         let mut seen_chunks: HashSet<Hash> = HashSet::new();
+        let mut at_frames: BTreeSet<Location> = BTreeSet::new();
         self.for_each_record_from(ORIGIN, self.log_end(), |loc, frame, _| {
             frames += 1;
             if frames > MAX_SCANNED_FRAMES {
@@ -825,11 +888,42 @@ impl Store {
             if kind == kinds::BLOB_CHUNK && chunks.contains(&hash) {
                 seen_chunks.insert(hash);
             }
+            if listed.contains(&loc) {
+                at_frames.insert(loc);
+            }
             if present && selected(kind, &hash) && !listed.contains(&loc) {
                 return Err(StoreError::corrupt_at(loc));
             }
+            if kind == kinds::BLOCK && !all_ids.is_empty() {
+                // the version's id: from the payload, or from the stub of a removed version; a
+                // payload that is no block is a version of no id
+                let id = match frame {
+                    StoredFrame::Present { payload, .. } => decode::<Block>(payload).ok(),
+                    StoredFrame::Dropped { .. } => Some(self.get_block(&hash)?),
+                }
+                .map(|b| b.id);
+                if let Some(id) = id
+                    && all_ids.contains(&id)
+                {
+                    stored.insert((id, hash));
+                }
+            }
             Ok(())
         })?;
+        if let Some(at) = listed.iter().find(|l| !at_frames.contains(l)) {
+            return Err(StoreError::corrupt_at(*at));
+        }
+        if let Some((id, v)) = stored
+            .iter()
+            .find(|iv| m.versions.binary_search(iv).is_err())
+        {
+            if at_commit {
+                return Err(StoreError::RedactionStale);
+            }
+            return Err(refused(format!(
+                "target {id} selects every stored version of it, but the manifest omits {id}@{v}"
+            )));
+        }
         if let Some(c) = chunks.iter().find(|c| !seen_chunks.contains(c)) {
             return Err(refused(format!(
                 "chunk {c} of a selected blob has no chunk frame"

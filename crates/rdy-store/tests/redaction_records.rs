@@ -1223,3 +1223,354 @@ fn rdx2_a_blob_read_names_the_earliest_apply() {
     );
     assert!(removed(r1, s.get_blob(&y)));
 }
+
+// Fix round 1: the write, read and preparation gaps an adversarial review found.
+
+/// A store at `path` whose block `a` (in view `work`) an approved request removed. Returns the
+/// open store, the request and the change that created `a`.
+fn removed_block(path: &Path, a: &Block) -> (Store, Hash, Hash) {
+    let mut s = Store::create(path).unwrap();
+    let ca = s
+        .commit_to_view(
+            "work",
+            change("work", vec![Op::Create { block: a.clone() }]),
+        )
+        .unwrap();
+    drop(s);
+    let fx = authorized_batch_fixture(
+        path,
+        &[RequestSpec::new("work", vec![version(a)])],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    (Store::open(path).unwrap(), fx.requests[0].request, ca)
+}
+
+#[test]
+fn rdx2_seal_cannot_activate_an_unapproved_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    let a = block("b-00001", "claim", "seal bypass secret");
+    s.commit_to_view(
+        "work",
+        change("work", vec![Op::Create { block: a.clone() }]),
+    )
+    .unwrap();
+    let d = build_request(&s, &RequestSpec::new("work", vec![version(&a)]));
+    let p = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap();
+    let req = s.commit_redaction(p).unwrap();
+    let apply = rdy_model::redaction::RedactionApply {
+        request: req,
+        landing: Hash::of(b"there is no landing"),
+        report_hash: Hash::of(b"there was no approved report"),
+    };
+    let records = [
+        (kinds::REDACTION_APPLY, enc(&apply)),
+        (kinds::REDACTION, enc(&d.request)),
+        (kinds::REDACTION_RESIDUE, enc(&d.residues[0])),
+    ];
+    let av = a.version_hash();
+
+    // unheld: no batch is open, so a refused seal opens none and appends nothing
+    for (kind, bytes) in &records {
+        let end = s.log_end();
+        let e = s.seal(vec![(*kind, bytes.clone())]).unwrap_err();
+        assert!(matches!(e, StoreError::Refused(_)), "kind {kind}: {e:?}");
+        assert_eq!(s.log_end(), end, "kind {kind}: the refused seal appended");
+        assert!(s.open_batch().is_none());
+    }
+    assert_eq!(s.redaction_of(BLOCK, &av).unwrap(), None);
+    assert_eq!(s.get_block(&av).unwrap(), a);
+
+    // held: the open batch stays open and unpoisoned, and seals cleanly afterwards
+    s.set_held(true).unwrap();
+    let other = block("b-00002", "claim", "in the held batch");
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Create {
+                block: other.clone(),
+            }],
+        ),
+    )
+    .unwrap();
+    let open = s.open_batch().unwrap().to_vec();
+    for (kind, bytes) in &records {
+        let end = s.log_end();
+        let e = s.seal(vec![(*kind, bytes.clone())]).unwrap_err();
+        assert!(matches!(e, StoreError::Refused(_)), "kind {kind}: {e:?}");
+        assert_eq!(s.log_end(), end, "kind {kind}: the refused seal appended");
+        assert_eq!(s.open_batch().unwrap(), &open[..]);
+    }
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
+    assert_eq!(s.redaction_of(BLOCK, &av).unwrap(), None);
+    assert_eq!(s.get_block(&av).unwrap(), a);
+    assert_eq!(s.get_block(&other.version_hash()).unwrap(), other);
+    let path = s.dir().to_path_buf();
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.redaction_of(BLOCK, &av).unwrap(), None);
+    assert_eq!(s.get_block(&av).unwrap(), a);
+}
+
+#[test]
+fn rdx2_a_raw_change_cannot_restore_a_removed_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let a = block("b-00001", "claim", "embedded restore secret");
+    let (mut s, req, _) = removed_block(&path, &a);
+    let end = s.log_end();
+    // a fresh change (no BLOCK frame) that embeds the removed original, created or updated
+    let restore = change("restore", vec![Op::Create { block: a.clone() }]);
+    let mut over = change(
+        "restore",
+        vec![Op::Update {
+            base: Hash::of(b"some base"),
+            block: a.clone(),
+        }],
+    );
+    over.message = "an update embeds it too".into();
+    for c in [&restore, &over] {
+        assert!(removed(req, s.write(vec![(CHANGE, enc(c))])));
+        assert!(removed(req, s.put(CHANGE, c)));
+        assert!(removed(req, s.seal(vec![(CHANGE, enc(c))])));
+        s.set_held(true).unwrap();
+        assert!(removed(req, s.write(vec![(CHANGE, enc(c))])));
+        s.set_held(false).unwrap();
+    }
+    assert_eq!(s.log_end(), end, "no refused write left a frame");
+    // a change embedding an unrelated new version still writes
+    let b = block("b-00002", "claim", "unrelated");
+    let h = s
+        .write(vec![(
+            CHANGE,
+            enc(&change("x", vec![Op::Create { block: b.clone() }])),
+        )])
+        .unwrap()[0];
+    assert!(matches!(&s.change(&h).unwrap().ops[0], Op::Create { block } if *block == b));
+}
+
+#[test]
+fn rdx2_block_reads_use_the_typed_mask() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut s = Store::create(&path).unwrap();
+    let a = block("b-00001", "claim", "wrong kind original secret");
+    // a blob chunk may hold a block's exact encoding; it is logged before the BLOCK frame
+    s.write(vec![(BLOB_CHUNK, enc(&a))]).unwrap();
+    s.commit_to_view(
+        "work",
+        change("work", vec![Op::Create { block: a.clone() }]),
+    )
+    .unwrap();
+    drop(s);
+    let fx = authorized_batch_fixture(
+        &path,
+        &[RequestSpec::new("work", vec![version(&a)])],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let req = fx.requests[0].request;
+    let s = Store::open(&path).unwrap();
+    let av = a.version_hash();
+    assert_eq!(s.redaction_of(BLOCK, &av).unwrap(), Some(req));
+    assert!(removed(req, s.get_kind(BLOCK, &av)));
+    let got = s.get_block(&av).unwrap();
+    assert!(
+        got.is_redacted(),
+        "get_block read the earlier other-kind frame"
+    );
+    assert_eq!(got.redaction(), Some(req));
+    assert_eq!(got.body, CONTENT_REMOVED);
+    // the chunk itself is another object, which the request did not select
+    assert_eq!(s.get_kind(BLOB_CHUNK, &av).unwrap(), enc(&a));
+}
+
+#[test]
+fn rdx2_put_cannot_serialize_a_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let a = block("b-00001", "claim", "projected block secret");
+    let (mut s, req, ca) = removed_block(&path, &a);
+    let end = s.log_end();
+    // a known projection names its request
+    let stub = s.get_block(&a.version_hash()).unwrap();
+    assert!(stub.is_redacted());
+    assert!(removed(req, s.put(BLOCK, &stub)));
+    let p = s.change(&ca).unwrap();
+    assert!(p.is_projection());
+    assert!(removed(req, s.put(CHANGE, &p)));
+    // a change holding the stub as an op's block
+    let with_stub = change(
+        "work",
+        vec![Op::Create {
+            block: stub.clone(),
+        }],
+    );
+    assert!(removed(req, s.put(CHANGE, &with_stub)));
+    // a forged or unmatched marker
+    let forged = Block::redacted(
+        a.id.clone(),
+        "claim".into(),
+        None,
+        "V".into(),
+        RedactedBlockIdentity {
+            version: a.version_hash(),
+            content_hash: a.content_hash(),
+            frozen: false,
+            request: Hash::of(b"no such request"),
+        },
+    );
+    assert!(projected(s.put(BLOCK, &forged)));
+    let mut fake = change("work", vec![]);
+    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    assert!(projected(s.put(CHANGE, &fake)));
+    assert_eq!(s.log_end(), end, "no refused put left a frame");
+    // an ordinary block still puts
+    let b = block("b-00002", "claim", "ordinary");
+    let h = s.put(BLOCK, &b).unwrap();
+    assert_eq!(s.get_block(&h).unwrap(), b);
+}
+
+#[test]
+fn rdx2_all_versions_rechecks_the_stored_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    let a = block("b-00001", "claim", "version one secret");
+    s.commit_to_view(
+        "work",
+        change("work", vec![Op::Create { block: a.clone() }]),
+    )
+    .unwrap();
+    let all = RequestSpec::new("work", vec![RedactTarget::AllVersions(a.id.clone())]);
+    let d = build_request(&s, &all);
+    let p = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap();
+    // a second version of the id, written after preparation, stales the request
+    let a2 = block("b-00001", "claim", "version two secret");
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Update {
+                base: a.version_hash(),
+                block: a2.clone(),
+            }],
+        ),
+    )
+    .unwrap();
+    let end = s.log_end();
+    let r = s.commit_redaction(p);
+    assert!(matches!(r, Err(StoreError::RedactionStale)), "{r:?}");
+    assert_eq!(s.log_end(), end);
+    // the same incomplete manifest, prepared now, is refused
+    let r = s.prepare_redaction(&d.carrier, &d.request, &d.residues);
+    assert!(matches!(r, Err(StoreError::Refused(_))), "{r:?}");
+    // a manifest with every stored version of the id prepares and commits
+    let d = build_request(&s, &all);
+    assert_eq!(d.request.manifest.versions.len(), 2);
+    let p = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap();
+    s.commit_redaction(p).unwrap();
+}
+
+#[test]
+fn rdx2_a_span_must_be_a_real_frame_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    let a = block("b-00001", "claim", "inner frame secret");
+    s.commit_to_view(
+        "work",
+        change("work", vec![Op::Create { block: a.clone() }]),
+    )
+    .unwrap();
+    // a blob whose bytes are a valid-looking BLOCK frame of a's encoding
+    let payload = enc(&a);
+    let mut decoy = Vec::new();
+    decoy.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    decoy.push(BLOCK);
+    decoy.extend_from_slice(&a.version_hash().0);
+    decoy.extend_from_slice(&payload);
+    let blob = s.put_blob(&decoy).unwrap();
+    let chunk = Hash::of(&decoy);
+    let loc = raw_frames(&s)
+        .into_iter()
+        .find(|(_, k, h)| *k == BLOB_CHUNK && *h == chunk)
+        .unwrap()
+        .0;
+    let mut d = build_request(&s, &RequestSpec::new("work", vec![version(&a)]));
+    let residue = d
+        .request
+        .manifest
+        .spans
+        .iter()
+        .find(|sp| sp.kind == BLOCK)
+        .unwrap()
+        .residue;
+    let inner = FramePlace {
+        segment: loc.segment,
+        offset: loc.offset + 37, // the frame header
+    };
+    d.request.manifest.spans.push(DropSpan {
+        place: inner,
+        kind: BLOCK,
+        hash: a.version_hash(),
+        len: payload.len() as u32,
+        residue,
+    });
+    d.request.manifest.spans.sort_by_key(|sp| sp.place);
+    let e = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap_err();
+    assert!(corrupt_at(&e, inner), "{e:?}");
+    assert_eq!(s.get_blob(&blob).unwrap(), decoy);
+}
+
+#[test]
+fn rdx2_a_residue_identity_matches_its_frame_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    // a BLOCK payload that decodes but is not the block's canonical encoding
+    let a = block("b-00001", "claim", "noncanonical block secret");
+    let mut bytes = enc(&a);
+    bytes.push(0);
+    let h = s.write(vec![(BLOCK, bytes)]).unwrap()[0];
+    assert_ne!(h, a.version_hash());
+    assert_eq!(s.get_block(&h).unwrap().body, a.body);
+    let target = RedactTarget::Version {
+        id: a.id.clone(),
+        version: h,
+    };
+    let d = build_request(&s, &RequestSpec::new("work", vec![target]));
+    let span = d.request.manifest.spans[0].clone();
+    assert_eq!(span.hash, h);
+    let end = s.log_end();
+    let e = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap_err();
+    assert!(corrupt_at(&e, span.place), "{e:?}");
+    assert_eq!(s.log_end(), end);
+    // a change payload with a trailing byte: its residue cannot name the frame hash either
+    let b = block("b-00002", "claim", "change frame");
+    let mut cbytes = enc(&change("work", vec![Op::Create { block: b.clone() }]));
+    cbytes.push(0);
+    s.write(vec![(BLOCK, enc(&b))]).unwrap();
+    let ch = s.write(vec![(CHANGE, cbytes)]).unwrap()[0];
+    let d = build_request(&s, &RequestSpec::new("work", vec![version(&b)]));
+    let span = d
+        .request
+        .manifest
+        .spans
+        .iter()
+        .find(|sp| sp.kind == CHANGE && sp.hash == ch)
+        .unwrap()
+        .clone();
+    let e = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap_err();
+    assert!(corrupt_at(&e, span.place), "{e:?}");
+}

@@ -871,6 +871,9 @@ impl Store {
     /// sync per batch, held or not. With no batch open and `last` empty it does nothing; with no
     /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
     ///
+    /// Like `write`, it refuses a redaction record (kinds 20 to 22) and an item that would bring
+    /// back a removed hash, before anything is appended.
+    ///
     /// A failure truncates the log to the batch's start. If a batch was open, it also poisons the
     /// store: the index already holds entries of frames that are gone, so every later write and
     /// every checkpoint fails until reopen. If no batch was open, the index holds nothing of the
@@ -883,6 +886,11 @@ impl Store {
         if self.poisoned {
             return Err(poisoned_error());
         }
+        // the same refusals as `write`, before anything is appended: a redaction record (only
+        // the store's checked redaction writers write one) or an item that would bring back a
+        // removed hash is refused with the batch still open, and nothing poisoned
+        crate::redaction::refuse_redaction_kinds(&last)?;
+        self.refuse_removed(&last)?;
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
         let mut entries = vec![];
@@ -1159,16 +1167,9 @@ impl Store {
     /// A redaction record (kinds 20 to 22) is refused: only the store's checked redaction writers
     /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
     /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
-    /// chunk. Nothing is written then.
+    /// chunk, nor a change that embeds a removed block version. Nothing is written then.
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
-        if let Some((kind, _)) = items
-            .iter()
-            .find(|(k, _)| crate::redaction::is_redaction_kind(*k))
-        {
-            return Err(StoreError::Refused(format!(
-                "object kind {kind} is a redaction record: only the store's checked redaction writers write one"
-            )));
-        }
+        crate::redaction::refuse_redaction_kinds(&items)?;
         self.write_guarded(items)
     }
 
@@ -1180,12 +1181,7 @@ impl Store {
         if self.poisoned {
             return Err(poisoned_error());
         }
-        if self.index().any_redaction_active() {
-            let hashes: Vec<Hash> = items.iter().map(|(_, p)| Hash::of(p)).collect();
-            if let Some((_, request)) = self.index().redaction_active_hit(&hashes)? {
-                return Err(StoreError::Redacted { request });
-            }
-        }
+        self.refuse_removed(&items)?;
         let start = self.log.end();
         let result = if self.held {
             self.append_held(items)
@@ -1468,7 +1464,17 @@ impl Store {
         self.log.fail_next_append_after(bytes);
     }
 
-    pub fn put<T: Serialize>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {
+    /// Writes `value` as one object of `kind` (see `write`). A block or change that is a read
+    /// projection is refused before it is serialized: `Redacted` when its marker names a request
+    /// that removed it, `ProjectedWrite` for a forged or unmatched marker.
+    pub fn put<T: Serialize + 'static>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {
+        let any: &dyn std::any::Any = value;
+        if let Some(block) = any.downcast_ref::<Block>() {
+            self.refuse_block_projection(block)?;
+        }
+        if let Some(change) = any.downcast_ref::<Change>() {
+            self.refuse_projection(change)?;
+        }
         Ok(self.write(vec![(kind, encode(value))])?[0])
     }
 
@@ -1817,9 +1823,17 @@ impl StoreReader {
 
     /// The block version `version`. A version a redaction removed reads as its stub: id, type,
     /// parent, order and the recorded identity, body `Content removed.`.
+    ///
+    /// The `BLOCK` frame is read and masked by kind, so an earlier object of another kind with
+    /// the same bytes never stands in for a removed version. With no `BLOCK` frame of that hash,
+    /// the first object with it is decoded, as before redaction existed.
     pub fn get_block(&self, version: &Hash) -> Result<Block, StoreError> {
-        match self.get_raw(version) {
-            Ok((_, payload)) => decode(&payload),
+        let read = match self.get_kind(kinds::BLOCK, version) {
+            Err(StoreError::NotFound(_)) => self.get_raw(version).map(|(_, payload)| payload),
+            r => r,
+        };
+        match read {
+            Ok(payload) => decode(&payload),
             Err(StoreError::Redacted { request }) => self.block_projection(version, request),
             Err(e) => Err(e),
         }
