@@ -116,6 +116,7 @@ enum Cmd {
     /// Print the link to the live docs site; open it in a browser. Pages update by themselves as the scope changes.
     Site(site_cmd::SiteArgs),
     Render(site_cmd::RenderArgs),
+    /// Print the docs as one PDF, one HTML file or a Markdown tree (--format pdf, html or md).
     Export(site_cmd::ExportArgs),
     Import(site_cmd::ImportArgs),
     /// Write the whole project, with its history, views and proposals, to one dump file; every hash is kept.
