@@ -3,14 +3,15 @@
 //! A block whose content an approved removal erased reads as its authorized projection (its id,
 //! type, parent, order and recorded identity; body `Content removed.`; no fields, links or pins).
 //! The checker keeps every structure rule for it (parent, cycle, depth, placement, order key,
-//! references) and checks that its absence has exact active authorization; it never validates
-//! the stub's missing fields as content (D-600CW, D-3M81W).
+//! references, and the read schema's type, prefix and parent-type rules) and checks that its
+//! absence has exact active authorization; it never validates the stub's missing fields as
+//! content (D-600CW, D-3M81W).
 use rdy_engine::{Rdy, ReadState, Scope};
 use rdy_model::redaction::RedactedBlockIdentity;
 use rdy_model::{
     Block, BlockId, FieldValue, Hash, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
 };
-use rdy_schema::{Severity, validate_block, validate_prefix};
+use rdy_schema::{Severity, validate_prefix, validate_read_block};
 use rdy_store::{Conflict, StoreReader, ViewOpKind, kinds};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -168,13 +169,13 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
                 ));
             }
         }
-        // schema, of content only: a removed block's stub holds no fields to validate
-        if b.is_redacted() {
-            continue;
-        }
-        // schema; nameless M1 docs are validated with their effective name, as the gate does
+        // schema, as a stored state is read (D-3M81W): a removed block's stub keeps its type,
+        // prefix, parent-type and order checks; only what removal made unavailable (required
+        // fields, the body rule) is skipped. Nameless M1 docs are validated with their effective
+        // name, as the gate does; a stub holds no fields, so it gets none.
         let mut checked: Block = b.clone();
         if b.block_type == tree::DOC
+            && !b.is_redacted()
             && !b.fields.contains_key("name")
             && let Some(n) = m.name_of(&b.id)
         {
@@ -182,7 +183,7 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
         }
         for i in validate_prefix(pack, &checked)
             .into_iter()
-            .chain(validate_block(pack, &checked, parent))
+            .chain(validate_read_block(pack, &checked, parent))
         {
             if i.severity == Severity::Error && i.code != "E_ORDER_KEY" {
                 out.push(v(

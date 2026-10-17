@@ -1100,3 +1100,83 @@ fn rdx15_a_removed_frozen_decision_is_covered_not_compared() {
     let e = check(&r, &Scope::Canon).unwrap_err();
     assert!(e.iter().any(|v| v.rule == "frozen"), "{e:#?}");
 }
+
+/// A pack whose section may hold only sections and terms (no prose).
+const TERMS_ONLY_PACK: &str = "\
+name: terms
+version: \"1\"
+extends: rdy-standard
+block_types:
+  section:
+    prefix: s
+    traits: [structural]
+    fields:
+      title: { kind: str, required: true }
+    children: [section, term]
+";
+
+/// Fix round 1, finding 1: an authorized stub keeps the schema's structure rules. Two prose
+/// blocks under a section are removed with a person's approval; the project then switches to a
+/// pack whose section may hold only terms. The read schema refuses each stub's parent type, and
+/// so does the checker, though the removal itself is exactly authorized.
+#[test]
+fn rdx15_a_removed_block_keeps_its_parent_type_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": SECRET},
+            {"op": "create", "type": "prose", "id": "$q", "parent": "$s", "body": "A second paragraph."},
+            {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Ledger"}, "body": "A ledger."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = |k: &str| BlockId::parse(&w.created[k]).unwrap();
+    let removed = [id("$p"), id("$q")];
+    let s = agent(1);
+    r.redact(&s, input(removed.iter().map(BlockId::to_string).collect()))
+        .unwrap();
+    let p = r
+        .propose(
+            &s,
+            &s.default_view(),
+            "Remove",
+            Some("Removes two paragraphs."),
+        )
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    check(&r, &Scope::Canon).unwrap_or_else(|v| panic!("{v:#?}"));
+    r.close().unwrap();
+    std::fs::write(dir.path().join(".rdy/packs/terms.yaml"), TERMS_ONLY_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: terms\n").unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    for b in &removed {
+        let stub = m.get(b).unwrap();
+        assert!(stub.is_redacted(), "{b} reads as its stub");
+        let parent = stub.parent.as_ref().and_then(|p| m.get(p));
+        let codes: Vec<&str> = rdy_schema::validate_read_block(st.pack(), stub, parent)
+            .iter()
+            .map(|i| i.code)
+            .collect();
+        assert!(codes.contains(&"E_CHILD_TYPE"), "{b}: {codes:?}");
+    }
+    drop(st);
+    let e = check(&r, &Scope::Canon).expect_err("a stub under a parent that cannot hold it");
+    for b in &removed {
+        assert!(
+            e.iter().any(|v| v.rule == "schema"
+                && v.block.as_ref() == Some(b)
+                && v.detail.starts_with("E_CHILD_TYPE")),
+            "{b}: {e:#?}"
+        );
+    }
+    // the stubs' absence is still exactly authorized: only the parent type is refused
+    assert!(!e.iter().any(|v| v.rule == "redaction"), "{e:#?}");
+}

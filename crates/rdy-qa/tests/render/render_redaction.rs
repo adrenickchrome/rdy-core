@@ -341,8 +341,45 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The RFC 4648 base64 text `b64` decoded (padding ends it); `None` for a byte outside the
+/// alphabet.
+fn unbase64(b64: &str) -> Option<Vec<u8>> {
+    let mut out = vec![];
+    let (mut acc, mut n) = (0u32, 0u32);
+    for c in b64.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push((acc >> n) as u8);
+            acc &= (1 << n) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// The decoded payload of each base64 data URI in `t` (single-file HTML embeds its pictures and
+/// fonts this way, so their bytes never show raw).
+fn data_uri_payloads(t: &str) -> Vec<Vec<u8>> {
+    Regex::new(r"data:[^;,\s]*;base64,([A-Za-z0-9+/]*=*)")
+        .unwrap()
+        .captures_iter(t)
+        .filter_map(|c| unbase64(&c[1]))
+        .collect()
+}
+
 /// Every output and every selected canary it holds; a PDF is read through its text and its
-/// images (`PICTURE` stands for the picture), an asset by its bytes.
+/// images (`PICTURE` stands for the picture), an asset by its bytes, and a text output also by
+/// the decoded payloads of its base64 data URIs.
 fn holdings(outputs: &Outputs, picture: &[u8]) -> BTreeMap<String, BTreeSet<String>> {
     let mut out = BTreeMap::new();
     for (name, bytes) in outputs {
@@ -360,7 +397,11 @@ fn holdings(outputs: &Outputs, picture: &[u8]) -> BTreeMap<String, BTreeSet<Stri
                 found.insert(c.to_string());
             }
         }
-        if find(bytes, picture, 0).is_some() {
+        if find(bytes, picture, 0).is_some()
+            || data_uri_payloads(&t)
+                .iter()
+                .any(|p| find(p, picture, 0).is_some())
+        {
             found.insert("picture".to_string());
         }
         out.insert(name.clone(), found);
@@ -933,6 +974,7 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
     let picture = rgb_png(PICTURE.0, PICTURE.1, [200, 30, 30]);
     let mut shapes = vec![];
     let mut cards = vec![];
+    let img_tag = Regex::new(r#"<img src="data:image/png;base64,[^"]*"[^>]*>"#).unwrap();
     for adapter in ["mcp", "cli"] {
         let s = Served::new();
         let ids = content(&s);
@@ -975,6 +1017,11 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             "{adapter}: the picture is an asset"
         );
         assert!(held["print: print.pdf"].contains("picture"), "{adapter}");
+        // the single-file HTML embeds the picture as a base64 data URI, which the detector reads
+        assert!(
+            held["print: single.html"].contains("picture"),
+            "{adapter}: the single HTML's picture"
+        );
         // the PDF's text, decoded through its ToUnicode maps, holds the term's body (a raw grep
         // of the compressed file could not see it)
         let pdf = &before["print: print.pdf"];
@@ -1198,6 +1245,23 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             leaks.is_empty(),
             "{adapter}: outputs hold a selected canary: {leaks:?}"
         );
+        // the detector would fail this test if the picture came back: the before-output's image
+        // tag, put back into the single HTML, is found
+        let tag = img_tag
+            .find(&text(&before["print: single.html"]))
+            .expect("the single HTML's image tag")
+            .as_str()
+            .to_string();
+        let mut tampered = after_all.clone();
+        tampered
+            .get_mut("print: single.html")
+            .unwrap()
+            .extend_from_slice(tag.as_bytes());
+        assert_eq!(
+            holdings(&tampered, &picture)["print: single.html"],
+            BTreeSet::from(["picture".to_string()]),
+            "{adapter}: the picture put back is found"
+        );
         // the outputs read the notice in place of the removed blocks; the assets hold no picture
         for name in [
             "canon: plan.html",
@@ -1233,4 +1297,28 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
         "the request and report, across adapters"
     );
     assert_eq!(cards[0], cards[1], "the removal card, across adapters");
+}
+
+/// Fix round 1, finding 2: the detector reads a picture that an output embeds as a base64 data
+/// URI (single-file HTML does), decoding each URI's payload with the RFC 4648 alphabet.
+#[test]
+fn rdx15_the_canary_detector_reads_data_uri_pictures() {
+    for (encoded, raw) in [
+        ("Zg==", "f"),
+        ("Zm8=", "fo"),
+        ("Zm9v", "foo"),
+        ("Zm9vYg==", "foob"),
+        ("Zm9vYmE=", "fooba"),
+        ("Zm9vYmFy", "foobar"),
+    ] {
+        let html = format!("<p>x</p>\n<img src=\"data:image/png;base64,{encoded}\" alt=\"a\">\n");
+        let outputs: Outputs = [("print: single.html".to_string(), html.into_bytes())].into();
+        assert_eq!(
+            holdings(&outputs, raw.as_bytes())["print: single.html"],
+            BTreeSet::from(["picture".to_string()]),
+            "{encoded}"
+        );
+        // the encoded text alone is no match for other bytes
+        assert!(holdings(&outputs, b"other bytes")["print: single.html"].is_empty());
+    }
 }

@@ -431,7 +431,17 @@ fn rdx15_the_v2_s13_fixture_loads_with_every_hash() {
         assert_eq!(stub["version"], key.split_once('@').unwrap().1, "{key}");
     }
     drop(reader);
-    assert_eq!(got["fsck"], expect["fsck"], "fsck counts");
+    // fsck counts the whole log: the fixture's frames, plus each intact data frame of the
+    // upgrade batch checked above (none while the store format is 13), which is hashed too
+    let upgrade = tail
+        .iter()
+        .filter(|(kind, _)| *kind != kinds::BATCH_COMMIT)
+        .count() as u64;
+    let mut want_fsck = expect["fsck"].clone();
+    for member in ["frames", "checked_payloads"] {
+        want_fsck[member] = json!(want_fsck[member].as_u64().unwrap() + upgrade);
+    }
+    assert_eq!(got["fsck"], want_fsck, "fsck counts");
     rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{v:#?}"));
     r.close().unwrap();
     // the reindex check opens the project itself, so the store lock is released first
