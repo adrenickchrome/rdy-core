@@ -19,6 +19,7 @@ use crate::index::{IndexEntry, RedactedSpan};
 use crate::kinds::{self, BlobManifest};
 use crate::segment::{HEADER, Location};
 use crate::store::decode;
+use crate::view::Owner;
 use crate::{Store, StoreReader};
 use rdy_model::redaction::{
     BlockResidue, CARRIER_MESSAGE, ChangeResidue, RedactTarget, Redaction, RedactionApply,
@@ -118,6 +119,8 @@ pub enum StoredFrame<'a> {
 #[derive(Clone, Debug)]
 pub struct PreparedRedaction {
     checked: Checked,
+    /// The owner the carrier's commit claims its view for, as an ordinary first commit does.
+    claim: Option<Owner>,
 }
 
 impl PreparedRedaction {
@@ -509,6 +512,20 @@ impl Store {
         request: &Redaction,
         residues: &[RedactionResidue],
     ) -> Result<PreparedRedaction, StoreError> {
+        self.prepare_redaction_claiming(carrier, request, residues, None)
+    }
+
+    /// [`Store::prepare_redaction`], where the carrier's view commit claims its view for `claim`
+    /// exactly as an ordinary commit's claim does: a view with no head is created owned by it,
+    /// an unowned head becomes owned by it. The caller computes the claim by its own ownership
+    /// rules, as for any commit.
+    pub fn prepare_redaction_claiming(
+        &self,
+        carrier: &Change,
+        request: &Redaction,
+        residues: &[RedactionResidue],
+        claim: Option<Owner>,
+    ) -> Result<PreparedRedaction, StoreError> {
         let checked = self.check_redaction(carrier, request, residues, false)?;
         // the view takes the commit (a closed view refuses it), checked now as at commit
         let c = &checked.carrier;
@@ -517,10 +534,10 @@ impl Store {
             vec![c.clone()],
             &|_| None,
             &[],
-            None,
+            claim.clone(),
             &c.provenance,
         )?;
-        Ok(PreparedRedaction { checked })
+        Ok(PreparedRedaction { checked, claim })
     }
 
     /// Writes a prepared request as one batch: its residues, the carrier, the request, then the
@@ -528,6 +545,7 @@ impl Store {
     /// a source version or span that changed since preparation is `RedactionStale`, and nothing
     /// is written. Removes nothing. Returns the request's hash.
     pub fn commit_redaction(&mut self, prepared: PreparedRedaction) -> Result<Hash, StoreError> {
+        let claim = prepared.claim;
         let p = prepared.checked;
         let checked = match self.check_redaction(&p.carrier, &p.request, &p.residues, true) {
             Err(StoreError::RedactionCorrupt { .. }) => return Err(StoreError::RedactionStale),
@@ -543,7 +561,7 @@ impl Store {
             vec![checked.carrier.clone()],
             &|_| None,
             &[],
-            None,
+            claim,
             &committer,
         )?;
         let mut items: Vec<(u8, Vec<u8>)> = checked

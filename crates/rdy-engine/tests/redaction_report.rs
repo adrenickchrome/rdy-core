@@ -13,7 +13,7 @@ use rdy_engine::redaction::report::{outside_rows, warnings};
 use rdy_engine::redaction::{
     ASSIGNED_KINDS, Limits, QuoteRow, RedactInput, RedactResult, RedactionReport, ReportCopies,
     TextPolicy, compute_report, dry_run, override_limits_for_tests, prepare_request,
-    require_text_policies, text_policy,
+    report_computations_for_tests, require_text_policies, text_policy,
 };
 use rdy_engine::{
     E_BAD_INPUT, E_REDACTION_BUDGET, E_REDACTION_LIMIT, E_REDACTION_REASON, E_REDACTION_STALE,
@@ -1593,6 +1593,24 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
     let y = p.r.store_mut().put_blob(&bytes(b"by")).unwrap();
     let z = p.r.store_mut().put_blob(b"unrelated").unwrap();
     p.r.invalidate();
+    // a figure of the shared blob y, landed and tagged on its own first: everything it reaches
+    // is in the report only because y shares a chunk with x
+    let wy = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([
+            {"op": "create", "type": "figure", "id": "$y", "parent": p.section.to_string(), "fields": {"blob": y.to_string(), "media_type": "application/octet-stream", "alt": "y"}}
+        ]),
+        "",
+    );
+    let fy = id(&wy.created["$y"]);
+    let fy_change = h(&wy.change);
+    let vfy = version(&p.r, "work", &fy);
+    let py = p.r.propose(&writer(), "work", "figure y", None).unwrap();
+    let landing_y = h(&p.r.land(&approver(), &py.id).unwrap());
+    p.r.tag(&approver(), "v0.9.0", None, None).unwrap();
+    let state_y = p.r.read().reader().landing(&landing_y).unwrap().state;
     let w = write(
         &mut p.r,
         &writer(),
@@ -1617,18 +1635,26 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
     assert_eq!(d.drop_frames, 2, "both chunks of x");
     assert_eq!(d.drop_bytes, 1024 * 1024 + 2);
     let refs = ImpactRelation::References;
+    let mut expected = vec![
+        row(ImpactKind::BlockVersion, format!("{fx}@{vfx}"), refs, false),
+        row(ImpactKind::BlockVersion, format!("{fy}@{vfy}"), refs, false),
+        row(ImpactKind::Change, fx_change, refs, false),
+        row(ImpactKind::Change, fy_change, refs, false),
+        row(ImpactKind::Landing, landing, refs, false),
+        row(ImpactKind::Landing, landing_y, refs, false),
+        row(ImpactKind::Tag, "v0.9.0", refs, false),
+        row(ImpactKind::Tag, "v1.0.0", refs, false),
+        row(ImpactKind::View, "work", refs, false),
+        row(ImpactKind::Proposal, &pi.id, refs, false),
+        row(ImpactKind::Proposal, &py.id, refs, false),
+        row(ImpactKind::StateSnapshot, state, refs, false),
+        row(ImpactKind::StateSnapshot, state_y, refs, false),
+    ];
+    expected.sort_by(|a, b| (a.kind as u8, &a.record).cmp(&(b.kind as u8, &b.record)));
     assert_eq!(
-        d.inside,
-        vec![
-            row(ImpactKind::BlockVersion, format!("{fx}@{vfx}"), refs, false),
-            row(ImpactKind::Change, fx_change, refs, false),
-            row(ImpactKind::Landing, landing, refs, false),
-            row(ImpactKind::Tag, "v1.0.0", refs, false),
-            row(ImpactKind::View, "work", refs, false),
-            row(ImpactKind::Proposal, &pi.id, refs, false),
-            row(ImpactKind::StateSnapshot, state, refs, false),
-        ],
-        "a blob reference reaches the tag and the snapshot; the figure is not erased"
+        d.inside, expected,
+        "a blob reference, of the selected blob or of one sharing its chunk, reaches the change, \
+         landing, tag, proposal and snapshot; no figure is erased"
     );
     // the store's preparation checks the closure: embedding changes and every chunk frame
     let rec =
@@ -1991,12 +2017,12 @@ fn rdx5_limits_fail_before_writing() {
         Limits { sources: 0, ..d },
         Some("4096 source strings"),
     );
-    // strings: the longest string the scan reads is the longest of the store's own texts
-    let longest = longest_string(&p);
+    // strings: the bound applies to the source strings only (the selected body); the store's
+    // other strings are searched at any length
     check(
         &mut p,
         Limits {
-            string: longest,
+            string: SECRET.len(),
             ..d
         },
         None,
@@ -2004,7 +2030,7 @@ fn rdx5_limits_fail_before_writing() {
     check(
         &mut p,
         Limits {
-            string: longest - 1,
+            string: SECRET.len() - 1,
             ..d
         },
         Some("1048576 bytes per string"),
@@ -2028,31 +2054,21 @@ fn rdx5_limits_fail_before_writing() {
         let e = p.r.redact(&writer(), input(&n, false)).unwrap_err();
         limit(&e, "64 field levels");
         assert_eq!(p.r.store().log_end(), end2);
+        // the bound refuses only a selected target: elsewhere the search stops at that depth
+        let other = dry(&p.r, &t);
+        let deep: Vec<String> = other
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("nest deeper"))
+            .map(|w| format!("{}: {}", w.code, w.message))
+            .collect();
+        assert_eq!(
+            deep,
+            [
+                "W_REDACTION_QUOTES: 1 records nest deeper than 2 levels; rdy did not search below that depth"
+            ]
+        );
     }
-}
-
-/// The longest string the report scan reads: found by lowering the bound until it refuses.
-fn longest_string(p: &P) -> usize {
-    let t = vec![p.prose.to_string()];
-    let ok = |n: usize| {
-        let _g = override_limits_for_tests(Limits {
-            string: n,
-            ..Limits::default()
-        });
-        p.r.read().redaction_report(&input(&t, true)).is_ok()
-    };
-    let (mut lo, mut hi) = (0usize, 1_048_576usize);
-    assert!(ok(hi));
-    while lo + 1 < hi {
-        let mid = (lo + hi) / 2;
-        if ok(mid) {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    assert!(hi >= SECRET.len());
-    hi
 }
 
 #[test]
@@ -2144,5 +2160,264 @@ fn rdx5_an_already_removed_set_is_a_noop() {
             id: prose.clone(),
             version: v1
         }]
+    );
+}
+
+#[test]
+fn rdx5_long_strings_and_deep_fields_elsewhere_never_block_a_report() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    // a pasted 1.1 MB body that also holds a copy of the secret, and a body at the bound
+    let section = p.section.to_string();
+    let w = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "id": "$b", "parent": section, "body": format!("{}{SECRET}", "x".repeat(1_100_000))},
+            {"op": "create", "type": "prose", "id": "$m", "parent": section, "body": "y".repeat(1_048_576)}
+        ]),
+        "",
+    );
+    let big = id(&w.created["$b"]);
+    let vb = version(&p.r, "work", &big);
+    let max = id(&w.created["$m"]);
+    // the small secret block is a target, and the long body is searched for its copy
+    let d = dry(&p.r, &[p.prose.to_string()]);
+    assert!(
+        d.quotes.contains(&quote(
+            ImpactKind::BlockVersion,
+            format!("{big}@{vb}"),
+            SECRET,
+            true
+        )),
+        "{:?}",
+        d.quotes
+    );
+    assert_eq!(d.warnings, warnings(ReasonClass::Secret, false));
+    // a block whose own string is at the bound is a target
+    dry(&p.r, &[max.to_string()]);
+    // the long block itself: its own body is over the bound
+    let e =
+        p.r.read()
+            .redaction_report(&input(&[big.to_string()], true))
+            .unwrap_err();
+    assert_eq!(e.code, E_REDACTION_LIMIT, "{e}");
+    assert_eq!(e.message, "The redaction exceeds 1048576 bytes per string.");
+    // a field nested 65 levels deep elsewhere: searched down to level 64, with one warning
+    let mut rows = json!([SECRET]);
+    for _ in 0..64 {
+        rows = json!([rows]);
+    }
+    let w = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([{"op": "create", "type": "table", "id": "$n", "parent": section, "fields": {"columns": [SECRET], "rows": rows}}]),
+        "",
+    );
+    let deep = id(&w.created["$n"]);
+    let vd = version(&p.r, "work", &deep);
+    let rec =
+        p.r.redact(&writer(), input(&[p.prose.to_string()], false))
+            .unwrap();
+    assert!(rec.redaction.is_some());
+    let line = "W_REDACTION_QUOTES: 1 records nest deeper than 64 levels; rdy did not search below \
+                that depth";
+    let lines: Vec<String> = rec
+        .warnings
+        .iter()
+        .map(|w| format!("{}: {}", w.code, w.message))
+        .collect();
+    let mut expected: Vec<String> = warnings(ReasonClass::Secret, false)
+        .iter()
+        .map(|w| format!("{}: {}", w.code, w.message))
+        .collect();
+    expected.insert(3, line.to_string());
+    assert_eq!(lines, expected, "one line, after the quotes warning");
+    assert!(rec.warnings.iter().all(|w| w.fix.is_empty()));
+    assert!(
+        rec.report.quotes.contains(&quote(
+            ImpactKind::BlockVersion,
+            format!("{deep}@{vd}"),
+            SECRET,
+            true
+        )),
+        "the deep record is still searched above the depth"
+    );
+    let text = report_text(&rec, 20_000).unwrap().text;
+    assert!(text.contains(line), "{text}");
+    // the deep table as a target is refused: the depth bound holds for selected targets
+    let e =
+        p.r.read()
+            .redaction_report(&input(&[deep.to_string()], true))
+            .unwrap_err();
+    assert_eq!(e.message, "The redaction exceeds 64 field levels.");
+}
+
+#[test]
+fn rdx5_id_shaped_strings_are_quoted_like_any_text() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    const PIN: &str = "PIN-7Q2ZZ";
+    assert!(
+        BlockId::parse(PIN).is_ok(),
+        "the text has the shape of an id"
+    );
+    // a block id's JSON is its plain string, as a value and as a map key
+    let pin = id(PIN);
+    assert_eq!(serde_json::to_string(&pin).unwrap(), "\"PIN-7Q2ZZ\"");
+    assert_eq!(
+        serde_json::to_string(&BTreeMap::from([(pin.clone(), 1)])).unwrap(),
+        "{\"PIN-7Q2ZZ\":1}"
+    );
+    assert_eq!(serde_json::to_value(&pin).unwrap(), json!(PIN));
+    let section = p.section.to_string();
+    let w = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "id": "$s", "parent": section, "body": PIN},
+            {"op": "create", "type": "prose", "id": "$q", "parent": section, "body": PIN},
+            {"op": "create", "type": "prose", "id": "$t", "parent": section, "body": format!("see {PIN}")}
+        ]),
+        "",
+    );
+    let s = id(&w.created["$s"]);
+    let q = id(&w.created["$q"]);
+    let t = id(&w.created["$t"]);
+    let (vq, vt) = (version(&p.r, "work", &q), version(&p.r, "work", &t));
+    let review = Review {
+        subject: ReviewSubject::Mention {
+            block: q.clone(),
+            entity: p.term.clone(),
+        },
+        case_hash: None,
+        verdict: Verdict::Dismiss,
+        reason: PIN.into(),
+        findings: vec![Finding {
+            block: q.clone(),
+            note: PIN.into(),
+        }],
+        provenance: prov("agent:r"),
+    };
+    let rh = p.r.store_mut().put(kinds::REVIEW, &review).unwrap();
+    p.r.invalidate();
+    let d = dry(&p.r, &[s.to_string()]);
+    let mut blocks = vec![
+        quote(ImpactKind::BlockVersion, format!("{q}@{vq}"), PIN, true),
+        quote(ImpactKind::BlockVersion, format!("{t}@{vt}"), PIN, true),
+    ];
+    blocks.sort_by(|a, b| a.record.cmp(&b.record));
+    blocks.push(quote(ImpactKind::Review, rh, PIN, false));
+    assert_eq!(
+        d.quotes, blocks,
+        "a string is a quote by its type, never by its shape; the review's ids are not"
+    );
+    // a body that spells an existing id: the id-typed parents and subjects that hold it are
+    // identifiers, not quotes
+    let w = write(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([{"op": "create", "type": "prose", "id": "$i", "parent": section, "body": q.to_string()}]),
+        "",
+    );
+    let d = dry(&p.r, &[w.created["$i"].clone()]);
+    assert_eq!(d.quotes, vec![], "q's id appears only as a BlockId value");
+}
+
+#[test]
+fn rdx5_a_pair_review_and_a_tension_through_it_are_affected() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    // the only edge to the target: the review's pair subject
+    let review = Review {
+        subject: ReviewSubject::Pair {
+            key: Hash([9; 32]),
+            items: vec![
+                PairItem {
+                    block: p.term.clone(),
+                    content: Hash([4; 32]),
+                },
+                PairItem {
+                    block: p.prose.clone(),
+                    content: Hash([5; 32]),
+                },
+            ],
+        },
+        case_hash: None,
+        verdict: Verdict::Tension,
+        reason: "they disagree".into(),
+        findings: vec![],
+        provenance: prov("agent:r"),
+    };
+    let rh = p.r.store_mut().put(kinds::REVIEW, &review).unwrap();
+    // the only edge to the target: that real review
+    let tension = SemanticTension {
+        key: Hash([3; 32]),
+        items: vec![PairItem {
+            block: p.term.clone(),
+            content: Hash([6; 32]),
+        }],
+        review: rh,
+        advice: Some("align them".into()),
+        blocking: false,
+        relay: None,
+        relayed_by: None,
+        prev: None,
+        provenance: prov("agent:t"),
+    };
+    let th = p.r.store_mut().put(kinds::TENSION, &tension).unwrap();
+    // neither: a review and a tension of the term only
+    let other = Review {
+        subject: ReviewSubject::Pair {
+            key: Hash([8; 32]),
+            items: vec![PairItem {
+                block: p.term.clone(),
+                content: Hash([4; 32]),
+            }],
+        },
+        ..review.clone()
+    };
+    let oh = p.r.store_mut().put(kinds::REVIEW, &other).unwrap();
+    let ot =
+        p.r.store_mut()
+            .put(
+                kinds::TENSION,
+                &SemanticTension {
+                    review: oh,
+                    ..tension.clone()
+                },
+            )
+            .unwrap();
+    p.r.invalidate();
+    let d = dry(&p.r, &[p.prose.to_string()]);
+    assert_eq!(
+        d.report_rows_of(&[ImpactKind::Review, ImpactKind::Tension]),
+        vec![
+            row(ImpactKind::Review, rh, ImpactRelation::References, false),
+            row(ImpactKind::Tension, th, ImpactRelation::References, false),
+        ],
+        "review {oh} and tension {ot} name only the term"
+    );
+}
+
+#[test]
+fn rdx5_a_request_computes_its_report_once() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    let t = vec![p.prose.to_string()];
+    let before = report_computations_for_tests();
+    p.r.redact(&writer(), input(&t, true)).unwrap();
+    assert_eq!(report_computations_for_tests() - before, 1, "a dry run");
+    let before = report_computations_for_tests();
+    let rec = p.r.redact(&writer(), input(&t, false)).unwrap();
+    assert!(rec.redaction.is_some());
+    assert_eq!(
+        report_computations_for_tests() - before,
+        1,
+        "a recorded request computes its report once, under the writer"
     );
 }

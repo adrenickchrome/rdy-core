@@ -7,7 +7,7 @@
 //! and every record that quotes a complete source string of a selected version. Quoted text is
 //! returned in the transient quote rows only; the manifest a request binds holds record
 //! identities, never the text.
-use super::scan::{require_text_policies, visit_strings, walk};
+use super::scan::{Hits, Matcher, require_text_policies, visit_strings, walk};
 use super::targets::{Checked, check_input, selector_text};
 use super::{Limits, RedactInput, limits};
 use crate::ReadState;
@@ -207,16 +207,37 @@ struct ChangeInfo {
     bases: Vec<Hash>,
 }
 
-/// The quote matcher: the sorted source strings and the matches found, by record.
+/// The quote search: the sorted source strings, their matcher (none when there are no
+/// sources), the matches found by record, and the records the search did not read in full.
 struct Quotes<'a> {
     sources: &'a [String],
-    limits: Limits,
+    matcher: Option<(Matcher, Hits)>,
+    levels: usize,
     found: BTreeMap<(u8, String, bool), BTreeSet<String>>,
+    deep: BTreeSet<(u8, String)>,
 }
 
-impl Quotes<'_> {
+impl<'a> Quotes<'a> {
+    fn new(sources: &'a [String], levels: usize) -> Result<Quotes<'a>, RdyError> {
+        let matcher = if sources.is_empty() {
+            None
+        } else {
+            let m = Matcher::new(sources)?;
+            let hits = Hits::new(&m)?;
+            Some((m, hits))
+        };
+        Ok(Quotes {
+            sources,
+            matcher,
+            levels,
+            found: BTreeMap::new(),
+            deep: BTreeSet::new(),
+        })
+    }
+
     /// Scans every string of `value` for complete source strings; each match is a quote of the
-    /// record `(kind, record)`.
+    /// record `(kind, record)`. A field nested deeper than the level bound is not searched below
+    /// it, and the record is counted in `deep`.
     fn scan<T: Serialize + ?Sized>(
         &mut self,
         kind: ImpactKind,
@@ -224,26 +245,34 @@ impl Quotes<'_> {
         erasable: bool,
         value: &T,
     ) -> Result<(), RdyError> {
-        if self.sources.is_empty() {
+        let Some((m, hits)) = &mut self.matcher else {
             return Ok(());
+        };
+        hits.begin();
+        let skipped = visit_strings(value, self.levels, &mut |s: &str| m.search(s, hits))?;
+        if skipped {
+            self.deep.insert((kind as u8, record.to_string()));
         }
-        let sources = self.sources;
-        let mut hits: Vec<&str> = vec![];
-        visit_strings(value, &self.limits, &mut |s: &str| {
-            for src in sources {
-                if s.contains(src.as_str()) {
-                    hits.push(src);
-                }
-            }
-        })?;
-        if !hits.is_empty() {
+        if !hits.found().is_empty() {
             let set = self
                 .found
                 .entry((kind as u8, record.to_string(), erasable))
                 .or_default();
-            set.extend(hits.into_iter().map(str::to_string));
+            let sources = self.sources;
+            set.extend(hits.found().iter().map(|i| sources[*i as usize].clone()));
         }
         Ok(())
+    }
+}
+
+/// The warning line for `n` records the quote search did not read below `levels` field levels.
+fn deep_warning(n: usize, levels: usize) -> RedactionWarning {
+    RedactionWarning {
+        code: W_REDACTION_QUOTES.to_string(),
+        message: format!(
+            "{n} records nest deeper than {levels} levels; rdy did not search below that depth"
+        ),
+        fix: String::new(),
     }
 }
 
@@ -420,6 +449,7 @@ pub(crate) fn compute(
     input: &RedactInput,
     quarantine: &[String],
 ) -> Result<Full, RdyError> {
+    super::count_computation();
     if let Some(e) = &state.error {
         return Err(e.clone());
     }
@@ -705,11 +735,7 @@ pub(crate) fn compute(
     }
 
     // pass 2: references and quotes
-    let mut quotes = Quotes {
-        sources: &sources,
-        limits,
-        found: BTreeMap::new(),
-    };
+    let mut quotes = Quotes::new(&sources, limits.levels)?;
     let mut seen: HashSet<(u8, Hash)> = HashSet::new();
     let mut proposals: Vec<(Hash, Vec<Hash>)> = vec![];
     let mut landings: BTreeMap<Hash, LandingRecord> = BTreeMap::new();
@@ -732,7 +758,6 @@ pub(crate) fn compute(
                     continue;
                 }
                 let b = reader.get_block(&h)?;
-                check_levels(&b, &limits)?;
                 quotes.scan(
                     ImpactKind::BlockVersion,
                     &version_record(&b.id, &h),
@@ -760,7 +785,6 @@ pub(crate) fn compute(
                         if block.is_redacted() || versions.contains(&v) {
                             continue;
                         }
-                        check_levels(block, &limits)?;
                         quotes.scan(
                             ImpactKind::BlockVersion,
                             &version_record(&block.id, &v),
@@ -960,6 +984,14 @@ pub(crate) fn compute(
     }
     for h in &affected_answers {
         row(ImpactKind::Answer, h.to_string(), refs, false);
+    }
+    let mut warnings = warnings;
+    if !quotes.deep.is_empty() {
+        let at = warnings
+            .iter()
+            .position(|w| w.code == W_REDACTION_QUOTES)
+            .map_or(warnings.len(), |i| i + 1);
+        warnings.insert(at, deep_warning(quotes.deep.len(), limits.levels));
     }
     let mut quote_rows: Vec<QuoteRow> = vec![];
     for ((kind, record, erasable), texts) in quotes.found {

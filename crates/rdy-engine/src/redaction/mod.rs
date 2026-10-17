@@ -17,10 +17,10 @@ pub use presentation::{ReportText, report_text};
 pub use report::{QuoteRow, RedactionReport, ReportCopies, compute_report};
 pub use scan::{ASSIGNED_KINDS, TextPolicy, require_text_policies, text_policy};
 
-use crate::error::{E_PERMISSION, E_VIEW_OWNER, RdyError};
-use crate::views::Action;
+use crate::error::{E_PERMISSION, RdyError};
+use crate::views::{Action, commit_claim};
 use crate::write::check_view_access;
-use crate::{Delta, Rdy, ReadState, Session, SessionKind};
+use crate::{Delta, Rdy, ReadState, Session};
 use rdy_model::redaction::{ReasonClass, RedactionWarning, carrier};
 use rdy_model::{Hash, Redaction, hash_of};
 use rdy_store::StoreError;
@@ -70,9 +70,11 @@ pub struct Limits {
     pub rows: usize,
     /// Bytes of one encoded report or record.
     pub record: usize,
-    /// UTF-8 bytes of one scanned string.
+    /// UTF-8 bytes of one source string (a selected target's own text). Other strings are
+    /// searched at any length; the scanned-bytes bound bounds that work.
     pub string: usize,
-    /// Nested field containers.
+    /// Nested field containers of a selected target. Elsewhere the quote search stops at this
+    /// depth and the report says how many records it did not read below it.
     pub levels: usize,
     /// Exact-match source strings.
     pub sources: usize,
@@ -96,6 +98,19 @@ impl Default for Limits {
 
 thread_local! {
     static LIMITS: Cell<Option<Limits>> = const { Cell::new(None) };
+    static COMPUTATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Tests only: how many complete reports this thread has computed, so a test can check that a
+/// request computes its report once.
+#[doc(hidden)]
+pub fn report_computations_for_tests() -> u64 {
+    COMPUTATIONS.with(Cell::get)
+}
+
+/// Counts one complete report computation on this thread.
+pub(crate) fn count_computation() {
+    COMPUTATIONS.with(|c| c.set(c.get().wrapping_add(1)));
 }
 
 /// The bounds this thread computes reports under: the defaults, unless a test lowered them.
@@ -126,12 +141,12 @@ impl Drop for LimitsGuard {
 /// it (a reader too).
 pub fn dry_run(st: &ReadState, input: &RedactInput) -> Result<RedactResult, RdyError> {
     let full = report::compute(st, input, &crate::quarantine::names(st.root()))?;
-    Ok(result_of(full, true, None, None))
+    Ok(result_of(full, true))
 }
 
-/// May `s` record a request in `view`? A writer, reviewer or approver may (a reader may not);
-/// the view must be one `s` may commit to; an agent records only in a view that exists and that
-/// it owns (a request is never the commit that claims a view).
+/// May `s` record a request in `view`? A writer, reviewer or approver may (a reader may not),
+/// under the existing view ownership rules of a commit (`check_view_access`): the carrier's
+/// commit creates or claims the session's own view exactly as an ordinary first commit does.
 pub fn check_recorder(st: &ReadState, s: &Session, view: &str) -> Result<(), RdyError> {
     if !s.role.can_write() {
         return Err(RdyError::new(
@@ -140,21 +155,7 @@ pub fn check_recorder(st: &ReadState, s: &Session, view: &str) -> Result<(), Rdy
             "start the session as a writer, or run the redaction as a dry run",
         ));
     }
-    check_view_access(st, view, s, Action::Commit)?;
-    if s.kind == SessionKind::Agent {
-        let owned = st
-            .view_head(view)
-            .and_then(|h| h.owner.as_ref())
-            .is_some_and(|o| (&o.actor, &o.run) == (&s.actor, &s.run));
-        if !owned {
-            return Err(RdyError::new(
-                E_VIEW_OWNER,
-                format!("view {view:?} is not a view this session owns"),
-                "record the request in your own view: write to it first, then record the request",
-            ));
-        }
-    }
-    Ok(())
+    check_view_access(st, view, s, Action::Commit)
 }
 
 /// Records the request `input` with its `report` in `session`'s default view, through the
@@ -190,42 +191,77 @@ pub fn prepare_request_in(
     if full.report.report_hash != report.report_hash || full.report.targets != report.targets {
         return Err(StoreError::RedactionStale.into());
     }
-    if full.request_targets.is_empty() {
-        return Ok(result_of(full, false, None, None));
+    let (result, parts) = split(full);
+    record(rdy, session, view, result, parts)
+}
+
+/// What a request records beside its result: the manifest, the residues and its own targets.
+struct Parts {
+    manifest: rdy_model::redaction::RedactionManifest,
+    residues: Vec<rdy_model::redaction::RedactionResidue>,
+    request_targets: Vec<rdy_model::redaction::RedactTarget>,
+}
+
+/// A computed report as a result with null hashes, and the parts a request records.
+fn split(full: report::Full) -> (RedactResult, Parts) {
+    let parts = Parts {
+        manifest: full.manifest,
+        residues: full.residues,
+        request_targets: full.request_targets,
+    };
+    let result = RedactResult {
+        dry_run: false,
+        reason_class: full.class,
+        reason: full.reason,
+        change: None,
+        redaction: None,
+        warnings: full.report.warnings.clone(),
+        report: full.report,
+    };
+    (result, parts)
+}
+
+/// Records the request of `result` in `view` from its computed `parts`, without computing the
+/// report again: the carrier (no ops, the session's provenance), the residues and the request,
+/// through the store's checked preparation and commit, as one batch. The carrier's commit claims
+/// the view as an ordinary first commit does (`commit_claim`). When every target was already
+/// removed nothing is written and both hashes stay null.
+fn record(
+    rdy: &mut Rdy,
+    session: &Session,
+    view: &str,
+    mut result: RedactResult,
+    parts: Parts,
+) -> Result<RedactResult, RdyError> {
+    if parts.request_targets.is_empty() {
+        return Ok(result);
     }
+    let claim = commit_claim(&rdy.read(), session, view)?;
     let provenance = session.provenance();
     let carrier = carrier(view.to_string(), vec![], provenance.clone());
     let request = Redaction {
         carrier: hash_of(&carrier),
         actor: provenance,
-        targets: full.request_targets.clone(),
-        reason_class: full.class,
-        reason: full.reason.clone(),
-        manifest: full.manifest.clone(),
+        targets: parts.request_targets,
+        reason_class: result.reason_class,
+        reason: result.reason.clone(),
+        manifest: parts.manifest,
     };
-    let prepared = rdy
-        .store()
-        .prepare_redaction(&carrier, &request, &full.residues)?;
+    let prepared =
+        rdy.store()
+            .prepare_redaction_claiming(&carrier, &request, &parts.residues, claim)?;
     let change = prepared.carrier();
     let redaction = rdy.store_mut().commit_redaction(prepared)?;
-    Ok(result_of(full, false, Some(change), Some(redaction)))
+    result.change = Some(change);
+    result.redaction = Some(redaction);
+    Ok(result)
 }
 
 /// The result of a computed report.
-fn result_of(
-    full: report::Full,
-    dry_run: bool,
-    change: Option<Hash>,
-    redaction: Option<Hash>,
-) -> RedactResult {
+fn result_of(full: report::Full, dry_run: bool) -> RedactResult {
     RedactResult {
         dry_run,
-        reason_class: full.class,
-        reason: full.reason,
-        change,
-        redaction,
-        warnings: full.report.warnings.clone(),
-        report: full.report,
+        ..split(full).0
     }
 }
 
@@ -251,14 +287,30 @@ impl Rdy {
         view: &str,
         input: RedactInput,
     ) -> Result<RedactResult, RdyError> {
+        self.redact_checked(session, view, input, &mut |_| Ok(()))
+    }
+
+    /// [`Rdy::redact_in`], where `check` reads the result before anything is recorded (its
+    /// hashes still null): an error from it refuses the request and writes nothing. The report
+    /// is computed once, from the published state, and recorded from that computation; no
+    /// second computation runs on the writer. A dry run returns before `check`.
+    pub fn redact_checked(
+        &mut self,
+        session: &Session,
+        view: &str,
+        input: RedactInput,
+        check: &mut dyn FnMut(&RedactResult) -> Result<(), RdyError>,
+    ) -> Result<RedactResult, RdyError> {
         let st = self.read();
         if input.dry_run {
             return dry_run(&st, &input);
         }
         check_recorder(&st, session, view)?;
-        let report = st.redaction_report(&input)?;
+        let full = report::compute(&st, &input, &crate::quarantine::names(st.root()))?;
         drop(st);
-        let result = prepare_request_in(self, session, view, input, report)?;
+        let (result, parts) = split(full);
+        check(&result)?;
+        let result = record(self, session, view, result, parts)?;
         if result.change.is_some() {
             self.publish(Delta::Full)?;
         }

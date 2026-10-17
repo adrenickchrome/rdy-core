@@ -974,7 +974,7 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
     dispatch(&c, "redact", args(true)).unwrap();
     let err = dispatch(&c, "redact", args(false)).unwrap_err();
     assert_eq!(err.code, "E_PERMISSION", "{err}");
-    // an agent records only in a view it owns
+    // an agent records under the existing ownership rules: never in the human's work view
     let a = Session::agent("agent:a".into(), Some("r1".into()), Role::Writer).unwrap();
     let c = cx(&e, &a, d.path());
     dispatch(&c, "redact", args(true)).unwrap();
@@ -982,23 +982,24 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
     w["view"] = json!("work");
     let err = dispatch(&c, "redact", w).unwrap_err();
     assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
-    let err = dispatch(&c, "redact", args(false)).unwrap_err();
-    assert_eq!(err.code, "E_VIEW_OWNER", "r1 has no head yet: {err}");
     assert_eq!(e.read().seq(), end, "refusals write nothing");
-    let a2 = a.clone();
-    write_typed(&e, move |r| {
-        let ops = serde_json::from_value(json!([{"op": "create", "type": "folder", "fields": {"name": "mine", "title": "Mine"}}])).unwrap();
-        r.write(&a2, WriteRequest { view: "r1".into(), ops, justification: None, message: String::new() })
-    })
-    .unwrap();
+    // an agent's first request creates its own view and claims it, as its first commit would
+    assert!(e.read().view_head("r1").is_none(), "r1 has no head yet");
     let v = dispatch(&c, "redact", args(false)).unwrap();
     let ch: rdy_model::Hash = v["change"].as_str().unwrap().parse().unwrap();
     assert!(e.read().included("r1").contains(&ch));
+    let owner = e.read().view_head("r1").unwrap().owner.clone().unwrap();
+    assert_eq!(
+        (owner.actor.as_str(), owner.run.as_deref()),
+        ("agent:a", Some("r1"))
+    );
+    // another agent may not record in it: the existing ownership error, unchanged
     let other = Session::agent("agent:b".into(), Some("r2".into()), Role::Writer).unwrap();
     let mut w = args(false);
     w["view"] = json!("r1");
     let err = dispatch(&cx(&e, &other, d.path()), "redact", w).unwrap_err();
     assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
+    assert_eq!(err.message, "view \"r1\" is owned by agent:a/r1");
     // the strict args: a near key names the field, in the args' order
     let s = human();
     let c = cx(&e, &s, d.path());

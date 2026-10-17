@@ -1,7 +1,7 @@
 //! The redact op: a redaction dry run or request (plan Redaction). A dry run reads one snapshot
-//! with any role; a request runs `Rdy::redact_in` on the writer and replies through the mutation
-//! envelope. Both replies carry the shared text (`report_text`) and, when its rows were omitted,
-//! `truncated: true`.
+//! with any role; a request runs `Rdy::redact_checked` on the writer, which computes the report
+//! once, and replies through the mutation envelope. Both replies carry the shared text
+//! (`report_text`) and, when its rows were omitted, `truncated: true`.
 use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::redaction::presentation::{DEFAULT_TOKENS, check_budget, check_recorded_fits};
@@ -51,20 +51,12 @@ pub(super) fn redact(cx: &OpContext, a: RedactArgs) -> Result<Value, RdyError> {
     let v = view.clone();
     let out = write_and_report(cx.engine, &view, None, move |r| {
         // the permission first, then the budget: its range, and the text of the report about to
-        // be recorded, so a budget refusal never follows a write
-        let st = r.read();
-        check_recorder(&st, &s, &v)?;
+        // be recorded, so a budget refusal never follows a write; the report is computed once
+        check_recorder(&r.read(), &s, &v)?;
         check_budget(max_tokens)?;
-        let probe = dry_run(
-            &st,
-            &RedactInput {
-                dry_run: true,
-                ..input.clone()
-            },
-        )?;
-        check_recorded_fits(&probe, max_tokens)?;
-        drop(st);
-        let result = r.redact_in(&s, &v, input)?;
+        let result = r.redact_checked(&s, &v, input, &mut |probe| {
+            check_recorded_fits(probe, max_tokens)
+        })?;
         *inner.lock().unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
         Ok(result)
     })?;

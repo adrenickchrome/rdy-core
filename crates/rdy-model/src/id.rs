@@ -135,15 +135,61 @@ impl fmt::Debug for BlockId {
     }
 }
 
+/// A block id serializes as a newtype struct named `BlockId` around its string. Postcard, JSON
+/// and YAML read through a newtype struct, so the encoded bytes are the plain string's; a typed
+/// visitor can still tell an id from text by the name.
 impl Serialize for BlockId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
+        s.serialize_newtype_struct(BLOCK_ID_NAME, self.0.as_str())
     }
 }
+
+/// The newtype name a block id serializes under.
+const BLOCK_ID_NAME: &str = "BlockId";
 
 impl<'de> Deserialize<'de> for BlockId {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         BlockId::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A block id carries a type marker a typed visitor can see (`serialize_newtype_struct`), and
+    /// postcard and YAML read through it: every stored byte and hash stays the plain string's.
+    #[test]
+    fn rdx5_a_block_id_encodes_as_its_plain_string() {
+        let id = BlockId::parse("PIN-7Q2ZZ").unwrap();
+        let s = "PIN-7Q2ZZ".to_string();
+        let typed = (
+            id.clone(),
+            Some(id.clone()),
+            vec![id.clone(), id.clone()],
+            BTreeMap::from([(id.clone(), 1u8)]),
+        );
+        let plain = (
+            s.clone(),
+            Some(s.clone()),
+            vec![s.clone(), s.clone()],
+            BTreeMap::from([(s.clone(), 1u8)]),
+        );
+        assert_eq!(
+            postcard::to_allocvec(&typed).unwrap(),
+            postcard::to_allocvec(&plain).unwrap()
+        );
+        assert_eq!(
+            postcard::to_allocvec(&id).unwrap(),
+            [&[9u8][..], b"PIN-7Q2ZZ"].concat()
+        );
+        assert_eq!(
+            serde_yaml_ng::to_string(&typed).unwrap(),
+            serde_yaml_ng::to_string(&plain).unwrap()
+        );
+        let back: BlockId = postcard::from_bytes(&postcard::to_allocvec(&id).unwrap()).unwrap();
+        assert_eq!(back, id);
     }
 }
