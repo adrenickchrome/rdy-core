@@ -348,7 +348,9 @@ fn removal_card_show(item: Item) -> RemovalCardShow {
 }
 
 /// The text of `s`, a serialized [`ProposalShow`]: the command line renders the daemon's JSON
-/// and MCP renders its own.
+/// and MCP renders its own. A version with a removal card shows the card whole and its card
+/// hash before the approve or blocking line; a card that could not be read shows its error
+/// row (code, message and fix) there instead.
 pub fn proposal_text(v: &Value) -> String {
     let s = |x: &Value| x.as_str().unwrap_or("").to_string();
     let first12 = |x: &Value| s(x).chars().take(12).collect::<String>();
@@ -417,6 +419,23 @@ pub fn proposal_text(v: &Value) -> String {
         })
         .collect();
     out.push_str(&format!("versions: {}\n", versions.join(", ")));
+    // the removal card whole, the text `rdy pending` and `rdy approve` print (D-CC90E), so a
+    // person sees what approving removes before the approve line
+    if let Some(c) = v.get("removal_card").filter(|c| c.is_object()) {
+        out.push_str(&format!(
+            "\n{}\n\ncard hash: {}\n",
+            s(&c["card"]),
+            s(&c["card_hash"])
+        ));
+    }
+    if let Some(e) = v.get("removal_card_error").filter(|e| e.is_object()) {
+        out.push_str(&format!(
+            "removal card: not read ({}: {}) (fix: {})\n",
+            s(&e["code"]),
+            s(&e["message"]),
+            s(&e["fix"])
+        ));
+    }
     let blocking: Vec<String> = v["blocking"]
         .as_array()
         .into_iter()
@@ -578,6 +597,67 @@ mod tests {
         v["advised"] = json!([]);
         v["advised_error"] = json!("E_IO: busy");
         assert!(proposal_text(&v).ends_with("advised: not read (E_IO: busy)\n"));
+    }
+
+    /// rdx13 (13.promoted fix round 1; ruling task-13-round1 item 2): the text of a show that
+    /// carries `removal_card` prints that card whole, as `rdy approve` and `rdy pending` print it,
+    /// then its card hash, before the approve or blocking line. A show that carries
+    /// `removal_card_error` prints its code, message and fix there instead.
+    #[test]
+    fn rdx13_proposal_text_shows_the_removal_card_or_its_error() {
+        let h = |c: char| c.to_string().repeat(64);
+        let card = "P-111111111111@2  Pins                approve\n\nContent removal r-1\n  Reason class: secret.\n\nApproved content removal cannot be undone.";
+        let mut v = json!({
+            "ref": "P-111111111111@2", "id": h('2'), "stable": h('1'), "version": 2,
+            "title": "Pins", "summary": null, "view": "work",
+            "proposed_by": {"actor": "agent:a", "run": null}, "proposed_at": "2026-10-06T10:00:00Z",
+            "canon_at": null, "state": "open", "landing": null, "changes": [], "blocks": 0,
+            "conflicts": [], "blocking": [],
+            "versions": [{"ref": "P-111111111111@2", "id": h('2'), "latest": true, "landed": false}],
+            "removal_card": {"ref": "P-111111111111@2", "card": card, "card_hash": h('9'), "removal": []}
+        });
+        let head = "proposal P-111111111111@2 (version 222222222222): Pins\n\
+                    view work, proposed by agent:a at 2026-10-06T10:00:00Z\n";
+        let open = format!(
+            "{head}state: open\n\
+             changes: 0 (0 blocks)\n\
+             versions: P-111111111111@2 (latest)\n\
+             \n{card}\n\n\
+             card hash: {}\n\
+             approve with: rdy approve P-111111111111@2\n",
+            h('9')
+        );
+        assert_eq!(proposal_text(&v), open);
+        // a withdrawn version keeps its card and offers no approve command
+        v["state"] = json!("withdrawn");
+        v["blocking"] = json!(["withdrawn (view work closed)"]);
+        let t = proposal_text(&v);
+        assert!(
+            t.ends_with(&format!(
+                "\n{card}\n\ncard hash: {}\nblocking: withdrawn (view work closed)\n",
+                h('9')
+            )),
+            "{t}"
+        );
+        // the card could not be read: the error row stands in its place
+        v["state"] = json!("open");
+        v["blocking"] = json!([]);
+        v.as_object_mut().unwrap().remove("removal_card");
+        v["removal_card_error"] = json!({
+            "code": "E_REDACTION_BUDGET",
+            "message": "The output budget is too small for the redaction warning.",
+            "fix": "raise max_tokens"
+        });
+        assert_eq!(
+            proposal_text(&v),
+            format!(
+                "{head}state: open\n\
+                 changes: 0 (0 blocks)\n\
+                 versions: P-111111111111@2 (latest)\n\
+                 removal card: not read (E_REDACTION_BUDGET: The output budget is too small for the redaction warning.) (fix: raise max_tokens)\n\
+                 approve with: rdy approve P-111111111111@2\n"
+            )
+        );
     }
 
     /// The JSON a show serialized to before rdx13 (plan amendment, rulings task-13-round1 and

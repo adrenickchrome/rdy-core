@@ -864,16 +864,14 @@ fn rdx13_a_version_the_queue_omits_still_shows_its_card() {
     assert_eq!(landings(&s), before, "nothing landed");
 }
 
-/// rdx13 fix round 1 (finding 4): an approval renders only its own version's card. A removal
-/// proposal elsewhere whose card does not fit any budget blocks neither the queue-free approval
-/// of an ordinary proposal nor anything but its own approval, which it refuses before running.
-#[test]
-fn rdx13_an_oversized_card_elsewhere_never_blocks_an_approval() {
-    let (s, id) = secret_served();
+/// Records one secret request for `id` and 17 more whose reasons are 4096 bytes each, through
+/// the op, and proposes `work`: the version's removal card does not fit any budget. Returns the
+/// version's ref.
+fn propose_oversized_removal(s: &Served, id: &str) -> String {
     let long = "r".repeat(4096);
     let record = |reason: &str| {
         op_as(
-            &s,
+            s,
             &human(),
             "redact",
             json!({"targets": [id], "reason_class": "secret", "reason": reason}),
@@ -893,7 +891,16 @@ fn rdx13_an_oversized_card_elsewhere_never_blocks_an_approval() {
         "Removes the leaked code.",
     ]);
     assert!(ok, "{big}");
-    let big = big["ref"].as_str().unwrap().to_string();
+    big["ref"].as_str().unwrap().to_string()
+}
+
+/// rdx13 fix round 1 (finding 4): an approval renders only its own version's card. A removal
+/// proposal elsewhere whose card does not fit any budget blocks neither the queue-free approval
+/// of an ordinary proposal nor anything but its own approval, which it refuses before running.
+#[test]
+fn rdx13_an_oversized_card_elsewhere_never_blocks_an_approval() {
+    let (s, id) = secret_served();
+    let big = propose_oversized_removal(&s, &id);
     let e = op_as(&s, &human(), "pending", json!({"max_tokens": 20000})).unwrap_err();
     assert_eq!(
         e.code, "E_REDACTION_BUDGET",
@@ -970,4 +977,71 @@ fn rdx13_a_card_that_cannot_be_shown_stops_the_approval() {
         "the approval never ran: {err}"
     );
     assert_eq!(landings(&s), before, "nothing landed");
+}
+
+/// rdx13 (13.promoted fix round 1; ruling task-13-round1 item 2): `rdy show P-x@n` as text
+/// shows a person what approving the version removes. For an open removal proposal it prints
+/// the version's removal card whole, the same text `rdy pending` and `rdy approve` print, and the
+/// card hash; for a version whose card cannot be read it prints the error row (code, message and
+/// fix) that the JSON show carries and a direct approval refuses with.
+#[test]
+fn rdx13_show_text_prints_the_removal_card_or_its_error() {
+    let (s, id) = secret_served();
+    let p = propose_removal(&s, &id, Some("Removes the leaked code."));
+    let pref = p["ref"].as_str().unwrap().to_string();
+    let q = op_as(&s, &human(), "pending", json!({"max_tokens": 20000})).unwrap();
+    let item = q["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["ref"] == pref.as_str())
+        .unwrap_or_else(|| panic!("{pref}: {q}"))
+        .clone();
+    let card = item["card"].as_str().unwrap().to_string();
+    let card_hash = item["card_hash"].as_str().unwrap().to_string();
+    let o = s.rdy(&["show", &pref]);
+    let (ok, stdout, err) = out(&o);
+    assert!(ok, "{err}");
+    assert!(
+        stdout.contains(&format!(
+            "\n{card}\n\ncard hash: {card_hash}\napprove with: rdy approve {pref}\n"
+        )),
+        "the whole card and its hash, before the approve line\n---\n{stdout}"
+    );
+    for line in [
+        "Content removal".to_string(),
+        "  Reason class: secret.".to_string(),
+        "  Reason: a leaked code".to_string(),
+        format!("  {COPIES}"),
+        format!("  {QUOTES}"),
+        format!("  {REUSE}"),
+        format!("  {ROTATE}"),
+        IRREVERSIBLE.to_string(),
+    ] {
+        assert!(stdout.contains(&line), "{line}\n---\n{stdout}");
+    }
+    assert!(!stdout.contains("ZEBRA"), "{stdout}");
+    assert!(!stdout.contains("removal card: not read"), "{stdout}");
+
+    // a version whose card does not fit any budget: the error row instead of the card
+    let (s, id) = secret_served();
+    let big = propose_oversized_removal(&s, &id);
+    let (ok, v) = s.json(&["--json", "show", &big]);
+    assert!(ok, "{v}");
+    let e = &v["proposal"]["removal_card_error"];
+    assert_eq!(e["code"], "E_REDACTION_BUDGET", "{v}");
+    let o = s.rdy(&["show", &big]);
+    let (ok, stdout, err) = out(&o);
+    assert!(ok, "{err}");
+    assert!(
+        stdout.contains(&format!(
+            "removal card: not read ({}: {}) (fix: {})\n",
+            text(&e["code"]),
+            text(&e["message"]),
+            text(&e["fix"])
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Content removal"), "{stdout}");
+    assert!(!stdout.contains("card hash:"), "{stdout}");
 }
