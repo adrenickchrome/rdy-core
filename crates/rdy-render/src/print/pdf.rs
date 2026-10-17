@@ -35,12 +35,18 @@ const MONO_NAME: &[u8] = b"F2";
 /// The layout the PDF draws: the print on A4 pages, with the figures whose images print
 /// ([`image::decode`]) at their size and every other figure as a line.
 pub fn lay_out(p: &Print, fonts: &Fonts) -> Laid {
-    lay_out_with(p, fonts, &decoded(p))
+    let sizes = p
+        .blobs
+        .iter()
+        .filter_map(|(h, b)| image::decode(&b.media_type, &b.bytes).map(|px| (*h, px.size())))
+        .collect();
+    lay_out_with(p, fonts, &sizes)
 }
 
 /// The PDF of `p`: its bytes, its number of pages and its warnings. The warnings are the build's,
-/// then one per figure that does not print, in print order, then one for the characters with no
-/// glyph. The same print gives the same bytes.
+/// then one per figure that does not print (its type or form does not print, or it is over the
+/// budget of [`image::decode`]), in print order, then one for the characters with no glyph. The
+/// same print gives the same bytes.
 pub fn pdf_bytes(p: &Print, fonts: &Fonts) -> (Vec<u8>, usize, Vec<String>) {
     let r = render(p, fonts);
     (r.bytes, r.pages, r.warnings)
@@ -74,28 +80,14 @@ struct Rendered {
     images: usize,
 }
 
-/// The print's figure images that print, by blob.
-fn decoded(p: &Print) -> BTreeMap<Hash, Pixels> {
-    p.blobs
-        .iter()
-        .filter_map(|(h, b)| image::decode(&b.media_type, &b.bytes).map(|px| (*h, px)))
-        .collect()
+/// The layout with the figure images of these sizes; every other figure is a line.
+fn lay_out_with(p: &Print, fonts: &Fonts, sizes: &BTreeMap<Hash, (u32, u32)>) -> Laid {
+    layout::lay_out(p, fonts, &PageSpec::A4, &|h: &Hash| sizes.get(h).copied())
 }
 
-fn lay_out_with(p: &Print, fonts: &Fonts, images: &BTreeMap<Hash, Pixels>) -> Laid {
-    layout::lay_out(p, fonts, &PageSpec::A4, &|h: &Hash| {
-        images.get(h).map(Pixels::size)
-    })
-}
-
-/// The warnings of the PDF of `p`, in their order.
-fn warnings(p: &Print, images: &BTreeMap<Hash, Pixels>, laid: &Laid) -> Vec<String> {
-    fn figures(
-        p: &Print,
-        images: &BTreeMap<Hash, Pixels>,
-        blocks: &[PBlock],
-        out: &mut Vec<String>,
-    ) {
+/// The warnings of the PDF of `p`, in their order. `images` are the figure images that print.
+fn warnings<V>(p: &Print, images: &BTreeMap<Hash, V>, laid: &Laid) -> Vec<String> {
+    fn figures<V>(p: &Print, images: &BTreeMap<Hash, V>, blocks: &[PBlock], out: &mut Vec<String>) {
         for b in blocks {
             match b {
                 PBlock::Figure {
@@ -104,11 +96,21 @@ fn warnings(p: &Print, images: &BTreeMap<Hash, Pixels>, laid: &Laid) -> Vec<Stri
                     if let Some(blob) = p.blobs.get(h)
                         && !images.contains_key(h)
                     {
-                        out.push(format!(
-                            "the figure {alt:?} is a {} image, which does not print in a PDF; \
-                             the HTML and Markdown exports show it",
-                            blob.media_type
-                        ));
+                        out.push(match image::over_budget(&blob.media_type, &blob.bytes) {
+                            Some((w, h)) => format!(
+                                "the figure {alt:?} is {w}×{h} pixels, larger than a PDF export \
+                                 prints ({}×{}, {} MiB decoded); the HTML and Markdown exports \
+                                 show it",
+                                image::MAX_SIDE,
+                                image::MAX_SIDE,
+                                image::MAX_DECODED >> 20
+                            ),
+                            None => format!(
+                                "the figure {alt:?} is a {} image, which does not print in a \
+                                 PDF; the HTML and Markdown exports show it",
+                                blob.media_type
+                            ),
+                        });
                     }
                 }
                 PBlock::List { items, .. } => {
@@ -296,38 +298,45 @@ fn image_name(i: usize) -> String {
 }
 
 fn render(p: &Print, fonts: &Fonts) -> Rendered {
-    let images = decoded(p);
-    let laid = lay_out_with(p, fonts, &images);
-    let warnings = warnings(p, &images, &laid);
+    let mut pdf = Pdf::new();
+    let mut next = Ref::new(1);
+    let catalog_ref = next.bump();
+    let tree_ref = next.bump();
+    let info_ref = next.bump();
 
-    // the glyphs each DejaVu subset draws, whether Courier draws, and the images drawn
+    // the images, one at a time (the task-9 ruling): each is decoded, written and its pixels
+    // dropped before the next, so the export never holds more than one decoded image
+    let mut sizes: BTreeMap<Hash, (u32, u32)> = BTreeMap::new();
+    let mut image_index: BTreeMap<Hash, usize> = BTreeMap::new();
+    let mut image_refs: Vec<Ref> = vec![];
+    for (h, b) in &p.blobs {
+        let Some(px) = image::decode(&b.media_type, &b.bytes) else {
+            continue;
+        };
+        let r = next.bump();
+        sizes.insert(*h, px.size());
+        image_index.insert(*h, image_refs.len());
+        image_refs.push(r);
+        write_image(&mut pdf, &mut next, r, px);
+    }
+    let laid = lay_out_with(p, fonts, &sizes);
+    let warnings = warnings(p, &sizes, &laid);
+
+    // the glyphs each DejaVu subset draws, and whether Courier draws
     let mut subsets = [Subset::default(), Subset::default()];
     let mut mono = false;
-    let mut drawn: BTreeSet<Hash> = BTreeSet::new();
     for item in laid.pages.iter().flat_map(|pg| &pg.items) {
-        match item {
-            LItem::Text { face, text, .. } => match slot(*face) {
+        if let LItem::Text { face, text, .. } = item {
+            match slot(*face) {
                 Some(s) => {
                     for c in text.chars() {
                         subsets[s].glyphs.entry(glyph(fonts, *face, c)).or_insert(c);
                     }
                 }
                 None => mono = true,
-            },
-            LItem::Image { blob, .. } => {
-                drawn.insert(*blob);
             }
-            _ => {}
         }
     }
-    let image_index: BTreeMap<Hash, usize> =
-        drawn.iter().enumerate().map(|(i, h)| (*h, i)).collect();
-
-    let mut pdf = Pdf::new();
-    let mut next = Ref::new(1);
-    let catalog_ref = next.bump();
-    let tree_ref = next.bump();
-    let info_ref = next.bump();
 
     // the fonts
     let mut font_refs: BTreeMap<&'static [u8], Ref> = BTreeMap::new();
@@ -346,60 +355,6 @@ fn render(p: &Print, fonts: &Fonts) -> Rendered {
         pdf.type1_font(r)
             .base_font(Name(b"Courier"))
             .encoding_predefined(Name(b"WinAnsiEncoding"));
-    }
-
-    // the images
-    let mut image_refs = vec![];
-    for h in &drawn {
-        let r = next.bump();
-        image_refs.push(r);
-        match &images[h] {
-            Pixels::Jpeg {
-                w,
-                h,
-                components,
-                bytes,
-            } => {
-                let mut x = pdf.image_xobject(r, bytes);
-                x.width(dim(*w))
-                    .height(dim(*h))
-                    .color_space_name(Name(if *components == 1 {
-                        b"DeviceGray"
-                    } else {
-                        b"DeviceRGB"
-                    }))
-                    .bits_per_component(8)
-                    .filter(Filter::DctDecode);
-            }
-            Pixels::Raw {
-                w,
-                h,
-                gray,
-                color,
-                alpha,
-            } => {
-                let mask = alpha.as_ref().map(|a| (next.bump(), flate(a)));
-                let packed = flate(color);
-                let mut x = pdf.image_xobject(r, &packed);
-                x.width(dim(*w))
-                    .height(dim(*h))
-                    .color_space_name(Name(if *gray { b"DeviceGray" } else { b"DeviceRGB" }))
-                    .bits_per_component(8)
-                    .filter(Filter::FlateDecode);
-                if let Some((m, _)) = &mask {
-                    x.s_mask(*m);
-                }
-                x.finish();
-                if let Some((m, packed)) = &mask {
-                    pdf.image_xobject(*m, packed)
-                        .width(dim(*w))
-                        .height(dim(*h))
-                        .color_space_name(Name(b"DeviceGray"))
-                        .bits_per_component(8)
-                        .filter(Filter::FlateDecode);
-                }
-            }
-        }
     }
 
     // the pages
@@ -562,7 +517,60 @@ fn render(p: &Print, fonts: &Fonts) -> Rendered {
         bytes: pdf.finish(),
         pages: laid.pages.len(),
         warnings,
-        images: drawn.len(),
+        images: image_refs.len(),
+    }
+}
+
+/// Writes one figure image as an image XObject at `r`, with its soft mask when it has alpha,
+/// and drops its pixels.
+fn write_image(pdf: &mut Pdf, next: &mut Ref, r: Ref, px: Pixels) {
+    match px {
+        Pixels::Jpeg {
+            w,
+            h,
+            components,
+            bytes,
+        } => {
+            pdf.image_xobject(r, &bytes)
+                .width(dim(w))
+                .height(dim(h))
+                .color_space_name(Name(if components == 1 {
+                    b"DeviceGray"
+                } else {
+                    b"DeviceRGB"
+                }))
+                .bits_per_component(8)
+                .filter(Filter::DctDecode);
+        }
+        Pixels::Raw {
+            w,
+            h,
+            gray,
+            color,
+            alpha,
+        } => {
+            let mask = alpha.map(|a| (next.bump(), flate(&a)));
+            let packed = flate(&color);
+            drop(color);
+            let mut x = pdf.image_xobject(r, &packed);
+            x.width(dim(w))
+                .height(dim(h))
+                .color_space_name(Name(if gray { b"DeviceGray" } else { b"DeviceRGB" }))
+                .bits_per_component(8)
+                .filter(Filter::FlateDecode);
+            if let Some((m, _)) = &mask {
+                x.s_mask(*m);
+            }
+            x.finish();
+            if let Some((m, packed)) = &mask {
+                pdf.image_xobject(*m, packed)
+                    .width(dim(w))
+                    .height(dim(h))
+                    .color_space_name(Name(b"DeviceGray"))
+                    .bits_per_component(8)
+                    .filter(Filter::FlateDecode);
+            }
+        }
     }
 }
 
@@ -1049,5 +1057,171 @@ mod tests {
             }
         }
         assert_eq!(faces_seen.len(), 5, "every face: {faces_seen:?}");
+    }
+
+    /// A print of one doc whose blocks are these figures, each `(media type, bytes, alt)`.
+    fn figures(figs: Vec<(&str, Vec<u8>, &str)>) -> Print {
+        let mut p = sample();
+        p.docs.truncate(1);
+        p.docs[0].blocks = vec![];
+        for (media_type, bytes, alt) in figs {
+            let h = Hash::of(&bytes);
+            p.docs[0].blocks.push(PBlock::Figure {
+                anchor: None,
+                blob: Some(h),
+                alt: alt.into(),
+                caption: vec![],
+            });
+            p.blobs.insert(
+                h,
+                crate::print::Blob {
+                    media_type: media_type.into(),
+                    bytes,
+                    file: format!("assets/{h}"),
+                },
+            );
+        }
+        p
+    }
+
+    /// The image objects of a PDF, each with its soft mask's object when it has one.
+    fn image_objects(objs: &BTreeMap<u32, Obj>) -> Vec<(&Obj, Option<&Obj>)> {
+        let masks: BTreeSet<u32> = objs
+            .values()
+            .filter_map(|o| refs(&o.dict, r"/(SMask) (\d+) 0 R").first().map(|r| r.1))
+            .collect();
+        objs.iter()
+            .filter(|(id, o)| o.dict.contains("/Subtype /Image") && !masks.contains(id))
+            .map(|(_, o)| {
+                let mask = refs(&o.dict, r"/(SMask) (\d+) 0 R")
+                    .first()
+                    .map(|r| &objs[&r.1]);
+                (o, mask)
+            })
+            .collect()
+    }
+
+    fn figure_lines(laid: &Laid) -> Vec<String> {
+        laid.pages
+            .iter()
+            .flat_map(|pg| &pg.items)
+            .filter_map(|it| match it {
+                LItem::Text { text, .. } if text.starts_with("Figure: ") => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ec9_a_trns_colour_key_prints_as_a_soft_mask() {
+        use crate::print::image::tests::{filter, png_with};
+        let rgb = vec![
+            vec![0u8, 0, 0, 9, 9, 9, 0, 0, 0],
+            vec![1, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
+        let gray = vec![vec![0u8, 7, 0, 7]];
+        let p = figures(vec![
+            (
+                "image/png",
+                png_with(3, 2, 8, 2, 0, &filter(&rgb, 3), &[(b"tRNS", vec![0; 6])]),
+                "black is see-through",
+            ),
+            (
+                "image/png",
+                png_with(4, 1, 8, 0, 0, &filter(&gray, 1), &[(b"tRNS", vec![0, 7])]),
+                "seven is see-through",
+            ),
+        ]);
+        let fonts = Fonts::load();
+        let (pdf, _, warnings) = pdf_bytes(&p, &fonts);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let objs = objects(&pdf);
+        let images = image_objects(&objs);
+        assert_eq!(images.len(), 2);
+        for (color, mask) in images {
+            let mask = mask.unwrap_or_else(|| panic!("a soft mask: {}", color.dict));
+            assert!(
+                mask.dict.contains("/ColorSpace /DeviceGray"),
+                "{}",
+                mask.dict
+            );
+            if color.dict.contains("/Width 3") {
+                assert!(color.dict.contains("/ColorSpace /DeviceRGB"));
+                assert_eq!(inflate(color), rgb.concat());
+                assert_eq!(inflate(mask), vec![0, 255, 0, 255, 0, 0]);
+            } else {
+                assert!(color.dict.contains("/ColorSpace /DeviceGray"));
+                assert_eq!(inflate(color), gray.concat());
+                assert_eq!(inflate(mask), vec![255, 0, 255, 0]);
+            }
+        }
+    }
+
+    #[test]
+    fn ec9_a_whole_jpeg_prints_and_a_cut_one_leaves_a_line_and_a_warning() {
+        use crate::print::image::tests::{
+            BASELINE_GRAY, BASELINE_RGB, PROGRESSIVE_RGB, after_segment,
+        };
+        let cut = BASELINE_RGB[..after_segment(BASELINE_RGB, 0xc0)].to_vec();
+        let p = figures(vec![
+            ("image/jpeg", BASELINE_GRAY.to_vec(), "gray"),
+            ("image/jpeg", cut, "cut short"),
+            ("image/jpeg", PROGRESSIVE_RGB.to_vec(), "progressive"),
+        ]);
+        let fonts = Fonts::load();
+        let (pdf, _, warnings) = pdf_bytes(&p, &fonts);
+        assert_eq!(
+            warnings,
+            vec![
+                "the figure \"cut short\" is a image/jpeg image, which does not print in a PDF; \
+                 the HTML and Markdown exports show it"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            figure_lines(&lay_out(&p, &fonts)),
+            vec!["Figure: cut short"]
+        );
+        let objs = objects(&pdf);
+        let mut streams: Vec<Vec<u8>> = image_objects(&objs)
+            .into_iter()
+            .map(|(o, mask)| {
+                assert!(mask.is_none());
+                assert!(o.dict.contains("/Filter /DCTDecode"), "{}", o.dict);
+                o.stream.clone().unwrap()
+            })
+            .collect();
+        streams.sort();
+        let mut want = vec![BASELINE_GRAY.to_vec(), PROGRESSIVE_RGB.to_vec()];
+        want.sort();
+        assert_eq!(streams, want);
+    }
+
+    #[test]
+    fn ec9_an_image_over_the_budget_leaves_a_line_and_its_warning() {
+        use crate::print::image::tests::png;
+        let mut wide = vec![0u8];
+        wide.extend(std::iter::repeat_n(3u8, 8193));
+        let mut ok = vec![0u8];
+        ok.extend(std::iter::repeat_n(3u8, 8192));
+        let p = figures(vec![
+            ("image/png", png(8193, 1, 8, 0, 0, &wide), "too wide"),
+            ("image/png", png(8192, 1, 8, 0, 0, &ok), "wide enough"),
+        ]);
+        let fonts = Fonts::load();
+        let (pdf, _, warnings) = pdf_bytes(&p, &fonts);
+        assert_eq!(
+            warnings,
+            vec![
+                "the figure \"too wide\" is 8193×1 pixels, larger than a PDF export prints \
+                 (8192×8192, 64 MiB decoded); the HTML and Markdown exports show it"
+                    .to_string()
+            ]
+        );
+        assert_eq!(figure_lines(&lay_out(&p, &fonts)), vec!["Figure: too wide"]);
+        let objs = objects(&pdf);
+        let images = image_objects(&objs);
+        assert_eq!(images.len(), 1);
+        assert!(images[0].0.dict.contains("/Width 8192"));
     }
 }

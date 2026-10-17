@@ -417,21 +417,40 @@ fn rgba_png(w: u32, h: u32) -> Vec<u8> {
             ]);
         }
     }
-    let mut z = vec![0x78, 0x01, 0x01];
-    let len = raw.len() as u16;
-    z.extend_from_slice(&len.to_le_bytes());
-    z.extend_from_slice(&(!len).to_le_bytes());
-    z.extend_from_slice(&raw);
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    png_of(w, h, 6, &raw)
+}
+
+/// The zlib stream of `raw` in stored blocks, with no compression.
+fn stored(raw: &[u8]) -> Vec<u8> {
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(0xffff).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push(u8::from(i + 1 == blocks.len()));
+        let len = block.len() as u16;
+        z.extend_from_slice(&len.to_le_bytes());
+        z.extend_from_slice(&(!len).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    z.extend_from_slice(&adler32(raw).to_be_bytes());
+    z
+}
+
+/// An 8-bit PNG of `w` × `h` and colour type `color` whose IDAT is `idat`.
+fn png_with_idat(w: u32, h: u32, color: u8, idat: &[u8]) -> Vec<u8> {
     let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
     let mut ihdr = vec![];
     ihdr.extend_from_slice(&w.to_be_bytes());
     ihdr.extend_from_slice(&h.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    ihdr.extend_from_slice(&[8, color, 0, 0, 0]);
     chunk(&mut out, b"IHDR", &ihdr);
-    chunk(&mut out, b"IDAT", &z);
+    chunk(&mut out, b"IDAT", idat);
     chunk(&mut out, b"IEND", &[]);
     out
+}
+
+/// An 8-bit PNG of `w` × `h` and colour type `color` whose data is the filtered scanlines `raw`.
+fn png_of(w: u32, h: u32, color: u8, raw: &[u8]) -> Vec<u8> {
+    png_with_idat(w, h, color, &stored(raw))
 }
 
 /// The corpus with a figure of `bytes` as `media_type`, landed.
@@ -643,4 +662,127 @@ fn ec9_an_existing_out_is_refused() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert!(names.iter().all(|n| !n.contains(".partial-")), "{names:?}");
+}
+
+/// The figure lines of a layout.
+fn figure_lines(laid: &Laid) -> Vec<String> {
+    laid.pages
+        .iter()
+        .flat_map(|pg| &pg.items)
+        .filter_map(|it| match it {
+            LItem::Text { text, .. } if text.starts_with("Figure: ") => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The number of images the layout draws.
+fn drawn(laid: &Laid) -> usize {
+    laid.pages
+        .iter()
+        .flat_map(|pg| &pg.items)
+        .filter(|it| matches!(it, LItem::Image { .. }))
+        .count()
+}
+
+#[test]
+fn ec9_an_image_over_the_pixel_budget_prints_a_line_and_a_warning() {
+    // 8193 × 1 gray, whole and valid: one pixel wider than a PDF export prints
+    let mut line = vec![0u8];
+    line.extend(std::iter::repeat_n(90u8, 8193));
+    let wide = png_of(8193, 1, 0, &line);
+    // 5000 × 5000 RGBA: 100,000,000 bytes decoded, in a file of a few dozen bytes whose data
+    // is not even zlib; nothing past the header is read
+    let big = png_with_idat(5000, 5000, 6, b"not zlib");
+    for (bytes, alt, size) in [
+        (wide, "A wide strip", "8193×1"),
+        (big, "A big square", "5000×5000"),
+    ] {
+        let (_d, r) = with_figure("image/png", &bytes, alt);
+        let p = canon(&r);
+        let (_, _, warnings) = pdf_of(&p);
+        let mut want = p.warnings.clone();
+        want.push(format!(
+            "the figure {alt:?} is {size} pixels, larger than a PDF export prints \
+             (8192×8192, 64 MiB decoded); the HTML and Markdown exports show it"
+        ));
+        assert_eq!(warnings, want, "{alt}");
+        let laid = laid_of(&p);
+        assert_eq!(figure_lines(&laid), vec![format!("Figure: {alt}")]);
+        assert_eq!(drawn(&laid), 1, "only the corpus's own figure");
+        // the export succeeds
+        let dir = tempfile::tempdir().unwrap();
+        let s = print::pdf::write_pdf(&p, &dir.path().join("p.pdf")).unwrap();
+        assert_eq!(s.assets, 1);
+        assert_eq!(s.warnings, want);
+    }
+}
+
+#[test]
+fn ec9_a_png_that_inflates_past_its_header_does_not_decode() {
+    // the header says 3 × 2 RGB; the data holds three rows
+    let row = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    let (_d, r) = with_figure("image/png", &png_of(3, 2, 2, &row.repeat(3)), "Too long");
+    let p = canon(&r);
+    let (_, _, warnings) = pdf_of(&p);
+    let mut want = p.warnings.clone();
+    want.push(
+        "the figure \"Too long\" is a image/png image, which does not print in a PDF; \
+         the HTML and Markdown exports show it"
+            .to_string(),
+    );
+    assert_eq!(warnings, want);
+    let laid = laid_of(&p);
+    assert_eq!(figure_lines(&laid), vec!["Figure: Too long".to_string()]);
+    assert_eq!(drawn(&laid), 1);
+    // the guard: the same image with two rows prints
+    let (_d, r) = with_figure("image/png", &png_of(3, 2, 2, &row.repeat(2)), "Just right");
+    let p = canon(&r);
+    assert!(figure_lines(&laid_of(&p)).is_empty());
+    assert_eq!(drawn(&laid_of(&p)), 2);
+}
+
+#[test]
+fn ec9_a_jpeg_cut_short_leaves_a_line_and_a_warning() {
+    let whole: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rdy-render/src/print/testdata/baseline-rgb.jpg"
+    ));
+    // the file cut just after its frame header: no scan and no end
+    let mut i = 2;
+    while whole[i + 1] != 0xc0 {
+        i += 2 + usize::from(u16::from_be_bytes([whole[i + 2], whole[i + 3]]));
+    }
+    let cut = &whole[..i + 2 + usize::from(u16::from_be_bytes([whole[i + 2], whole[i + 3]]))];
+    let (_d, r) = with_figure("image/jpeg", cut, "A cut photo");
+    let p = canon(&r);
+    let (pdf, _, warnings) = pdf_of(&p);
+    let mut want = p.warnings.clone();
+    want.push(
+        "the figure \"A cut photo\" is a image/jpeg image, which does not print in a PDF; \
+         the HTML and Markdown exports show it"
+            .to_string(),
+    );
+    assert_eq!(warnings, want);
+    assert_eq!(
+        figure_lines(&laid_of(&p)),
+        vec!["Figure: A cut photo".to_string()]
+    );
+    assert!(
+        !objects(&pdf)
+            .values()
+            .any(|o| o.dict.contains("/DCTDecode")),
+        "no JPEG in the file"
+    );
+    // the guard: the whole file prints, its bytes as they are
+    let (_d, r) = with_figure("image/jpeg", whole, "A photo");
+    let p = canon(&r);
+    let (pdf, _, warnings) = pdf_of(&p);
+    assert_eq!(warnings, p.warnings);
+    assert!(
+        objects(&pdf)
+            .values()
+            .any(|o| o.dict.contains("/DCTDecode") && o.stream.as_deref() == Some(whole)),
+        "the JPEG passes through"
+    );
 }
