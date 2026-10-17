@@ -94,6 +94,7 @@ impl Rdy {
             justification: None,
             message: format!("take the landed side of conflict {cid} on {id}"),
             links,
+            read_identity: None,
         };
         let conflicts = conflicts.as_ref().clone();
         drop(st);

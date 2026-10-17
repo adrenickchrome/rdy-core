@@ -116,6 +116,7 @@ fn cf1_a_frozen_side_that_did_not_land_is_refused_with_e_frozen() {
                 justification: None,
                 message: "accept".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
         )
         .unwrap();
@@ -154,6 +155,7 @@ fn cf1_a_frozen_side_that_did_not_land_is_refused_with_e_frozen() {
                 justification: None,
                 message: "take canon's side".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
             &|x| m.version_of(x),
             &conflicts,
@@ -292,6 +294,7 @@ fn cf1_the_store_refuses_taking_an_unlanded_side_unchanged() {
                 justification: None,
                 message: "take b's side".into(),
                 links: ChangeLinks::default(),
+                read_identity: None,
             },
             &|x| m.version_of(x),
             &conflicts,
