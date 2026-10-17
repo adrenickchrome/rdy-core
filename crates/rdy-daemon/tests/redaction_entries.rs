@@ -15,6 +15,7 @@ use rdy_mcp::server::serve_on;
 use rdy_model::{Hash, Provenance, Role};
 use rdy_store::LandRequest;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -137,16 +138,27 @@ struct Applied {
     request: String,
     /// The proposal version's ref, `P-<stable>@1`.
     proposal: String,
+    /// The ids the first write created, by its `$` names.
+    created: BTreeMap<String, String>,
 }
 
 fn applied() -> Applied {
+    applied_with(json!([]), &[])
+}
+
+/// [`applied`], with `extra` create ops in the first write (after the doc `$d` and the secret
+/// prose `$p`) and the blocks named by `targets` removed by the same request as `$p`.
+fn applied_with(extra: Value, targets: &[&str]) -> Applied {
     let dir = tempfile::tempdir().unwrap();
     let mut rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let ops = serde_json::from_value(json!([
+    let mut ops = json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Doc", "doc_type": "page"}},
         {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
-    ]))
-    .unwrap();
+    ]);
+    ops.as_array_mut()
+        .unwrap()
+        .extend(extra.as_array().unwrap().iter().cloned());
+    let ops = serde_json::from_value(ops).unwrap();
     let w = rdy
         .write(
             &human(),
@@ -166,7 +178,9 @@ fn applied() -> Applied {
         .redact(
             &human(),
             RedactInput {
-                targets: vec![secret.clone()],
+                targets: std::iter::once(secret.clone())
+                    .chain(targets.iter().map(|t| w.created[*t].clone()))
+                    .collect(),
                 reason_class: "secret".into(),
                 reason: "a leaked code".into(),
                 dry_run: false,
@@ -207,6 +221,7 @@ fn applied() -> Applied {
         secret,
         request,
         proposal: p.r#ref,
+        created: w.created,
     }
 }
 
@@ -380,5 +395,81 @@ async fn rdx12_source_reads_of_a_stub_name_its_redaction() {
     for v in [&md, &compact, &ctx] {
         assert!(!v.to_string().contains("ZEBRA-7731"), "{v}");
     }
+    drop(a.dir);
+}
+
+/// rdx12 (fix round 1): every block type's markdown source read of a stub shows the neutral stub,
+/// its id, `Content removed.` and then its redaction line, whatever the type's own formatter
+/// does with fields and body; a pattern read finds the removal notice. The removed text and
+/// fields never appear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rdx12_source_reads_of_every_stub_type_show_the_removal_notice() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let kinds = [
+        ("$s", "section"),
+        ("$tb", "table"),
+        ("$dc", "decision"),
+        ("$cd", "code"),
+        ("$dg", "diagram"),
+        ("$fl", "flow"),
+        ("$tm", "term"),
+        ("$q", "question"),
+        ("$cm", "component"),
+    ];
+    let a = applied_with(
+        json!([
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "ZEBRA-7731 section"}, "body": "ZEBRA-7731 body."},
+            {"op": "create", "type": "section", "id": "$keep", "parent": "$d", "fields": {"title": "Kept"}},
+            {"op": "create", "type": "table", "id": "$tb", "parent": "$keep", "fields": {"columns": ["Code"], "rows": [["ZEBRA-7731"]]}},
+            {"op": "create", "type": "decision", "id": "$dc", "parent": "$keep", "fields": {"statement": "Use ZEBRA-7731", "status": "proposed"}},
+            {"op": "create", "type": "code", "id": "$cd", "parent": "$keep", "fields": {"lang": "yaml"}, "body": "code: ZEBRA-7731\n"},
+            {"op": "create", "type": "diagram", "id": "$dg", "parent": "$keep", "fields": {"lang": "mermaid", "alt": "ZEBRA-7731"}, "body": "graph TD\n  A[ZEBRA-7731] --> B\n"},
+            {"op": "create", "type": "flow", "id": "$fl", "parent": "$keep", "fields": {"name": "ZEBRA-7731", "steps": ["Enter ZEBRA-7731"]}},
+            {"op": "create", "type": "term", "id": "$tm", "parent": "$keep", "fields": {"name": "ZEBRA-7731"}, "body": "ZEBRA-7731."},
+            {"op": "create", "type": "question", "id": "$q", "parent": "$keep", "fields": {"prompt": "Is ZEBRA-7731 live?"}},
+            {"op": "create", "type": "component", "id": "$cm", "parent": "$keep", "fields": {"name": "ZEBRA-7731"}}
+        ]),
+        &kinds.map(|(k, _)| k),
+    );
+    let engine: Arc<dyn Engine> = Arc::new(Local::new(a.rdy));
+    let mut c = Client::start(engine).await;
+    let (err, v) = c
+        .call(
+            "rdy_session",
+            json!({"actor": "agent:a", "run": "r1", "role": "writer"}),
+        )
+        .await;
+    assert!(!err, "{v}");
+    let line = format!("Redaction: {}.", a.request);
+    let mut wrong = vec![];
+    for (key, kind) in std::iter::once(("$p", "prose")).chain(kinds) {
+        let id = &a.created[key];
+        let (err, md) = c
+            .call(
+                "rdy_read",
+                json!({"id": id, "scope": "canon", "format": "markdown"}),
+            )
+            .await;
+        assert!(!err, "{kind}: {md}");
+        let text = md["text"].as_str().unwrap();
+        if !text.starts_with(&format!("`{id}` Content removed.\n\n{line}")) {
+            wrong.push(format!("{kind}: {text}"));
+            continue;
+        }
+        let (err, hit) = c
+            .call(
+                "rdy_read",
+                json!({"id": id, "scope": "canon", "format": "markdown", "pattern": "Content removed."}),
+            )
+            .await;
+        assert!(!err, "{kind}: {hit}");
+        if hit["matched"] != 1 || !hit["text"].as_str().unwrap().contains(&line) {
+            wrong.push(format!("{kind} pattern: {hit}"));
+        }
+        for v in [&md, &hit] {
+            assert!(!v.to_string().contains("ZEBRA-7731"), "{kind}: {v}");
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n----\n"));
     drop(a.dir);
 }
