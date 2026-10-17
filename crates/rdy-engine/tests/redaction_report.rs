@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: the report fixtures make symlinks and set file modes (seams rule, FW-XP1 D-1RXEA).
 //! rdx5: the complete redaction blast radius and the request (D-6B1W1, D-14SAY, D-EPK1Z, D-33JR0,
 //! D-ST423). A report reads the whole log: every stored version, closed views and withdrawn
 //! proposals included; every embedding change and shared chunk; every landing, tag, view,
