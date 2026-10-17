@@ -791,6 +791,9 @@ fn rdx13_every_spelling_shows_the_card_before_the_approval_runs() {
         format!("P-{stable}@01"),
         format!("P-{stable}@1"),
         format!("P-{stable}"),
+        // fix round 2 (finding 1): the resolver reads `@+1` as version 1 (`u32` parsing)
+        format!("P-{stable}@+1"),
+        format!("P-{}@+1", stable.to_ascii_uppercase()),
     ] {
         let o = s.rdy(&["approve", &named, "--strict"]);
         let (ok, stdout, err) = out(&o);
@@ -801,7 +804,16 @@ fn rdx13_every_spelling_shows_the_card_before_the_approval_runs() {
             format!("{card}\n\n"),
             "{named}: the whole card, shown before the refusal"
         );
-        let e = error_of(&s.rdy(&["--json", "approve", &named, "--strict"]));
+        // fix round 2 (finding 2): with --json the card is shown on stderr before the approval
+        // runs (stdout stays one JSON value); the error object is stderr's last line
+        let o = s.rdy(&["--json", "approve", &named, "--strict"]);
+        let (_, stdout, err) = out(&o);
+        assert_eq!(stdout, "", "{named}: --json stdout holds no card");
+        assert!(
+            err.starts_with(&format!("{card}\n\n")),
+            "{named}: the whole card on stderr, before the refusal: {err}"
+        );
+        let e = error_of(&o);
         assert_eq!(e["code"], "E_PROPOSAL_MOVED", "{named}: {e}");
         assert_eq!(
             e["removal_card"],
@@ -911,4 +923,39 @@ fn rdx13_an_oversized_card_elsewhere_never_blocks_an_approval() {
         "{e}"
     );
     assert_eq!(seq(&s), before, "the refusal wrote nothing");
+}
+
+/// rdx13 fix round 2 (finding 3): the removal card that cannot be shown stops the approval
+/// before it runs. Here stdout is a pipe whose reader is closed, so writing the card fails: the
+/// approval is refused with `E_IO` on stderr, not sent (a `--strict` approval that ran would be
+/// refused with `E_PROPOSAL_MOVED` after the unrelated landing), and nothing lands.
+#[test]
+fn rdx13_a_card_that_cannot_be_shown_stops_the_approval() {
+    let (s, id) = secret_served();
+    let p = propose_removal(&s, &id, Some("Removes the leaked code."));
+    let pref = p["ref"].as_str().unwrap().to_string();
+    land_unrelated(&s);
+    let before = landings(&s);
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let o = rdy_qa::daemon::human_command(
+        s.dir.path(),
+        &s.env_pairs(),
+        &["approve", &pref, "--strict"],
+    )
+    .stdout(writer)
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    assert!(
+        err.starts_with("error E_IO: "),
+        "the card write failed: {err}"
+    );
+    assert!(
+        !err.contains("E_PROPOSAL_MOVED"),
+        "the approval never ran: {err}"
+    );
+    assert_eq!(landings(&s), before, "nothing landed");
 }

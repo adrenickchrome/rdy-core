@@ -1,8 +1,9 @@
 use crate::brief_text;
-use crate::conn::{Conn, Env, call, human_session};
+use crate::conn::{Conn, Env, call, human_session, io_error};
 use crate::output::{hash_short, new_keys_text, num, text};
 use rdy_daemon::ErrorReply;
-use rdy_engine::{E_BAD_INPUT, E_INTERNAL, is_proposal_ref};
+use rdy_engine::proposal_show::canonical_proposal_ref;
+use rdy_engine::{E_BAD_INPUT, E_INTERNAL};
 use rdy_model::Hash;
 use serde_json::{Value, json};
 use std::io::Write;
@@ -207,12 +208,15 @@ fn propose_text(v: &Value) -> String {
 
 /// `rdy approve`: the approval op, through `land_with` (no switch of its own skips the person).
 /// A person approving, or an agent relaying a person, first reads the version the argument
-/// names with the shared resolver (`show`, which takes the approval's own spellings: a full
-/// hash, `P-<id>@<n>` or `P-<id>`), with that version's removal card when it carries content
-/// removal (Task 8's card, read for that version alone: D-CC90E, D-6B1W1). The card is shown
-/// whole before the approval op runs: as text on stdout at once, so a refused or interrupted
-/// approval still showed it; as JSON in the reply (`removal_card`), or in the error when the
-/// approval is refused. The approval then names that exact version, so a version proposed after
+/// names with the shared resolver (`show`, by [`canonical_proposal_ref`], so every spelling the
+/// approval takes is read: a full hash, `P-<id>@<n>` with any version the resolver parses, or
+/// `P-<id>`), with that version's removal card when it carries content removal (Task 8's card,
+/// read for that version alone: D-CC90E, D-6B1W1). The card is shown whole, and flushed, before
+/// the approval op runs, so a refused or interrupted approval has still shown it: as text on
+/// stdout, or with `--json` as text on stderr (stdout holds one JSON value, and the error object
+/// is stderr's last line), where the reply (`removal_card`), or the error when the approval is
+/// refused, carries it too. A card that cannot be written or flushed stops the approval before
+/// it runs (`E_IO`). The approval then names that exact version, so a version proposed after
 /// the card was read moves it (`E_PROPOSAL_MOVED`) instead of landing unseen. An agent's own
 /// approval is refused as before, without the read.
 pub(crate) fn approve(
@@ -222,13 +226,14 @@ pub(crate) fn approve(
 ) -> Result<(Value, String), ErrorReply> {
     let reads_card = human_session(env) || a.relayed_by.is_some();
     let mut c = Conn::open(env)?;
-    let out = approve_on(&mut |op, args| c.op(op, args), reads_card, a, &mut |t| {
-        if !as_json {
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(t.as_bytes());
-            let _ = out.flush();
-        }
-    });
+    let out = approve_on(
+        &mut |op, args| c.op(op, args),
+        reads_card,
+        a,
+        as_json,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    );
     c.close();
     out
 }
@@ -236,14 +241,16 @@ pub(crate) fn approve(
 /// Runs one op on the approval's session.
 type OpFn<'a> = dyn FnMut(&str, Value) -> Result<Value, ErrorReply> + 'a;
 
-/// The approval on one session: `op` runs an op, `emit` shows text to the person at once. With
-/// `reads_card`, the version is read and bound first ([`approve`]); the text returned is the
-/// landing lines alone, after the card `emit` showed.
+/// The approval on one session: `op` runs an op; the card goes to `stdout`, or to `stderr` with
+/// `as_json`. With `reads_card`, the version is read, its card shown and the version bound first
+/// ([`approve`]); the text returned is the landing lines alone, after the card.
 fn approve_on(
     op: &mut OpFn<'_>,
     reads_card: bool,
     a: ApproveArgs,
-    emit: &mut dyn FnMut(&str),
+    as_json: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> Result<(Value, String), ErrorReply> {
     let ApproveArgs {
         proposal,
@@ -253,17 +260,41 @@ fn approve_on(
         session_ref,
         strict,
     } = a;
-    let bound = if reads_card && binds(&proposal, relayed_by.is_some()) {
-        Some(bound_version(op, &proposal)?)
+    let spelling = if reads_card {
+        canonical_proposal_ref(&proposal)
     } else {
         None
     };
+    let bound = match &spelling {
+        Some(s) => Some(bound_version(op, &proposal, s)?),
+        None => None,
+    };
     let card = bound.as_ref().and_then(|b| b.card.clone());
     if let Some(text) = card.as_ref().and_then(|c| c["card"].as_str()) {
-        emit(&format!("{text}\n\n"));
+        let shown = if as_json {
+            show_card(stderr, text)
+        } else {
+            show_card(stdout, text)
+        };
+        shown.map_err(|e| {
+            io_error(
+                e,
+                "the removal card could not be shown, so nothing was approved; run rdy approve again where its output can be read",
+            )
+        })?;
     }
+    // a relay names the exact version it relays: an unversioned relay goes to the approval as
+    // typed, which refuses it before anything is written
+    let unversioned_relay = relayed_by.is_some()
+        && spelling
+            .as_deref()
+            .is_some_and(|s| s.starts_with("P-") && !s.contains('@'));
+    let sent = match &bound {
+        Some(b) if !unversioned_relay => b.version.as_str(),
+        _ => proposal.as_str(),
+    };
     let args = json!({
-        "proposal": bound.as_ref().map_or(proposal.as_str(), |b| b.version.as_str()),
+        "proposal": sent,
         "relayed_by": relayed_by,
         "evidence": evidence,
         "question": question,
@@ -287,14 +318,11 @@ fn approve_on(
     }
 }
 
-/// Whether the approval of `proposal` reads and binds its version first: when the text has a
-/// proposal's shape (`P-<id>[@<n>]` or a full hash). Any other text never resolves, so the
-/// approval refuses it as before. A relay must name the exact version: an unversioned relay goes
-/// to the approval unchanged, which refuses it before anything is written.
-fn binds(proposal: &str, relayed: bool) -> bool {
-    let hash = proposal.parse::<Hash>().is_ok();
-    let shaped = is_proposal_ref(proposal);
-    hash || (shaped && (proposal.contains('@') || !relayed))
+/// Writes the removal card `text` and a blank line to `to`, and flushes it: the card is shown
+/// whole before the approval runs, or the approval does not run.
+fn show_card(to: &mut dyn Write, text: &str) -> std::io::Result<()> {
+    to.write_all(format!("{text}\n\n").as_bytes())?;
+    to.flush()
 }
 
 /// The version an approval binds: its full hash, and its removal card (`ref`, `card`,
@@ -304,11 +332,12 @@ struct Bound {
     card: Option<Value>,
 }
 
-/// Reads the version `proposal` names (`show`, the shared resolver) and its removal card. A
-/// version whose card cannot be read is refused with that error: the approval never runs
-/// without the card it must show.
-fn bound_version(op: &mut OpFn<'_>, proposal: &str) -> Result<Bound, ErrorReply> {
-    let v = op("show", json!({"id": proposal}))?;
+/// Reads the version `proposal` names (`show`, the shared resolver, by `spelling`: the
+/// [`canonical_proposal_ref`] of `proposal`, which resolves to the same version) and its removal
+/// card. A version whose card cannot be read is refused with that error: the approval never
+/// runs without the card it must show.
+fn bound_version(op: &mut OpFn<'_>, proposal: &str, spelling: &str) -> Result<Bound, ErrorReply> {
+    let v = op("show", json!({"id": spelling}))?;
     let p = &v["proposal"];
     if let Some(e) = p.get("removal_card_error") {
         return Err(ErrorReply::new(
@@ -432,6 +461,7 @@ pub(crate) fn tag(env: &Env, a: TagArgs) -> Result<(Value, String), ErrorReply> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdy_engine::is_proposal_ref;
     use rdy_engine::pending::{
         CARD_MAX_TOKENS, Item, ItemKind, ItemOption, RemovalCard, card_hash, render_checked,
     };
@@ -548,28 +578,92 @@ mod tests {
         }
     }
 
-    /// rdx13 fix round 1 (findings 2 and 4): the whole removal card is shown before the approval
-    /// op runs, and a refused approval keeps it (the error carries it as `removal_card`). The op
-    /// here observes what was shown at the moment it runs: the mutation boundary. The card is
-    /// read for the named version alone: any other op (the queue) panics.
-    #[test]
-    fn rdx13_the_card_is_shown_before_the_approval_runs() {
-        let (item, v) = removal_item();
-        let version = "ab".repeat(32);
-        let shown_card = json!({
+    /// A stream that records what was written to it, and what of that had been flushed at its
+    /// last flush. `fail_write` or `fail_flush` makes its writes or its flushes fail, as a pipe
+    /// whose reader is closed does.
+    #[derive(Clone, Default)]
+    struct Sink {
+        written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        flushed: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl Sink {
+        fn failing(fail_write: bool, fail_flush: bool) -> Sink {
+            Sink {
+                fail_write,
+                fail_flush,
+                ..Sink::default()
+            }
+        }
+        fn written(&self) -> String {
+            String::from_utf8(self.written.borrow().clone()).unwrap()
+        }
+        fn flushed(&self) -> String {
+            String::from_utf8(self.flushed.borrow().clone()).unwrap()
+        }
+    }
+
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.written.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_flush {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            *self.flushed.borrow_mut() = self.written.borrow().clone();
+            Ok(())
+        }
+    }
+
+    /// The show of version `version` carrying `item`'s removal card, and that card as the show
+    /// carries it (`{ref, card, card_hash, removal}`).
+    fn show_with_card(item: &Item, v: &Value, version: &str) -> (Value, Value) {
+        let card = json!({
             "ref": item.r#ref, "card": item.card, "card_hash": item.card_hash,
             "removal": v["removal"],
         });
         let show = json!({"proposal": {
-            "ref": item.r#ref, "id": version, "state": "open", "removal_card": shown_card,
+            "ref": item.r#ref, "id": version, "state": "open", "removal_card": card,
         }});
-        let mut at_approval: Option<(Vec<String>, Value)> = None;
-        let shown = std::cell::RefCell::new(vec![]);
+        (show, card)
+    }
+
+    /// The streams at the moment the approval op ran: stdout written, stdout flushed, stderr
+    /// written, stderr flushed.
+    type AtApproval = (String, String, String, String);
+
+    /// rdx13 fix round 1 (findings 2 and 4), with the streams of fix round 2: the whole removal
+    /// card is shown, and flushed, before the approval op runs, and a refused approval keeps it
+    /// (the error carries it as `removal_card`). The op here observes the streams at the moment it
+    /// runs: the mutation boundary. The card is read for the named version alone: any other op
+    /// (the queue) panics.
+    #[test]
+    fn rdx13_the_card_is_shown_before_the_approval_runs() {
+        let (item, v) = removal_item();
+        let version = "ab".repeat(32);
+        let (show, shown_card) = show_with_card(&item, &v, &version);
+        let mut at_approval: Option<(AtApproval, Value)> = None;
+        let (out, err_out) = (Sink::default(), Sink::default());
         let err = approve_on(
             &mut |op, a| match op {
                 "show" => Ok(show.clone()),
                 "approve" => {
-                    at_approval = Some((shown.borrow().clone(), a));
+                    at_approval = Some((
+                        (
+                            out.written(),
+                            out.flushed(),
+                            err_out.written(),
+                            err_out.flushed(),
+                        ),
+                        a,
+                    ));
                     Err(ErrorReply::new(
                         "E_PROPOSAL_MOVED",
                         "canon moved",
@@ -580,16 +674,24 @@ mod tests {
             },
             true,
             args("P-0123456789ab", true),
-            &mut |t| shown.borrow_mut().push(t.to_string()),
+            false,
+            &mut out.clone(),
+            &mut err_out.clone(),
         )
         .unwrap_err();
         let (seen, sent) = at_approval.expect("the approval ran");
+        let card_text = format!("{}\n\n", item.card);
         assert_eq!(
             seen,
-            vec![format!("{}\n\n", item.card)],
-            "the card was shown before the op"
+            (
+                card_text.clone(),
+                card_text.clone(),
+                String::new(),
+                String::new()
+            ),
+            "the card was shown on stdout, and flushed, before the op"
         );
-        assert_eq!(*shown.borrow(), seen, "and nothing after it");
+        assert_eq!(out.written(), card_text, "and nothing after it");
         assert_eq!(sent["proposal"], version.as_str(), "the exact version");
         assert_eq!(sent["strict"], true);
         assert_eq!(err.code, "E_PROPOSAL_MOVED");
@@ -599,7 +701,7 @@ mod tests {
             "approved": item.r#ref, "title": "Remove the code", "changes": 1,
             "landing": "cd".repeat(32)
         });
-        let shown = std::cell::RefCell::new(vec![]);
+        let out = Sink::default();
         let (v2, t) = approve_on(
             &mut |op, _| match op {
                 "show" => Ok(show.clone()),
@@ -608,15 +710,127 @@ mod tests {
             },
             true,
             args("P-0123456789ab@1", false),
-            &mut |t| shown.borrow_mut().push(t.to_string()),
+            false,
+            &mut out.clone(),
+            &mut Sink::default(),
         )
         .unwrap();
         assert_eq!(t, approve_text(&reply));
         assert_eq!(
-            format!("{}{t}", shown.borrow().concat()),
+            format!("{}{t}", out.written()),
             approve_text_with(&reply, Some(&shown_card))
         );
         assert_eq!(v2["removal_card"], shown_card);
+    }
+
+    /// rdx13 fix round 2 (finding 2): with `--json`, stdout holds one JSON value and stderr's
+    /// last line holds the error object, so the card is shown as text on stderr, whole and
+    /// flushed, before the approval op runs: an approval interrupted after it was authorized has
+    /// still shown the card. The reply, or the error, also carries it as `removal_card`.
+    #[test]
+    fn rdx13_json_mode_shows_the_card_before_the_approval_runs() {
+        let (item, v) = removal_item();
+        let version = "ab".repeat(32);
+        let (show, shown_card) = show_with_card(&item, &v, &version);
+        let card_text = format!("{}\n\n", item.card);
+        let reply = json!({
+            "approved": item.r#ref, "title": "Remove the code", "changes": 1,
+            "landing": "cd".repeat(32)
+        });
+        for refused in [true, false] {
+            let mut at_approval: Option<AtApproval> = None;
+            let (out, err_out) = (Sink::default(), Sink::default());
+            let res = approve_on(
+                &mut |op, _| match op {
+                    "show" => Ok(show.clone()),
+                    "approve" => {
+                        at_approval = Some((
+                            out.written(),
+                            out.flushed(),
+                            err_out.written(),
+                            err_out.flushed(),
+                        ));
+                        if refused {
+                            Err(ErrorReply::new(
+                                "E_PROPOSAL_MOVED",
+                                "canon moved",
+                                "approve without --strict",
+                            ))
+                        } else {
+                            Ok(reply.clone())
+                        }
+                    }
+                    other => panic!("unexpected op {other}"),
+                },
+                true,
+                args("P-0123456789ab@1", refused),
+                true,
+                &mut out.clone(),
+                &mut err_out.clone(),
+            );
+            assert_eq!(
+                at_approval.expect("the approval ran"),
+                (
+                    String::new(),
+                    String::new(),
+                    card_text.clone(),
+                    card_text.clone()
+                ),
+                "refused {refused}: the card on stderr, flushed, before the op; stdout untouched"
+            );
+            assert_eq!(
+                out.written(),
+                "",
+                "refused {refused}: stdout stays one JSON value"
+            );
+            assert_eq!(err_out.written(), card_text, "refused {refused}");
+            match res {
+                Err(e) => {
+                    assert!(refused, "{e:?}");
+                    assert_eq!(e.code, "E_PROPOSAL_MOVED");
+                    assert_eq!(e.extra.get("removal_card"), Some(&shown_card));
+                }
+                Ok((v2, _)) => {
+                    assert!(!refused);
+                    assert_eq!(v2["removal_card"], shown_card);
+                }
+            }
+        }
+    }
+
+    /// rdx13 fix round 2 (finding 3): a card that cannot be shown (its write or its flush fails,
+    /// as on a closed pipe) stops the approval before the op runs, in either mode, with the
+    /// output error.
+    #[test]
+    fn rdx13_a_card_that_cannot_be_shown_stops_the_approval() {
+        let (item, v) = removal_item();
+        let version = "ab".repeat(32);
+        let (show, _) = show_with_card(&item, &v, &version);
+        for as_json in [false, true] {
+            for (fail_write, fail_flush) in [(true, false), (false, true)] {
+                let failing = Sink::failing(fail_write, fail_flush);
+                let (mut out, mut err_out) = if as_json {
+                    (Sink::default(), failing)
+                } else {
+                    (failing, Sink::default())
+                };
+                let e = approve_on(
+                    &mut |op, _| match op {
+                        "show" => Ok(show.clone()),
+                        other => panic!("{other} ran though the card was not shown"),
+                    },
+                    true,
+                    args("P-0123456789ab@1", false),
+                    as_json,
+                    &mut out,
+                    &mut err_out,
+                )
+                .unwrap_err();
+                let case = format!("json {as_json}, write fails {fail_write}");
+                assert_eq!(e.code, "E_IO", "{case}: {e:?}");
+                assert!(e.fix.contains("nothing was approved"), "{case}: {e:?}");
+            }
+        }
     }
 
     /// A new project in `dir` whose view `work` holds a doc with one prose block; returns the
@@ -688,7 +902,7 @@ mod tests {
         use rdy_engine::engine::Engine as _;
         let landings = || local.read().log_page(None, None).unwrap().len();
         let before = landings();
-        let shown = std::cell::RefCell::new(vec![]);
+        let shown = Sink::default();
         let mut moved = false;
         let err = approve_on(
             &mut |op, a| {
@@ -704,11 +918,13 @@ mod tests {
             },
             true,
             args(&stable, false),
-            &mut |t| shown.borrow_mut().push(t.to_string()),
+            false,
+            &mut shown.clone(),
+            &mut Sink::default(),
         )
         .unwrap_err();
         assert_eq!(err.code, "E_PROPOSAL_MOVED", "{err:?}");
-        let shown = shown.borrow().concat();
+        let shown = shown.written();
         assert_eq!(
             shown.matches("  Request: ").count(),
             1,
@@ -718,6 +934,128 @@ mod tests {
         assert!(!shown.contains("  Reason: second"), "{shown}");
         assert_eq!(err.extra["removal_card"]["ref"], p1["ref"], "{err:?}");
         assert_eq!(landings(), before, "nothing landed");
+        local.close().unwrap();
+    }
+
+    /// rdx13 fix round 2 (finding 1): every spelling the approval's resolver takes reads the
+    /// version's card first. `canonical_proposal_ref` accepts exactly the text the resolver reads
+    /// as a proposal (whatever it refuses on its syntax alone, it refuses), its spelling resolves
+    /// to what the text resolves to, and `show` routes it to the proposal. `P-<id>@+1` is one:
+    /// the resolver parses the version as a `u32`. The approval then shows the card and binds the
+    /// version; an unversioned relay shows it too, and goes to the approval as typed, which
+    /// refuses it before anything is written.
+    #[test]
+    fn rdx13_every_spelling_the_resolver_takes_reads_its_card() {
+        use rdy_engine::engine::Engine as _;
+        use rdy_engine::proposal_show::canonical_proposal_ref;
+        let dir = tempfile::tempdir().unwrap();
+        let id = project_with_prose(dir.path());
+        let local = rdy_engine::engine::Local::open(dir.path()).unwrap();
+        let session = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer);
+        let cwd = dir.path().to_path_buf();
+        let cx = rdy_daemon::OpContext {
+            engine: &local,
+            session: &session,
+            human: "human:qa",
+            cwd: &cwd,
+        };
+        let run = |op: &str, a: Value| rdy_daemon::dispatch(&cx, op, a).map_err(ErrorReply::from);
+        run(
+            "redact",
+            json!({"targets": [id], "reason_class": "secret", "reason": "a leak"}),
+        )
+        .unwrap();
+        let p = run(
+            "propose",
+            json!({"title": "Remove", "view": "work", "summary": "Removes the code."}),
+        )
+        .unwrap();
+        let hash = p["id"].as_str().unwrap().to_string();
+        let stable = p["ref"].as_str().unwrap()[2..]
+            .split('@')
+            .next()
+            .unwrap()
+            .to_string();
+        let st = local.read();
+        let syntax_refused = |t: &str| matches!(st.proposal_show(t), Err(e) if e.message.ends_with("is not a proposal id"));
+        let upper = stable.to_ascii_uppercase();
+        let short = &stable[..4];
+        for t in [
+            hash.clone(),
+            format!("P-{stable}"),
+            format!("P-{stable}@1"),
+            format!("P-{stable}@01"),
+            format!("P-{stable}@+1"),
+            format!("P-{upper}@+1"),
+            format!("P-{short}@+1"),
+            format!("P-{stable}@+0"),
+            format!("P-{stable}@0"),
+            format!("P-{stable}@2"),
+            format!("P-{stable}@4294967295"),
+            format!("P-{stable}@4294967296"),
+            format!("P-{stable}@-1"),
+            format!("P-{stable}@ 1"),
+            format!("P-{stable}@1 "),
+            format!("P-{stable}@"),
+            format!("P-{stable}@+"),
+            format!("P-{stable}@1@1"),
+            format!("P-{}", &stable[..3]),
+            format!("P-{}", "a".repeat(65)),
+            format!("p-{stable}"),
+            hash.to_ascii_uppercase(),
+            format!("{hash}0"),
+            "P-".to_string(),
+            String::new(),
+            "p-AAAAA".to_string(),
+        ] {
+            let canon = canonical_proposal_ref(&t);
+            assert_eq!(canon.is_none(), syntax_refused(&t), "{t:?}: {canon:?}");
+            let Some(canon) = canon else { continue };
+            assert!(
+                is_proposal_ref(&canon) || canon.parse::<Hash>().is_ok(),
+                "{t:?}: show routes {canon:?} to the proposal"
+            );
+            let outcome = |t: &str| match st.proposal_show(t) {
+                Ok(s) => Ok(s.id),
+                Err(e) => Err((e.code.to_string(), e.message)),
+            };
+            assert_eq!(outcome(&canon), outcome(&t), "{t:?} and {canon:?}");
+        }
+        drop(st);
+        // the approval of `P-<id>@+1` shows the card, then names the version's hash
+        for (named, relayed, sent_as) in [
+            (format!("P-{stable}@+1"), false, hash.clone()),
+            (format!("P-{upper}@+1"), true, hash.clone()),
+            (format!("P-{stable}"), true, format!("P-{stable}")),
+        ] {
+            let shown = Sink::default();
+            let mut sent: Option<(String, Value)> = None;
+            let mut a = args(&named, false);
+            if relayed {
+                a.relayed_by = Some("agent:relay".into());
+                a.evidence = Some("yes, remove it".into());
+            }
+            let e = approve_on(
+                &mut |op, a| {
+                    if op == "approve" {
+                        sent = Some((shown.flushed(), a));
+                        return Err(ErrorReply::new("E_TEST", "stopped here", "none"));
+                    }
+                    run(op, a)
+                },
+                true,
+                a,
+                false,
+                &mut shown.clone(),
+                &mut Sink::default(),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, "E_TEST", "{named}: {e:?}");
+            let (seen, sent) = sent.expect("the approval ran");
+            assert!(seen.contains("Content removal"), "{named}: {seen}");
+            assert!(seen.contains("  Reason: a leak"), "{named}: {seen}");
+            assert_eq!(sent["proposal"], sent_as.as_str(), "{named}");
+        }
         local.close().unwrap();
     }
 
