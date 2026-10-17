@@ -84,8 +84,9 @@ impl StoreReader {
     /// name order; (2) `meta/repo_id`, when present, holds 16 bytes; (3) `meta/repo_id` is present
     /// (RULING F2: a load gives an older log one); (4) `meta/origin`, when present, decodes;
     /// (5) it names this repo id when `fork` is false and another one when it is true. The first
-    /// failure is returned.
-    pub(crate) fn check_meta(&self) -> Result<(), StoreError> {
+    /// failure is returned. Part of `check_objects`; a clone runs it alone before it writes its
+    /// origin (ruling task-5).
+    pub fn check_meta(&self) -> Result<(), StoreError> {
         for (name, _) in self.refs_with_prefix(META_REF)? {
             if !KNOWN.contains(&name.as_str()) {
                 return Err(bad(format!(

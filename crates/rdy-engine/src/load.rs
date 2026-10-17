@@ -21,8 +21,9 @@
 //!    holds the lock until it ends, so no other rdy process opens the project before step 7
 //!    ends (D-R7N9J, D-A6ZZA).
 //! 7. Open the project under that lock (the index build), run the caller's step if any (a
-//!    clone's origin batch, `crate::clone`), run `fsck`, and count landings, tags and views. A
-//!    failure of `fsck` or the counts that names a target file the dump does not carry
+//!    clone's origin batch, `crate::clone`) once the store's meta refs pass their check (a
+//!    failure is the load's fsck failure, ruling task-5), run `fsck`, and count landings, tags
+//!    and views. A failure of `fsck` or the counts that names a target file the dump does not carry
 //!    (`.rdy/local.yaml`, `.rdyignore`, a pack file outside the dump's set) names that file; any
 //!    other such failure is the source's. The caller's step returns its own errors.
 //!
@@ -36,7 +37,7 @@ use crate::config_levels::{LOCAL_FILE, PROJECT_FILE};
 use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_IO, E_LOCKED, RdyError};
 use crate::fsck::FsckReport;
 use crate::wc::ignore::IGNORE_FILE;
-use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, DumpRefusal};
+use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal};
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
 use rdy_store::layout::STORE_DIR;
@@ -110,6 +111,25 @@ pub(crate) fn open_dump(file: &Path) -> Result<File, RdyError> {
     })
 }
 
+/// A dump stream whose prelude and header step 1 has read: the reader, positioned at the first
+/// item, the dump format and the header.
+pub(crate) struct Opened<R: Read> {
+    reader: DumpReader<R>,
+    dump_format: u32,
+    pub(crate) header: DumpHeader,
+}
+
+/// Step 1 on the dump stream `r`: reads its prelude and header. `source` is the path the texts
+/// name, as in [`load_from`].
+pub(crate) fn open_stream<R: Read>(source: &Path, r: R) -> Result<Opened<R>, RdyError> {
+    let (reader, dump_format, header) = DumpReader::open(r).map_err(|e| read_error(source, e))?;
+    Ok(Opened {
+        reader,
+        dump_format,
+        header,
+    })
+}
+
 /// [`load`] of the dump stream `r` into `project`. `source` is the path every text names: the
 /// dump file, or the source project's root for a clone of an open project (O24). `after_open`
 /// runs in step 7 right after the open, before `fsck`.
@@ -119,9 +139,25 @@ pub(crate) fn load_from(
     project: &Path,
     after_open: Option<AfterOpen>,
 ) -> Result<LoadSummary, RdyError> {
+    let opened = open_stream(source, r)?;
+    load_opened(source, opened, project, after_open)
+}
+
+/// [`load_from`] past step 1: loads the stream that [`open_stream`] opened. A caller that checks
+/// the header first (a clone, O10) checks the header of the very stream this load consumes.
+pub(crate) fn load_opened<R: Read>(
+    source: &Path,
+    opened: Opened<R>,
+    project: &Path,
+    after_open: Option<AfterOpen>,
+) -> Result<LoadSummary, RdyError> {
     // the texts below name the stream by its source
     let file = source;
-    let (mut reader, dump_format, header) = DumpReader::open(r).map_err(|e| read_error(file, e))?;
+    let Opened {
+        mut reader,
+        dump_format,
+        header,
+    } = opened;
     // step 2: the project files come first; then check the target, writing nothing yet
     let mut files = Vec::new();
     let first = loop {
@@ -396,10 +432,11 @@ fn write_new(project: &Path, path: &str, bytes: &[u8], made: &mut Made) -> Resul
 }
 
 /// Step 7: opens the loaded project under the load's `lock` (the open builds its index from the
-/// log), runs `after_open`, then `fsck`, counts the tags and views, and closes it. An open that
-/// finds the load does not hold the store keeps every file (`made.keep`): it is not the load's
-/// to remove. A failure of `fsck` or the counts that names a target file outside `carried` (the
-/// dump's project files) names it; `after_open` returns its own errors.
+/// log), runs `after_open` once the store's meta refs pass their check, then `fsck`, counts the
+/// tags and views, and closes it. An open that finds the load does not hold the store keeps
+/// every file (`made.keep`): it is not the load's to remove. A failure of the meta check, `fsck`
+/// or the counts that names a target file outside `carried` (the dump's project files) names
+/// it; `after_open` returns its own errors.
 fn check(
     project: &Path,
     carried: &[String],
@@ -425,12 +462,21 @@ fn check(
         }
         Err(e) => return Err(fails(e)),
     };
-    // the step's own errors are its own; fsck's and the counts' are the load's
-    if let Some(step) = after_open
-        && let Err(e) = step(&mut r)
-    {
-        let _ = r.close();
-        return Err(e);
+    if let Some(step) = after_open {
+        // a step writes meta refs, never over bad ones (ruling task-5): first the loaded store's
+        // meta refs pass the store's own check, with the source's repo id, and a failure is the
+        // load's, in the words fsck gives: fsck's first failure, which is load's for this dump
+        // (it can be a fault that fsck finds before the meta refs)
+        if let Err(meta) = r.store().check_meta() {
+            let e = r.fsck().err().unwrap_or_else(|| meta.into());
+            let _ = r.close();
+            return Err(fails(e));
+        }
+        // the step's own errors are its own; fsck's and the counts' are the load's
+        if let Err(e) = step(&mut r) {
+            let _ = r.close();
+            return Err(e);
+        }
     }
     let counted = (|| {
         let fsck = r.fsck()?;

@@ -480,3 +480,153 @@ fn ec5_a_url_and_a_plain_directory_are_refused_with_their_texts() {
     assert!(matches!(source_kind(src.path()), Ok(SourceKind::Project)));
     a.close().unwrap();
 }
+
+/// A small project whose store holds the forged `meta/origin` value `origin`, open, with a dump
+/// of it and a scratch directory (fix round 1: a source that `fsck` and `rdy load` refuse).
+fn forged_source(origin: Vec<u8>) -> (tempfile::TempDir, Rdy, PathBuf) {
+    forged_source_with(vec![(REF_ORIGIN.into(), origin)])
+}
+
+/// [`forged_source`] with the forged refs `refs`.
+fn forged_source_with(refs: Vec<(String, Vec<u8>)>) -> (tempfile::TempDir, Rdy, PathBuf) {
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path().join("src");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut r = Rdy::init(&dir, "rdy-standard").unwrap();
+    r.store_mut().set_refs_unchecked_for_tests(refs).unwrap();
+    r.close().unwrap();
+    let r = Rdy::open(&dir).unwrap();
+    let file = scratch.path().join("src.rdydump");
+    r.read().dump(&file).unwrap();
+    (scratch, r, file)
+}
+
+/// Ruling task-5: a clone refuses every source that `rdy load` of the same dump refuses, with
+/// load's error, and leaves the target as it was; for a clone and a fork, from the project and
+/// from the file.
+fn refuses_as_load_does(scratch: &Path, r: &Rdy, file: &Path) {
+    let loaded = rdy_engine::load::load(file, &scratch.join("loaded")).unwrap_err();
+    assert_eq!(loaded.code, "E_DUMP", "{loaded}");
+    assert!(
+        loaded
+            .message
+            .starts_with("the dump loads, but the project fails fsck: "),
+        "{loaded}"
+    );
+    for fork in [false, true] {
+        let st = r.read();
+        for (what, src) in [
+            ("project", CloneSource::State(&st)),
+            ("file", CloneSource::File(file)),
+        ] {
+            let to = scratch.join(format!("clone-{what}-{fork}"));
+            std::fs::create_dir_all(&to).unwrap();
+            std::fs::write(to.join("README.md"), "kept").unwrap();
+            let before = tree(&to);
+            let e = clone(src, &to, fork).unwrap_err();
+            assert_eq!(e.code, loaded.code, "{what} {fork}: {e}");
+            assert_eq!(e.message, loaded.message, "{what} {fork}");
+            assert_eq!(e.fix, loaded.fix, "{what} {fork}");
+            assert!(!to.join(".rdy").exists(), "{what} {fork}: no .rdy");
+            assert_eq!(tree(&to), before, "{what} {fork}: untouched");
+        }
+    }
+}
+
+#[test]
+fn ec5_a_clone_refuses_a_source_whose_origin_does_not_decode() {
+    let (scratch, r, file) = forged_source(vec![9]);
+    refuses_as_load_does(scratch.path(), &r, &file);
+    r.close().unwrap();
+}
+
+#[test]
+fn ec5_a_clone_refuses_a_source_whose_origin_names_another_repo() {
+    // a decodable clone origin that names a repo id other than the source's
+    let other = rdy_model::RepoId::new();
+    let o = Origin {
+        fork: false,
+        repo_id: other,
+        tag: None,
+        landing: None,
+    };
+    let (scratch, r, file) = forged_source(rdy_store::meta::encode_origin(&o));
+    assert_ne!(repo_id_of(&r), other);
+    refuses_as_load_does(scratch.path(), &r, &file);
+    r.close().unwrap();
+}
+
+#[test]
+fn ec5_a_clone_of_a_source_with_two_faults_gives_the_fault_load_gives() {
+    // fix round 1: a source whose origin does not decode and whose view ref is not a view head;
+    // fsck finds the view first, so load names the view, and the clone names it too
+    let (scratch, r, file) = forged_source_with(vec![
+        (REF_ORIGIN.into(), vec![9]),
+        ("view/broken".into(), vec![9]),
+    ]);
+    refuses_as_load_does(scratch.path(), &r, &file);
+    r.close().unwrap();
+}
+
+#[test]
+fn ec5_a_dump_replaced_after_its_header_check_is_never_cloned_from_the_new_bytes() {
+    // fix round 1: the O10 check reads the header of the stream the load consumes. While the
+    // source path flips between a format-12 dump and a format-11 one by atomic renames, every
+    // clone either refuses with O10 or clones the format-12 dump; none ingests format 11.
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path().join("good");
+    std::fs::create_dir_all(&dir).unwrap();
+    let g = Rdy::init(&dir, "rdy-standard").unwrap();
+    let good_id = repo_id_of(&g);
+    let good = scratch.path().join("good.rdydump");
+    g.read().dump(&good).unwrap();
+    g.close().unwrap();
+    let good = std::fs::read(&good).unwrap();
+    let old = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/dump/v1-s11.rdydump"),
+    )
+    .unwrap();
+    let src = scratch.path().join("src.rdydump");
+    std::fs::write(&src, &good).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let swapper = {
+        let (stop, src, stage) = (stop.clone(), src.clone(), scratch.path().join("stage"));
+        std::thread::spawn(move || {
+            let mut flip = false;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                flip = !flip;
+                std::fs::write(&stage, if flip { &old } else { &good }).unwrap();
+                // a rename onto an open file may fail on some platforms: try again
+                let _ = std::fs::rename(&stage, &src);
+            }
+        })
+    };
+    let o10 = format!(
+        "{} is a dump of store format 11, which has no repo id, so rdy clone cannot record its origin",
+        src.display()
+    );
+    let mut outcome = Ok(());
+    for i in 0..300 {
+        let to = scratch.path().join(format!("t{i}"));
+        match clone(CloneSource::File(&src), &to, false) {
+            Ok(s) if s.load.store_format >= 12 && s.repo_id == good_id.to_string() => {}
+            Ok(s) => {
+                outcome = Err(format!(
+                    "attempt {i}: cloned store format {} with repo id {}",
+                    s.load.store_format, s.repo_id
+                ));
+                break;
+            }
+            Err(e) if e.code == "E_DUMP" && e.message == o10 => {
+                assert!(!to.exists(), "attempt {i}: the target is untouched");
+            }
+            Err(e) => {
+                outcome = Err(format!("attempt {i}: {e}"));
+                break;
+            }
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    swapper.join().unwrap();
+    outcome.unwrap();
+}

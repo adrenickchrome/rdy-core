@@ -6,12 +6,15 @@
 //!
 //! The steps (closed):
 //! 1. `File`: a dump whose header names a store format before 12 is refused: it holds no repo id
-//!    (O10). `State`: read the project files, then a spawned thread loads the pipe's reader while
-//!    this thread writes the dump into the pipe's writer (O14).
+//!    (O10). The check reads the header of the one stream the load then consumes. `State`: read
+//!    the project files, then a spawned thread loads the pipe's reader while this thread writes
+//!    the dump into the pipe's writer (O14).
 //! 2. The load's steps 2 to 6, unchanged (`crate::load`).
-//! 3. After the open under the load's lock: read the loaded store's repo id (the source's), its
-//!    newest version and canon's head (O8), and write the origin batch (`Store::put_origin`, a
-//!    fork with a new repo id). Then the load's `fsck` and counts.
+//! 3. After the open under the load's lock: the loaded store's meta refs pass the store's check
+//!    first, so a source that `rdy load` refuses is refused in its words, never written over
+//!    (ruling task-5). Then read the loaded store's repo id (the source's), its newest version
+//!    and canon's head (O8), and write the origin batch (`Store::put_origin`, a fork with a new
+//!    repo id). Then the load's `fsck` and counts.
 //! 4. Any failure undoes everything, as the load does.
 //! 5. The loader thread is always joined. The clone returns the writer's error when the writer
 //!    failed and the loader failed reading the stream; in every other case the loader's (O25).
@@ -21,10 +24,9 @@ use crate::Rdy;
 use crate::config_levels::PROJECT_FILE;
 use crate::dump::project_files;
 use crate::error::{E_BAD_INPUT, E_DUMP, E_INTERNAL, E_IO, RdyError};
-use crate::load::{LoadSummary, load_from, open_dump};
+use crate::load::{LoadSummary, Opened, load_opened, open_dump, open_stream};
 use crate::read_state::ReadState;
 use rdy_model::RepoId;
-use rdy_store::dump::DumpReader;
 use rdy_store::layout::STORE_DIR;
 use rdy_store::meta::{FIRST_REPO_ID_STORE_FORMAT, Origin};
 use serde::Serialize;
@@ -140,8 +142,9 @@ pub fn clone(source: CloneSource, dir: &Path, fork: bool) -> Result<CloneSummary
 /// What the origin step recorded: the origin and the clone's repo id.
 type Recorded = Option<(Origin, RepoId)>;
 
-/// Step 3: the origin batch, written into the loaded project `r`. A loaded store with no repo
-/// id writes nothing: the load's `fsck` then refuses it (`meta/repo_id` is required).
+/// Step 3: the origin batch, written into the loaded project `r`. The load runs this step only
+/// after the store's meta check passed, which requires a repo id; a store with none would write
+/// nothing, and the load's `fsck` would refuse it.
 fn record_origin(r: &mut Rdy, fork: bool) -> Result<Recorded, RdyError> {
     let Some(source_id) = r.store().reader().repo_id()? else {
         return Ok(None);
@@ -159,11 +162,11 @@ fn record_origin(r: &mut Rdy, fork: bool) -> Result<Recorded, RdyError> {
     Ok(Some((origin, after)))
 }
 
-/// Runs the load of `r` (named `source` in its texts) into `dir` with the origin step after the
-/// open.
-fn load_recording(
+/// Runs the load of the opened stream (named `source` in its texts) into `dir` with the origin
+/// step after the open.
+fn load_recording<R: Read>(
     source: &Path,
-    r: impl Read,
+    opened: Opened<R>,
     dir: &Path,
     fork: bool,
 ) -> Result<(LoadSummary, Origin, RepoId), RdyError> {
@@ -172,7 +175,7 @@ fn load_recording(
         got = record_origin(r, fork)?;
         Ok(())
     };
-    let load = load_from(source, r, dir, Some(&mut step))?;
+    let load = load_opened(source, opened, dir, Some(&mut step))?;
     // the load's fsck requires a repo id, so a load that passed recorded the origin
     let (origin, repo_id) = got.ok_or_else(|| {
         RdyError::new(
@@ -187,29 +190,27 @@ fn load_recording(
     Ok((load, origin, repo_id))
 }
 
-/// Step 1 for a dump file: refuses a dump older than store format 12 (O10), then loads it.
+/// Step 1 for a dump file: opens it once and reads its header, refuses a dump older than store
+/// format 12 (O10), then loads that same stream: a file replaced after the check is never read.
+/// A file that does not open or a header that does not read is refused in the load's words.
 fn from_file(
     file: &Path,
     dir: &Path,
     fork: bool,
 ) -> Result<(LoadSummary, Origin, RepoId), RdyError> {
-    // a header that does not read is the load's to report, in its own words
-    if let Ok(f) = open_dump(file)
-        && let Ok((_, _, header)) = DumpReader::open(BufReader::new(f))
-        && header.store_format < FIRST_REPO_ID_STORE_FORMAT
-    {
+    let opened = open_stream(file, BufReader::new(open_dump(file)?))?;
+    let format = opened.header.store_format;
+    if format < FIRST_REPO_ID_STORE_FORMAT {
         let file = file.display();
         return Err(RdyError::new(
             E_DUMP,
             format!(
-                "{file} is a dump of store format {}, which has no repo id, so rdy clone cannot record its origin",
-                header.store_format
+                "{file} is a dump of store format {format}, which has no repo id, so rdy clone cannot record its origin"
             ),
             format!("load it with rdy load {file} <dir>, then clone that project"),
         ));
     }
-    let f = open_dump(file)?;
-    load_recording(file, BufReader::new(f), dir, fork)
+    load_recording(file, opened, dir, fork)
 }
 
 /// Step 1 for an open project (O14): the loader runs on a spawned thread that owns the pipe's
@@ -235,8 +236,10 @@ fn from_state(
     };
     let source: PathBuf = st.root().to_path_buf();
     let target: PathBuf = dir.to_path_buf();
-    let loader =
-        std::thread::spawn(move || load_recording(&source, BufReader::new(seen), &target, fork));
+    let loader = std::thread::spawn(move || {
+        let opened = open_stream(&source, BufReader::new(seen))?;
+        load_recording(&source, opened, &target, fork)
+    });
     // the writer is dropped here on every path, so the loader always sees the stream end
     let wrote = st.write_dump(BufWriter::new(writer), &files).map(drop);
     let loaded = match loader.join() {
