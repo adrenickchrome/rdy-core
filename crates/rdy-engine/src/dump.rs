@@ -74,7 +74,7 @@ impl ReadState {
     /// an `out` in the project's `.rdy` directory.
     pub fn dump(&self, out: &Path) -> Result<DumpSummary, RdyError> {
         if std::fs::symlink_metadata(out).is_ok() {
-            return Err(exists(out));
+            return Err(exists(out, DUMP_CMD));
         }
         let dir = out
             .parent()
@@ -89,47 +89,16 @@ impl ReadState {
         }
         inside_rdy(self.root(), dir, out)?;
         let files = project_files(self.root())?;
-        let mut partial = out.as_os_str().to_owned();
-        partial.push(format!(".partial-{}", std::process::id()));
-        let partial = Path::new(&partial);
-        // only a partial file this call created is ever removed
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(partial)
-            .map_err(|e| match e.kind() {
-                // never removed: it is another call's, or left by a dump that was killed
-                ErrorKind::AlreadyExists => RdyError::new(
-                    E_ALREADY_EXISTS,
-                    format!(
-                        "{} exists: another dump may be writing it",
-                        partial.display()
-                    ),
-                    "remove it if no dump is running, then retry",
-                ),
-                _ => io_at(partial, e),
-            })?;
-        let totals = match self
-            .write_dump(BufWriter::new(file), &files)
-            .and_then(|(buf, t)| {
-                let file = buf
-                    .into_inner()
-                    .map_err(|e| io_at(partial, e.into_error()))?;
-                file.sync_all().map_err(|e| io_at(partial, e))?;
-                Ok(t)
-            })
-            .and_then(|t| {
-                link_into_place(partial, out, |a, b| std::fs::hard_link(a, b))?;
-                Ok(t)
-            }) {
-            Ok(totals) => totals,
-            Err(e) => {
-                let _ = std::fs::remove_file(partial);
-                return Err(e);
-            }
-        };
-        std::fs::remove_file(partial).map_err(|e| io_at(partial, e))?;
-        sync_dir(dir).map_err(|e| io_at(dir, e))?;
+        let totals = place(out, DUMP_CMD, |partial, file| {
+            self.write_dump(BufWriter::new(file), &files)
+                .and_then(|(buf, t)| {
+                    let file = buf
+                        .into_inner()
+                        .map_err(|e| io_at(partial, e.into_error()))?;
+                    file.sync_all().map_err(|e| io_at(partial, e))?;
+                    Ok(t)
+                })
+        })?;
         Ok(DumpSummary {
             out: out.display().to_string(),
             dump_format: DUMP_FORMAT,
@@ -141,8 +110,8 @@ impl ReadState {
         })
     }
 
-    /// Writes the whole dump into `w` and returns `w`, flushed.
-    fn write_dump<W: Write>(
+    /// Writes the whole dump into `w` and returns `w`, flushed (a dump, and a clone's stream).
+    pub(crate) fn write_dump<W: Write>(
         &self,
         w: W,
         files: &[(String, Vec<u8>)],
@@ -175,25 +144,108 @@ impl ReadState {
     }
 }
 
+/// The command `rdy dump` names in its texts.
+const DUMP_CMD: &str = "rdy dump";
+
+/// Places a file at `out` as `rdy dump` and `rdy export` do: `out` must not exist and its
+/// directory must. The bytes go to `<out>.partial-<pid>` (`create_new`), which is synced, then
+/// hard-linked to `out`, so `out` is the whole file or nothing and never replaces a file. The
+/// partial is removed and the directory synced. `cmd` names the command in the texts
+/// (`rdy dump` or `rdy export`). Returns the length of the file.
+pub fn place_file(out: &Path, bytes: &[u8], cmd: &str) -> Result<u64, RdyError> {
+    place(out, cmd, |partial, mut file| {
+        file.write_all(bytes).map_err(|e| io_at(partial, e))?;
+        file.sync_all().map_err(|e| io_at(partial, e))?;
+        Ok(bytes.len() as u64)
+    })
+}
+
+/// The write rule of [`place_file`] with the filling of the partial file left to `fill`, which
+/// gets the partial's path and the file, and syncs it.
+fn place<T>(
+    out: &Path,
+    cmd: &str,
+    fill: impl FnOnce(&Path, std::fs::File) -> Result<T, RdyError>,
+) -> Result<T, RdyError> {
+    if std::fs::symlink_metadata(out).is_ok() {
+        return Err(exists(out, cmd));
+    }
+    let dir = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !dir.exists() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{} does not exist", dir.display()),
+            "create the directory first, or pick another path",
+        ));
+    }
+    let mut partial = out.as_os_str().to_owned();
+    partial.push(format!(".partial-{}", std::process::id()));
+    let partial = Path::new(&partial);
+    // only a partial file this call created is ever removed
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(partial)
+        .map_err(|e| match e.kind() {
+            // never removed: it is another call's, or left by a call that was killed
+            ErrorKind::AlreadyExists => RdyError::new(
+                E_ALREADY_EXISTS,
+                format!(
+                    "{} exists: another {} may be writing it",
+                    partial.display(),
+                    cmd.strip_prefix("rdy ").unwrap_or(cmd)
+                ),
+                format!(
+                    "remove it if no {} is running, then retry",
+                    cmd.strip_prefix("rdy ").unwrap_or(cmd)
+                ),
+            ),
+            _ => io_at(partial, e),
+        })?;
+    let done = fill(partial, file).and_then(|t| {
+        link_into_place(partial, out, cmd, |a, b| std::fs::hard_link(a, b))?;
+        Ok(t)
+    });
+    let done = match done {
+        Ok(done) => done,
+        Err(e) => {
+            let _ = std::fs::remove_file(partial);
+            return Err(e);
+        }
+    };
+    std::fs::remove_file(partial).map_err(|e| io_at(partial, e))?;
+    sync_dir(dir).map_err(|e| io_at(dir, e))?;
+    Ok(done)
+}
+
 /// Links the synced `partial` to `out` with `link` (`std::fs::hard_link`): `out` appears whole
 /// or not at all, and never over a file. A file system without hard links (FAT, exFAT, some
-/// network mounts) gets its own fix: a retry there never passes.
+/// network mounts) gets its own fix: a retry there never passes. `cmd` names the command.
 fn link_into_place(
     partial: &Path,
     out: &Path,
+    cmd: &str,
     link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), RdyError> {
     link(partial, out).map_err(|e| {
         if e.kind() == ErrorKind::AlreadyExists {
-            exists(out)
+            exists(out, cmd)
         } else if no_hard_links(&e) {
+            let (noun, verb) = if cmd == DUMP_CMD {
+                ("the dump", "dump")
+            } else {
+                ("the file", cmd.strip_prefix("rdy ").unwrap_or(cmd))
+            };
             RdyError::new(
                 E_IO,
                 format!(
-                    "{}: this file system does not support hard links, which rdy dump uses to put the dump in place",
+                    "{}: this file system does not support hard links, which {cmd} uses to put {noun} in place",
                     out.display()
                 ),
-                "dump to a local disk, then copy the file",
+                format!("{verb} to a local disk, then copy the file"),
             )
         } else {
             io_at(out, e)
@@ -278,12 +330,19 @@ fn io_at(path: &Path, e: std::io::Error) -> RdyError {
     )
 }
 
-/// `out` exists: a dump never overwrites a file.
-fn exists(out: &Path) -> RdyError {
+/// `out` exists: neither `rdy dump` nor `rdy export` overwrites a file.
+fn exists(out: &Path, cmd: &str) -> RdyError {
+    if cmd == DUMP_CMD {
+        return RdyError::new(
+            E_ALREADY_EXISTS,
+            format!("{} exists", out.display()),
+            "pick a new file name; rdy dump never overwrites a file",
+        );
+    }
     RdyError::new(
         E_ALREADY_EXISTS,
-        format!("{} exists", out.display()),
-        "pick a new file name; rdy dump never overwrites a file",
+        format!("{} exists; {cmd} never overwrites a file", out.display()),
+        "pick another path, or remove the file",
     )
 }
 
@@ -329,7 +388,7 @@ mod tests {
         }
         for e in no_links {
             let shown = e.to_string();
-            let got = super::link_into_place(partial, out, |_, _| Err(e)).unwrap_err();
+            let got = super::link_into_place(partial, out, "rdy dump", |_, _| Err(e)).unwrap_err();
             assert_eq!(got.code, E_IO, "{shown}");
             assert_eq!(
                 got.message,
@@ -344,16 +403,42 @@ mod tests {
     }
 
     #[test]
+    fn ec7_a_file_system_without_hard_links_gets_the_export_fix() {
+        let out = std::path::Path::new("/mnt/stick/p.html");
+        let partial = std::path::Path::new("/mnt/stick/p.html.partial-1");
+        let got = super::link_into_place(partial, out, "rdy export", |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        })
+        .unwrap_err();
+        assert_eq!(got.code, E_IO);
+        assert_eq!(
+            got.message,
+            "/mnt/stick/p.html: this file system does not support hard links, which rdy export uses to put the file in place"
+        );
+        assert_eq!(got.fix, "export to a local disk, then copy the file");
+        let got = super::link_into_place(partial, out, "rdy export", |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        })
+        .unwrap_err();
+        assert_eq!(got.code, crate::error::E_ALREADY_EXISTS);
+        assert_eq!(
+            got.message,
+            "/mnt/stick/p.html exists; rdy export never overwrites a file"
+        );
+        assert_eq!(got.fix, "pick another path, or remove the file");
+    }
+
+    #[test]
     fn dl5_a_late_io_error_names_its_path() {
         let out = std::path::Path::new("/d/p.rdydump");
         let partial = std::path::Path::new("/d/p.rdydump.partial-1");
         let e = std::io::Error::from_raw_os_error(28);
         let shown = e.to_string();
-        let got = super::link_into_place(partial, out, |_, _| Err(e)).unwrap_err();
+        let got = super::link_into_place(partial, out, "rdy dump", |_, _| Err(e)).unwrap_err();
         assert_eq!(got.code, E_IO);
         assert_eq!(got.message, format!("/d/p.rdydump: {shown}"));
         assert_eq!(got.fix, "check file permissions and disk space");
-        let got = super::link_into_place(partial, out, |_, _| {
+        let got = super::link_into_place(partial, out, "rdy dump", |_, _| {
             Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
         })
         .unwrap_err();

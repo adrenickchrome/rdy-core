@@ -17,7 +17,7 @@ pub(crate) fn one_line(s: &str) -> String {
 }
 
 /// The five entities `escape` writes, decoded (`&amp;` last, so `&amp;lt;` stays `&lt;`).
-fn decode(s: &str) -> String {
+pub(crate) fn decode(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
@@ -97,7 +97,7 @@ fn md_text(s: &str) -> String {
 
 /// [`md_text`]; `line_start` says whether `s` begins a line, where a `#`, `-`, `+` or `N.` would
 /// open a heading, a list item or a numbered one.
-fn md_escape(s: &str, line_start: bool) -> String {
+pub(crate) fn md_escape(s: &str, line_start: bool) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     let lead = s.len() - s.trim_start().len();
     out.push_str(&s[..lead]);
@@ -305,7 +305,7 @@ impl Lines {
 
 /// The value of attribute `key` in a start tag's text (its name, then its attributes), as written:
 /// quoted values may hold spaces and `=`, so a title or href that mentions an attribute is not one.
-fn attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
     let mut rest = tag.trim_start_matches(|c: char| !c.is_whitespace());
     loop {
         rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
@@ -346,7 +346,7 @@ fn attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
 /// reader hears (`class="visually-hidden"`), the diagram canvas (`aria-hidden="true"`; its
 /// words are under "Diagram source"), and a script, a stylesheet (an SVG's own included) or a
 /// template. Only the attributes count, never an href or title that mentions them.
-fn unseen(name: &str, tag: &str) -> bool {
+pub(crate) fn unseen(name: &str, tag: &str) -> bool {
     matches!(name, "button" | "script" | "style" | "template")
         || attr(tag, "aria-hidden") == Some("true")
         || attr(tag, "class").is_some_and(|c| c.split_whitespace().any(|c| c == "visually-hidden"))

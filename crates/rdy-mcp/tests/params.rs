@@ -117,6 +117,34 @@ fn dl7_rdy_dump_refuses_an_unknown_key() {
     assert!(message.contains("out"), "{message}");
 }
 
+/// ec12: `rdy_clone` takes `dir`, `file` and `fork` and nothing else.
+#[test]
+fn ec12_rdy_clone_refuses_an_unknown_key() {
+    let (code, message, _) = refusal::<CloneParams>("rdy_clone", json!({"dirs": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("dir"), "{message}");
+    let (code, message, _) =
+        refusal::<CloneParams>("rdy_clone", json!({"dir": "x", "forks": true}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("fork"), "{message}");
+}
+
+/// ec11: `rdy_export` takes `out`, `format`, `layout` and `scope` and nothing else; `format` and
+/// `layout` are closed sets.
+#[test]
+fn ec11_rdy_export_refuses_an_unknown_key() {
+    let (code, message, _) = refusal::<ExportParams>(
+        "rdy_export",
+        json!({"out": "x", "format": "md", "layouts": "mkdocs"}),
+    );
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("layout"), "{message}");
+    let (code, message, _) =
+        refusal::<ExportParams>("rdy_export", json!({"out": "x", "format": "docx"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("format"), "{message}");
+}
+
 /// dl7: `rdy_load` takes `file` and `dir` and nothing else.
 #[test]
 fn dl7_rdy_load_refuses_an_unknown_key() {
@@ -240,7 +268,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 40 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 42 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
     // `RelayParams`, `RecommendedParams`).
     check!(
@@ -252,11 +280,13 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         AnswerParams,
         AssetParams,
         BriefParams,
+        CloneParams,
         CoverageParams,
         DecideParams,
         DismissParams,
         DumpParams,
         EditorialParams,
+        ExportParams,
         FindingParams,
         IdParams,
         InboxParams,

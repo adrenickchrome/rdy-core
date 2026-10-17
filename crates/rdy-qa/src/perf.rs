@@ -204,6 +204,12 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "dump" => "no spec target: the whole project as one dump stream (reported)",
         "load" => "no spec target: rebuild from a dump, with the index build and fsck (reported)",
+        "export_md" => "no spec target: the scope printed as md, written whole (reported)",
+        "export_html" => "no spec target: the scope printed as html, written whole (reported)",
+        "export_pdf" => "no spec target: the scope laid out and written as PDF (reported)",
+        "clone" => {
+            "no spec target: a clone of this project, with the index build, the origin and fsck (reported)"
+        }
         "lexicon_build" => {
             "no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1)"
         }
@@ -3150,6 +3156,59 @@ fn tier_dump(
     }));
 }
 
+/// `export_md`, `export_html` and `export_pdf`: canon printed whole at a new path (D-9QV85). Run
+/// with the project closed. The handle is opened outside the timer; each output (a tree for
+/// Markdown, a file for the others) is removed outside it.
+fn tier_export(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    runs: usize,
+) {
+    use rdy_render::print::{Format, export};
+    let r = Rdy::open(proj).expect("open");
+    for (name, format, ext) in [
+        ("export_md", Format::Md, "md"),
+        ("export_html", Format::Html, "html"),
+        ("export_pdf", Format::Pdf, "pdf"),
+    ] {
+        out.push(measure_timed(name, runs, |i| {
+            let to = parent.join(format!("{name}-{i}.{ext}"));
+            let s = Instant::now();
+            export(&r.read(), &Scope::Canon, &to, format, None).expect("export");
+            let t = s.elapsed();
+            if to.is_dir() {
+                std::fs::remove_dir_all(&to).expect("remove the exported tree");
+            } else {
+                std::fs::remove_file(&to).expect("remove the exported file");
+            }
+            t
+        }));
+    }
+}
+
+/// `clone`: the project cloned from its open state into a new directory, with the index build,
+/// the origin and `fsck` (D-9QV85). The handle is opened outside the timer; the clone is removed
+/// outside it.
+fn tier_clone(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) {
+    use rdy_engine::clone::{CloneSource, clone};
+    let r = Rdy::open(proj).expect("open");
+    out.push(measure_timed(&format!("clone{sfx}"), runs, |i| {
+        let target = parent.join(format!("c{sfx}-{i}"));
+        let s = Instant::now();
+        clone(CloneSource::State(&r.read()), &target, false).expect("clone");
+        let t = s.elapsed();
+        std::fs::remove_dir_all(&target).expect("remove the clone");
+        t
+    }));
+}
+
 /// `diff_since`: the block and word diff from the tier's tag to canon, as the page of the changes
 /// since the tag reads it (`render` builds it among its pages). The tag's landing is found outside
 /// the timer. Only the 10k tier is tagged (F3).
@@ -3604,6 +3663,8 @@ pub fn run_workload() -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, "", 5);
     tier_render_cold(&mut out, &proj, dir.path(), "", 5);
     tier_dump(&mut out, &proj, dir.path(), "", 5);
+    tier_export(&mut out, &proj, dir.path(), 5);
+    tier_clone(&mut out, &proj, dir.path(), "", 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -4357,6 +4418,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
     tier_dump(&mut out, &proj, parent, sfx, 3);
+    tier_clone(&mut out, &proj, parent, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
@@ -5008,6 +5070,38 @@ mod tests {
         assert!(spec_target("load_50k").is_some());
     }
 
+    /// The export and clone ops run end to end on a small tree: the project is landed and closed,
+    /// as in the tiers, and each op has a reported target and no spec ceiling.
+    #[test]
+    fn ecperf1_the_export_and_clone_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6563_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        drop(r);
+        let mut out = vec![];
+        tier_export(&mut out, &proj, dir.path(), 2);
+        tier_clone(&mut out, &proj, dir.path(), "", 2);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["export_md", "export_html", "export_pdf", "clone"]);
+        for m in &out {
+            assert!(m.median_ms >= 0.0, "{m:?}");
+            assert!(spec_target(&m.op).is_some(), "{} has no target", m.op);
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
+        }
+        assert!(spec_target("clone_50k").is_some());
+        // nothing is left behind: each op removes its output outside the timer
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("p")]);
+    }
+
     /// The intake ops run end to end on a small tree with two proposals, and each has a reported
     /// target and no spec ceiling.
     #[test]
@@ -5052,10 +5146,13 @@ mod tests {
         at("out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));");
         at("tier_render_cold(&mut out, &proj, dir.path(), \"\", 5);");
         at("tier_dump(&mut out, &proj, dir.path(), \"\", 5);");
+        at("tier_export(&mut out, &proj, dir.path(), 5);");
+        at("tier_clone(&mut out, &proj, dir.path(), \"\", 5);");
         let large = src.find("fn run_large_tier(").expect("run_large_tier");
         let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
         assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_dump(&mut out, &proj, parent, sfx, 3);"));
+        assert!(large.contains("tier_clone(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);"));
     }
 

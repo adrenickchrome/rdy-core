@@ -44,6 +44,31 @@ pub trait Engine: Send + Sync {
     fn site_warnings(&self, _scope: &ScopeRef) -> Result<Vec<String>, RdyError> {
         Ok(Vec::new())
     }
+    /// Prints the docs (Task 11). An engine with no renderer refuses.
+    fn export(&self, _req: ExportRequest) -> Result<serde_json::Value, RdyError> {
+        Err(RdyError::new(
+            crate::E_BAD_INPUT,
+            "rdy_export runs in the daemon, and this session runs without one",
+            "drop --no-daemon, or run rdy export --out <path> --format <pdf|html|md>",
+        ))
+    }
+}
+
+/// What `rdy_export` asks for, as its parameters give it; the daemon parses `format` and `layout`.
+#[derive(Clone, Debug)]
+pub struct ExportRequest {
+    /// The path to write, resolved by the caller.
+    pub out: PathBuf,
+    /// `pdf`, `html` or `md`.
+    pub format: String,
+    /// `mkdocs`, with `md` only.
+    pub layout: Option<String>,
+    /// The scope's text; canon when none.
+    pub scope: Option<String>,
+    /// The asking session's view. A scope naming it needs no record yet (the session's first
+    /// write makes one), as for every read (`ReadState::resolve_read_scope`); another view with
+    /// no record is not found.
+    pub view: Option<String>,
 }
 
 /// Where the live site listens (D-N5NSN, D-FV6G9).

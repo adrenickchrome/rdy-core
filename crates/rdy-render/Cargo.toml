@@ -13,6 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 rdy-schema.workspace = true
+ttf-parser.workspace = true
+pdf-writer.workspace = true
+subsetter.workspace = true
+miniz_oxide.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

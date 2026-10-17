@@ -183,9 +183,14 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         .map(|(name, n)| json!({"name": name, "changes": n}))
         .collect();
     let landings = st_.landings()?.len();
+    // ec10 (D-KQ4CA): the repo id, and the origin of a clone or a fork, as `rdy status` shows them
+    let mut project = json!({"name": st_.project_name(), "description": st_.project_description()});
+    if let Some(p) = project.as_object_mut() {
+        p.extend(rdy_engine::repo::repo_json(&st_)?);
+    }
     let mut out = json!({
         "pack": st_.pack().name, "session": {"actor": s.actor, "view": st.view},
-        "project": {"name": st_.project_name(), "description": st_.project_description()},
+        "project": project,
         "canon": {"landings": landings},
         "open_report": open_report_json(&st.engine.open_report()),
         "views": views, "tree": tree, "version_position": position,

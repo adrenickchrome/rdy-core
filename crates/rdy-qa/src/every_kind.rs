@@ -1,6 +1,7 @@
 //! The every-kind project: one project that holds an object of every kind of dump format 1 (store
-//! format 11) and a ref of every family, and one read of it ("facts") that a later rdy can
-//! repeat. Shared by the sg6 store test and the dump and load tests (D-69AY3, D-EV4F1).
+//! format 12) and a ref of every family, and one read of it ("facts") that a later rdy can
+//! repeat. The project is a clone, so it holds `meta/origin` (O41). Shared by the sg6 store test
+//! and the dump, load and clone tests (D-69AY3, D-EV4F1).
 use crate::fixtures::*;
 use crate::inbox::on;
 use crate::intake::{PERSON, confirm_exceptions, decide_in};
@@ -9,6 +10,7 @@ use crate::tensions::{ag, created, one_involving, put, upd};
 use rdy_engine::alt::AltMemberInput;
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
+use rdy_engine::clone::{CloneSource, clone};
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::inbox::sub::subscribe;
 use rdy_engine::mention_review::MentionVerdict;
@@ -27,12 +29,16 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The ref families of an every-kind store (store format 11): the ten of an M2 store, `canon`,
-/// the open proposals (`proposal/`), the answers (`answer/`) and the snoozes (`pending/`). A
-/// store format that adds a family adds it here; each frozen fixture test keeps its own list
-/// (`V1_FAMILIES` in `io_dump_fixture.rs`, `V11_FAMILIES` in `io_dump_fixture_s11.rs`).
-pub const FAMILIES: [&str; 14] = [
+/// The ref families of an every-kind store (store format 12): the ten of an M2 store, `canon`,
+/// the open proposals (`proposal/`), the answers (`answer/`), the snoozes (`pending/`), the repo
+/// id (`meta/repo_id`) and the clone's origin (`meta/origin`). A store format that adds a family
+/// adds it here; each frozen fixture test keeps its own list (`V1_FAMILIES` in
+/// `io_dump_fixture.rs`, `V11_FAMILIES` in `io_dump_fixture_s11.rs`, `V12_FAMILIES` in
+/// `io_dump_fixture_s12.rs`).
+pub const FAMILIES: [&str; 16] = [
     "meta/store_format",
+    "meta/repo_id",
+    "meta/origin",
     "view/",
     "tag/",
     "intent/",
@@ -88,6 +94,10 @@ pub const V11_KINDS: [u8; 16] = [
     kinds::TENSION,
     kinds::TRANSITION,
 ];
+
+/// The object kinds of dump format 1 with store format 12 that the project holds: `V11_KINDS`
+/// (store format 12 adds refs, no kind). Frozen with the v1-s12 fixture.
+pub const V12_KINDS: [u8; 16] = V11_KINDS;
 
 /// The blocks of the seeded canon doc.
 #[derive(Clone)]
@@ -216,7 +226,9 @@ fn foreign_export(out: &Path) {
 /// of `FAMILIES`: an imported blob, the open proposals `sa` and `dec` (`proposal/`), an `ANSWER`
 /// of each family (a relayed tag and a local confirm under `answer/`, a relayed snooze under
 /// `pending/`), a `.rdyignore` with the line `*.draft.yaml`, and a `.rdy/local.yaml` with
-/// `actor: human:qa` (a dump leaves it out).
+/// `actor: human:qa` (a dump leaves it out). The project returned is a clone of the one built
+/// (O41): it keeps the built project's log byte for byte, then holds its origin batch
+/// (`meta/origin`).
 /// Closed.
 pub fn project() -> tempfile::TempDir {
     build(None)
@@ -224,7 +236,7 @@ pub fn project() -> tempfile::TempDir {
 
 /// `project`, built on a store whose segments hold `segment_max` bytes: its log rolls where a
 /// batch and its marker do not fit, and a batch that grows past the limit stays in its segment
-/// (the soft limit). The dump format 1 fixtures are written from it (dl8, di2).
+/// (the soft limit). The dump format 1 fixtures are written from it (dl8, di2, ec13).
 pub fn rolling_project(segment_max: u64) -> tempfile::TempDir {
     build(Some(segment_max))
 }
@@ -455,9 +467,18 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
         "the ack moved the cursor"
     );
     e.close().unwrap();
+    // O41: the project returned is a clone of the one built. A clone carries `.rdyignore`, so it
+    // is written first; a clone never carries `.rdy/local.yaml`, so it is written into the clone.
     std::fs::write(dir.path().join(".rdyignore"), "*.draft.yaml\n").unwrap();
-    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
-    dir
+    let src = Rdy::open(dir.path()).unwrap();
+    let to = tempfile::TempDir::new().unwrap();
+    {
+        let st = src.read();
+        clone(CloneSource::State(&st), to.path(), false).unwrap();
+    }
+    src.close().unwrap();
+    std::fs::write(to.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
+    to
 }
 
 /// The agent that relays the person's words from chat.

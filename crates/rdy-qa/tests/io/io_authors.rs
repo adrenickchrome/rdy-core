@@ -584,6 +584,24 @@ fn older_author_export(out: &Path, ops: serde_json::Value) {
     let p = r.propose(&b, "vb", "b", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     r.read().export(&Scope::Canon, out).unwrap();
+    // The authors wrote in this order, but a fast machine can stamp the founder's landing and
+    // agent:b's write in the same millisecond, and import breaks a tie by actor name
+    // (POST-LAUNCH 49). Give each author its own time, in the order they wrote.
+    let mut rows = authors(out);
+    for row in rows.iter_mut() {
+        let at = match row["actor"].as_str().unwrap() {
+            "agent:a" => 1_000,
+            "human:founder" => 2_000,
+            "agent:b" => 3_000,
+            other => panic!("unexpected author {other}"),
+        };
+        row["at_ms"] = serde_yaml_ng::Value::from(at);
+    }
+    std::fs::write(
+        out.join("authors.yaml"),
+        serde_yaml_ng::to_string(&rows).unwrap(),
+    )
+    .unwrap();
 }
 
 /// Fix round 2 (finding 1): the import reply reports what every author change gives, not only

@@ -151,7 +151,7 @@ struct OpenBatch {
 
 /// The refusal of a step that would make the index durable, or read the log as a whole, while a
 /// held batch is open.
-fn batch_open(what: &str) -> StoreError {
+pub(crate) fn batch_open(what: &str) -> StoreError {
     StoreError::Refused(format!("a held batch is open: seal it {what}"))
 }
 
@@ -729,9 +729,9 @@ impl Store {
     /// ref is the truth: any other number there is refused, and so is a log with frames and no
     /// number. An index with no number over a log with frames may have lost it (an old partial
     /// rebuild), so the index is first rebuilt from the log and asked again. A new store (an
-    /// empty log; `create` wrote `FORMAT` first) gets the ref as one marked batch, then a
-    /// checkpoint. A crash before that leaves `FORMAT` and an empty log, which the next open
-    /// finishes.
+    /// empty log; `create` wrote `FORMAT` first) gets the ref and its repo id (`meta/repo_id`) as
+    /// one marked batch, then a checkpoint. A crash before that leaves `FORMAT` and an empty log,
+    /// which the next open finishes.
     fn ensure_format(&mut self) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
@@ -756,10 +756,18 @@ impl Store {
                 }
             }
             None => {
-                self.set_refs(vec![(
-                    format::REF_STORE_FORMAT.into(),
-                    format::encode_u32(Format::CURRENT.store_format),
-                )])?;
+                // one batch of the format and the repo id (D-DAGNB): set_refs refuses meta/ refs
+                let items = self.ref_items(vec![
+                    (
+                        format::REF_STORE_FORMAT.into(),
+                        format::encode_u32(Format::CURRENT.store_format),
+                    ),
+                    (
+                        crate::meta::REF_REPO_ID.into(),
+                        crate::meta::encode_repo_id(&rdy_model::RepoId::new()),
+                    ),
+                ]);
+                self.write(items)?;
                 // a new store is durable from its first open
                 self.checkpoint()?;
             }
@@ -805,6 +813,11 @@ impl Store {
         }
         self.held = on;
         Ok(())
+    }
+
+    /// Whether held batches are on.
+    pub(crate) fn held(&self) -> bool {
+        self.held
     }
 
     /// The kind and hash of each frame of the open held batch, in order; `None` when no batch is
@@ -1412,7 +1425,8 @@ impl Store {
     /// `put_verdict` and `put_tension_versions` write them, with their objects (plan M2e1). An
     /// `inbox/` ref is refused: only `put_inbox` writes one, after its checks (plan M2e2). An
     /// `answer/` or `pending/` ref is refused: only `put_answer` writes one, with its answer
-    /// (plan Decision intake).
+    /// (plan Decision intake). A `meta/` ref is refused: only the store writes one (plan Export
+    /// and clone, `crate::meta`).
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
         if let Some((name, _)) = refs
             .iter()
@@ -1460,6 +1474,14 @@ impl Store {
         }) {
             return Err(StoreError::Decode(format!(
                 "ref {name:?} is an answer: only put_answer writes one"
+            )));
+        }
+        if let Some((name, _)) = refs
+            .iter()
+            .find(|(name, _)| name.starts_with(crate::meta::META_REF))
+        {
+            return Err(StoreError::Decode(format!(
+                "ref {name:?} is project metadata: only the store writes meta/ refs"
             )));
         }
         let items = self.ref_items(refs);

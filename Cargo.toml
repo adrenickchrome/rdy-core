@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.99"
-version = "0.4.0"
+version = "0.5.0"
 license = "Apache-2.0"
 
 [workspace.dependencies]
@@ -40,6 +40,10 @@ libc = "0.2.190"
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"
+ttf-parser = "0.25"
+pdf-writer = "0.15"
+subsetter = { version = "0.2", default-features = false }
+miniz_oxide = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

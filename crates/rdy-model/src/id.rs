@@ -5,32 +5,58 @@ use std::fmt;
 thread_local! {
     /// splitmix64 state for test-seeded ids on this thread; `None`: ids are random.
     static SEEDED: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The seeded thread's own splitmix64 state for `random_bytes` (repo ids), apart from
+    /// `SEEDED` so a repo id never moves the `BlockId` stream (O19); `None`: random bytes.
+    static SEEDED_BYTES: Cell<Option<u64>> = const { Cell::new(None) };
 }
+
+/// What `seed_ids_for_tests` mixes into its seed for the `random_bytes` stream ("REPOID_1").
+const BYTES_SEED_SALT: u64 = 0x5245_504f_4944_5f31;
 
 /// Tests only: make `BlockId::new` on this thread draw from a deterministic generator seeded
 /// with `seed`, so a test's ids replay exactly. Undo with [`unseed_ids_for_tests`].
 #[doc(hidden)]
 pub fn seed_ids_for_tests(seed: u64) {
     SEEDED.with(|s| s.set(Some(seed)));
+    SEEDED_BYTES.with(|s| s.set(Some(seed ^ BYTES_SEED_SALT)));
 }
 
 /// Tests only: return this thread's `BlockId::new` to random ids.
 #[doc(hidden)]
 pub fn unseed_ids_for_tests() {
     SEEDED.with(|s| s.set(None));
+    SEEDED_BYTES.with(|s| s.set(None));
+}
+
+/// One step of splitmix64: moves `state` and returns the step's output.
+fn splitmix64(state: &Cell<Option<u64>>, seed: u64) -> u64 {
+    let next = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    state.set(Some(next));
+    let mut z = next;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// A digit in `0..32`: from the seeded splitmix64 stream if this thread has one, else random.
 fn next_digit() -> usize {
     SEEDED.with(|s| match s.get() {
         None => rand::random_range(0..32),
-        Some(state) => {
-            let state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            s.set(Some(state));
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            ((z ^ (z >> 31)) >> 59) as usize
+        Some(state) => (splitmix64(s, state) >> 59) as usize,
+    })
+}
+
+/// Fills `buf` with random bytes. On a seeded thread they come from the thread's own byte
+/// stream, eight bytes per step, which never moves the `BlockId` stream (O19).
+pub(crate) fn random_bytes(buf: &mut [u8]) {
+    SEEDED_BYTES.with(|s| match s.get() {
+        None => rand::fill(buf),
+        Some(_) => {
+            for chunk in buf.chunks_mut(8) {
+                let state = s.get().expect("a seeded thread");
+                let z = splitmix64(s, state).to_le_bytes();
+                chunk.copy_from_slice(&z[..chunk.len()]);
+            }
         }
     })
 }
@@ -45,6 +71,8 @@ pub enum IdError {
     BadBody(String),
     #[error("bad hash {0:?}: expected 64 hex characters")]
     BadHash(String),
+    #[error("bad repo id {0:?}: expected 32 hex digits")]
+    BadRepoId(String),
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

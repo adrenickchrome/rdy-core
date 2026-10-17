@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, DumpParams, LoadParams};
+use crate::tools::{self, CloneParams, DumpParams, LoadParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = store_router, vis = "pub(crate)")]
@@ -19,5 +19,12 @@ impl RdyServer {
     )]
     async fn rdy_load(&self, Parameters(p): Parameters<LoadParams>) -> CallToolResult {
         self.run("rdy_load", p, tools::rdy_load).await
+    }
+
+    #[tool(
+        description = "Clone this project, or the dump file named by file, into dir, a directory with no rdy store. The clone keeps every hash, landing, tag and view, keeps the repo id and records its origin; fork gives it a new repo id. To clone another project, call rdy_dump on its own server, then pass the file here."
+    )]
+    async fn rdy_clone(&self, Parameters(p): Parameters<CloneParams>) -> CallToolResult {
+        self.run("rdy_clone", p, tools::rdy_clone).await
     }
 }

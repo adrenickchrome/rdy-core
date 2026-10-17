@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 mod brief;
+mod clone;
 mod dump;
 mod edit;
 mod intake;
@@ -30,6 +31,7 @@ mod site_url;
 mod wc;
 
 use brief::brief;
+use clone::clone;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_folder};
 use intake::{answer, pending};
@@ -38,7 +40,8 @@ pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use search::search;
-use site::{export, import, render};
+pub(crate) use site::export_print;
+use site::{EXPORT_SHAPE, export, import, render};
 use site_url::site_url;
 pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
@@ -70,6 +73,7 @@ pub const OPS: &[&str] = &[
     "render",
     "export",
     "dump",
+    "clone",
     "check",
     "new_folder",
     "new_doc",
@@ -335,8 +339,9 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
-        "export" => export(cx, parse(op, args, "{out, scope?}")?),
+        "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out}")?),
+        "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),
         "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),

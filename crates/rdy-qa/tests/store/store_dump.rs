@@ -552,7 +552,7 @@ fn dl1_an_unassigned_kind_is_refused() {
     assert_eq!(
         frame_kinds(DUMP_FORMAT, STORE_FORMAT),
         Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19][..]),
-        "exactly the kinds store format 11 assigns"
+        "exactly the kinds store format 12 assigns"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");

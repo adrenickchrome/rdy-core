@@ -1,6 +1,7 @@
-//! Spec §15.3 invariant 7: a working copy checked out from a view holds what `rdy export` of
-//! that view writes, less what lives only in the store (the metadata split: supporting blocks
-//! and their subtrees, version pins, rdy's own fields, store-only links). Only people edit the
+//! Spec §15.3 invariant 7: a working copy checked out from a view holds what the format-3 export
+//! of that view writes (O13: the engine's, on a load of the view's dump), less what lives only in
+//! the store (the metadata split: supporting blocks and their subtrees, version pins, rdy's own
+//! fields, store-only links). Only people edit the
 //! working copy (FW-V2), so the check runs on a checkout that nobody has touched since. This
 //! module is the QA gate's; the product's `rdy check` lint of a working copy is
 //! `rdy_engine::wc_check`.
@@ -190,24 +191,42 @@ fn shown(file: &str, types: &BTreeMap<String, String>, pack: &Pack) -> Option<St
     }
 }
 
-/// Runs `rdy export --scope view:<view> --out <tmp>` as the person and compares it with
-/// `checkout`: every file under `<tmp>/docs/`, less the metadata split, with the same path
-/// under `checkout` (bytes equal; rule `wc_tree`), and the content hashes under `<tmp>/blobs/` with those under
-/// `checkout/_blobs/` (rule `wc_blobs`). A failed export is one `wc_export` violation.
+/// The format-3 tree of `view`, written at `out` as the person reads the project (O13): `rdy
+/// dump` through the daemon, a load of that dump into `<tmp>/project`, and the engine's export
+/// there, in process. No CLI path writes a format-3 tree (O12), and the oracle shares no code
+/// with the checkout.
+fn export_view(s: &Served, view: &str, tmp: &Path, out: &Path) -> Result<(), String> {
+    let file = tmp.join("view.rdydump");
+    let o = s.rdy(&["dump", "--out", &file.to_string_lossy()]);
+    if !o.status.success() {
+        return Err(format!(
+            "rdy dump failed: {}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ));
+    }
+    let project = tmp.join("project");
+    rdy_engine::load::load(&file, &project).map_err(|e| format!("rdy load failed: {e}"))?;
+    let r = rdy_engine::Rdy::open(&project).map_err(|e| format!("the loaded project: {e}"))?;
+    let exported = r
+        .read()
+        .export(&rdy_engine::Scope::View(view.to_string()), out)
+        .map(|_| ())
+        .map_err(|e| format!("the export of view {view}: {e}"));
+    r.close().map_err(|e| format!("the loaded project: {e}"))?;
+    exported
+}
+
+/// Writes the format-3 tree of `view` at `<tmp>/export` (O13) and compares it with `checkout`:
+/// every file under `<tmp>/export/docs/`, less the metadata split, with the same path under
+/// `checkout` (bytes equal; rule `wc_tree`), and the content hashes under `<tmp>/export/blobs/`
+/// with those under `checkout/_blobs/` (rule `wc_blobs`). A failed export is one `wc_export`
+/// violation.
 pub fn matches_export(s: &Served, view: &str, checkout: &Path) -> Result<(), Vec<Violation>> {
     let tmp = tempfile::tempdir().expect("a temp dir for the export");
     let out = tmp.path().join("export");
-    let scope = format!("view:{view}");
-    let o = s.rdy(&["export", "--scope", &scope, "--out", &out.to_string_lossy()]);
-    if !o.status.success() {
-        return Err(vec![violation(
-            "wc_export",
-            format!(
-                "rdy export failed: {}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            ),
-        )]);
+    if let Err(why) = export_view(s, view, tmp.path(), &out) {
+        return Err(vec![violation("wc_export", why)]);
     }
     let mut found = vec![];
     // the project's own pack names the type of each id prefix (final review M9, minors item 7);

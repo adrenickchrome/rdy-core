@@ -17,8 +17,15 @@ pub(crate) struct RenderArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct ExportArgs {
+    /// The file (pdf, html) or directory (md) to write. It must not exist; a directory may be empty.
     #[arg(long)]
     out: PathBuf,
+    /// pdf, html or md.
+    #[arg(long, value_parser = ["pdf", "html", "md"])]
+    format: String,
+    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. Only with --format md.
+    #[arg(long, value_parser = ["mkdocs"])]
+    layout: Option<String>,
     /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
@@ -79,21 +86,32 @@ pub(crate) fn render(env: &Env, a: RenderArgs) -> Result<(Value, String), ErrorR
     Ok((v, t))
 }
 
+/// `rdy export`: prints the docs, the CLI twin of `rdy_export` (D-EVRNM, O1). One line names the
+/// docs, folders, format, path and bytes, then the pages of a PDF; then the warnings as `rdy
+/// render` prints them.
 pub(crate) fn export(env: &Env, a: ExportArgs) -> Result<(Value, String), ErrorReply> {
-    let ExportArgs { out, scope } = a;
+    let ExportArgs {
+        out,
+        format,
+        layout,
+        scope,
+    } = a;
     let v = call(
         env,
         "export",
-        json!({"out": path_arg(&out)?, "scope": scope}),
+        json!({"out": path_arg(&out)?, "format": format, "layout": layout, "scope": scope}),
     )?;
-    let t = format!(
-        "exported {} docs in {} folders, {} blocks, {} blobs{}",
+    let mut t = format!(
+        "exported {} docs in {} folders as {format} to {} ({} bytes)",
         num(&v["docs"]),
         num(&v["folders"]),
-        num(&v["blocks"]),
-        num(&v["blobs"]),
-        warning_lines(&v["warnings"])
+        out.display(),
+        num(&v["bytes"]),
     );
+    if !v["pages"].is_null() {
+        t.push_str(&format!(", {} pages", num(&v["pages"])));
+    }
+    t.push_str(&warning_lines(&v["warnings"]));
     Ok((v, t))
 }
 

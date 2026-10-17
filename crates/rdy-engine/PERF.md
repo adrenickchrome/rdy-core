@@ -1400,6 +1400,32 @@ are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed he
 Deep gate (bench): <orchestrator fills in>
 
 
+## Export and clone (2026-10-16)
+
+Five ops, reported with no target (D-9QV85, D-WQSAY, O42). The three exports run on the typical
+tier only, right after `dump` and `load`. `clone` runs on both tiers (`clone_50k` on the large
+one), right after `dump`, with the project closed. The handle is opened outside every timer, and
+each output is removed outside it.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `export_md` | `print::export` of canon as a Markdown tree at a new path | 5 | no spec target: the scope printed as md, written whole (reported) |
+| `export_html` | the same, as one HTML file | 5 | no spec target: the scope printed as html, written whole (reported) |
+| `export_pdf` | the same, laid out and written as one PDF file | 5 | no spec target: the scope laid out and written as PDF (reported) |
+| `clone` | `rdy_engine::clone::clone` of the open project's state into a new directory: the dump stream, the load with its index build, the origin batch and `fsck` | 5 (3 at 50k) | no spec target: a clone of this project, with the index build, the origin and fsck (reported) |
+
+What each cost grows with:
+
+- The exports grow with the blocks printed. The PDF also pays for the page layout and the font
+  subsetting; Markdown pays for one file per page.
+- `clone` grows as `dump` plus `load` do, plus one origin batch.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
+are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+
 ## Decision intake (2026-10-15)
 
 Two ops, reported with no target (D-JV6Z8, O33). Both run on both tiers (`pending_50k` and

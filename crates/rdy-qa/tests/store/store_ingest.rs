@@ -1,9 +1,12 @@
 //! dl4: the ingest writes each dumped batch where the source log held it, so the new log is the
 //! source log byte for byte; the first open builds the index from it.
-use rdy_store::dump::DumpBatch;
-use rdy_store::format::{Format, REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+//!
+//! ec2 (RULING F2): the upgrade batch of a log with no repo id gives it one.
+use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, Frame};
+use rdy_store::format::{self, Format, REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
 use rdy_store::ingest::Ingest;
-use rdy_store::kinds::{self, RefUpdate};
+use rdy_store::kinds::{self, BatchCommit, RefUpdate};
+use rdy_store::meta::REF_REPO_ID;
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
 use std::path::Path;
@@ -295,4 +298,159 @@ fn dl8_a_log_of_a_newer_store_format_is_refused() {
         "{e}"
     );
     assert_eq!(i.end(), s.log_end(), "nothing is appended");
+}
+
+/// The batches of a dump fixture (`fixtures/dump/<name>`), read with `DumpReader`, and the source
+/// log end its header names.
+fn fixture_batches(name: &str) -> (Vec<DumpBatch>, Location) {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/dump")
+        .join(name);
+    let (mut rd, _, h) = DumpReader::open(std::fs::File::open(p).unwrap()).unwrap();
+    let mut out = vec![];
+    while let Some(item) = rd.next().unwrap() {
+        if let DumpItem::Batch(b) = item {
+            out.push(b);
+        }
+    }
+    (out, h.log_end)
+}
+
+/// The v1-s11 fixture's batches ingested into `to`, then `upgrade(11)`; returns the fixture's
+/// log end.
+fn upgraded_s11(to: &Path) -> Location {
+    let (bs, log_end) = fixture_batches("v1-s11.rdydump");
+    let mut i = Ingest::create(to).unwrap();
+    for (n, b) in bs.iter().enumerate() {
+        i.batch(n as u64, b).unwrap();
+    }
+    assert_eq!(i.end(), log_end, "the fixture's batches end at its log end");
+    assert!(i.upgrade(11).unwrap(), "an upgrade batch is appended");
+    i.finish().unwrap();
+    log_end
+}
+
+#[test]
+fn ec2_an_upgrade_of_a_log_with_no_repo_id_writes_the_format_and_a_new_repo_id_in_one_batch() {
+    // RULING F2: a log of a store format before 12 has no repo id; its upgrade batch gives it one
+    let base = tempfile::tempdir().unwrap();
+    let to = base.path().join("dst");
+    let log_end = upgraded_s11(&to);
+    let t = Store::open(&to).unwrap();
+    let after = frames_after(&t, log_end);
+    assert_eq!(after.len(), 3, "two ref frames and one marker: {after:?}");
+    assert_eq!(after[0].0, kinds::REF_UPDATE);
+    let f: RefUpdate = postcard::from_bytes(&after[0].1).unwrap();
+    assert_eq!(f.name, REF_STORE_FORMAT);
+    assert_eq!(f.value, encode_u32(STORE_FORMAT));
+    assert_eq!(after[1].0, kinds::REF_UPDATE);
+    let r: RefUpdate = postcard::from_bytes(&after[1].1).unwrap();
+    assert_eq!(r.name, REF_REPO_ID);
+    assert_eq!(r.value.len(), 16, "a repo id is 16 bytes");
+    assert_eq!(after[2].0, kinds::BATCH_COMMIT);
+    let m: BatchCommit = postcard::from_bytes(&after[2].1).unwrap();
+    assert_eq!(m.start, log_end, "one batch, from the fixture's log end");
+    assert_eq!(m.frames, 2, "one batch of both refs");
+    assert_eq!(t.reader().get_ref(REF_REPO_ID).unwrap(), Some(r.value));
+    t.check_objects().unwrap();
+}
+
+#[test]
+fn ec2_the_upgrade_salts_each_ref_as_the_store_does() {
+    let base = tempfile::tempdir().unwrap();
+    let to = base.path().join("dst");
+    let log_end = upgraded_s11(&to);
+    let t = Store::open(&to).unwrap();
+    let after = frames_after(&t, log_end);
+    let ats: Vec<Location> = after
+        .iter()
+        .filter(|(k, _)| *k == kinds::REF_UPDATE)
+        .map(|(_, p)| postcard::from_bytes::<RefUpdate>(p).unwrap().at)
+        .collect();
+    assert_eq!(
+        ats,
+        vec![
+            log_end,
+            Location {
+                segment: log_end.segment,
+                offset: log_end.offset + 1,
+            },
+        ],
+        "the i-th ref of a batch is salted with the log end plus i"
+    );
+}
+
+#[test]
+fn ec2_an_upgrade_of_a_log_that_has_a_repo_id_writes_only_the_format() {
+    // guard: a store made by this rdy holds its repo id; a forced older format upgrades only the
+    // format, and the repo id stays
+    let base = tempfile::tempdir().unwrap();
+    let mut s = rolling_store(base.path());
+    let id = s.reader().get_ref(REF_REPO_ID).unwrap().expect("a repo id");
+    let older = STORE_FORMAT - 1;
+    s.set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(older))])
+        .unwrap();
+    let (src_end, bs) = (s.log_end(), batches(&s));
+    let to = base.path().join("dst");
+    let mut i = Ingest::create(&to).unwrap();
+    for (n, b) in bs.iter().enumerate() {
+        i.batch(n as u64, b).unwrap();
+    }
+    assert!(i.upgrade(older).unwrap(), "an upgrade batch is appended");
+    i.finish().unwrap();
+    let t = Store::open(&to).unwrap();
+    let after = frames_after(&t, src_end);
+    assert_eq!(after.len(), 2, "one ref frame and its marker: {after:?}");
+    let u: RefUpdate = postcard::from_bytes(&after[0].1).unwrap();
+    assert_eq!(
+        u,
+        RefUpdate {
+            name: REF_STORE_FORMAT.into(),
+            value: encode_u32(STORE_FORMAT),
+            at: src_end,
+        }
+    );
+    assert_eq!(after[1].0, kinds::BATCH_COMMIT);
+    // the rolling store forges a view ref, so fsck is not run here
+    assert_eq!(t.reader().get_ref(REF_REPO_ID).unwrap(), Some(id));
+}
+
+#[test]
+fn ec2_check_refuses_a_store_with_no_repo_id() {
+    // The v1-s11 batches with no upgrade batch, the log's format forced to 12 by one hand-made
+    // batch of `meta/store_format` alone, and `FORMAT` forced to 12: a store format 12 log with
+    // no repo id.
+    let base = tempfile::tempdir().unwrap();
+    let to = base.path().join("dst");
+    let (bs, log_end) = fixture_batches("v1-s11.rdydump");
+    let mut i = Ingest::create(&to).unwrap();
+    for (n, b) in bs.iter().enumerate() {
+        i.batch(n as u64, b).unwrap();
+    }
+    let payload = postcard::to_allocvec(&RefUpdate {
+        name: REF_STORE_FORMAT.into(),
+        value: encode_u32(12),
+        at: log_end,
+    })
+    .unwrap();
+    let hash = rdy_model::Hash::of(&payload);
+    let forced = DumpBatch {
+        start: log_end,
+        digest: kinds::batch_digest([&hash]),
+        frames: vec![Frame {
+            kind: kinds::REF_UPDATE,
+            hash,
+            payload,
+        }],
+    };
+    i.batch(bs.len() as u64, &forced).unwrap();
+    i.finish().unwrap();
+    format::write_format_file(&to, Format { store_format: 12 }).unwrap();
+    let t = Store::open(&to).unwrap();
+    assert_eq!(t.reader().get_ref(REF_REPO_ID).unwrap(), None);
+    let e = t.check_objects().unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Decode(m) if m == "meta/repo_id is missing; load the project from a dump with this rdy"),
+        "{e}"
+    );
 }

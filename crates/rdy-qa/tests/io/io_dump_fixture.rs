@@ -14,6 +14,7 @@ use rdy_qa::every_kind;
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader};
 use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
 use rdy_store::kinds::{self, RefUpdate};
+use rdy_store::meta::REF_REPO_ID;
 use rdy_store::segment::Location;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -136,6 +137,13 @@ fn dl8_the_v1_fixture_loads_with_every_hash() {
     // store format (the upgrade batch sets it when the fixture's format is older)
     let mut want = expect["refs"].clone();
     want[REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    // RULING F2 (Export and clone): a log with no repo id gets one in the upgrade batch.
+    let repo_id = got["refs"][REF_REPO_ID]
+        .as_str()
+        .expect("a repo id")
+        .to_string();
+    assert_eq!(repo_id.len(), 32, "a repo id is 16 bytes: {repo_id}");
+    want[REF_REPO_ID] = json!(repo_id);
     assert_eq!(
         got["refs"], want,
         "every ref: views, tags, proposals, inboxes, reviews"
@@ -179,7 +187,7 @@ fn dl8_the_v1_fixture_loads_with_every_hash() {
     if STORE_FORMAT == fixture_format {
         assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
     } else {
-        assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
+        assert_eq!(tail.len(), 3, "two ref frames and their marker: {tail:?}");
         assert_eq!(tail[0].0, kinds::REF_UPDATE);
         let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
         assert_eq!(
@@ -190,7 +198,20 @@ fn dl8_the_v1_fixture_loads_with_every_hash() {
                 at: log_end,
             }
         );
-        assert_eq!(tail[1].0, kinds::BATCH_COMMIT);
+        assert_eq!(tail[1].0, kinds::REF_UPDATE);
+        let u: RefUpdate = postcard::from_bytes(&tail[1].1).unwrap();
+        assert_eq!(
+            (hex(&u.value), u.at),
+            (
+                repo_id,
+                Location {
+                    segment: log_end.segment,
+                    offset: log_end.offset + 1,
+                }
+            )
+        );
+        assert_eq!(u.name, REF_REPO_ID);
+        assert_eq!(tail[2].0, kinds::BATCH_COMMIT);
     }
     // every object of the fixture is in the loaded store under its own hash and kind
     for b in batches {

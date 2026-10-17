@@ -8,7 +8,7 @@ use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
-use rdy_engine::engine::{Engine, SiteLink, WriteFn};
+use rdy_engine::engine::{Engine, ExportRequest, SiteLink, WriteFn};
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_scope::ScopeRef;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState};
@@ -230,6 +230,23 @@ impl Engine for DaemonEngine {
     fn site_warnings(&self, scope: &ScopeRef) -> Result<Vec<String>, RdyError> {
         Ok(self.0.site.refresh(&self.0, scope)?.warnings.clone())
     }
+
+    /// `rdy_export`: the `export` op's print. A relative `out` is under the project directory;
+    /// the scope defaults to canon. The session's own view reads as the `export` op reads it.
+    fn export(&self, req: ExportRequest) -> Result<Value, RdyError> {
+        let st = self.read();
+        let scope = match req.scope.as_deref() {
+            Some(text) => st.resolve_read_scope(text, req.view.as_deref())?,
+            None => rdy_engine::Scope::Canon,
+        };
+        crate::ops::export_print(
+            &st,
+            &scope,
+            &self.0.root.join(&req.out),
+            &req.format,
+            req.layout.as_deref(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -407,6 +424,83 @@ mod tests {
                 "{name}"
             );
         }
+        sh.shutdown().unwrap();
+    }
+
+    /// ec11 fix round 1 (finding 3): `rdy_export` reads a scope as the `export` op does. The
+    /// session's own view needs no record (it is made by the first write); another view with no
+    /// record is not found. The same holds for a session view `rdy_session` selects.
+    #[test]
+    fn ec11_rdy_export_takes_the_session_view_as_the_export_op_does() {
+        use crate::ops::{OpContext, dispatch};
+        use rdy_engine::{E_NOT_FOUND, Session};
+        use rdy_mcp::tools::{ExportFormat, ExportParams, McpState, rdy_export, rdy_session};
+        use rdy_model::Role;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let e = sh.engine();
+        let out = tempfile::tempdir().unwrap();
+        let path = |name: &str| out.path().join(name).to_str().unwrap().to_string();
+        let op = |run: &str, scope: &str, name: &str| {
+            let s = Session::agent("agent:review".into(), Some(run.into()), Role::Reader).unwrap();
+            let cx = OpContext {
+                engine: &*e,
+                session: &s,
+                human: "human:t",
+                cwd: out.path(),
+            };
+            dispatch(
+                &cx,
+                "export",
+                json!({"out": path(name), "format": "html", "scope": scope}),
+            )
+        };
+        let mcp = |session: Value| {
+            let mut st = McpState::new(Arc::clone(&e));
+            rdy_session(&mut st, serde_json::from_value(session).unwrap()).unwrap();
+            st
+        };
+        let tool = |st: &mut McpState, scope: &str, name: &str| {
+            rdy_export(
+                st,
+                ExportParams {
+                    out: path(name),
+                    format: ExportFormat::Html,
+                    layout: None,
+                    scope: Some(scope.into()),
+                },
+            )
+        };
+
+        // before the session's first write: its run names its view
+        let mut st = mcp(json!({"actor": "agent:review", "run": "fresh", "role": "reader"}));
+        op("fresh", "fresh", "op-fresh.html").expect("the op reads its own view");
+        tool(&mut st, "fresh", "mcp-fresh.html").expect("the tool reads its own view");
+        assert_eq!(
+            std::fs::read(path("op-fresh.html")).unwrap(),
+            std::fs::read(path("mcp-fresh.html")).unwrap(),
+            "the same print"
+        );
+        // another view with no record is not found, alike
+        let a = op("fresh", "nobody", "op-nobody.html").unwrap_err();
+        let b = tool(&mut st, "nobody", "mcp-nobody.html").unwrap_err();
+        assert_eq!((a.code, &a.message), (E_NOT_FOUND, &b.message));
+        assert_eq!(b.code, E_NOT_FOUND);
+        assert!(!out.path().join("op-nobody.html").exists());
+        assert!(!out.path().join("mcp-nobody.html").exists());
+
+        // a session view rdy_session selects is the session's own view
+        let mut st = mcp(
+            json!({"actor": "agent:review", "run": "other", "role": "reader", "view": "draft"}),
+        );
+        op("draft", "draft", "op-draft.html").expect("the op reads its own view");
+        tool(&mut st, "draft", "mcp-draft.html").expect("the tool reads its selected view");
+        let e = tool(&mut st, "other", "mcp-other.html").unwrap_err();
+        assert_eq!(
+            e.code, E_NOT_FOUND,
+            "the run's name is not this session's view"
+        );
         sh.shutdown().unwrap();
     }
 }

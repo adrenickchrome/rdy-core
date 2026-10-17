@@ -247,7 +247,7 @@ fn kill1_a_refused_open_keeps_a_kills_sentinel() {
     // 4 the current format, so the literal `4` this test held stopped being "another": the
     // other format is derived from STORE_FORMAT so a later bump cannot do that again.
     let other = (rdy_store::format::STORE_FORMAT + 1).to_string();
-    s.set_refs(vec![(
+    s.set_refs_unchecked_for_tests(vec![(
         rdy_store::format::REF_STORE_FORMAT.into(),
         other.into_bytes(),
     )])

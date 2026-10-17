@@ -151,8 +151,8 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_DUMP",
-        "the file is not a dump this rdy reads, the dump is damaged, or the loaded project fails fsck",
-        "pass a file rdy dump wrote; a damaged dump is never repaired: dump the project again",
+        "the file is not a dump this rdy reads, the dump is damaged, the loaded project fails fsck, or a clone's dump is older than store format 12",
+        "pass a file rdy dump wrote; a damaged dump is never repaired: dump the project again; for an older dump, load it, then clone the loaded project",
     ),
     (
         "W_SKELETON_MISSING",
