@@ -18,14 +18,14 @@ use crate::error::StoreError;
 use crate::index::{IndexEntry, RedactedSpan};
 use crate::kinds::{self, BlobManifest};
 use crate::segment::{HEADER, Location};
-use crate::store::decode;
+use crate::store::{decode, encode};
 use crate::view::Owner;
 use crate::{Store, StoreReader};
 use rdy_model::redaction::{
     BlockResidue, CARRIER_MESSAGE, ChangeResidue, RedactTarget, Redaction, RedactionApply,
     RedactionResidue, ResidualOp, encode_into, record_buffer,
 };
-use rdy_model::{Block, BlockId, Change, ChangeLinks, Hash};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, Hash, LandingRecord, Op};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -137,6 +137,36 @@ impl PreparedRedaction {
     /// The view the carrier is committed to.
     pub fn view(&self) -> &str {
         &self.checked.carrier.view
+    }
+}
+
+/// The redaction applies of one human landing, checked against the store: each carrier the
+/// landing lands, its request and the report hash the apply binds, in request-hash order. Only
+/// [`Store::prepare_redaction_apply`] builds one. It is not a serialized kind and grants nothing
+/// unchecked: the apply batch's writer validates the batch with the log again before it seals.
+#[derive(Debug)]
+pub(crate) struct PreparedRedactionApply {
+    /// Each request with the report hash its apply binds, in request-hash order.
+    requests: Vec<(Hash, Hash)>,
+}
+
+impl PreparedRedactionApply {
+    /// The apply frames of landing `landing`: one REDACTION_APPLY per request, in request-hash
+    /// order, binding the landing, the request and its report hash.
+    pub(crate) fn frames(&self, landing: Hash) -> Vec<(u8, Vec<u8>)> {
+        self.requests
+            .iter()
+            .map(|(request, report_hash)| {
+                (
+                    kinds::REDACTION_APPLY,
+                    encode(&RedactionApply {
+                        request: *request,
+                        landing,
+                        report_hash: *report_hash,
+                    }),
+                )
+            })
+            .collect()
     }
 }
 
@@ -954,5 +984,236 @@ impl Store {
             residues: residues.to_vec(),
             residue_frames,
         })
+    }
+}
+
+impl Store {
+    /// The redaction applies of a landing, checked at the store boundary before anything is
+    /// written. `landing` is the record about to be written; `view` and `included` are the
+    /// proposing view and its included changes before the landing; `accept` is the landing's
+    /// acceptance change, if any. None when the landing lands no carrier.
+    ///
+    /// The carriers are found from the landing's changes and the derived carrier-to-request map.
+    /// Then, for every carrier:
+    ///
+    /// - the landing is a person's approval (the closed test of O19: an Approver, and either
+    ///   Local with no relay fields or Relayed with both), or `RedactionHuman`;
+    /// - the carrier is a change of the proposing view and in its history, or `Refused`;
+    /// - its request names it, decodes to its own hash, and it and its residues were sealed in an
+    ///   earlier batch (never the held batch now open), or `Refused`;
+    /// - every span is strictly ascending, before the request, a removable frame whose header
+    ///   holds the span's kind, hash and length (or the same span an earlier apply removed), and
+    ///   a block or change span names the residue of exactly that frame and a manifest version, a
+    ///   chunk span a chunk of a manifest blob; or `RedactionCorrupt` at the span;
+    /// - every stored producer of a manifest version is a span of the request or already
+    ///   removed, and the acceptance change writes no manifest version, or `RedactionStale`: a
+    ///   copy written after the request would keep the content.
+    pub(crate) fn prepare_redaction_apply(
+        &self,
+        view: &str,
+        included: &[Hash],
+        landing: &LandingRecord,
+        accept: Option<&Change>,
+    ) -> Result<Option<PreparedRedactionApply>, StoreError> {
+        let mut found = vec![];
+        for c in &landing.changes {
+            if let Some(r) = self.redaction_for_carrier(c)? {
+                found.push((*c, r));
+            }
+        }
+        if found.is_empty() {
+            return Ok(None);
+        }
+        if !crate::redaction_io::human_approval(landing) {
+            return Err(StoreError::RedactionHuman);
+        }
+        let open: HashSet<(u8, Hash)> = self
+            .open_batch()
+            .map(|f| f.iter().copied().collect())
+            .unwrap_or_default();
+        let mut buf = record_buffer().map_err(|_| StoreError::RedactionLimit {
+            limit: limit::RECORD,
+        })?;
+        let mut requests = Vec::with_capacity(found.len());
+        for (carrier, request) in found {
+            let report =
+                self.check_apply(view, included, carrier, request, &open, accept, &mut buf)?;
+            requests.push((request, report));
+        }
+        requests.sort();
+        requests.dedup();
+        Ok(Some(PreparedRedactionApply { requests }))
+    }
+
+    /// The checks of one carrier and its request (see [`Store::prepare_redaction_apply`]).
+    /// Returns the report hash the apply binds.
+    #[allow(clippy::too_many_arguments)]
+    fn check_apply(
+        &self,
+        view: &str,
+        included: &[Hash],
+        carrier: Hash,
+        r: Hash,
+        open: &HashSet<(u8, Hash)>,
+        accept: Option<&Change>,
+        buf: &mut [u8],
+    ) -> Result<Hash, StoreError> {
+        // the carrier: a change of the proposing view, in its history
+        if !included.contains(&carrier) || self.change(&carrier)?.view != view {
+            return Err(refused(format!(
+                "change {carrier} carries redaction request {r} but is not in the history of view {view:?}: a carrier lands only with a proposal of its own view"
+            )));
+        }
+        // the request: it names the carrier, it is its own canonical record, and its batch is
+        // sealed before this one
+        let rloc = self
+            .index()
+            .typed(kinds::REDACTION, &r)?
+            .ok_or(StoreError::NotFound(r))?;
+        let request = self.redaction_request(&r)?;
+        if Hash::of(&encode(&request)) != r {
+            return Err(StoreError::corrupt_at(rloc));
+        }
+        if request.carrier != carrier {
+            return Err(refused(format!(
+                "redaction request {r} names carrier {}, not {carrier}",
+                request.carrier
+            )));
+        }
+        let unsealed = |kind: u8, h: &Hash| open.contains(&(kind, *h));
+        let early = || {
+            refused(format!(
+                "redaction request {r} and its residues must be sealed before the landing that applies it"
+            ))
+        };
+        if unsealed(kinds::REDACTION, &r) {
+            return Err(early());
+        }
+        let report = request
+            .manifest
+            .report_hash(buf)
+            .map_err(|_| StoreError::RedactionLimit {
+                limit: limit::RECORD,
+            })?;
+        // the spans
+        let m = &request.manifest;
+        let versions: BTreeSet<(BlockId, Hash)> = m.versions.iter().cloned().collect();
+        let version_hashes: HashSet<Hash> = m.versions.iter().map(|(_, v)| *v).collect();
+        let mut chunks: Option<HashSet<Hash>> = None;
+        let mut spanned: BTreeSet<(Location, Hash)> = BTreeSet::new();
+        let mut prev: Option<Location> = None;
+        for span in &m.spans {
+            let at = location(span.place);
+            let corrupt = || StoreError::corrupt_at(at);
+            if prev.is_some_and(|p| p >= at) || at >= rloc || !is_removable(span.kind) {
+                return Err(corrupt());
+            }
+            prev = Some(at);
+            let payload = match self.index().redaction_span_at(&at)? {
+                // removed by an earlier apply: its recorded span
+                Some(active) => {
+                    let s = active.span;
+                    if (s.kind, s.hash, s.len, s.residue)
+                        != (span.kind, span.hash, span.len, span.residue)
+                    {
+                        return Err(corrupt());
+                    }
+                    None
+                }
+                None => {
+                    let (kind, hash, payload) =
+                        self.segments().read_hashed(at).map_err(|_| corrupt())?;
+                    if kind != span.kind || hash != span.hash || payload.len() != span.len as usize
+                    {
+                        return Err(corrupt());
+                    }
+                    Some(payload)
+                }
+            };
+            match (span.kind, span.residue) {
+                (kinds::BLOCK | kinds::CHANGE, Some(rh)) => {
+                    if unsealed(kinds::REDACTION_RESIDUE, &rh) {
+                        return Err(early());
+                    }
+                    if self
+                        .index()
+                        .typed(kinds::REDACTION_RESIDUE, &rh)?
+                        .is_none_or(|l| l >= rloc)
+                    {
+                        return Err(corrupt());
+                    }
+                    let residue: RedactionResidue = self
+                        .get_typed(kinds::REDACTION_RESIDUE, &rh)
+                        .map_err(|_| corrupt())?;
+                    let fits = match &residue {
+                        RedactionResidue::Block(b) => {
+                            span.kind == kinds::BLOCK
+                                && b.version == span.hash
+                                && versions.contains(&(b.id.clone(), span.hash))
+                                && payload.as_deref().is_none_or(|p| {
+                                    decode::<Block>(p).is_ok_and(|blk| BlockResidue::of(&blk) == *b)
+                                })
+                        }
+                        RedactionResidue::Change(c) => {
+                            span.kind == kinds::CHANGE
+                                && c.change == span.hash
+                                && c.ops.iter().any(|op| match op {
+                                    ResidualOp::Create { version, .. }
+                                    | ResidualOp::Update { version, .. } => {
+                                        version_hashes.contains(version)
+                                    }
+                                    ResidualOp::Delete { .. } => false,
+                                })
+                                && payload.as_deref().is_none_or(|p| {
+                                    decode::<Change>(p).is_ok_and(|ch| ChangeResidue::of(&ch) == *c)
+                                })
+                        }
+                    };
+                    if !fits {
+                        return Err(corrupt());
+                    }
+                }
+                (kinds::BLOB_CHUNK, None) => {
+                    if chunks.is_none() {
+                        let mut set = HashSet::new();
+                        for b in &m.blobs {
+                            let manifest: BlobManifest = self
+                                .get_typed(kinds::BLOB_MANIFEST, b)
+                                .map_err(|_| corrupt())?;
+                            set.extend(manifest.chunks);
+                        }
+                        chunks = Some(set);
+                    }
+                    if !chunks.as_ref().is_some_and(|s| s.contains(&span.hash)) {
+                        return Err(corrupt());
+                    }
+                }
+                _ => return Err(corrupt()),
+            }
+            spanned.insert((at, span.hash));
+        }
+        // no copy of a manifest version outside the spans: every stored producer is a span or
+        // already removed, and the acceptance change writes none
+        for v in &version_hashes {
+            for c in self.producers(v)? {
+                let Some(loc) = self.index().typed(kinds::CHANGE, &c)? else {
+                    continue;
+                };
+                if !spanned.contains(&(loc, c)) && self.index().redaction_span_at(&loc)?.is_none() {
+                    return Err(StoreError::RedactionStale);
+                }
+            }
+        }
+        if let Some(a) = accept
+            && a.ops.iter().any(|op| match op {
+                Op::Create { block } | Op::Update { block, .. } => {
+                    version_hashes.contains(&block.version_hash())
+                }
+                Op::Delete { .. } => false,
+            })
+        {
+            return Err(StoreError::RedactionStale);
+        }
+        Ok(report)
     }
 }
