@@ -573,35 +573,84 @@ fn rdx1_a_stub_keeps_the_frozen_guard_fact() {
     assert!(!is_frozen(&BlockResidue::of(&note).stub(request)));
 }
 
+/// The report hash through the bounded encoder, with a fallibly allocated record buffer.
+fn digest(m: &RedactionManifest) -> Hash {
+    let mut buf = record_buffer().unwrap();
+    assert_eq!(buf.len(), MAX_RECORD_BYTES);
+    m.report_hash(&mut buf).unwrap()
+}
+
 #[test]
 fn rdx1_manifest_hash_ignores_presentation() {
     let (m, bytes) = manifest();
     let mut domain = REPORT_DOMAIN.to_vec();
     assert_eq!(domain, b"rdy-redaction-report-v1\0");
     domain.extend(&bytes);
-    let digest = m.report_hash();
-    assert_eq!(digest, Hash::of(&domain));
+    let digest_m = digest(&m);
+    assert_eq!(digest_m, Hash::of(&domain));
     // The same manifest has one digest, however it is later shown.
-    assert_eq!(m.clone().report_hash(), digest);
-    assert_eq!(manifest().0.report_hash(), digest);
+    assert_eq!(digest(&m.clone()), digest_m);
+    assert_eq!(digest(&manifest().0), digest_m);
 
     let mut target = m.clone();
     target.versions[0].1 = h(b"other version");
-    assert_ne!(
-        target.report_hash(),
-        digest,
-        "a target change kept the digest"
-    );
+    assert_ne!(digest(&target), digest_m, "a target change kept the digest");
     let mut span = m.clone();
     span.spans[0].len += 1;
-    assert_ne!(span.report_hash(), digest, "a span change kept the digest");
+    assert_ne!(digest(&span), digest_m, "a span change kept the digest");
     let mut outside = m.clone();
     outside.outside.pop();
-    assert_ne!(
-        outside.report_hash(),
-        digest,
-        "an outside row kept the digest"
+    assert_ne!(digest(&outside), digest_m, "an outside row kept the digest");
+}
+
+/// A manifest with empty object lists, the six Unknown outside rows and these quarantine names.
+fn quarantine_manifest(quarantine: Vec<String>) -> RedactionManifest {
+    let mut m = manifest().0;
+    m.versions.clear();
+    m.blobs.clear();
+    m.spans.clear();
+    m.inside.clear();
+    m.quarantine = quarantine;
+    m
+}
+
+#[test]
+fn rdx1_report_hash_is_bounded_and_fallible() {
+    // Oversized: 100000 names of 183 bytes encode to 18500022 bytes, over the record bound.
+    let names = (0..100_000)
+        .map(|i| format!("segments/{i:08}.torn-{}", "x".repeat(160)))
+        .collect();
+    let big = quarantine_manifest(names);
+    assert_eq!(enc(&big).len(), 18_500_022);
+    let mut buf = record_buffer().unwrap();
+    assert_eq!(
+        big.report_hash(&mut buf),
+        Err(postcard::Error::SerializeBufferFull),
+        "an oversized manifest was hashed"
     );
+
+    // Boundary: an encoding of exactly MAX_RECORD_BYTES hashes; one byte less of buffer refuses.
+    let pad = |i: usize, extra: usize| format!("segments/{i:08}.torn-{}", "x".repeat(142 + extra));
+    let base: Vec<String> = (0..100_000).map(|i| pad(i, 0)).collect();
+    let deficit = MAX_RECORD_BYTES - enc(&quarantine_manifest(base)).len();
+    assert!(deficit < 100_000, "deficit {deficit}");
+    let names = (0..100_000)
+        .map(|i| pad(i, usize::from(i < deficit)))
+        .collect();
+    let exact = quarantine_manifest(names);
+    let bytes = enc(&exact);
+    assert_eq!(bytes.len(), MAX_RECORD_BYTES);
+    let mut domain = REPORT_DOMAIN.to_vec();
+    domain.extend(&bytes);
+    assert_eq!(exact.report_hash(&mut buf), Ok(Hash::of(&domain)));
+    assert_eq!(
+        exact.report_hash(&mut buf[..MAX_RECORD_BYTES - 1]),
+        Err(postcard::Error::SerializeBufferFull)
+    );
+    // The digest does not depend on the buffer's size or earlier contents.
+    let (m, _) = manifest();
+    let mut small = vec![0xffu8; 4096];
+    assert_eq!(m.report_hash(&mut small), Ok(digest(&m)));
 }
 
 #[test]
@@ -635,4 +684,70 @@ fn rdx1_human_readable_hashes_are_full_lowercase_hex() {
     let mut buf = [0u8; 4096];
     assert_eq!(encode_into(&m, &mut buf).unwrap(), &enc(&m)[..]);
     assert!(encode_into(&m, &mut [0u8; 8]).is_err());
+}
+
+#[test]
+fn rdx1_residue_link_hashes_are_full_lowercase_hex() {
+    use serde_yaml_ng::Value;
+    let original = change();
+    let residue = ChangeResidue::of(&original);
+    let intent = h(b"intent");
+    let set = h(b"set");
+    assert_eq!(residue.links.intent, Some(intent));
+    assert_eq!(residue.links.alternative.as_ref().unwrap().set, set);
+
+    // Out: the nested link hashes are full lowercase hex strings.
+    let value = serde_yaml_ng::to_value(&residue).unwrap();
+    let links = &value["links"];
+    assert_eq!(
+        links["intent"],
+        Value::String(intent.to_string()),
+        "{links:?}"
+    );
+    assert_eq!(
+        links["alternative"]["set"],
+        Value::String(set.to_string()),
+        "{links:?}"
+    );
+    assert_eq!(links["alternative"]["member"], Value::String("alt".into()));
+    assert_eq!(links["client_nonce"], Value::String("n".into()));
+    assert_eq!(
+        links["imported_by"]["actor"],
+        Value::String("human:i".into())
+    );
+    assert_eq!(
+        serde_yaml_ng::from_value::<ChangeResidue>(value.clone()).unwrap(),
+        residue
+    );
+
+    // In: hex text decodes to the hashes it names; absent links stay absent.
+    let (other_intent, other_set) = (h(b"other intent"), h(b"other set"));
+    let mut edited = value.clone();
+    edited["links"]["intent"] = Value::String(other_intent.to_string());
+    edited["links"]["alternative"]["set"] = Value::String(other_set.to_string());
+    let decoded = serde_yaml_ng::from_value::<ChangeResidue>(edited).unwrap();
+    assert_eq!(decoded.links.intent, Some(other_intent));
+    assert_eq!(decoded.links.alternative.unwrap().set, other_set);
+    let mut empty = residue.clone();
+    empty.links = ChangeLinks::default();
+    let text = serde_yaml_ng::to_string(&empty).unwrap();
+    assert_eq!(
+        serde_yaml_ng::from_str::<ChangeResidue>(&text).unwrap(),
+        empty
+    );
+    // A byte array is not the human-readable form, and a short hash is refused.
+    let mut array = value.clone();
+    array["links"]["intent"] = serde_yaml_ng::to_value(intent.0).unwrap();
+    assert!(serde_yaml_ng::from_value::<ChangeResidue>(array).is_err());
+    let mut short = value;
+    short["links"]["intent"] = Value::String(intent.short());
+    assert!(serde_yaml_ng::from_value::<ChangeResidue>(short).is_err());
+
+    // Postcard: the links keep ChangeLinks's own bytes, as the residue's last field.
+    let bytes = enc(&residue);
+    assert!(bytes.ends_with(&enc(&original.links)));
+    assert_eq!(
+        postcard::from_bytes::<ChangeResidue>(&bytes).unwrap(),
+        residue
+    );
 }

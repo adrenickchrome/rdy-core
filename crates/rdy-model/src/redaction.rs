@@ -168,6 +168,7 @@ pub struct ChangeResidue {
     pub provenance: Provenance,
     pub justification: Option<Justification>,
     pub message: String,
+    #[serde(with = "hex::links")]
     pub links: ChangeLinks,
 }
 
@@ -263,14 +264,28 @@ pub struct RedactionManifest {
 impl RedactionManifest {
     /// The report hash: BLAKE3 of [`REPORT_DOMAIN`] then the manifest's postcard bytes. No
     /// presentation text, token budget or time enters it.
-    pub fn report_hash(&self) -> Hash {
-        let mut bytes = REPORT_DOMAIN.to_vec();
-        bytes.extend(
-            postcard::to_allocvec(self)
-                .expect("postcard encoding of an in-memory value cannot fail"),
-        );
-        Hash::of(&bytes)
+    ///
+    /// The manifest is encoded into the caller's bounded `buf` (production callers pass a
+    /// [`record_buffer`] of [`MAX_RECORD_BYTES`]) and hashed from there, with no other copy. A
+    /// manifest that does not fit returns postcard's `SerializeBufferFull`; callers report it as
+    /// E_REDACTION_LIMIT (`16777216 bytes per record`).
+    pub fn report_hash(&self, buf: &mut [u8]) -> Result<Hash, postcard::Error> {
+        let bytes = encode_into(self, buf)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(REPORT_DOMAIN);
+        hasher.update(bytes);
+        Ok(Hash(*hasher.finalize().as_bytes()))
     }
+}
+
+/// A zeroed buffer of [`MAX_RECORD_BYTES`] for [`encode_into`] and
+/// [`RedactionManifest::report_hash`], allocated fallibly. Callers report an allocation failure
+/// as E_REDACTION_LIMIT (`16777216 bytes per record`).
+pub fn record_buffer() -> Result<Vec<u8>, std::collections::TryReserveError> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(MAX_RECORD_BYTES)?;
+    buf.resize(MAX_RECORD_BYTES, 0);
+    Ok(buf)
 }
 
 /// A warning shown with a redaction report.
@@ -555,6 +570,84 @@ mod hex {
                     .collect()
             } else {
                 Vec::<(BlockId, Hash)>::deserialize(d)
+            }
+        }
+    }
+
+    /// A change's links: the intent and alternative-set hashes as hex in a human-readable
+    /// format; `ChangeLinks`'s own serializer, unchanged, otherwise (postcard).
+    pub mod links {
+        use super::*;
+        use crate::{ActorRun, AltChoice, ChangeLinks};
+
+        /// `ChangeLinks`'s fields, in its order, with hex hashes.
+        #[derive(Serialize)]
+        #[serde(rename = "ChangeLinks")]
+        struct LinksOut<'a> {
+            #[serde(with = "super::opt")]
+            intent: Option<Hash>,
+            alternative: Option<AltOut<'a>>,
+            client_nonce: &'a Option<String>,
+            imported_by: &'a Option<ActorRun>,
+        }
+
+        #[derive(Serialize)]
+        #[serde(rename = "AltChoice")]
+        struct AltOut<'a> {
+            #[serde(with = "super::one")]
+            set: Hash,
+            member: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename = "ChangeLinks")]
+        struct LinksIn {
+            #[serde(with = "super::opt")]
+            intent: Option<Hash>,
+            alternative: Option<AltIn>,
+            client_nonce: Option<String>,
+            imported_by: Option<ActorRun>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename = "AltChoice")]
+        struct AltIn {
+            #[serde(with = "super::one")]
+            set: Hash,
+            member: String,
+        }
+
+        pub fn serialize<S: Serializer>(l: &ChangeLinks, s: S) -> Result<S::Ok, S::Error> {
+            if s.is_human_readable() {
+                LinksOut {
+                    intent: l.intent,
+                    alternative: l.alternative.as_ref().map(|a| AltOut {
+                        set: a.set,
+                        member: &a.member,
+                    }),
+                    client_nonce: &l.client_nonce,
+                    imported_by: &l.imported_by,
+                }
+                .serialize(s)
+            } else {
+                l.serialize(s)
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ChangeLinks, D::Error> {
+            if d.is_human_readable() {
+                let l = LinksIn::deserialize(d)?;
+                Ok(ChangeLinks {
+                    intent: l.intent,
+                    alternative: l.alternative.map(|a| AltChoice {
+                        set: a.set,
+                        member: a.member,
+                    }),
+                    client_nonce: l.client_nonce,
+                    imported_by: l.imported_by,
+                })
+            } else {
+                ChangeLinks::deserialize(d)
             }
         }
     }
