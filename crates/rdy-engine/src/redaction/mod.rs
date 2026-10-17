@@ -22,7 +22,7 @@ use crate::views::{Action, commit_claim};
 use crate::write::check_view_access;
 use crate::{Delta, Rdy, ReadState, Session};
 use rdy_model::redaction::{ReasonClass, RedactionWarning, carrier};
-use rdy_model::{Hash, Redaction, hash_of};
+use rdy_model::{Change, Hash, Redaction, hash_of};
 use rdy_store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -355,12 +355,20 @@ pub(crate) fn requests_carried(st: &ReadState, changes: &[Hash]) -> Result<Vec<H
     Ok(out)
 }
 
-/// The approval-time freshness check of recorded request `request` (plan Redaction, Task 10):
-/// its complete report is computed again from `st`, through the one report path with the
-/// project's current quarantine names, leaving out only the request's own records
-/// ([`report::Own`]). A manifest hash or a target set that differs from the recorded one is
-/// `E_REDACTION_STALE`; nothing is refreshed. The caller holds the writer.
-pub(crate) fn check_fresh(st: &ReadState, request: &Hash) -> Result<(), RdyError> {
+/// The freshness check of recorded request `request` (plan Redaction, Task 10), before its
+/// removal card is shown and again under the writer before its approval lands: its complete
+/// report is computed again from `st`, through the one report path with the project's current
+/// quarantine names, leaving out only the batches the request itself wrote ([`report::Own`]).
+/// A manifest hash or a target set that differs from the recorded one is `E_REDACTION_STALE`;
+/// nothing is refreshed. `prospective` holds the changes the landing would write beside the log
+/// (its acceptance and re-key change): one that would join the report (a new version of an
+/// all-versions target, a new copy or quote of the content) is `E_REDACTION_STALE` too, so the
+/// landing never writes a copy outside the removal the person approved.
+pub(crate) fn check_fresh(
+    st: &ReadState,
+    request: &Hash,
+    prospective: &[Change],
+) -> Result<(), RdyError> {
     let r = st.reader().redaction_request(request)?;
     let input = RedactInput {
         targets: r.targets.iter().map(targets::selector_text).collect(),
@@ -373,13 +381,13 @@ pub(crate) fn check_fresh(st: &ReadState, request: &Hash) -> Result<(), RdyError
         request: *request,
     };
     let names = crate::quarantine::names(st.root());
-    let full = report::compute_excluding(st, &input, &names, Some(&own))?;
+    let full = report::compute_excluding(st, &input, &names, Some(&own), prospective)?;
     let mut buf = report::buffer(limits().record)?;
     let bound = r
         .manifest
         .report_hash(&mut buf)
         .map_err(|_| crate::error::redaction_limit(rdy_store::redaction::limit::RECORD))?;
-    if full.report.report_hash != bound || full.request_targets != r.targets {
+    if full.prospective || full.report.report_hash != bound || full.request_targets != r.targets {
         return Err(StoreError::RedactionStale.into());
     }
     Ok(())

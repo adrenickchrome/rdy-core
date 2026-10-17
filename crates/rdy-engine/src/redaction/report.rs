@@ -7,7 +7,7 @@
 //! and every record that quotes a complete source string of a selected version. Quoted text is
 //! returned in the transient quote rows only; the manifest a request binds holds record
 //! identities, never the text.
-use super::scan::{Hits, Matcher, require_text_policies, visit_strings, walk};
+use super::scan::{Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
 use super::targets::{Checked, check_input, selector_text};
 use super::{Limits, RedactInput, limits};
 use crate::ReadState;
@@ -25,11 +25,12 @@ use rdy_model::redaction::{
     RedactionManifest, RedactionResidue, RedactionWarning, encode_into,
 };
 use rdy_model::{
-    AltSet, Answer, Block, BlockId, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
+    AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
     Redaction, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
 };
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
+use rdy_store::segment::Location;
 use rdy_store::transition::Transitions;
 use rdy_store::{StoreReader, ViewOp, ViewOpKind};
 use serde::{Deserialize, Serialize};
@@ -151,6 +152,8 @@ pub(crate) struct Full {
     pub(crate) request_targets: Vec<RedactTarget>,
     pub(crate) class: ReasonClass,
     pub(crate) reason: String,
+    /// Whether a prospective change ([`compute_excluding`]) would join the report.
+    pub(crate) prospective: bool,
 }
 
 /// The `E_BAD_INPUT` of a cycle in a history the store keeps acyclic.
@@ -442,10 +445,13 @@ pub(super) fn buffer(n: usize) -> Result<Vec<u8>, RdyError> {
     Ok(buf)
 }
 
-/// A recorded request's own records, which its approval-time recomputation leaves out (plan
-/// Redaction, Task 10): its carrier change and the view op that committed it, the request record
-/// itself, and every proposal version that holds the carrier. Its residues report under their
-/// original identity in every computation, and its apply is written only by the landing.
+/// A recorded request, whose approval-time recomputation leaves out the batches the request
+/// itself wrote (plan Redaction, Task 10; ruling task-10: by batch, never by name): the batch
+/// that recorded it (its carrier, residues, request record, the carrier's view commit and that
+/// view's refs), and each batch that recorded a proposal version holding the carrier (the
+/// proposal, its `proposal/` and `open/` refs). Every row whose frame sits in one of those
+/// batches is left out, ref updates included; a row of any other batch counts, even one that
+/// names the same refs or quotes the same text. Its apply is written only by the landing.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Own {
     pub(crate) carrier: Hash,
@@ -453,17 +459,54 @@ pub(crate) struct Own {
 }
 
 impl Own {
-    /// Whether the frame `(kind, hash)` is one of the request's own records. Proposals and view
-    /// ops are matched by what they name (`changes`), so a later version of the proposal is one
-    /// too.
-    fn holds(&self, kind: u8, h: &Hash, changes: &[Hash]) -> bool {
-        match kind {
-            kinds::CHANGE => *h == self.carrier,
-            kinds::REDACTION => *h == self.request,
-            kinds::PROPOSAL => changes.contains(&self.carrier),
-            kinds::VIEW_OP => changes == [self.carrier],
-            _ => false,
+    /// The log positions of the request's own batches in `frames` (the walk, batch markers
+    /// included): a batch is named by the place of its first frame, and holds every frame up to
+    /// and including its marker.
+    fn batches(&self, reader: &StoreReader, frames: &[Frame]) -> Result<OwnBatches, RdyError> {
+        let mut starts: Vec<Location> = Vec::new();
+        starts
+            .try_reserve_exact(frames.len())
+            .map_err(|_| over(limit::FRAMES))?;
+        let mut open: Option<Location> = None;
+        let mut own: BTreeSet<Location> = BTreeSet::new();
+        for f in frames {
+            let start = *open.get_or_insert(f.loc);
+            starts.push(start);
+            if f.kind == kinds::BATCH_COMMIT {
+                open = None;
+            }
+            let mine = f.present
+                && match f.kind {
+                    kinds::CHANGE => f.hash == self.carrier,
+                    kinds::REDACTION => f.hash == self.request,
+                    kinds::PROPOSAL => reader
+                        .get_typed::<Proposal>(kinds::PROPOSAL, &f.hash)?
+                        .changes
+                        .contains(&self.carrier),
+                    kinds::VIEW_OP => matches!(
+                        reader.get_typed::<ViewOp>(kinds::VIEW_OP, &f.hash)?.op,
+                        ViewOpKind::Commit { change } if change == self.carrier
+                    ),
+                    _ => false,
+                };
+            if mine {
+                own.insert(start);
+            }
         }
+        Ok(OwnBatches { starts, own })
+    }
+}
+
+/// The batch of each frame of a walk, and which of them are a request's own ([`Own`]).
+struct OwnBatches {
+    starts: Vec<Location>,
+    own: BTreeSet<Location>,
+}
+
+impl OwnBatches {
+    /// Whether the frame at index `i` of the walk sits in one of the request's own batches.
+    fn holds(&self, i: usize) -> bool {
+        self.starts.get(i).is_some_and(|s| self.own.contains(s))
     }
 }
 
@@ -474,17 +517,24 @@ pub(crate) fn compute(
     input: &RedactInput,
     quarantine: &[String],
 ) -> Result<Full, RdyError> {
-    compute_excluding(state, input, quarantine, None)
+    compute_excluding(state, input, quarantine, None, &[])
 }
 
-/// [`compute`], leaving out the records of `own` (a recorded request recomputed at its approval):
-/// they are neither searched for quotes nor followed as references, so recording, proposing and
-/// re-proposing the request never stale it. Every other record counts as in [`compute`].
+/// [`compute`], leaving out the batches of `own` (a recorded request recomputed at its
+/// approval): their records are neither searched for quotes nor followed as references, so
+/// recording, proposing and re-proposing the request never stale it. Every other record counts
+/// as in [`compute`].
+///
+/// `prospective` holds the changes the approving landing would write beside the log (the
+/// acceptance and re-key change). [`Full::prospective`] says whether any of them would join the
+/// report: a new version of an all-versions target, a version or base among the affected
+/// versions, a blob reference to a removed or shared blob, or a quote of a source string.
 pub(crate) fn compute_excluding(
     state: &ReadState,
     input: &RedactInput,
     quarantine: &[String],
     own: Option<&Own>,
+    prospective: &[Change],
 ) -> Result<Full, RdyError> {
     super::count_computation();
     if let Some(e) = &state.error {
@@ -504,6 +554,7 @@ pub(crate) fn compute_excluding(
 
     // the walk, under the frame and byte bounds
     let frames = walk(reader, state.seq(), &limits)?;
+    let own = own.map(|o| o.batches(reader, &frames)).transpose()?;
     let present_kinds: BTreeSet<u8> = frames.iter().map(|f| f.kind).collect();
     require_text_policies(&present_kinds.into_iter().collect::<Vec<_>>())?;
 
@@ -783,15 +834,17 @@ pub(crate) fn compute_excluding(
     let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let audit = ImpactKind::AuditText;
-    for f in &frames {
+    for (i, f) in frames.iter().enumerate() {
+        // the request's own batches are left out before the first-seen check, so the same
+        // record in another batch still counts
+        if own.as_ref().is_some_and(|o| o.holds(i)) {
+            continue;
+        }
         if !seen.insert((f.kind, f.hash)) {
             continue;
         }
         let h = f.hash;
         let rec = h.to_string();
-        if own.is_some_and(|o| o.holds(f.kind, &h, &[])) {
-            continue;
-        }
         match f.kind {
             kinds::BLOCK => {
                 if !f.present || versions.contains(&h) {
@@ -836,9 +889,6 @@ pub(crate) fn compute_excluding(
             }
             kinds::PROPOSAL => {
                 let p: Proposal = reader.get_typed(kinds::PROPOSAL, &h)?;
-                if own.is_some_and(|o| o.holds(kinds::PROPOSAL, &h, &p.changes)) {
-                    continue;
-                }
                 quotes.scan(ImpactKind::Proposal, &rec, false, &p)?;
                 proposals.push((h, p.changes));
             }
@@ -860,13 +910,8 @@ pub(crate) fn compute_excluding(
             }
             kinds::VIEW_OP => {
                 let op: ViewOp = reader.get_typed(kinds::VIEW_OP, &h)?;
-                let named = view_op_changes(&op);
-                if matches!(op.op, ViewOpKind::Commit { .. })
-                    && own.is_some_and(|o| o.holds(kinds::VIEW_OP, &h, &named))
-                {
-                    continue;
-                }
                 quotes.scan(audit, &rec, false, &op)?;
+                let named = view_op_changes(&op);
                 view_refs.push((op.view, named));
             }
             kinds::REVIEW => {
@@ -1078,7 +1123,15 @@ pub(crate) fn compute_excluding(
         assessment: AssessmentSupport::NotImplemented,
     };
     let drop_frames = u64::try_from(manifest.spans.len()).map_err(|_| over(limit::FRAMES))?;
-    finish(
+    let prospective = prospective_hits(
+        prospective,
+        &request_targets,
+        &affected_versions,
+        &manifest,
+        &sources,
+        &limits,
+    )?;
+    let mut full = finish(
         Draft {
             targets,
             already,
@@ -1093,7 +1146,79 @@ pub(crate) fn compute_excluding(
         class,
         reason,
         &limits,
-    )
+    )?;
+    full.prospective = prospective;
+    Ok(full)
+}
+
+/// Whether any of the changes `prospective` (not in the log yet) would join the report of
+/// `manifest`: an op that writes a new version of an all-versions target, or a version among
+/// `affected` (the selected and referencing versions); an op whose base is among `affected`; a
+/// block whose `blob` field names a selected or shared blob; or a string of the change or of a
+/// block it embeds that holds a complete source string.
+fn prospective_hits(
+    prospective: &[Change],
+    request_targets: &[RedactTarget],
+    affected: &HashSet<Hash>,
+    manifest: &RedactionManifest,
+    sources: &[String],
+    limits: &Limits,
+) -> Result<bool, RdyError> {
+    if prospective.is_empty() {
+        return Ok(false);
+    }
+    let all: HashSet<&BlockId> = request_targets
+        .iter()
+        .filter_map(|t| match t {
+            RedactTarget::AllVersions(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    let blob_hit = |b: &Block| {
+        b.fields
+            .get("blob")
+            .and_then(FieldValue::as_str)
+            .and_then(|s| s.parse::<Hash>().ok())
+            .is_some_and(|h| manifest.blobs.contains(&h) || manifest.shared_blobs.contains(&h))
+    };
+    let mut quotes = Quotes::new(sources, limits.levels)?;
+    for c in prospective {
+        quotes.scan(
+            ImpactKind::Change,
+            "",
+            false,
+            &(
+                &c.view,
+                &c.provenance,
+                &c.justification,
+                &c.message,
+                &c.links,
+            ),
+        )?;
+        for op in &c.ops {
+            let hit = match op {
+                Op::Create { block } => {
+                    all.contains(&block.id)
+                        || affected.contains(&block.version_hash())
+                        || blob_hit(block)
+                }
+                Op::Update { base, block } => {
+                    all.contains(&block.id)
+                        || affected.contains(&block.version_hash())
+                        || affected.contains(base)
+                        || blob_hit(block)
+                }
+                Op::Delete { base, .. } => affected.contains(base),
+            };
+            if hit {
+                return Ok(true);
+            }
+            if let Op::Create { block } | Op::Update { block, .. } = op {
+                quotes.scan(ImpactKind::BlockVersion, "", true, block)?;
+            }
+        }
+    }
+    Ok(!quotes.found.is_empty())
 }
 
 /// The relation whose ordinal is `n`.
@@ -1187,6 +1312,7 @@ fn finish(
         request_targets,
         class,
         reason,
+        prospective: false,
     })
 }
 

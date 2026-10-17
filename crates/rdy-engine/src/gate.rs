@@ -2573,9 +2573,11 @@ impl Rdy {
         let landed_ops = applied_ops(&all, &order);
         // D-6B1W1, D-14SAY: the complete report of each request the version carries is computed
         // again here, under the writer, and must match the one the request recorded and the card
-        // showed; a stale one is refused, never refreshed
+        // showed; a stale one is refused, never refreshed. The acceptance change is not in the
+        // log yet: one that would copy or quote the content outside the approved removal (a new
+        // version of an all-versions target) is stale too, never a silently grown removal
         for r in &requests {
-            crate::redaction::check_fresh(&st, r)?;
+            crate::redaction::check_fresh(&st, r, accept.as_slice())?;
         }
 
         // 4. land in one write (atom1): the acceptance change, the final proposal version, the

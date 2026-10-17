@@ -326,9 +326,10 @@ fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
 type RemovalFacts = (Option<Vec<RemovalCard>>, BTreeMap<Hash, Vec<String>>);
 
 /// The removal card of each request that a change of `changes` carries, by request hash, and
-/// the quarantine names of the report each card names. Each card is read from the request
-/// record: the report hash is the hash of the complete manifest the request binds, never of a
-/// shortened presentation, and the names are that manifest's.
+/// the quarantine names of the report each card names. Each request must still be fresh
+/// (`redaction::check_fresh`). Each card is read from the request record: the report hash is
+/// the hash of the complete manifest the request binds, never of a shortened presentation, and
+/// the names are that manifest's.
 fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyError> {
     let reader = st.reader();
     let mut cards: Vec<RemovalCard> = vec![];
@@ -338,6 +339,10 @@ fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyEr
         let Some(request) = reader.redaction_for_carrier(h)? else {
             continue;
         };
+        // the card shows the removal the request recorded only while its complete report is
+        // still that one: the shared freshness check runs first, and a stale request is
+        // `E_REDACTION_STALE`, never refreshed (D-6B1W1, D-14SAY)
+        crate::redaction::check_fresh(st, &request, &[])?;
         let req = reader.redaction_request(&request)?;
         let buf = match &mut buf {
             Some(b) => b,

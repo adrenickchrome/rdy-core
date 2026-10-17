@@ -79,6 +79,11 @@ struct P {
 }
 
 fn landed() -> P {
+    landed_with(SECRET)
+}
+
+/// [`landed`], with `body` as the prose block's body.
+fn landed_with(body: &str) -> P {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let w = write(
@@ -88,7 +93,7 @@ fn landed() -> P {
             {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
             {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}},
-            {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": SECRET},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": body},
             {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "A ledger."}
         ]),
     );
@@ -821,12 +826,31 @@ fn rdx10_public_reports_have_one_quarantine_source() {
     assert_eq!(res.report.quarantine, vec![name.clone()]);
     assert_eq!(res.report.report_hash, dry.report.report_hash);
     let prop = propose(&mut p, &writer(), "redact");
+    // the card display computes the complete report once, through the same wrapper
+    let before = report_computations_for_tests();
     let item = item_of(&p.r, &prop.r#ref);
+    assert_eq!(report_computations_for_tests(), before + 1);
     assert_eq!(
         item.removal_reports.get(&res.report.report_hash),
         Some(&vec![name.clone()])
     );
     assert!(item.card.contains(QUARANTINE), "{}", item.card);
+    // a quarantine name that appears before the card is shown again stales the request: the
+    // display refuses the card, and never refreshes the request
+    let late = p.dir.path().join(".rdy/store/index.redb.damaged-99");
+    std::fs::write(&late, b"damaged").unwrap();
+    let before = report_computations_for_tests();
+    let e =
+        p.r.read()
+            .pending(&PendingQuery {
+                person: PERSON.into(),
+                session_ref: None,
+                max_tokens: CARD_MAX_TOKENS,
+            })
+            .unwrap_err();
+    assert_stale(&e, "a card shown after a new quarantine name");
+    assert_eq!(report_computations_for_tests(), before + 1);
+    std::fs::remove_file(&late).unwrap();
     // output files (an export, a render, a dump) are not report inputs: no file list, no hook
     let root = p.dir.path();
     std::fs::create_dir_all(root.join("site")).unwrap();
@@ -844,4 +868,97 @@ fn rdx10_public_reports_have_one_quarantine_source() {
     // the quarantine file is reported and never erased
     assert!(root.join(".rdy/store").join(&name).exists());
     assert_eq!(canon_prose(&p.r.read(), &p).body, CONTENT_REMOVED);
+}
+
+#[test]
+fn rdx10_an_acceptance_that_copies_a_target_is_stale() {
+    let _clock = pin_clock(9_000_000);
+    const RULING: &str = "Another secret.";
+    let mut p = landed();
+    // a proposed decision that holds the content, and prose that applies it, in the view that
+    // then records the removal of every version of the decision
+    let w = write(
+        &mut p.r,
+        "redact",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Rulings", "doc_type": "decisions-log"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rulings"}},
+            {"op": "create", "type": "decision", "id": "$x", "parent": "$s", "fields": {"statement": RULING, "status": "proposed"}},
+            {"op": "create", "type": "claim", "parent": "$s", "body": "Codes rotate each week.", "links": {"decided_by": [{"target": "$x"}]}}
+        ]),
+    );
+    let decision = id(&w.created["$x"]);
+    request(&mut p, &writer(), "redact", vec![decision.to_string()]);
+    let prop = propose(&mut p, &writer(), "redact");
+    assert!(
+        queue(&p.r)
+            .iter()
+            .all(|i| i.batch.as_deref() != Some(prop.r#ref.as_str()) || i.r#ref == prop.r#ref),
+        "the version needs no other answer"
+    );
+    // landing would accept the decision: the acceptance change embeds a new version of it that
+    // holds the content, outside the removal the person saw, so the approval is stale
+    let end = p.r.store().log_end();
+    let e = match p.r.land(&approver(), &prop.id) {
+        Ok(l) => panic!("the approval landed as {l}"),
+        Err(e) => e,
+    };
+    assert_stale(&e, "an acceptance of a removed decision");
+    assert_eq!(p.r.store().log_end(), end, "nothing is written");
+    assert!(applies_in_last_batch(&p.r).is_empty());
+    assert!(on_disk(p.dir.path(), RULING), "nothing is removed");
+    assert_intact(&p, "an acceptance of a removed decision");
+    // after a reopen no version of the decision is accepted, and the log holds what it held
+    let P { dir, r, .. } = p;
+    drop(r);
+    let r = Rdy::open(dir.path()).unwrap();
+    assert_eq!(r.store().log_end(), end);
+    let st = r.read();
+    assert!(st.block(&Scope::Canon, &decision).is_err(), "not in canon");
+    let d = st.block(&Scope::View("redact".into()), &decision).unwrap();
+    assert_eq!(d.field_str("status"), Some("proposed"));
+}
+
+#[test]
+fn rdx10_own_ref_updates_never_stale_a_request() {
+    let _clock = pin_clock(10_000_000);
+    // "proposal/" is in the name of the request's own proposal ref, and "work" in the names of
+    // its own view's refs (a person's default view): the batches the request itself wrote
+    for body in ["proposal/", "work"] {
+        let mut p = landed_with(body);
+        let res =
+            p.r.redact(&writer(), input(vec![p.prose.to_string()], false))
+                .unwrap();
+        let prop = propose(&mut p, &writer(), "work");
+        p.r.land(&approver(), &prop.id)
+            .unwrap_or_else(|e| panic!("{body}: {e}"));
+        let applies = applies_in_last_batch(&p.r);
+        assert_eq!(applies.len(), 1, "{body}");
+        assert_eq!(applies[0].request, res.redaction.unwrap(), "{body}");
+        assert_eq!(canon_prose(&p.r.read(), &p).body, CONTENT_REMOVED, "{body}");
+    }
+    // a ref update of another batch that quotes the same text still stales the request: an
+    // unrelated proposal's ref, an unrelated view's ref
+    let unrelated = json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "other", "title": "Other"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Other", "doc_type": "page"}}
+    ]);
+    for (body, view, proposes) in [("proposal/", "side", true), ("work", "workshop", false)] {
+        let mut p = landed_with(body);
+        p.r.redact(&writer(), input(vec![p.prose.to_string()], false))
+            .unwrap();
+        let prop = propose(&mut p, &writer(), "work");
+        write(&mut p.r, view, unrelated.clone());
+        if proposes {
+            p.r.propose(&writer(), view, "Other", None).unwrap();
+        }
+        let end = p.r.store().log_end();
+        let e = match p.r.land(&approver(), &prop.id) {
+            Ok(l) => panic!("{body}: the approval landed as {l}"),
+            Err(e) => e,
+        };
+        assert_stale(&e, body);
+        assert_eq!(p.r.store().log_end(), end, "{body}: nothing is written");
+        assert_eq!(canon_prose(&p.r.read(), &p).body, body, "{body}");
+    }
 }

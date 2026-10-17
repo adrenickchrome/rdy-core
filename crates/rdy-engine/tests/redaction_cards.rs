@@ -709,12 +709,14 @@ fn rdx8_each_request_has_its_own_sorted_facts() {
     let _clock = pin_clock(1_000_000);
     let mut p = base();
     let (prose, term) = (p.prose.clone(), p.term.clone());
-    let a = redact(&mut p, &prose, "secret", "a leaked code");
+    // the quarantine name is there before both requests: a request recorded before a new
+    // quarantine name is stale, and its card is never shown (rdx10, fix round 1)
     quarantine_file(p.dir.path());
+    let a = redact(&mut p, &prose, "secret", "a leaked code");
     let b = redact(&mut p, &term, "personal", "a name");
     let prop = propose(&mut p, "work", "Remove two things");
     let item = item_of(&p.r, &prop.r#ref);
-    let mut want = vec![(expected_card(&a), false), (expected_card(&b), true)];
+    let mut want = vec![(expected_card(&a), true), (expected_card(&b), true)];
     want.sort_by_key(|(c, _)| c.request);
     let quarantined: Vec<bool> = want.iter().map(|(_, q)| *q).collect();
     let want: Vec<RemovalCard> = want.into_iter().map(|(c, _)| c).collect();
@@ -735,13 +737,20 @@ fn rdx8_each_request_has_its_own_sorted_facts() {
     assert_eq!(item.card.matches(QUOTES).count(), 2);
     assert_eq!(item.card.matches(REUSE).count(), 2);
     assert_eq!(item.card.matches(ROTATE).count(), 1);
-    assert_eq!(item.card.matches(QUARANTINE).count(), 1);
-    let secret = if want[0].reason_class == ReasonClass::Secret {
-        &section(&want[0], quarantined[0])
+    assert_eq!(item.card.matches(QUARANTINE).count(), 2);
+    let (secret, other) = if want[0].reason_class == ReasonClass::Secret {
+        (
+            &section(&want[0], quarantined[0]),
+            &section(&want[1], quarantined[1]),
+        )
     } else {
-        &section(&want[1], quarantined[1])
+        (
+            &section(&want[1], quarantined[1]),
+            &section(&want[0], quarantined[0]),
+        )
     };
-    assert!(secret.contains(ROTATE) && !secret.contains(QUARANTINE));
+    assert!(secret.contains(ROTATE) && secret.contains(QUARANTINE));
+    assert!(!other.contains(ROTATE) && other.contains(QUARANTINE));
     // deterministic: the same state gives the same card and digest, and so does a reopen
     let again = item_of(&p.r, &prop.r#ref);
     assert_eq!(again, item);
