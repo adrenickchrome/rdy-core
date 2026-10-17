@@ -215,10 +215,10 @@ fn ec13_the_v1_s12_fixture_loads_with_every_hash() {
     for b in batches {
         for f in b.frames {
             assert!(
-                r.store().has_kind(f.kind, &f.hash).unwrap(),
+                r.store().has_kind(f.kind(), f.hash()).unwrap(),
                 "kind {} {} is gone",
-                f.kind,
-                f.hash
+                f.kind(),
+                f.hash()
             );
         }
     }
@@ -287,9 +287,12 @@ fn ec13_the_every_kind_project_is_a_clone_with_an_origin() {
                 .frames
                 .iter()
                 .map(|f| {
-                    let name = (f.kind == kinds::REF_UPDATE)
-                        .then(|| postcard::from_bytes::<RefUpdate>(&f.payload).unwrap().name);
-                    (f.kind, name)
+                    let name = (f.kind() == kinds::REF_UPDATE).then(|| {
+                        postcard::from_bytes::<RefUpdate>(f.present_payload().unwrap())
+                            .unwrap()
+                            .name
+                    });
+                    (f.kind(), name)
                 })
                 .collect();
             Ok(())

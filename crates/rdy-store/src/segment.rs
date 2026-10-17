@@ -1287,6 +1287,59 @@ impl SegmentLog {
         Ok(placed)
     }
 
+    /// Writes one data frame of a loaded batch at the end of the current segment, with no roll
+    /// and no sync: the ingest rolls only where the source rolled (`crate::ingest`). Returns
+    /// where it went and its payload's hash.
+    pub(crate) fn append_unrolled(
+        &mut self,
+        kind: u8,
+        payload: &[u8],
+    ) -> io::Result<(Location, Hash)> {
+        if payload.len() > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "payload too large",
+            ));
+        }
+        self.write_frame(kind, payload)
+    }
+
+    /// Writes a loaded frame whose payload a redaction removed, at the end of the current
+    /// segment with no roll and no sync: its original header (`len`, `kind`, `hash`), then `len`
+    /// zero bytes through one fixed buffer of `ERASE_BUFFER` bytes, by positioned writes. So the
+    /// frame takes its original place and length, as an erased frame of the source does.
+    /// Returns where it went.
+    pub(crate) fn append_dropped(
+        &mut self,
+        kind: u8,
+        hash: &Hash,
+        len: u32,
+    ) -> io::Result<Location> {
+        static ZEROS: [u8; ERASE_BUFFER] = [0; ERASE_BUFFER];
+        let loc = Location {
+            segment: self.current(),
+            offset: self.len,
+        };
+        let end = self
+            .len
+            .checked_add(HEADER)
+            .and_then(|e| e.checked_add(u64::from(len)))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
+        let mut head = [0u8; HEADER as usize];
+        head[0..4].copy_from_slice(&len.to_le_bytes());
+        head[4] = kind;
+        head[5..37].copy_from_slice(&hash.0);
+        pio::write_all_at(&self.writer, &head, self.len)?;
+        let mut at = self.len + HEADER;
+        while at < end {
+            let n = (end - at).min(ERASE_BUFFER as u64) as usize;
+            pio::write_all_at(&self.writer, &ZEROS[..n], at)?;
+            at += n as u64;
+        }
+        self.len = end;
+        Ok(loc)
+    }
+
     /// Writes the `BATCH_COMMIT` marker of the batch whose first data frame is at `start` and
     /// whose data frames have `hashes`, in order. It does not sync.
     pub fn append_marker<'a>(

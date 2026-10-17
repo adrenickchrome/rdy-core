@@ -42,8 +42,35 @@
 //! A reader checks every record's hash, the order above, each frame's kind, each batch's frame
 //! count and both its digests, and the trailer's counts and digest. Any failure is
 //! `StoreError::Dump`: rdy never repairs a dump.
+//!
+//! # Dump format 2
+//!
+//! Dump format 2 carries store format 13 (the pair (2, 13); its frame kinds are those of (1, 12)
+//! and 20 to 22). It keeps the magic, the container framing and the `HEADER`, `FILE`, `BATCH` and
+//! `TRAILER` layouts of format 1, and adds one container kind, `DROPPED = 0xF3` (D-3M81W: rdy
+//! "drops their bytes and keeps their hashes"). A `DROPPED` record stands only where a batch's
+//! data frame is expected, and only under (2, 13). It is one source frame whose payload an applied
+//! redaction removed. Its payload is exactly 102 bytes:
+//!
+//! `original_kind: u8 || original_hash: [u8; 32] || original_len: u32 || apply_hash: [u8; 32] ||
+//! has_residue: u8 || residue_hash: [u8; 32]`.
+//!
+//! - `original_kind` is BLOCK, CHANGE or BLOB_CHUNK; no other kind is removable.
+//! - `has_residue` is 0 or 1. With 0, `residue_hash` is 32 zero bytes; with 1, it names the
+//!   residue of the frame. BLOCK and CHANGE have a residue; BLOB_CHUNK has none.
+//! - The record's own hash covers its 102 bytes, as for any record.
+//! - The frame's place in the source log is implicit: the batch's start plus the original sizes
+//!   (`37 + original_len`) of the frames before it. A dropped record counts as one source frame.
+//! - The `BATCH` record's `digest` and `kinds` use the original `(kind, hash)`. The trailer's
+//!   digest uses the container record as it is: `(0xF3, 102, record hash)`.
+//!
+//! The apply that authorizes a dropped frame comes later in the stream than the frame. So the
+//! reader checks only the record's own rules; the ingest checks the authorization against the
+//! complete stream before it finishes the store (`crate::ingest`).
 use crate::error::StoreError;
 use crate::kinds::{self, BatchCommit, batch_digest};
+use crate::redaction::StoredFrame;
+use crate::redaction_io::ERASE_BUFFER;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::StoreReader;
 use rdy_model::Hash;
@@ -51,11 +78,11 @@ use std::io::{self, Read, Write};
 
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
-/// The dump format this rdy writes.
-pub const DUMP_FORMAT: u32 = 1;
+/// The dump format this rdy writes: 2, of store format 13 (the pair (2, 13)).
+pub const DUMP_FORMAT: u32 = 2;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
-/// this list (D-69AY3).
-pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12)];
+/// this list (D-69AY3). No (1, 13) pair exists: store format 13 travels only in dump format 2.
+pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13)];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -68,18 +95,156 @@ pub mod rec {
     pub const HEADER: u8 = 0xF0;
     pub const FILE: u8 = 0xF1;
     pub const BATCH: u8 = 0xF2;
+    /// A data frame whose payload a redaction removed (dump format 2 only).
+    pub const DROPPED: u8 = 0xF3;
     pub const TRAILER: u8 = 0xFF;
 }
 
 const BATCH_LEN: usize = 4 + 8 + 4 + 32 + 32;
 const TRAILER_LEN: usize = 8 + 8 + 4 + 32;
+/// The length of a `DROPPED` record's payload.
+pub const DROPPED_LEN: usize = 1 + 32 + 4 + 32 + 1 + 32;
 
-/// One store frame of a batch, as the log holds it.
+/// One store frame of a batch, as the log holds it: `Present` with its payload, or `Dropped`, a
+/// frame whose payload an applied redaction removed. `Dropped` keeps the frame's original kind,
+/// hash and payload length, the apply record that authorized the removal and the residue that
+/// replaces it for reads (none for a blob chunk). An in-memory form only: no stored kind changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Frame {
-    pub kind: u8,
-    pub hash: Hash,
-    pub payload: Vec<u8>,
+pub enum Frame {
+    Present {
+        kind: u8,
+        hash: Hash,
+        payload: Vec<u8>,
+    },
+    Dropped {
+        kind: u8,
+        hash: Hash,
+        len: u32,
+        apply: Hash,
+        residue: Option<Hash>,
+    },
+}
+
+impl Frame {
+    /// The frame's store kind (the original kind of a dropped frame).
+    pub fn kind(&self) -> u8 {
+        match self {
+            Frame::Present { kind, .. } | Frame::Dropped { kind, .. } => *kind,
+        }
+    }
+
+    /// The frame's hash: of its payload, or the original hash of a dropped frame.
+    pub fn hash(&self) -> &Hash {
+        match self {
+            Frame::Present { hash, .. } | Frame::Dropped { hash, .. } => hash,
+        }
+    }
+
+    /// The length of the frame's payload in the source log: the payload's, or a dropped frame's
+    /// original length. A present payload over `u32::MAX` bytes cannot be in a log; it reads as
+    /// `u32::MAX`.
+    pub fn original_len(&self) -> u32 {
+        match self {
+            Frame::Present { payload, .. } => u32::try_from(payload.len()).unwrap_or(u32::MAX),
+            Frame::Dropped { len, .. } => *len,
+        }
+    }
+
+    /// The payload of a present frame; None for a dropped frame, whose bytes are gone.
+    pub fn present_payload(&self) -> Option<&[u8]> {
+        match self {
+            Frame::Present { payload, .. } => Some(payload),
+            Frame::Dropped { .. } => None,
+        }
+    }
+}
+
+/// The 102 bytes of the `DROPPED` record of a dropped frame.
+pub(crate) fn dropped_payload(
+    kind: u8,
+    hash: &Hash,
+    len: u32,
+    apply: &Hash,
+    residue: Option<&Hash>,
+) -> [u8; DROPPED_LEN] {
+    let mut p = [0u8; DROPPED_LEN];
+    p[0] = kind;
+    p[1..33].copy_from_slice(&hash.0);
+    p[33..37].copy_from_slice(&len.to_le_bytes());
+    p[37..69].copy_from_slice(&apply.0);
+    if let Some(r) = residue {
+        p[69] = 1;
+        p[70..102].copy_from_slice(&r.0);
+    }
+    p
+}
+
+/// A dump refusal of a dropped frame (the `what` of `StoreError::Dump`, closed).
+pub(crate) mod drop_text {
+    pub const NOT_ALLOWED: &str = "dropped frame is not allowed in this dump format";
+    pub const WRONG_LENGTH: &str = "dropped frame has the wrong length";
+    pub const INVALID_KIND: &str = "dropped frame has an invalid kind";
+    pub const INVALID_RESIDUE: &str = "dropped frame has an invalid residue";
+    pub const NO_AUTHORIZATION: &str = "dropped frame has no valid authorization";
+    pub const SPAN: &str = "dropped frame does not match its authorized span";
+    pub const ALLOCATION: &str = "record allocation failed";
+}
+
+/// The record rules of a dropped frame, shared by the writer and the reader: a removable kind,
+/// and the residue its kind needs (BLOCK and CHANGE one, BLOB_CHUNK none).
+fn check_dropped(kind: u8, residue: Option<&Hash>) -> Result<(), &'static str> {
+    let needs_residue = match kind {
+        kinds::BLOCK | kinds::CHANGE => true,
+        kinds::BLOB_CHUNK => false,
+        _ => return Err(drop_text::INVALID_KIND),
+    };
+    if residue.is_some() != needs_residue {
+        return Err(drop_text::INVALID_RESIDUE);
+    }
+    Ok(())
+}
+
+/// Decodes the payload of a `DROPPED` record: exactly 102 bytes, a removable kind, a residue flag
+/// of 0 (with a zero hash) or 1, and the residue its kind needs.
+pub(crate) fn parse_dropped(p: &[u8]) -> Result<Frame, &'static str> {
+    if p.len() != DROPPED_LEN {
+        return Err(drop_text::WRONG_LENGTH);
+    }
+    let kind = p[0];
+    if !crate::redaction::is_removable(kind) {
+        return Err(drop_text::INVALID_KIND);
+    }
+    let hash = Hash(p[1..33].try_into().expect("32 bytes"));
+    let len = u32::from_le_bytes(p[33..37].try_into().expect("4 bytes"));
+    let apply = Hash(p[37..69].try_into().expect("32 bytes"));
+    let residue_hash = Hash(p[70..102].try_into().expect("32 bytes"));
+    let residue = match p[69] {
+        0 if residue_hash.0 == [0u8; 32] => None,
+        1 => Some(residue_hash),
+        _ => return Err(drop_text::INVALID_RESIDUE),
+    };
+    check_dropped(kind, residue.as_ref())?;
+    Ok(Frame::Dropped {
+        kind,
+        hash,
+        len,
+        apply,
+        residue,
+    })
+}
+
+/// Whether a dump of `dump_format` may hold `DROPPED` records: format 2 does, format 1 never.
+fn drops_allowed(dump_format: u32) -> bool {
+    dump_format >= 2
+}
+
+/// The offset after `frames` in the source log, from `start`: each frame takes `37 +
+/// original_len` bytes. None when it passes `u64::MAX`.
+fn batch_end(start: u64, frames: &[Frame]) -> Option<u64> {
+    frames.iter().try_fold(start, |at, f| {
+        at.checked_add(FRAME_HEADER)?
+            .checked_add(u64::from(f.original_len()))
+    })
 }
 
 /// The dump's header: the store format of its frames, the source log's end, and the writing
@@ -198,6 +363,31 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
             kinds::TRANSITION,
         ],
     ),
+    // store format 13 adds the redaction kinds; dump format 2 adds the DROPPED record
+    (
+        (2, 13),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+            kinds::REDACTION,
+            kinds::REDACTION_RESIDUE,
+            kinds::REDACTION_APPLY,
+        ],
+    ),
 ];
 
 /// The store kinds a batch's frames may have in a dump of `dump_format` whose frames are of
@@ -209,12 +399,13 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
         .map(|(_, k)| *k)
 }
 
-/// The `BATCH` record's `kinds`: `Hash::of` over each frame's `kind || hash`, in order.
+/// The `BATCH` record's `kinds`: `Hash::of` over each frame's (original) `kind || hash`, in
+/// order.
 fn kinds_digest(frames: &[Frame]) -> Hash {
     let mut b = Vec::with_capacity(frames.len() * 33);
     for f in frames {
-        b.push(f.kind);
-        b.extend_from_slice(&f.hash.0);
+        b.push(f.kind());
+        b.extend_from_slice(&f.hash().0);
     }
     Hash::of(&b)
 }
@@ -375,10 +566,12 @@ impl<W: Write> DumpWriter<W> {
         Ok(())
     }
 
-    /// Writes one sealed batch: its `BATCH` record, then its frames byte for byte. Refuses a
-    /// frame of a kind that cannot stand in a batch (a batch marker or an unassigned kind among
-    /// them), a frame whose hash is not its payload's, and a batch whose digest is not its
-    /// frames'.
+    /// Writes one sealed batch: its `BATCH` record, then its frames byte for byte, each dropped
+    /// frame as its `DROPPED` record. Refuses a frame of a kind that cannot stand in a batch (a
+    /// batch marker or an unassigned kind among them), a frame whose hash is not its payload's, a
+    /// dropped frame in a dump format that has no `DROPPED` record or one that breaks its record
+    /// rules, a batch whose original frames run past `u64::MAX`, and a batch whose digest is not
+    /// its frames'.
     pub fn batch(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
         let n = self.totals.batches + 1;
         // every check before the first byte, so a refused batch writes nothing; no store writes
@@ -386,17 +579,33 @@ impl<W: Write> DumpWriter<W> {
         if b.frames.is_empty() {
             return Err(StoreError::Refused(cannot_stand(rec::BATCH)));
         }
+        let mut dropped = false;
         for f in &b.frames {
-            if !self.kinds.contains(&f.kind) {
-                return Err(StoreError::Refused(cannot_stand(f.kind)));
+            if !self.kinds.contains(&f.kind()) {
+                return Err(StoreError::Refused(cannot_stand(f.kind())));
             }
-            if Hash::of(&f.payload) != f.hash {
-                return Err(StoreError::Refused(
-                    "a record's hash does not match its bytes".into(),
-                ));
+            match f {
+                Frame::Present { hash, payload, .. } => {
+                    if Hash::of(payload) != *hash {
+                        return Err(StoreError::Refused(
+                            "a record's hash does not match its bytes".into(),
+                        ));
+                    }
+                }
+                Frame::Dropped { kind, residue, .. } => {
+                    if !drops_allowed(DUMP_FORMAT) {
+                        return Err(StoreError::Refused(drop_text::NOT_ALLOWED.into()));
+                    }
+                    check_dropped(*kind, residue.as_ref())
+                        .map_err(|what| StoreError::Refused(what.into()))?;
+                    dropped = true;
+                }
             }
         }
-        if batch_digest(b.frames.iter().map(|f| &f.hash)) != b.digest {
+        if dropped && batch_end(b.start.offset, &b.frames).is_none() {
+            return Err(StoreError::Refused(drop_text::SPAN.into()));
+        }
+        if batch_digest(b.frames.iter().map(|f| f.hash())) != b.digest {
             return Err(StoreError::Refused(format!(
                 "batch {n} does not match its digest"
             )));
@@ -416,8 +625,24 @@ impl<W: Write> DumpWriter<W> {
         p.extend_from_slice(&kinds_digest(&b.frames).0);
         self.record(rec::BATCH, &p)?;
         for f in &b.frames {
-            // the hash was checked above: each payload is hashed once
-            self.write_record(f.kind, f.hash, &f.payload)?;
+            match f {
+                // the hash was checked above: each payload is hashed once
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } => self.write_record(*kind, *hash, payload)?,
+                Frame::Dropped {
+                    kind,
+                    hash,
+                    len,
+                    apply,
+                    residue,
+                } => {
+                    let p = dropped_payload(*kind, hash, *len, apply, residue.as_ref());
+                    self.record(rec::DROPPED, &p)?;
+                }
+            }
         }
         self.phase = Phase::Batches;
         self.totals.batches += 1;
@@ -470,6 +695,8 @@ pub struct DumpReader<R: Read> {
     last_path: Option<String>,
     /// The store kinds a frame may have (`frame_kinds` of the dump's pair).
     kinds: &'static [u8],
+    /// Whether the dump's format has `DROPPED` records.
+    drops: bool,
     /// `kind || len || hash` of every record read so far, the trailer's excepted.
     chain: Vec<u8>,
     totals: DumpTotals,
@@ -566,6 +793,7 @@ impl<R: Read> DumpReader<R> {
             failed: None,
             last_path: None,
             kinds: &[],
+            drops: false,
             chain: Vec::new(),
             totals: DumpTotals::default(),
         };
@@ -584,7 +812,8 @@ impl<R: Read> DumpReader<R> {
         if !READS.iter().any(|(d, _)| *d == format) {
             return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
         }
-        let first = me.record()?;
+        me.drops = drops_allowed(format);
+        let first = me.record(false)?;
         if first.kind != rec::HEADER {
             return Err(damaged(first.at, cannot_stand(first.kind)));
         }
@@ -624,7 +853,7 @@ impl<R: Read> DumpReader<R> {
         if self.phase == ReadPhase::Done {
             return Ok(None);
         }
-        let record = self.record()?;
+        let record = self.record(false)?;
         match record.kind {
             rec::FILE if self.phase == ReadPhase::Files => {
                 let item = self.file(&record)?;
@@ -707,11 +936,13 @@ impl<R: Read> DumpReader<R> {
         let Some((start, count, digest, kinds)) = parsed.filter(|p| p.1 > 0) else {
             return Err(damaged(record.at, cannot_stand(record.kind)));
         };
-        // no buffer is sized from an unread count: frames are pushed as they are read
-        let mut frames = Vec::new();
+        // no buffer is sized from an unread count: frames are pushed as they are read, each slot
+        // taken by fallible growth
+        let mut frames: Vec<Frame> = Vec::new();
+        let mut dropped = false;
         while frames.len() < count as usize {
-            let f = self.record()?;
-            if f.kind >= rec::HEADER {
+            let f = self.record(true)?;
+            if f.kind != rec::DROPPED && f.kind >= rec::HEADER {
                 return Err(damaged(
                     f.at,
                     format!(
@@ -720,17 +951,31 @@ impl<R: Read> DumpReader<R> {
                     ),
                 ));
             }
-            if !self.kinds.contains(&f.kind) {
-                return Err(damaged(f.at, cannot_stand(f.kind)));
-            }
+            // the trailer's digest covers the container record as it is
             self.link(&f);
-            frames.push(Frame {
-                kind: f.kind,
-                hash: f.hash,
-                payload: f.payload,
-            });
+            let frame = if f.kind == rec::DROPPED {
+                dropped = true;
+                parse_dropped(&f.payload).map_err(|what| damaged(f.at, what))?
+            } else {
+                Frame::Present {
+                    kind: f.kind,
+                    hash: f.hash,
+                    payload: f.payload,
+                }
+            };
+            if !self.kinds.contains(&frame.kind()) {
+                return Err(damaged(f.at, cannot_stand(frame.kind())));
+            }
+            frames
+                .try_reserve(1)
+                .map_err(|_| damaged(f.at, drop_text::ALLOCATION))?;
+            frames.push(frame);
         }
-        if batch_digest(frames.iter().map(|f| &f.hash)) != digest || kinds_digest(&frames) != kinds
+        // a dropped frame's place is the batch start plus the original sizes before it
+        if dropped && batch_end(start.offset, &frames).is_none() {
+            return Err(damaged(record.at, drop_text::SPAN));
+        }
+        if batch_digest(frames.iter().map(|f| f.hash())) != digest || kinds_digest(&frames) != kinds
         {
             return Err(damaged(
                 record.at,
@@ -786,18 +1031,37 @@ impl<R: Read> DumpReader<R> {
     }
 
     /// Reads one record and checks its hash. The end of the file inside a record, or where a
-    /// record should start, is a dump that ends before its trailer.
-    fn record(&mut self) -> Result<Record, StoreError> {
+    /// record should start, is a dump that ends before its trailer. `frame` says a batch's data
+    /// frame is expected: there a `DROPPED` record is refused by its header alone, before its
+    /// payload is read, in a dump format without one or with another length than 102 bytes. The
+    /// payload is read in chunks of at most `ERASE_BUFFER` bytes, each taken by fallible growth:
+    /// a length the header claims is never reserved before its bytes arrive.
+    fn record(&mut self, frame: bool) -> Result<Record, StoreError> {
         let at = self.totals.bytes;
         let mut head = [0u8; FRAME_HEADER as usize];
         self.exact(&mut head, at)?;
         let len = u32::from_le_bytes(head[0..4].try_into().unwrap()) as u64;
         let kind = head[4];
         let hash = Hash(head[5..37].try_into().unwrap());
-        let mut payload = Vec::new();
-        (&mut self.r).take(len).read_to_end(&mut payload)?;
-        if (payload.len() as u64) < len {
-            return Err(damaged(at, ENDS_EARLY));
+        if frame && kind == rec::DROPPED {
+            if !self.drops {
+                return Err(damaged(at, drop_text::NOT_ALLOWED));
+            }
+            if len != DROPPED_LEN as u64 {
+                return Err(damaged(at, drop_text::WRONG_LENGTH));
+            }
+        }
+        let mut payload: Vec<u8> = Vec::new();
+        let mut left = len;
+        while left > 0 {
+            let n = left.min(ERASE_BUFFER as u64) as usize;
+            payload
+                .try_reserve(n)
+                .map_err(|_| damaged(at, drop_text::ALLOCATION))?;
+            let from = payload.len();
+            payload.resize(from + n, 0);
+            self.exact(&mut payload[from..], at)?;
+            left -= n as u64;
         }
         if Hash::of(&payload) != hash {
             return Err(damaged(at, "a record's hash does not match its bytes"));
@@ -823,9 +1087,11 @@ impl<R: Read> DumpReader<R> {
 
 impl StoreReader {
     /// Calls `f` with every sealed batch of `[ORIGIN, upto)`, in log order: its marker's start
-    /// and digest, and its data frames byte for byte. Each marker is checked against the frames
-    /// it closes (start, count, digest); a marker that closes no frames does not match. A
-    /// mismatch, or frames after the last marker, is `StoreError::Decode`.
+    /// and digest, and its data frames byte for byte; a frame whose payload an applied redaction
+    /// removed is `Frame::Dropped`, with its apply and residue (`for_each_record_from`). Each
+    /// marker is checked against the frames it closes (start, count, digest); a marker that
+    /// closes no frames does not match. A mismatch, or frames after the last marker, is
+    /// `StoreError::Decode`.
     pub fn for_each_batch(
         &self,
         upto: Location,
@@ -837,10 +1103,33 @@ impl StoreReader {
         };
         let mut pending: Vec<Frame> = Vec::new();
         let mut first: Option<Location> = None;
-        self.for_each_frame_from(origin, upto, |loc, kind, hash, payload, _next| {
+        self.for_each_record_from(origin, upto, |loc, frame, _next| {
+            let (kind, payload) = match frame {
+                StoredFrame::Present { kind, payload, .. } => (kind, payload),
+                StoredFrame::Dropped {
+                    kind,
+                    hash,
+                    len,
+                    apply,
+                    residue,
+                } => {
+                    first.get_or_insert(loc);
+                    pending.push(Frame::Dropped {
+                        kind,
+                        hash,
+                        len,
+                        apply,
+                        residue,
+                    });
+                    return Ok(());
+                }
+            };
             if kind != kinds::BATCH_COMMIT {
+                let StoredFrame::Present { hash, .. } = frame else {
+                    unreachable!("a present frame")
+                };
                 first.get_or_insert(loc);
-                pending.push(Frame {
+                pending.push(Frame::Present {
                     kind,
                     hash,
                     payload: payload.to_vec(),
@@ -860,7 +1149,7 @@ impl StoreReader {
             if frames.is_empty()
                 || marker.start != start
                 || marker.frames as usize != frames.len()
-                || batch_digest(frames.iter().map(|f| &f.hash)) != marker.digest
+                || batch_digest(frames.iter().map(|f| f.hash())) != marker.digest
             {
                 return Err(mismatch());
             }

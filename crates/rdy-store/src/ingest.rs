@@ -16,12 +16,20 @@
 //!
 //! A converter for another store format must remap every location inside a payload
 //! (`RefUpdate.at`, `InboxCursor.at`) if it changes the layout.
-use crate::dump::DumpBatch;
+//!
+//! A dropped frame (dump format 2, D-3M81W) is written as the source's erased frame is: its
+//! original header, then zeros of its original length, at its original place. Its authorization
+//! comes later in the stream than the frame, so the ingest keeps each dropped record and checks
+//! them all in `finish`, against the complete log and before `FORMAT` is written: the store's
+//! own authorization bootstrap must authorize the frame's exact span, by the apply and with the
+//! residue the record names. A dangling or forged drop refuses the load, and no store is made.
+use crate::dump::{DROPPED_LEN, DumpBatch, Frame, drop_text, dropped_payload, parse_dropped};
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
 use crate::kinds::{self, RefUpdate, batch_digest};
 use crate::meta::{REF_REPO_ID, encode_repo_id};
+use crate::redaction_io;
 use crate::segment::{Location, SegmentLog};
 use crate::store::encode;
 use rdy_model::RepoId;
@@ -29,6 +37,17 @@ use std::path::{Path, PathBuf};
 
 /// The directory of the log inside a store directory.
 const SEGMENTS_DIR: &str = "segments";
+
+/// The most dropped frames one ingest holds for its final check (inclusive): the bound on
+/// scanned frames. One more is refused with `record allocation failed`.
+pub const MAX_PENDING_DROPS: usize = 1_000_000;
+
+/// A dropped frame waiting for its authorization: its 102 container bytes and its original
+/// location.
+struct PendingDrop {
+    record: [u8; DROPPED_LEN],
+    loc: Location,
+}
 
 /// A new store directory that takes a dump's batches in log order.
 pub struct Ingest {
@@ -38,6 +57,8 @@ pub struct Ingest {
     frames: u64,
     /// Whether an ingested frame set `meta/repo_id`.
     has_repo_id: bool,
+    /// The dropped frames so far, in log order, at most `MAX_PENDING_DROPS`.
+    pending: Vec<PendingDrop>,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -75,14 +96,18 @@ impl Ingest {
             batches: 0,
             frames: 0,
             has_repo_id: false,
+            pending: Vec::new(),
         })
     }
 
     /// Appends batch `n` of the dump at its source place, then its marker, and notes whether the
     /// batch sets `meta/repo_id`. When the batch starts at offset 0 of the next segment and the
-    /// current segment holds frames, the log rolls once first. The log's end must then equal the batch's start, so a batch at any other place is
-    /// refused before the log rolls or takes a frame. The marker's digest must equal the batch's
-    /// digest. Either failure is `StoreError::Dump`. Nothing is synced until `finish`.
+    /// current segment holds frames, the log rolls once first. The log's end must then equal the
+    /// batch's start, so a batch at any other place is refused before the log rolls or takes a
+    /// frame. A dropped frame is written as its original header and zeros of its original length,
+    /// with its original hash, and kept for `finish` to check; more than `MAX_PENDING_DROPS` of
+    /// them is `record allocation failed`. The marker's digest must equal the batch's digest.
+    /// Each failure is `StoreError::Dump`. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
         let end = self.log.end();
         if b.start.segment == end.segment.wrapping_add(1) && b.start.offset == 0 && end.offset > 0 {
@@ -98,24 +123,98 @@ impl Ingest {
         if b.frames.is_empty() {
             return Err(dump_error(format!("batch {n} has no frames")));
         }
-        let frames: Vec<(u8, Vec<u8>)> = b
-            .frames
-            .iter()
-            .map(|f| (f.kind, f.payload.clone()))
-            .collect();
-        let placed = self.log.append_frames(&frames, false)?;
-        let hashes: Vec<_> = placed.iter().map(|(_, h)| *h).collect();
+        let mut hashes = Vec::with_capacity(b.frames.len());
+        let mut sets_repo_id = false;
+        for f in &b.frames {
+            match f {
+                Frame::Present { kind, payload, .. } => {
+                    let (_, hash) = self.log.append_unrolled(*kind, payload)?;
+                    hashes.push(hash);
+                    sets_repo_id |= *kind == kinds::REF_UPDATE
+                        && postcard::from_bytes::<RefUpdate>(payload)
+                            .is_ok_and(|u| u.name == REF_REPO_ID);
+                }
+                Frame::Dropped {
+                    kind,
+                    hash,
+                    len,
+                    apply,
+                    residue,
+                } => {
+                    if self.pending.len() >= MAX_PENDING_DROPS
+                        || self.pending.try_reserve(1).is_err()
+                    {
+                        return Err(dump_error(drop_text::ALLOCATION.into()));
+                    }
+                    let loc = self.log.append_dropped(*kind, hash, *len)?;
+                    self.pending.push(PendingDrop {
+                        record: dropped_payload(*kind, hash, *len, apply, residue.as_ref()),
+                        loc,
+                    });
+                    hashes.push(*hash);
+                }
+            }
+        }
         if batch_digest(&hashes) != b.digest {
             return Err(dump_error(format!("batch {n} does not match its digest")));
         }
         self.log.append_marker(b.start, hashes.iter())?;
-        self.has_repo_id |= b.frames.iter().any(|f| {
-            f.kind == kinds::REF_UPDATE
-                && postcard::from_bytes::<RefUpdate>(&f.payload)
-                    .is_ok_and(|u| u.name == REF_REPO_ID)
-        });
+        self.has_repo_id |= sets_repo_id;
         self.batches += 1;
-        self.frames += placed.len() as u64;
+        self.frames += hashes.len() as u64;
+        Ok(())
+    }
+
+    /// Checks every dropped frame against the complete log, before the store is finished: the
+    /// store's authorization bootstrap (`redaction_io::bootstrap`) must hold its location as an
+    /// authorized span with its original kind, hash and length, from the first valid apply that
+    /// authorizes it, which the record names, and with the residue the record names. Refusals
+    /// (`StoreError::Dump`): a span the log's applies place elsewhere or with another header is
+    /// `dropped frame does not match its authorized span`; no valid apply for it, or another
+    /// apply than the record names, is `dropped frame has no valid authorization`; another
+    /// residue is `dropped frame has an invalid residue`. An I/O error stays one.
+    fn check_drops(&self) -> Result<(), StoreError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let refuse = |what: &str| Err(dump_error(what.into()));
+        let auth = match redaction_io::bootstrap(self.log.readers()) {
+            Ok(auth) => auth,
+            Err(StoreError::Io(e)) => return Err(StoreError::Io(e)),
+            Err(StoreError::RedactionCorrupt { segment, offset }) => {
+                let at = Location { segment, offset };
+                return refuse(if self.pending.iter().any(|p| p.loc == at) {
+                    drop_text::SPAN
+                } else {
+                    drop_text::NO_AUTHORIZATION
+                });
+            }
+            Err(_) => return refuse(drop_text::NO_AUTHORIZATION),
+        };
+        for p in &self.pending {
+            let Frame::Dropped {
+                kind,
+                hash,
+                len,
+                apply,
+                residue,
+            } = parse_dropped(&p.record).map_err(|what| dump_error(what.into()))?
+            else {
+                return refuse(drop_text::NO_AUTHORIZATION);
+            };
+            let (Some(hole), Some(span)) = (auth.holes.get(&p.loc), auth.spans.get(&p.loc)) else {
+                return refuse(drop_text::NO_AUTHORIZATION);
+            };
+            if (hole.kind, hole.hash, hole.len) != (kind, hash, len) {
+                return refuse(drop_text::SPAN);
+            }
+            if span.apply != apply {
+                return refuse(drop_text::NO_AUTHORIZATION);
+            }
+            if span.residue != residue {
+                return refuse(drop_text::INVALID_RESIDUE);
+            }
+        }
         Ok(())
     }
 
@@ -126,7 +225,7 @@ impl Ingest {
 
     /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
     /// store format of the dump's log. The cases (closed):
-    /// - `from` is this rdy's store format: nothing is appended (a format-12 log holds its id);
+    /// - `from` is this rdy's store format: nothing is appended (such a log holds its id);
     /// - `from` is older: one batch is appended after the dump's batches. It holds the
     ///   `REF_UPDATE` that sets `meta/store_format` to this rdy's store format, salted with the
     ///   log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
@@ -173,10 +272,13 @@ impl Ingest {
         Ok(true)
     }
 
-    /// Makes the new log durable: one sync of the log, then of `segments/`. Then writes `FORMAT`
-    /// (this rdy's store format: `upgrade` made the log say it too) and syncs the store
+    /// Checks every dropped frame's authorization against the complete log (see `batch`): a
+    /// refusal is `StoreError::Dump`, and no `FORMAT` is written, so nothing opens the directory.
+    /// Then makes the new log durable: one sync of the log, then of `segments/`. Then writes
+    /// `FORMAT` (this rdy's store format: `upgrade` made the log say it too) and syncs the store
     /// directory. Writes no index.
     pub fn finish(mut self) -> Result<IngestReport, StoreError> {
+        self.check_drops()?;
         self.log.sync()?;
         sync_dir(&self.dir.join(SEGMENTS_DIR))?;
         format::write_format_file(&self.dir, Format::CURRENT)?;

@@ -15,7 +15,9 @@
 //!    where the header says the source log ends, and there must be at least one (every store
 //!    holds its format batch from its first open). When the dump's store format is older than
 //!    this rdy's, append one batch that sets `meta/store_format` to this rdy's (FW-UP1, in its
-//!    smallest form). Then write the store's `FORMAT`.
+//!    smallest form). Then check each dropped frame's authorization against the whole log (dump
+//!    format 2, `rdy_store::ingest`): a refusal is damage at the end of the stream, where the
+//!    check runs. Then write the store's `FORMAT`.
 //! 5. Write each project file the target does not have.
 //! 6. Take the new store's lock, then rename `.rdy/store.loading` to `.rdy/store`. The load
 //!    holds the lock until it ends, so no other rdy process opens the project before step 7
@@ -246,7 +248,7 @@ fn check_target(project: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<Strin
         return Err(RdyError::new(
             E_LOCKED,
             format!("a daemon still runs for {dir} (pid {pid})"),
-            format!("run rdy serve --stop in {dir}, then load again"),
+            format!("run rdy serve --stop in {dir}, then load or clone again"),
         ));
     }
     let mut absent = Vec::new();
@@ -446,7 +448,12 @@ fn ingest<R: Read>(
     ingest
         .upgrade(store_format)
         .map_err(|e| target_error(&loading, e))?;
-    let report = ingest.finish().map_err(|e| target_error(&loading, e))?;
+    // the dropped frames' authorizations are checked against the whole stream, at its end
+    let at = reader.offset();
+    let report = ingest.finish().map_err(|e| match e {
+        StoreError::Dump { what, .. } => damaged(file, at, &what),
+        e => target_error(&loading, e),
+    })?;
     Ok((report.batches, report.frames))
 }
 

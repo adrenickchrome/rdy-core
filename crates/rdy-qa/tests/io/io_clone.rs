@@ -114,10 +114,12 @@ fn batches_from(r: &Rdy, from: rdy_store::segment::Location) -> Vec<Vec<(u8, Opt
                     b.frames
                         .iter()
                         .map(|f| {
-                            let name = (f.kind == kinds::REF_UPDATE).then(|| {
-                                postcard::from_bytes::<RefUpdate>(&f.payload).unwrap().name
+                            let name = (f.kind() == kinds::REF_UPDATE).then(|| {
+                                postcard::from_bytes::<RefUpdate>(f.present_payload().unwrap())
+                                    .unwrap()
+                                    .name
                             });
-                            (f.kind, name)
+                            (f.kind(), name)
                         })
                         .collect(),
                 );

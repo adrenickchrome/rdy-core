@@ -8,7 +8,7 @@ use rdy_qa::every_kind;
 use rdy_qa::fixtures::{land, write, writer};
 use rdy_qa::inbox::on;
 use rdy_qa::packs::qa_project;
-use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader};
+use rdy_store::dump::{DUMP_FORMAT, DumpBatch, DumpHeader, DumpItem, DumpReader};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds::{self, BatchCommit};
 use rdy_store::segment::Location;
@@ -25,7 +25,7 @@ const ORIGIN: Location = Location {
 fn read_back(path: &Path) -> (DumpHeader, Vec<DumpItem>) {
     let f = std::io::BufReader::new(std::fs::File::open(path).unwrap());
     let (mut r, format, header) = DumpReader::open(f).unwrap();
-    assert_eq!(format, 1);
+    assert_eq!(format, DUMP_FORMAT);
     let mut items = vec![];
     while let Some(item) = r.next().unwrap() {
         items.push(item);
@@ -317,7 +317,7 @@ fn dl5_the_header_names_the_rdy_that_wrote_it() {
     let (header, _) = read_back(&out);
     assert_eq!(header.rdy, env!("CARGO_PKG_VERSION"));
     assert_eq!(header.store_format, STORE_FORMAT);
-    assert_eq!(summary.dump_format, 1);
+    assert_eq!(summary.dump_format, 2);
     assert_eq!(summary.store_format, STORE_FORMAT);
 }
 

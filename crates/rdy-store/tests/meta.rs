@@ -1,9 +1,9 @@
 //! The project's metadata refs (store format 12, plan Export and clone): `meta/repo_id` in a new
 //! store's first batch, `meta/origin`, the `set_refs` guard and the fsck rules.
 use rdy_model::Hash;
-use rdy_store::dump::{DumpBatch, DumpHeader, DumpWriter, Frame, READS, frame_kinds};
+use rdy_store::dump::{DumpItem, DumpReader, READS, frame_kinds, rec};
 use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
-use rdy_store::kinds::{self, RefUpdate, batch_digest};
+use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::meta::{
     FIRST_REPO_ID_STORE_FORMAT, Origin, REF_ORIGIN, REF_REPO_ID, decode_origin, decode_repo_id,
     encode_origin, encode_repo_id,
@@ -46,8 +46,8 @@ fn ec1_a_new_store_writes_its_repo_id_in_its_first_batch() {
         .frames
         .iter()
         .map(|f| {
-            assert_eq!(f.kind, kinds::REF_UPDATE);
-            postcard::from_bytes(&f.payload).unwrap()
+            assert_eq!(f.kind(), kinds::REF_UPDATE);
+            postcard::from_bytes(f.present_payload().unwrap()).unwrap()
         })
         .collect();
     let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
@@ -192,41 +192,47 @@ fn ec1_the_dump_reads_store_format_12_with_the_kinds_of_11() {
     }
     let kinds_11 = frame_kinds(1, 11).unwrap();
     assert_eq!(frame_kinds(1, 12), Some(kinds_11));
-    let header = DumpHeader {
-        store_format: 12,
-        log_end: Location {
-            segment: 0,
-            offset: 0,
-        },
-        rdy: "test".into(),
-    };
-    let batch = |kind: u8, n: u64| {
-        let payload = format!("frame {kind}").into_bytes();
-        let hash = Hash::of(&payload);
-        DumpBatch {
-            start: Location {
-                segment: 0,
-                offset: n,
-            },
-            digest: batch_digest([&hash]),
-            frames: vec![Frame {
-                kind,
-                hash,
-                payload,
-            }],
+    // the frozen (1, 12) fixture: this rdy writes only (2, 13), so the pair is read from it
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rdy-qa/fixtures/dump/v1-s12.rdydump");
+    let bytes = std::fs::read(path).unwrap();
+    let (mut r, format, header) = DumpReader::open(&bytes[..]).unwrap();
+    assert_eq!((format, header.store_format), (1, 12));
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(item) = r.next().unwrap() {
+        if let DumpItem::Batch(b) = item {
+            for f in &b.frames {
+                assert!(f.present_payload().is_some(), "a format-1 frame is present");
+                assert!(kinds_11.contains(&f.kind()), "kind {}", f.kind());
+                seen.insert(f.kind());
+            }
         }
-    };
-    let mut w = DumpWriter::new(Vec::new(), &header).unwrap();
-    for (i, k) in kinds_11.iter().enumerate() {
-        w.batch(&batch(*k, i as u64))
-            .unwrap_or_else(|e| panic!("kind {k}: {e}"));
     }
-    match w.batch(&batch(11, 99)) {
-        Err(StoreError::Refused(m)) => assert_eq!(m, "a record of kind 11 cannot stand here"),
+    assert!(
+        seen.contains(&kinds::ANSWER),
+        "the kinds of 11, ANSWER among them"
+    );
+    // kind 11 is unassigned: a frame of that kind is refused
+    let mut at = 12usize;
+    let first_frame = loop {
+        let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        if bytes[at + 4] < rec::HEADER {
+            break at;
+        }
+        at += 37 + len;
+    };
+    let mut bad = bytes.clone();
+    bad[first_frame + 4] = 11;
+    let e = (|| {
+        let (mut r, _, _) = DumpReader::open(&bad[..])?;
+        while r.next()?.is_some() {}
+        Ok::<(), StoreError>(())
+    })()
+    .unwrap_err();
+    match e {
+        StoreError::Dump { what, .. } => assert_eq!(what, "a record of kind 11 cannot stand here"),
         other => panic!("{other:?}"),
     }
-    let (_, totals) = w.finish().unwrap();
-    assert_eq!(totals.batches, kinds_11.len() as u64);
 }
 
 #[test]

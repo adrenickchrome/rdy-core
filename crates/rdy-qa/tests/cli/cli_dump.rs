@@ -235,7 +235,10 @@ fn dl7_rdy_load_refuses_a_target_whose_daemon_still_runs() {
     );
     assert_eq!(
         e["fix"],
-        format!("run rdy serve --stop in {}, then load again", dir.display())
+        format!(
+            "run rdy serve --stop in {}, then load or clone again",
+            dir.display()
+        )
     );
     assert!(!store.exists(), "the load wrote no store");
     // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside

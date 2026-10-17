@@ -227,10 +227,10 @@ fn di2_the_v1_s11_fixture_loads_with_every_hash() {
     for b in batches {
         for f in b.frames {
             assert!(
-                r.store().has_kind(f.kind, &f.hash).unwrap(),
+                r.store().has_kind(f.kind(), f.hash()).unwrap(),
                 "kind {} {} is gone",
-                f.kind,
-                f.hash
+                f.kind(),
+                f.hash()
             );
         }
     }

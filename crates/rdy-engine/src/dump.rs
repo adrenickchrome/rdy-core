@@ -1,7 +1,9 @@
 //! `rdy dump` (plan Dump and load; D-69AY3, D-D2NPN, D-FR0C4): the whole project as one
-//! stream of dump format 1 (`rdy_store::dump`). It holds the published log's sealed batches,
-//! byte for byte, and the closed set of project files (F5): `.rdy.yaml`, `.rdyignore` and the
-//! pack files in `.rdy/packs`, never `.rdy/local.yaml`.
+//! stream of the current dump format, 2 (`rdy_store::dump`). It holds the published log's
+//! sealed batches, byte for byte, and the closed set of project files (F5): `.rdy.yaml`,
+//! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A frame whose
+//! payload an applied redaction removed travels as its dropped record: its original header, its
+//! apply and its residue, never its bytes (plan Redaction, D-3M81W).
 //!
 //! A dump is atomic at the target: it writes `<out>.partial-<pid>`, syncs it, and hard-links it
 //! to `out`, so `out` is a complete dump or nothing. It never overwrites a file.
