@@ -401,25 +401,106 @@ fn check(valid: bool, key: &str, ty: &str, presence: bool) -> CryptoCheck {
     }
 }
 
+/// An SSH string.
+fn ssh_string(bytes: &[u8]) -> Vec<u8> {
+    let mut out = (bytes.len() as u32).to_be_bytes().to_vec();
+    out.extend(bytes);
+    out
+}
+
+/// The public line `<ty> <base64 of blob>`.
+fn raw_line(ty: &str, blob: &[u8]) -> String {
+    format!("{ty} {}", Base64::encode_string(blob))
+}
+
+/// Public-key lines whose type field matches their blob's name, but whose key material is not a
+/// complete encoding of that type: each is a malformed selector (`E_BAD_INPUT`), never an
+/// unsupported key type.
+fn malformed_public_lines() -> Vec<String> {
+    let mut out = vec![
+        // an RSA blob with only its algorithm name: no exponent, no modulus
+        "ssh-rsa AAAAB3NzaC1yc2E=".to_string(),
+        // unknown algorithms: rdy cannot read their key material
+        raw_line("garbage", &ssh_string(b"garbage")),
+        raw_line(
+            "garbage",
+            &[ssh_string(b"garbage"), ssh_string(&[1; 32])].concat(),
+        ),
+        raw_line(
+            "ssh-mystery@example.com",
+            &[ssh_string(b"ssh-mystery@example.com"), ssh_string(&[1; 32])].concat(),
+        ),
+    ];
+    // Every unsupported fixture (RSA, ECDSA, sk-ECDSA, both certificates) cut by one byte,
+    // cut to its name and first field, and with a byte after its end.
+    for (public, ty) in UNSUPPORTED {
+        let b = line_blob(public.trim_end());
+        let name_len = 4 + ty.len();
+        out.push(raw_line(ty, &b[..b.len() - 1]));
+        out.push(raw_line(ty, &b[..name_len + 4]));
+        out.push(raw_line(ty, &[&b[..], &[0]].concat()));
+    }
+    // ECDSA: a curve that is not the algorithm's, and a point of the wrong size.
+    let ecdsa = line_blob(UNSUPPORTED[1].0.trim_end());
+    let point = &ecdsa[4 + 19 + 4 + 8 + 4..];
+    assert_eq!(point.len(), 65, "nistp256 uncompressed point");
+    out.push(raw_line(
+        "ecdsa-sha2-nistp256",
+        &[
+            ssh_string(b"ecdsa-sha2-nistp256"),
+            ssh_string(b"nistp384"),
+            ssh_string(point),
+        ]
+        .concat(),
+    ));
+    out.push(raw_line(
+        "ecdsa-sha2-nistp256",
+        &[
+            ssh_string(b"ecdsa-sha2-nistp256"),
+            ssh_string(b"nistp256"),
+            ssh_string(&point[..64]),
+        ]
+        .concat(),
+    ));
+    // RSA: a negative modulus (high bit set), and an empty exponent.
+    out.push(raw_line(
+        "ssh-rsa",
+        &[
+            ssh_string(b"ssh-rsa"),
+            ssh_string(&[1, 0, 1]),
+            ssh_string(&[0x80; 64]),
+        ]
+        .concat(),
+    ));
+    out.push(raw_line(
+        "ssh-rsa",
+        &[
+            ssh_string(b"ssh-rsa"),
+            ssh_string(&[]),
+            ssh_string(&[0x40; 64]),
+        ]
+        .concat(),
+    ));
+    out
+}
+
 // ---- the pinned tests ----
 
 #[test]
 fn sig3_openssh_vectors_verify_for_both_key_types() {
     // The independent OpenSSH vectors: PEM is the oracle's form, the binary blob rdy's.
-    for (pem, public, fp, ty, presence) in [
+    for (pem, public, fp, ty) in [
         (
             OPENSSH_ED25519_SIG,
             OPENSSH_ED25519_PUB,
             OPENSSH_ED25519_FP,
             "ssh-ed25519",
-            false,
         ),
         (
             OPENSSH_SK_SIG,
             OPENSSH_SK_PUB,
             OPENSSH_SK_FP,
             "sk-ssh-ed25519@openssh.com",
-            true,
         ),
     ] {
         let bin = pem_to_bin(pem);
@@ -432,46 +513,93 @@ fn sig3_openssh_vectors_verify_for_both_key_types() {
         assert_eq!(sig.hash_alg(), HashAlg::Sha512);
         assert_eq!(sig.version(), 1);
         assert_eq!(key_fingerprint(public.trim_end()), Ok(fp.to_string()));
+        // The public verifier accepts only the four rdy namespaces: it refuses `example` before
+        // any cryptographic check, and still reports the key. The module's own unit test checks
+        // these vectors through the generic verifier, which accepts them, as OpenSSH does.
         assert_eq!(
             verify_sshsig("example", b"testing", &bin),
-            check(true, fp, ty, presence),
+            check(false, fp, ty, false),
             "{ty}"
         );
-        // another message, another namespace: the key is still reported
-        assert_eq!(
-            verify_sshsig("example", b"testinG", &bin),
-            check(false, fp, ty, false)
-        );
+        // another namespace: the key is still reported
         assert_eq!(
             verify_sshsig("rdy-approval-v1", b"testing", &bin),
             check(false, fp, ty, false)
         );
-        // a statement over 16384 bytes is never valid
-        assert_eq!(
-            verify_sshsig("example", &[b't'; 16385], &bin),
-            check(false, fp, ty, false)
-        );
-        // trailing bytes, a damaged length, a version other than 1, over the bound: invalid
-        let mut trailing = bin.clone();
-        trailing.push(0);
-        assert!(!verify_sshsig("example", b"testing", &trailing).valid);
-        let mut cut = bin.clone();
-        cut.truncate(bin.len() - 1);
-        assert!(!verify_sshsig("example", b"testing", &cut).valid);
-        assert_eq!(
-            verify_sshsig("example", b"testing", &with_version(&bin, 0)),
-            invalid()
-        );
-        assert_eq!(
-            verify_sshsig("example", b"testing", &with_version(&bin, 2)),
-            invalid()
-        );
-        assert_eq!(verify_sshsig("example", b"testing", b"SSHSIG"), invalid());
-        assert_eq!(verify_sshsig("example", b"testing", &[]), invalid());
-        let mut big = bin.clone();
-        big.resize(16385, 0);
-        assert_eq!(verify_sshsig("example", b"testing", &big), invalid());
     }
+
+    // Each of the four rdy namespaces verifies through the public verifier; a valid signature
+    // under any other name is refused, with the key reported.
+    for (key, b, ty) in [
+        (Key::Ed, ed_blob(), "ssh-ed25519"),
+        (Key::Sk, sk_blob(), "sk-ssh-ed25519@openssh.com"),
+    ] {
+        let fp = key_fingerprint(&line(&b, "")).unwrap();
+        for ns in NAMESPACES {
+            let bin = software_sshsig(key, ns, HashAlg::Sha512, STATEMENT, 1);
+            assert_eq!(
+                verify_sshsig(ns, STATEMENT, &bin),
+                check(true, &fp, ty, key == Key::Sk),
+                "{ns}"
+            );
+        }
+        for ns in [
+            "example",
+            "file",
+            "git",
+            "rdy-approval-v2",
+            "rdy-tag-v1x",
+            "RDY-TAG-V1",
+        ] {
+            let bin = software_sshsig(key, ns, HashAlg::Sha512, STATEMENT, 1);
+            assert_eq!(
+                verify_sshsig(ns, STATEMENT, &bin),
+                check(false, &fp, ty, false),
+                "{ns} is not an rdy namespace"
+            );
+        }
+    }
+
+    // Damage to a valid rdy vector: another message, another namespace, a statement over 16384
+    // bytes, trailing bytes, a cut blob, a version other than 1, over the bound.
+    let ed_fp = key_fingerprint(&line(&ed_blob(), "")).unwrap();
+    let ns = "rdy-approval-v1";
+    let bin = software_sshsig(Key::Ed, ns, HashAlg::Sha512, STATEMENT, 0);
+    assert_eq!(
+        verify_sshsig(ns, STATEMENT, &bin),
+        check(true, &ed_fp, "ssh-ed25519", false)
+    );
+    assert_eq!(
+        verify_sshsig(ns, b"another statement", &bin),
+        check(false, &ed_fp, "ssh-ed25519", false)
+    );
+    assert_eq!(
+        verify_sshsig("rdy-relay-v1", STATEMENT, &bin),
+        check(false, &ed_fp, "ssh-ed25519", false)
+    );
+    assert_eq!(
+        verify_sshsig(ns, &[b't'; 16385], &bin),
+        check(false, &ed_fp, "ssh-ed25519", false)
+    );
+    let mut trailing = bin.clone();
+    trailing.push(0);
+    assert!(!verify_sshsig(ns, STATEMENT, &trailing).valid);
+    let mut cut = bin.clone();
+    cut.truncate(bin.len() - 1);
+    assert!(!verify_sshsig(ns, STATEMENT, &cut).valid);
+    assert_eq!(
+        verify_sshsig(ns, STATEMENT, &with_version(&bin, 0)),
+        invalid()
+    );
+    assert_eq!(
+        verify_sshsig(ns, STATEMENT, &with_version(&bin, 2)),
+        invalid()
+    );
+    assert_eq!(verify_sshsig(ns, STATEMENT, b"SSHSIG"), invalid());
+    assert_eq!(verify_sshsig(ns, STATEMENT, &[]), invalid());
+    let mut big = bin.clone();
+    big.resize(16385, 0);
+    assert_eq!(verify_sshsig(ns, STATEMENT, &big), invalid());
 
     // The software vectors under rdy namespaces, committed and verified by OpenSSH. The
     // software keys' public lines are committed too, for the OpenSSH oracle.
@@ -529,10 +657,24 @@ fn sig3_openssh_vectors_verify_for_both_key_types() {
         assert_eq!(committed, pem);
         assert_eq!(sha256_hex(committed.as_bytes()), RESERVED_SHA256);
     }
+    // The public verifier refuses its `example` namespace; the module's unit test checks it
+    // through the generic verifier.
     assert_eq!(
         verify_sshsig("example", b"testing", &reserved),
-        check(true, OPENSSH_ED25519_FP, "ssh-ed25519", false)
+        check(false, OPENSSH_ED25519_FP, "ssh-ed25519", false)
     );
+    // Through the public verifier: a valid rdy vector with reserved bytes put in still verifies.
+    for reserved_bytes in [&b"x"[..], &[0u8; 100][..]] {
+        let bin = software_sshsig(Key::Ed, "rdy-tag-v1", HashAlg::Sha512, STATEMENT, 0);
+        assert_eq!(
+            verify_sshsig(
+                "rdy-tag-v1",
+                STATEMENT,
+                &with_reserved(&bin, reserved_bytes)
+            ),
+            check(true, &ed_fp, "ssh-ed25519", false)
+        );
+    }
 
     // sha256 is refused for both key types, though the signature itself is good.
     for key in [Key::Ed, Key::Sk] {
@@ -562,6 +704,122 @@ fn sig3_openssh_vectors_verify_for_both_key_types() {
     let c = verify_sshsig("rdy-tag-v1", STATEMENT, &crossed);
     assert!(!c.valid && !c.presence);
     assert_eq!(c.key_type.as_deref(), Some("ssh-ed25519"));
+}
+
+/// `bin` with the public-key field replaced by the raw field bytes `field` (length prefix
+/// included, so a test can write a length that runs past the end).
+fn with_public_key_field(bin: &[u8], field: &[u8]) -> Vec<u8> {
+    let at = 6 + 4;
+    let n = u32::from_be_bytes(bin[at..at + 4].try_into().unwrap()) as usize;
+    let mut out = bin[..at].to_vec();
+    out.extend(field);
+    out.extend(&bin[at + 4 + n..]);
+    out
+}
+
+#[test]
+fn sig3_check_reports_key_identity_only_when_readable() {
+    let ns = "rdy-approval-v1";
+    for (key, b, ty) in [
+        (Key::Ed, ed_blob(), "ssh-ed25519"),
+        (Key::Sk, sk_blob(), "sk-ssh-ed25519@openssh.com"),
+    ] {
+        let fp = key_fingerprint(&line(&b, "")).unwrap();
+        let bin = software_sshsig(key, ns, HashAlg::Sha512, STATEMENT, 1);
+        let damaged = check(false, &fp, ty, false);
+        // Damage after an intact public key: the key is still read and reported.
+        let mut cut = bin.clone();
+        cut.truncate(bin.len() - 1);
+        assert_eq!(
+            verify_sshsig(ns, STATEMENT, &cut),
+            damaged,
+            "{ty}: last byte cut"
+        );
+        let mut cut_more = bin.clone();
+        cut_more.truncate(bin.len() - 40);
+        assert_eq!(
+            verify_sshsig(ns, STATEMENT, &cut_more),
+            damaged,
+            "{ty}: cut"
+        );
+        let mut trailing = bin.clone();
+        trailing.push(0);
+        assert_eq!(
+            verify_sshsig(ns, STATEMENT, &trailing),
+            damaged,
+            "{ty}: trailing"
+        );
+        // a signature field whose length runs past the end
+        let mut long_sig = bin.clone();
+        let sig_len_at = bin.len() - ssh_sig_field_len(&bin) - 4;
+        long_sig[sig_len_at..sig_len_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            verify_sshsig(ns, STATEMENT, &long_sig),
+            damaged,
+            "{ty}: sig len"
+        );
+        // only the public key itself, after the preamble
+        let key_only = bin[..10 + 4 + b.len()].to_vec();
+        assert_eq!(
+            verify_sshsig(ns, STATEMENT, &key_only),
+            damaged,
+            "{ty}: key only"
+        );
+
+        // An unreadable public key: no key and no type, whatever follows it.
+        let name_only = ssh_string(ty.as_bytes());
+        for (what, field) in [
+            ("empty", ssh_string(&[])),
+            ("cut by one byte", ssh_string(&b[..b.len() - 1])),
+            ("name only", ssh_string(&name_only)),
+            ("a byte after the key", ssh_string(&[&b[..], &[0]].concat())),
+            ("unknown algorithm", ssh_string(&ssh_string(b"garbage"))),
+            (
+                "unknown algorithm with a body",
+                ssh_string(&[ssh_string(b"garbage"), ssh_string(&[1; 32])].concat()),
+            ),
+            ("not a name", ssh_string(&[0xff; 40])),
+        ] {
+            let blob = with_public_key_field(&bin, &field);
+            assert_eq!(
+                verify_sshsig(ns, STATEMENT, &blob),
+                invalid(),
+                "{ty}: {what}"
+            );
+        }
+        // a public-key length that runs past the end of the blob
+        let mut past = bin[..10].to_vec();
+        past.extend(((b.len() + 1000) as u32).to_be_bytes());
+        past.extend(&b);
+        assert_eq!(
+            verify_sshsig(ns, STATEMENT, &past),
+            invalid(),
+            "{ty}: key past end"
+        );
+    }
+    // A whole key of an unsupported type is read and reported; the check is invalid.
+    let (rsa, _) = UNSUPPORTED[0];
+    let rsa_blob = line_blob(rsa.trim_end());
+    let rsa_fp = key_fingerprint(rsa.trim_end()).unwrap();
+    let bin = software_sshsig(Key::Ed, ns, HashAlg::Sha512, STATEMENT, 0);
+    let swapped = with_public_key_field(&bin, &ssh_string(&rsa_blob));
+    assert_eq!(
+        verify_sshsig(ns, STATEMENT, &swapped),
+        check(false, &rsa_fp, "ssh-rsa", false)
+    );
+    // ... and a cut key of that type is not
+    let cut_rsa = with_public_key_field(&bin, &ssh_string(&rsa_blob[..rsa_blob.len() - 1]));
+    assert_eq!(verify_sshsig(ns, STATEMENT, &cut_rsa), invalid());
+}
+
+/// The length of the last field (the signature) of the SSHSIG `bin`.
+fn ssh_sig_field_len(bin: &[u8]) -> usize {
+    let u32_at = |at: usize| u32::from_be_bytes(bin[at..at + 4].try_into().unwrap()) as usize;
+    let mut at = 6 + 4;
+    for _ in 0..4 {
+        at += 4 + u32_at(at); // public key, namespace, reserved, hash
+    }
+    u32_at(at)
 }
 
 #[test]
@@ -639,6 +897,16 @@ fn sig3_agent_rejects_types_before_signing() {
             assert_key_type(&e, &fp, ty);
         }
         assert_eq!(agent.sign_count(), 0, "{ty}: no sign request was sent");
+        // A held blob of that type that is not a whole key is the agent's invalid reply, not
+        // an unsupported key.
+        let cut = unsupported[..unsupported.len() - 1].to_vec();
+        let cut_fp = rdy_engine::signing_crypto::blob_fingerprint(&cut);
+        let agent = FakeAgent::new(vec![cut, ed_blob()]);
+        assert_no_agent(
+            &err(resolve_key("signing.key", &cut_fp, &agent)),
+            "invalid reply",
+        );
+        assert_eq!(agent.sign_count(), 0);
     }
 }
 
@@ -721,7 +989,10 @@ fn sig3_public_line_and_fingerprint_select_the_same_identity() {
         format!("{ty}  not-base64"),
         format!("{ty} {}", Base64::encode_string(b"\0\0\0\x0bssh-ed25519")),
         "not a key".to_string(),
-    ] {
+    ]
+    .into_iter()
+    .chain(malformed_public_lines())
+    {
         assert_eq!(key_fingerprint(&bad), Err(()), "{bad:?}");
         let e = err(resolve_key("signing.agent_key", &bad, &agent));
         assert_eq!(e.code, E_BAD_INPUT, "{bad:?}: {e}");

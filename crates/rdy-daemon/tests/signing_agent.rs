@@ -159,6 +159,13 @@ fn sig3_agent_packets_are_bounded_and_complete() {
         let (ids, sig) = both(frame(&[ty]));
         assert_cause(ids, "request refused", &format!("identities, type {ty}"));
         assert_cause(sig, "request refused", &format!("sign, type {ty}"));
+        // A refusal is the bare type: any byte after it is an invalid reply.
+        for body in [&[99u8, 100][..], &[0][..]] {
+            let (ids, sig) = both(frame(&[&[ty][..], body].concat()));
+            let what = format!("type {ty} with trailing {body:?}");
+            assert_cause(ids, "invalid reply", &format!("identities, {what}"));
+            assert_cause(sig, "invalid reply", &format!("sign, {what}"));
+        }
     }
     // Every other unexpected type is an invalid reply.
     for ty in 0u8..=255 {

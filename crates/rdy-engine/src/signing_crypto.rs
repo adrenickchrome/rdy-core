@@ -113,7 +113,7 @@ pub struct KeyInfo {
 }
 
 /// The cryptographic check of one SSHSIG blob.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CryptoCheck {
     /// The blob is SSHSIG v1, sha512, of an accepted key type, in the namespace asked for, and
     /// its signature verifies.
@@ -135,7 +135,9 @@ pub fn blob_fingerprint(blob: &[u8]) -> String {
 }
 
 /// The canonical SHA256 fingerprint `selector` names: a fingerprint in canonical spelling, or a
-/// public-key line (`<type> <base64> [comment]`, the comment ignored). `Err` for anything else.
+/// public-key line (`<type> <base64> [comment]`, the comment ignored) whose blob is one whole
+/// public key or certificate of a type rdy can read, that type being the line's. `Err` for
+/// anything else, an unknown key type or cut key material included.
 /// Needs no agent and reads no file. The error carries nothing: each caller reports its own
 /// setting's `E_BAD_INPUT` ([`crate::signing_selector`]).
 #[allow(clippy::result_unit_err)]
@@ -148,8 +150,8 @@ pub fn key_fingerprint(selector: &str) -> Result<String, ()> {
 
 /// The key the selector `selector` of setting `setting` names, as the caller's agent holds it.
 ///
-/// - An empty selector is `E_SIGNING_KEY_MISSING`; one that is neither a public-key line nor a
-///   canonical fingerprint is `E_BAD_INPUT`.
+/// - An empty selector is `E_SIGNING_KEY_MISSING`; one that is neither a public-key line (see
+///   [`key_fingerprint`]) nor a canonical fingerprint is `E_BAD_INPUT`.
 /// - A public-key line of an unsupported type is `E_SIGNING_KEY_TYPE`, held or not, and asks the
 ///   agent nothing.
 /// - A key the agent does not hold is `E_NO_AGENT` `key is not held`; a held key of an
@@ -226,38 +228,44 @@ pub fn sign_sshsig(
 
 /// The cryptographic check of the SSHSIG blob `blob` over `statement` in `namespace`.
 ///
-/// Valid only for SSHSIG v1, sha512, an accepted key type whose signature algorithm is its own,
-/// the namespace asked for, and a signature that verifies (for sk keys: over the application,
-/// the message, the flags and the counter). Reserved bytes are ignored, as OpenSSH ignores them.
-/// The embedded key and its type are reported whenever they can be read, valid or not.
+/// Valid only for one of the four rdy [`NAMESPACES`] (any other is refused before any
+/// cryptographic check), SSHSIG v1, sha512, an accepted key type whose signature algorithm is
+/// its own, the namespace asked for, and a signature that verifies (for sk keys: over the
+/// application, the message, the flags and the counter). Reserved bytes are ignored, as OpenSSH
+/// ignores them. The embedded key and its type are reported whenever the key is a whole public
+/// key of a known type, valid or not, even when a later field is damaged.
 pub fn verify_sshsig(namespace: &str, statement: &[u8], blob: &[u8]) -> CryptoCheck {
-    let mut out = CryptoCheck {
-        valid: false,
-        key: None,
-        key_type: None,
-        presence: false,
-    };
-    if blob.len() > SSHSIG_MAX {
+    if !NAMESPACES.contains(&namespace) {
+        let mut out = CryptoCheck::default();
+        if let Some(parts) = sshsig_parts(blob) {
+            parts.report_key(&mut out);
+        }
         return out;
     }
+    verify_generic(namespace, statement, blob)
+}
+
+/// [`verify_sshsig`] for any namespace: the generic SSHSIG check, which the public verifier
+/// calls after its namespace check. Only this module's tests call it directly, with the
+/// interoperability vectors of other namespaces.
+pub(crate) fn verify_generic(namespace: &str, statement: &[u8], blob: &[u8]) -> CryptoCheck {
+    let mut out = CryptoCheck::default();
     let Some(parts) = sshsig_parts(blob) else {
         return out;
     };
-    out.key = Some(blob_fingerprint(parts.public_key));
-    out.key_type = blob_key_type(parts.public_key).map(str::to_string);
-    let Some(key_type) = out.key_type.clone() else {
+    parts.report_key(&mut out);
+    let key_type = parts.key_type;
+    let Some(tail) = parts.tail else {
         return out;
     };
-    if statement.len() > STATEMENT_MAX
-        || parts.hash_alg != SHA512
-        || !KEY_TYPES.contains(&key_type.as_str())
+    if statement.len() > STATEMENT_MAX || tail.hash_alg != SHA512 || !KEY_TYPES.contains(&key_type)
     {
         return out;
     }
     let (Some(key_data), Some(signature), Ok(sig_namespace)) = (
         decode_key(parts.public_key),
-        decode_signature(parts.signature, &key_type),
-        std::str::from_utf8(parts.namespace),
+        decode_signature(tail.signature, key_type),
+        std::str::from_utf8(tail.namespace),
     ) else {
         return out;
     };
@@ -307,7 +315,9 @@ fn parse_selector(s: &str) -> Option<Selector> {
         return None;
     }
     let blob = Base64::decode_vec(b64).ok()?;
-    if blob.len() > PUBLIC_KEY_MAX || blob_key_type(&blob) != Some(key_type) {
+    // The blob must be a whole public key or certificate of a known type, and that type the
+    // line's: an unsupported key type is reported only for a key rdy could read.
+    if public_key_type(&blob) != Some(key_type) {
         return None;
     }
     // A supported key's blob must be a whole, canonical key of its type.
@@ -356,11 +366,18 @@ fn blob_key_type(blob: &[u8]) -> Option<&str> {
 
 /// The key info of a held blob: `E_SIGNING_KEY_TYPE` for an unsupported type, `E_NO_AGENT`
 /// `invalid reply` for a blob that is not a whole, canonical key.
+///
+/// A held blob of a type rdy knows must be a whole key or certificate of that type; one whose
+/// type rdy does not know is reported by its name, which is all rdy can read of it.
 fn key_info(public_key: Vec<u8>) -> Result<KeyInfo, RdyError> {
     let fingerprint = blob_fingerprint(&public_key);
-    let key_type = blob_key_type(&public_key)
-        .ok_or_else(invalid_reply)?
-        .to_string();
+    let name = blob_key_type(&public_key).ok_or_else(invalid_reply)?;
+    let key_type = match public_key_type(&public_key) {
+        Some(ty) => ty,
+        None if is_known_type(name) => return Err(invalid_reply()),
+        None => name,
+    }
+    .to_string();
     if !KEY_TYPES.contains(&key_type.as_str()) {
         return Err(signing_key_type(&fingerprint, &key_type));
     }
@@ -438,20 +455,51 @@ fn decode_signature(blob: &[u8], key_type: &str) -> Option<Signature> {
     Some(signature)
 }
 
-/// The fields of a whole SSHSIG v1 blob, every length checked.
+/// The fields of an SSHSIG v1 blob, every length checked: its public key, read on its own, and
+/// the fields after it when they are whole.
 struct SshsigParts<'a> {
     public_key: &'a [u8],
+    /// The key's type; the key is a whole public key of a known type.
+    key_type: &'a str,
+    /// `None` when a later field is damaged or bytes trail the last one.
+    tail: Option<SshsigTail<'a>>,
+}
+
+struct SshsigTail<'a> {
     namespace: &'a [u8],
     hash_alg: &'a [u8],
     signature: &'a [u8],
 }
 
+impl SshsigParts<'_> {
+    /// Puts the key's fingerprint and type in `out`.
+    fn report_key(&self, out: &mut CryptoCheck) {
+        out.key = Some(blob_fingerprint(self.public_key));
+        out.key_type = Some(self.key_type.to_string());
+    }
+}
+
+/// The parts of `blob`; `None` when it is over the bound, is not SSHSIG v1, or its public key
+/// is not a whole key of a known type. The key is read before, and independently of, the fields
+/// after it.
 fn sshsig_parts(blob: &[u8]) -> Option<SshsigParts<'_>> {
+    if blob.len() > SSHSIG_MAX {
+        return None;
+    }
     let mut r = Bounded::new(blob);
     if r.bytes(MAGIC.len())? != MAGIC || r.u32()? != 1 {
         return None;
     }
     let public_key = r.string(PUBLIC_KEY_MAX)?;
+    let key_type = public_key_type(public_key)?;
+    Some(SshsigParts {
+        public_key,
+        key_type,
+        tail: sshsig_tail(r),
+    })
+}
+
+fn sshsig_tail(mut r: Bounded<'_>) -> Option<SshsigTail<'_>> {
     let namespace = r.string(NAMESPACE_MAX)?;
     let _reserved = r.string(SSHSIG_MAX)?;
     let hash_alg = r.string(NAME_MAX)?;
@@ -459,12 +507,191 @@ fn sshsig_parts(blob: &[u8]) -> Option<SshsigParts<'_>> {
     if namespace.is_empty() || !r.is_empty() {
         return None;
     }
-    Some(SshsigParts {
-        public_key,
+    Some(SshsigTail {
         namespace,
         hash_alg,
         signature,
     })
+}
+
+// ---- the structure of public keys and certificates ----
+
+/// The plain public-key types rdy can read, accepted or not.
+const PLAIN_TYPES: [&str; 8] = [
+    KEY_TYPE_ED25519,
+    KEY_TYPE_SK_ED25519,
+    "ssh-rsa",
+    "ssh-dss",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+
+/// The OpenSSH certificate types rdy can read, each with the plain type of its key.
+const CERT_TYPES: [(&str, &str); 8] = [
+    ("ssh-ed25519-cert-v01@openssh.com", KEY_TYPE_ED25519),
+    ("sk-ssh-ed25519-cert-v01@openssh.com", KEY_TYPE_SK_ED25519),
+    ("ssh-rsa-cert-v01@openssh.com", "ssh-rsa"),
+    ("ssh-dss-cert-v01@openssh.com", "ssh-dss"),
+    (
+        "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+        "ecdsa-sha2-nistp256",
+    ),
+    (
+        "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+        "ecdsa-sha2-nistp384",
+    ),
+    (
+        "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+        "ecdsa-sha2-nistp521",
+    ),
+    (
+        "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
+    ),
+];
+
+/// Whether `name` is a key or certificate type rdy can read.
+fn is_known_type(name: &str) -> bool {
+    PLAIN_TYPES.contains(&name) || CERT_TYPES.iter().any(|(cert, _)| *cert == name)
+}
+
+/// The type of `blob` when it is exactly one whole public key or certificate of a type rdy can
+/// read: every field present and of its type's shape, every length within the bytes that
+/// remain, nothing after the last field. `None` for anything else, an unknown type included.
+/// This checks the encoding only: it proves no curve point valid and no certificate signature.
+fn public_key_type(blob: &[u8]) -> Option<&str> {
+    if blob.len() > PUBLIC_KEY_MAX {
+        return None;
+    }
+    let name = blob_key_type(blob)?;
+    let mut r = Bounded::new(blob);
+    r.string(NAME_MAX)?;
+    if let Some((_, plain)) = CERT_TYPES.iter().find(|(cert, _)| *cert == name) {
+        certificate_fields(plain, &mut r)?;
+    } else {
+        plain_key_fields(name, &mut r)?;
+    }
+    r.is_empty().then_some(name)
+}
+
+/// The key fields (after the type name) of a plain key of type `name`.
+fn plain_key_fields(name: &str, r: &mut Bounded<'_>) -> Option<()> {
+    match name {
+        KEY_TYPE_ED25519 => ed25519_point(r),
+        KEY_TYPE_SK_ED25519 => {
+            ed25519_point(r)?;
+            application(r)
+        }
+        "ssh-rsa" => {
+            mpint(r)?;
+            mpint(r)
+        }
+        "ssh-dss" => (0..4).try_for_each(|_| mpint(r)),
+        "ecdsa-sha2-nistp256" => ec_point(r, b"nistp256", 65),
+        "ecdsa-sha2-nistp384" => ec_point(r, b"nistp384", 97),
+        "ecdsa-sha2-nistp521" => ec_point(r, b"nistp521", 133),
+        "sk-ecdsa-sha2-nistp256@openssh.com" => {
+            ec_point(r, b"nistp256", 65)?;
+            application(r)
+        }
+        _ => None,
+    }
+}
+
+/// The fields (after the type name) of an OpenSSH certificate whose key is of type `plain`.
+fn certificate_fields(plain: &str, r: &mut Bounded<'_>) -> Option<()> {
+    r.string(PUBLIC_KEY_MAX)?; // nonce
+    plain_key_fields(plain, r)?;
+    r.bytes(8)?; // serial
+    if !matches!(r.u32()?, 1 | 2) {
+        return None; // user or host
+    }
+    r.string(PUBLIC_KEY_MAX)?; // key id
+    let mut principals = Bounded::new(r.string(PUBLIC_KEY_MAX)?);
+    while !principals.is_empty() {
+        principals.string(PUBLIC_KEY_MAX)?;
+    }
+    r.bytes(8 + 8)?; // valid after, valid before
+    for _ in 0..2 {
+        // critical options, then extensions: name and data pairs
+        let mut options = Bounded::new(r.string(PUBLIC_KEY_MAX)?);
+        while !options.is_empty() {
+            options.string(PUBLIC_KEY_MAX)?;
+            options.string(PUBLIC_KEY_MAX)?;
+        }
+    }
+    r.string(PUBLIC_KEY_MAX)?; // reserved
+    // the signing CA's key: a whole plain key
+    let ca = r.string(PUBLIC_KEY_MAX)?;
+    let ca_type = blob_key_type(ca)?;
+    let mut ca_r = Bounded::new(ca);
+    ca_r.string(NAME_MAX)?;
+    plain_key_fields(ca_type, &mut ca_r)?;
+    if !ca_r.is_empty() {
+        return None;
+    }
+    signature_fields(ca_type, r.string(PUBLIC_KEY_MAX)?)
+}
+
+/// Whether `sig` is a whole SSH signature blob of a key of type `key_type`, by its shape.
+fn signature_fields(key_type: &str, sig: &[u8]) -> Option<()> {
+    let mut r = Bounded::new(sig);
+    let name = r.string(NAME_MAX)?;
+    let name_ok = match key_type {
+        "ssh-rsa" => matches!(name, b"ssh-rsa" | b"rsa-sha2-256" | b"rsa-sha2-512"),
+        _ => name == key_type.as_bytes(),
+    };
+    if !name_ok {
+        return None;
+    }
+    let raw = r.string(PUBLIC_KEY_MAX)?;
+    let raw_ok = match key_type {
+        KEY_TYPE_ED25519 | KEY_TYPE_SK_ED25519 => raw.len() == ED25519_SIG_LEN,
+        "ssh-dss" => raw.len() == 40,
+        "ssh-rsa" => !raw.is_empty(),
+        _ => {
+            // ECDSA: the two integers r and s
+            let mut rs = Bounded::new(raw);
+            mpint(&mut rs).and_then(|()| mpint(&mut rs)).is_some() && rs.is_empty()
+        }
+    };
+    if !raw_ok {
+        return None;
+    }
+    if key_type.starts_with("sk-") {
+        r.bytes(1 + 4)?; // flags, counter
+    }
+    r.is_empty().then_some(())
+}
+
+/// A 32-byte Ed25519 public key.
+fn ed25519_point(r: &mut Bounded<'_>) -> Option<()> {
+    (r.string(ED25519_KEY_LEN)?.len() == ED25519_KEY_LEN).then_some(())
+}
+
+/// The UTF-8 application of an sk key.
+fn application(r: &mut Bounded<'_>) -> Option<()> {
+    std::str::from_utf8(r.string(PUBLIC_KEY_MAX)?)
+        .ok()
+        .map(|_| ())
+}
+
+/// An ECDSA key's curve (it must be `curve`) and its uncompressed point of `len` bytes.
+fn ec_point(r: &mut Bounded<'_>, curve: &[u8], len: usize) -> Option<()> {
+    if r.string(NAME_MAX)? != curve {
+        return None;
+    }
+    let q = r.string(len)?;
+    (q.len() == len && q.first() == Some(&0x04)).then_some(())
+}
+
+/// A positive SSH multiple-precision integer: not empty, sign bit clear, not zero.
+fn mpint(r: &mut Bounded<'_>) -> Option<()> {
+    let n = r.string(PUBLIC_KEY_MAX)?;
+    let first = *n.first()?;
+    (first & 0x80 == 0 && n.iter().any(|&b| b != 0)).then_some(())
 }
 
 fn encode<T: Encode>(value: &T) -> Option<Vec<u8>> {
@@ -513,5 +740,95 @@ impl<'a> Bounded<'a> {
 
     fn is_empty(&self) -> bool {
         self.rest.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The generic SSHSIG verifier, which the public verifier calls after its namespace check,
+    //! against the independent OpenSSH interoperability vectors in their own namespace
+    //! `example`. Provenance and the OpenSSH 10.3p1 cross-check are in
+    //! `tests/signing_crypto.rs`; the checksums are pinned here again.
+
+    use super::{CryptoCheck, verify_generic, verify_sshsig};
+    use ssh_key::SshSig;
+
+    const ED_SIG: &str = include_str!("../tests/fixtures/sshsig/sshsig_ed25519");
+    const SK_SIG: &str = include_str!("../tests/fixtures/sshsig/sshsig_sk_ed25519");
+    const RESERVED_SIG: &str = include_str!("../tests/fixtures/sshsig/rdy_ed25519_reserved.sig");
+    const ED_FP: &str = "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ";
+    const SK_FP: &str = "SHA256:6gcI7q24Uf/4jZEyRdzDIZ2x5pW2AxPAQt/lgHoHae0";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        ssh_key::HashAlg::Sha256
+            .digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn bin(pem: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        ssh_encoding::Encode::encode(&SshSig::from_pem(pem).unwrap(), &mut out).unwrap();
+        out
+    }
+
+    fn check(valid: bool, key: &str, ty: &str, presence: bool) -> CryptoCheck {
+        CryptoCheck {
+            valid,
+            key: Some(key.to_string()),
+            key_type: Some(ty.to_string()),
+            presence,
+        }
+    }
+
+    #[test]
+    fn sig3_generic_verifier_accepts_the_openssh_example_vectors() {
+        for (pem, digest, fp, ty, presence) in [
+            (
+                ED_SIG,
+                "3a93dffb17b883d281b6b22750bd2106cb458544c1b70973c502f82f49991f80",
+                ED_FP,
+                "ssh-ed25519",
+                false,
+            ),
+            (
+                SK_SIG,
+                "c71d66aaea3f24c7e3bc29c85c63c603a25df982cc2ad4f15dac205cb725872b",
+                SK_FP,
+                "sk-ssh-ed25519@openssh.com",
+                true,
+            ),
+            // the OpenSSH ed25519 vector with reserved bytes `x` put in (OpenSSH says Good)
+            (
+                RESERVED_SIG,
+                "6e7cf2e6515b51cf920cff97bc45386a909ac5d03936f79a1ecbf6fc39f53d57",
+                ED_FP,
+                "ssh-ed25519",
+                false,
+            ),
+        ] {
+            assert_eq!(sha256_hex(pem.as_bytes()), digest, "pinned vector");
+            let b = bin(pem);
+            assert_eq!(
+                verify_generic("example", b"testing", &b),
+                check(true, fp, ty, presence),
+                "{ty}"
+            );
+            // the generic verifier still binds message and namespace
+            assert_eq!(
+                verify_generic("example", b"testinG", &b),
+                check(false, fp, ty, false)
+            );
+            assert_eq!(
+                verify_generic("examplf", b"testing", &b),
+                check(false, fp, ty, false)
+            );
+            // the public verifier refuses `example`: it is not an rdy namespace
+            assert_eq!(
+                verify_sshsig("example", b"testing", &b),
+                check(false, fp, ty, false)
+            );
+        }
     }
 }

@@ -9,6 +9,10 @@
 //! connection; no connection outlives its call. Calls block, so they run on a request's blocking
 //! worker. Every failure is `E_NO_AGENT` with one of the closed causes, never the agent's own
 //! text.
+//!
+//! A call can be cancelled at any point: it is registered before its connection is set up, the
+//! connect runs on a short helper thread that the call waits on together with its cancel, and
+//! the request and reply run on the call's own thread over a connection that a cancel closes.
 
 use crate::sys::{self, AgentStream};
 use rdy_engine::signing_crypto::{
@@ -16,9 +20,12 @@ use rdy_engine::signing_crypto::{
     STATEMENT_MAX, SigningAgent,
 };
 use rdy_engine::{NoAgentCause, RdyError, no_agent, signing_limit};
-use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::io::{self, Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 
 /// The agent's failure reply.
 pub const SSH_AGENT_FAILURE: u8 = 5;
@@ -49,6 +56,8 @@ const AUTH_SOCK: &str = "SSH_AUTH_SOCK";
 pub struct CallerAgent {
     /// The agent socket; `None` when the caller has no agent.
     socket: Option<PathBuf>,
+    /// How the socket is reached: the daemon's sys seam (an in-memory one in unit tests).
+    transport: Arc<dyn Transport>,
     /// The connections of the calls in flight, so [`CallerAgent::cancel`] can close them.
     active: Mutex<Active>,
 }
@@ -59,10 +68,54 @@ struct Active {
     calls: Vec<Call>,
 }
 
+/// One call in flight. It is registered before its connection is set up, so a cancel at any
+/// point is latched.
 struct Call {
     id: u64,
-    handle: AgentStream,
+    /// Set by [`CallerAgent::cancel`]; the call then ends as `request cancelled`.
     cancelled: bool,
+    /// Wakes the call while it waits for its connection; taken once the connection is in use.
+    wake: Option<Sender<Setup>>,
+    /// Closes the call's connection once it is in use.
+    closer: Option<Closer>,
+}
+
+/// What a call waiting for its connection receives.
+enum Setup {
+    Connected(io::Result<Box<dyn Conn>>),
+    Cancelled,
+}
+
+/// Closes a connection from another thread: a read or write that waits on it ends.
+type Closer = Box<dyn Fn() + Send>;
+
+/// How a [`CallerAgent`] reaches its agent socket.
+trait Transport: Send + Sync {
+    /// A new connection to the agent socket at `path`. It may block; a call runs it on a helper
+    /// thread, so a cancel ends the call while it waits.
+    fn connect(&self, path: &Path) -> io::Result<Box<dyn Conn>>;
+}
+
+/// One connection to an agent.
+trait Conn: Read + Write + Send {
+    /// A closer for this connection.
+    fn closer(&self) -> io::Result<Closer>;
+}
+
+/// The daemon's sys seam: the platform socket.
+struct SysTransport;
+
+impl Transport for SysTransport {
+    fn connect(&self, path: &Path) -> io::Result<Box<dyn Conn>> {
+        Ok(Box::new(sys::agent_connect(path)?))
+    }
+}
+
+impl Conn for AgentStream {
+    fn closer(&self) -> io::Result<Closer> {
+        let handle = sys::agent_handle(self)?;
+        Ok(Box::new(move || sys::agent_close(&handle)))
+    }
 }
 
 impl CallerAgent {
@@ -83,18 +136,34 @@ impl CallerAgent {
     fn new(socket: Option<PathBuf>) -> CallerAgent {
         CallerAgent {
             socket,
+            transport: Arc::new(SysTransport),
             active: Mutex::new(Active::default()),
         }
     }
 
-    /// Cancels the calls in flight: their connections close and each ends as `E_NO_AGENT`
-    /// `request cancelled`. A later call is not affected. There is no timeout: a request waits
-    /// as long as the agent (or a security key) does, until it answers or is cancelled.
+    /// The agent at `path`, reached through `transport`.
+    #[cfg(test)]
+    fn with_transport(path: impl Into<PathBuf>, transport: Arc<dyn Transport>) -> CallerAgent {
+        CallerAgent {
+            transport,
+            ..CallerAgent::with_socket(path)
+        }
+    }
+
+    /// Cancels the calls in flight, a call still setting up its connection included: their
+    /// connections close and each ends as `E_NO_AGENT` `request cancelled`, without sending its
+    /// request if it had not yet. A later call is not affected. There is no timeout: a request
+    /// waits as long as the agent (or a security key) does, until it answers or is cancelled.
     pub fn cancel(&self) {
         let mut active = self.lock();
         for call in &mut active.calls {
             call.cancelled = true;
-            sys::agent_close(&call.handle);
+            if let Some(wake) = call.wake.take() {
+                let _ = wake.send(Setup::Cancelled);
+            }
+            if let Some(close) = &call.closer {
+                close();
+            }
         }
     }
 
@@ -109,33 +178,78 @@ impl CallerAgent {
             .socket
             .as_ref()
             .ok_or_else(|| no_agent(NoAgentCause::Unset))?;
-        let stream =
-            sys::agent_connect(socket).map_err(|_| no_agent(NoAgentCause::ConnectionFailed))?;
-        let handle =
-            sys::agent_handle(&stream).map_err(|_| no_agent(NoAgentCause::ConnectionFailed))?;
+        // Registered (and so cancellable) before any connection setup.
+        let (wake, setup) = channel();
         let id = {
             let mut active = self.lock();
             let id = active.next;
             active.next = active.next.wrapping_add(1);
             active.calls.push(Call {
                 id,
-                handle,
                 cancelled: false,
+                wake: Some(wake.clone()),
+                closer: None,
             });
             id
         };
-        let result = exchange(&stream, request, expected);
+        let result = self.connect_and_exchange(id, socket, wake, setup, request, expected);
         let cancelled = {
             let mut active = self.lock();
             let at = active.calls.iter().position(|c| c.id == id);
             at.is_some_and(|at| active.calls.swap_remove(at).cancelled)
         };
-        // The connection closes here, whatever the reply was.
-        drop(stream);
         if cancelled {
             return Err(no_agent(NoAgentCause::Cancelled));
         }
         result.map_err(no_agent)
+    }
+
+    /// The connection setup and the exchange of the registered call `id`. A cancel latched at
+    /// any point before the exchange stops the call before it sends anything.
+    fn connect_and_exchange(
+        &self,
+        id: u64,
+        socket: &Path,
+        wake: Sender<Setup>,
+        setup: Receiver<Setup>,
+        request: &[u8],
+        expected: u8,
+    ) -> Result<Vec<u8>, NoAgentCause> {
+        // The connect runs on a helper thread, so the call can end on a cancel while it waits.
+        // The active lock is never held across it. A connection set up after the call ended
+        // has no receiver: it drops on the helper thread, closed unused.
+        let transport = Arc::clone(&self.transport);
+        let path = socket.to_path_buf();
+        thread::Builder::new()
+            .name("rdy-agent-connect".into())
+            .spawn(move || {
+                let conn = catch_unwind(AssertUnwindSafe(|| transport.connect(&path)))
+                    .unwrap_or_else(|_| Err(io::Error::other("agent connect panicked")));
+                let _ = wake.send(Setup::Connected(conn));
+            })
+            .map_err(|_| NoAgentCause::ConnectionFailed)?;
+        let mut stream = match setup.recv() {
+            Ok(Setup::Connected(Ok(stream))) => stream,
+            Ok(Setup::Connected(Err(_))) | Err(_) => return Err(NoAgentCause::ConnectionFailed),
+            Ok(Setup::Cancelled) => return Err(NoAgentCause::Cancelled),
+        };
+        let closer = stream
+            .closer()
+            .map_err(|_| NoAgentCause::ConnectionFailed)?;
+        {
+            let mut active = self.lock();
+            let call = active.calls.iter_mut().find(|c| c.id == id);
+            match call {
+                Some(call) if !call.cancelled => {
+                    call.wake = None;
+                    call.closer = Some(closer);
+                }
+                // Cancelled while connecting: the connection closes here, unused.
+                _ => return Err(NoAgentCause::Cancelled),
+            }
+        }
+        // The connection closes when this returns, whatever the reply was.
+        exchange(&mut *stream, request, expected)
     }
 }
 
@@ -166,8 +280,7 @@ impl SigningAgent for CallerAgent {
 }
 
 /// One request and its reply on `stream`: the reply body when its type is `expected`.
-fn exchange(stream: &AgentStream, request: &[u8], expected: u8) -> Result<Vec<u8>, NoAgentCause> {
-    let mut stream = stream;
+fn exchange(stream: &mut dyn Conn, request: &[u8], expected: u8) -> Result<Vec<u8>, NoAgentCause> {
     let len = u32::try_from(request.len()).map_err(|_| NoAgentCause::InvalidReply)?;
     let mut packet = Vec::with_capacity(4 + request.len());
     packet.extend(len.to_be_bytes());
@@ -193,7 +306,9 @@ fn exchange(stream: &AgentStream, request: &[u8], expected: u8) -> Result<Vec<u8
         .read_exact(&mut reply)
         .map_err(|_| NoAgentCause::ConnectionFailed)?;
     match reply[0] {
-        t if REFUSALS.contains(&t) => Err(NoAgentCause::Refused),
+        // A refusal is the bare type; anything after it makes the reply malformed.
+        t if REFUSALS.contains(&t) && len == 1 => Err(NoAgentCause::Refused),
+        t if REFUSALS.contains(&t) => Err(NoAgentCause::InvalidReply),
         t if t == expected => {
             reply.remove(0);
             Ok(reply)
@@ -260,5 +375,165 @@ impl<'a> Wire<'a> {
             return None;
         }
         self.bytes(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Cancellation while a call is still setting up its connection, through an in-memory
+    //! transport (no socket): the call is registered, and can be cancelled, before it connects.
+
+    use super::{CallerAgent, Closer, Conn, Transport};
+    use rdy_engine::signing_crypto::SigningAgent;
+    use rdy_engine::{E_NO_AGENT, RdyError};
+    use std::io::{self, Cursor, Read, Write};
+    use std::path::Path;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    /// An in-memory connection: it records what the caller writes, answers with an empty
+    /// identities answer, and reports when it is dropped (closed).
+    struct MemConn {
+        written: Arc<Mutex<Vec<u8>>>,
+        reply: Cursor<Vec<u8>>,
+        dropped: Sender<()>,
+    }
+
+    impl Read for MemConn {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reply.read(buf)
+        }
+    }
+
+    impl Write for MemConn {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Conn for MemConn {
+        fn closer(&self) -> io::Result<Closer> {
+            Ok(Box::new(|| {}))
+        }
+    }
+
+    impl Drop for MemConn {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(());
+        }
+    }
+
+    /// A transport whose connect reports that it began, then waits for the test's release.
+    struct PausedConnect {
+        entered: Mutex<Sender<()>>,
+        release: Mutex<Receiver<()>>,
+        written: Arc<Mutex<Vec<u8>>>,
+        dropped: Mutex<Sender<()>>,
+    }
+
+    impl Transport for PausedConnect {
+        fn connect(&self, _path: &Path) -> io::Result<Box<dyn Conn>> {
+            let _ = self.entered.lock().unwrap().send(());
+            let _ = self.release.lock().unwrap().recv();
+            // the empty identities answer: type 12, count 0
+            let reply = vec![0, 0, 0, 5, 12, 0, 0, 0, 0];
+            Ok(Box::new(MemConn {
+                written: Arc::clone(&self.written),
+                reply: Cursor::new(reply),
+                dropped: self.dropped.lock().unwrap().clone(),
+            }))
+        }
+    }
+
+    struct Harness {
+        agent: Arc<CallerAgent>,
+        entered: Receiver<()>,
+        release: Sender<()>,
+        written: Arc<Mutex<Vec<u8>>>,
+        dropped: Receiver<()>,
+    }
+
+    fn harness() -> Harness {
+        let (entered_tx, entered) = channel();
+        let (release, release_rx) = channel();
+        let (dropped_tx, dropped) = channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let transport = PausedConnect {
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+            written: Arc::clone(&written),
+            dropped: Mutex::new(dropped_tx),
+        };
+        Harness {
+            agent: Arc::new(CallerAgent::with_transport(
+                "agent.sock",
+                Arc::new(transport),
+            )),
+            entered,
+            release,
+            written,
+            dropped,
+        }
+    }
+
+    /// Starts an identities call on its own thread; its result arrives on the receiver.
+    fn start(agent: &Arc<CallerAgent>) -> Receiver<Result<usize, RdyError>> {
+        let (tx, rx) = channel();
+        let agent = Arc::clone(agent);
+        thread::spawn(move || {
+            let _ = tx.send(agent.identities().map(|ids| ids.len()));
+        });
+        rx
+    }
+
+    fn assert_cancelled(r: Result<usize, RdyError>) {
+        let e = r.expect_err("the cancelled call must fail");
+        assert_eq!(e.code, E_NO_AGENT);
+        assert_eq!(e.message, "the SSH agent could not sign: request cancelled");
+    }
+
+    #[test]
+    fn sig3_cancel_during_connect_sends_nothing() {
+        let h = harness();
+        let done = start(&h.agent);
+        // Connection setup has begun and is paused: cancel, then let the connect finish.
+        h.entered.recv().unwrap();
+        h.agent.cancel();
+        h.release.send(()).unwrap();
+        assert_cancelled(done.recv().unwrap());
+        // The connection that was set up closes unused: no request reached the agent.
+        h.dropped.recv().unwrap();
+        assert!(
+            h.written.lock().unwrap().is_empty(),
+            "no exchange after cancel"
+        );
+
+        // The cancel applied to that call only: the next call is answered.
+        h.release.send(()).unwrap();
+        assert_eq!(h.agent.identities().unwrap(), Vec::new());
+        assert_eq!(*h.written.lock().unwrap(), vec![0, 0, 0, 1, 11]);
+    }
+
+    #[test]
+    fn sig3_cancel_ends_a_call_whose_connect_still_waits() {
+        let h = harness();
+        let done = start(&h.agent);
+        h.entered.recv().unwrap();
+        h.agent.cancel();
+        // The call ends while its connect still waits (it is never released before this).
+        assert_cancelled(done.recv().unwrap());
+        // When the connect finishes later, its connection closes unused.
+        h.release.send(()).unwrap();
+        h.dropped.recv().unwrap();
+        assert!(
+            h.written.lock().unwrap().is_empty(),
+            "no exchange after cancel"
+        );
     }
 }
