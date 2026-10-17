@@ -392,6 +392,9 @@ fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
     }
 }
 
+/// The raw rows of the six redaction tables: carriers, items, objects, applied, active, spans.
+pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 6];
+
 /// The six redaction tables of one write transaction.
 struct RedactionTables<'t> {
     carriers: redb::Table<'t, &'static [u8], &'static [u8]>,
@@ -934,6 +937,75 @@ impl Index {
             t.insert(key, &[][..]).map_err(db)?;
         }
         w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// An empty index in memory, for deriving the redaction rows a log's records give
+    /// (`Store::redaction_index_matches`). Nothing is written to disk.
+    pub(crate) fn in_memory() -> Result<Index, StoreError> {
+        let database = redb::Builder::new()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .map_err(db)?;
+        Index::with_tables(database)
+    }
+
+    /// The rows of the six redaction tables, from one read transaction: carriers, items,
+    /// objects, applied, active, spans.
+    pub(crate) fn redaction_rows(&self) -> Result<RedactionRows, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        Ok([
+            dump_table(&r, REDACTION_CARRIERS)?,
+            dump_table(&r, REDACTION_ITEMS)?,
+            dump_table(&r, REDACTION_OBJECTS)?,
+            dump_table(&r, REDACTION_APPLIED)?,
+            dump_table(&r, REDACTION_ACTIVE)?,
+            dump_table(&r, REDACTION_SPANS)?,
+        ])
+    }
+
+    /// Writes a forged active span and mask row (an apply the log does not hold) in a durable
+    /// commit. No store path calls it: it is the test hook that forges an authorization in the
+    /// index, which the next open must not trust.
+    #[doc(hidden)]
+    pub fn forge_active_span_for_tests(
+        &self,
+        span: &RedactedSpan,
+        apply: &Hash,
+        request: &Hash,
+    ) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut spans = w.open_table(REDACTION_SPANS).map_err(db)?;
+            let mut v = Vec::with_capacity(64 + 69);
+            v.extend_from_slice(&apply.0);
+            v.extend_from_slice(&request.0);
+            v.extend_from_slice(&span_value(span));
+            spans.insert(&loc_key(&span.loc)[..], &v[..]).map_err(db)?;
+            let mut active = w.open_table(REDACTION_ACTIVE).map_err(db)?;
+            let mut v = Vec::with_capacity(76);
+            v.extend_from_slice(&request.0);
+            v.extend_from_slice(&apply.0);
+            v.extend_from_slice(&loc_key(&span.loc));
+            active
+                .insert(&typed_key(span.kind, &span.hash)[..], &v[..])
+                .map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        self.redacted.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Empties the applied, active and span tables in a durable commit. No store path calls it:
+    /// it is the test hook of an index that forgot the log's authorization.
+    #[doc(hidden)]
+    pub fn clear_redaction_rows_for_tests(&self) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        for def in [REDACTION_APPLIED, REDACTION_ACTIVE, REDACTION_SPANS] {
+            w.delete_table(def).map_err(db)?;
+            w.open_table(def).map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        self.redacted.store(false, Ordering::Release);
         Ok(())
     }
 

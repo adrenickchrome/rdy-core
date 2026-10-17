@@ -5,6 +5,7 @@ use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
+use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
     CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
@@ -97,6 +98,9 @@ struct ReaderShared {
     epoch: Arc<AtomicU64>,
     /// The store's poisoned state, as its readers see it (`Store::poisoned`).
     poisoned: AtomicBool,
+    /// Set when a removal failed after its apply was synced (E_REDACTION_PENDING): no reader of
+    /// this family serves content again; a reopen finishes the removal.
+    pending: AtomicBool,
 }
 
 pub struct Store {
@@ -171,6 +175,25 @@ fn poisoned_error() -> StoreError {
     StoreError::Io(std::io::Error::other(
         "an earlier failed write could not be rolled back; reopen the store",
     ))
+}
+
+/// The holes of the active spans `spans` (from the index), for a hole-aware walk.
+pub(crate) fn holes_of(
+    spans: &BTreeMap<Location, crate::index::ActiveSpan>,
+) -> crate::segment::Holes {
+    spans
+        .iter()
+        .map(|(loc, s)| {
+            (
+                *loc,
+                crate::segment::Hole {
+                    kind: s.span.kind,
+                    hash: s.span.hash,
+                    len: s.span.len,
+                },
+            )
+        })
+        .collect()
 }
 
 impl Deref for Store {
@@ -481,11 +504,16 @@ fn replay_into(
     let mut done = CatchUp::default();
     let mut entries = vec![];
     let mut in_chunk = 0usize;
-    log.for_each_from(from, |loc, kind, hash, payload, next| {
+    let auth = log.authorization();
+    log.for_each_view(from, |loc, v, next| {
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
         }
-        entries.extend(entries_for_frame(kind, hash, loc, payload)?);
+        // a removed payload's entries come from its residue: the validated stream
+        entries.extend(match v.payload {
+            Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload)?,
+            None => auth.entries_for_hole(v.kind, v.hash, loc)?,
+        });
         done.frames += 1;
         in_chunk += 1;
         if in_chunk == CATCH_UP_CHUNK {
@@ -639,7 +667,9 @@ impl Store {
         // The log opens by the marker rule: the acknowledged boundary is the last valid batch
         // marker. The index's durable end is only the floor under which damage is refused, never
         // the boundary, because it lags the log.
-        let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
+        // two passes: the redaction bootstrap validates every apply from the log's own frames,
+        // then the marker rule's scan hashes every payload but the authorized holes
+        let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
         let report = OpenReport {
             quarantined,
             unclean_shutdown: unclean,
@@ -657,6 +687,7 @@ impl Store {
                 refs_read: AtomicU64::new(0),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
+                pending: AtomicBool::new(false),
             }),
             tracking: Arc::default(),
             epoch: 0,
@@ -705,10 +736,18 @@ impl Store {
         if let Some(n) = store.format_ref()? {
             format::check_format(Format { store_format: n }, dir)?;
         }
+        // the index's redaction rows must be the ones the log's validated records give: a
+        // forged or forgotten row is rebuilt from the log, never trusted
+        if !store.redaction_index_matches(upto)? {
+            store.reindex()?;
+            store.report.index_rebuilt = true;
+        }
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
         store.ensure_format()?;
+        // an authorized removal finishes before any reader escapes this open
+        store.finish_redactions_at_open()?;
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
         // there) is left as it is, and nothing is followed or truncated.
@@ -884,13 +923,22 @@ impl Store {
             return Ok(());
         }
         if self.poisoned {
-            return Err(poisoned_error());
+            return Err(self.poisoned_err());
         }
         // the same refusals as `write`, before anything is appended: a redaction record (only
         // the store's checked redaction writers write one) or an item that would bring back a
         // removed hash is refused with the batch still open, and nothing poisoned
         crate::redaction::refuse_redaction_kinds(&last)?;
         self.refuse_removed(&last)?;
+        // a held batch that holds a redaction apply seals through the apply hook, which never
+        // takes the rollback below once the batch is synced
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
+        {
+            return self.seal_held_apply(last).map(|_| ());
+        }
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
         let mut entries = vec![];
@@ -1081,7 +1129,7 @@ impl Store {
             });
         }
         // at the end of its segment, the next one follows
-        Ok(from.offset < len && self.log.read_hashed(from).is_err())
+        Ok(from.offset < len && !self.log.frame_readable(from)?)
     }
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
@@ -1133,6 +1181,7 @@ impl Store {
             replay_into(&self.log, &ix, ORIGIN, fail_after)?;
             // durable before it becomes the index
             ix.checkpoint()?;
+            crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
             Ok(ix)
         });
         let ix = match built {
@@ -1179,7 +1228,7 @@ impl Store {
         items: Vec<(u8, Vec<u8>)>,
     ) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
-            return Err(poisoned_error());
+            return Err(self.poisoned_err());
         }
         self.refuse_removed(&items)?;
         let start = self.log.end();
@@ -1262,6 +1311,13 @@ impl Store {
     }
 
     fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        // an apply seals only through `seal_apply_batch`, whose failures after the sync never
+        // reach this path's rollback
+        if items.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY) {
+            return Err(StoreError::Refused(
+                "a redaction apply seals only through the checked apply writer".into(),
+            ));
+        }
         let (hashes, batch) = self.dedupe(items)?;
         if batch.is_empty() {
             self.last_batch.clear();
@@ -1360,10 +1416,11 @@ impl Store {
                 std::mem::forget(self.reader.take());
                 return Err(e);
             }
+            let err = self.poisoned_err();
             drop(self.drop_index());
             self.log.crash_point(CrashPoint::StaleIndexClosed);
             sealed?;
-            return Err(poisoned_error());
+            return Err(err);
         }
         sealed?;
         self.checkpoint()?;
@@ -1669,6 +1726,7 @@ impl StoreReader {
     /// (`RedactedState` when a redaction was applied since it was taken), and the store is not
     /// poisoned (the store's poisoned-handle error).
     pub fn check_redaction_epoch(&self) -> Result<(), StoreError> {
+        self.refuse_pending()?;
         if self.epoch != self.redaction_epoch() {
             return Err(StoreError::RedactedState);
         }
@@ -1709,23 +1767,29 @@ impl StoreReader {
         upto: Location,
         mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
+        self.refuse_pending()?;
         let spans = self.index().redaction_spans_in(from, upto)?;
         if spans.is_empty() {
             return self.shared.segments.for_each_from(from, upto, f);
         }
+        let holes = holes_of(&spans);
         self.shared
             .segments
-            .for_each_from(from, upto, |loc, kind, hash, payload, next| {
+            .for_each_view_from(from, upto, &holes, |loc, v, next| {
                 if let Some(s) = spans.get(&loc) {
                     return Err(StoreError::Redacted { request: s.request });
                 }
-                f(loc, kind, hash, payload, next)
+                match v.payload {
+                    Some(payload) => f(loc, v.kind, v.hash, payload, next),
+                    None => Err(StoreError::corrupt_at(loc)),
+                }
             })
     }
 
     /// The first object written with hash `h`, whatever its kind, and that kind. A payload a
     /// redaction removed is `Redacted`, never a valid object.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
+        self.refuse_pending()?;
         let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
         if let Some(request) = self.mask_at(&loc)? {
             return Err(StoreError::Redacted { request });
@@ -1735,6 +1799,7 @@ impl StoreReader {
 
     /// Reads the frame at `loc`, which the index says holds an object with hash `h`.
     fn read_object(&self, h: &Hash, loc: Location) -> Result<(u8, Vec<u8>), StoreError> {
+        self.refuse_pending()?;
         self.shared.frames_read.fetch_add(1, Ordering::Relaxed);
         let (kind, found, payload) = self.shared.segments.read_hashed(loc)?;
         if found != *h {
@@ -1748,6 +1813,7 @@ impl StoreReader {
     /// The payload of the object of `kind` with hash `h` (kind1). A payload a redaction removed
     /// is `Redacted`.
     pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        self.refuse_pending()?;
         let loc = self
             .index()
             .typed(kind, h)?
@@ -2326,6 +2392,382 @@ impl StoreReader {
             *slot = Some(self.included(view)?.iter().copied().collect());
         }
         Ok(slot.as_ref().expect("set above"))
+    }
+}
+
+impl StoreReader {
+    /// `RedactionPending` once a removal failed after its apply was synced: no reader of this
+    /// store family serves content again.
+    pub(crate) fn refuse_pending(&self) -> Result<(), StoreError> {
+        if self.shared.pending.load(Ordering::Acquire) {
+            return Err(StoreError::RedactionPending);
+        }
+        Ok(())
+    }
+}
+
+/// The removal of payloads (`crate::redaction_io`): finishing authorized work, the live apply
+/// writer, and fsck's counts.
+impl Store {
+    /// The error of a write on a poisoned store: `RedactionPending` after a removal failed past
+    /// its synced apply, else the poisoned-handle error.
+    fn poisoned_err(&self) -> StoreError {
+        if self.shared.pending.load(Ordering::Acquire) {
+            StoreError::RedactionPending
+        } else {
+            poisoned_error()
+        }
+    }
+
+    /// A failure after a synced apply: the handle is poisoned for writes and reads, its index
+    /// is not checkpointed (the close removes it and the next open rebuilds it from the log), and
+    /// the error is `RedactionPending`. Nothing is rolled back: the apply stays in the log, and
+    /// the next open finishes the exact authorized operation.
+    fn pending_failure(&mut self) -> StoreError {
+        self.poison();
+        self.shared.pending.store(true, Ordering::Release);
+        self.stale_index = true;
+        StoreError::RedactionPending
+    }
+
+    /// Advances the store family's redaction epoch to `epoch` (one past the current value; the
+    /// caller checked it) after an apply batch is synced and before any payload is written. The
+    /// store's own reader takes the new epoch; every reader taken before keeps its old one, and
+    /// refuses new responses with `RedactedState`.
+    fn advance_epoch(&mut self, epoch: u64) {
+        self.shared.epoch.store(epoch, Ordering::Release);
+        if let Some(r) = self.reader.as_mut() {
+            r.epoch = epoch;
+        }
+    }
+
+    /// The rollback of a batch that failed before its sync: the log is cut back to `to`; a
+    /// rollback that fails poisons the store.
+    fn roll_back(&mut self, to: Location) {
+        let rolled_back =
+            !std::mem::take(&mut self.faults.rollback) && self.log.truncate_to(to).is_ok();
+        if !rolled_back {
+            self.poison();
+        }
+    }
+
+    /// Whether the index's six redaction tables hold exactly the rows the log's validated records
+    /// before `upto` (the index's `indexed_upto`) give. They are derived again, in an index in
+    /// memory, from the requests and the validated applies; nothing in the index is trusted.
+    fn redaction_index_matches(&self, upto: Location) -> Result<bool, StoreError> {
+        let auth = Arc::clone(self.log.authorization());
+        let have = self.index().redaction_rows()?;
+        if auth.requests.is_empty() && auth.applies.is_empty() && have.iter().all(|t| t.is_empty())
+        {
+            return Ok(true);
+        }
+        let want = Index::in_memory()?;
+        let entries = auth.index_entries(self.log.readers(), upto)?;
+        want.apply(&entries, upto)?;
+        Ok(want.redaction_rows()? == have)
+    }
+
+    /// Finishes the removal an open found authorized, before the open returns. A failure is
+    /// `RedactionPending` (the open is refused; the next one retries), except a proof the open
+    /// finds broken, which stays `RedactionCorrupt`.
+    fn finish_redactions_at_open(&mut self) -> Result<(), StoreError> {
+        if self.log.authorization().holes.is_empty() {
+            return Ok(());
+        }
+        match self.finish(true) {
+            Ok(_) => Ok(()),
+            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(_) => Err(StoreError::RedactionPending),
+        }
+    }
+
+    /// Finishes every authorized removal this store's log holds: each authorized payload that is
+    /// not all zero yet (intact, or partly zeroed by an interrupted removal) is overwritten with
+    /// zeros through one fixed buffer, in `(segment, offset)` order; each affected segment is
+    /// synced; then the derived index is rebuilt from the surviving data and the residues (no
+    /// old index is kept). Work already complete is recognized and left alone, so the call is
+    /// safe to repeat. Returns the active redaction's objects, frames and bytes, and the
+    /// authorized payloads found intact (and hashed) before this call erased them.
+    ///
+    /// The open runs it before it returns a store, and the live apply writer runs it after the
+    /// apply batch is synced. A failure poisons the store (`RedactionPending`): no write and no
+    /// read is served, and the next open finishes the removal.
+    pub fn finish_redactions(&mut self) -> Result<RedactionCounts, StoreError> {
+        if self.poisoned {
+            return Err(self.poisoned_err());
+        }
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
+        match self.finish(false) {
+            Ok(c) => Ok(c),
+            Err(e @ StoreError::RedactionCorrupt { .. }) => Err(e),
+            Err(_) => Err(self.pending_failure()),
+        }
+    }
+
+    /// The work of `finish_redactions`. `at_open`: the open's run, which reaches the
+    /// after-apply-sync failpoint before its first zero write (the live writer reaches it right
+    /// after its sync).
+    fn finish(&mut self, at_open: bool) -> Result<RedactionCounts, StoreError> {
+        let auth = Arc::clone(self.log.authorization());
+        let mut counts = auth.counts();
+        let mut affected: BTreeSet<u32> = BTreeSet::new();
+        for (loc, hole) in &auth.holes {
+            match self.log.hole_state(*loc, hole)? {
+                Some(true) => continue,
+                Some(false) => counts.checked_payloads += 1,
+                None => {}
+            }
+            if at_open && affected.is_empty() {
+                crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync)?;
+            }
+            let span = crate::redaction_io::drop_span(*loc, hole, &auth.spans[loc]);
+            self.log.zero_payload(&span)?;
+            affected.insert(loc.segment);
+        }
+        if affected.is_empty() {
+            return Ok(counts);
+        }
+        self.log.sync_segments(&affected)?;
+        crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
+        self.reindex()?;
+        Ok(counts)
+    }
+
+    /// Reads and hash-checks every frame as `verify` does, reading the authorized holes as frames
+    /// whose payloads are neither read nor hashed, and returns the data frames with, when an
+    /// active redaction exists, its counts (`checked_payloads`: the intact data frames hashed).
+    pub fn verify_report(&self) -> Result<VerifyReport, StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("first"));
+        }
+        let (frames, holes) = self.log.verify_frames_counted()?;
+        let auth = self.log.authorization();
+        let redaction = auth.is_active().then(|| RedactionCounts {
+            checked_payloads: (frames - holes) as u64,
+            ..auth.counts()
+        });
+        Ok(VerifyReport { frames, redaction })
+    }
+
+    /// Seals one batch that holds REDACTION_APPLY records, then finishes the removal before it
+    /// returns. Kept apart from the ordinary append path:
+    ///
+    /// 1. Before anything is written, the batch is validated with the log as the open validates
+    ///    it (`redaction_io::bootstrap_pending`): a landing no person approved is
+    ///    `RedactionHuman`, any other failure `RedactionCorrupt`; the epoch's next value is
+    ///    checked (overflow is `RedactionPending`).
+    /// 2. The batch is appended with its marker and synced. A failure up to here rolls back as
+    ///    an ordinary write does: nothing is acknowledged.
+    /// 3. From the sync on the removal is authorized and irreversible: the store family's epoch
+    ///    advances once (older readers refuse new responses with `RedactedState`), the batch is
+    ///    indexed, and `finish_redactions` erases, syncs and rebuilds the index. A failure here
+    ///    never truncates the batch: it poisons the handle (`RedactionPending`) and the next open
+    ///    finishes the removal.
+    pub(crate) fn seal_apply_batch(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<RedactionCounts, StoreError> {
+        if self.poisoned {
+            return Err(self.poisoned_err());
+        }
+        if self.open.is_some() {
+            return Err(batch_open("before a redaction apply"));
+        }
+        if !items.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY) {
+            return Err(StoreError::Refused(
+                "a redaction apply batch holds at least one REDACTION_APPLY".into(),
+            ));
+        }
+        self.refuse_removed(&items)?;
+        let (_, batch) = self.dedupe(items)?;
+        let start = self.log.batch_start(&batch);
+        let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;
+        let epoch = self
+            .shared
+            .epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(StoreError::RedactionPending)?;
+        let mut entries = vec![];
+        for (kind, payload) in &batch {
+            entries.push(entries_for_frame(
+                *kind,
+                Hash::of(payload),
+                ORIGIN,
+                payload,
+            )?);
+        }
+        let before = self.log.end();
+        let placed = match self.log.append_batch(&batch) {
+            Ok(p) => p,
+            Err(e) => {
+                self.roll_back(before);
+                return Err(e.into());
+            }
+        };
+        let mut placed_entries = vec![];
+        for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
+            for e in &mut frame {
+                if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } = e {
+                    *loc = *at;
+                }
+            }
+            placed_entries.extend(frame);
+        }
+        self.log.crash_point(CrashPoint::BeforeSync);
+        if let Err(e) = self.log.sync() {
+            self.roll_back(before);
+            return Err(e.into());
+        }
+        // authorized: the apply is durable, and no error below rolls it back
+        self.log.set_authorization(Arc::new(auth));
+        if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+            return Err(self.pending_failure());
+        }
+        self.advance_epoch(epoch);
+        if self.take_index_fault() || self.index().apply(&placed_entries, self.log.end()).is_err() {
+            return Err(self.pending_failure());
+        }
+        self.writes += 1;
+        self.acknowledge(
+            batch
+                .iter()
+                .zip(&placed)
+                .map(|((kind, _), (_, hash))| (*kind, *hash))
+                .collect(),
+        );
+        match self.finish(false) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(self.pending_failure()),
+        }
+    }
+
+    /// The seal hook of a held batch that holds REDACTION_APPLY records: the batch (its frames
+    /// read back from the log, then `last`) is validated as the open validates a stored one
+    /// before anything more is written; a refusal leaves the batch open and nothing poisoned.
+    /// Then `last` and the marker are appended and synced; a failure there truncates the batch
+    /// and poisons the store, as `seal` does. From the sync on, the removal is authorized: the
+    /// epoch advances once, `last` is indexed and `finish_redactions` runs; a failure poisons the
+    /// handle with `RedactionPending` and never truncates the batch.
+    fn seal_held_apply(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<RedactionCounts, StoreError> {
+        let start = self.open.as_ref().expect("a batch is open").start;
+        let mut batch: Vec<(u8, Vec<u8>)> = vec![];
+        self.log.for_each_from(start, |_, kind, _, payload, _| {
+            batch.push((kind, payload.to_vec()));
+            Ok::<(), StoreError>(())
+        })?;
+        batch.extend(last.iter().cloned());
+        let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;
+        let epoch = self
+            .shared
+            .epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(StoreError::RedactionPending)?;
+        let mut entries = vec![];
+        for (kind, payload) in &last {
+            entries.push(entries_for_frame(
+                *kind,
+                Hash::of(payload),
+                ORIGIN,
+                payload,
+            )?);
+        }
+        let synced = (|| -> Result<Vec<IndexEntry>, StoreError> {
+            let placed = self.log.append_frames(&last, false)?;
+            let open = self.open.as_mut().expect("a batch is open");
+            open.frames
+                .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+            let mut placed_entries = vec![];
+            for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
+                for e in &mut frame {
+                    if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } =
+                        e
+                    {
+                        *loc = *at;
+                    }
+                }
+                placed_entries.extend(frame);
+            }
+            let open = self.open.as_ref().expect("a batch is open");
+            self.log
+                .append_marker(open.start, open.frames.iter().map(|(_, h)| h))?;
+            self.log.crash_point(CrashPoint::BeforeSync);
+            self.log.sync()?;
+            Ok(placed_entries)
+        })();
+        let placed_entries = match synced {
+            Ok(e) => e,
+            Err(e) => {
+                // not synced: nothing is authorized, and the batch goes as a failed seal's does
+                self.open = None;
+                self.poison();
+                self.stale_index = true;
+                self.roll_back(start);
+                return Err(e);
+            }
+        };
+        // authorized: the apply is durable, and no error below rolls it back
+        self.log.set_authorization(Arc::new(auth));
+        if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+            self.open = None;
+            return Err(self.pending_failure());
+        }
+        self.advance_epoch(epoch);
+        if self.take_index_fault() || self.index().apply(&placed_entries, self.log.end()).is_err() {
+            self.open = None;
+            return Err(self.pending_failure());
+        }
+        let open = self.open.take().expect("a batch is open");
+        self.acknowledge(open.frames);
+        match self.finish(false) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(self.pending_failure()),
+        }
+    }
+
+    /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the
+    /// checked apply writer (`seal_apply_batch`): the batch is validated exactly as an open
+    /// validates a stored one, before anything is written. The store's own landing path will
+    /// call that writer; until then the tests drive it here.
+    #[doc(hidden)]
+    pub fn seal_redaction_batch_for_tests(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<RedactionCounts, StoreError> {
+        self.seal_apply_batch(items)
+    }
+
+    /// Test hook: forges an active span over the frame at `loc` in the index (an authorization
+    /// the log does not hold).
+    #[doc(hidden)]
+    pub fn forge_active_span_for_tests(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: Hash,
+        len: u32,
+        apply: Hash,
+        request: Hash,
+    ) -> Result<(), StoreError> {
+        let span = crate::index::RedactedSpan {
+            loc,
+            kind,
+            hash,
+            len,
+            residue: None,
+        };
+        self.index()
+            .forge_active_span_for_tests(&span, &apply, &request)
+    }
+
+    /// Test hook: empties the index's applied, active and span tables (an index that forgot the
+    /// log's authorization).
+    #[doc(hidden)]
+    pub fn clear_redaction_rows_for_tests(&mut self) -> Result<(), StoreError> {
+        self.index().clear_redaction_rows_for_tests()
     }
 }
 

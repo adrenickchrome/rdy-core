@@ -447,38 +447,36 @@ impl StoreReader {
         upto: Location,
         mut callback: impl for<'a> FnMut(Location, StoredFrame<'a>, Location) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
+        self.refuse_pending()?;
         let spans = self.index().redaction_spans_in(from, upto)?;
+        let holes = crate::store::holes_of(&spans);
+        // a masked frame is read by its header alone: its payload (zero once erased) is never
+        // read, hashed or handed out
         self.segments()
-            .for_each_from(from, upto, |loc, kind, hash, payload, next| {
-                match spans.get(&loc) {
-                    None => callback(
+            .for_each_view_from(from, upto, &holes, |loc, v, next| {
+                match (spans.get(&loc), v.payload) {
+                    (None, Some(payload)) => callback(
                         loc,
                         StoredFrame::Present {
-                            kind,
-                            hash,
+                            kind: v.kind,
+                            hash: v.hash,
                             payload,
                         },
                         next,
                     ),
-                    Some(s) => {
-                        if s.span.kind != kind
-                            || s.span.hash != hash
-                            || s.span.len as usize != payload.len()
-                        {
-                            return Err(StoreError::corrupt_at(loc));
-                        }
-                        callback(
-                            loc,
-                            StoredFrame::Dropped {
-                                kind,
-                                hash,
-                                len: s.span.len,
-                                apply: s.apply,
-                                residue: s.span.residue,
-                            },
-                            next,
-                        )
-                    }
+                    (Some(s), None) => callback(
+                        loc,
+                        StoredFrame::Dropped {
+                            kind: v.kind,
+                            hash: v.hash,
+                            len: s.span.len,
+                            apply: s.apply,
+                            residue: s.span.residue,
+                        },
+                        next,
+                    ),
+                    // a masked frame whose header no longer names its span
+                    _ => Err(StoreError::corrupt_at(loc)),
                 }
             })
     }
