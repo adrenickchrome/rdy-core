@@ -2,10 +2,12 @@
 use crate::answer::relay::{RelayInput, relayed};
 use crate::error::*;
 use crate::{Rdy, ReadState, Scope, Session};
-use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Role, Tag};
-use rdy_store::{StoreError, kinds};
+use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Op, Role, Tag};
+use rdy_store::StoreError;
+use rdy_store::kinds::{self, BlobManifest};
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -34,12 +36,17 @@ type VposKey = (Option<Hash>, usize, VposScope);
 /// request's carrier, so these name one set of markers.
 type MarkKey = (Option<Hash>, usize, u64);
 
-/// The cached positions, shared by every published state (see `VposKey`), and the tag markers
-/// of one state (see `MarkKey`).
+/// Each landing's own requests (see `ReadState::landing_requests`), by landing hash, for one
+/// redaction epoch: the active mask of an epoch never changes, and a landing never changes.
+type LandingMarks = (u64, Arc<HashMap<Hash, Vec<Hash>>>);
+
+/// The cached positions, shared by every published state (see `VposKey`), the tag markers of one
+/// state (see `MarkKey`) and the per-landing requests they are built from (see `LandingMarks`).
 #[derive(Default)]
 pub(crate) struct VposCache {
     entries: HashMap<VposKey, VersionPosition>,
     marks: Option<(MarkKey, Arc<Vec<Vec<Hash>>>)>,
+    landings: Option<LandingMarks>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -545,45 +552,50 @@ impl ReadState {
     }
 
     /// For each of `tags` (in order), the requests that removed content its history holds,
-    /// ascending: the requests whose applied masks hold a change that a landing at or before the
-    /// tag's landing carried. A change embeds every block version it writes, so a removed
-    /// version is found through its change. Read once per canon head, tag count and redaction
-    /// epoch, then kept in the cache every state shares.
+    /// ascending and without repeats: the union of `landing_requests` over the tag's landing and
+    /// every landing before it. Read once per canon head, tag count and redaction epoch, then
+    /// kept in the cache every state shares; each landing's own requests are kept per epoch, so
+    /// a new landing reads only its own changes.
     fn tag_marks(&self, tags: &[(semver::Version, Tag)]) -> Result<Arc<Vec<Vec<Hash>>>, RdyError> {
         if tags.is_empty() {
             return Ok(Arc::new(vec![]));
         }
-        let key = (
-            self.canon_head,
-            tags.len(),
-            self.reader.captured_redaction_epoch(),
-        );
+        let epoch = self.reader.captured_redaction_epoch();
+        let key = (self.canon_head, tags.len(), epoch);
         let lock = || self.vpos.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((k, marks)) = &lock().marks
-            && *k == key
-        {
-            return Ok(Arc::clone(marks));
-        }
-        // each landing's requests, head first; a mask lookup reads nothing while none is applied
-        let mut chain: Vec<(Hash, Vec<Hash>)> = vec![];
+        let known = {
+            let cache = lock();
+            if let Some((k, marks)) = &cache.marks
+                && *k == key
+            {
+                return Ok(Arc::clone(marks));
+            }
+            match &cache.landings {
+                Some((e, known)) if *e == epoch => Arc::clone(known),
+                _ => Arc::new(HashMap::new()),
+            }
+        };
+        // canon's landings, head first; a landing not read in this epoch yet reads its changes
+        let mut chain: Vec<Hash> = vec![];
+        let mut fresh: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        let mut blobs: HashMap<Hash, Vec<Hash>> = HashMap::new();
         for landing in self.landing_walk() {
             let (h, rec) = landing?;
-            let mut found = vec![];
-            for c in &rec.changes {
-                if let Some(request) = self.reader.redaction_of(kinds::CHANGE, c)? {
-                    found.push(request);
-                }
+            if !known.contains_key(&h) && !fresh.contains_key(&h) {
+                fresh.insert(h, self.landing_requests(&rec, &mut blobs)?);
             }
-            chain.push((h, found));
+            chain.push(h);
         }
         // oldest first, the requests found so far, kept at each tagged landing
         let tagged: HashSet<Hash> = tags.iter().map(|(_, t)| t.landing).collect();
         let mut at: HashMap<Hash, Vec<Hash>> = HashMap::new();
         let mut seen: BTreeSet<Hash> = BTreeSet::new();
-        for (h, found) in chain.into_iter().rev() {
-            seen.extend(found);
-            if tagged.contains(&h) {
-                at.insert(h, seen.iter().copied().collect());
+        for h in chain.iter().rev() {
+            if let Some(found) = known.get(h).or_else(|| fresh.get(h)) {
+                seen.extend(found.iter().copied());
+            }
+            if tagged.contains(h) {
+                at.insert(*h, seen.iter().copied().collect());
             }
         }
         let marks: Arc<Vec<Vec<Hash>>> = Arc::new(
@@ -591,8 +603,82 @@ impl ReadState {
                 .map(|(_, t)| at.get(&t.landing).cloned().unwrap_or_default())
                 .collect(),
         );
-        lock().marks = Some((key, Arc::clone(&marks)));
+        let mut cache = lock();
+        if !fresh.is_empty() {
+            let mut all = (*known).clone();
+            all.extend(fresh);
+            cache.landings = Some((epoch, Arc::new(all)));
+        }
+        cache.marks = Some((key, Arc::clone(&marks)));
         Ok(marks)
+    }
+
+    /// The requests whose applied masks remove something landing `rec` carried, ascending and
+    /// without repeats. For each change: the request that holds the change itself; the request
+    /// named by each block version it writes, read through the store's projection (a removed
+    /// version reads as its stub, so a sibling removed later by another request is found too);
+    /// and the requests that hold the manifest or a chunk of each blob a written version names in
+    /// its `blob` field. `blobs` keeps each blob's requests across the landings of one read.
+    fn landing_requests(
+        &self,
+        rec: &LandingRecord,
+        blobs: &mut HashMap<Hash, Vec<Hash>>,
+    ) -> Result<Vec<Hash>, RdyError> {
+        let mut found: BTreeSet<Hash> = BTreeSet::new();
+        for c in &rec.changes {
+            if let Some(request) = self.reader.redaction_of(kinds::CHANGE, c)? {
+                found.insert(request);
+            }
+            let change = match self.reader.change(c) {
+                Ok(change) => change,
+                // a removed change that no residue reads: its request is the whole answer
+                Err(StoreError::Redacted { request }) => {
+                    found.insert(request);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            for op in &change.ops {
+                let (Op::Create { block } | Op::Update { block, .. }) = op else {
+                    continue;
+                };
+                if let Some(request) = block.redaction() {
+                    found.insert(request);
+                }
+                let Some(h) = block.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) else {
+                    continue;
+                };
+                let requests = match blobs.entry(h) {
+                    Entry::Occupied(e) => e.into_mut(),
+                    Entry::Vacant(e) => e.insert(self.blob_requests(&h)?),
+                };
+                found.extend(requests.iter().copied());
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
+    /// The requests whose applied masks hold blob `h`'s manifest or any of its chunks, ascending
+    /// and without repeats; none when `h` names no blob.
+    fn blob_requests(&self, h: &Hash) -> Result<Vec<Hash>, RdyError> {
+        let mut found: BTreeSet<Hash> = BTreeSet::new();
+        if let Some(request) = self.reader.redaction_of(kinds::BLOB_MANIFEST, h)? {
+            found.insert(request);
+        }
+        let manifest: BlobManifest = match self.reader.get_typed(kinds::BLOB_MANIFEST, h) {
+            Ok(m) => m,
+            // not a blob, or a selected manifest (its request is already found)
+            Err(StoreError::NotFound(_) | StoreError::Redacted { .. }) => {
+                return Ok(found.into_iter().collect());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        for c in &manifest.chunks {
+            if let Some(request) = self.reader.redaction_of(kinds::BLOB_CHUNK, c)? {
+                found.insert(request);
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 
     /// A landing in canon's chain, by full hash or unique prefix of at least 6 hex characters.

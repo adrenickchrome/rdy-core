@@ -39,10 +39,17 @@ pub struct Context {
     /// trk1: the block type's tracking fields, ascending; absent when it has none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tracking: Vec<String>,
-    /// rdx6: for a stub of removed content, the request that removed it (its full hash); absent
-    /// for every block whose content stays.
+    /// rdx6: for a stub of removed content, the request that removed it; absent for every block
+    /// whose content stays.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub redaction: Option<String>,
+    pub redaction: Option<RedactionRef>,
+}
+
+/// rdx6: the redaction a source block reply names, as `{"id": "<request hash>"}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RedactionRef {
+    /// The request's full hash.
+    pub id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -333,7 +340,9 @@ impl ReadState {
                 .get(&block.block_type)
                 .map(|t| t.tracking.iter().cloned().collect())
                 .unwrap_or_default(),
-            redaction: block.redaction().map(|h| h.to_string()),
+            redaction: block
+                .redaction()
+                .map(|h| RedactionRef { id: h.to_string() }),
         })
     }
 

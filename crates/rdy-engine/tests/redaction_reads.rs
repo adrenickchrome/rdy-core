@@ -329,7 +329,7 @@ fn rdx6_every_scope_keeps_identity_and_returns_a_stub() {
             let ctx = serde_json::to_value(st.context(&scope, id).unwrap()).unwrap();
             assert_eq!(
                 ctx["redaction"],
-                json!(w.request.to_string()),
+                json!({"id": w.request.to_string()}),
                 "{text}: {id}"
             );
             assert_eq!(ctx["body"], json!(CONTENT_REMOVED), "{text}: {id}");
@@ -452,7 +452,7 @@ fn rdx6_source_reads_name_the_redaction_without_source_text() {
     assert_eq!(ctx["parent"], json!(w.section.to_string()));
     assert_eq!(ctx["fields"], json!({}));
     assert_eq!(ctx["body"], json!(CONTENT_REMOVED));
-    assert_eq!(ctx["redaction"], json!(w.request.to_string()));
+    assert_eq!(ctx["redaction"], json!({"id": w.request.to_string()}));
     assert_no_canary("context", &ctx.to_string());
     // history: the original change, version, author, message and landing, and the redaction
     let h = st.history(&Scope::Canon, &w.removed, 1000).unwrap();
@@ -750,4 +750,185 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// A project with an early landing tagged v0.1.0 (a doc that nothing removes), then one write in
+/// view `work` of `ops`, landed and tagged v1.0.0. Returns the open project and the write.
+fn tagged_world(dir: &Path, ops: impl FnOnce(&mut Rdy) -> Value) -> (Rdy, WriteResult) {
+    let mut r = Rdy::init(dir, "rdy-standard").unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "other", "title": "Other", "doc_type": "page"}}]),
+    );
+    land(&mut r, "work", "other");
+    r.tag(&founder(), "v0.1.0", None, Some("first".into()))
+        .unwrap();
+    let ops = ops(&mut r);
+    let w = write(&mut r, "work", ops);
+    land(&mut r, "work", "plan");
+    r.tag(&founder(), "v1.0.0", None, Some("plan".into()))
+        .unwrap();
+    (r, w)
+}
+
+/// Authorizes one request of `targets`, recorded in view `view` at `at_ms`, against the closed
+/// project at `dir`; returns the request's hash.
+fn authorize(dir: &Path, view: &str, at_ms: i64, targets: Vec<RedactTarget>) -> Hash {
+    let fixture = authorized_batch_fixture(
+        &dir.join(".rdy/store"),
+        &[RequestSpec::new(view, targets).at(at_ms)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    fixture.requests[0].request
+}
+
+/// The versions' marker members, by name: (redacted, redactions) as JSON.
+fn markers_of(st: &ReadState) -> BTreeMap<String, (Value, Value)> {
+    st.versions()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            let j = serde_json::to_value(v).unwrap();
+            (
+                v.name.clone(),
+                (
+                    j.get("redacted").cloned().unwrap_or(Value::Null),
+                    j.get("redactions").cloned().unwrap_or(Value::Null),
+                ),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn rdx6_tags_mark_a_blob_only_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut blob = Hash([0; 32]);
+    let (r, w) = tagged_world(dir.path(), |r| {
+        blob = r.store_mut().put_blob(b"secret figure bytes").unwrap();
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "figure", "id": "$f", "parent": "$d", "fields": {"blob": blob.to_string(), "media_type": "application/octet-stream", "alt": "figure"}}
+        ])
+    });
+    let fig = bid(&w.created["$f"]);
+    r.close().unwrap();
+    // the request removes the blob only: no block version and no change
+    let request = authorize(dir.path(), "redact", 40, vec![RedactTarget::Blob(blob)]);
+    let r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    assert!(matches!(
+        st.reader().get_blob(&blob),
+        Err(rdy_store::StoreError::Redacted { request: q }) if q == request
+    ));
+    let c: Hash = w.change.parse().unwrap();
+    assert_eq!(st.reader().redaction_of(kinds::CHANGE, &c).unwrap(), None);
+    assert!(!st.block(&Scope::Canon, &fig).unwrap().is_redacted());
+    let marks = markers_of(&st);
+    assert_eq!(marks["v0.1.0"], (Value::Null, Value::Null));
+    assert_eq!(
+        marks["v1.0.0"],
+        (json!(true), json!([request.to_string()])),
+        "the tag's figure names a removed blob"
+    );
+}
+
+#[test]
+fn rdx6_tags_mark_a_shared_chunk_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut removed, mut shared) = (Hash([0; 32]), Hash([0; 32]));
+    let (r, _) = tagged_world(dir.path(), |r| {
+        let removed_bytes = vec![7u8; 1 << 20];
+        let mut shared_bytes = removed_bytes.clone();
+        shared_bytes.extend_from_slice(b"tail");
+        // the removed blob is in the store, but no block names it
+        removed = r.store_mut().put_blob(&removed_bytes).unwrap();
+        shared = r.store_mut().put_blob(&shared_bytes).unwrap();
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "figure", "id": "$f", "parent": "$d", "fields": {"blob": shared.to_string(), "media_type": "application/octet-stream", "alt": "shared"}}
+        ])
+    });
+    r.close().unwrap();
+    let fixture = authorized_batch_fixture(
+        &dir.path().join(".rdy/store"),
+        &[RequestSpec::new(
+            "redact",
+            vec![RedactTarget::Blob(removed)],
+        )],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let request = fixture.requests[0].request;
+    assert_eq!(
+        fixture.requests[0].draft.request.manifest.shared_blobs,
+        vec![shared],
+        "the figure's blob shares the removed chunk"
+    );
+    let r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    assert_eq!(
+        st.reader()
+            .redaction_of(kinds::BLOB_MANIFEST, &shared)
+            .unwrap(),
+        None,
+        "the figure's own manifest is not selected"
+    );
+    assert!(matches!(
+        st.reader().get_blob(&shared),
+        Err(rdy_store::StoreError::Redacted { request: q }) if q == request
+    ));
+    let marks = markers_of(&st);
+    assert_eq!(marks["v0.1.0"], (Value::Null, Value::Null));
+    assert_eq!(
+        marks["v1.0.0"],
+        (json!(true), json!([request.to_string()])),
+        "the tag's figure names a blob that lost a shared chunk"
+    );
+}
+
+#[test]
+fn rdx6_tags_list_every_sibling_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, w) = tagged_world(dir.path(), |_| {
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$a", "parent": "$d", "body": "CANARY a."},
+            {"op": "create", "type": "prose", "id": "$b", "parent": "$d", "body": "CANARY b."}
+        ])
+    });
+    let (a, b) = (bid(&w.created["$a"]), bid(&w.created["$b"]));
+    r.close().unwrap();
+    // two removals, one after the other, of two blocks one change wrote
+    let r1 = authorize(
+        dir.path(),
+        "redact-a",
+        40,
+        vec![RedactTarget::AllVersions(a.clone())],
+    );
+    let r2 = authorize(
+        dir.path(),
+        "redact-b",
+        50,
+        vec![RedactTarget::AllVersions(b.clone())],
+    );
+    let r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    assert_eq!(st.block(&Scope::Canon, &a).unwrap().redaction(), Some(r1));
+    assert_eq!(st.block(&Scope::Canon, &b).unwrap().redaction(), Some(r2));
+    // the change's own mask names one request only
+    let c: Hash = w.change.parse().unwrap();
+    assert_eq!(
+        st.reader().redaction_of(kinds::CHANGE, &c).unwrap(),
+        Some(r1)
+    );
+    let mut want = vec![r1.to_string(), r2.to_string()];
+    want.sort();
+    let marks = markers_of(&st);
+    assert_eq!(marks["v0.1.0"], (Value::Null, Value::Null));
+    assert_eq!(
+        marks["v1.0.0"],
+        (json!(true), json!(want)),
+        "both requests that removed the change's blocks"
+    );
 }
