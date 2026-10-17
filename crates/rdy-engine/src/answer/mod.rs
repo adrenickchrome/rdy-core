@@ -56,7 +56,7 @@ use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
 use crate::{Rdy, ReadState, Session};
 use rdy_model::{ActorRun, BlockId, EvidenceKind, Hash};
-use rdy_store::Relay;
+use rdy_store::{Relay, StoreError};
 use relay::{MAX_QUOTE, RelayInput, relayed};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -159,6 +159,12 @@ impl Rdy {
     /// own card hash (`card_hashes`, one a ref; none for a local answer) and with the same relay.
     /// Each answer is its own record (p-E975A). It stops at the first refusal: the error's
     /// `corrected` then lists, under `done`, the answers given before it.
+    ///
+    /// Content removal is never approved in a batch (D-CC90E: "never under a policy"). Before it
+    /// answers anything, the call reads every ref of `refs` in the queue; if any names an item
+    /// that carries a removal request, the whole call is `E_REDACTION_HUMAN`, with that item's
+    /// card in `corrected`, and nothing is answered or landed, wherever the ref stands in the
+    /// list.
     pub fn answer_all_recommended(
         &mut self,
         s: &Session,
@@ -179,6 +185,17 @@ impl Rdy {
             ));
         }
         let by = answerer(s, person, &relay)?;
+        let removal = self
+            .read()
+            .eligible(&PendingQuery {
+                person: person.to_string(),
+                session_ref: None,
+                max_tokens: CARD_MAX_TOKENS,
+            })?
+            .removal_among(refs)?;
+        if let Some(item) = removal {
+            return Err(RdyError::from(StoreError::RedactionHuman).with_corrected(card_of(&item)));
+        }
         let mut done: Vec<AnswerInfo> = vec![];
         for (n, r) in refs.iter().enumerate() {
             let shown = card_hashes.get(n).map(String::as_str);
@@ -275,7 +292,7 @@ fn bind(
         session_ref: None,
         max_tokens: CARD_MAX_TOKENS,
     })?;
-    let cards = q.items_of(r);
+    let cards = q.items_of(r)?;
     let Some(first) = cards.first() else {
         return Err(gone(st, &q, r)?);
     };
@@ -389,7 +406,7 @@ fn gone(st: &ReadState, q: &Eligible, r: &str) -> Result<RdyError, RdyError> {
     if let Some(n) = q.not_ready.iter().find(|n| n.r#ref == r) {
         e.issues.clone_from(&n.issues);
     }
-    Ok(match fresh(q, r) {
+    Ok(match fresh(q, r)? {
         Some(i) => e.with_corrected(card_of(&i)),
         None => e,
     })
@@ -397,7 +414,7 @@ fn gone(st: &ReadState, q: &Eligible, r: &str) -> Result<RdyError, RdyError> {
 
 /// The item of the queue that stands where `r` stood: the same proposal, decision or question,
 /// at another version (the ref up to its `@`).
-fn fresh(q: &Eligible, r: &str) -> Option<Item> {
+fn fresh(q: &Eligible, r: &str) -> Result<Option<Item>, RdyError> {
     let key = match r.rfind('@') {
         Some(at) => r[..=at].to_string(),
         None => format!("{r}@"),

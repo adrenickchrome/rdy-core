@@ -30,6 +30,16 @@
 //! item, ref `advice:P-x@n` (D-WMCFW). [`super::tensions`] builds it, with the `resolve` item of
 //! each blocking tension a person or a reviewer must dismiss (D-562QR).
 //!
+//! # Content removal (D-CC90E, D-6B1W1)
+//!
+//! A change of the version that carries a removal request (`redaction_for_carrier`) puts one
+//! [`RemovalCard`] on the version's `approve` item for each request, by request hash, read from
+//! the request record: its report hash is the hash of the complete manifest the request binds.
+//! The approve option adds the line that approved removal cannot be undone. Such an item is
+//! always answered on its own: a batch of recommended answers refuses it
+//! (`Rdy::answer_all_recommended`). A card whose mandatory removal lines do not fit the budget is
+//! `E_REDACTION_BUDGET` for the queue, never a card that hides them.
+//!
 //! # Questions and snoozes
 //!
 //! Each open question in canon that carries authored options is an `answer` item of its own
@@ -59,14 +69,16 @@
 //! item, its exceptions by ref, then its advice); then the items that stand alone (questions);
 //! each kind by `raised_at`, oldest first; then by ref. At most [`PENDING_ITEMS_MAX`] items are
 //! listed, whole batches only; `omitted` counts the rest.
-use super::card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render};
-use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, age};
+use super::card::{
+    CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
+};
+use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, RemovalCard, age};
 use super::questions::question_items;
 use super::snooze::hide_snoozed;
 use super::tensions::tension_items;
 use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
-use crate::error::{E_VALIDATION, RdyError};
+use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, landing_readiness, open_proposals};
 use crate::read_state::Built;
 use crate::session::{now_ms, rfc3339};
@@ -74,8 +86,10 @@ use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tens
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
 use rdy_model::decision::{self, DecisionStatus, REVOKES, SUPERSEDES};
-use rdy_model::{AnswerAct, Block, BlockId, Change, Op, Proposal};
+use rdy_model::redaction::record_buffer;
+use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Op, Proposal};
 use rdy_schema::{Issue, Severity};
+use rdy_store::redaction::limit;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -143,7 +157,7 @@ impl Eligible {
     /// Each item of ref `r`, its card whole (a decision version beside two batches has two).
     /// Final review fix round 1 (R2): the answer binds here, so neither the cap nor a snooze
     /// hides an item from it.
-    pub(crate) fn items_of(&self, r: &str) -> Vec<Item> {
+    pub(crate) fn items_of(&self, r: &str) -> Result<Vec<Item>, RdyError> {
         self.items()
             .filter(|i| i.r#ref == r)
             .map(|i| finish(i.clone(), CARD_MAX_TOKENS))
@@ -151,10 +165,22 @@ impl Eligible {
     }
 
     /// The first item whose ref starts with `key`, its card whole.
-    pub(crate) fn first_with_prefix(&self, key: &str) -> Option<Item> {
+    pub(crate) fn first_with_prefix(&self, key: &str) -> Result<Option<Item>, RdyError> {
         self.items()
             .find(|i| i.r#ref.starts_with(key))
             .map(|i| finish(i.clone(), CARD_MAX_TOKENS))
+            .transpose()
+    }
+
+    /// The first item named in `refs`, in their order, that carries a removal request, its card
+    /// whole. Reads only: an answer to many refs asks it before it writes anything.
+    pub(crate) fn removal_among(&self, refs: &[String]) -> Result<Option<Item>, RdyError> {
+        for r in refs {
+            if let Some(i) = self.items().find(|i| &i.r#ref == r && i.removal.is_some()) {
+                return finish(i.clone(), CARD_MAX_TOKENS).map(Some);
+            }
+        }
+        Ok(None)
     }
 
     fn items(&self) -> impl Iterator<Item = &Item> {
@@ -181,7 +207,9 @@ impl ReadState {
                 omitted += shown.len();
                 continue;
             }
-            items.extend(shown.into_iter().map(|i| finish(i, max)));
+            for i in shown {
+                items.push(finish(i, max)?);
+            }
         }
         Ok(Pending {
             items,
@@ -279,7 +307,7 @@ pub(crate) fn approval_holds(st: &ReadState, pref: &ProposalRef) -> Result<Holds
     let mut open = vec![];
     for item in v.exception_items(now_ms()) {
         if !answered(st, &item.r#ref, AnswerAct::Confirm)? {
-            open.push(finish(item, CARD_DEFAULT_TOKENS));
+            open.push(finish(item, CARD_DEFAULT_TOKENS)?);
         }
     }
     Ok(Holds {
@@ -296,11 +324,56 @@ pub(super) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<boo
         .is_some_and(|(_, a)| a.act == act))
 }
 
-/// `item` with its card cut to `max_tokens` and its card's hash (at full size, O7).
-fn finish(mut item: Item, max_tokens: usize) -> Item {
-    item.card = render(&item, max_tokens);
+/// `item` with its card cut to `max_tokens` and its card's hash (at full size, O7). A card whose
+/// mandatory removal lines do not fit is `E_REDACTION_BUDGET` ([`render_checked`]).
+fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
+    item.card = render_checked(&item, max_tokens)?;
     item.card_hash = card_hash(&item).to_string();
-    item
+    Ok(item)
+}
+
+/// The removal card of each request that a change of `changes` carries, by request hash; None
+/// when no change carries one. Each card is read from the request record: the report hash is the
+/// hash of the complete manifest the request binds, never of a shortened presentation.
+fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<Option<Vec<RemovalCard>>, RdyError> {
+    let reader = st.reader();
+    let mut cards: Vec<RemovalCard> = vec![];
+    let mut buf: Option<Vec<u8>> = None;
+    for h in changes {
+        let Some(request) = reader.redaction_for_carrier(h)? else {
+            continue;
+        };
+        let req = reader.redaction_request(&request)?;
+        let buf = match &mut buf {
+            Some(b) => b,
+            None => buf.insert(record_buffer().map_err(|_| redaction_limit(limit::RECORD))?),
+        };
+        let m = &req.manifest;
+        let report = m
+            .report_hash(buf)
+            .map_err(|_| redaction_limit(limit::RECORD))?;
+        let bytes = m
+            .spans
+            .iter()
+            .try_fold(0u64, |n, s| n.checked_add(u64::from(s.len)))
+            .ok_or_else(|| redaction_limit(limit::BYTES))?;
+        let n = |len: usize| u64::try_from(len).map_err(|_| redaction_limit(limit::SELECTED));
+        cards.push(RemovalCard {
+            request,
+            report,
+            versions: n(m.versions.len())?,
+            blobs: n(m.blobs.len())?,
+            shared_blobs: n(m.shared_blobs.len())?,
+            payloads: u64::try_from(m.spans.len()).map_err(|_| redaction_limit(limit::FRAMES))?,
+            bytes,
+            reason_class: req.reason_class,
+            reason: req.reason,
+            quarantine: !m.quarantine.is_empty(),
+        });
+    }
+    cards.sort_by_key(|c| c.request);
+    cards.dedup_by_key(|c| c.request);
+    Ok((!cards.is_empty()).then_some(cards))
 }
 
 /// One batch and the items beside it, or one item on its own.
@@ -359,6 +432,8 @@ struct Version {
     /// The version's open tensions: its landing form and the in-flight forms of its changes, as
     /// a proposal lists them, by id.
     tensions: Vec<Arc<Tension>>,
+    /// The removal requests the version's changes carry, by request hash.
+    removal: Option<Vec<RemovalCard>>,
 }
 
 impl Version {
@@ -369,6 +444,7 @@ impl Version {
             .flat_map(|c| c.ops.iter().map(|o| o.block_id().clone()))
             .collect();
         let tensions = open_tensions(st, &p)?;
+        let removal = removal_cards(st, &p.changes)?;
         // canon's graph first, so the prospective canon carries it instead of building another
         let canon_g = st.graph(&Scope::Canon)?;
         let built = candidate_build(st, &changes)?;
@@ -422,6 +498,7 @@ impl Version {
             next,
             decisions,
             tensions,
+            removal,
         })
     }
 
@@ -508,13 +585,18 @@ impl Version {
             .iter()
             .map(|d| format!("{}  {}", d.block.id, d.title()))
             .collect();
+        let mut approve = option(
+            "approve",
+            &approve,
+            "Lands the proposal in canon.",
+            Some(summary.unwrap_or_default()),
+        );
+        if self.removal.is_some() {
+            approve.consequences.push(REMOVAL_IRREVERSIBLE.to_string());
+        }
+        it.removal.clone_from(&self.removal);
         it.options = vec![
-            option(
-                "approve",
-                &approve,
-                "Lands the proposal in canon.",
-                Some(summary.unwrap_or_default()),
-            ),
+            approve,
             option(
                 "reject",
                 "Reject",
@@ -848,6 +930,7 @@ pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
         exception: None,
         card: String::new(),
         card_hash: String::new(),
+        removal: None,
     }
 }
 
@@ -901,6 +984,7 @@ fn name_of<T: Serialize>(v: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pending::card::render;
     use crate::{DecisionInput, Rdy, Session, WriteRequest};
     use rdy_model::{Answer, Role};
     use serde_json::json;
