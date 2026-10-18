@@ -581,7 +581,8 @@ fn resolve_in(
         .filter_map(|id| Some((id.clone(), m.get(id)?.clone())))
         .collect();
     let sel = Materialized::build(StateSnapshot { blocks: versions }, blocks);
-    let references = references::scan(sel.iter(), m, &keep, profile.audience, l)?;
+    let chosen = profile.id.as_ref().and_then(|id| m.get(id));
+    let references = references::scan(sel.iter(), chosen, m, &keep, profile.audience, l)?;
     let mut edges = 0usize;
     for b in sel.iter() {
         edges += rdy_graph::edges_of(b).len() + usize::from(b.parent.is_some());

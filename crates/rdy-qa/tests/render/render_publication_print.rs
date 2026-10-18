@@ -815,6 +815,117 @@ fn pub8_print_reference_words_match_the_site() {
     }
 }
 
+/// Final fix round 1: a figure's media type is text the page shows (a download's meta) and
+/// passes on (the asset's type): a reference in it reads through the selection in the site and
+/// every print format, the PDF's drawn text included, and never reaches a file name, an embedded
+/// data URI or a warning. The source reads it as before.
+#[test]
+fn pub8_figure_media_type_reads_references_through_the_selection() {
+    let mut w = world();
+    let (cs, sib) = (w.id("$cs"), w.id("$sib"));
+    let file_bytes = b"media probe file bytes".to_vec();
+    let file_blob = w.r.store_mut().put_blob(&file_bytes).unwrap();
+    let image_blob = w.r.store_mut().put_blob(&png(2, 2, [9, 9, 9])).unwrap();
+    put(
+        &mut w.r,
+        "w2",
+        json!([
+            {"op": "create", "type": "figure", "parent": cs, "fields": {"blob": file_blob.to_string(), "media_type": format!("application/{{{{{sib}}}}}"), "alt": "Media file probe"}},
+            {"op": "create", "type": "figure", "parent": cs, "fields": {"blob": image_blob.to_string(), "media_type": format!("image/{{{{{sib}}}}}"), "alt": "Media image probe"}},
+            {"op": "create", "type": "figure", "parent": cs, "fields": {"blob": file_blob.to_string(), "media_type": format!("application/x-{{{{{sib}|Shown media words}}}}; v=1"), "alt": "Media words probe"}}
+        ]),
+    );
+    land(&mut w.r, "w2").unwrap();
+    let st = w.r.read();
+    // the org check counts each media type's reference; the public profile refuses
+    let res = rdy_engine::publication::resolve(&st, &Scope::Canon, "orgp").unwrap();
+    let media_rows = res
+        .references
+        .rows
+        .iter()
+        .filter(|r| r.location == "/fields/media_type")
+        .count();
+    assert_eq!(media_rows, 3, "{:?}", res.references.rows);
+    let Err(e) = build_profile_site(&st, "canon", "pubp") else {
+        panic!("the public profile must refuse");
+    };
+    assert_eq!(e.code, E_PUBLICATION_REFERENCE);
+
+    let size = format!("{} bytes", file_bytes.len());
+    let file_meta = format!("({UNAVAILABLE}, {size})");
+    let words_meta = format!("(X-Shown media words, {size})");
+    // the site
+    let site = build_profile_site(&st, "canon", "orgp").unwrap();
+    let chosen = String::from_utf8(site.files["area/chosen.html"].clone()).unwrap();
+    assert!(
+        chosen.contains(&format!(
+            "download>Media file probe</a> <span class=\"meta\">{file_meta}</span>"
+        )),
+        "{chosen}"
+    );
+    assert!(
+        chosen.contains(&format!(
+            "download>Media words probe</a> <span class=\"meta\">{words_meta}</span>"
+        )),
+        "{chosen}"
+    );
+    assert!(chosen.contains("alt=\"Media image probe\""), "{chosen}");
+    assert!(!chosen.contains("{{"), "{chosen}");
+    for word in [sib.as_str(), &sib.to_uppercase(), "SIBCANARY"] {
+        let held: Vec<&String> = site
+            .files
+            .iter()
+            .filter(|(p, b)| {
+                let w = word.as_bytes();
+                p.as_bytes().windows(w.len()).any(|x| x == w) || b.windows(w.len()).any(|x| x == w)
+            })
+            .map(|(p, _)| p)
+            .collect();
+        assert!(held.is_empty(), "{word} in {held:?}");
+    }
+    // every print format and the PDF's drawn text
+    let p = model(&st, "canon", "orgp");
+    let out = tempfile::tempdir().unwrap();
+    let all = export_all(&st, "canon", "orgp", out.path());
+    for word in [sib.as_str(), &sib.to_uppercase(), "SIBCANARY"] {
+        assert_absent(&p, &all, word);
+        for (short, o) in &all {
+            let warned = format!("{:?}", o.summary);
+            assert!(
+                !warned.contains(word),
+                "{word} in the {short} summary: {warned}"
+            );
+        }
+    }
+    let words = pdf_words(&p);
+    let html = text(&all["html"], "out.html");
+    let md = text(&all["md"], "area/chosen.md");
+    let mkdocs = text(&all["mkdocs"], "docs/area/chosen.md");
+    for want in [
+        format!("Media file probe {file_meta}"),
+        format!("Media words probe {words_meta}"),
+    ] {
+        assert!(words.contains(&want), "{want} in {words}");
+        assert!(html.contains(&format!(">{want}</p>")), "{want} in {html}");
+        assert!(md.lines().any(|l| l == want), "{want} in {md}");
+        assert!(mkdocs.lines().any(|l| l == want), "{want} in {mkdocs}");
+    }
+    // the image's embedded type carries none of the media type's reference
+    assert!(
+        html.contains("<img src=\"data:application/octet-stream;base64,"),
+        "{html}"
+    );
+
+    // the source reads the media type as before: the subtype upper-cased, token and all
+    let full = rdy_render::build_site(&st, &Scope::Canon, rdy_render::Mode::Static).unwrap();
+    let source = String::from_utf8(full.files["area/chosen.html"].clone()).unwrap();
+    let token = format!("{{{{{}}}}}", sib.to_uppercase());
+    assert!(
+        source.contains(&format!("<span class=\"meta\">({token}, {size})</span>")),
+        "{source}"
+    );
+}
+
 // --- 5. refusal and path rules -----------------------------------------------------------------
 
 /// `print::export_profile` of `profile` at `scope` to `out`, as `format`.

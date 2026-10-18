@@ -812,6 +812,93 @@ fn pub6_profile_metadata_reads_references_through_the_selection() {
     assert_eq!(holding(&full, "Author words"), Vec::<String>::new());
 }
 
+/// Final fix round 1: the chosen profile's title and description count in the check (the
+/// report, the public refusal and the org warning) though the profile's home doc is excluded;
+/// the home doc stays out of the selection.
+#[test]
+fn pub6_profile_metadata_references_count_in_the_check() {
+    let (dir, mut r) = tiny();
+    let ids = put_land(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$hid", "fields": {"name": "hidden", "title": "HIDDENCANARY doc", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$hp", "parent": "$hid", "body": "HIDDENCANARY prose."},
+            {"op": "create", "type": "doc", "id": "$pub", "fields": {"name": "shown", "title": "Shown page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$pub", "body": "Shown words."}
+        ]),
+    );
+    let (hid, shown) = (ids["$hid"].to_string(), &ids["$pub"]);
+    let admin = put(
+        &mut r,
+        "admin",
+        json!([{"op": "create", "type": "doc", "id": "$admin",
+            "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}]),
+    )["$admin"]
+        .clone();
+    let mut public = profile_op("metap", "public", &admin, &[shown]);
+    public["fields"]["title"] = json!(format!("Metadata {{{{{hid}}}}}"));
+    let mut org = profile_op("metao", "org", &admin, &[shown]);
+    org["fields"]["description"] = json!(format!("About {{{{{hid}|Author words}}}}."));
+    let clean = profile_op("cleanp", "public", &admin, &[shown]);
+    let pids = put(&mut r, "admin", json!([public, org, clean]));
+    land(&mut r, "admin").expect("land the profiles");
+    let st = r.read();
+    for (key, field, status) in [
+        ("metap", "/fields/title", "blocked"),
+        ("metao", "/fields/description", "warning"),
+    ] {
+        let v = rdy_engine::publication::check(&st, key, Some("canon"), None).unwrap();
+        let refs = &v["references"];
+        assert_eq!(refs["status"], status, "{key}: {v}");
+        assert_eq!(
+            (&refs["excluded"], &refs["missing"], &refs["total"]),
+            (&json!(1), &json!(0), &json!(1)),
+            "{key}: {v}"
+        );
+        let text = v.to_string();
+        assert!(text.contains(field), "{key}: {text}");
+        assert!(
+            text.contains(&pids[&format!("${key}")].to_string()),
+            "{key}: {text}"
+        );
+        assert!(!text.contains(&admin.to_string()), "{key}: {text}");
+        for leak in ["HIDDENCANARY", "Author words", "Admin page"] {
+            assert!(!text.contains(leak), "{leak} in {key}: {text}");
+        }
+    }
+    let v = rdy_engine::publication::check(&st, "cleanp", Some("canon"), None).unwrap();
+    assert_eq!(v["references"]["status"], "clear", "{v}");
+    // the public profile refuses before anything is written; the org profile warns
+    let out = dir.path().join("metap-site");
+    let e = render_profile_site(&st, "canon", "metap", &out).unwrap_err();
+    assert_eq!(e.code, E_PUBLICATION_REFERENCE, "{e}");
+    assert!(!out.exists());
+    let e = rdy_render::print::export_profile(
+        &st,
+        "canon",
+        "metap",
+        &dir.path().join("metap.html"),
+        rdy_render::print::Format::Html,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_PUBLICATION_REFERENCE, "{e}");
+    assert!(!dir.path().join("metap.html").exists());
+    let s = site(&st, "canon", "metao");
+    assert_absent(&s, "HIDDENCANARY");
+    assert!(page(&s, "index.html").contains("About Author words."));
+    let summary = render_profile_site(&st, "canon", "metao", &dir.path().join("metao")).unwrap();
+    assert!(
+        summary
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Org profile has 1 references outside its selection.")),
+        "{:?}",
+        summary.warnings
+    );
+}
+
 /// Fix round 1: a partial supersession's part reads its references through the selection, with
 /// the author's display words kept; the source trail keeps its existing text.
 #[test]

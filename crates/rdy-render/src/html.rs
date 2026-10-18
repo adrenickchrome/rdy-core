@@ -173,14 +173,80 @@ fn with_refs(text: &str, mode: RefMode, r: &dyn Fn(&RefSpan) -> String) -> Strin
 
 /// A file's media type as a reader names it: `PDF`, `Text`, `Image`, else the subtype upper-cased.
 fn human_media(media: &str) -> String {
-    let (kind, sub) = media.split_once('/').unwrap_or((media, ""));
-    let sub = sub.split(';').next().unwrap_or("").trim();
-    match (kind.trim(), sub) {
+    media_name(media, &[], &|_| String::new())
+}
+
+/// A figure's media type as its page shows it ([`human_media`]). For a named profile, each
+/// reference in it reads as its words ([`diagram_label`]) exactly, never its token: only the
+/// author's own text is upper-cased. A source output shows it as before.
+fn media_words(media: &str, ctx: &BlockCtx) -> String {
+    if !reads_ref_words(media, ctx) {
+        return human_media(media);
+    }
+    let spans = ref_spans(media, RefMode::Strict);
+    media_name(media, &spans, &|span| {
+        diagram_label(span, ctx.link, ctx.unavailable)
+    })
+}
+
+/// [`human_media`] of `media`, whose references `spans` read as `words`: the type and subtype
+/// split at the first `/` and the parameters at the first `;` outside a reference, so no
+/// reference is cut or upper-cased.
+fn media_name(media: &str, spans: &[RefSpan], words: &dyn Fn(&RefSpan) -> String) -> String {
+    let outside = |i: usize| !spans.iter().any(|s| s.range.contains(&i));
+    let find = |from: usize, c: char| {
+        media[from..]
+            .char_indices()
+            .find(|(i, x)| *x == c && outside(from + i))
+            .map(|(i, _)| from + i)
+    };
+    let (kind, sub) = match find(0, '/') {
+        Some(slash) => {
+            let end = find(slash + 1, ';').unwrap_or(media.len());
+            (&media[..slash], slash + 1..end)
+        }
+        None => (media, media.len()..media.len()),
+    };
+    // the subtype's own range, without its surrounding whitespace
+    let text = &media[sub.clone()];
+    let start = sub.start + (text.len() - text.trim_start().len());
+    let end = sub.end - (text.len() - text.trim_end().len());
+    match (kind.trim(), &media[start..end.max(start)]) {
         (_, "pdf") => "PDF".into(),
         ("text", _) => "Text".into(),
         ("image", _) => "Image".into(),
         (_, "") => "File".into(),
-        (_, s) => s.to_uppercase(),
+        _ => {
+            // the author's own text: as written, upper-cased (with the rdy escape read when the
+            // text holds references, as their words are)
+            let own = |t: &str| match spans.is_empty() {
+                true => t.to_uppercase(),
+                false => inline::unescape_braces(t).to_uppercase(),
+            };
+            let mut out = String::new();
+            let mut last = start;
+            for span in spans
+                .iter()
+                .filter(|s| s.range.start >= start && s.range.end <= end)
+            {
+                out.push_str(&own(&media[last..span.range.start]));
+                out.push_str(&words(span));
+                last = span.range.end;
+            }
+            out.push_str(&own(&media[last..end]));
+            out
+        }
+    }
+}
+
+/// The media type a figure's asset carries (its file's extension, a print's embedded type):
+/// as written, except that a named profile's media type holding a reference carries none of
+/// it, only the neutral `application/octet-stream`.
+fn asset_media<'m>(media: &'m str, ctx: &BlockCtx) -> &'m str {
+    if reads_ref_words(media, ctx) {
+        "application/octet-stream"
+    } else {
+        media
     }
 }
 
@@ -206,13 +272,13 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let image = media.starts_with("image/");
     match h.parse::<Hash>() {
         Ok(hash) if (ctx.present)(&hash) => {
-            let src = escape(&(ctx.asset_href)(&hash, media));
+            let src = escape(&(ctx.asset_href)(&hash, asset_media(media, ctx)));
             if image {
                 format!(
                     "<figure class=\"figure\"><img src=\"{src}\" alt=\"{alt}\" loading=\"lazy\"><figcaption>{caption}</figcaption></figure>"
                 )
             } else {
-                let mut meta = human_media(media);
+                let mut meta = media_words(media, ctx);
                 if let Some(n) = (ctx.blob_len)(&hash) {
                     let _ = write!(meta, ", {}", human_size(n));
                 }
@@ -689,6 +755,30 @@ mod tests {
         assert_eq!(human_size(512), "512 bytes");
         assert_eq!(human_size(12 * 1024), "12 KB");
         assert_eq!(human_size(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
+    }
+
+    /// Final fix round 1: a named profile's media type reads each reference as its words, never
+    /// cut at a `/` or `;` inside it and never upper-cased; the source's reading is unchanged.
+    #[test]
+    fn pub_media_type_references_read_as_words() {
+        let words = |m: &str| {
+            let spans = ref_spans(m, RefMode::Strict);
+            media_name(m, &spans, &|s| {
+                s.display
+                    .clone()
+                    .unwrap_or_else(|| "unavailable reference".into())
+            })
+        };
+        assert_eq!(words("application/{{d-2ZGWX}}"), "unavailable reference");
+        assert_eq!(words("application/x-{{d-2ZGWX|a/b; c}}; v=1"), "X-a/b; c");
+        assert_eq!(words(" application / zip ; v={{d-2ZGWX}}"), "ZIP");
+        assert_eq!(words("{{d-2ZGWX}}"), "File");
+        assert_eq!(words("image/{{d-2ZGWX}}"), "Image");
+        assert_eq!(words("application/{{d-2ZGWX|pdf}}"), "pdf");
+        assert_eq!(words("application/   "), "File");
+        // the source reads the token as written, upper-cased, as before
+        assert_eq!(human_media("application/{{d-2ZGWX}}"), "{{D-2ZGWX}}");
+        assert_eq!(human_media("application/x-zip; v=1"), "X-ZIP");
     }
 
     #[test]

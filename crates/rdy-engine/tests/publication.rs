@@ -832,6 +832,162 @@ fn pub4_reference_policy_has_exact_text_and_no_target_labels() {
     assert!(!e.message.contains("d-DR0P1") && !w.message.contains("d-DR0P1"));
 }
 
+/// Final fix round 1: the chosen profile's title and description become the output's own
+/// metadata, so their references count in the check though the profile's home doc is outside
+/// the selection: excluded and missing targets, both fields, both audiences. A profile inside
+/// its own selection counts once, and another profile's metadata never counts.
+#[test]
+fn pub4_chosen_profile_metadata_references_are_checked() {
+    let (_dir, r) = project();
+    let st = r.read();
+    let meta = |b: Block, title: &str, description: Option<&str>| {
+        let mut b = with_field(b, "title", s(title));
+        match description {
+            Some(d) => b.fields.insert("description".into(), s(d)),
+            None => b.fields.remove("description"),
+        };
+        b
+    };
+    let both_fields = (
+        "Metadata {{d-DR0P1}}",
+        Some("About {{d-M1SS1}} and {{d-DR0P1|Shown words}}."),
+    );
+    let blocks = vec![
+        named(blk("d-ADM1N", "doc", None, "a"), "admin"),
+        // the home doc d-ADM1N is outside every selection below
+        meta(
+            profile_block("pf-PBC01", "d-ADM1N", "pubmeta", "public", &["d-KEEP1"]),
+            both_fields.0,
+            both_fields.1,
+        ),
+        meta(
+            profile_block("pf-0RG01", "d-ADM1N", "orgmeta", "org", &["d-KEEP1"]),
+            both_fields.0,
+            both_fields.1,
+        ),
+        meta(
+            profile_block("pf-T1TXE", "d-ADM1N", "titleonly", "public", &["d-KEEP1"]),
+            "Own home {{d-ADM1N}}",
+            None,
+        ),
+        meta(
+            profile_block("pf-DESC1", "d-ADM1N", "desconly", "org", &["d-KEEP1"]),
+            "Clean title",
+            Some("Gone {{d-M1SS1}}"),
+        ),
+        meta(
+            profile_block("pf-CXEAN", "d-ADM1N", "cleanmeta", "public", &["d-KEEP1"]),
+            "Clean title",
+            Some("Clean description."),
+        ),
+        named(blk("d-KEEP1", "doc", None, "b"), "keep"),
+        with_body(blk("p-KEEP1", "prose", Some("d-KEEP1"), "a"), "Clean."),
+        // a profile inside its own selection: its fields are scanned once, as a selected block's
+        named(blk("d-SEXF1", "doc", None, "bb"), "self"),
+        meta(
+            profile_block("pf-1NSXF", "d-SEXF1", "inself", "public", &["d-SEXF1"]),
+            "Self {{d-DR0P1}}",
+            Some("Self {{d-M1SS1}}"),
+        ),
+        named(blk("d-DR0P1", "doc", None, "c"), "drop"),
+        with_body(blk("p-DR0P1", "prose", Some("d-DR0P1"), "a"), "Hidden."),
+    ];
+    let m = synth(blocks.clone());
+    use Classification::{Excluded, Missing};
+    let both = vec![
+        row("pf-PBC01", "/fields/description", "d-DR0P1", Excluded, 1),
+        row("pf-PBC01", "/fields/description", "d-M1SS1", Missing, 1),
+        row("pf-PBC01", "/fields/title", "d-DR0P1", Excluded, 1),
+    ];
+    // public: refused
+    let public = publication::resolve_in_for_tests(&st, &m, "pubmeta").unwrap();
+    assert_eq!(public.references.rows, both);
+    assert_eq!(
+        (
+            public.references.excluded_count,
+            public.references.missing_count,
+            public.references.blocked_count
+        ),
+        (2, 1, 3)
+    );
+    assert_eq!(public.references.status, CheckStatus::Blocked);
+    assert_eq!(
+        public.require_output().unwrap_err().message,
+        "Public profile has 3 references outside its selection."
+    );
+    // neither the home doc nor the profile joins the selection
+    assert!(!entry_ids(&public).contains(&bid("d-ADM1N")));
+    assert!(!entry_ids(&public).contains(&bid("pf-PBC01")));
+    // org: a warning on the same occurrences
+    let org = publication::resolve_in_for_tests(&st, &m, "orgmeta").unwrap();
+    let org_rows: Vec<ReferenceRow> = both
+        .iter()
+        .map(|r| ReferenceRow {
+            source: bid("pf-0RG01"),
+            ..r.clone()
+        })
+        .collect();
+    assert_eq!(org.references.rows, org_rows);
+    assert_eq!(org.references.status, CheckStatus::Warning);
+    assert!(org.require_output().is_ok());
+    assert_eq!(
+        org.references.warning().unwrap().message,
+        "Org profile has 3 references outside its selection."
+    );
+    // each field alone
+    let title = publication::resolve_in_for_tests(&st, &m, "titleonly").unwrap();
+    assert_eq!(
+        title.references.rows,
+        vec![row("pf-T1TXE", "/fields/title", "d-ADM1N", Excluded, 1)]
+    );
+    assert_eq!(title.references.status, CheckStatus::Blocked);
+    let desc = publication::resolve_in_for_tests(&st, &m, "desconly").unwrap();
+    assert_eq!(
+        desc.references.rows,
+        vec![row(
+            "pf-DESC1",
+            "/fields/description",
+            "d-M1SS1",
+            Missing,
+            1
+        )]
+    );
+    assert_eq!(desc.references.status, CheckStatus::Warning);
+    // clean metadata is clear: another profile's metadata in the same home never counts
+    let clean = publication::resolve_in_for_tests(&st, &m, "cleanmeta").unwrap();
+    assert_eq!(clean.references.status, CheckStatus::Clear);
+    assert!(clean.references.rows.is_empty());
+    // a selected profile: each occurrence once, as a selected block's fields
+    let inself = publication::resolve_in_for_tests(&st, &m, "inself").unwrap();
+    assert!(entry_ids(&inself).contains(&bid("pf-1NSXF")));
+    assert_eq!(
+        inself.references.rows,
+        vec![
+            row("pf-1NSXF", "/fields/description", "d-M1SS1", Missing, 1),
+            row("pf-1NSXF", "/fields/title", "d-DR0P1", Excluded, 1),
+        ]
+    );
+    assert_eq!(inself.references.blocked_count, 2);
+    // the disclosure delta carries the references the metadata gains
+    let before_blocks = blocks
+        .iter()
+        .map(|b| match b.id == bid("pf-PBC01") {
+            true => meta(b.clone(), "Metadata", None),
+            false => b.clone(),
+        })
+        .collect();
+    let before = publication::resolve_in_for_tests(&st, &synth(before_blocks), "pubmeta").unwrap();
+    assert_eq!(before.references.status, CheckStatus::Clear);
+    let d = publication::disclosure_diff(&before, &public).unwrap();
+    assert_eq!(d.new_references, both);
+    assert_eq!(d.new_reference_count, 3);
+    // no target text in the report
+    let shown = format!("{:?} {:?}", public.references, org.references);
+    for leak in ["Hidden", "Shown words", "\"drop\"", "\"admin\""] {
+        assert!(!shown.contains(leak), "{leak} in {shown}");
+    }
+}
+
 #[test]
 fn pub4_selection_hash_tracks_children_assets_paths_and_redaction() {
     let (dir, mut r) = project();
@@ -1156,6 +1312,13 @@ fn pub4_hostile_selection_is_bounded() {
             }
         }
         b.fields.values().for_each(|v| walk(v, &mut texts));
+    }
+    // the chosen profile's title and description are scanned too, though it is not selected
+    let chosen = m.get(&bid("pf-H0ST1")).unwrap();
+    for name in ["title", "description"] {
+        if let Some(FieldValue::Str(x)) = chosen.fields.get(name) {
+            texts.push(x.len() as u64);
+        }
     }
     let longest_text = *texts.iter().max().unwrap();
     let total_text: u64 = texts.iter().sum();

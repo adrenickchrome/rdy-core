@@ -264,6 +264,21 @@ impl Scan<'_> {
         Ok(())
     }
 
+    /// The fields of the chosen profile `b` that become the output's own metadata (its title
+    /// and description), when `b` lies outside the selection; a selected profile's fields are
+    /// already scanned as a selected block's.
+    fn metadata(&mut self, b: &Block) -> Result<(), RdyError> {
+        if b.is_redacted() || self.keep.contains(&b.id) {
+            return Ok(());
+        }
+        for name in METADATA_FIELDS {
+            if let Some(value) = b.fields.get(name) {
+                self.field(b, name, value)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The body, then the fields, then the links of `b`. A removed version's stub holds no
     /// reference.
     fn block(&mut self, b: &Block) -> Result<(), RdyError> {
@@ -287,10 +302,16 @@ impl Scan<'_> {
     }
 }
 
+/// The fields of a chosen profile that its output shows as its own title and description.
+const METADATA_FIELDS: [&str; 2] = ["description", "title"];
+
 /// The reference check of `selected` (the selected blocks, in id order) against `source`, the
-/// whole snapshot, which classifies each target and supplies nothing else.
+/// whole snapshot, which classifies each target and supplies nothing else. `profile` is the
+/// chosen profile's block: its title and description reach the output whether or not its home
+/// doc is selected, so they count once either way (None for the implicit profile).
 pub(crate) fn scan<'a>(
     selected: impl IntoIterator<Item = &'a Block>,
+    profile: Option<&Block>,
     source: &Materialized,
     keep: &BTreeSet<BlockId>,
     audience: Audience,
@@ -307,6 +328,9 @@ pub(crate) fn scan<'a>(
     };
     for b in selected {
         s.block(b)?;
+    }
+    if let Some(b) = profile {
+        s.metadata(b)?;
     }
     let (mut excluded_count, mut missing_count) = (0u64, 0u64);
     let rows: Vec<ReferenceRow> = s
