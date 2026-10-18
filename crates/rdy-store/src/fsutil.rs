@@ -28,10 +28,13 @@ enum ProbeState {
     Running,
 }
 
-/// A stage of a private or settings replacement, after which the test probe runs.
+/// A stage of a private or settings replacement, or of a config edit's new directory, after
+/// which the test probe runs.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivateWriteStage {
+    /// A config edit made a directory, and has not opened it yet (see [`probe_dir_made`]).
+    DirMade,
     /// The temp file exists, with its final mode and no bytes.
     Created,
     /// The bytes are written to the temp file.
@@ -45,7 +48,8 @@ pub enum PrivateWriteStage {
 }
 
 /// Runs `run` with `probe` called after each stage of every private or settings replacement on
-/// this thread (with the temp path, then the target, then the parent directory). A probe error
+/// this thread (with the temp path, then the target, then the parent directory), and after a
+/// config edit makes a directory (with that directory's path). A probe error
 /// stops the replacement as that stage's own failure would, with the same cleanup. The probe is
 /// removed again even if `run` panics. A nested probe panics.
 #[doc(hidden)]
@@ -69,6 +73,14 @@ pub fn with_private_write_probe_for_tests<T>(
     });
     let _off = Off;
     run()
+}
+
+/// Calls this thread's probe, if there is one, with [`PrivateWriteStage::DirMade`] at `path`: a
+/// config edit calls it after it makes the directory `path` and before it opens it. A probe error
+/// is returned, to be handled as a failed open.
+#[doc(hidden)]
+pub fn probe_dir_made(path: &Path) -> io::Result<()> {
+    probe(PrivateWriteStage::DirMade, path)
 }
 
 /// Calls this thread's probe, if there is one, after `stage` at `path`.

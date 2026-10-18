@@ -7,11 +7,11 @@
 //!   0o600 (`private_file`, `make_private_file`, `is_private_file`), private directories of
 //!   mode 0o700 (`create_private_dir`, `make_private_dir`, `is_private_dir`), and the mode
 //!   tests `is_shared_writable` and `is_owner_only`;
-//! - calls in an open directory (`open_dir`, `open_dir_at`, `open_read_at`,
-//!   `create_private_at`, `create_private_dir_at`, `make_private_open_dir`, `remove_file_at`,
-//!   `rename_at`, `is_link_refusal`): each names one entry of a directory handle, so a path
-//!   that is changed after the handle was opened cannot redirect it, and none follows a link
-//!   at that entry.
+//! - calls in an open directory (`open_dir`, `open_dir_at`, `open_dir_handle_at`,
+//!   `open_read_at`, `create_private_at`, `create_private_dir_at`, `make_private_open_dir`,
+//!   `reopen_dir`, `remove_file_at`, `rename_at`, `is_link_refusal`): each names one entry of a
+//!   directory handle, or the handle itself, so a path that is changed after the handle was
+//!   opened cannot redirect it, and none follows a link at that entry.
 //!
 //! Every other store module, and the engine, calls these functions. The daemon's `sys` seam
 //! re-exports the no-follow and privacy calls under the same names.
@@ -146,6 +146,42 @@ pub fn open_dir_at(dir: &File, name: &OsStr) -> io::Result<File> {
     )
 }
 
+/// Opens the directory `name` in the open directory `dir`, never through a link, whatever the
+/// directory's own mode: a read handle when this user may read it, else a search-only handle
+/// (`O_SEARCH` on macOS, which needs the owner's search bit; `O_PATH` on Linux, which needs no
+/// bit). A search-only handle serves only for its metadata, [`make_private_open_dir`] and
+/// [`reopen_dir`]. A link or a non-directory at `name` fails as with [`open_dir_at`].
+#[cfg(unix)]
+pub fn open_dir_handle_at(dir: &File, name: &OsStr) -> io::Result<File> {
+    match open_dir_at(dir, name) {
+        Err(e) if e.raw_os_error() == Some(libc::EACCES) => open_at(
+            dir,
+            name,
+            SEARCH_ONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            0,
+        ),
+        r => r,
+    }
+}
+
+/// The open flag of a directory handle that needs no read permission.
+#[cfg(target_vendor = "apple")]
+const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
+/// The open flag of a directory handle that needs no read permission.
+#[cfg(target_os = "linux")]
+const SEARCH_ONLY: libc::c_int = libc::O_PATH;
+/// Elsewhere only a read handle: the retry fails as the first open did.
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "linux")))]
+const SEARCH_ONLY: libc::c_int = libc::O_RDONLY;
+
+/// A read handle on the very directory that the handle `f` (from [`open_dir_handle_at`])
+/// names, opened through `f` (`openat(f, ".")`), never by path. It fails while the directory's
+/// mode denies this user reading it.
+#[cfg(unix)]
+pub fn reopen_dir(f: &File) -> io::Result<File> {
+    open_at_c(f, c".", libc::O_RDONLY | libc::O_DIRECTORY, 0)
+}
+
 /// Opens `name` in the open directory `dir` for reading, never through a link and without
 /// waiting on a FIFO. The caller judges the kind of file from the handle's metadata. The
 /// handle blocks as usual for later calls, such as `File::lock`.
@@ -186,10 +222,19 @@ pub fn create_private_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
     cvt(unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) }).map(|_| ())
 }
 
-/// Sets the open directory `f` to mode 0o700.
+/// Sets the open directory `f` to mode 0o700, through the handle, which may be a search-only
+/// one from [`open_dir_handle_at`].
 #[cfg(unix)]
 pub fn make_private_open_dir(f: &File) -> io::Result<()> {
-    f.set_permissions(fs::Permissions::from_mode(0o700))
+    let r = f.set_permissions(fs::Permissions::from_mode(0o700));
+    // Linux refuses fchmod on an O_PATH handle (EBADF); the handle's /proc link names that very
+    // directory, whatever its path is now
+    #[cfg(target_os = "linux")]
+    if matches!(&r, Err(e) if e.raw_os_error() == Some(libc::EBADF)) {
+        let link = format!("/proc/self/fd/{}", f.as_raw_fd());
+        return fs::set_permissions(link, fs::Permissions::from_mode(0o700));
+    }
+    r
 }
 
 /// Removes the entry `name` (not a directory) from the open directory `dir`. A link is
@@ -232,11 +277,21 @@ fn entry_name(name: &OsStr) -> io::Result<std::ffi::CString> {
     std::ffi::CString::new(b).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
+/// `openat(dir, name, flags | O_CLOEXEC, mode)`, as a `File`, for one entry name.
+#[cfg(unix)]
+fn open_at(dir: &File, name: &OsStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
+    open_at_c(dir, &entry_name(name)?, flags, mode)
+}
+
 /// `openat(dir, name, flags | O_CLOEXEC, mode)`, as a `File`.
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn open_at(dir: &File, name: &OsStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
-    let name = entry_name(name)?;
+fn open_at_c(
+    dir: &File,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> io::Result<File> {
     // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string. The mode
     // is passed as the variadic argument `openat` reads only with O_CREAT.
     let fd = cvt(unsafe {

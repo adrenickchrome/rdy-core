@@ -626,30 +626,34 @@ fn hsa2_a_lock_open_to_group_or_others_is_refused() {
 const UMASK_CHILD: &str = "RDY_HSA2_UMASK_CHILD";
 
 /// Finding 5: directories this open makes are 0700 whatever the umask, so a restrictive umask
-/// cannot leave an unusable config directory. Each umask runs in its own process, set by `sh`.
+/// cannot leave an unusable config directory, even one that takes the owner's read bit (477).
+/// Each umask runs in its own process, set by `sh`, twice against the same home: the second
+/// process finds the first one's directories usable.
 #[test]
 fn hsa2_new_directories_are_0700_whatever_the_umask() {
     let exe = std::env::current_exe().unwrap();
-    for umask in ["277", "000", "077"] {
+    for umask in ["277", "000", "077", "477", "177", "377"] {
         let d = tempfile::tempdir().unwrap();
         chmod(d.path(), 0o700);
-        let out = Command::new("/bin/sh")
-            .args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
-            .arg(&exe)
-            .args(["hsa2_new_directories_child", "--exact", "--test-threads=1"])
-            .arg("--nocapture")
-            .env(UMASK_CHILD, d.path())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success()
-                && stdout.contains("test result: ok. 1 passed")
-                && stdout.contains("HSA2 umask child done"),
-            "umask {umask}: {}\n{stdout}\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
+        for run in 1..=2 {
+            let out = Command::new("/bin/sh")
+                .args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
+                .arg(&exe)
+                .args(["hsa2_new_directories_child", "--exact", "--test-threads=1"])
+                .arg("--nocapture")
+                .env(UMASK_CHILD, d.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success()
+                    && stdout.contains("test result: ok. 1 passed")
+                    && stdout.contains("HSA2 umask child done"),
+                "umask {umask}, run {run}: {}\n{stdout}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }
 
@@ -676,4 +680,80 @@ fn hsa2_new_directories_child() {
     let c = open(home, "rdy/deeper/credentials.yaml", true).unwrap();
     assert_eq!(c.bytes(), b"secret");
     println!("HSA2 umask child done");
+}
+
+/// Round 2, finding 2: mkdirat returns no handle, so what stands at the new name when it is
+/// opened is taken as the new directory only if that mkdir can have made it: a directory this
+/// user owns with no group or other bit. A directory put at the name between the mkdir and the
+/// open is refused, keeps its mode and gets nothing written into it, and so does a link there.
+#[test]
+fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
+    // (what is put at the new name, its mode, a file inside it)
+    let cases = [
+        ("a same-owner 0755 directory", 0o755, false),
+        ("a same-owner 0750 directory with a file", 0o750, true),
+        ("a same-owner 0711 directory", 0o711, false),
+        ("a link to a directory", 0o700, false),
+    ];
+    for (what, pre_mode, with_file) in cases {
+        for private in [true, false] {
+            let d = tempfile::tempdir().unwrap();
+            let home = d.path().to_path_buf();
+            chmod(&home, 0o700);
+            let pre = home.join("pre");
+            fs::create_dir(&pre).unwrap();
+            if with_file {
+                fs::write(pre.join("keep"), b"keep").unwrap();
+            }
+            chmod(&pre, pre_mode);
+            let pre_ino = fs::symlink_metadata(&pre).unwrap().ino();
+            let link = what.starts_with("a link");
+            let made = home.join("rdy");
+            let (h, m, p) = (home.clone(), made.clone(), pre.clone());
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let count = calls.clone();
+            let r = with_private_write_probe_for_tests(
+                move |stage, path: &Path| {
+                    if stage == PrivateWriteStage::DirMade {
+                        count.set(count.get() + 1);
+                        assert_eq!(path, m, "the probe gets the new directory's path");
+                        fs::rename(&m, h.join("aside"))?;
+                        if link {
+                            symlink(&p, &m)?;
+                        } else {
+                            fs::rename(&p, &m)?;
+                        }
+                    }
+                    Ok(())
+                },
+                || open(&home, "rdy/credentials.yaml", private),
+            );
+            assert_privacy(r, what);
+            assert_eq!(
+                calls.get(),
+                1,
+                "{what}: the probe ran between the mkdir and the open"
+            );
+            let (stands, want_names): (PathBuf, Vec<&str>) = if link {
+                (pre.clone(), if with_file { vec!["keep"] } else { vec![] })
+            } else {
+                (made.clone(), if with_file { vec!["keep"] } else { vec![] })
+            };
+            assert_eq!(mode(&stands), pre_mode, "{what}: never chmodded");
+            assert_eq!(
+                fs::symlink_metadata(&stands).unwrap().ino(),
+                pre_ino,
+                "{what}"
+            );
+            assert_eq!(
+                names(&stands),
+                want_names,
+                "{what}: no lock or file is made in it"
+            );
+            assert!(
+                names(&home.join("aside")).is_empty(),
+                "{what}: nothing is written into the directory moved aside"
+            );
+        }
+    }
 }

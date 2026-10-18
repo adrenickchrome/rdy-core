@@ -14,7 +14,8 @@
 //! other user can swap a temp file or the target. A secret file (`private`) must also be mode
 //! 0o600, and a lock must give group and others no access; a settings file keeps its mode
 //! through a replacement. Nothing here changes the mode of an existing file or directory; a
-//! directory this open makes is set to 0o700.
+//! directory this open makes is set to 0o700 through its handle, and a directory put in its place
+//! before it is opened is refused.
 //!
 //! The lock, the read and the replacement all go through the handle of the directory checked
 //! at open, so a path changed later cannot redirect them, and a replacement first checks that
@@ -219,31 +220,43 @@ fn walk(home: &Path, dirs: &[&OsStr], create: bool) -> Result<(File, PathBuf), R
     Ok((cur, cur_path))
 }
 
-/// Makes the directory `part` in `parent` (at `parent_path`) and opens it. A directory this
-/// call made is set to 0o700, whatever the umask, then synced with its parent. One that another
+/// Makes the directory `part` in `parent` (at `parent_path`) and opens it. One that another
 /// process made first is opened and judged as an existing one; it is never chmodded.
+///
+/// mkdir returns no handle, so the directory at `part` when it is opened is taken as the one
+/// this call made only if that mkdir can have made it: a directory (not a link) that this user
+/// owns, with no group or other bit, since the umask only takes bits away from 0o700. Anything
+/// else is refused and keeps its mode. From that open on, every step goes through the handle:
+/// the handle works whatever bits the umask took (even the owner's read bit), the directory is
+/// set to 0o700 through it, and the readable handle the walk goes on with is reopened through
+/// it. Then the directory and its parent are synced.
 fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, RdyError> {
-    let made = match pio::create_private_dir_at(parent, part) {
-        Ok(()) => true,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+    match pio::create_private_dir_at(parent, part) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return match pio::open_dir_at(parent, part) {
+                Ok(f) => Ok(f),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Err(not_private()),
+                Err(e) => Err(open_failed(&e)),
+            };
+        }
         Err(_) => return Err(save_failed()),
-    };
-    let dir = match pio::open_dir_at(parent, part) {
+    }
+    fsutil::probe_dir_made(&parent_path.join(part)).map_err(|_| save_failed())?;
+    let handle = match pio::open_dir_handle_at(parent, part) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_private()),
         Err(e) => return Err(open_failed(&e)),
     };
-    if made {
-        // only a directory this user owns is set: one swapped in by another user is refused
-        let m = dir.metadata().map_err(|_| save_failed())?;
-        if pio::owner(&m) != pio::own_uid() {
-            return Err(not_private());
-        }
-        pio::make_private_open_dir(&dir).map_err(|_| save_failed())?;
-        dir.sync_all().map_err(|_| save_failed())?;
-        parent.sync_all().map_err(|_| save_failed())?;
-        fsutil::record(parent_path);
+    let m = handle.metadata().map_err(|_| save_failed())?;
+    if !m.is_dir() || pio::owner(&m) != pio::own_uid() || !pio::is_owner_only(&m) {
+        return Err(not_private());
     }
+    pio::make_private_open_dir(&handle).map_err(|_| save_failed())?;
+    let dir = pio::reopen_dir(&handle).map_err(|_| save_failed())?;
+    dir.sync_all().map_err(|_| save_failed())?;
+    parent.sync_all().map_err(|_| save_failed())?;
+    fsutil::record(parent_path);
     Ok(dir)
 }
 
