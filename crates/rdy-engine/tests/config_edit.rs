@@ -10,7 +10,7 @@ use rdy_engine::{E_IO, E_LIMIT, RdyError};
 use rdy_store::fsutil::{PrivateWriteStage, with_private_write_probe_for_tests};
 use std::fs;
 use std::io::{self, BufRead, BufReader};
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -42,6 +42,22 @@ fn lock_of(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".lock");
     PathBuf::from(s)
+}
+
+/// A fresh config home that group and others cannot write, whatever the umask: `tempdir()` asks
+/// for 0o777, so a umask of 002 (the Linux default for user private groups) would make it a
+/// shared-writable home, which `LockedConfig` refuses. 0o700 minus any umask has no such bit.
+fn home_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
+/// Makes the directory `path` 0o700 minus the umask, so a fixture directory is never
+/// group-writable under a umask of 002; a test that needs a wider mode sets it with [`chmod`].
+fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)
 }
 
 /// Opens `rel` below `home` with the usual limit.
@@ -89,7 +105,7 @@ fn next_mark(lines: &mut impl Iterator<Item = io::Result<String>>) -> String {
 
 #[test]
 fn hsa2_config_lock_serializes_processes() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let mut held = open(d.path(), "credentials.yaml", true).unwrap();
     held.replace(b"first").unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
@@ -115,10 +131,10 @@ fn hsa2_config_lock_serializes_processes() {
 
 #[test]
 fn hsa2_settings_mode_is_preserved_and_secrets_require_0600() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let home = d.path();
     let rdy = home.join("rdy");
-    fs::create_dir(&rdy).unwrap();
+    mkdir(&rdy).unwrap();
     chmod(&rdy, 0o755);
     let config = rdy.join("config.yaml");
     fs::write(&config, b"# mine\nremotes: {}\n").unwrap();
@@ -177,7 +193,7 @@ fn hsa2_settings_mode_is_preserved_and_secrets_require_0600() {
 
 #[test]
 fn hsa2_lock_inode_survives_replacement() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let path = d.path().join("config.yaml");
     let lock = lock_of(&path);
     let mut c = open(d.path(), "config.yaml", false).unwrap();
@@ -216,7 +232,7 @@ fn hsa2_failure_keeps_old_or_complete_new_bytes() {
     ];
     for (fault, what, renamed) in faults {
         for private in [true, false] {
-            let d = tempfile::tempdir().unwrap();
+            let d = home_dir();
             let path = d.path().join("f.yaml");
             let mut c = open(d.path(), "f.yaml", private).unwrap();
             c.replace(b"old bytes").unwrap();
@@ -252,11 +268,11 @@ fn hsa2_failure_keeps_old_or_complete_new_bytes() {
 
 #[test]
 fn hsa2_symlinks_and_foreign_paths_are_refused() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let home = d.path();
-    fs::create_dir(home.join("rdy")).unwrap();
+    mkdir(home.join("rdy")).unwrap();
     let elsewhere = home.join("elsewhere");
-    fs::create_dir(&elsewhere).unwrap();
+    mkdir(&elsewhere).unwrap();
     let victim = elsewhere.join("victim.yaml");
     fs::write(&victim, b"keep").unwrap();
     chmod(&victim, 0o600);
@@ -283,7 +299,7 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
         );
         // a directory at the target is not a regular file
         let dir_target = format!("rdy/dir-{private}.yaml");
-        fs::create_dir(home.join(&dir_target)).unwrap();
+        mkdir(home.join(&dir_target)).unwrap();
         assert_privacy(open(home, &dir_target, private), "a directory target");
         // an intermediate directory owned by another user (the system's temp directory,
         // owned by root), with the directory above it as the home
@@ -319,7 +335,7 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
 
 #[test]
 fn hsa2_config_reads_and_writes_are_bounded() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let path = d.path().join("config.yaml");
     fs::write(&path, [b'a'; 17]).unwrap();
     chmod(&path, 0o600);
@@ -360,10 +376,10 @@ fn hsa2_config_reads_and_writes_are_bounded() {
 /// replace, before any temp file is made. An owner-held 0755 directory still works.
 #[test]
 fn hsa2_a_directory_others_may_write_is_refused_before_a_temp_is_made() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let home = d.path();
     let rdy = home.join("rdy");
-    fs::create_dir(&rdy).unwrap();
+    mkdir(&rdy).unwrap();
     for wide in [0o777, 0o775, 0o757, 0o1777] {
         chmod(&rdy, wide);
         assert_privacy(
@@ -405,7 +421,7 @@ fn hsa2_a_directory_others_may_write_is_refused_before_a_temp_is_made() {
     chmod(&rdy, 0o755);
     // a home that holds the file itself is judged as the directory that holds it
     let wide_home = home.join("wide");
-    fs::create_dir(&wide_home).unwrap();
+    mkdir(&wide_home).unwrap();
     chmod(&wide_home, 0o777);
     assert_privacy(
         open(&wide_home, "credentials.yaml", true),
@@ -419,10 +435,10 @@ fn hsa2_a_directory_others_may_write_is_refused_before_a_temp_is_made() {
 /// directory never overwrites that other config, which keeps its own lock.
 #[test]
 fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let home = d.path();
     for name in ["a", "b"] {
-        fs::create_dir(home.join(name)).unwrap();
+        mkdir(home.join(name)).unwrap();
     }
     let mut a = open(home, "a/credentials.yaml", true).unwrap();
     a.replace(b"a bytes").unwrap();
@@ -448,7 +464,7 @@ fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
     );
     // a real directory put in its place is refused too
     fs::remove_file(home.join("a")).unwrap();
-    fs::create_dir(home.join("a")).unwrap();
+    mkdir(home.join("a")).unwrap();
     assert_privacy(a.replace(b"new dir"), "a directory replaced by another");
     assert!(names(&home.join("a")).is_empty());
     drop(a);
@@ -508,12 +524,12 @@ fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
 /// points. The home itself may be reached through a link.
 #[test]
 fn hsa2_every_component_below_the_home_is_checked() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let home = d.path().join("home");
-    fs::create_dir(&home).unwrap();
+    mkdir(&home).unwrap();
     chmod(&home, 0o755);
     let elsewhere = d.path().join("elsewhere");
-    fs::create_dir(&elsewhere).unwrap();
+    mkdir(&elsewhere).unwrap();
     symlink(&elsewhere, home.join("link")).unwrap();
     // H/link -> E, target H/link/sub/credentials.yaml: sub missing, then present
     assert_privacy(
@@ -524,7 +540,7 @@ fn hsa2_every_component_below_the_home_is_checked() {
         names(&elsewhere).is_empty(),
         "nothing is made under the link"
     );
-    fs::create_dir(elsewhere.join("sub")).unwrap();
+    mkdir(elsewhere.join("sub")).unwrap();
     for private in [true, false] {
         assert_privacy(
             open(&home, "link/sub/credentials.yaml", private),
@@ -540,7 +556,7 @@ fn hsa2_every_component_below_the_home_is_checked() {
         open(&home, "link/credentials.yaml", true),
         "a link as the last directory",
     );
-    fs::create_dir(home.join("a")).unwrap();
+    mkdir(home.join("a")).unwrap();
     symlink(&elsewhere, home.join("a/mid")).unwrap();
     assert_privacy(
         open(&home, "a/mid/sub/credentials.yaml", true),
@@ -598,7 +614,7 @@ fn hsa2_every_component_below_the_home_is_checked() {
 /// other user can hold it. An owner-only lock with fewer bits (a racing creator's umask) is used.
 #[test]
 fn hsa2_a_lock_open_to_group_or_others_is_refused() {
-    let d = tempfile::tempdir().unwrap();
+    let d = home_dir();
     let home = d.path();
     let lock = home.join("credentials.yaml.lock");
     for wide in [0o666, 0o640, 0o604, 0o660] {
@@ -648,7 +664,7 @@ fn hsa2_new_directories_are_0700_or_not_made_at_all() {
         ("700", "refused"),
     ];
     for (umask, expect) in cases {
-        let d = tempfile::tempdir().unwrap();
+        let d = home_dir();
         chmod(d.path(), 0o700);
         for run in 1..=2 {
             let out = Command::new("/bin/sh")
@@ -750,11 +766,11 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
     ];
     for (what, pre_mode, with_file, refusal) in cases {
         for private in [true, false] {
-            let d = tempfile::tempdir().unwrap();
+            let d = home_dir();
             let home = d.path().to_path_buf();
             chmod(&home, 0o700);
             let pre = home.join("pre");
-            fs::create_dir(&pre).unwrap();
+            mkdir(&pre).unwrap();
             if with_file {
                 fs::write(pre.join("keep"), b"keep").unwrap();
             }
@@ -829,11 +845,11 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
 fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchanged() {
     for private in [true, false] {
         // put in place between the mkdir and the open
-        let d = tempfile::tempdir().unwrap();
+        let d = home_dir();
         let home = d.path().to_path_buf();
         chmod(&home, 0o700);
         let pre = home.join("pre");
-        fs::create_dir(&pre).unwrap();
+        mkdir(&pre).unwrap();
         chmod(&pre, 0o700);
         let pre_ino = fs::symlink_metadata(&pre).unwrap().ino();
         let made = home.join("rdy");
@@ -855,9 +871,9 @@ fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchange
         assert_eq!(names(&made), ["credentials.yaml.lock"]);
         assert!(names(&home.join("aside")).is_empty());
         // the same directory standing there before the open: the same outcome
-        let d2 = tempfile::tempdir().unwrap();
+        let d2 = home_dir();
         chmod(d2.path(), 0o700);
-        fs::create_dir(d2.path().join("rdy")).unwrap();
+        mkdir(d2.path().join("rdy")).unwrap();
         chmod(&d2.path().join("rdy"), 0o700);
         drop(open(d2.path(), "rdy/credentials.yaml", private).unwrap());
         assert_eq!(mode(&d2.path().join("rdy")), 0o700);
