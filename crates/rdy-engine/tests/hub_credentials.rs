@@ -137,6 +137,11 @@ fn mode(p: &Path) -> u32 {
 
 /// Writes the credential file (0600) holding exactly `records`.
 fn seed(e: &Env, records: &[(&str, Credential)]) {
+    seed_at(&e.creds, records);
+}
+
+/// Writes the credential file at `creds` (0600) holding exactly `records`.
+fn seed_at(creds: &Path, records: &[(&str, Credential)]) {
     let mut file = CredentialFile::default();
     for (o, c) in records {
         file.set(origin(o), Some(c.clone()));
@@ -147,10 +152,10 @@ fn seed(e: &Env, records: &[(&str, Credential)]) {
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&e.creds)
+        .open(creds)
         .unwrap();
     f.write_all(&bytes).unwrap();
-    fs::set_permissions(&e.creds, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(creds, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 /// The record of `install` on disk, read without the lock (a replacement is a rename).
@@ -963,6 +968,91 @@ fn hsa5_resignin_revokes_before_replacing_the_old_credential() {
             panic!("{saved:?}")
         };
         assert_eq!(p.machine_name, MACHINE);
+    }
+    assert_eq!(fs::read_to_string(&e.user_file).unwrap(), CONFIG);
+}
+
+/// Fix round 1: a confirmed start that rereads after discovery returns the sign-in another
+/// caller finished meanwhile. It revokes nothing and starts nothing. The other caller's write
+/// happens inside this start's metadata request, when it holds no lock.
+#[test]
+fn hsa5_older_start_returns_a_signin_completed_during_discovery() {
+    let e = env();
+    let clock = Clock::at(T0);
+    let person = human();
+    let install = origin(INSTALL);
+    let old = ready(&old_access(), &old_refresh(), T0 + HOUR_MS, HANDLE);
+    let winner = ready(
+        &new_access(),
+        &new_refresh(),
+        T0 + HOUR_MS,
+        "test-person-new",
+    );
+    let other = ready(&old_access(), &new_refresh(), T0 + HOUR_MS, HANDLE);
+    let start = |s: &HubCredentials| {
+        s.start(
+            &install,
+            MACHINE,
+            Some(&confirm(INSTALL)),
+            caller(&person, false),
+        )
+    };
+
+    // What the start reads first, and what another caller saves during its discovery.
+    let cases: Vec<(&str, Option<Credential>, Credential)> = vec![
+        ("absent, then ready", None, winner.clone()),
+        ("ready, then a new ready", Some(old.clone()), winner.clone()),
+        (
+            "reauth_required, then ready",
+            Some(Credential::ReauthRequired),
+            winner.clone(),
+        ),
+        (
+            "another machine pending, then ready",
+            Some(pending_on(INSTALL, "old box", T0 + 600_000, T0 + 5_000, 5)),
+            winner.clone(),
+        ),
+        (
+            "absent, then this machine pending",
+            None,
+            pending(T0 + 600_000, T0 + 5_000, 5),
+        ),
+    ];
+    for (name, first, saved) in cases {
+        let mut records = vec![(OTHER, other.clone())];
+        if let Some(c) = &first {
+            records.push((INSTALL, c.clone()));
+        }
+        seed(&e, &records);
+        let fake = Fake::default();
+        let (creds, lock, won) = (e.creds.clone(), e.lock.clone(), saved.clone());
+        let keep = other.clone();
+        fake.on("Metadata", move |_| {
+            assert!(lock_is_free(&lock), "{name}: discovery holds no lock");
+            seed_at(&creds, &[(INSTALL, won.clone()), (OTHER, keep.clone())]);
+            meta(INSTALL)
+        });
+        let st = start(&svc(&e, &fake, &clock)).unwrap();
+        assert_eq!(fake.ops(), ["Metadata"], "{name}: no revoke and no start");
+        fake.done();
+        assert_eq!(on_disk(&e.creds, INSTALL), Some(saved.clone()), "{name}");
+        assert_eq!(on_disk(&e.creds, OTHER), Some(other.clone()), "{name}");
+        match &saved {
+            Credential::Ready(_) => {
+                assert_eq!(st.state, AuthPhase::SignedIn, "{name}");
+                assert_eq!(st.account.as_deref(), Some(ACCOUNT), "{name}");
+                assert_eq!(
+                    st.human_actor.as_deref(),
+                    Some("human:test-person-new"),
+                    "{name}"
+                );
+                assert_eq!(st.expires_at_ms, Some(T0 + HOUR_MS), "{name}");
+            }
+            _ => {
+                assert_eq!(st.state, AuthPhase::Pending, "{name}");
+                assert_eq!(st.next_poll_at_ms, Some(T0 + 5_000), "{name}");
+            }
+        }
     }
     assert_eq!(fs::read_to_string(&e.user_file).unwrap(), CONFIG);
 }

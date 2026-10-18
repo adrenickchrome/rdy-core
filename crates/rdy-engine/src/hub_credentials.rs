@@ -458,13 +458,25 @@ impl<'a> HubCredentials<'a> {
     }
 
     fn confirmed_start(&self, install: &Origin, machine_name: &str) -> Result<AuthState, RdyError> {
-        if let Some(s) = self.same_pending(&self.lock()?, install, machine_name) {
-            return Ok(s);
-        }
+        let first = {
+            let held = self.lock()?;
+            if let Some(s) = self.same_pending(&held, install, machine_name) {
+                return Ok(s);
+            }
+            held.get(install)
+        };
         let d = self.discover(install)?;
         let mut held = self.lock()?;
         if let Some(s) = self.same_pending(&held, install, machine_name) {
             return Ok(s);
+        }
+        // A ready record that is not the one read before discovery is another caller's newer
+        // sign-in: it is returned as it is, never revoked or replaced by this older start.
+        let now = held.get(install);
+        if now != first
+            && let Some(Credential::Ready(r)) = &now
+        {
+            return Ok(AuthState::signed_in(install, r));
         }
         if let Some(Credential::Ready(old)) = held.get(install) {
             // The old refresh token is revoked once, under the lock; only HTTP 200 lets its
