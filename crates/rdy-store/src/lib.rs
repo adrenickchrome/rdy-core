@@ -29,7 +29,7 @@ pub use check::StoreCheck;
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
-pub use land::{AltLanding, LandOutcome, LandRequest, RebasedView, Relay};
+pub use land::{AltLanding, LandOutcome, LandRequest, PreparedLanding, RebasedView, Relay};
 pub use merge::{
     Conflict, MergeChange, Merged, Side, conflict_id, find_parent_cycle, merge, merge_on_blocks,
 };
@@ -39,5 +39,5 @@ pub use store::{
     OpenReport, Store, StoreLock, StoreReader, lock_error,
 };
 mod state;
-pub use state::{ViewRecord, apply_op};
+pub use state::{PreparedTag, ViewRecord, apply_op};
 pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};

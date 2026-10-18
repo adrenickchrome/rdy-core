@@ -51,6 +51,7 @@ pub mod section;
 pub mod semantic;
 mod session;
 pub mod signature_check;
+pub mod signing_act;
 pub mod signing_config;
 pub mod signing_crypto;
 pub mod site_scope;

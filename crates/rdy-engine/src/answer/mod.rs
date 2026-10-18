@@ -118,9 +118,28 @@ enum Pick<'a> {
     Recommended,
 }
 
+/// What the first half of an answer did: an act other than an approval, written; or an
+/// approval, prepared under the writer and not yet landed ([`Rdy::commit_answer`] lands it).
+pub(crate) enum AnswerStep {
+    Done(Box<AnswerInfo>),
+    Approval(Box<PreparedAnswer>),
+}
+
+/// An approval answer prepared under the writer: the landing to commit and the answer's reply
+/// before its `landing` and `next` are known.
+pub(crate) struct PreparedAnswer {
+    pub(crate) landing: crate::gate::PreparedApproval,
+    pub(crate) info: AnswerInfo,
+    /// The chat session whose queue gives `next` after the commit: `Some` for a single answer
+    /// (the relay's `session_ref`, or none), `None` for an answer of a list, whose caller sets
+    /// `next` on the last one.
+    pub(crate) next_session: Option<Option<String>>,
+}
+
 /// The session an answer runs as, its relay and its evidence kind, the session that gave the
 /// answer (the relaying agent's, or the person's own) and the briefing its write cites (only an
 /// answer to a question reads it; a batch of recommended answers cites none).
+#[derive(Clone)]
 pub(crate) struct Answerer {
     pub who: Session,
     pub relay: Option<Relay>,
@@ -138,12 +157,26 @@ impl Rdy {
         person: &str,
         req: AnswerRequest,
     ) -> Result<AnswerInfo, RdyError> {
+        match self.answer_step(s, person, req)? {
+            AnswerStep::Done(info) => Ok(*info),
+            AnswerStep::Approval(prepared) => self.commit_answer(*prepared, &[], person),
+        }
+    }
+
+    /// `answer` up to its write: every act but an approval is written (with its `next`); an
+    /// approval is prepared and not landed.
+    pub(crate) fn answer_step(
+        &mut self,
+        s: &Session,
+        person: &str,
+        req: AnswerRequest,
+    ) -> Result<AnswerStep, RdyError> {
         let by = Answerer {
             brief: req.brief,
             ..answerer(s, person, &req.relay)?
         };
         let note = note_of(req.note)?;
-        let mut info = self.answer_one(
+        let step = self.answer_one(
             &by,
             person,
             &req.r#ref,
@@ -151,7 +184,35 @@ impl Rdy {
             req.card_hash.as_deref(),
             note,
         )?;
-        info.next = next_of(&self.read(), person, &by);
+        Ok(match step {
+            AnswerStep::Done(mut info) => {
+                info.next = next_of(&self.read(), person, &by);
+                AnswerStep::Done(info)
+            }
+            AnswerStep::Approval(mut prepared) => {
+                prepared.next_session = Some(session_ref_of(&by));
+                AnswerStep::Approval(prepared)
+            }
+        })
+    }
+
+    /// Lands the approval `prepared` holds, with `signatures` of its landing in the same batch,
+    /// and completes its reply: the landing, and `next` for a single answer.
+    pub(crate) fn commit_answer(
+        &mut self,
+        prepared: PreparedAnswer,
+        signatures: &[rdy_model::signature::Signature],
+        person: &str,
+    ) -> Result<AnswerInfo, RdyError> {
+        let PreparedAnswer {
+            landing,
+            mut info,
+            next_session,
+        } = prepared;
+        info.landing = Some(self.commit_landing(landing, signatures)?);
+        if let Some(session_ref) = next_session {
+            info.next = next_in(&self.read(), person, session_ref);
+        }
         Ok(info)
     }
 
@@ -175,6 +236,38 @@ impl Rdy {
         card_hashes: &[String],
         relay: RelayInput,
     ) -> Result<Vec<AnswerInfo>, RdyError> {
+        let by = self.recommended_answerer(s, person, refs, card_hashes, &relay)?;
+        let mut done: Vec<AnswerInfo> = vec![];
+        for (n, r) in refs.iter().enumerate() {
+            let shown = card_hashes.get(n).map(String::as_str);
+            let one = self
+                .recommended_step(&by, person, r, shown)
+                .and_then(|step| match step {
+                    AnswerStep::Done(info) => Ok(*info),
+                    AnswerStep::Approval(prepared) => self.commit_answer(*prepared, &[], person),
+                });
+            match one {
+                Ok(info) => done.push(info),
+                Err(e) => return Err(with_done(e, &done)),
+            }
+        }
+        if let Some(last) = done.last_mut() {
+            last.next = next_of(&self.read(), person, &by);
+        }
+        Ok(done)
+    }
+
+    /// The checks `answer_all_recommended` makes before it answers anything: one card hash for
+    /// each ref (or none), the relay table, and the removal pre-scan (D-CC90E): a list that holds
+    /// a removal is `E_REDACTION_HUMAN` as a whole. Returns the answerer of every item.
+    pub(crate) fn recommended_answerer(
+        &self,
+        s: &Session,
+        person: &str,
+        refs: &[String],
+        card_hashes: &[String],
+        relay: &RelayInput,
+    ) -> Result<Answerer, RdyError> {
         if !card_hashes.is_empty() && card_hashes.len() != refs.len() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -186,7 +279,7 @@ impl Rdy {
                 "pass the card_hash of each card, in the order of the refs",
             ));
         }
-        let by = answerer(s, person, &relay)?;
+        let by = answerer(s, person, relay)?;
         let st = self.read();
         if let Some(r) = removal_ref(&st, refs)? {
             let e = RdyError::from(StoreError::RedactionHuman);
@@ -195,19 +288,19 @@ impl Rdy {
                 None => e,
             });
         }
-        drop(st);
-        let mut done: Vec<AnswerInfo> = vec![];
-        for (n, r) in refs.iter().enumerate() {
-            let shown = card_hashes.get(n).map(String::as_str);
-            match self.answer_one(&by, person, r, Pick::Recommended, shown, None) {
-                Ok(info) => done.push(info),
-                Err(e) => return Err(with_done(e, &done)),
-            }
-        }
-        if let Some(last) = done.last_mut() {
-            last.next = next_of(&self.read(), person, &by);
-        }
-        Ok(done)
+        Ok(by)
+    }
+
+    /// One item of a list of recommended answers, up to its write: an approval is prepared,
+    /// every other act written. `next` is left to the caller.
+    pub(crate) fn recommended_step(
+        &mut self,
+        by: &Answerer,
+        person: &str,
+        r: &str,
+        shown: Option<&str>,
+    ) -> Result<AnswerStep, RdyError> {
+        self.answer_one(by, person, r, Pick::Recommended, shown, None)
     }
 
     fn answer_one(
@@ -218,14 +311,18 @@ impl Rdy {
         pick: Pick<'_>,
         shown: Option<&str>,
         note: Option<String>,
-    ) -> Result<AnswerInfo, RdyError> {
+    ) -> Result<AnswerStep, RdyError> {
         let bound = bind(&self.read(), person, r, shown, by.relay.is_some(), pick)?;
         match (bound.item.kind, bound.option.id.as_str()) {
             (_, "later") | (ItemKind::Approve | ItemKind::Confirm, _) => {
                 batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
             }
-            (ItemKind::Answer, _) => question::act(self, by, person, bound, note),
-            (ItemKind::Resolve, _) => resolve::act(self, by, bound, note),
+            (ItemKind::Answer, _) => {
+                question::act(self, by, person, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
+            }
+            (ItemKind::Resolve, _) => {
+                resolve::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
+            }
         }
     }
 }
@@ -504,7 +601,7 @@ pub(crate) fn card_of(i: &Item) -> Value {
 }
 
 /// `e`, with the answers given before it under `done` in `corrected`.
-fn with_done(mut e: RdyError, done: &[AnswerInfo]) -> RdyError {
+pub(crate) fn with_done(mut e: RdyError, done: &[AnswerInfo]) -> RdyError {
     let done = serde_json::to_value(done).unwrap_or(Value::Null);
     match &mut e.corrected {
         Some(Value::Object(m)) => {
@@ -516,11 +613,21 @@ fn with_done(mut e: RdyError, done: &[AnswerInfo]) -> RdyError {
 }
 
 /// The first item of `person`'s queue after an answer, as the relay's chat session sees it.
-fn next_of(st: &ReadState, person: &str, by: &Answerer) -> Option<String> {
+pub(crate) fn next_of(st: &ReadState, person: &str, by: &Answerer) -> Option<String> {
+    next_in(st, person, session_ref_of(by))
+}
+
+/// The chat session of `by`'s relay, if any.
+fn session_ref_of(by: &Answerer) -> Option<String> {
+    by.relay.as_ref().map(|r| r.evidence.session_ref.clone())
+}
+
+/// The first item of `person`'s queue as chat session `session_ref` sees it.
+fn next_in(st: &ReadState, person: &str, session_ref: Option<String>) -> Option<String> {
     let q = st
         .pending(&PendingQuery {
             person: person.to_string(),
-            session_ref: by.relay.as_ref().map(|r| r.evidence.session_ref.clone()),
+            session_ref,
             max_tokens: CARD_DEFAULT_TOKENS,
         })
         .ok()?;

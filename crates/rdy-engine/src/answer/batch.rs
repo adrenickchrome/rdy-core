@@ -27,7 +27,7 @@
 //! a time, as the person (local) or by a relay of the person's words: its card hash is the
 //! removal digest, so an approval binds each request and the hash of its complete report. A batch
 //! of recommended answers never reaches it (`Rdy::answer_all_recommended` refuses the whole call).
-use super::{AnswerInfo, Bound};
+use super::{AnswerInfo, AnswerStep, Bound, PreparedAnswer};
 use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
 use crate::gate::LandOptions;
 use crate::pending::{Item, ItemKind};
@@ -35,7 +35,9 @@ use crate::{Delta, Rdy, Session};
 use rdy_model::{Answer, AnswerAct, ApprovalEvidence, EvidenceKind};
 use rdy_store::{Relay, StoreError};
 
-/// Runs the act the item's kind and the chosen option name (the table in the module docs).
+/// Runs the act the item's kind and the chosen option name (the table in the module docs). An
+/// approval is only prepared: [`super::Rdy::commit_answer`] lands it. Every other act is written
+/// here.
 pub(crate) fn act(
     r: &mut Rdy,
     who: &Session,
@@ -43,7 +45,7 @@ pub(crate) fn act(
     kind: Option<EvidenceKind>,
     b: Bound,
     note: Option<String>,
-) -> Result<AnswerInfo, RdyError> {
+) -> Result<AnswerStep, RdyError> {
     let act = match (b.item.kind, b.option.id.as_str()) {
         (_, "later") => {
             if relay.is_none() {
@@ -55,7 +57,10 @@ pub(crate) fn act(
             }
             AnswerAct::Later
         }
-        (ItemKind::Approve, "approve") => return approve(r, who, relay, kind, b, note),
+        (ItemKind::Approve, "approve") => {
+            return approve(r, who, relay, kind, b, note)
+                .map(|a| AnswerStep::Approval(Box::new(a)));
+        }
         (ItemKind::Approve, "reject") => AnswerAct::RejectProposal,
         (ItemKind::Confirm, "confirm") => AnswerAct::Confirm,
         (ItemKind::Confirm, "reject") => AnswerAct::RejectDecision,
@@ -71,7 +76,7 @@ pub(crate) fn act(
             ));
         }
     };
-    record(r, who, relay, kind, b, note, act)
+    record(r, who, relay, kind, b, note, act).map(|i| AnswerStep::Done(Box::new(i)))
 }
 
 /// The labels the card shows, in order.
@@ -84,7 +89,7 @@ fn assurance(relay: &Option<Relay>) -> &'static str {
 }
 
 /// approve · `approve`: the landing (which holds the exception check, F2), with the card as
-/// evidence for a relay.
+/// evidence for a relay, prepared under the writer and not yet written.
 fn approve(
     r: &mut Rdy,
     who: &Session,
@@ -92,7 +97,7 @@ fn approve(
     kind: Option<EvidenceKind>,
     b: Bound,
     note: Option<String>,
-) -> Result<AnswerInfo, RdyError> {
+) -> Result<PreparedAnswer, RdyError> {
     if note.is_some() {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -106,7 +111,7 @@ fn approve(
         choice: Some(b.option.label.clone()),
         card_hash: b.card_hash,
     });
-    let landing = r.land_with(
+    let landing = r.prepare_landing(
         who,
         &b.item.r#ref,
         LandOptions {
@@ -115,16 +120,20 @@ fn approve(
             evidence,
         },
     )?;
-    Ok(AnswerInfo {
-        r#ref: b.item.r#ref,
-        act: "approve".into(),
-        option: b.option.id,
-        label: b.option.label,
-        assurance: assurance(&relay),
-        answer: None,
-        landing: Some(landing),
-        relayed_by: relay.map(|r| r.by),
-        next: None,
+    Ok(PreparedAnswer {
+        landing,
+        info: AnswerInfo {
+            r#ref: b.item.r#ref,
+            act: "approve".into(),
+            option: b.option.id,
+            label: b.option.label,
+            assurance: assurance(&relay),
+            answer: None,
+            landing: None,
+            relayed_by: relay.map(|r| r.by),
+            next: None,
+        },
+        next_session: None,
     })
 }
 
