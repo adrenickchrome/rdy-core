@@ -10,12 +10,17 @@
 //! - a sequence or map holds at most [`MAX_ELEMENTS`] elements: its length hint is checked
 //!   before serde's collection visitor sees it, and the hint the visitor sees is never more than
 //!   the bytes left, so a hostile hint cannot make a visitor preallocate;
-//! - a record decodes at most [`MAX_VALUES`] values. Every string, byte string, unit, option,
-//!   newtype, sequence, tuple, map, struct and enum the decoder builds is one value (a hash is
-//!   one tuple). Fixed-width scalars (booleans, integers, floats and chars) are not counted: each
-//!   takes at least one encoded byte, so the record bytes bound them;
+//! - a record decodes at most [`MAX_VALUES`] values (see the counting rule below);
 //! - containers (options, newtypes, sequences, tuples, maps, structs and enums) nest at most
 //!   [`MAX_DEPTH`] deep: opening the next one is refused before the decoder recurses into it.
+//!
+//! The counting rule (O3): containers and leaves count, scalars do not. Each struct, newtype,
+//! tuple, sequence, map, enum and option is one value, and so is each string, byte string and
+//! unit. Fixed-width scalars (booleans, integers, floats and chars) are not values. A
+//! [`Hash`](rdy_model::Hash) is 2 values and 2 nesting levels: a newtype around a 32-byte tuple.
+//! So a snapshot entry is 3 values (its block id string and its hash). Why: the record bytes and
+//! the element bound already limit scalars, and no stored type has a scalar sequence other than
+//! bytes, so scalars cannot amplify memory. Counting them would refuse a 50,000-block snapshot.
 //!
 //! A raw BLOB_CHUNK has no typed decode; [`MAX_CHUNK_BYTES`] bounds it.
 use serde::de::{

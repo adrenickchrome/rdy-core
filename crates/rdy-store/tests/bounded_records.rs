@@ -256,6 +256,59 @@ fn ha1_depth_and_total_values_are_bounded() {
     );
 }
 
+/// The block id of entry `i`: prefix `c` and five Crockford digits.
+fn entry_id(i: usize) -> rdy_model::BlockId {
+    let body: String = (0..5)
+        .rev()
+        .map(|d| rdy_model::CROCKFORD[(i >> (5 * d)) & 31] as char)
+        .collect();
+    rdy_model::BlockId::parse(&format!("c-{body}")).unwrap()
+}
+
+/// A hash unique to `i`.
+fn entry_hash(i: usize) -> Hash {
+    let mut h = [0u8; 32];
+    h[..8].copy_from_slice(&(i as u64).to_be_bytes());
+    Hash(h)
+}
+
+#[test]
+fn ha1_values_count_containers_and_leaves_not_scalars() {
+    // A hash is 2 values (its newtype and its tuple); its 32 bytes are scalars and do not count.
+    // One outer sequence, 11 inner ones and 11 x 45,454 hashes: 1 + 11 + 999,988 = 1,000,000.
+    let hashes = |last: usize| {
+        let mut out = varint(11);
+        for i in 0..11 {
+            let n = if i == 10 { last } else { 45_454 };
+            out.extend(varint(n as u64));
+            out.extend(vec![7u8; 32 * n]);
+        }
+        out
+    };
+    assert_eq!(
+        bounded::decode::<Vec<Vec<Hash>>>(&hashes(45_454))
+            .map(|v| v.iter().map(Vec::len).sum::<usize>()),
+        Ok(499_994)
+    );
+    assert_eq!(
+        unit(bounded::decode::<Vec<Vec<Hash>>>(&hashes(45_455))),
+        limit(DECODED_VALUES, 1_000_000)
+    );
+
+    // A snapshot of 100,000 blocks (the element bound) is 2 + 3 x 100,000 = 300,002 values,
+    // within the values bound. Counting scalars too would make it about 3,500,000.
+    let snapshot = rdy_model::StateSnapshot {
+        blocks: (0..100_000).map(|i| (entry_id(i), entry_hash(i))).collect(),
+    };
+    assert_eq!(snapshot.blocks.len(), 100_000);
+    let bytes = postcard::to_allocvec(&snapshot).unwrap();
+    assert_eq!(
+        bounded::decode::<rdy_model::StateSnapshot>(&bytes).as_ref(),
+        Ok(&snapshot)
+    );
+    assert_eq!(refs_of(SNAPSHOT, &bytes).map(|r| r.len()), Ok(100_000));
+}
+
 #[test]
 fn ha1_decode_requires_one_complete_record() {
     let full = postcard::to_allocvec(&tag()).unwrap();
