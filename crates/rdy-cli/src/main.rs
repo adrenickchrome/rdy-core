@@ -110,7 +110,8 @@ enum Cmd {
     Tag(land_cmd::TagArgs),
     /// List versions, oldest first.
     Tags,
-    /// Create a folder or a doc at a path (missing folders are created too).
+    // the about is given in full: a doc comment would lose its closing period
+    #[command(about = "Create a folder, doc, or publication profile.")]
     New {
         #[command(subcommand)]
         what: edit_cmd::NewCmd,

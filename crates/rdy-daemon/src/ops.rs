@@ -34,7 +34,7 @@ mod wc;
 use brief::brief;
 use clone::clone;
 use dump::dump;
-use edit::{edit_block, keys_assign, new_doc, new_folder};
+use edit::{edit_block, keys_assign, new_doc, new_folder, new_profile};
 use intake::{answer, pending};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
@@ -80,6 +80,7 @@ pub const OPS: &[&str] = &[
     "check",
     "new_folder",
     "new_doc",
+    "new_profile",
     "keys_assign",
     "edit_block",
     "propose",
@@ -365,6 +366,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
+        "new_profile" => new_profile(
+            cx,
+            parse(
+                op,
+                args,
+                "{key, parent, title, audience, select, description?, trail?, view?}",
+            )?,
+        ),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(
             cx,

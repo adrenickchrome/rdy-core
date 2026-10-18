@@ -19,6 +19,7 @@ mod cli_keys;
 mod cli_log;
 mod cli_output;
 mod cli_proposal;
+mod cli_publication_create;
 mod cli_quarantine;
 mod cli_redaction;
 mod cli_ref;

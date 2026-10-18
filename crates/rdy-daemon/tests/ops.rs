@@ -38,8 +38,14 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 41);
+    assert_eq!(OPS.len(), 42);
     assert_eq!(OPS[0], "session");
+    let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
+    assert_eq!(
+        OPS[new_doc + 1],
+        "new_profile",
+        "pub5: new_profile follows new_doc"
+    );
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
     assert_eq!(OPS[export + 2], "clone", "ec12: clone follows dump");
@@ -1094,4 +1100,85 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
             .collect::<Vec<_>>(),
         ["index.redb.damaged-8", "index.redb.damaged-9"]
     );
+}
+
+/// The profile request every refusal below changes one thing of.
+fn profile_args(parent: &str, select: &str) -> Value {
+    json!({"key": "site", "parent": parent, "title": "Site", "audience": "public", "select": [select]})
+}
+
+#[test]
+fn pub5_profile_create_is_strict_and_uses_normal_write_rules() {
+    let (d, e) = project();
+    let s = human();
+    let guide = doc(&e, "guide")["created"]["$d"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let other = doc(&e, "other")["created"]["$d"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c = cx(&e, &s, d.path());
+    let end = e.read().seq();
+
+    // an unknown request key fails before the write, and the nearest key is named
+    let mut args = profile_args(&guide, &other);
+    let list = args.as_object_mut().unwrap().remove("select").unwrap();
+    args["selects"] = list;
+    let err = dispatch(&c, "new_profile", args).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "new_profile: unknown field \"selects\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"select\"? the fields are key, parent, title, audience, select, description, trail, view"
+    );
+    // a required key left out is the op's shape error
+    let mut args = profile_args(&guide, &other);
+    args.as_object_mut().unwrap().remove("title");
+    let err = dispatch(&c, "new_profile", args).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert!(err.message.contains("missing field `title`"), "{err}");
+    // a parent that is no block, and the schema's refusal of a wrong audience, come from the
+    // write path
+    let err = dispatch(&c, "new_profile", profile_args("d-ZZZZZ", &other)).unwrap_err();
+    assert_ne!(err.code, "E_VIEW_OWNER", "{err}");
+    let mut args = profile_args(&guide, &other);
+    args["audience"] = json!("everyone");
+    let err = dispatch(&c, "new_profile", args).unwrap_err();
+    assert_eq!(err.code, "E_VALIDATION", "{err}");
+    // view ownership: an agent never writes the human's view
+    let a = Session::agent("agent:a".into(), Some("r1".into()), Role::Writer).unwrap();
+    let mut args = profile_args(&guide, &other);
+    args["view"] = json!("work");
+    let err = dispatch(&cx(&e, &a, d.path()), "new_profile", args).unwrap_err();
+    assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
+    assert_eq!(e.read().seq(), end, "every refusal wrote nothing");
+
+    // the same request, valid: one create of a profile, the ordinary write result, and a change
+    // message of exactly `new publication profile site`
+    let v = dispatch(&c, "new_profile", profile_args(&guide, &other)).unwrap();
+    assert_eq!(v["view"], "work");
+    let id = v["created"]["$profile"].as_str().unwrap().to_string();
+    assert!(id.starts_with("pf-"), "{id}");
+    assert!(e.read().seq() > end);
+    let st = e.read();
+    let b = st
+        .block(&Scope::View("work".into()), &id.parse().unwrap())
+        .unwrap();
+    assert_eq!(b.block_type, "publication_profile");
+    assert_eq!(
+        b.parent.as_ref().map(|p| p.to_string()),
+        Some(guide.clone())
+    );
+    assert_eq!(b.fields["key"].as_str(), Some("site"));
+    assert!(!b.fields.contains_key("trail"), "{:?}", b.fields);
+    assert!(b.body.is_empty() && b.links.is_empty());
+    let change: rdy_model::Hash = v["change"].as_str().unwrap().parse().unwrap();
+    let ch: rdy_model::Change = st
+        .reader()
+        .get_typed(rdy_store::kinds::CHANGE, &change)
+        .unwrap();
+    assert_eq!(ch.message, "new publication profile site");
+    assert_eq!(ch.ops.len(), 1);
 }

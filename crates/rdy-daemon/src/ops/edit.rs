@@ -1,4 +1,4 @@
-//! The edit ops: new_folder, new_doc, keys_assign and edit_block.
+//! The edit ops: new_folder, new_doc, new_profile, keys_assign and edit_block.
 use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::{EditBase, RdyError};
@@ -19,6 +19,19 @@ pub(super) struct NewDocArgs {
     view: Option<String>,
     doc_type: Option<String>,
     title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewProfileArgs {
+    key: String,
+    parent: String,
+    title: String,
+    audience: String,
+    select: Vec<String>,
+    description: Option<String>,
+    trail: Option<bool>,
+    view: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +78,51 @@ pub(super) fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> 
             &a.path,
             a.doc_type.as_deref(),
             a.title.as_deref(),
+        )
+    })?;
+    out["view"] = json!(name);
+    Ok(out)
+}
+
+/// The block type of a publication profile (D-KDFZ3).
+const PROFILE_TYPE: &str = "publication_profile";
+
+/// `rdy new profile`: one ordinary `create` of a publication profile through the calling
+/// session's write, the same op `rdy_write` takes. Every rule on the write (the profile schema,
+/// briefing, consequence, role, view ownership) is the write path's own; nothing is checked or
+/// stored here. `trail` is left out of the fields when absent, so the audience's default holds.
+pub(super) fn new_profile(cx: &OpContext, a: NewProfileArgs) -> Result<Value, RdyError> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("key".into(), json!(a.key));
+    fields.insert("title".into(), json!(a.title));
+    fields.insert("audience".into(), json!(a.audience));
+    fields.insert("select".into(), json!(a.select));
+    if let Some(d) = a.description {
+        fields.insert("description".into(), json!(d));
+    }
+    if let Some(t) = a.trail {
+        fields.insert("trail".into(), json!(t));
+    }
+    let message = format!("new publication profile {}", a.key);
+    let ops = rdy_engine::parse_ops(vec![json!({
+        "op": "create",
+        "type": PROFILE_TYPE,
+        "id": "$profile",
+        "parent": a.parent,
+        "fields": fields,
+    })])?;
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| {
+        r.write(
+            &s,
+            rdy_engine::WriteRequest {
+                view,
+                ops,
+                justification: None,
+                message,
+            },
         )
     })?;
     out["view"] = json!(name);

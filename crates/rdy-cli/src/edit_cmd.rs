@@ -24,6 +24,32 @@ pub(crate) enum NewCmd {
         #[arg(long)]
         view: Option<String>,
     },
+    /// A publication profile: the docs and folders a publication holds, and its audience.
+    /// `rdy edit` changes it later; ordinary propose, approve and tag land and pin it.
+    Profile {
+        /// The profile's key (an ordinary block key).
+        key: String,
+        /// The id of the doc that holds the profile.
+        #[arg(long)]
+        parent: String,
+        #[arg(long)]
+        title: String,
+        /// Who the publication is for: `org` or `public`.
+        #[arg(long)]
+        audience: String,
+        /// The id of a doc or folder the publication holds; repeat it for more.
+        #[arg(long = "select", required = true)]
+        select: Vec<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Whether the publication carries its decision trail (default: on for an org
+        /// audience, off for public).
+        #[arg(long)]
+        trail: Option<bool>,
+        /// The view to write (default: the session's, `work` for the human).
+        #[arg(long)]
+        view: Option<String>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -39,9 +65,67 @@ pub(crate) struct EditArgs {
     reason: Option<String>,
 }
 
+/// `rdy new profile`: the `new_profile` op. A profile is supporting content, so the wrapper
+/// writes no working-copy file and a copied worktree needs no refusal; like the docs it sits
+/// beside, it goes to the view a human's working copy is bound to.
+fn new_profile(
+    env: &Env,
+    args: Value,
+    view: Option<String>,
+) -> Result<(Value, String), ErrorReply> {
+    let key = text(&args["key"]).to_string();
+    let view = match view {
+        None if crate::conn::human_session(env) => crate::conn::bound_view(env)?,
+        named => named,
+    };
+    let mut args = args;
+    args["view"] = json!(view);
+    let v = call(env, "new_profile", args)?;
+    let id = text(&v["created"]["$profile"]);
+    let mut t = format!(
+        "created publication profile {key} ({id}){}",
+        brief_text::consequences_text(&v)
+    );
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\nwarning {}: {}",
+            text(&w["code"]),
+            text(&w["message"])
+        ));
+    }
+    Ok((v, t))
+}
+
 pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply> {
+    let what = match what {
+        NewCmd::Profile {
+            key,
+            parent,
+            title,
+            audience,
+            select,
+            description,
+            trail,
+            view,
+        } => {
+            // an absent option stays out of the request, so the op's own defaults hold
+            let mut args = json!({
+                "key": key, "parent": parent, "title": title,
+                "audience": audience, "select": select,
+            });
+            if let Some(d) = description {
+                args["description"] = json!(d);
+            }
+            if let Some(t) = trail {
+                args["trail"] = json!(t);
+            }
+            return new_profile(env, args, view);
+        }
+        other => other,
+    };
     let named = match &what {
         NewCmd::Folder { view, .. } | NewCmd::Doc { view, .. } => view.clone(),
+        NewCmd::Profile { .. } => unreachable!("handled above"),
     };
     wc::new_files::refuse_in_copy(env, named.as_deref())?;
     let (kind, path, v) = match what {
@@ -62,6 +146,7 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
             )?;
             ("doc", path, v)
         }
+        NewCmd::Profile { .. } => unreachable!("handled above"),
     };
     let prefix = if kind == "doc" { "d-" } else { "fd-" };
     let created: Vec<String> = v["created"]
