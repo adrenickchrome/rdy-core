@@ -1347,68 +1347,76 @@ mod tests {
         assert_eq!(title_page("", true), want(None));
     }
 
+    /// pub8: writes `ops` to `view` as a writer agent; returns the created ids.
+    fn pub8_write(
+        r: &mut rdy_engine::Rdy,
+        view: &str,
+        ops: serde_json::Value,
+    ) -> BTreeMap<String, String> {
+        r.write(
+            &pub8_session("agent:a", rdy_model::Role::Writer),
+            rdy_engine::WriteRequest {
+                view: view.into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: format!("write to {view}"),
+            },
+        )
+        .unwrap_or_else(|e| panic!("write to {view}: {e}"))
+        .created
+    }
+
+    fn pub8_session(actor: &str, role: rdy_model::Role) -> rdy_engine::Session {
+        rdy_engine::Session {
+            actor: actor.into(),
+            run: None,
+            role,
+            kind: rdy_engine::SessionKind::Human,
+        }
+    }
+
+    /// pub8: lands `view`, confirming each exception the founder's queue holds for it.
+    fn pub8_land(r: &mut rdy_engine::Rdy, view: &str) {
+        use rdy_engine::answer::{AnswerRequest, relay::RelayInput};
+        use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
+        let agent = pub8_session("agent:a", rdy_model::Role::Writer);
+        let founder = pub8_session("human:founder", rdy_model::Role::Approver);
+        let p = r.propose(&agent, view, view, Some("test summary")).unwrap();
+        let q = r
+            .read()
+            .pending(&PendingQuery {
+                person: founder.actor.clone(),
+                session_ref: None,
+                max_tokens: CARD_MAX_TOKENS,
+            })
+            .unwrap();
+        let refs: Vec<String> = q
+            .items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(&*p.r#ref))
+            .map(|i| i.r#ref.clone())
+            .collect();
+        for item in refs {
+            let req = AnswerRequest {
+                r#ref: item,
+                option: "confirm".into(),
+                card_hash: None,
+                note: None,
+                relay: RelayInput::default(),
+                brief: None,
+            };
+            r.answer(&founder, &founder.actor, req).unwrap();
+        }
+        r.land(&founder, &p.id).unwrap();
+    }
+
     /// pub8 (D-5CVWB): the PDF of a named profile's print draws the selected text, read back
     /// glyph by glyph through the same decoding as `ec9_page_text_reads_back_through_to_unicode`,
     /// and no glyph of a block outside the selection, of another profile or of the project's name.
     #[test]
     fn pub8_pdf_text_reads_back_from_the_selected_print() {
-        use rdy_engine::answer::{AnswerRequest, relay::RelayInput};
-        use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
-        use rdy_engine::{Rdy, Scope, Session, SessionKind, WriteRequest};
-        use rdy_model::Role;
-        let session = |actor: &str, role| Session {
-            actor: actor.into(),
-            run: None,
-            role,
-            kind: SessionKind::Human,
-        };
-        let (agent, founder) = (
-            session("agent:a", Role::Writer),
-            session("human:founder", Role::Approver),
-        );
-        let write = |r: &mut Rdy, view: &str, ops: serde_json::Value| {
-            r.write(
-                &agent,
-                WriteRequest {
-                    view: view.into(),
-                    ops: serde_json::from_value(ops).unwrap(),
-                    justification: None,
-                    message: format!("write to {view}"),
-                },
-            )
-            .unwrap_or_else(|e| panic!("write to {view}: {e}"))
-            .created
-        };
-        // lands `view`, confirming each exception the founder's queue holds for it
-        let land = |r: &mut Rdy, view: &str| {
-            let p = r.propose(&agent, view, view, Some("test summary")).unwrap();
-            let q = r
-                .read()
-                .pending(&PendingQuery {
-                    person: founder.actor.clone(),
-                    session_ref: None,
-                    max_tokens: CARD_MAX_TOKENS,
-                })
-                .unwrap();
-            let refs: Vec<String> = q
-                .items
-                .iter()
-                .filter(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(&*p.r#ref))
-                .map(|i| i.r#ref.clone())
-                .collect();
-            for item in refs {
-                let req = AnswerRequest {
-                    r#ref: item,
-                    option: "confirm".into(),
-                    card_hash: None,
-                    note: None,
-                    relay: RelayInput::default(),
-                    brief: None,
-                };
-                r.answer(&founder, &founder.actor, req).unwrap();
-            }
-            r.land(&founder, &p.id).unwrap();
-        };
+        use rdy_engine::{Rdy, Scope};
+        let (write, land) = (pub8_write, pub8_land);
         let dir = tempfile::tempdir().unwrap();
         let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
         let ids = write(
@@ -1487,6 +1495,98 @@ mod tests {
         canaries.extend([&ids["$sib"], &ids["$sp"], &admin].map(|s| s.to_string()));
         for word in &canaries {
             assert!(!text.contains(word.as_str()), "{word}: {text}");
+            assert!(
+                find(&pdf, word.as_bytes(), 0).is_none(),
+                "{word} in the bytes"
+            );
+        }
+    }
+
+    /// Final fix round 2 (pub8, D-5CVWB): a figure's media type holding a reference to a doc
+    /// outside the selection reads back from the serialized PDF, glyph by glyph through
+    /// [`page_text`], as the reference's words: the fixed phrase for a bare reference, the
+    /// author's display words for a shown one. No drawn glyph and no raw byte holds the target's
+    /// id, as written or upper-cased (the case `human_media` gives a subtype).
+    #[test]
+    fn pub8_pdf_media_type_reference_reads_back_as_words() {
+        use rdy_engine::{Rdy, Scope};
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let file_bytes = b"media probe file bytes".to_vec();
+        let file_blob = r.store_mut().put_blob(&file_bytes).unwrap().to_string();
+        let ids = pub8_write(
+            &mut r,
+            "w1",
+            serde_json::json!([
+                {"op": "create", "type": "doc", "id": "$sib", "fields": {"name": "sibling", "title": "SIBCANARY title", "doc_type": "page"}},
+                {"op": "create", "type": "doc", "id": "$chosen", "fields": {"name": "chosen", "title": "Chosen page", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "parent": "$chosen", "body": "Chosen media words."}
+            ]),
+        );
+        pub8_land(&mut r, "w1");
+        let (sib, chosen) = (ids["$sib"].clone(), ids["$chosen"].clone());
+        pub8_write(
+            &mut r,
+            "w2",
+            serde_json::json!([
+                {"op": "create", "type": "figure", "parent": chosen, "fields": {"blob": file_blob, "media_type": format!("application/{{{{{sib}}}}}"), "alt": "Media file probe"}},
+                {"op": "create", "type": "figure", "parent": chosen, "fields": {"blob": file_blob, "media_type": format!("application/x-{{{{{sib}|Shown media words}}}}; v=1"), "alt": "Media words probe"}}
+            ]),
+        );
+        pub8_land(&mut r, "w2");
+        let admin = pub8_write(
+            &mut r,
+            "admin",
+            serde_json::json!([{"op": "create", "type": "doc", "id": "$admin",
+                "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}]),
+        )["$admin"]
+            .clone();
+        pub8_write(
+            &mut r,
+            "admin",
+            serde_json::json!([{"op": "create", "type": "publication_profile", "parent": admin,
+                "fields": {"key": "media", "title": "Media title",
+                    "description": "Media description.", "audience": "org",
+                    "select": [chosen]}}]),
+        );
+        pub8_land(&mut r, "admin");
+        let fonts = Fonts::load();
+        let read = r.read();
+        let drawn = |p: &Print| -> (Vec<u8>, String) {
+            let (pdf, pages, _) = pdf_bytes(p, &fonts);
+            let text = page_text(&pdf, &fonts);
+            assert_eq!(text.len(), pages);
+            let words = text
+                .iter()
+                .flatten()
+                .map(|d| d.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            (pdf, words)
+        };
+        let upper = sib.to_uppercase();
+
+        // the canary is real: the full-source PDF draws the token, upper-cased
+        let (_, full) = drawn(&crate::print::build(&read, &Scope::Canon).unwrap());
+        assert!(full.contains(&format!("{{{{{upper}}}}}")), "{full}");
+
+        let p = crate::print::build_profile(&read, "canon", "media").unwrap();
+        let (pdf, text) = drawn(&p);
+        let size = format!("{} bytes", file_bytes.len());
+        for want in [
+            "Media title".to_string(),
+            "Chosen page".into(),
+            "Chosen media words.".into(),
+            format!("Media file probe (unavailable reference, {size})"),
+            format!("Media words probe (X-Shown media words, {size})"),
+        ] {
+            assert!(text.contains(&want), "{want}: {text}");
+        }
+        for word in [sib.as_str(), upper.as_str(), "SIBCANARY", "{{"] {
+            assert!(!text.contains(word), "{word}: {text}");
             assert!(
                 find(&pdf, word.as_bytes(), 0).is_none(),
                 "{word} in the bytes"
