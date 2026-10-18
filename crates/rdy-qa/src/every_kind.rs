@@ -1,5 +1,5 @@
 //! The every-kind project: one project that holds an object of every kind of dump format 2 (store
-//! format 13) and a ref of every family, and one read of it ("facts") that a later rdy can
+//! format 14) and a ref of every family, and one read of it ("facts") that a later rdy can
 //! repeat. The project is a clone, so it holds `meta/origin` (O41). Its source's last landing is a
 //! person's approval of a content removal, so its log holds dropped payloads (D-3M81W). Shared by
 //! the sg6 store test and the dump, load and clone tests (D-69AY3, D-EV4F1).
@@ -7,6 +7,7 @@ use crate::fixtures::*;
 use crate::inbox::on;
 use crate::intake::{PERSON, confirm_exceptions, decide_in};
 use crate::packs::qa_project;
+use crate::signing::{TestKey, sign_record};
 use crate::tensions::{ag, created, one_involving, put, upd};
 use rdy_engine::alt::AltMemberInput;
 use rdy_engine::answer::AnswerRequest;
@@ -17,13 +18,15 @@ use rdy_engine::inbox::sub::subscribe;
 use rdy_engine::mention_review::MentionVerdict;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
 use rdy_engine::redaction::RedactInput;
+use rdy_engine::signature_check::{check_signature, read_check_context, signature_checks};
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::tensions::{TensionKind, tension_label};
 use rdy_engine::{DecisionInput, Engine, LandOptions, Local, Rdy, Scope, Session};
 use rdy_model::redaction::{Redaction, RedactionApply};
+use rdy_model::signature::{Signature, StatementSource};
 use rdy_model::{
-    ActorRun, BlockId, Finding, Hash, PairItem, Provenance, RelayEvidence, Review, ReviewSubject,
-    Role, SemanticTension, Verdict, pair_key,
+    ActorRun, Assurance, BlockId, Finding, Hash, PairItem, Provenance, RelayEvidence, Review,
+    ReviewSubject, Role, SemanticTension, Verdict, pair_key,
 };
 use rdy_store::Relay;
 use rdy_store::kinds;
@@ -33,10 +36,11 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The ref families of an every-kind store (store format 13): the ten of an M2 store, `canon`,
+/// The ref families of an every-kind store (store format 14): the ten of an M2 store, `canon`,
 /// the open proposals (`proposal/`), the answers (`answer/`), the snoozes (`pending/`), the repo
-/// id (`meta/repo_id`) and the clone's origin (`meta/origin`). Store format 13 adds kinds and no
-/// family: a redaction has no ref. A store format that adds a family adds it here; each frozen
+/// id (`meta/repo_id`) and the clone's origin (`meta/origin`). Store formats 13 and 14 add kinds
+/// and no family: a redaction and a signature have no ref. A store format that adds a family adds
+/// it here; each frozen
 /// fixture test keeps its own list (`V1_FAMILIES` in `io_dump_fixture.rs`, `V11_FAMILIES` in
 /// `io_dump_fixture_s11.rs`, `V12_FAMILIES` in `io_dump_fixture_s12.rs`, `V13_FAMILIES` in
 /// `io_dump_fixture_s13.rs`).
@@ -118,6 +122,32 @@ pub const V13_KINDS: [u8; 19] = [
     kinds::REF_UPDATE,
     kinds::TAG,
     kinds::ANSWER,
+    kinds::VIEW_OP,
+    kinds::INTENT,
+    kinds::ALT_SET,
+    kinds::REVIEW,
+    kinds::TENSION,
+    kinds::TRANSITION,
+    kinds::REDACTION,
+    kinds::REDACTION_RESIDUE,
+    kinds::REDACTION_APPLY,
+];
+
+/// The object kinds of dump format 2 with store format 14 that the project holds: `V13_KINDS`
+/// and `SIGNATURE` (kind 11), in numeric order. Store format 14 adds that kind and no ref family.
+/// Frozen with the v2-s14 fixture.
+pub const V14_KINDS: [u8; 20] = [
+    kinds::BLOCK,
+    kinds::CHANGE,
+    kinds::PROPOSAL,
+    kinds::LANDING,
+    kinds::SNAPSHOT,
+    kinds::BLOB_CHUNK,
+    kinds::BLOB_MANIFEST,
+    kinds::REF_UPDATE,
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
     kinds::VIEW_OP,
     kinds::INTENT,
     kinds::ALT_SET,
@@ -301,9 +331,11 @@ fn foreign_export(out: &Path) {
 /// content removal: a term version (its body and name the canaries, its alias quoted whole by a
 /// kept review finding, tension advice and answer), the change that embeds it beside an
 /// unaffected sibling op, a duplicate frame of the version, and a blob whose first chunk another
-/// blob shares. The project returned is a clone of the one built (O41): it keeps the built
-/// project's log byte for byte, then holds its origin batch (`meta/origin`), which names the
-/// removal's landing.
+/// blob shares. The built project then holds three valid signatures (store format 14): the
+/// person's approval of the seed landing, the agent's relay of the relayed landing and the
+/// person's signature of the tag `v0.2.0`, made by the QA signer (`crate::signing`). The project
+/// returned is a clone of the one built (O41): it keeps the built project's log byte for byte,
+/// then holds its origin batch (`meta/origin`), which names the removal's landing.
 /// Closed.
 pub fn project() -> tempfile::TempDir {
     build(None)
@@ -654,6 +686,9 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
         res.redaction.expect("the request is recorded")
     });
     e.close().unwrap();
+    // store format 14: three signatures of the final records, before the clone, so the clone's
+    // log still ends with its origin batch
+    sign_acts(dir.path());
     // O41: the project returned is a clone of the one built. A clone carries `.rdyignore`, so it
     // is written first; a clone never carries `.rdy/local.yaml`, so it is written into the clone.
     std::fs::write(dir.path().join(".rdyignore"), "*.draft.yaml\n").unwrap();
@@ -667,6 +702,93 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     src.close().unwrap();
     std::fs::write(to.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
     to
+}
+
+/// Appends three valid signatures to the project at `dir`, each in its own batch, with the
+/// project's repo id, which its clone keeps (D-1Z951): the person's key signs the approval of the seed landing
+/// and the tag `v0.2.0`; the agent's key signs the relay of the relayed landing. The records are
+/// the final ones the build made. The open batch is sealed, then fsck and the pure check of each
+/// signature pass before the project is returned. No signing act runs: the QA signer is a test
+/// harness (`crate::signing`).
+fn sign_acts(dir: &Path) {
+    let mut r = Rdy::open(dir).unwrap();
+    let repo = r.read().repo_id().unwrap();
+    let person = Provenance {
+        actor: PERSON.into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 1,
+    };
+    let agent = Provenance {
+        actor: "agent:relay".into(),
+        run: Some("chat".into()),
+        role: Role::Writer,
+        at_ms: 2,
+    };
+    let (landings, tags) = {
+        let st = r.read();
+        (st.landings().unwrap(), st.reader().tags().unwrap())
+    };
+    // `landings` runs newest first: the seed landing is the oldest local approval
+    let (seed_hash, seed) = landings
+        .iter()
+        .rev()
+        .find(|(_, l)| l.assurance == Assurance::Local)
+        .expect("the seed landing");
+    let relayed: Vec<_> = landings
+        .iter()
+        .filter(|(_, l)| l.assurance == Assurance::Relayed && l.relayed_by.is_some())
+        .collect();
+    assert_eq!(relayed.len(), 1, "one relayed landing");
+    let (relayed_hash, relayed) = relayed[0];
+    let (_, tag_hash, tag) = tags
+        .iter()
+        .find(|(name, ..)| name == "v0.2.0")
+        .expect("the tag v0.2.0");
+    let signatures = [
+        sign_record(
+            *seed_hash,
+            StatementSource::Approval(seed),
+            repo,
+            person.clone(),
+            TestKey::Person,
+        ),
+        sign_record(
+            *relayed_hash,
+            StatementSource::RelayApproval(relayed),
+            repo,
+            agent,
+            TestKey::Agent,
+        ),
+        sign_record(
+            *tag_hash,
+            StatementSource::Tag {
+                hash: *tag_hash,
+                tag,
+            },
+            repo,
+            person,
+            TestKey::Person,
+        ),
+    ];
+    for g in &signatures {
+        r.store_mut().put_signature(g).unwrap();
+    }
+    r.seal_open().unwrap();
+    r.fsck().unwrap();
+    let st = r.read();
+    for g in &signatures {
+        let checks = signature_checks(&st, &g.subject, None).unwrap();
+        assert_eq!(checks.len(), 1, "one signature per subject");
+        let c = &checks[0];
+        assert_eq!(
+            (c.signed.as_str(), c.statement.as_str(), c.code.as_deref()),
+            ("valid", "match", None),
+            "{c:?}"
+        );
+    }
+    drop(st);
+    r.close().unwrap();
 }
 
 /// The agent that relays the person's words from chat.
@@ -689,7 +811,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// What a later rdy must read the same from this project, after a dump and a load:
-/// `{"refs": {<name>: <hex value>}, "objects": {<kind>: <count>}, "landings": [<hash>], "fsck": <FsckReport>}`.
+/// `{"refs": {<name>: <hex value>}, "objects": {<kind>: <count>}, "landings": [<hash>], "fsck": <FsckReport>, "signatures": {<hash>: {..}}}`.
 /// `refs` is every ref. `objects` counts the data frames by their original kind from the log start
 /// to `seq()`, through the record walker: a frame whose payload a removal dropped counts as its
 /// kind (batch markers left out). `landings` is canon's landing chain, oldest first.
@@ -730,7 +852,37 @@ pub fn facts(r: &Rdy) -> serde_json::Value {
         "objects": objects,
         "landings": landings,
         "fsck": r.fsck().unwrap(),
+        "signatures": signature_facts(&st),
     })
+}
+
+/// The stored signatures, keyed by full signature hash: `{subject, namespace, statement_hash,
+/// sig_hash, check}`. Both byte hashes are BLAKE3 of the statement and of the SSHSIG blob. The
+/// check is the offline check with no trust data (`trust` is `unknown`), as `rdy fsck` and
+/// `rdy verify` run it. Empty for a store that holds none.
+fn signature_facts(st: &rdy_engine::ReadState) -> serde_json::Value {
+    let mut stored: Vec<(Hash, Signature)> = vec![];
+    st.reader()
+        .visit_signatures(&mut |h, g| {
+            stored.push((h, g.clone()));
+            Ok(())
+        })
+        .unwrap();
+    let mut out = serde_json::Map::new();
+    for (hash, g) in stored {
+        let context = read_check_context(st, &g).unwrap();
+        out.insert(
+            hash.to_string(),
+            json!({
+                "subject": g.subject.to_string(),
+                "namespace": g.namespace,
+                "statement_hash": Hash::of(&g.statement).to_string(),
+                "sig_hash": Hash::of(&g.sig).to_string(),
+                "check": check_signature(&g, &context, None),
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
 }
 
 /// The one applied content removal of a project: the request's hash and record, and its apply's

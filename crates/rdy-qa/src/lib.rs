@@ -19,6 +19,7 @@ pub mod platform;
 pub mod reindex_check;
 pub mod report;
 pub mod seams;
+pub mod signing;
 pub mod site;
 pub mod skip;
 pub mod swarm;
