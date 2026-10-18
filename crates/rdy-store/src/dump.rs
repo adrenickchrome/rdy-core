@@ -46,11 +46,12 @@
 //! # Dump format 2
 //!
 //! Dump format 2 carries store format 13 (the pair (2, 13); its frame kinds are those of (1, 12)
-//! and 20 to 22). It keeps the magic, the container framing and the `HEADER`, `FILE`, `BATCH` and
-//! `TRAILER` layouts of format 1, and adds one container kind, `DROPPED = 0xF3` (D-3M81W: rdy
-//! "drops their bytes and keeps their hashes"). A `DROPPED` record stands only where a batch's
-//! data frame is expected, and only under (2, 13). It is one source frame whose payload an applied
-//! redaction removed. Its payload is exactly 102 bytes:
+//! and 20 to 22) and store format 14 (the pair (2, 14); its frame kinds are those of (2, 13) and
+//! 11, the signature). It keeps the magic, the container framing and the `HEADER`, `FILE`,
+//! `BATCH` and `TRAILER` layouts of format 1, and adds one container kind, `DROPPED = 0xF3`
+//! (D-3M81W: rdy "drops their bytes and keeps their hashes"). A `DROPPED` record stands only where
+//! a batch's data frame is expected, and only under dump format 2. It is one source frame whose
+//! payload an applied redaction removed. Its payload is exactly 102 bytes:
 //!
 //! `original_kind: u8 || original_hash: [u8; 32] || original_len: u32 || apply_hash: [u8; 32] ||
 //! has_residue: u8 || residue_hash: [u8; 32]`.
@@ -85,11 +86,12 @@ use std::io::{self, Read, Write};
 
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
-/// The dump format this rdy writes: 2, of store format 13 (the pair (2, 13)).
+/// The dump format this rdy writes: 2, of store format 14 (the pair (2, 14)).
 pub const DUMP_FORMAT: u32 = 2;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
-/// this list (D-69AY3). No (1, 13) pair exists: store format 13 travels only in dump format 2.
-pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13)];
+/// this list (D-69AY3). No (1, 13) pair exists: store formats 13 and 14 travel only in dump
+/// format 2.
+pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14)];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -403,6 +405,32 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
             kinds::REF_UPDATE,
             kinds::TAG,
             kinds::ANSWER,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+            kinds::REDACTION,
+            kinds::REDACTION_RESIDUE,
+            kinds::REDACTION_APPLY,
+        ],
+    ),
+    // store format 14 adds the signature
+    (
+        (2, 14),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::SIGNATURE,
             kinds::VIEW_OP,
             kinds::INTENT,
             kinds::ALT_SET,

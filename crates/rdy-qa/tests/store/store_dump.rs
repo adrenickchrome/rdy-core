@@ -558,18 +558,25 @@ fn dl1_an_unassigned_kind_is_refused() {
         frame_kinds(DUMP_FORMAT, STORE_FORMAT),
         Some(
             &[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19, 20, 21, 22
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22
             ][..]
         ),
-        "exactly the kinds store format 13 assigns"
+        "exactly the kinds store format 14 assigns"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
     }
+    // kind 11 (SIGNATURE) is assigned for (2, 14) only: every older pair still refuses it
+    for (d, sf) in [(1, 10), (1, 11), (1, 12), (2, 13)] {
+        assert!(
+            !frame_kinds(d, sf).unwrap().contains(&11),
+            "({d}, {sf}) refuses kind 11"
+        );
+    }
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    for k in [11u8, 12, 14] {
+    for k in [12u8, 14] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;

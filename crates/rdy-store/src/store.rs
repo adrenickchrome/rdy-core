@@ -436,6 +436,14 @@ fn entries_for_frame(
                 landing: hash,
             }));
         }
+        kinds::SIGNATURE => {
+            // the bounded decoder only: a record that does not decode is damage
+            let g = crate::signature::decode_stored(&hash, payload)?;
+            out.push(IndexEntry::Signature {
+                subject: g.subject,
+                signature: hash,
+            });
+        }
         kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
@@ -934,6 +942,7 @@ impl Store {
         // removed hash is refused with the batch still open, and nothing poisoned
         crate::redaction::refuse_redaction_kinds(&last)?;
         self.refuse_removed(&last)?;
+        self.check_new_signatures(&last)?;
         // a held batch that holds a redaction apply seals through the apply hook, which never
         // takes the rollback below once the batch is synced
         if self
@@ -1248,6 +1257,7 @@ impl Store {
             ));
         }
         self.refuse_removed(&items)?;
+        self.check_new_signatures(&items)?;
         let start = self.log.end();
         let result = if self.held {
             self.append_held(items)
@@ -2689,6 +2699,7 @@ impl Store {
         }
         crate::redaction_io::refuse_oversized_records(&items)?;
         self.refuse_removed(&items)?;
+        self.check_new_signatures(&items)?;
         let (_, batch) = self.dedupe(items)?;
         let start = self.log.batch_start(&batch);
         let auth = crate::redaction_io::bootstrap_pending(self.log.readers(), start, &batch)?;

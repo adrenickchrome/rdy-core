@@ -5,7 +5,8 @@
 //! the dismissal refs and the reviews they name (rvw1), and the mention review refs and the
 //! reviews they name (cc1), and the values of the inbox refs (ib1), and the fold of the
 //! TRANSITION records against the open-move tables (ib14), and the ANSWER records and the
-//! `answer/` and `pending/` refs (di1).
+//! `answer/` and `pending/` refs (di1), and the SIGNATURE records against the signature table
+//! (sig4).
 use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
@@ -153,6 +154,7 @@ impl StoreReader {
         let inboxes = self.check_inboxes()?;
         let transitions = self.check_transitions()?;
         let answers = self.check_answers()?;
+        self.check_signatures()?;
         self.check_meta()?;
         Ok(StoreCheck {
             views,
@@ -168,6 +170,23 @@ impl StoreReader {
             transitions,
             answers,
         })
+    }
+
+    /// Every SIGNATURE record decodes within its bounds (`signature {hash} has an invalid
+    /// record` otherwise), and the signature table holds exactly its rows. A decodable record's
+    /// subject is not checked here: a missing or wrong-kind subject is the engine's
+    /// E_SIG_OBJECT_MISMATCH, and its statement text the engine's E_SIG_INVALID.
+    fn check_signatures(&self) -> Result<(), StoreError> {
+        let matches = self
+            .index()
+            .signature_rows_match(&mut |h| Ok(self.signature(&h)?.subject))?;
+        if !matches {
+            return Err(bad(
+                "the signature table differs from the signature records; run rdy reindex"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Folds every TRANSITION record, in log order from the origin to the end of what the index

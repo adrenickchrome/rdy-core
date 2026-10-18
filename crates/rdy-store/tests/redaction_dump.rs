@@ -846,15 +846,24 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
 }
 
 #[test]
-fn rdx9_current_output_is_only_pair_two_thirteen() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (2, 13));
-    assert_eq!(READS, &[(1, 10), (1, 11), (1, 12), (2, 13)]);
+fn rdx9_current_output_uses_the_current_store_pair() {
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (2, 14));
+    assert_eq!(READS, &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14)]);
     assert_eq!(frame_kinds(1, 13), None, "no (1, 13) reader entry");
     assert_eq!(
         frame_kinds(2, 13),
         Some(
             &[
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19, 20, 21, 22
+            ][..]
+        )
+    );
+    // the current pair: the kinds of (2, 13) and SIGNATURE (11)
+    assert_eq!(
+        frame_kinds(2, 14),
+        Some(
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22
             ][..]
         )
     );
@@ -887,7 +896,7 @@ fn rdx9_current_output_is_only_pair_two_thirteen() {
     let bytes = src.dump();
     assert_eq!(&bytes[..12], b"RDYDUMP\n\x02\x00\x00\x00");
     let (format, h, _) = read_dump(&bytes).unwrap();
-    assert_eq!((format, h.store_format), (2, 13));
+    assert_eq!((format, h.store_format), (DUMP_FORMAT, STORE_FORMAT));
 }
 
 /// The bytes of the log of the store directory `to`, in all its segments.

@@ -19,6 +19,7 @@ pub mod redaction;
 pub mod redaction_io;
 pub mod review;
 pub mod segment;
+pub mod signature;
 mod store;
 pub mod transition;
 pub mod view;

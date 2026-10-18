@@ -13,7 +13,7 @@ use rdy_engine::clone::{CloneSource, clone};
 use rdy_engine::{E_DUMP, Rdy, load::load};
 use rdy_model::Hash;
 use rdy_model::redaction::RedactTarget;
-use rdy_store::dump::{DumpItem, DumpReader, MAGIC, rec};
+use rdy_store::dump::{DUMP_FORMAT, DumpItem, DumpReader, MAGIC, rec};
 use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
 use rdy_store::kinds;
 use rdy_store::meta::Origin;
@@ -226,7 +226,7 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     let scratch = tempfile::tempdir().unwrap();
     let file = scratch.path().join("p.rdydump");
     let d = a.read().dump(&file).unwrap();
-    assert_eq!((d.dump_format, d.store_format), (2, 13));
+    assert_eq!((d.dump_format, d.store_format), (DUMP_FORMAT, STORE_FORMAT));
     let bytes = std::fs::read(&file).unwrap();
     assert!(
         !bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()),
