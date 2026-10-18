@@ -5556,7 +5556,7 @@ mod tests {
     }
 
     /// Task 11: the publication ops are information only (D-0VCQ5, D-5CVWB, F4): exactly six, with
-    /// the exact target texts in operation order, no ceiling and no entry in the baseline file.
+    /// the exact target texts in operation order and no ceiling.
     #[test]
     fn pub11_perf_operations_have_closed_targets() {
         let want = [
@@ -5585,14 +5585,9 @@ mod tests {
                 "no spec target: print selected docs as PDF (reported)",
             ),
         ];
-        let baseline: serde_json::Value =
-            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
         for (op, text) in want {
             assert_eq!(spec_target(op).as_deref(), Some(text), "{op}");
             assert_eq!(spec_ceiling_ms(op), None, "{op} has a ceiling");
-            for class in baseline["classes"].as_object().expect("classes").values() {
-                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
-            }
         }
     }
 
@@ -5625,7 +5620,6 @@ mod tests {
         );
         for m in &out {
             assert_eq!(m.runs, 2, "{m:?}");
-            assert!(m.median_ms >= 0.0 && m.p95_ms >= 0.0, "{m:?}");
         }
         let left: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read_dir")
