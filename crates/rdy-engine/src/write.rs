@@ -942,6 +942,7 @@ fn drop_rekey_op(
 /// The conflicts of the view a write goes to, and the changes it includes: an `E_FROZEN` hint
 /// names a side's change only when the view includes it (msw1).
 pub(crate) struct ViewConflicts<'a> {
+    pub view: &'a str,
     pub list: &'a [Conflict],
     pub included: &'a [Hash],
 }
@@ -976,7 +977,7 @@ fn current_for_edit<'b>(
         ));
     }
     if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
-        let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts.included)?;
+        let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts)?;
         check_not_frozen(id, &cur)?;
         return Ok((b, cur));
     }
@@ -1014,11 +1015,11 @@ fn conflicted_for_edit<'b>(
     base: &Option<String>,
     c: &Conflict,
     store: &rdy_store::Store,
-    included: &[Hash],
+    conflicts: &ViewConflicts<'_>,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     let cid = c.id.short();
     let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
-    frozen_in_conflict(id, c, store, included)?;
+    frozen_in_conflict(conflicts.view, id, c, store, conflicts.included)?;
     let Some(b) = parse_base(base)? else {
         let side_list = sides
             .iter()
@@ -1060,13 +1061,16 @@ fn conflicted_for_edit<'b>(
 }
 
 /// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
-/// from any version: the edit would change or drop an accepted or rejected decision. The way out
-/// is to drop a side's change from the view or to supersede the decision. msw1 (#1165): the hint
-/// names only the sides' changes the view can exclude, the ones it includes (`included`), frozen
-/// or not. A landed change is in a view only when the view is pinned (a pinned view is never
-/// rebased), and then it can be excluded too. The check reads the blocks first and the landings
-/// only when something is frozen, so a plain conflict never reads the landed index.
-fn frozen_in_conflict(
+/// from any version: the edit would change or drop an accepted or rejected decision. The ways out
+/// are, first, to take the landed side when the conflict has one (cf1, D-X4GMH: `rdy view
+/// resolve <view> <id> --landed`, `landed_side`), then to drop a side's change from the view or
+/// to supersede the decision. msw1 (#1165): the hint names only the sides' changes the view can
+/// exclude, the ones it includes (`included`), frozen or not. A landed change is in a view only
+/// when the view is pinned (a pinned view is never rebased), and then it can be excluded too.
+/// The check reads the blocks first and the landings only when something is frozen, so a plain
+/// conflict never reads the landed index.
+pub(crate) fn frozen_in_conflict(
+    view: &str,
     id: &BlockId,
     c: &Conflict,
     store: &rdy_store::Store,
@@ -1115,7 +1119,7 @@ fn frozen_in_conflict(
         }
     }
     let supersede = format!("write a new decision that supersedes or revokes {id}");
-    let fix = match excludable.as_slice() {
+    let others = match excludable.as_slice() {
         [] => supersede,
         [one] => {
             format!("exclude the change {one} from the view (rdy view exclude), or {supersede}")
@@ -1125,6 +1129,12 @@ fn frozen_in_conflict(
             many.join(", ")
         ),
     };
+    let fix = match landed_side(c, store)? {
+        Some(_) => {
+            format!("take the landed side (rdy view resolve {view} {id} --landed), or {others}")
+        }
+        None => others,
+    };
     Err(RdyError::new(
         E_FROZEN,
         format!(
@@ -1132,6 +1142,99 @@ fn frozen_in_conflict(
         ),
         fix,
     ))
+}
+
+/// Whether any version in conflict `c`, its base or a side, is a frozen decision.
+pub(crate) fn conflict_has_frozen(
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<bool, RdyError> {
+    for v in c
+        .base
+        .iter()
+        .chain(c.sides.iter().filter_map(|s| s.version.as_ref()))
+    {
+        if decision::is_frozen(&store.get_block(v)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// cf1 (D-X4GMH): the landed side of conflict `c`, the version the landing froze: canon's
+/// version of the block, when a side holds it and it is a frozen decision. None otherwise (canon
+/// moved past every side, or its version is not frozen). Reads canon's state, so call it only
+/// for a conflict that holds something frozen.
+pub(crate) fn landed_side(
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<Option<Hash>, RdyError> {
+    let Some(cv) = store.canon_state()?.blocks.get(&c.block).copied() else {
+        return Ok(None);
+    };
+    if !c.sides.iter().any(|s| s.version == Some(cv)) {
+        return Ok(None);
+    }
+    Ok(decision::is_frozen(&store.get_block(&cv)?).then_some(cv))
+}
+
+/// cf1: the landed side's block `b` against view `m`, as a write of it is checked: the view
+/// reads the conflict's base, so since the landing another block may have taken `b`'s key, and
+/// the view may have deleted its parent, a link target or a block it cites, or moved its parent
+/// under it (cres1).
+pub(crate) fn check_landed_block(pack: &Pack, m: &Materialized, b: &Block) -> Result<(), RdyError> {
+    Resolver::new(m).check_key(b)?;
+    let cited = b.links.values().flatten().map(|l| &l.target);
+    for target in cited.chain(b.pins.keys()) {
+        if *target != b.id && m.get(target).is_none() {
+            return Err(RdyError::new(
+                E_UNKNOWN_REF,
+                format!(
+                    "{} links to or cites {target}, which does not exist in this view",
+                    b.id
+                ),
+                format!(
+                    "bring {target} back into the view (exclude or undo the change that deleted it), then resolve again"
+                ),
+            ));
+        }
+    }
+    // the parents above the landed parent, as the view holds them, must not reach `b` (a damaged
+    // store may hold a loop of its own: never walk more steps than there are blocks)
+    if let Some(p) = &b.parent {
+        let mut walk = Some(p.clone());
+        let mut steps = 0;
+        while let Some(w) = walk {
+            if w == b.id {
+                return Err(bad(
+                    format!(
+                        "the landed side puts {} under {p}, which this view holds under {}: that would make a parent loop",
+                        b.id, b.id
+                    ),
+                    format!(
+                        "move {p} out from under {} in this view, then resolve again",
+                        b.id
+                    ),
+                ));
+            }
+            steps += 1;
+            if steps > m.len() {
+                break;
+            }
+            walk = m.get(&w).and_then(|x| x.parent.clone());
+        }
+    }
+    let issues = validate_block(pack, b, b.parent.as_ref().and_then(|p| m.get(p)));
+    if has_errors(&issues) {
+        let first = issues
+            .iter()
+            .find(|i| i.severity == rdy_schema::Severity::Error)
+            .expect("an error");
+        let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+        e.issues = issues;
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// The refusal of a tracking edit with no editorial reason (`rdy edit` gives its own fix).
@@ -2661,6 +2764,7 @@ impl Rdy {
             session,
             req.ops,
             &ViewConflicts {
+                view: &req.view,
                 list: &conflicts,
                 included: &included,
             },

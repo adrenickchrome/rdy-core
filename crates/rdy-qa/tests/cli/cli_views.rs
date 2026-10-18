@@ -321,3 +321,32 @@ fn msw13_an_agent_session_whose_run_names_a_reserved_view_is_refused() {
         .is_ok()
     );
 }
+
+/// cf1 (D-X4GMH): `rdy view resolve <view> <block> --landed` takes the landed side of a frozen
+/// conflict, as the human and as the view's agent; the text names the conflict and the version.
+#[test]
+fn cf1_rdy_view_resolve_landed_takes_the_landed_side() {
+    let s = Served::new();
+    let d = with_rdy(&s, |r| frozen_conflict(r).0);
+    let (ok, said) = text(&s, &["view", "resolve", "b", &d]);
+    assert!(
+        !ok && said.contains("--landed"),
+        "landed is required: {said}"
+    );
+    let o = s.rdy_as(
+        "agent:b",
+        Some("r1"),
+        &["view", "resolve", "b", &d, "--landed"],
+    );
+    let (ok, stdout, stderr) = out(&o);
+    assert!(ok, "{stdout}{stderr}");
+    assert!(
+        stdout.starts_with("resolved conflict ")
+            && stdout.contains(&format!(" on {d} in b: took the landed side ")),
+        "{stdout}"
+    );
+    let (ok, v) = s.json(&["--json", "view", "show", "b"]);
+    assert!(ok && v["conflicts"] == json!([]), "{v}");
+    let (ok, v) = s.json(&["--json", "view", "resolve", "b", &d, "--landed"]);
+    assert!(!ok && v["code"] == "E_BAD_INPUT", "no conflict left: {v}");
+}
