@@ -76,12 +76,29 @@ pub fn single_html(p: &Print) -> Vec<u8> {
     if let Some(d) = p.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = writeln!(h, "<p class=\"description\">{}</p>", esc(d));
     }
-    let _ = writeln!(
-        h,
-        "<p class=\"colophon\">{} <span class=\"scope\">({})</span></p>",
-        esc(&p.label),
-        esc(&p.scope)
-    );
+    // a named profile's print has no scope, and a label only for a chosen tag (RULING F3): no
+    // colophon without either
+    match (p.label.is_empty(), p.scope.is_empty()) {
+        (true, true) => {}
+        (false, true) => {
+            let _ = writeln!(h, "<p class=\"colophon\">{}</p>", esc(&p.label));
+        }
+        (true, false) => {
+            let _ = writeln!(
+                h,
+                "<p class=\"colophon\"><span class=\"scope\">({})</span></p>",
+                esc(&p.scope)
+            );
+        }
+        (false, false) => {
+            let _ = writeln!(
+                h,
+                "<p class=\"colophon\">{} <span class=\"scope\">({})</span></p>",
+                esc(&p.label),
+                esc(&p.scope)
+            );
+        }
+    }
     h.push_str("</header>\n");
 
     contents(&mut h, &p.docs);

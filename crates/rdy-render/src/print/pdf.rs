@@ -954,21 +954,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ec9_page_text_reads_back_through_to_unicode() {
-        let fonts = Fonts::load();
-        let p = sample();
-        let laid = lay_out(&p, &fonts);
-        let (pdf, pages, warnings) = pdf_bytes(&p, &fonts);
-        assert_eq!(pages, laid.pages.len());
-        assert!(pages >= 3, "the title part and two docs");
-        assert_eq!(
-            warnings,
-            vec!["3 characters have no glyph in the PDF fonts and print as ?: → ☃ 中".to_string()]
-        );
-        let objs = objects(&pdf);
-        let page_ids = page_ids(&objs);
-        assert_eq!(page_ids.len(), pages);
+    /// One run of text a page draws: its text, its text matrix and whether its font is bold.
+    type Drawn = (String, Vec<f32>, bool);
+
+    /// The text each page of `pdf` draws, in page order: each `Tj` string decoded through its
+    /// font's ToUnicode map (an embedded font) or Courier's WinAnsiEncoding (the code face).
+    fn page_text(pdf: &[u8], fonts: &Fonts) -> Vec<Vec<Drawn>> {
+        let objs = objects(pdf);
         // Courier's WinAnsiEncoding: byte → character
         let mut win_ansi = BTreeMap::new();
         for c in (0u32..0x3000).filter_map(char::from_u32) {
@@ -976,10 +968,9 @@ mod tests {
                 win_ansi.insert(u8::try_from(g).unwrap(), c);
             }
         }
-        let slant = 12f32.to_radians().tan();
-        let mut faces_seen = std::collections::BTreeSet::new();
-        for (i, id) in page_ids.iter().enumerate() {
-            let page = &objs[id].dict;
+        let mut out = vec![];
+        for id in page_ids(&objs) {
+            let page = &objs[&id].dict;
             let fonts_of: BTreeMap<String, u32> =
                 refs(page, r"/(F\d+) (\d+) 0 R").into_iter().collect();
             let content = inflate(&objs[&one_ref(page, "Contents")]);
@@ -1031,6 +1022,29 @@ mod tests {
                     _ => {}
                 }
             }
+            out.push(read);
+        }
+        out
+    }
+
+    #[test]
+    fn ec9_page_text_reads_back_through_to_unicode() {
+        let fonts = Fonts::load();
+        let p = sample();
+        let laid = lay_out(&p, &fonts);
+        let (pdf, pages, warnings) = pdf_bytes(&p, &fonts);
+        assert_eq!(pages, laid.pages.len());
+        assert!(pages >= 3, "the title part and two docs");
+        assert_eq!(
+            warnings,
+            vec!["3 characters have no glyph in the PDF fonts and print as ?: → ☃ 中".to_string()]
+        );
+        let objs = objects(&pdf);
+        let page_ids = page_ids(&objs);
+        assert_eq!(page_ids.len(), pages);
+        let slant = 12f32.to_radians().tan();
+        let mut faces_seen = std::collections::BTreeSet::new();
+        for (i, read) in page_text(&pdf, &fonts).iter().enumerate() {
             let want: Vec<(String, Face)> = laid.pages[i]
                 .items
                 .iter()
@@ -1297,5 +1311,152 @@ mod tests {
         let images = image_objects(&objs);
         assert_eq!(images.len(), 1);
         assert!(images[0].0.dict.contains("/Width 8192"));
+    }
+
+    /// pub8 (D-5CVWB): the PDF of a named profile's print draws the selected text, read back
+    /// glyph by glyph through the same decoding as `ec9_page_text_reads_back_through_to_unicode`,
+    /// and no glyph of a block outside the selection, of another profile or of the project's name.
+    #[test]
+    fn pub8_pdf_text_reads_back_from_the_selected_print() {
+        use rdy_engine::answer::{AnswerRequest, relay::RelayInput};
+        use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
+        use rdy_engine::{Rdy, Scope, Session, SessionKind, WriteRequest};
+        use rdy_model::Role;
+        let session = |actor: &str, role| Session {
+            actor: actor.into(),
+            run: None,
+            role,
+            kind: SessionKind::Human,
+        };
+        let (agent, founder) = (
+            session("agent:a", Role::Writer),
+            session("human:founder", Role::Approver),
+        );
+        let write = |r: &mut Rdy, view: &str, ops: serde_json::Value| {
+            r.write(
+                &agent,
+                WriteRequest {
+                    view: view.into(),
+                    ops: serde_json::from_value(ops).unwrap(),
+                    justification: None,
+                    message: format!("write to {view}"),
+                },
+            )
+            .unwrap_or_else(|e| panic!("write to {view}: {e}"))
+            .created
+        };
+        // lands `view`, confirming each exception the founder's queue holds for it
+        let land = |r: &mut Rdy, view: &str| {
+            let p = r.propose(&agent, view, view, Some("test summary")).unwrap();
+            let q = r
+                .read()
+                .pending(&PendingQuery {
+                    person: founder.actor.clone(),
+                    session_ref: None,
+                    max_tokens: CARD_MAX_TOKENS,
+                })
+                .unwrap();
+            let refs: Vec<String> = q
+                .items
+                .iter()
+                .filter(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(&*p.r#ref))
+                .map(|i| i.r#ref.clone())
+                .collect();
+            for item in refs {
+                let req = AnswerRequest {
+                    r#ref: item,
+                    option: "confirm".into(),
+                    card_hash: None,
+                    note: None,
+                    relay: RelayInput::default(),
+                    brief: None,
+                };
+                r.answer(&founder, &founder.actor, req).unwrap();
+            }
+            r.land(&founder, &p.id).unwrap();
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let ids = write(
+            &mut r,
+            "w1",
+            serde_json::json!([
+                {"op": "create", "type": "doc", "id": "$sib", "fields": {"name": "sibling", "title": "SIBCANARY title", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$sp", "parent": "$sib", "body": "SIBCANARY prose."},
+                {"op": "create", "type": "code", "parent": "$sib", "fields": {"lang": "python"}, "body": "SIBCANARY_CODE = 2"},
+                {"op": "create", "type": "doc", "id": "$chosen", "fields": {"name": "chosen", "title": "Chosen page", "doc_type": "page"}},
+                {"op": "create", "type": "section", "parent": "$chosen", "fields": {"title": "Chosen section"}},
+                {"op": "create", "type": "prose", "parent": "$chosen", "body": "Chosen readback words, é and α."},
+                {"op": "create", "type": "prose", "parent": "$chosen", "body": "Shown {{$sp|display words}} and bare {{$sp}}."},
+                {"op": "create", "type": "code", "parent": "$chosen", "fields": {"lang": "python"}, "body": "chosen_code = 1"}
+            ]),
+        );
+        land(&mut r, "w1");
+        let admin = write(
+            &mut r,
+            "admin",
+            serde_json::json!([{"op": "create", "type": "doc", "id": "$admin",
+                "fields": {"name": "admin", "title": "ADMINCANARY page", "doc_type": "page"}}]),
+        )["$admin"]
+            .clone();
+        write(
+            &mut r,
+            "admin",
+            serde_json::json!([{"op": "create", "type": "publication_profile", "parent": admin,
+                "fields": {"key": "readback", "title": "Readback title",
+                    "description": "Readback description.", "audience": "org",
+                    "select": [ids["$chosen"].clone()]}}]),
+        );
+        land(&mut r, "admin");
+        let fonts = Fonts::load();
+        let read = r.read();
+        let drawn = |p: &Print| -> String {
+            let (pdf, pages, _) = pdf_bytes(p, &fonts);
+            let text = page_text(&pdf, &fonts);
+            assert_eq!(text.len(), pages);
+            text.iter()
+                .flatten()
+                .map(|d| d.0.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // the canaries are real: the full-source PDF draws them (RULING F2)
+        let full = drawn(&crate::print::build(&read, &Scope::Canon).unwrap());
+        for word in ["SIBCANARY", "SIBCANARY_CODE", "ADMINCANARY"] {
+            assert!(full.contains(word), "{word}: {full}");
+        }
+
+        let p = crate::print::build_profile(&read, "canon", "readback").unwrap();
+        let (pdf, _, _) = pdf_bytes(&p, &fonts);
+        let text = drawn(&p);
+        for want in [
+            "Readback title",
+            "Readback description.",
+            "Chosen page",
+            "Chosen section",
+            "Chosen readback words, é and α.",
+            "Shown display words and bare unavailable reference.",
+            "chosen_code = 1",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        // no glyph and no raw byte of an excluded block, its id, the profile's home or the
+        // project's own source scope
+        let mut canaries = vec![
+            "SIBCANARY".to_string(),
+            "ADMINCANARY".into(),
+            "Version:".into(),
+            "Scope:".into(),
+            "canon".into(),
+        ];
+        canaries.extend([&ids["$sib"], &ids["$sp"], &admin].map(|s| s.to_string()));
+        for word in &canaries {
+            assert!(!text.contains(word.as_str()), "{word}: {text}");
+            assert!(
+                find(&pdf, word.as_bytes(), 0).is_none(),
+                "{word} in the bytes"
+            );
+        }
     }
 }

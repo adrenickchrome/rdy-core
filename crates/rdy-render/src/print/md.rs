@@ -436,8 +436,12 @@ fn title_file(p: &Print) -> String {
         out.push_str(&paras.join("\n\n"));
         out.push('\n');
     }
-    out.push_str(&format!("\nVersion: {}\n", text_line(&p.label, false)));
-    out.push_str(&format!("\nScope: {}\n", text_line(&p.scope, false)));
+    // an empty label or scope (a named profile's, RULING F3) leaves no line and no blank line
+    for (name, value) in [("Version", &p.label), ("Scope", &p.scope)] {
+        if !value.is_empty() {
+            out.push_str(&format!("\n{name}: {}\n", text_line(value, false)));
+        }
+    }
     out
 }
 

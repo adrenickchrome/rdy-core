@@ -3,10 +3,13 @@
 //!
 //! A print holds a title part (the project's name, its description, the version label and the
 //! scope), then every folder and doc page in tree order, then the glossary when the site has one
-//! (O2). It holds the words of the site's own pages: the blocks each page builds, read back from
-//! the renderer's HTML ([`ir::from_html`]). Nothing on the site that acts is printed: no button,
-//! script, navigation, search, review mark, change summary, version pill or "Why?" trail
-//! (D-X61DT). A diagram prints as its source (O3). No id is shown (O4).
+//! (O2). A named profile's print ([`build_profile`]) is built the same way from its selected view
+//! alone, under the profile's title and description, with no scope and only the explicitly chosen
+//! tag's name as its label (D-5CVWB, RULING F3). It holds the words of the site's own pages: the
+//! blocks each page builds, read back from the renderer's HTML ([`ir::from_html`]). Nothing on
+//! the site that acts is printed: no button, script, navigation, search, review mark, change
+//! summary, version pill or "Why?" trail (D-X61DT). A diagram prints as its source (O3). No id
+//! is shown (O4).
 pub mod fonts;
 pub mod image;
 pub mod ir;
@@ -42,7 +45,7 @@ pub enum Format {
 /// applies to the Markdown tree only; `None` lays it out plainly. Refuses `inflight`. O29's path
 /// rules (`check_out`) come before the print is built, the same for every format. The writer of
 /// the format never overwrites: a file must not exist, a directory may be empty. It writes no
-/// format-3 tree (O12).
+/// format-3 tree (O12). Without a profile the print is the full source (RULING F2).
 pub fn export(
     rdy: &ReadState,
     scope: &Scope,
@@ -50,6 +53,35 @@ pub fn export(
     format: Format,
     layout: Option<Layout>,
 ) -> Result<PrintSummary, RdyError> {
+    check_layout(format, layout)?;
+    // O29 before the print is built: no format writes into the store
+    check_out(&rdy.root().join(".rdy"), out)?;
+    let p = build(rdy, scope)?;
+    write(&p, out, format, layout)
+}
+
+/// Prints the publication profile `profile` (an id or key) at `scope_text` (`canon`,
+/// `tag:<name>` or `landing:<hash>`) as `format` at `out` (D-5CVWB): the same selected view and
+/// reference check as the profile's site, with [`export`]'s layout, path and no-overwrite rules
+/// and its writers. The profile resolves and its check runs once, before anything is written: a
+/// public profile whose check is blocked refuses with `E_PUBLICATION_REFERENCE` and leaves no
+/// file, directory or staging behind. An org profile's warning comes first in the warnings.
+pub fn export_profile(
+    read: &ReadState,
+    scope_text: &str,
+    profile: &str,
+    out: &Path,
+    format: Format,
+    layout: Option<Layout>,
+) -> Result<PrintSummary, RdyError> {
+    check_layout(format, layout)?;
+    check_out(&read.root().join(".rdy"), out)?;
+    let p = build_profile(read, scope_text, profile)?;
+    write(&p, out, format, layout)
+}
+
+/// A layout applies to the Markdown tree only.
+fn check_layout(format: Format, layout: Option<Layout>) -> Result<(), RdyError> {
     if layout.is_some() && !matches!(format, Format::Md) {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -57,13 +89,21 @@ pub fn export(
             "drop --layout, or export with --format md",
         ));
     }
-    // O29 before the print is built: no format writes into the store
-    check_out(&rdy.root().join(".rdy"), out)?;
-    let p = build(rdy, scope)?;
+    Ok(())
+}
+
+/// Writes the print `p` as `format` at `out`: every export, with or without a profile, writes
+/// through here.
+fn write(
+    p: &Print,
+    out: &Path,
+    format: Format,
+    layout: Option<Layout>,
+) -> Result<PrintSummary, RdyError> {
     match format {
-        Format::Pdf => pdf::write_pdf(&p, out),
-        Format::Html => single::write_single_html(&p, out),
-        Format::Md => md::write_markdown(&p, out, layout.unwrap_or(Layout::Plain)),
+        Format::Pdf => pdf::write_pdf(p, out),
+        Format::Html => single::write_single_html(p, out),
+        Format::Md => md::write_markdown(p, out, layout.unwrap_or(Layout::Plain)),
     }
 }
 
@@ -129,10 +169,11 @@ pub(crate) fn check_out(rdy_dir: &Path, out: &Path) -> Result<(), RdyError> {
 pub struct Print {
     pub title: String,
     pub description: Option<String>,
-    /// The version label as the colophon writes it.
+    /// The version label as the colophon writes it. A named profile's is its chosen tag's name,
+    /// else empty (RULING F3); a writer leaves out an empty label.
     pub label: String,
     /// The scope's text: `canon`, `view:<name>`, `tag:<version>`, `landing:<hash>` or
-    /// `proposal:<hash>`.
+    /// `proposal:<hash>`. Empty for a named profile; a writer leaves out an empty scope.
     pub scope: String,
     /// Folders and docs in tree order, then the glossary (O2).
     pub docs: Vec<PrintDoc>,
@@ -265,7 +306,23 @@ pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Print, RdyError> {
     build_from(prepare::source(rdy, scope, Purpose::Print)?)
 }
 
-/// [`build`] from what [`prepare::source`] read: it reads no source.
+/// The print of the publication profile `profile` (an id or key) at `scope_text` (`canon`,
+/// `tag:<name>` or `landing:<hash>`) (D-5CVWB, D-0VCQ5): built as [`build`] builds, from the
+/// profile's selected state, induced graph and selected figures alone. Its title and description
+/// are the profile's; its label is the explicitly chosen tag's name, else empty (RULING F3); its
+/// scope is empty, so it names no source scope or hash. A public profile whose reference check is
+/// blocked refuses with `E_PUBLICATION_REFERENCE`.
+pub fn build_profile(read: &ReadState, scope_text: &str, profile: &str) -> Result<Print, RdyError> {
+    build_from(crate::publication::prepare(
+        read,
+        scope_text,
+        profile,
+        Purpose::Print,
+    )?)
+}
+
+/// [`build`] and [`build_profile`] from what [`prepare::source`] or `publication::prepare`
+/// read: it reads no source.
 fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
     let Prepared {
         m,
