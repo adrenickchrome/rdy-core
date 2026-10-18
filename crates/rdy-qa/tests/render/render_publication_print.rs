@@ -605,6 +605,10 @@ fn pub8_print_has_no_excluded_text_metadata_or_links() {
         // RULING F3: the explicit tag's name only; no source scope or hash
         assert_eq!(p.label, label, "{scope}");
         assert_eq!(p.scope, "", "{scope}");
+        // no redaction touched this tag: no redacted marker in any format
+        assert!(!p.tag_redacted, "{scope}");
+        assert_eq!(holding(&all, b"redacted"), Vec::<String>::new(), "{scope}");
+        assert!(!pdf_words(&p).contains("redacted"), "{scope}");
         // Markdown front matter and title file: no empty Version or Scope line, no leftover blank
         let title_md = text(&all["md"], "index.md");
         let version = if label.is_empty() {
@@ -683,7 +687,20 @@ fn pub8_print_has_no_excluded_text_metadata_or_links() {
 
 #[test]
 fn pub8_print_reference_words_match_the_site() {
-    let w = world();
+    let mut w = world();
+    // a selected block the print leaves out (its only content is a link with blank words), a
+    // reference to it with display words, and one to the selected doc's own page
+    let (cs, doc) = (w.id("$cs"), w.id("$chosen"));
+    let blank = put(
+        &mut w.r,
+        "w2",
+        json!([
+            {"op": "create", "type": "prose", "id": "$blank", "parent": cs, "body": "[ ](https://example.com)"},
+            {"op": "create", "type": "prose", "parent": cs, "body": format!("To {{{{$blank|BLANKREF words}}}} and {{{{{doc}|PAGEREF words}}}} end.")}
+        ]),
+    )["$blank"]
+        .clone();
+    land(&mut w.r, "w2").unwrap();
     let st = w.r.read();
     let explicit =
         format!("Explicit Shown display words and bare {UNAVAILABLE} and typed {UNAVAILABLE}.");
@@ -704,6 +721,19 @@ fn pub8_print_reference_words_match_the_site() {
     }
     assert!(!chosen.contains(">SIBLINK</a>"));
     assert!(chosen.contains(">OWNLINK</a>"));
+    // the site links the reference to the left-out block's anchor, and the page reference
+    let at = chosen.find(">BLANKREF words</a>").expect("BLANKREF");
+    let tag = &chosen[chosen[..at].rfind("<a ").unwrap()..at];
+    let anchor = tag
+        .split("href=\"#")
+        .nth(1)
+        .and_then(|t| t.split('"').next())
+        .expect("a link to an anchor of this page");
+    assert!(
+        chosen.contains(&format!("id=\"{anchor}\" data-rdy-block=\"{blank}\"")),
+        "{chosen}"
+    );
+    assert!(chosen.contains(">PAGEREF words</a>"), "{chosen}");
 
     let p = model(&st, "canon", "orgp");
     let paras = paras(&p);
@@ -724,6 +754,28 @@ fn pub8_print_reference_words_match_the_site() {
             }
         }
     }
+    // the print leaves the blank block out: a link to its anchor reads as its words, and a link
+    // to a printed page with no anchor stays
+    assert!(
+        paras.contains(&"To BLANKREF words and PAGEREF words end.".to_string()),
+        "{paras:?}"
+    );
+    let blank_ref = runs(&p)
+        .into_iter()
+        .find(|r| r.text.contains("BLANKREF"))
+        .expect("BLANKREF");
+    assert_eq!(blank_ref.link, None, "{blank_ref:?}");
+    let page_ref = runs(&p)
+        .into_iter()
+        .find(|r| r.text == "PAGEREF words")
+        .expect("PAGEREF is its own run");
+    assert_eq!(
+        page_ref.link,
+        Some(Href::Page {
+            page: "area/chosen.html".into(),
+            anchor: None
+        })
+    );
     // a link to a printed page and anchor stays
     let own = runs(&p)
         .into_iter()
@@ -746,9 +798,14 @@ fn pub8_print_reference_words_match_the_site() {
         md.contains("Go QLINK and HOMELINK and SIBLINK and [OWNLINK]("),
         "{md}"
     );
+    assert!(
+        md.contains("To BLANKREF words and [PAGEREF words]("),
+        "{md}"
+    );
     let html = text(&all["html"], "out.html");
     assert!(html.contains(&explicit) && html.contains(&missing));
     assert!(html.contains("Go QLINK and HOMELINK and SIBLINK and <a href=\"#area/chosen:chosen-section\">OWNLINK</a> now."), "{html}");
+    assert!(html.contains("To BLANKREF words and <a href="), "{html}");
     let words = pdf_words(&p);
     assert!(words.contains(&explicit), "{words}");
     assert!(words.contains(&missing), "{words}");
@@ -1099,5 +1156,56 @@ fn pub8_redacted_print_uses_the_existing_notice() {
         // only the chosen tag's name, as a label
         let label = if scope == "canon" { "" } else { "v1.0.0" };
         assert_eq!((p.label.as_str(), p.scope.as_str()), (label, ""));
+        // the chosen tag keeps its redacted marker in every format, as its site shows it; canon
+        // has no label and no marker
+        let site = build_profile_site(&st, scope, "vaultp").unwrap();
+        let site_home = String::from_utf8(site.files["index.html"].clone()).unwrap();
+        let badge = "<span class=\"badge badge-redacted\">redacted</span>";
+        let title_md = text(&all["md"], "index.md");
+        assert_eq!(text(&all["mkdocs"], "docs/index.md"), title_md, "{scope}");
+        let first = &pdf_lines(&p)[0];
+        if scope == "canon" {
+            assert!(!p.tag_redacted, "{scope}");
+            assert!(!site_home.contains(badge), "{scope}");
+            assert!(!html.contains("class=\"colophon\""), "{scope}");
+            assert!(!html.contains("badge-redacted"), "{scope}");
+            assert!(!title_md.contains("Version"), "{scope}: {title_md}");
+            assert!(!title_md.contains("redacted"), "{scope}: {title_md}");
+            assert!(
+                !first
+                    .iter()
+                    .any(|l| l.contains("Version") || l.contains("redacted")),
+                "{scope}: {first:?}"
+            );
+        } else {
+            assert!(p.tag_redacted, "{scope}");
+            assert!(
+                site_home.contains(&format!("v1.0.0</span></span> {badge}")),
+                "{scope}: {site_home}"
+            );
+            assert!(
+                html.contains(&format!(
+                    "<p class=\"colophon\">v1.0.0 {badge}</p>\n</header>\n"
+                )),
+                "{scope}"
+            );
+            assert!(
+                title_md.ends_with("\nVersion: v1.0.0 (redacted)\n"),
+                "{scope}: {title_md}"
+            );
+            assert_eq!(
+                title_md.matches("Version").count(),
+                1,
+                "{scope}: {title_md}"
+            );
+            assert!(
+                first.contains(&"Version: v1.0.0 (redacted)".to_string()),
+                "{scope}: {first:?}"
+            );
+            assert!(
+                pdf_words(&p).contains("Version: v1.0.0 (redacted)"),
+                "{scope}"
+            );
+        }
     }
 }

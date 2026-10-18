@@ -175,6 +175,10 @@ pub struct Print {
     /// The scope's text: `canon`, `view:<name>`, `tag:<version>`, `landing:<hash>` or
     /// `proposal:<hash>`. Empty for a named profile; a writer leaves out an empty scope.
     pub scope: String,
+    /// A named profile's chosen tag's history holds content a redaction removed
+    /// (`VersionInfo::redacted`): each writer marks the label `redacted`, as the profile's site
+    /// does beside the tag's name (D-3M81W). False without a chosen tag and for a source print.
+    pub tag_redacted: bool,
     /// Folders and docs in tree order, then the glossary (O2).
     pub docs: Vec<PrintDoc>,
     /// Every figure blob a doc names.
@@ -184,6 +188,18 @@ pub struct Print {
     /// The project's `.rdy` directory, as the project path names it. The writers refuse an
     /// `out` that resolves into it (O29). It is not part of any output.
     pub rdy_dir: std::path::PathBuf,
+}
+
+impl Print {
+    /// What the Markdown and PDF version line writes after the label: ` (redacted)` for an
+    /// affected chosen tag (D-3M81W), else nothing; nothing without a label (RULING F3).
+    pub(crate) fn redacted_suffix(&self) -> &'static str {
+        if self.tag_redacted && !self.label.is_empty() {
+            " (redacted)"
+        } else {
+            ""
+        }
+    }
 }
 
 /// A figure's file.
@@ -485,29 +501,48 @@ fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
     }
     // a link leads to a page of the print and an anchor a block of that page has: a link to a
     // page the print leaves out reads as its words; a block's id (the site's id anchor) reads as
-    // the anchor the print gives that block; an anchor no printed block has is dropped
+    // the anchor the print gives that block, and a page's own id leads to the page; an anchor no
+    // printed block has is dropped from a source print's link, and a named profile's link to it
+    // reads as its words, as a link to a site-only page does (D-5CVWB)
     let mut on_page: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for d in &docs {
         ir::anchors(&d.blocks, on_page.entry(d.page.clone()).or_default());
     }
+    let profiled = profile.is_some();
     let to = |h: &Href| -> Option<Href> {
         let Href::Page { page, anchor } = h else {
             return Some(h.clone());
         };
         let on = on_page.get(page)?;
-        let anchor = anchor.as_deref().and_then(|a| {
-            let a = match a.parse::<BlockId>() {
+        // the printed anchor `anchor` asks for: `Some(None)` for the page itself, `None` when no
+        // printed block has it
+        let printed: Option<Option<String>> = match anchor.as_deref() {
+            None => Some(None),
+            Some(a) => match a.parse::<BlockId>() {
                 Ok(id) if m.get(&id).is_some() => {
-                    site.url_of(&id).filter(|u| u.page == *page)?.anchor?
+                    match site.url_of(&id).filter(|u| u.page == *page) {
+                        // a page's own id leads to the page
+                        Some(u) => match u.anchor {
+                            None => Some(None),
+                            Some(a) => on.contains(&a).then_some(Some(a)),
+                        },
+                        None => None,
+                    }
                 }
-                _ => a.to_string(),
-            };
-            on.contains(&a).then_some(a)
-        });
-        Some(Href::Page {
-            page: page.clone(),
-            anchor,
-        })
+                _ => on.contains(a).then(|| Some(a.to_string())),
+            },
+        };
+        match printed {
+            Some(anchor) => Some(Href::Page {
+                page: page.clone(),
+                anchor,
+            }),
+            None if profiled => None,
+            None => Some(Href::Page {
+                page: page.clone(),
+                anchor: None,
+            }),
+        }
     };
     for d in &mut docs {
         ir::map_links(&mut d.blocks, &to);
@@ -538,6 +573,7 @@ fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         description: description.clone(),
         label,
         scope: scope_text,
+        tag_redacted: profile.as_ref().is_some_and(|p| p.tag_redacted),
         docs,
         blobs: print_blobs,
         // the site build's warnings: a summary page a doc keeps, and the glossary's

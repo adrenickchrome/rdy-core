@@ -74,8 +74,8 @@ fn tree_digest(files: &BTreeMap<String, Vec<u8>>) -> String {
     d.hex()
 }
 
-/// Every output of a print: the model (without `rdy_dir`), the PDF, the single HTML file and
-/// both Markdown layouts.
+/// Every output of a print: the model (without `rdy_dir`, and without `tag_redacted`, which a
+/// source print always leaves false), the PDF, the single HTML file and both Markdown layouts.
 struct PrintOut {
     model: String,
     pdf: Vec<u8>,
@@ -99,7 +99,11 @@ fn print_out(p: &Print) -> PrintOut {
     print::md::write_markdown(p, &md, Layout::Plain).expect("the markdown tree");
     print::md::write_markdown(p, &mkdocs, Layout::Mkdocs).expect("the mkdocs tree");
     PrintOut {
-        model: format!("{model:?}"),
+        // pub8 added `tag_redacted` for a named profile's chosen tag; a source print has none
+        model: {
+            assert!(!p.tag_redacted, "a source print marks no tag");
+            format!("{model:?}").replacen(", tag_redacted: false", "", 1)
+        },
         pdf: std::fs::read(&pdf).unwrap(),
         html: std::fs::read(&html).unwrap(),
         md: tree(&md),

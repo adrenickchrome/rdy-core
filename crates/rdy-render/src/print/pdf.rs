@@ -930,6 +930,7 @@ mod tests {
             description: Some("A print that reads back".into()),
             label: "v1.0.0".into(),
             scope: "canon".into(),
+            tag_redacted: false,
             docs: vec![
                 PrintDoc {
                     kind: PageKind::Doc,
@@ -1311,6 +1312,39 @@ mod tests {
         let images = image_objects(&objs);
         assert_eq!(images.len(), 1);
         assert!(images[0].0.dict.contains("/Width 8192"));
+    }
+
+    /// pub8 (D-3M81W, RULING F3): the title page of a named profile's print at an affected
+    /// chosen tag reads back `Version: <tag> (redacted)`, glyph by glyph; an unaffected tag's
+    /// reads `Version: <tag>`, and no label leaves no version line.
+    #[test]
+    fn pub8_pdf_title_page_reads_back_the_redacted_marker() {
+        let fonts = Fonts::load();
+        let title_page = |label: &str, redacted: bool| -> Vec<String> {
+            let mut p = sample();
+            p.label = label.into();
+            p.scope = String::new();
+            p.tag_redacted = redacted;
+            let (pdf, _, _) = pdf_bytes(&p, &fonts);
+            page_text(&pdf, &fonts)[0]
+                .iter()
+                .map(|r| r.0.clone())
+                .collect()
+        };
+        let head = ["Readback “quoted”", "A print that reads back"];
+        let want = |version: Option<&str>| -> Vec<String> {
+            let mut out: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+            out.extend(version.map(str::to_string));
+            out.push("1".into());
+            out
+        };
+        assert_eq!(
+            title_page("v1.0.0", true),
+            want(Some("Version: v1.0.0 (redacted)"))
+        );
+        assert_eq!(title_page("v1.0.0", false), want(Some("Version: v1.0.0")));
+        assert_eq!(title_page("", false), want(None));
+        assert_eq!(title_page("", true), want(None));
     }
 
     /// pub8 (D-5CVWB): the PDF of a named profile's print draws the selected text, read back

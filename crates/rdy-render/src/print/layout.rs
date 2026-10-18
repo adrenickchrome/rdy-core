@@ -528,12 +528,16 @@ impl Layout<'_> {
             );
         }
         // an empty label or scope (a named profile's, RULING F3) leaves no line; with neither,
-        // no gap follows the title either
-        let lines: Vec<String> = [("Version", &p.label), ("Scope", &p.scope)]
-            .into_iter()
-            .filter(|(_, value)| !value.is_empty())
-            .map(|(name, value)| format!("{name}: {value}"))
-            .collect();
+        // no gap follows the title either; an affected chosen tag's label keeps its redacted
+        // marker
+        let lines: Vec<String> = [
+            ("Version", &p.label, p.redacted_suffix()),
+            ("Scope", &p.scope, ""),
+        ]
+        .into_iter()
+        .filter(|(_, value, _)| !value.is_empty())
+        .map(|(name, value, suffix)| format!("{name}: {value}{suffix}"))
+        .collect();
         if lines.is_empty() {
             return;
         }
@@ -946,6 +950,7 @@ mod tests {
             description: Some("How the wallet works.".into()),
             label: "v1.2".into(),
             scope: "canon".into(),
+            tag_redacted: false,
             docs,
             blobs: BTreeMap::new(),
             warnings: vec![],
