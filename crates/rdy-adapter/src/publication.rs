@@ -107,8 +107,12 @@ fn summarize(r: &Resolved) -> Result<ProfileSummary, RdyError> {
 }
 
 impl Snapshot {
-    /// The scope of the captured tag `tag`: its landing, never a live tag-name lookup.
+    /// The scope of the captured tag `tag`: its landing, never a live tag-name lookup. The
+    /// snapshot's epoch is checked first, as every content entry must: a cached tag
+    /// materialization would otherwise answer without consulting the store, so content removed
+    /// since the snapshot was taken (or a poisoned store) would still be summarized.
     fn tag_scope(&self, tag: &str) -> Result<Scope, RdyError> {
+        self.read_state().ensure_current_epoch()?;
         let (_, captured) = self.captured_tag(tag)?;
         Ok(Scope::At(captured.landing))
     }
@@ -175,5 +179,146 @@ impl Snapshot {
             references: candidate.references,
             comparison,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::StoreHandle;
+    use rdy_engine::redaction::RedactInput;
+    use rdy_engine::{Engine, Rdy, Session, SessionKind, WriteRequest};
+    use rdy_model::{Provenance, Role};
+    use rdy_store::LandRequest;
+    use serde_json::{Value, json};
+
+    fn session(role: Role) -> Session {
+        Session {
+            actor: if role == Role::Approver {
+                "human:founder".into()
+            } else {
+                "agent:a".into()
+            },
+            run: None,
+            role,
+            kind: SessionKind::Human,
+        }
+    }
+
+    fn write(r: &mut Rdy, ops: Value) -> rdy_engine::WriteResult {
+        r.write(
+            &session(Role::Writer),
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap()
+    }
+
+    /// A tagged project with one profile and a secret prose block, closed again.
+    fn tagged() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let w = write(
+            &mut r,
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "D", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."},
+                {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+            ]),
+        );
+        let (d, secret, admin) = (
+            w.created["$d"].clone(),
+            w.created["$p"].clone(),
+            w.created["$admin"].clone(),
+        );
+        write(
+            &mut r,
+            json!([{"op": "create", "type": "publication_profile", "parent": admin,
+                "fields": {"key": "site", "title": "Site", "audience": "org", "select": [d]}}]),
+        );
+        let p = r
+            .propose(&session(Role::Writer), "work", "ha6", None)
+            .unwrap();
+        r.land(&session(Role::Approver), &p.id).unwrap();
+        r.tag(&session(Role::Approver), "v1.0.0", None, None)
+            .unwrap();
+        r.close().unwrap();
+        (dir, secret)
+    }
+
+    /// Applies a content removal of `secret` through the store's own landing path, so every
+    /// snapshot taken before it is behind the store's redaction epoch.
+    fn remove(handle: &StoreHandle, secret: String) {
+        handle
+            .local()
+            .write(Box::new(move |rdy| {
+                let s = session(Role::Writer);
+                let req = rdy.redact(
+                    &s,
+                    RedactInput {
+                        targets: vec![secret],
+                        reason_class: "secret".into(),
+                        reason: "a leaked code".into(),
+                        dry_run: false,
+                    },
+                )?;
+                assert!(req.redaction.is_some());
+                let p = rdy.propose(&s, "work", "Remove the code", None)?;
+                let version: Hash = p.id.parse().unwrap();
+                rdy.seal_open()?;
+                rdy.store_mut().set_held(false)?;
+                rdy.store_mut().land_atomic(LandRequest {
+                    proposal: version,
+                    accept: None,
+                    approver: Provenance {
+                        actor: "human:t".into(),
+                        run: None,
+                        role: Role::Approver,
+                        at_ms: 1_000_000,
+                    },
+                    alt: None,
+                    relay: None,
+                    evidence: None,
+                })?;
+                rdy.store_mut().set_held(true)?;
+                rdy.invalidate();
+                Ok(Value::Null)
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn ha6_reads_refuse_a_snapshot_that_predates_a_content_removal() {
+        let _clock = rdy_engine::pin_clock(1_000_000);
+        let (dir, secret) = tagged();
+        let handle = StoreHandle::open(dir.path()).unwrap();
+        let snap = handle.snapshot().unwrap();
+        // warm the tag's materialization, so a refusal cannot come from a cold read
+        let rows = snap.profiles("v1.0.0").unwrap();
+        let selector = rows[1].selector.clone();
+        let prev = PreviousPublication {
+            tag: "v1.0.0".into(),
+            profile_version: rows[1].version,
+            selection_hash: rows[1].selection_hash,
+        };
+        snap.disclosure("v1.0.0", &selector, Some(&prev)).unwrap();
+
+        remove(&handle, secret);
+
+        for e in [
+            snap.profiles("v1.0.0").unwrap_err(),
+            snap.disclosure("v1.0.0", &selector, Some(&prev))
+                .unwrap_err(),
+            snap.disclosure("v1.0.0", IMPLICIT_ORG, None).unwrap_err(),
+        ] {
+            assert_eq!(e.code, "E_REDACTED_STATE", "{e}");
+        }
+        // a new snapshot reads again
+        handle.snapshot().unwrap().profiles("v1.0.0").unwrap();
+        handle.close().unwrap();
     }
 }

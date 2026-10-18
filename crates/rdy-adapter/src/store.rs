@@ -64,6 +64,12 @@ impl StoreHandle {
         })
     }
 
+    /// The engine handle, so a sibling module's tests can write through it.
+    #[cfg(test)]
+    pub(crate) fn local(&self) -> &Local {
+        &self.local
+    }
+
     /// Closes the store cleanly, which releases its lock.
     pub fn close(self) -> Result<(), RdyError> {
         self.local.close()
