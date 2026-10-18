@@ -411,8 +411,9 @@ impl std::fmt::Display for Dropped {
 /// buffering the line: it tracks string and escape state and nesting depth, and captures the
 /// value of the `"id"` key of the top-level object wherever it occurs (the TypeScript SDK
 /// writes it after `params`). Keys and values at deeper levels are ignored.
-#[derive(Default)]
 struct IdScanner {
+    /// The longest id value captured; a longer one counts as no id.
+    id_limit: usize,
     depth: usize,
     top_is_object: bool,
     in_string: bool,
@@ -436,7 +437,32 @@ struct IdScanner {
     id: Option<String>,
 }
 
+impl Default for IdScanner {
+    fn default() -> IdScanner {
+        IdScanner::with_id_limit(MAX_ID_BYTES)
+    }
+}
+
 impl IdScanner {
+    fn with_id_limit(id_limit: usize) -> IdScanner {
+        IdScanner {
+            id_limit,
+            depth: 0,
+            top_is_object: false,
+            in_string: false,
+            escaped: false,
+            expect_key: false,
+            key: None,
+            response: false,
+            key_was_id: None,
+            value_is_id: false,
+            capture: None,
+            capture_is_string: false,
+            id_over_limit: false,
+            id: None,
+        }
+    }
+
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.byte(b);
@@ -476,7 +502,7 @@ impl IdScanner {
             if self
                 .capture
                 .as_ref()
-                .is_some_and(|c| c.len() > MAX_ID_BYTES)
+                .is_some_and(|c| c.len() > self.id_limit)
             {
                 self.capture = None;
                 self.capture_is_string = false;
@@ -487,7 +513,7 @@ impl IdScanner {
         if let Some(c) = &mut self.capture {
             if matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
                 c.push(b);
-                if c.len() > MAX_ID_BYTES {
+                if c.len() > self.id_limit {
                     self.capture = None;
                     self.id_over_limit = true;
                 }
@@ -567,15 +593,24 @@ pub struct Scanned {
     pub response: bool,
 }
 
-/// Scans one JSON line as it streams, in constant memory, never holding the line: its top-level
-/// `"id"` and whether it is a response. It is the scanner [`pump_lines`] reads an oversized
-/// request's id with, so a line of any length can be followed by its id.
+/// Scans one JSON line as it streams, never holding the line: its top-level `"id"` and whether
+/// it is a response. It holds no more than the id, up to its id limit (an id over the limit
+/// counts as none). It is the scanner [`pump_lines`] reads an oversized request's id with, so a
+/// line of any length can be followed by its id.
 #[derive(Default)]
 pub struct LineScan(IdScanner);
 
 impl LineScan {
+    /// A scanner that keeps an id of up to 1024 bytes, as [`pump_lines`] does.
     pub fn new() -> LineScan {
         LineScan::default()
+    }
+
+    /// A scanner that keeps an id of up to `id_limit` bytes. A reader that must match a reply
+    /// to any request it forwarded sets the request lines' own bound: an id is never longer than
+    /// the line that carried it, and a reply writes the id no longer than the request did.
+    pub fn with_id_limit(id_limit: usize) -> LineScan {
+        LineScan(IdScanner::with_id_limit(id_limit))
     }
 
     /// The next bytes of the line, its newline excluded.
@@ -1457,5 +1492,21 @@ mod mcp1_id_tests {
         // a callback body with junk after its id still yields the id
         let r = scan(&[br#"{"id":12,"op":"identities","pad":""#, &big]);
         assert_eq!(r.id, Some(serde_json::json!(12)));
+    }
+
+    #[test]
+    fn sig5_line_scan_keeps_an_id_up_to_its_limit() {
+        let long = serde_json::Value::from("i".repeat(4000));
+        let line = serde_json::json!({"jsonrpc": "2.0", "id": long, "result": {}}).to_string();
+        let scan = |mut s: LineScan| {
+            s.feed(line.as_bytes());
+            s.finish()
+        };
+        // the default keeps 1024 bytes, as pump_lines does
+        assert_eq!(scan(LineScan::new()).id, None);
+        let r = scan(LineScan::with_id_limit(8000));
+        assert_eq!(r.id, Some(long));
+        assert!(r.response);
+        assert_eq!(scan(LineScan::with_id_limit(2000)).id, None);
     }
 }

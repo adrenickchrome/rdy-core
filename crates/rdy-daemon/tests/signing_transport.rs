@@ -1470,6 +1470,48 @@ async fn sig5_stdin_eof_after_a_reply_over_the_tracked_bound() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_stdin_eof_after_a_reply_with_a_long_id() {
+    let fake = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    // a tool call whose string id is far over the 1024 bytes the request-side scanner keeps
+    let long = json!("i".repeat(64 * 1024));
+    let call = json!({"jsonrpc": "2.0", "id": long, "method": "tools/call", "params": {"name": "rdy_sign", "arguments": {}}})
+        .to_string()
+        + "\n";
+    p.input.write_all(call.as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], long);
+    let reply = json!({"jsonrpc": "2.0", "id": long, "result": {}}).to_string() + "\n";
+    send(&mut p.host, reply.as_bytes()).await;
+    let got: Value = serde_json::from_str(&raw_out(&mut p.output).await).unwrap();
+    assert_eq!(got["id"], long);
+    // the long-id call is answered: a cancel of request 2 is a cancel of the active request
+    p.input.write_all(tool_call(2).as_bytes()).await.unwrap();
+    p.input.write_all(cancelled(2).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 2);
+    assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
+    send(&mut p.host, &cb(r#"{"id":1,"op":"identities"}"#)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(1, NoAgentCause::Cancelled)
+    );
+    // at stdin's end nothing is awaited: the proxy's EOF reaches the daemon
+    drop(p.input);
+    let mut rest = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        p.host.read_to_end(&mut rest),
+    )
+    .await
+    .expect("the proxy kept its writing half open for a call already answered")
+    .unwrap();
+    assert!(rest.is_empty(), "{:?}", String::from_utf8_lossy(&rest));
+    drop(p.host);
+    assert_eq!(proxy.await.unwrap(), 0);
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sig5_proxy_fails_closed_on_an_oversized_callback() {
     let open = Fake::open(vec![key(1)]);
     let (mut p, proxy) = raw(open.clone());

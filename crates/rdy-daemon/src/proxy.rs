@@ -21,7 +21,8 @@
 //! call is active belongs to a request no longer awaited, and is refused as `request
 //! cancelled` without asking the agent. (The daemon refuses the callbacks of a cancelled
 //! request on its side too: it knows which request is running.) Replies are followed as they
-//! stream, in constant memory, so a reply of any length settles its request.
+//! stream, holding no more than their id, so a reply of any length settles its request, and so
+//! does a reply to a request with an id of any length the request line's bound allows.
 //!
 //! At stdin's end, the socket's writing half stays open, for the callback replies only, until
 //! every tool call already sent is answered or cancelled: an act already submitted is never left
@@ -316,7 +317,9 @@ async fn socket_to_stdout<R, O>(
                         over: false,
                     }
                 } else {
-                    Reading::Ordinary(LineScan::new())
+                    // the reply's id is matched to a request the pump forwarded, of any id
+                    // length: the scan keeps an id up to the request lines' own bound
+                    Reading::Ordinary(LineScan::with_id_limit(MAX_CTL_LINE_BYTES))
                 }
             });
             let (seg, done) = match rest.iter().position(|&b| b == b'\n') {
