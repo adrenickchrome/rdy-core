@@ -6,6 +6,7 @@
 //! depends on this crate alone. No raw `Local`, `Rdy`, `ReadState` or `StoreReader` escapes it.
 //! No product behaviour is promised stable across pins.
 
+pub mod publication;
 mod store;
 mod value;
 
