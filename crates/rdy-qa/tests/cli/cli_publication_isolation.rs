@@ -13,7 +13,7 @@ use rdy_engine::tensions::{TensionKind, tension_label};
 use rdy_engine::{DecisionInput, Local, Rdy, ReadState, Scope, Session};
 use rdy_model::{BlockId, Hash, Role};
 use rdy_qa::daemon::{Served, short_tempdir};
-use rdy_qa::every_kind::{facts, verdict};
+use rdy_qa::every_kind::{facts, verdict_with_reason};
 use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_qa::inbox::on;
 use rdy_qa::intake::PERSON;
@@ -159,6 +159,23 @@ fn approve_item(r: &Rdy, r#ref: &str) -> rdy_engine::pending::Item {
         .clone()
 }
 
+/// The person's `answer` item of the open question `qid` in their queue.
+fn question_item(r: &Rdy, qid: &str) -> rdy_engine::pending::Item {
+    let q = r
+        .read()
+        .pending(&PendingQuery {
+            person: PERSON.into(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    q.items
+        .iter()
+        .find(|i| i.kind == ItemKind::Answer && i.r#ref.starts_with(&format!("{qid}@")))
+        .unwrap_or_else(|| panic!("the answer item of {qid}: {q:#?}"))
+        .clone()
+}
+
 /// Builds the project in `dir` (closed on return). The excluded canaries all start with `NEG`;
 /// the selected content's with `POS`. The org profile `orgp` selects the folder `pubdocs`, whose
 /// prose refers to an excluded claim; the public profile `openp` selects the clean folder
@@ -189,11 +206,11 @@ fn iso_seed(dir: &Path) -> Iso {
             {"op": "create", "type": "doc", "id": "$cld", "parent": "$clf", "fields": {"name": "cleandoc", "title": "POSCLEANTITLE doc", "doc_type": "page"}},
             {"op": "create", "type": "prose", "parent": "$cld", "body": "POSCLEANBODY words."},
             {"op": "create", "type": "folder", "id": "$negf", "fields": {"name": "negfoldername", "title": "NEGFOLDER hidden", "description": "NEGFOLDERDESC words."}},
-            {"op": "create", "type": "doc", "id": "$hid", "parent": "$negf", "fields": {"name": "neghidname", "title": "NEGTITLE hidden doc", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$hid", "parent": "$negf", "fields": {"name": "neghidname", "key": "NEGDOCKEY", "title": "NEGTITLE hidden doc", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$hs", "parent": "$hid", "fields": {"title": "NEGSECTION heading"}},
             {"op": "create", "type": "prose", "parent": "$hs", "body": "NEGBODY words."},
             {"op": "create", "type": "term", "parent": "$hs", "fields": {"name": "NEGTERM", "key": "NEG-KEY"}, "body": "NEGTERMBODY words."},
-            {"op": "create", "type": "question", "id": "$hq", "parent": "$hs", "fields": {"prompt": "NEGQUESTION prompt?"}},
+            {"op": "create", "type": "question", "id": "$hq", "parent": "$hs", "fields": {"prompt": "NEGQUESTION prompt?", "options": ["NEGANSWERLABEL one", "NEGANSWERLABEL two"]}},
             {"op": "create", "type": "figure", "parent": "$hs", "fields": {"blob": neg_blob.to_string(), "media_type": "image/png", "alt": "NEGFIGCAP caption"}},
             {"op": "create", "type": "claim", "id": "$c1", "parent": "$hs", "body": "NEGCLAIM one."},
             {"op": "create", "type": "claim", "id": "$c2", "parent": "$hs", "after": "$c1", "body": "NEGCLAIM two."},
@@ -232,6 +249,16 @@ fn iso_seed(dir: &Path) -> Iso {
         .unwrap();
     }
     land(&mut r, "work").unwrap();
+    // the excluded doc's own key field holds its canary in canon
+    {
+        let st = r.read();
+        let hid = st.block(&Scope::Canon, &bid(&id("$hid"))).unwrap();
+        assert_eq!(
+            hid.fields.get("key").and_then(|k| k.as_str()),
+            Some("NEGDOCKEY"),
+            "the excluded doc's key"
+        );
+    }
     let admin = id("$admin");
     let pw = write(
         &mut r,
@@ -316,6 +343,39 @@ fn iso_seed(dir: &Path) -> Iso {
             .unwrap();
         assert_eq!(a.act, "later");
     });
+    // the excluded question, answered with a card option: the answer's label is the authored
+    // option label, and the decision it records carries the label as its statement
+    let question = id("$hq");
+    on(&e, move |r| {
+        let item = question_item(r, &question);
+        assert_eq!(item.options[0].label, "NEGANSWERLABEL one");
+        let relay = RelayInput {
+            evidence: Some("NEGRELAYWORDS chose the first".into()),
+            question: Some("Which option do you choose?".into()),
+            session_ref: Some("chat-9".into()),
+            ..Default::default()
+        };
+        let relaying =
+            Session::agent("agent:relay".into(), Some("chat".into()), Role::Writer).unwrap();
+        let a = r
+            .answer(
+                &relaying,
+                PERSON,
+                AnswerRequest {
+                    r#ref: item.r#ref.clone(),
+                    option: "o1".into(),
+                    card_hash: Some(item.card_hash.clone()),
+                    note: None,
+                    relay,
+                    brief: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(a.act, "answer_question");
+        // the source record holds the canary in its own label field
+        let (_, rec) = r.store().answer_of(&item.r#ref).unwrap().unwrap();
+        assert_eq!(rec.label.as_deref(), Some("NEGANSWERLABEL one"));
+    });
     // an edit collision, dismissed with a reason
     let c = ids.clone();
     on(&e, move |r| {
@@ -333,14 +393,18 @@ fn iso_seed(dir: &Path) -> Iso {
     let c = ids.clone();
     on(&e, move |r| {
         put(r, "sv", upd(&c[4], "NEGCLAIM five, edited."));
-        verdict(
+        let h = verdict_with_reason(
             r,
             &c[3],
             &c[4],
             Hash([9; 32]),
             "NEGFINDINGNOTE on the pair",
             "NEGADVICE text for the pair",
+            "NEGREVIEWREASON for the verdict",
         );
+        // the source record holds the canary in its own reason field
+        let review = r.store().review(&h).unwrap();
+        assert_eq!(review.reason, "NEGREVIEWREASON for the verdict");
     });
     // an intent: its angle
     let c = ids.clone();
@@ -438,6 +502,9 @@ fn canaries(iso: &Iso, scope: &str, profile: &str) -> (Vec<String>, Vec<String>)
         "NEGFINDINGNOTE",
         "NEGADVICE",
         "NEGANSWERNOTE",
+        "NEGANSWERLABEL",
+        "NEGREVIEWREASON",
+        "NEGDOCKEY",
         "NEGRELAYWORDS",
         "NEGINTENT",
         "NEGALTTITLE",
@@ -820,10 +887,15 @@ fn pub10_profiles_do_not_restrict_source_reads_dumps_or_clones() {
     let dump = scratch.path().join("full.dump");
     let (ok, v) = s.json(&["--json", "dump", "--out", dump.to_str().unwrap()]);
     assert!(ok, "{v}");
-    assert!(
-        has(&std::fs::read(&dump).unwrap(), b"NEGTAGMSG release words"),
-        "the dump holds the excluded tag message"
-    );
+    let dumped = std::fs::read(&dump).unwrap();
+    for (word, what) in [
+        ("NEGTAGMSG release words", "tag message"),
+        ("NEGREVIEWREASON for the verdict", "review reason"),
+        ("NEGANSWERLABEL one", "answer label"),
+        ("NEGDOCKEY", "doc key"),
+    ] {
+        assert!(has(&dumped, word.as_bytes()), "the dump holds the {what}");
+    }
     let loaded = short_tempdir();
     let out = s.rdy(&[
         "load",
