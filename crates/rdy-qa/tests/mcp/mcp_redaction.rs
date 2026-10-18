@@ -48,6 +48,7 @@ fn daemon_reply(dir: &Path, args: Value) -> Value {
         session: &s,
         human: "human:qa",
         cwd: dir,
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let v = dispatch(&cx, "redact", args).unwrap();
     local.close().unwrap();

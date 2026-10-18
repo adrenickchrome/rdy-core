@@ -3,6 +3,7 @@
 //! scheduler order).
 use rdy_engine::Rdy;
 use rdy_engine::engine::{Engine, Local};
+use rdy_engine::signing_crypto::UnavailableAgent;
 use rdy_mcp::notify::NotifyHub;
 use rdy_mcp::server::serve_on;
 use serde_json::{Value, json};
@@ -45,6 +46,7 @@ async fn ord1_pipelined_calls_on_a_multi_thread_runtime_apply_and_answer_in_orde
             Arc::clone(&engine),
             s + 1,
             NotifyHub::new(),
+            Arc::new(UnavailableAgent),
             sr,
             sw,
         ));
@@ -106,7 +108,14 @@ async fn hd4_serve_on_answers_an_oversized_line_with_the_limit_error_and_lives()
         Arc::new(Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap()));
     let (client, server) = tokio::io::duplex(1 << 20);
     let (sr, sw) = tokio::io::split(server);
-    tokio::spawn(serve_on(engine, 1, NotifyHub::new(), sr, sw));
+    tokio::spawn(serve_on(
+        engine,
+        1,
+        NotifyHub::new(),
+        Arc::new(UnavailableAgent),
+        sr,
+        sw,
+    ));
     let (cr, mut cw) = tokio::io::split(client);
     let mut cr = BufReader::new(cr);
     send(&mut cw, json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
@@ -153,7 +162,14 @@ async fn hd4_serve_on_ends_when_the_session_fails_to_start() {
         Arc::new(Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap()));
     let (client, server) = tokio::io::duplex(1 << 20);
     let (sr, sw) = tokio::io::split(server);
-    let session = tokio::spawn(serve_on(engine, 1, NotifyHub::new(), sr, sw));
+    let session = tokio::spawn(serve_on(
+        engine,
+        1,
+        NotifyHub::new(),
+        Arc::new(UnavailableAgent),
+        sr,
+        sw,
+    ));
     let (_cr, mut cw) = tokio::io::split(client);
     send(
         &mut cw,

@@ -6,6 +6,7 @@
 use rdy_engine::answer::relay::{RelayInput, RelayRefusal, relayed};
 use rdy_engine::engine::Engine;
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
+use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::tensions::api::{TensionsRequest, run_resolve, run_tensions};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Relay, Scope, Session, alt, intent,
@@ -49,13 +50,17 @@ pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
 
 /// What an op runs against: the engine, the calling session, the project's human actor (the
-/// one the session was classified against) and the session's working directory.
+/// one the session was classified against), the session's working directory and the calling
+/// process's own signer.
 pub struct OpContext<'a> {
     pub engine: &'a dyn Engine,
     pub session: &'a Session,
     /// The human actor: a relayed approval is recorded as this person's (D-HA7YZ).
     pub human: &'a str,
     pub cwd: &'a Path,
+    /// The caller's SSH agent: through the daemon, the process at the other end of the
+    /// request's connection; in a direct CLI run, that process's own. Reads never ask it.
+    pub agent: &'a dyn SigningAgent,
 }
 
 /// Every ctl op, in the order the docs list them. `session` is answered by the connection

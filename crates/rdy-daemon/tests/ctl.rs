@@ -7,7 +7,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 struct Echo;
 impl Handler for Echo {
-    fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
+    fn ctl(
+        &self,
+        s: &SessionInfo,
+        r: CtlRequest,
+        _agent: Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
+    ) -> Result<Value, ErrorReply> {
         match r.op.as_str() {
             "echo" => Ok(json!({"session": s.id, "args": r.args})),
             "fail" => Err(ErrorReply::new("E_TEST", "asked to fail", "don't")),
@@ -275,8 +280,13 @@ async fn ctl1_an_oversized_line_drains_pipelined_input_before_the_close() {
 /// `Echo`, plus a notice on every reply.
 struct Noticing;
 impl Handler for Noticing {
-    fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
-        Echo.ctl(s, r)
+    fn ctl(
+        &self,
+        s: &SessionInfo,
+        r: CtlRequest,
+        agent: Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
+    ) -> Result<Value, ErrorReply> {
+        Echo.ctl(s, r, agent)
     }
 
     fn notice(&self, _session: &SessionInfo) -> Option<String> {

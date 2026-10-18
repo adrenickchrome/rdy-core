@@ -1,3 +1,4 @@
+use rdy_daemon::signing_agent::CallerAgent;
 use rdy_daemon::{
     Client, ErrorReply, OpContext, Proto, RunDir, StartOptions, connect_or_start, dispatch,
     serve_command, spawn_serve,
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -161,6 +163,8 @@ pub(crate) enum Conn {
         /// The human actor the session was classified against.
         human: String,
         cwd: PathBuf,
+        /// This process's own SSH agent, the one signer of a direct run.
+        agent: CallerAgent,
     },
     /// `client` before `rt`: the connection drops while its runtime still runs. `pending` is
     /// the notice the `session` reply carried, printed with the first op's.
@@ -187,6 +191,7 @@ impl Conn {
                     session,
                     human,
                     cwd: env.cwd.clone(),
+                    agent: CallerAgent::from_env(),
                 }),
                 Err(e) => {
                     close_local(local);
@@ -198,7 +203,10 @@ impl Conn {
             let run_dir = RunDir::of_project(&env.project);
             let opts = start_options(&env.project, &env.cwd, Proto::Ctl);
             let mut client = rt.block_on(async {
-                let mut c = connect_or_start(&run_dir, opts).await?;
+                // the daemon asks this process, on this connection, to sign: with its own agent
+                let mut c = connect_or_start(&run_dir, opts)
+                    .await?
+                    .with_agent(Arc::new(CallerAgent::from_env()));
                 c.ctl("session", json!({"actor": actor, "run": run}))
                     .await?;
                 Ok::<Client, ErrorReply>(c)
@@ -220,12 +228,14 @@ impl Conn {
                 session,
                 human,
                 cwd,
+                agent,
             } => {
                 let cx = OpContext {
                     engine: &**local,
                     session,
                     human,
                     cwd,
+                    agent,
                 };
                 dispatch(&cx, op, args).map_err(ErrorReply::from)
             }

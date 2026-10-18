@@ -283,6 +283,7 @@ fn cgr1_show_in_the_inflight_scope_lists_the_in_flight_changes() {
         session: &s,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let v = dispatch(&cx, "show", json!({"id": claim, "scope": "inflight"})).unwrap();
     assert_eq!(v["inflight"][0]["change"], c, "{v}");

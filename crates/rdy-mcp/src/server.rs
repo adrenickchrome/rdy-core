@@ -28,6 +28,7 @@ use crate::notify::{NotifyHub, Sink};
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
+use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -88,6 +89,17 @@ impl RdyServer {
                 .into_iter()
                 .fold(ToolRouter::new(), |a, b| a + b),
         }
+    }
+
+    /// This server with `agent` as its session's signer: the caller's own SSH agent.
+    pub fn with_agent(self, agent: Arc<dyn SigningAgent>) -> Self {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).agent = agent;
+        self
+    }
+
+    /// The session's signer.
+    pub fn agent(&self) -> Arc<dyn SigningAgent> {
+        Arc::clone(&self.state.lock().unwrap_or_else(|p| p.into_inner()).agent)
     }
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
@@ -621,14 +633,17 @@ impl IdleCheckpointLog {
 /// (`spawn_blocking`) holding the state lock for the call. Writes apply, and replies leave, in
 /// request order because the calls are stamped at the transport ([`serve`]), not because of the
 /// runtime.
-pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
+///
+/// `agent` is the caller's own SSH agent, which this process made from its own environment: the
+/// session signs only through it.
+pub async fn serve_stdio(project: PathBuf, agent: Arc<dyn SigningAgent>) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    tokio::task::spawn_blocking(move || rt.block_on(serve_stdio_inner(project))).await?
+    tokio::task::spawn_blocking(move || rt.block_on(serve_stdio_inner(project, agent))).await?
 }
 
-async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
+async fn serve_stdio_inner(project: PathBuf, agent: Arc<dyn SigningAgent>) -> anyhow::Result<()> {
     let local = Arc::new(Local::open(&project)?);
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
@@ -644,7 +659,8 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         Arc::clone(&local) as Arc<dyn Engine>,
         None,
         NotifyHub::new(),
-    );
+    )
+    .with_agent(agent);
     let ticker = {
         let local = Arc::clone(&local);
         tokio::spawn(async move {
@@ -718,7 +734,8 @@ where
 /// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
 /// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id,
 /// and `hub` the daemon's hub of connected sessions (ib11): the session joins it under `sid`,
-/// and the daemon removes it when the session ends.
+/// and the daemon removes it when the session ends. `agent` is the signer of the process at the
+/// other end of the session's connection.
 /// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
 /// runtime. Dropping the returned future ends the session: the service is cancelled and the
 /// stream closed; a tool call already on the blocking pool finishes first.
@@ -726,6 +743,7 @@ pub async fn serve_on<R, W>(
     engine: Arc<dyn Engine>,
     sid: u64,
     hub: Arc<NotifyHub>,
+    agent: Arc<dyn SigningAgent>,
     r: R,
     w: W,
 ) -> anyhow::Result<()>
@@ -748,7 +766,11 @@ where
         );
     };
     let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
-    let served = serve(RdyServer::new(engine, Some(sid), hub), from_pump, w);
+    let served = serve(
+        RdyServer::new(engine, Some(sid), hub).with_agent(agent),
+        from_pump,
+        w,
+    );
     tokio::pin!(served);
     // the session ends when `serve` does (the peer closed, or the session failed to start);
     // when the pump ends first (the peer closed its side), `serve` reads EOF and ends after it

@@ -901,6 +901,7 @@ fn ctx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<
         session: s,
         human: PERSON,
         cwd,
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     }
 }
 

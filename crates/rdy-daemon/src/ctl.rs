@@ -4,8 +4,11 @@ use crate::daemon::DRAIN_AFTER_REPLY_BYTES;
 use crate::error::{E_BAD_INPUT, E_LIMIT, ErrorReply};
 use crate::handler::Handler;
 use crate::session::{SessionInfo, Sessions};
+use crate::signing_transport::{CALLBACK_MARK, HostInbound, MAX_CALLBACK_LINE_BYTES, host_link};
+use rdy_engine::signing_crypto::SigningAgent;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -105,16 +108,24 @@ enum Got {
     Bytes(Vec<u8>),
     /// Longer than the limit; its bytes were drained, not kept.
     Over,
+    /// A callback line (mark kept), for the connection's signing channel.
+    Callback(Vec<u8>),
+    /// A callback line longer than its limit; drained.
+    CallbackOver,
 }
 
 #[derive(Default)]
 struct LineState {
     buf: Vec<u8>,
     over: bool,
+    /// Whether the line being read is a callback line; `None` before its first byte.
+    callback: Option<bool>,
 }
 
-/// Reads one line, never holding more than the limit (plus a read chunk). The only await is
-/// `fill_buf`, so dropping this future loses nothing: a caller may select it against a signal.
+/// Reads one line, never holding more than the limit (plus a read chunk): `max` for an ordinary
+/// line, [`MAX_CALLBACK_LINE_BYTES`] for a callback line, which its first byte names. The only
+/// await is `fill_buf`, so dropping this future loses nothing: a caller may select it against a
+/// signal.
 async fn read_line<R: AsyncRead + Unpin>(
     r: &mut BufReader<R>,
     st: &mut LineState,
@@ -126,6 +137,12 @@ async fn read_line<R: AsyncRead + Unpin>(
             // EOF; a partial line is dropped
             return Ok(Got::Eof);
         }
+        let callback = *st.callback.get_or_insert(buf[0] == CALLBACK_MARK);
+        let max = if callback {
+            MAX_CALLBACK_LINE_BYTES
+        } else {
+            max
+        };
         let (chunk, done, consumed) = match buf.iter().position(|&b| b == b'\n') {
             Some(i) => (&buf[..i], true, i + 1),
             None => (buf, false, buf.len()),
@@ -141,16 +158,17 @@ async fn read_line<R: AsyncRead + Unpin>(
         r.consume(consumed);
         if done {
             let mut line = std::mem::take(&mut st.buf);
-            if std::mem::take(&mut st.over) {
-                return Ok(Got::Over);
-            }
+            st.callback = None;
+            let over = std::mem::take(&mut st.over);
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            if line.len() > max {
-                return Ok(Got::Over);
-            }
-            return Ok(Got::Bytes(line));
+            return Ok(match (callback, over || line.len() > max) {
+                (false, true) => Got::Over,
+                (false, false) => Got::Bytes(line),
+                (true, true) => Got::CallbackOver,
+                (true, false) => Got::Callback(line),
+            });
         }
     }
 }
@@ -206,13 +224,14 @@ async fn call_handler(
     handler: &Arc<dyn Handler>,
     session: &SessionInfo,
     request: CtlRequest,
+    agent: Arc<dyn SigningAgent>,
 ) -> CtlReply {
     let id = request.id.clone();
     let op = request.op.clone();
     let (handler, session) = (Arc::clone(handler), session.clone());
     let out = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handler.ctl(&session, request)
+            handler.ctl(&session, request, agent)
         }))
     })
     .await;
@@ -231,10 +250,40 @@ async fn call_handler(
     }
 }
 
+/// Lines read while a request ran, kept for after its reply.
+#[derive(Default)]
+struct Held {
+    lines: VecDeque<Got>,
+    /// The bytes of the kept request lines.
+    bytes: usize,
+}
+
+impl Held {
+    fn push(&mut self, got: Got) {
+        if let Got::Bytes(l) = &got {
+            self.bytes += l.len();
+        }
+        self.lines.push_back(got);
+    }
+
+    fn pop(&mut self) -> Option<Got> {
+        let got = self.lines.pop_front()?;
+        if let Got::Bytes(l) = &got {
+            self.bytes -= l.len();
+        }
+        Some(got)
+    }
+}
+
 /// The line loop for one ctl connection, from after the hello to the connection's end.
 /// Returns on EOF, a read or write error, an oversized line, or once `info.stop` is set
 /// (after the reply to the request in hand). The caller removes the session and calls
 /// `Handler::session_ended`.
+///
+/// Callback lines go to the connection's signing channel, never to the request parser. While a
+/// request runs, the loop writes the callback requests its agent makes and, while one waits for
+/// its reply, reads on: callback replies are taken at once, and other lines are kept, in order,
+/// for after the request's reply.
 pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     r: R,
     mut w: W,
@@ -245,14 +294,20 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let mut r = BufReader::new(r);
     let mut st = LineState::default();
     let mut stop = info.stop.subscribe();
+    let (agent, inbound, mut outbound) = host_link();
+    let agent: Arc<dyn SigningAgent> = agent;
+    let mut held = Held::default();
     loop {
         if *stop.borrow() {
             return Ok(());
         }
-        let line = tokio::select! {
-            biased;
-            _ = stop.changed() => return Ok(()),
-            line = read_line(&mut r, &mut st, MAX_CTL_LINE_BYTES) => line?,
+        let line = match held.pop() {
+            Some(line) => line,
+            None => tokio::select! {
+                biased;
+                _ = stop.changed() => return Ok(()),
+                line = read_line(&mut r, &mut st, MAX_CTL_LINE_BYTES) => line?,
+            },
         };
         let line = match line {
             Got::Eof => return Ok(()),
@@ -268,6 +323,14 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 let _ = w.shutdown().await;
                 drain_ready(&mut r, DRAIN_AFTER_REPLY_BYTES).await;
                 return Ok(());
+            }
+            Got::Callback(l) => {
+                inbound.deliver(&l);
+                continue;
+            }
+            Got::CallbackOver => {
+                inbound.over();
+                continue;
             }
             Got::Bytes(l) => l,
         };
@@ -314,9 +377,74 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 info.stop.send_replace(true);
             }
             _ => {
-                let reply = call_handler(&handler, &session, request).await;
+                let call = call_handler(&handler, &session, request, Arc::clone(&agent));
+                let reply = run_request(
+                    call,
+                    &mut r,
+                    &mut st,
+                    &mut w,
+                    &inbound,
+                    &mut outbound,
+                    &mut held,
+                )
+                .await?;
                 answer(&mut w, &handler, &session, reply).await?;
             }
+        }
+    }
+}
+
+/// Waits for the request `call`, writing the callback requests its agent makes and reading the
+/// replies to them. Lines that are not callback replies are kept in `held`; past
+/// [`crate::signing_transport::MAX_READ_AHEAD_BYTES`] of them the waiting callback fails, and
+/// nothing more is read until the request ends. A write that fails closes the signing channel;
+/// the error is returned once the request has ended.
+async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    call: impl std::future::Future<Output = CtlReply>,
+    r: &mut BufReader<R>,
+    st: &mut LineState,
+    w: &mut W,
+    inbound: &HostInbound,
+    outbound: &mut crate::signing_transport::HostOutbound,
+    held: &mut Held,
+) -> io::Result<CtlReply> {
+    tokio::pin!(call);
+    let mut reading = true;
+    let mut failed: Option<io::Error> = None;
+    loop {
+        let read = reading && inbound.outstanding();
+        tokio::select! {
+            biased;
+            reply = &mut call => return match failed {
+                Some(e) => Err(e),
+                None => Ok(reply),
+            },
+            line = outbound.next(), if failed.is_none() => {
+                let wrote = async {
+                    w.write_all(&line).await?;
+                    w.flush().await
+                };
+                if let Err(e) = wrote.await {
+                    inbound.close();
+                    failed = Some(e);
+                }
+            }
+            got = read_line(r, st, MAX_CTL_LINE_BYTES), if read => match got {
+                Ok(Got::Callback(l)) => inbound.deliver(&l),
+                Ok(Got::CallbackOver) => inbound.over(),
+                Ok(Got::Eof) | Err(_) => {
+                    inbound.close();
+                    reading = false;
+                    held.push(Got::Eof);
+                }
+                Ok(other) => {
+                    held.push(other);
+                    if held.bytes > crate::signing_transport::MAX_READ_AHEAD_BYTES {
+                        inbound.flooded();
+                        reading = false;
+                    }
+                }
+            },
         }
     }
 }

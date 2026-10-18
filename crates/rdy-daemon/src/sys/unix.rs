@@ -581,6 +581,157 @@ pub fn agent_close(stream: &AgentStream) {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
+// 8. The caller's interrupt while it signs
+
+/// The write end of the pipe the `SIGINT` handler writes to; -1 until the pipe exists. It is
+/// never closed, so the handler never writes to a reused descriptor.
+static INTERRUPT_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Who catches `SIGINT` now.
+struct InterruptState {
+    /// The guards alive; the handler is installed while there is one.
+    holders: usize,
+    /// The action the first guard replaced, put back by the last.
+    previous: Option<libc::sigaction>,
+    /// Counts the interrupts, for every guard; made with the pipe, by the first guard.
+    count: Option<tokio::sync::watch::Sender<u64>>,
+}
+
+static INTERRUPT_STATE: std::sync::Mutex<InterruptState> = std::sync::Mutex::new(InterruptState {
+    holders: 0,
+    previous: None,
+    count: None,
+});
+
+fn interrupt_state() -> std::sync::MutexGuard<'static, InterruptState> {
+    INTERRUPT_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `SIGINT` caught while the guard lives: [`InterruptGuard::recv`] ends at the next one. With no
+/// guard alive, `SIGINT` has the action it had before the first guard.
+pub struct InterruptGuard {
+    seen: tokio::sync::watch::Receiver<u64>,
+}
+
+impl InterruptGuard {
+    /// Waits for a `SIGINT` caught since the guard was made.
+    pub async fn recv(&mut self) {
+        if self.seen.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        let mut st = interrupt_state();
+        st.holders = st.holders.saturating_sub(1);
+        if st.holders == 0
+            && let Some(previous) = st.previous.take()
+        {
+            // SAFETY: `previous` is the action `sigaction` reported for SIGINT; putting it back
+            // touches no memory of ours.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::sigaction(libc::SIGINT, &previous, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
+/// The `SIGINT` handler: one byte on the pipe. It does only async-signal-safe work and keeps
+/// `errno`.
+extern "C" fn on_interrupt(_signal: libc::c_int) {
+    let fd = INTERRUPT_FD.load(std::sync::atomic::Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: `errno_location` returns this thread's errno; `write` is async-signal-safe and
+    // writes one byte from a live buffer to a non-blocking descriptor that is never closed.
+    #[allow(unsafe_code)]
+    unsafe {
+        let errno = errno_location();
+        let saved = *errno;
+        libc::write(fd, [1u8].as_ptr().cast(), 1);
+        *errno = saved;
+    }
+}
+
+/// This thread's `errno`.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+#[allow(unsafe_code)]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: returns the caller's thread's errno; no other effect.
+    unsafe { libc::__error() }
+}
+
+/// This thread's `errno`.
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+#[allow(unsafe_code)]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: returns the caller's thread's errno; no other effect.
+    unsafe { libc::__errno_location() }
+}
+
+/// Makes the pipe, and the thread that counts what the handler writes to it.
+fn interrupt_count() -> io::Result<tokio::sync::watch::Sender<u64>> {
+    use std::io::Read;
+    use std::os::fd::IntoRawFd;
+    let (mut read, write) = std::os::unix::net::UnixStream::pair()?;
+    write.set_nonblocking(true)?;
+    let (count, _) = tokio::sync::watch::channel(0u64);
+    let counter = count.clone();
+    std::thread::Builder::new()
+        .name("rdy-sigint".into())
+        .spawn(move || {
+            let mut buf = [0u8; 64];
+            while let Ok(n) = read.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                counter.send_modify(|c| *c = c.wrapping_add(1));
+            }
+        })?;
+    INTERRUPT_FD.store(write.into_raw_fd(), std::sync::atomic::Ordering::Relaxed);
+    Ok(count)
+}
+
+/// Catches `SIGINT` until the guard is dropped (guards may overlap). Call it before the work an
+/// interrupt should stop begins, so an interrupt during that work is never missed.
+pub fn catch_interrupt() -> io::Result<InterruptGuard> {
+    let mut st = interrupt_state();
+    let count = match &st.count {
+        Some(c) => c.clone(),
+        None => {
+            let c = interrupt_count()?;
+            st.count = Some(c.clone());
+            c
+        }
+    };
+    let seen = count.subscribe();
+    if st.holders == 0 {
+        // SAFETY: zeroed `sigaction` structs are valid; the new action names a handler that does
+        // only async-signal-safe work, and the old action is written into memory we own.
+        #[allow(unsafe_code)]
+        let previous = unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            previous
+        };
+        st.previous = Some(previous);
+    }
+    st.holders += 1;
+    Ok(InterruptGuard { seen })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sys::{

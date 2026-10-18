@@ -33,6 +33,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
         session: s,
         human: "human:t",
         cwd,
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     }
 }
 
@@ -481,6 +482,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
                 session: &s,
                 human: "human:t",
                 cwd: &root,
+                agent: &rdy_engine::signing_crypto::UnavailableAgent,
             };
             dispatch(
                 &c,
@@ -513,6 +515,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
                 session: &s,
                 human: "human:t",
                 cwd: &root,
+                agent: &rdy_engine::signing_crypto::UnavailableAgent,
             };
             dispatch(
                 &c,

@@ -874,6 +874,7 @@ mod tests {
             session: &session,
             human: "human:qa",
             cwd: &cwd,
+            agent: &rdy_engine::signing_crypto::UnavailableAgent,
         };
         let run = |op: &str, a: Value| rdy_daemon::dispatch(&cx, op, a).map_err(ErrorReply::from);
         let redact = |reason: &str| {
@@ -958,6 +959,7 @@ mod tests {
             session: &session,
             human: "human:qa",
             cwd: &cwd,
+            agent: &rdy_engine::signing_crypto::UnavailableAgent,
         };
         let run = |op: &str, a: Value| rdy_daemon::dispatch(&cx, op, a).map_err(ErrorReply::from);
         run(

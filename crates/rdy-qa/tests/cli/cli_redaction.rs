@@ -48,6 +48,7 @@ fn op_as(
         session,
         human: "human:qa",
         cwd: s.dir.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let out = dispatch(&cx, op, args).map_err(rdy_daemon::ErrorReply::from);
     e.close().unwrap();

@@ -21,7 +21,12 @@ pub struct Echo {
     pub ended: Mutex<Vec<SessionId>>,
 }
 impl Handler for Echo {
-    fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
+    fn ctl(
+        &self,
+        s: &SessionInfo,
+        r: CtlRequest,
+        _agent: Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
+    ) -> Result<Value, ErrorReply> {
         match r.op.as_str() {
             "echo" => Ok(json!({"session": s.id, "cwd": s.cwd, "args": r.args})),
             "sleep" => {

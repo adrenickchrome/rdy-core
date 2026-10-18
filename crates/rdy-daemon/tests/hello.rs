@@ -5,6 +5,7 @@ mod common;
 use common::*;
 use rdy_daemon::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -193,13 +194,19 @@ async fn hello1_an_mcp_hello_hands_the_stream_to_the_handler_with_pipelined_byte
     use std::sync::{Arc, Mutex};
     struct Grab(Mutex<Option<tokio::sync::oneshot::Sender<(Proto, String)>>>);
     impl Handler for Grab {
-        fn ctl(&self, _: &SessionInfo, _: CtlRequest) -> Result<Value, ErrorReply> {
+        fn ctl(
+            &self,
+            _: &SessionInfo,
+            _: CtlRequest,
+            _: Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
+        ) -> Result<Value, ErrorReply> {
             unreachable!()
         }
         fn mcp(
             &self,
             s: SessionInfo,
             stream: McpStream,
+            _agent: Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             let tx = self.0.lock().unwrap().take().unwrap();
             Box::pin(async move {
@@ -247,8 +254,13 @@ async fn hello1_an_mcp_hello_hands_the_stream_to_the_handler_with_pipelined_byte
 /// `starting` line), so the progress timer always fires first, however the runtime schedules.
 struct SlowStart(std::sync::Arc<tokio::sync::Notify>);
 impl Handler for SlowStart {
-    fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
-        Echo::default().ctl(s, r)
+    fn ctl(
+        &self,
+        s: &SessionInfo,
+        r: CtlRequest,
+        agent: Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
+    ) -> Result<Value, ErrorReply> {
+        Echo::default().ctl(s, r, agent)
     }
 
     fn session_started(
