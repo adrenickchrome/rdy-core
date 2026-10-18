@@ -472,6 +472,22 @@ pub fn set_remote(
             if other_share {
                 return Err(remote_exists());
             }
+            put_remote(map, name, Some(e))
+        }
+        None => put_remote(map, name, None),
+    }
+}
+
+/// [`set_remote`] without its share check, for a caller that checks the single share remote on
+/// the merged config instead: one file may hold a second share entry that another level
+/// overrides. `name` must be a remote name.
+pub(crate) fn put_remote(
+    map: &mut Mapping,
+    name: &str,
+    entry: Option<RemoteEntry>,
+) -> Result<(), RdyError> {
+    match entry {
+        Some(e) => {
             child_map(map, REMOTES_KEY, REMOTES_KEY)?.insert(Value::from(name), e.to_value());
         }
         None => {

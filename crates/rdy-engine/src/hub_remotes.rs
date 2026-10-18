@@ -29,7 +29,7 @@ use crate::hub_config::{
 use crate::hub_types::{LimitUnit, MAX_CONFIG_BYTES, MAX_REMOTES, Origin, RemoteUrl};
 use rdy_schema::Issue;
 use serde::{Deserialize, Serialize};
-use serde_yaml_ng::Mapping;
+use serde_yaml_ng::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
 /// The settings level a remote edit writes.
@@ -333,6 +333,10 @@ impl RemoteService {
             Level::Project => &project_map,
             _ => &local_map,
         };
+        // an add refuses any entry the file holds under the name, one the loader drops included,
+        // so it never replaces what the file keeps there
+        let present = matches!(old.get(hub_config::REMOTES_KEY),
+            Some(Value::Mapping(rs)) if rs.contains_key(name));
         // the selected level's entry, as the loader reads that file
         let at_level = self
             .merged(&[(level, old)])
@@ -340,14 +344,17 @@ impl RemoteService {
             .into_iter()
             .find(|r| r.name == name);
         let (entry, removed) = match (edit, at_level) {
-            (Edit::Add(_), Some(_)) => return Err(refuse(already_exists(name))),
-            (Edit::Add(e), None) => (Some(e), None),
+            // every entry the loader reads is a key of that mapping
+            (Edit::Add(_), _) if present => return Err(refuse(already_exists(name))),
+            (Edit::Add(e), _) => (Some(e), None),
             (_, None) => return Err(refuse(not_at_level(name))),
             (Edit::Remove, Some(r)) => (None, Some(r)),
             (Edit::SetMode(mode), Some(r)) => (Some(RemoteEntry { url: r.url, mode }), None),
         };
+        // staged without a per-file share check: one file may hold a second share entry that
+        // another level overrides, so the single share remote is checked on the merged config
         let mut next = old.clone();
-        hub_config::set_remote(&mut next, name, entry).map_err(refuse)?;
+        hub_config::put_remote(&mut next, name, entry).map_err(refuse)?;
 
         // the config as it would be after the edit, a row that a removal uncovers included
         let prospective: Vec<(Level, &Mapping)> = current

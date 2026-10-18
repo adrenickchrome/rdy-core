@@ -768,3 +768,104 @@ fn hsa6_failed_remote_save_never_claims_success() {
         svc.add("later", url, RemoteMode::Publish, level).unwrap();
     }
 }
+
+#[test]
+fn hsa6_add_refuses_an_entry_the_loader_drops() {
+    // an entry at the selected level that the loader does not read (an invalid mode) is still
+    // that level's entry: add refuses it and keeps the file, its other values included
+    let fx = Fx::new();
+    let svc = fx.svc();
+    fs::write(
+        fx.user_file(),
+        "remotes:\n  origin:\n    url: https://hub.example/existing\n    mode: shar\n    note: keep-my-saved-data\n",
+    )
+    .unwrap();
+    fs::write(
+        fx.local_file(),
+        "remotes:\n  origin: {url: 'not a url', mode: publish}\n",
+    )
+    .unwrap();
+    let before = fx.files().map(|f| stamp(&f));
+    for level in [RemoteLevel::User, RemoteLevel::Local] {
+        for mode in [RemoteMode::Publish, RemoteMode::Share] {
+            let e = err_of(svc.add("origin", "https://other.example/replacement", mode, level));
+            assert_err(&e, E_ALREADY_EXISTS, EXISTS_MESSAGE, EXISTS_FIX);
+            assert!(!e.issues.is_empty(), "the dropped entries are warned");
+        }
+    }
+    assert_eq!(fx.files().map(|f| stamp(&f)), before, "no file changed");
+    // a level without the entry still takes it
+    svc.add(
+        "origin",
+        "https://other.example/replacement",
+        RemoteMode::Publish,
+        RemoteLevel::Project,
+    )
+    .unwrap();
+    assert_eq!(stamp(&fx.user_file()), before[2]);
+    assert_eq!(stamp(&fx.local_file()), before[1]);
+}
+
+#[test]
+fn hsa6_share_uniqueness_is_checked_on_the_effective_config() {
+    let share = "https://hub.example.com/share";
+    let other = "https://hub.example.com/other";
+    // user remote a is share, and a local entry overrides it as publish: no share is in effect
+    let shadowed = || {
+        let fx = Fx::new();
+        let svc = fx.svc();
+        svc.add("a", share, RemoteMode::Share, RemoteLevel::User)
+            .unwrap();
+        svc.add("a", other, RemoteMode::Publish, RemoteLevel::Local)
+            .unwrap();
+        (fx, svc)
+    };
+    let effective_shares = |fx: &Fx| -> Vec<String> {
+        fx.load()
+            .remotes()
+            .iter()
+            .filter(|r| r.mode == RemoteMode::Share)
+            .map(|r| r.name.clone())
+            .collect()
+    };
+
+    // add: a second share entry in the user file, one share in effect
+    let (fx, svc) = shadowed();
+    let added = svc
+        .add("b", share, RemoteMode::Share, RemoteLevel::User)
+        .unwrap();
+    assert_eq!(added.remote.mode, RemoteMode::Share);
+    assert_eq!(
+        rows(&svc),
+        [
+            row("a", other, RemoteMode::Publish, RemoteLevel::Local),
+            row("b", share, RemoteMode::Share, RemoteLevel::User),
+        ]
+    );
+    assert_eq!(effective_shares(&fx), ["b"]);
+    assert_eq!(
+        yaml(&fx.user_file())["remotes"]["a"]["mode"],
+        Value::from("share")
+    );
+    // the local override's removal would uncover a second share: refused, nothing changes
+    let before = fx.files().map(|f| stamp(&f));
+    let e = err_of(svc.remove("a", RemoteLevel::Local));
+    assert_err(&e, E_REMOTE_EXISTS, SHARE_MESSAGE, SHARE_FIX);
+    let e = err_of(svc.set_mode("a", RemoteMode::Share, RemoteLevel::Local));
+    assert_err(&e, E_REMOTE_EXISTS, SHARE_MESSAGE, SHARE_FIX);
+    // two effective shares in one file are still refused
+    let e = err_of(svc.add("c", share, RemoteMode::Share, RemoteLevel::User));
+    assert_err(&e, E_REMOTE_EXISTS, SHARE_MESSAGE, SHARE_FIX);
+    assert_eq!(fx.files().map(|f| stamp(&f)), before);
+
+    // set_mode: the same end state through a mode change
+    let (fx, svc) = shadowed();
+    svc.add("b", share, RemoteMode::Publish, RemoteLevel::User)
+        .unwrap();
+    let changed = svc
+        .set_mode("b", RemoteMode::Share, RemoteLevel::User)
+        .unwrap();
+    assert_eq!(changed.remote.mode, RemoteMode::Share);
+    assert_eq!(changed.remote.level, RemoteLevel::User);
+    assert_eq!(effective_shares(&fx), ["b"]);
+}
