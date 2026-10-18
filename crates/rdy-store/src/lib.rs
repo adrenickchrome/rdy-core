@@ -1,6 +1,7 @@
 pub mod answer;
 pub mod bounded;
 mod check;
+pub mod closure;
 pub mod coord;
 pub mod dump;
 pub mod error;
@@ -25,6 +26,8 @@ pub mod segment;
 pub mod signature;
 mod store;
 pub mod stream_error;
+pub mod sync_proof;
+pub mod sync_stream;
 pub mod transition;
 pub mod view;
 

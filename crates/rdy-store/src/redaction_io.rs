@@ -287,6 +287,60 @@ pub(crate) fn human_approval(l: &LandingRecord) -> bool {
         }
 }
 
+/// The meaning of an apply that holds wherever its records are (shared with the portable proof
+/// check of a sync stream, `crate::sync_proof`): its landing landed the request's carrier, the
+/// request keeps its bounds, canonical manifest order and selector expansion as the checked apply
+/// path has them (`check_bounds`, `manifest_in_order`, `targets_agree`; final review finding 1),
+/// and the apply binds the request's report hash. False when any of them fails. `buf` is the
+/// report buffer, allocated on first use; a refused allocation is `RedactionLimit`.
+pub(crate) fn request_agrees(
+    request: &Redaction,
+    landing: &LandingRecord,
+    record: &RedactionApply,
+    buf: &mut Option<Vec<u8>>,
+) -> Result<bool, StoreError> {
+    if !landing.changes.contains(&request.carrier)
+        || check_bounds(request).is_err()
+        || !manifest_in_order(&request.manifest)
+        || targets_agree(request).is_err()
+    {
+        return Ok(false);
+    }
+    let buf = match buf {
+        Some(b) => b,
+        None => buf.insert(record_buffer().map_err(|_| StoreError::RedactionLimit {
+            limit: crate::redaction::limit::RECORD,
+        })?),
+    };
+    Ok(request
+        .manifest
+        .report_hash(buf)
+        .is_ok_and(|h| h == record.report_hash))
+}
+
+/// Whether `residue` is the residue a span of `kind` and `hash` binds (shared with
+/// `crate::sync_proof`): a block residue of that version, listed with its id among the
+/// manifest's `versions`, or a change residue of that change that embeds one of
+/// `version_hashes`.
+pub(crate) fn residue_fits(
+    kind: u8,
+    hash: &Hash,
+    residue: &RedactionResidue,
+    versions: &BTreeSet<(BlockId, Hash)>,
+    version_hashes: &HashSet<Hash>,
+) -> bool {
+    match residue {
+        RedactionResidue::Block(b) => {
+            kind == kinds::BLOCK && b.version == *hash && versions.contains(&(b.id.clone(), *hash))
+        }
+        RedactionResidue::Change(ch) => {
+            kind == kinds::CHANGE
+                && ch.change == *hash
+                && residual_versions(ch).any(|v| version_hashes.contains(v))
+        }
+    }
+}
+
 /// One apply frame the header pass met in a sealed batch.
 struct ApplyFrame {
     loc: Location,
@@ -650,23 +704,7 @@ fn validate(
         }
         // the request, its carrier's landing and its report
         let (rloc, request) = request_of(c, readers, a)?.ok_or_else(at)?;
-        if !landing.changes.contains(&request.carrier) {
-            return Err(at());
-        }
-        // the selector expansion the checked apply path enforces (final review finding 1)
-        if check_bounds(&request).is_err()
-            || !manifest_in_order(&request.manifest)
-            || targets_agree(&request).is_err()
-        {
-            return Err(at());
-        }
-        let buf = match &mut report_buf {
-            Some(b) => b,
-            None => report_buf.insert(record_buffer().map_err(|_| StoreError::RedactionLimit {
-                limit: crate::redaction::limit::RECORD,
-            })?),
-        };
-        if request.manifest.report_hash(buf).map_err(|_| at())? != record.report_hash {
+        if !request_agrees(&request, &landing, record, &mut report_buf)? {
             return Err(at());
         }
         // its spans
@@ -704,19 +742,7 @@ fn validate(
                             .ok_or_else(bad)?,
                     )
                     .map_err(|_| bad())?;
-                    let fits = match &res {
-                        RedactionResidue::Block(b) => {
-                            span.kind == kinds::BLOCK
-                                && b.version == span.hash
-                                && versions.contains(&(b.id.clone(), span.hash))
-                        }
-                        RedactionResidue::Change(ch) => {
-                            span.kind == kinds::CHANGE
-                                && ch.change == span.hash
-                                && residual_versions(ch).any(|v| version_hashes.contains(v))
-                        }
-                    };
-                    if !fits {
+                    if !residue_fits(span.kind, &span.hash, &res, &versions, &version_hashes) {
                         return Err(bad());
                     }
                     Some((r, res))

@@ -214,10 +214,14 @@ pub(crate) mod drop_text {
     }
 }
 
-/// The record rules of a dropped frame, shared by the writer and the reader: a removable kind,
-/// the residue its kind needs (BLOCK and CHANGE one, BLOB_CHUNK none), and an original length
-/// of at most `MAX_BLOB_BYTES`.
-fn check_dropped(kind: u8, residue: Option<&Hash>, len: u32) -> Result<(), Cow<'static, str>> {
+/// The record rules of a dropped frame, shared by the writer and the reader (and by the sync
+/// stream's `DROPPED` record, `crate::sync_stream`): a removable kind, the residue its kind needs
+/// (BLOCK and CHANGE one, BLOB_CHUNK none), and an original length of at most `MAX_BLOB_BYTES`.
+pub(crate) fn check_dropped(
+    kind: u8,
+    residue: Option<&Hash>,
+    len: u32,
+) -> Result<(), Cow<'static, str>> {
     let needs_residue = match kind {
         kinds::BLOCK | kinds::CHANGE => true,
         kinds::BLOB_CHUNK => false,
@@ -506,12 +510,13 @@ pub(crate) fn try_batch_digest<'a>(
     Some(Hash::of(&b))
 }
 
-/// The bytes one record adds to the trailer chain.
-const LINK_LEN: usize = 1 + 8 + 32;
+/// The bytes one record adds to the trailer chain (a dump's, and a sync stream's,
+/// `crate::sync_stream`).
+pub(crate) const LINK_LEN: usize = 1 + 8 + 32;
 
 /// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its
 /// growth is fallible: None when it cannot be allocated.
-fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) -> Option<()> {
+pub(crate) fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) -> Option<()> {
     chain.try_reserve(LINK_LEN).ok()?;
     chain.push(kind);
     chain.extend_from_slice(&len.to_le_bytes());
