@@ -38,13 +38,19 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 42);
+    assert_eq!(OPS.len(), 43);
     assert_eq!(OPS[0], "session");
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
         OPS[new_doc + 1],
         "new_profile",
         "pub5: new_profile follows new_doc"
+    );
+    let render = OPS.iter().position(|o| *o == "render").unwrap();
+    assert_eq!(
+        OPS[render + 1],
+        "publication_check",
+        "pub9: publication_check follows render"
     );
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
@@ -1181,4 +1187,93 @@ fn pub5_profile_create_is_strict_and_uses_normal_write_rules() {
         .unwrap();
     assert_eq!(ch.message, "new publication profile site");
     assert_eq!(ch.ops.len(), 1);
+}
+
+/// pub9: the `publication_check` op reads one snapshot for every session role, refuses an unknown
+/// key by name, takes only canon, tags and landings, and writes nothing, even when the policy
+/// result is blocked.
+#[test]
+fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
+    let (d, e) = project();
+    let s = human();
+    let w = write_typed(&e, |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]))
+        .unwrap();
+        r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+    })
+    .unwrap();
+    let (a, out, admin) = (
+        w["created"]["$a"].as_str().unwrap().to_string(),
+        w["created"]["$out"].as_str().unwrap().to_string(),
+        w["created"]["$admin"].as_str().unwrap().to_string(),
+    );
+    write_typed(&e, move |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "prose", "parent": a, "body": format!("See {{{{{out}}}}}.")},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "open", "title": "Open", "audience": "public", "select": [a]}}
+        ]))
+        .unwrap();
+        r.write(
+            &human(),
+            WriteRequest {
+                view: "work".into(),
+                ops,
+                justification: None,
+                message: String::new(),
+            },
+        )?;
+        let approver = Session::human("human:t".into(), Role::Approver);
+        let p = r.propose(&human(), "work", "pub", Some("summary"))?;
+        r.land(&approver, &p.id)
+    })
+    .unwrap();
+    let c = cx(&e, &s, d.path());
+    let end = e.read().seq();
+
+    // every role inspects; a blocked policy is a result
+    for role in [Role::Reader, Role::Writer, Role::Reviewer, Role::Approver] {
+        let who = Session::human("human:t".into(), role);
+        let v = dispatch(
+            &cx(&e, &who, d.path()),
+            "publication_check",
+            json!({"profile": "open"}),
+        )
+        .unwrap();
+        assert_eq!(v["references"]["status"], "blocked", "{role:?}: {v}");
+        assert_eq!(v["warnings"], json!([]));
+        assert_eq!(v["scope"]["kind"], "canon");
+    }
+    // the closed keys: a misspelt one is named, a missing profile is the op's shape error
+    let err = dispatch(
+        &c,
+        "publication_check",
+        json!({"profile": "open", "againts": "canon"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "publication_check: unknown field \"againts\"");
+    assert!(err.fix.starts_with("did you mean \"against\"?"), "{err}");
+    let err = dispatch(&c, "publication_check", json!({})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert!(err.message.contains("missing field `profile`"), "{err}");
+    // a view is no scope
+    for key in ["scope", "against"] {
+        let err = dispatch(
+            &c,
+            "publication_check",
+            json!({"profile": "open", key: "view:work"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{err}");
+        assert_eq!(
+            err.message,
+            format!("Publication check {key} must be canon, tag:<name>, or landing:<hash>.")
+        );
+    }
+    assert_eq!(e.read().seq(), end, "no check wrote anything");
 }

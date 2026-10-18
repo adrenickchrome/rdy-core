@@ -231,4 +231,14 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (W_REDACTION_REUSE, W_REDACTION_REUSE_MESSAGE, ""),
     (W_REDACTION_QUARANTINE, W_REDACTION_QUARANTINE_MESSAGE, ""),
     (W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE, ""),
+    (
+        E_PUBLICATION_REFERENCE,
+        "a public profile refers to blocks outside its selection",
+        "Include the target docs or remove these references. Run the publication check again.",
+    ),
+    (
+        W_PUBLICATION_REFERENCE,
+        "an org profile refers to blocks outside its selection",
+        "Review these references before you share the output.",
+    ),
 ];

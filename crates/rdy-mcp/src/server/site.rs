@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, ExportParams, SiteParams};
+use crate::tools::{self, ExportParams, PublicationCheckParams, SiteParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = site_router, vis = "pub(crate)")]
@@ -19,5 +19,16 @@ impl RdyServer {
     )]
     async fn rdy_export(&self, Parameters(p): Parameters<ExportParams>) -> CallToolResult {
         self.run("rdy_export", p, tools::rdy_export).await
+    }
+
+    #[tool(
+        description = "Check a publication profile's selected docs and references. Pass profile implicit:org for every doc. Pass against to compare with an explicit canon, tag, or landing baseline. This checks local output; it does not authorize publication or find the last publication. Relay warnings to the person."
+    )]
+    async fn rdy_publication_check(
+        &self,
+        Parameters(p): Parameters<PublicationCheckParams>,
+    ) -> CallToolResult {
+        self.run("rdy_publication_check", p, tools::rdy_publication_check)
+            .await
     }
 }

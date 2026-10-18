@@ -22,6 +22,7 @@ mod intent_cmd;
 mod land_cmd;
 mod output;
 mod project_cmd;
+mod publication_cmd;
 mod read_cmd;
 mod redact_cmd;
 mod search_cmd;
@@ -116,6 +117,11 @@ enum Cmd {
         #[command(subcommand)]
         what: edit_cmd::NewCmd,
     },
+    /// Check a publication profile's output: its selection, its references outside the selection, and the changes against a baseline.
+    Publication {
+        #[command(subcommand)]
+        cmd: publication_cmd::PublicationCmd,
+    },
     /// List the folder and doc tree.
     Ls(read_cmd::LsArgs),
     Edit(edit_cmd::EditArgs),
@@ -172,6 +178,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Status => read_cmd::status(env),
         Cmd::Show(a) => read_cmd::show(env, a),
         Cmd::New { what } => edit_cmd::new(env, what),
+        Cmd::Publication { cmd } => publication_cmd::publication(env, cmd),
         Cmd::Ls(a) => read_cmd::ls(env, a),
         Cmd::Log(a) => read_cmd::log(env, a),
         Cmd::Impact(a) => read_cmd::impact(env, a),

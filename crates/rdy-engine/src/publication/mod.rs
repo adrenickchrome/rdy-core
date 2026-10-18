@@ -6,11 +6,13 @@
 
 mod diff;
 mod references;
+mod report;
 mod select;
 
 pub use diff::{ChangedAttachment, ChangedDoc, ChangedFolder, DisclosureDiff, disclosure_diff};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
+pub use report::{REPORT_BYTES, REPORT_ROWS, check};
 pub use select::{
     AttachmentEntry, DocEntry, Limits, PublicationWarning, Resolved, ResolvedProfile,
     SelectionEntry, blob_reads_for_tests, limits, load_assets, resolve,

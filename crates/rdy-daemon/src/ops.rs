@@ -24,6 +24,7 @@ mod edit;
 mod intake;
 mod land;
 mod project;
+mod publication;
 mod read;
 mod redaction;
 mod search;
@@ -39,6 +40,7 @@ use intake::{answer, pending};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
+use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use redaction::redact;
 use search::search;
@@ -73,6 +75,7 @@ pub const OPS: &[&str] = &[
     "brief",
     "search",
     "render",
+    "publication_check",
     "export",
     "dump",
     "clone",
@@ -352,6 +355,9 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
+        "publication_check" => {
+            publication_check(cx, parse(op, args, "{profile, scope?, against?}")?)
+        }
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out}")?),
         "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),

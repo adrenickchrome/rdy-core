@@ -1,6 +1,8 @@
 //! ls7: `rdy_site`. The reply is built by `rdy_engine::engine::site_reply`, which the daemon's
 //! `site_url` op shares. ec11: `rdy_export`, the print, through `Engine::export` (O35: this crate
-//! has no edge to the renderer).
+//! has no edge to the renderer). `rdy_publication_check`: the reference check and disclosure
+//! comparison of a publication profile, from `rdy_engine::publication::check`, which the
+//! daemon's `publication_check` op shares.
 use super::*;
 use rdy_engine::RdyError;
 use rdy_engine::engine::{ExportRequest, site_reply};
@@ -82,4 +84,31 @@ pub fn rdy_export(st: &mut McpState, p: ExportParams) -> Result<Value, RdyError>
         scope: p.scope,
         view: Some(st.view.clone()),
     })
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationCheckParams {
+    /// A publication profile id or key, or implicit:org for every doc.
+    pub profile: String,
+    /// canon (the default, whatever your session view is), tag:<name> or landing:<hash>.
+    pub scope: Option<String>,
+    /// A baseline to compare with: canon, tag:<name> or landing:<hash>. It must hold the same profile id and audience. Omit it for no comparison.
+    pub against: Option<String>,
+}
+
+/// `rdy_publication_check`: the check of a profile, in one read state. A session is required;
+/// every role may inspect, because the check reads source and writes nothing. A blocked policy
+/// result is a success: the caller reads `references.status` and relays `warnings`.
+pub fn rdy_publication_check(
+    st: &mut McpState,
+    p: PublicationCheckParams,
+) -> Result<Value, RdyError> {
+    session(st)?;
+    rdy_engine::publication::check(
+        &st.engine.read(),
+        &p.profile,
+        p.scope.as_deref(),
+        p.against.as_deref(),
+    )
 }
