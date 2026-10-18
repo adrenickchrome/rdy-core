@@ -536,40 +536,25 @@ struct CatchUp {
 /// `fail_after` is a test fault: the replay fails before it indexes that frame (counting from 0).
 ///
 /// Every ref replayed meets the holder rules (`crate::holder::RefRules`) of the mode the log's
-/// first batch set (`creation`): a replay from a later point starts from the index's tags.
+/// first batch set: `rules` are those of the log before `from` (`RefRules::of_log`), so a batch
+/// that `from` cuts is judged whole at its marker.
 fn replay_into(
     log: &SegmentLog,
     index: &Index,
     from: Location,
     fail_after: Option<u64>,
-    creation: Creation,
+    mut rules: RefRules,
 ) -> Result<CatchUp, StoreError> {
     let end = log.end();
     let mut done = CatchUp::default();
     let mut entries = vec![];
     let mut in_chunk = 0usize;
     let auth = log.authorization();
-    let tags = if creation.mode == StoreMode::Holder && from != ORIGIN {
-        index
-            .refs_with_prefix(crate::holder::TAG_REF)?
-            .into_iter()
-            .map(|(name, _)| name[crate::holder::TAG_REF.len()..].to_string())
-            .collect()
-    } else {
-        Default::default()
-    };
-    let mut rules = RefRules::new(creation.mode, tags);
     log.for_each_view(from, |loc, v, next| {
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
         }
-        match (v.kind, v.payload) {
-            (kinds::REF_UPDATE, Some(payload)) => {
-                rules.on_ref_frame(creation.in_first(loc), payload)?
-            }
-            (kinds::BATCH_COMMIT, _) => rules.on_marker()?,
-            _ => {}
-        }
+        rules.on_frame(loc, v.kind, v.payload)?;
         // the redaction rows come from the validated stream only: an apply the bootstrap did not
         // validate is never a row, and a removed payload's entries come from its residue
         if v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc) {
@@ -1206,25 +1191,37 @@ impl Store {
     /// If `indexed_upto` is not a frame start in this log, the index is not trustworthy: it is set
     /// aside and the whole log is replayed into an empty one. Any other failure is returned with
     /// the index in place.
+    ///
+    /// The ref rules (`crate::holder`) judge the log, not the index: a holder's catch-up first
+    /// walks the log up to `indexed_upto`, even with nothing left to replay, then replays with
+    /// those rules. A project's rules hold no state across frames (a mode ref is refused outside
+    /// the first batch, which sets none), and any mode ref the index holds fails the open's
+    /// `check_mode_against`, so a project's catch-up skips that walk.
     fn catch_up(&mut self) -> Result<CatchUp, StoreError> {
         let from = self.index().indexed_upto()?;
         let end = self.log.end();
-        if from >= end {
-            return Ok(CatchUp::default());
-        }
-        if self.index_point_unusable(from, end)? {
+        if from < end && self.index_point_unusable(from, end)? {
             // close the file before it is renamed
             let shared = self.drop_index().expect("the store is open until close");
             let path = self.dir.join("index.redb");
             set_aside(&path)?;
             self.set_index(shared, Index::open(&path)?);
             self.report.index_rebuilt = true;
-            return self.replay_from(Location {
-                segment: 0,
-                offset: 0,
-            });
+            return self.replay_from(ORIGIN, RefRules::new(self.creation));
         }
-        self.replay_from(from)
+        let rules = match self.creation.mode {
+            StoreMode::Project => RefRules::new(self.creation),
+            StoreMode::Holder => RefRules::of_log(
+                self.segments(),
+                &self.log.authorization().holes,
+                self.creation,
+                from.min(end),
+            )?,
+        };
+        if from >= end {
+            return Ok(CatchUp::default());
+        }
+        self.replay_from(from, rules)
     }
 
     /// True if the frame at `from` (before the end of the log and of its segment) cannot be read:
@@ -1250,9 +1247,9 @@ impl Store {
         Ok(from.offset < len && !self.log.frame_readable(from)?)
     }
 
-    fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
+    fn replay_from(&mut self, from: Location, rules: RefRules) -> Result<CatchUp, StoreError> {
         let fail_after = self.faults.replay_after.take();
-        let done = replay_into(&self.log, self.index(), from, fail_after, self.creation)?;
+        let done = replay_into(&self.log, self.index(), from, fail_after, rules)?;
         // the replayed frames are in the log, not yet in the durable index
         self.checkpoint()?;
         Ok(done)
@@ -1296,7 +1293,13 @@ impl Store {
         let fail_after = self.faults.replay_after.take();
         // an error at any step, the open of the temp included, removes the temp
         let built = Index::open(&tmp).and_then(|ix| {
-            replay_into(&self.log, &ix, ORIGIN, fail_after, self.creation)?;
+            replay_into(
+                &self.log,
+                &ix,
+                ORIGIN,
+                fail_after,
+                RefRules::new(self.creation),
+            )?;
             // durable before it becomes the index
             ix.checkpoint()?;
             crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
@@ -1761,7 +1764,13 @@ impl Store {
     /// `answer/` or `pending/` ref is refused: only `put_answer` writes one, with its answer
     /// (plan Decision intake). A `meta/` ref is refused: only the store writes one (plan Export
     /// and clone, `crate::meta`).
+    ///
+    /// The mode and holder ref rules (`crate::holder`) come before those refusals, so their exact
+    /// errors are the same here as through `write` and the seals: `meta/store_mode` is `store
+    /// mode cannot change`, and a ref a holder never holds is `a holder store cannot write ref`.
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
+        let items = self.ref_items(refs.clone());
+        self.check_refs(&items, RefWrite::Public)?;
         if let Some((name, _)) = refs
             .iter()
             .find(|(name, _)| name.starts_with(crate::review::DISMISS_REF))
@@ -1818,7 +1827,6 @@ impl Store {
                 "ref {name:?} is project metadata: only the store writes meta/ refs"
             )));
         }
-        let items = self.ref_items(refs);
         self.write(items)?;
         Ok(())
     }

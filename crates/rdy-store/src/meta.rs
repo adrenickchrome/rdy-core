@@ -85,9 +85,10 @@ impl StoreReader {
     /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the four, in
     /// name order; (2) `meta/repo_id`, when present, holds 16 bytes; (3) `meta/repo_id` is present
     /// (RULING F2: a load gives an older log one); (4) `meta/origin`, when present, decodes;
-    /// (5) it names this repo id when `fork` is false and another one when it is true; (6) the
-    /// mode the log's first batch set is the index's (`meta/store_mode`), and a holder's refs
-    /// are all in its families (`crate::holder`). The first failure is returned. Part of
+    /// (5) it names this repo id when `fork` is false and another one when it is true; (6) every
+    /// ref of the indexed log meets the rules of the mode the log's first batch set, in log
+    /// order (`crate::holder`); (7) that mode is the index's (`meta/store_mode`), and a holder's
+    /// refs are all in its families. The first failure is returned. Part of
     /// `check_objects`; a clone runs it alone before it writes its origin (ruling task-5).
     pub fn check_meta(&self) -> Result<(), StoreError> {
         for (name, _) in self.refs_with_prefix(META_REF)? {
@@ -113,7 +114,8 @@ impl StoreReader {
                 )));
             }
         }
-        self.check_mode_against(self.read_creation()?)
+        let creation = self.check_ref_history()?;
+        self.check_mode_against(creation)
     }
 }
 

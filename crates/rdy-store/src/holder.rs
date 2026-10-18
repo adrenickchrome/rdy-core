@@ -14,11 +14,17 @@
 //! the replay of the log into the index (an open's catch-up and a reindex), an ingest, and the
 //! fsck (`StoreReader::check_meta`, which also checks the index's refs against the log's first
 //! batch). The mode is read from the log's first batch before the log's other refs are judged.
+//!
+//! The log, not the index's final refs, is what these rules judge: a late mode write of the
+//! creation's own value, or an answer ref in a batch before its tag's, leaves refs that look
+//! right. So the fsck walks the whole indexed log, and a holder's open walks the log up to where
+//! its index stands, whether or not anything is left to replay; the replay then goes on with the
+//! walk's rules, so a batch that a failed catch-up left half indexed is judged whole again.
 use crate::error::StoreError;
 use crate::format::REF_STORE_FORMAT;
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_ORIGIN, REF_REPO_ID};
-use crate::segment::Location;
+use crate::segment::{Holes, Location, SegmentReader};
 use crate::store::StoreReader;
 use std::collections::BTreeSet;
 
@@ -191,7 +197,7 @@ pub(crate) fn decode_ref(payload: &[u8]) -> Option<RefUpdate> {
 /// `holder` in it. In a holder, every ref must be in a holder family, and an `answer/tag:<name>`
 /// needs `tag/<name>` in its batch or an earlier one (checked at the batch's marker).
 pub(crate) struct RefRules {
-    mode: StoreMode,
+    creation: Creation,
     /// A holder's tag names of the batches before this one.
     tags: BTreeSet<String>,
     /// A holder's tag names of this batch.
@@ -201,14 +207,45 @@ pub(crate) struct RefRules {
 }
 
 impl RefRules {
-    /// The rules for a log whose first batch set `mode`, with the tag names `tags` already in
-    /// the batches before the first one these rules see.
-    pub fn new(mode: StoreMode, tags: BTreeSet<String>) -> RefRules {
+    /// The rules for a log whose first batch is `creation`, from its origin.
+    pub fn new(creation: Creation) -> RefRules {
         RefRules {
-            mode,
-            tags,
+            creation,
+            tags: BTreeSet::new(),
             batch_tags: BTreeSet::new(),
             batch_answers: Vec::new(),
+        }
+    }
+
+    /// The rules over the frames of the log `segments` reads from its origin up to `upto`
+    /// (`holes` are its authorized holes), as a replay from its origin would judge them. A batch
+    /// that `upto` cuts is pending: its refs count, and its end is judged when the frames past
+    /// `upto` reach its marker.
+    pub fn of_log(
+        segments: &SegmentReader,
+        holes: &Holes,
+        creation: Creation,
+        upto: Location,
+    ) -> Result<RefRules, StoreError> {
+        let mut rules = RefRules::new(creation);
+        segments.for_each_view_from(Creation::EMPTY.end, upto, holes, |loc, v, _| {
+            rules.on_frame(loc, v.kind, v.payload)
+        })?;
+        Ok(rules)
+    }
+
+    /// Takes the log frame `kind` at `loc` whose payload is `payload` (None for an authorized
+    /// hole): a ref, a batch's marker, or a frame no rule reads.
+    pub fn on_frame(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        payload: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
+        match (kind, payload) {
+            (kinds::REF_UPDATE, Some(p)) => self.on_ref_frame(self.creation.in_first(loc), p),
+            (kinds::BATCH_COMMIT, _) => self.on_marker(),
+            _ => Ok(()),
         }
     }
 
@@ -221,7 +258,7 @@ impl RefRules {
             decode_mode(Some(value))?;
             return Ok(());
         }
-        if self.mode == StoreMode::Project {
+        if self.creation.mode == StoreMode::Project {
             return Ok(());
         }
         match family(name) {
@@ -376,8 +413,18 @@ impl StoreReader {
         Ok(())
     }
 
-    /// The log's first batch, read from the origin to its marker, up to the index's end.
-    pub(crate) fn read_creation(&self) -> Result<Creation, StoreError> {
+    /// fsck: the log's first batch (`read_creation`), then every ref of the indexed log judged
+    /// by the rules of that creation, in log order, through the end of the last batch indexed.
+    /// Returns the creation.
+    pub(crate) fn check_ref_history(&self) -> Result<Creation, StoreError> {
+        let (creation, holes, upto) = self.read_creation()?;
+        RefRules::of_log(self.segments(), &holes, creation, upto)?.check_marker()?;
+        Ok(creation)
+    }
+
+    /// The log's first batch, read from the origin to its marker, up to the index's end; with
+    /// the holes of the indexed log and that end.
+    fn read_creation(&self) -> Result<(Creation, Holes, Location), StoreError> {
         let upto = self.index().indexed_upto()?;
         let spans = self.index().redaction_spans_in(Creation::EMPTY.end, upto)?;
         let holes = crate::store::holes_of(&spans);
@@ -392,7 +439,7 @@ impl StoreReader {
                     Err(e) => Err(Walk::Failed(e)),
                 });
         match walked {
-            Ok(()) | Err(Walk::Done) => Ok(first.creation(upto)),
+            Ok(()) | Err(Walk::Done) => Ok((first.creation(upto), holes, upto)),
             Err(Walk::Failed(e)) => Err(e),
         }
     }

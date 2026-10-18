@@ -264,10 +264,7 @@ impl Ingest {
                 for p in refs() {
                     scan.frame(kinds::REF_UPDATE, Some(p), b.start)?;
                 }
-                self.rules.insert(RefRules::new(
-                    scan.creation(b.start).mode,
-                    Default::default(),
-                ))
+                self.rules.insert(RefRules::new(scan.creation(b.start)))
             }
         };
         // a batch refused earlier left its refs: they never count

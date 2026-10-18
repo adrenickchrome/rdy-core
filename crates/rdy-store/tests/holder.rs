@@ -11,7 +11,7 @@ use rdy_store::format::{FORMAT_FILE, Format, REF_STORE_FORMAT, STORE_FORMAT, enc
 use rdy_store::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode};
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, RefUpdate, batch_digest};
-use rdy_store::meta::{REF_REPO_ID, encode_repo_id};
+use rdy_store::meta::{REF_ORIGIN, REF_REPO_ID, encode_repo_id};
 use rdy_store::segment::{Location, SegmentLog};
 use rdy_store::{Store, StoreError, StoreLock};
 use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fixture};
@@ -310,13 +310,13 @@ fn ha4_bad_mode_and_holder_canon_fail_open_and_fsck() {
 
 #[test]
 fn ha4_mode_is_not_a_public_ref_write() {
-    // a project: set_refs refuses every meta ref, a raw write refuses the mode
+    // a project: set_refs and a raw write both refuse the mode as a mode change
     let (_d, path, mut s) = project();
     let end = s.log_end();
-    assert!(matches!(
-        s.set_refs(vec![(REF_STORE_MODE.into(), b"holder".to_vec())]),
-        Err(StoreError::Decode(m)) if m.contains("project metadata")
-    ));
+    assert_eq!(
+        refused_text(s.set_refs(vec![(REF_STORE_MODE.into(), b"holder".to_vec())])),
+        CHANGE_MODE
+    );
     assert_eq!(
         refused_text(write_ref(&mut s, REF_STORE_MODE, b"holder")),
         CHANGE_MODE
@@ -682,4 +682,174 @@ fn ha4_late_mode_cannot_reinterpret_native_redactions() {
         append_raw(&rpath, &[(REF_STORE_MODE, value)]);
         assert_eq!(decode_text(Store::open(&rpath)), LATE, "{value:?}");
     }
+}
+
+/// Appends one sealed raw batch of `frames` (kind, payload) to the closed store at `dir`.
+fn append_raw_frames(dir: &Path, frames: &[(u8, Vec<u8>)]) {
+    let (mut log, quarantined) =
+        SegmentLog::open_marked(&dir.join("segments"), SEGMENT_MAX, None).unwrap();
+    assert!(quarantined.is_empty());
+    log.append_batch(frames).unwrap();
+    log.sync().unwrap();
+}
+
+#[test]
+fn ha4_a_warm_index_open_and_fsck_read_the_log_history() {
+    let ans: &[u8] = &[4; 32];
+    // a late, identical mode write: the refs equal the creation's, the log does not
+    let (_d, path, mut s) = holder();
+    s.set_refs_unchecked_for_tests(vec![(REF_STORE_MODE.into(), HOLDER_MODE.to_vec())])
+        .unwrap();
+    assert_eq!(all_refs(&s)[REF_STORE_MODE], HOLDER_MODE);
+    assert_eq!(decode_text(s.check_meta()), LATE);
+    s.checkpoint().unwrap();
+    drop(s);
+    assert_eq!(decode_text(Store::open(&path)), LATE);
+    assert_eq!(
+        decode_text(Store::open(&path)),
+        LATE,
+        "a retry stays refused"
+    );
+
+    // an answer ref in a batch before its tag's: the refs pair up, the log does not
+    let (_d, path, mut s) = holder();
+    s.set_refs_unchecked_for_tests(vec![("answer/tag:v1".into(), ans.to_vec())])
+        .unwrap();
+    s.put_tag(&tag("v1")).unwrap();
+    assert!(s.get_ref("tag/v1").unwrap().is_some());
+    assert_eq!(
+        decode_text(s.check_meta()),
+        "holder ref answer/tag:v1 is not allowed"
+    );
+    s.checkpoint().unwrap();
+    drop(s);
+    for _ in 0..2 {
+        assert_eq!(
+            decode_text(Store::open(&path)),
+            "holder ref answer/tag:v1 is not allowed"
+        );
+    }
+
+    // the control: the tag first, then its answer, opens warm and passes fsck
+    let (_d, path, mut s) = holder();
+    s.put_tag(&tag("v1")).unwrap();
+    s.set_refs_unchecked_for_tests(vec![("answer/tag:v1".into(), ans.to_vec())])
+        .unwrap();
+    s.check_meta().unwrap();
+    s.checkpoint().unwrap();
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.open_report().caught_up_frames, 0, "the index was warm");
+    assert_eq!(s.get_ref("answer/tag:v1").unwrap(), Some(ans.to_vec()));
+    s.check_meta().unwrap();
+}
+
+#[test]
+fn ha4_a_failed_catch_up_keeps_its_batch_refused() {
+    let ans: &[u8] = &[4; 32];
+    let chunk = rdy_store::CATCH_UP_CHUNK;
+    // the replay starts past the creation batch: the answer is its first frame, so a chunk
+    // ends inside the batch for every count from `chunk` - 1 on
+    for chunks in [chunk - 2, chunk - 1, chunk, chunk + 1, 1100, 2 * chunk + 5] {
+        let (_d, path, s) = holder();
+        let start = s.log_end();
+        drop(s);
+        let mut frames = ref_frames(start, &[("answer/tag:v1", ans)]);
+        frames.extend((0..chunks as u32).map(|i| (kinds::BLOB_CHUNK, i.to_le_bytes().to_vec())));
+        append_raw_frames(&path, &frames);
+        append_raw(&path, &[("tag/v1", &[5; 32])]);
+        // every open is refused: a failed catch-up never forgets the batch it stopped in
+        for attempt in 0..3 {
+            let r = Store::open(&path).map(|_| ());
+            assert!(
+                matches!(&r, Err(StoreError::Decode(m)) if m == "holder ref answer/tag:v1 is not allowed"),
+                "{chunks} chunk frames, open {attempt}: {r:?}"
+            );
+        }
+        // and with no index at all
+        let _ = std::fs::remove_file(path.join("index.redb"));
+        assert_eq!(
+            decode_text(Store::open(&path)),
+            "holder ref answer/tag:v1 is not allowed",
+            "{chunks} chunk frames, fresh index"
+        );
+    }
+}
+
+#[test]
+fn ha4_set_refs_takes_the_mode_and_holder_refusals_first() {
+    // a project: the mode ref is the mode refusal; other refs keep their own refusals
+    let (_d, _path, mut s) = project();
+    let end = s.log_end();
+    assert_eq!(
+        refused_text(s.set_refs(vec![(REF_STORE_MODE.into(), HOLDER_MODE.to_vec())])),
+        CHANGE_MODE
+    );
+    assert_eq!(
+        decode_text(s.set_refs(vec![("meta/zz".into(), vec![1])])),
+        "ref \"meta/zz\" is project metadata: only the store writes meta/ refs"
+    );
+    assert_eq!(
+        decode_text(s.set_refs(vec![("answer/tag:v1".into(), vec![1; 32])])),
+        "ref \"answer/tag:v1\" is an answer: only put_answer writes one"
+    );
+    assert_eq!(s.log_end(), end, "nothing was written");
+
+    // a holder: the mode refusal, then the holder ref refusal, whatever set_refs refused before
+    let (_d, _path, mut s) = holder();
+    let end = s.log_end();
+    for value in [&b"holder"[..], b"", b"project"] {
+        assert_eq!(
+            refused_text(s.set_refs(vec![(REF_STORE_MODE.into(), value.to_vec())])),
+            CHANGE_MODE
+        );
+    }
+    for name in [
+        "answer/tag:v1",
+        "answer/q-1",
+        "pending/human:a/q-1",
+        "inbox/agent:a",
+        "dismiss/k",
+        "mention/b/e",
+        "pair/k",
+        "semantic/k",
+        "canon",
+        "view/work",
+        "other",
+    ] {
+        let want = format!("a holder store cannot write ref {name}");
+        assert_eq!(
+            refused_text(s.set_refs(vec![(name.into(), vec![1; 32])])),
+            want,
+            "set_refs"
+        );
+        assert_eq!(
+            refused_text(write_ref(&mut s, name, &[1; 32])),
+            want,
+            "write"
+        );
+    }
+    // a meta ref the holder allows keeps the store-only refusal
+    assert_eq!(
+        decode_text(s.set_refs(vec![(REF_ORIGIN.into(), vec![1])])),
+        "ref \"meta/origin\" is project metadata: only the store writes meta/ refs"
+    );
+    assert_eq!(s.log_end(), end, "nothing was written");
+    // a held batch's seal: the same exact refusals
+    s.set_held(true).unwrap();
+    s.put_tag(&tag("v1")).unwrap();
+    for (name, want) in [
+        (REF_STORE_MODE, CHANGE_MODE.to_string()),
+        (
+            "answer/tag:v1",
+            "a holder store cannot write ref answer/tag:v1".to_string(),
+        ),
+        ("canon", "a holder store cannot write ref canon".to_string()),
+    ] {
+        let last = ref_frames(s.log_end(), &[(name, &[1; 32])]);
+        assert_eq!(refused_text(s.seal(last)), want, "seal {name}");
+    }
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
+    s.check_meta().unwrap();
 }
