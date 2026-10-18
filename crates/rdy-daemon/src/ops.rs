@@ -44,8 +44,8 @@ use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use redaction::redact;
 use search::search;
-pub(crate) use site::export_print;
 use site::{EXPORT_SHAPE, export, import, render};
+pub(crate) use site::{export_print, render_static};
 use site_url::site_url;
 pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
@@ -354,7 +354,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?, coverage_below?, sort?}",
             )?,
         ),
-        "render" => render(cx, parse(op, args, "{out, scope?}")?),
+        "render" => render(cx, parse(op, args, "{out, scope?, profile?}")?),
         "publication_check" => {
             publication_check(cx, parse(op, args, "{profile, scope?, against?}")?)
         }

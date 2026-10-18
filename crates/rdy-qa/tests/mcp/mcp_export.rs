@@ -227,6 +227,7 @@ fn ec11_rdy_export_without_a_daemon_is_refused() {
             format: ExportFormat::Pdf,
             layout: None,
             scope: None,
+            profile: None,
         },
     )
     .expect_err("no daemon, no export");

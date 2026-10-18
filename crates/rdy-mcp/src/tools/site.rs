@@ -1,11 +1,12 @@
 //! ls7: `rdy_site`. The reply is built by `rdy_engine::engine::site_reply`, which the daemon's
-//! `site_url` op shares. ec11: `rdy_export`, the print, through `Engine::export` (O35: this crate
-//! has no edge to the renderer). `rdy_publication_check`: the reference check and disclosure
+//! `site_url` op shares. ec11: `rdy_export`, the print, through `Engine::export`, and pub10:
+//! `rdy_render`, the static site, through `Engine::render` (O35: this crate has no edge to the
+//! renderer). `rdy_publication_check`: the reference check and disclosure
 //! comparison of a publication profile, from `rdy_engine::publication::check`, which the
 //! daemon's `publication_check` op shares.
 use super::*;
 use rdy_engine::RdyError;
-use rdy_engine::engine::{ExportRequest, site_reply};
+use rdy_engine::engine::{ExportRequest, RenderRequest, site_reply};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,8 +34,10 @@ pub struct ExportParams {
     pub format: ExportFormat,
     /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. Only with md.
     pub layout: Option<ExportLayout>,
-    /// canon (the default), a view, tag:<version>, landing:<id> or proposal:P-<id>@<n>.
+    /// canon (the default), a view, tag:<version>, landing:<id> or proposal:P-<id>@<n>. With a profile: canon, tag:<version> or landing:<id>.
     pub scope: Option<String>,
+    /// A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.
+    pub profile: Option<String>,
 }
 
 /// The print formats, in lower case.
@@ -82,6 +85,32 @@ pub fn rdy_export(st: &mut McpState, p: ExportParams) -> Result<Value, RdyError>
         format: p.format.as_str().to_string(),
         layout: p.layout.map(|l| l.as_str().to_string()),
         scope: p.scope,
+        profile: p.profile,
+        view: Some(st.view.clone()),
+    })
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenderParams {
+    /// The directory to write: absolute, or relative to the project directory. It must be new, empty, or a site rdy rendered before (replaced as a whole).
+    pub out: String,
+    /// canon (the default), a view, tag:<version>, landing:<id> or proposal:P-<id>@<n>. With a profile: canon, tag:<version> or landing:<id>.
+    pub scope: Option<String>,
+    /// A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.
+    pub profile: Option<String>,
+}
+
+/// `rdy_render`: builds a static docs site at `out`, the local twin of the live site. A session
+/// is required, as for `rdy_export`. A relative `out` is under the project directory. A scope
+/// defaults to canon, and a scope reads as every tool reads it. The daemon renders; an engine
+/// with no daemon refuses (O35).
+pub fn rdy_render(st: &mut McpState, p: RenderParams) -> Result<Value, RdyError> {
+    session(st)?;
+    st.engine.render(RenderRequest {
+        out: st.engine.root().join(&p.out),
+        scope: p.scope,
+        profile: p.profile,
         view: Some(st.view.clone()),
     })
 }

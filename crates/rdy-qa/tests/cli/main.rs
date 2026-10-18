@@ -21,6 +21,8 @@ mod cli_output;
 mod cli_proposal;
 mod cli_publication_check;
 mod cli_publication_create;
+mod cli_publication_isolation;
+mod cli_publication_output;
 mod cli_quarantine;
 mod cli_redaction;
 mod cli_ref;

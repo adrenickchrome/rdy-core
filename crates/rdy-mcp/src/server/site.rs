@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, ExportParams, PublicationCheckParams, SiteParams};
+use crate::tools::{self, ExportParams, PublicationCheckParams, RenderParams, SiteParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = site_router, vis = "pub(crate)")]
@@ -15,7 +15,14 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Print the docs for a person to read: one PDF file, one HTML file, or a Markdown tree (layout mkdocs for MkDocs and Backstage TechDocs). It never overwrites. Relay each entry of warnings to the person. Read and write through the tools yourself, not the export."
+        description = "Build a local static docs site at out. Pass profile to select whole docs and folders. A profile uses canon, a tag, or a landing. This creates local files; it does not publish them or control who can read them. Relay each entry of warnings to the person. Read and write through the tools yourself, not the rendered site."
+    )]
+    async fn rdy_render(&self, Parameters(p): Parameters<RenderParams>) -> CallToolResult {
+        self.run("rdy_render", p, tools::rdy_render).await
+    }
+
+    #[tool(
+        description = "Print the docs for a person to read: one PDF file, one HTML file, or a Markdown tree (layout mkdocs for MkDocs and Backstage TechDocs). Pass profile to use its selected view and reference check. This creates local files; it does not publish them or control who can read them. It never overwrites. Relay each entry of warnings to the person. Read and write through the tools yourself, not the export."
     )]
     async fn rdy_export(&self, Parameters(p): Parameters<ExportParams>) -> CallToolResult {
         self.run("rdy_export", p, tools::rdy_export).await
