@@ -1,7 +1,8 @@
+use rdy_daemon::ops::with_direct_context;
 use rdy_daemon::signing_agent::CallerAgent;
 use rdy_daemon::{
-    Client, ErrorReply, OpContext, Proto, RunDir, StartOptions, connect_or_start, dispatch,
-    serve_command, spawn_serve,
+    Client, ErrorReply, Proto, RunDir, StartOptions, connect_or_start, dispatch, serve_command,
+    spawn_serve,
 };
 use rdy_engine::engine::Local;
 use rdy_engine::wc::state::{POINTER_FILE, Place, WcState, pointer_project};
@@ -163,8 +164,6 @@ pub(crate) enum Conn {
         /// The human actor the session was classified against.
         human: String,
         cwd: PathBuf,
-        /// This process's own SSH agent, the one signer of a direct run.
-        agent: CallerAgent,
     },
     /// `client` before `rt`: the connection drops while its runtime still runs. `pending` is
     /// the notice the `session` reply carried, printed with the first op's.
@@ -191,7 +190,6 @@ impl Conn {
                     session,
                     human,
                     cwd: env.cwd.clone(),
-                    agent: CallerAgent::from_env(),
                 }),
                 Err(e) => {
                     close_local(local);
@@ -228,16 +226,10 @@ impl Conn {
                 session,
                 human,
                 cwd,
-                agent,
             } => {
-                let cx = OpContext {
-                    engine: &**local,
-                    session,
-                    human,
-                    cwd,
-                    agent,
-                };
-                dispatch(&cx, op, args).map_err(ErrorReply::from)
+                // signed, if at all, by this process's own agent
+                with_direct_context(&**local, session, human, cwd, |cx| dispatch(cx, op, args))
+                    .map_err(ErrorReply::from)
             }
             Conn::Daemon {
                 rt,

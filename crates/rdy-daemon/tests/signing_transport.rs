@@ -6,9 +6,10 @@
 mod common;
 
 use common::short_tempdir;
+use rdy_daemon::signing_agent::CallCancel;
 use rdy_daemon::signing_transport::{
-    CALLBACK_MARK, CallerLink, CallerSigner, HostMcp, MAX_CALLBACK_LINE_BYTES, RemoteAgent,
-    host_mcp, never_interrupted, read_reply,
+    CALLBACK_MARK, CallerLink, CallerSigner, HostMcp, InterruptSource, MAX_CALLBACK_LINE_BYTES,
+    RemoteAgent, Stop, host_mcp, never_interrupted, read_reply,
 };
 use rdy_daemon::*;
 use rdy_engine::engine::{Engine, write_typed};
@@ -66,21 +67,25 @@ fn no_agent_text(cause: NoAgentCause) -> String {
 struct Gate {
     /// Releases not yet taken: a call takes one and answers.
     released: usize,
-    /// A cancel latched for the call in flight.
-    cancelled: bool,
+    /// Lets a lingering call end after its cancel.
+    cleanup: bool,
 }
 
-/// A caller's agent holding `keys`. A gated one reports each call on `ready` and waits for a
-/// release or a cancel; it never waits on a clock.
+/// A caller's agent holding `keys`. Each call is bound to its cancel: one that came first ends
+/// the call before it reaches the agent. A gated one reports each call on `ready` and waits for
+/// a release or its cancel; it never waits on a clock.
 #[derive(Default)]
 struct Fake {
     keys: Vec<Vec<u8>>,
     gated: bool,
-    gate: Mutex<Gate>,
-    cv: Condvar,
+    /// A cancelled call ends only once `cleanup` is called.
+    linger: bool,
+    gate: Arc<(Mutex<Gate>, Condvar)>,
     ready: Mutex<Option<std_mpsc::Sender<()>>>,
+    /// Calls that reached the agent.
     calls: AtomicUsize,
     active: AtomicUsize,
+    /// Calls the agent saw cancelled while it waited.
     cancels: AtomicUsize,
 }
 
@@ -103,43 +108,72 @@ impl Fake {
         (Arc::new(fake), rx)
     }
 
-    fn release(&self) {
-        self.gate.lock().unwrap().released += 1;
-        self.cv.notify_all();
+    fn lingering(keys: Vec<Vec<u8>>) -> (Arc<Fake>, std_mpsc::Receiver<()>) {
+        let (fake, rx) = Fake::gated(keys);
+        let mut fake = Arc::into_inner(fake).unwrap();
+        fake.linger = true;
+        (Arc::new(fake), rx)
     }
 
-    fn wait(&self) -> Result<(), RdyError> {
+    fn release(&self) {
+        let (m, cv) = &*self.gate;
+        m.lock().unwrap().released += 1;
+        cv.notify_all();
+    }
+
+    fn cleanup(&self) {
+        let (m, cv) = &*self.gate;
+        m.lock().unwrap().cleanup = true;
+        cv.notify_all();
+    }
+
+    fn wait(&self, cancel: &CallCancel) -> Result<(), RdyError> {
+        let gate = Arc::clone(&self.gate);
+        let Some(hook) = cancel.on_cancel(Box::new(move || {
+            let (m, cv) = &*gate;
+            let _g = m.lock().unwrap();
+            cv.notify_all();
+        })) else {
+            // cancelled before the call started: the agent is never asked
+            return Err(no_agent(NoAgentCause::Cancelled));
+        };
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.active.fetch_add(1, Ordering::SeqCst);
-        let out = self.gate_through();
+        let out = self.gate_through(cancel);
         self.active.fetch_sub(1, Ordering::SeqCst);
+        cancel.forget(hook);
         out
     }
 
-    fn gate_through(&self) -> Result<(), RdyError> {
+    fn gate_through(&self, cancel: &CallCancel) -> Result<(), RdyError> {
         if !self.gated {
             return Ok(());
         }
         if let Some(tx) = &*self.ready.lock().unwrap() {
             let _ = tx.send(());
         }
-        let mut g = self.gate.lock().unwrap();
+        let (m, cv) = &*self.gate;
+        let mut g = m.lock().unwrap();
         loop {
-            if std::mem::take(&mut g.cancelled) {
+            if cancel.is_cancelled() {
+                self.cancels.fetch_add(1, Ordering::SeqCst);
+                while self.linger && !g.cleanup {
+                    g = cv.wait(g).unwrap();
+                }
                 return Err(no_agent(NoAgentCause::Cancelled));
             }
             if g.released > 0 {
                 g.released -= 1;
                 return Ok(());
             }
-            g = self.cv.wait(g).unwrap();
+            g = cv.wait(g).unwrap();
         }
     }
 }
 
-impl SigningAgent for Fake {
-    fn identities(&self) -> Result<Vec<AgentIdentity>, RdyError> {
-        self.wait()?;
+impl CallerSigner for Fake {
+    fn identities_until(&self, cancel: &CallCancel) -> Result<Vec<AgentIdentity>, RdyError> {
+        self.wait(cancel)?;
         Ok(self
             .keys
             .iter()
@@ -149,20 +183,30 @@ impl SigningAgent for Fake {
             .collect())
     }
 
-    fn sign(&self, public_key: &[u8], _payload: &[u8]) -> Result<Vec<u8>, RdyError> {
-        self.wait()?;
+    fn sign_until(
+        &self,
+        public_key: &[u8],
+        _payload: &[u8],
+        cancel: &CallCancel,
+    ) -> Result<Vec<u8>, RdyError> {
+        self.wait(cancel)?;
         Ok(fake_signature(public_key))
     }
 }
 
-impl CallerSigner for Fake {
-    fn cancel(&self) {
-        self.cancels.fetch_add(1, Ordering::SeqCst);
-        if self.active.load(Ordering::SeqCst) > 0 {
-            self.gate.lock().unwrap().cancelled = true;
-            self.cv.notify_all();
-        }
+impl SigningAgent for Fake {
+    fn identities(&self) -> Result<Vec<AgentIdentity>, RdyError> {
+        self.identities_until(&CallCancel::new())
     }
+
+    fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+        self.sign_until(public_key, payload, &CallCancel::new())
+    }
+}
+
+/// A fresh cancel, for one callback.
+fn fresh() -> Arc<CallCancel> {
+    Arc::new(CallCancel::new())
 }
 
 /// Waits on a std receiver without blocking the runtime.
@@ -872,12 +916,12 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
     // the caller's side fails closed too: a reply-shaped ask, a repeated id, a raw-sign ask
     let fake = Fake::open(vec![key(1)]);
     let mut link = CallerLink::new(Some(fake.clone()), never_interrupted());
-    let never = || std::future::pending::<()>();
+    let never = || std::future::pending::<Stop>();
     let identities = cb(r#"{"id":1,"op":"identities"}"#);
     let line_of = |v: Option<Vec<u8>>| String::from_utf8(v.expect("a reply")).unwrap();
     assert_eq!(
         line_of(
-            link.answer(&identities[..identities.len() - 1], never())
+            link.answer(&identities[..identities.len() - 1], fresh(), never())
                 .await
         ),
         format!(
@@ -891,7 +935,7 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
         hex(b"raw bytes")
     );
     assert_eq!(
-        line_of(link.answer(raw_sign.as_bytes(), never()).await),
+        line_of(link.answer(raw_sign.as_bytes(), fresh(), never()).await),
         "\u{1e}{\"id\":2,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"request refused\"}}\n"
     );
     let good_sign = format!(
@@ -900,25 +944,35 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
         hex(&signed_data())
     );
     assert_eq!(
-        line_of(link.answer(good_sign.as_bytes(), never()).await),
+        line_of(link.answer(good_sign.as_bytes(), fresh(), never()).await),
         format!(
             "\u{1e}{{\"id\":3,\"ok\":{{\"signature\":\"{}\"}}}}\n",
             hex(&fake_signature(&key(1)))
         )
     );
     assert_eq!(
-        line_of(link.answer(br#"{"id":3,"op":"identities"}"#, never()).await),
+        line_of(
+            link.answer(br#"{"id":3,"op":"identities"}"#, fresh(), never())
+                .await
+        ),
         "\u{1e}{\"id\":3,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
         "a repeated id"
     );
     assert_eq!(
-        line_of(link.answer(br#"{"id":9,"op":"identities"}"#, never()).await),
+        line_of(
+            link.answer(br#"{"id":9,"op":"identities"}"#, fresh(), never())
+                .await
+        ),
         "\u{1e}{\"id\":9,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
         "closed after a bad ask"
     );
     let mut other = CallerLink::new(Some(fake.clone()), never_interrupted());
     assert_eq!(
-        line_of(other.answer(br#"{"id":1,"ok":{"keys":[]}}"#, never()).await),
+        line_of(
+            other
+                .answer(br#"{"id":1,"ok":{"keys":[]}}"#, fresh(), never())
+                .await
+        ),
         "\u{1e}{\"id\":1,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
         "a reply sent to the caller"
     );
@@ -929,23 +983,43 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sig5_direct_cli_and_stdio_receive_the_caller_agent() {
-    // The caller's own agent, made from its environment: with no SSH_AUTH_SOCK it is
-    // E_NO_AGENT, even when private key files sit in the caller's home. Run in a child process
-    // so the environment is the child's own.
-    if std::env::var_os("RDY_SIG5_CHILD").is_some() {
-        let agent = rdy_daemon::signing_agent::CallerAgent::from_env();
-        assert_cause(
-            &agent.identities().map(|_| Value::Null),
-            NoAgentCause::Unset,
-        );
-        assert_cause(
-            &agent.sign(&key(1), &signed_data()).map(|_| Value::Null),
-            NoAgentCause::Unset,
-        );
-        return;
-    }
+/// A fake SSH agent on a Unix socket in `dir` (identities requests only): it answers each with
+/// one identity, `key(5)`, and counts the requests it answered.
+fn agent_socket(dir: &std::path::Path) -> (std::path::PathBuf, Arc<AtomicUsize>) {
+    use std::io::{Read, Write};
+    let path = dir.join("agent.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let served = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&served);
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { return };
+            let mut len = [0u8; 4];
+            if conn.read_exact(&mut len).is_err() {
+                continue;
+            }
+            let mut body = vec![0u8; usize::try_from(u32::from_be_bytes(len)).unwrap()];
+            if conn.read_exact(&mut body).is_err() || body != [11] {
+                continue;
+            }
+            let mut answer = vec![12u8];
+            answer.extend(1u32.to_be_bytes());
+            answer.extend(string(&key(5)));
+            answer.extend(string(b""));
+            let mut packet = u32::try_from(answer.len()).unwrap().to_be_bytes().to_vec();
+            packet.extend(answer);
+            if conn.write_all(&packet).is_ok() {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    (path, served)
+}
+
+/// Runs this test again in a child process, in `mode`, with `env` (SSH_AUTH_SOCK removed
+/// unless `env` sets it) and a home whose `.ssh` holds a private key file that must never be
+/// read.
+fn run_child(mode: &str, env: &[(&str, &std::path::Path)]) {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir(home.path().join(".ssh")).unwrap();
     std::fs::write(
@@ -953,65 +1027,105 @@ async fn sig5_direct_cli_and_stdio_receive_the_caller_agent() {
         "not a key, never read\n",
     )
     .unwrap();
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "sig5_direct_cli_and_stdio_receive_the_caller_agent",
-        ])
-        .env_remove("SSH_AUTH_SOCK")
-        .env("HOME", home.path())
-        .env("RDY_SIG5_CHILD", "1")
-        .output()
-        .unwrap();
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "sig5_direct_cli_and_stdio_receive_the_caller_agent",
+    ])
+    .env_remove("SSH_AUTH_SOCK")
+    .env("HOME", home.path())
+    .env("RDY_SIG5_CHILD", mode)
+    .stdin(std::process::Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let child = cmd.output().unwrap();
     assert!(
         child.status.success(),
-        "{}{}",
+        "{mode}: {}{}",
         String::from_utf8_lossy(&child.stdout),
         String::from_utf8_lossy(&child.stderr)
     );
+}
 
-    // The direct path hands the op the caller's agent; a read never asks it.
-    let dir = tempfile::tempdir().unwrap();
-    let local = rdy_engine::engine::Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
-    let fake = Fake::open(vec![key(1)]);
-    let s = Session::human("human:t".into(), Role::Writer);
-    let cx = OpContext {
-        engine: &local,
-        session: &s,
-        human: "human:t",
-        cwd: dir.path(),
-        agent: &*fake,
-    };
-    for op in ["status", "ls", "log", "tags"] {
-        dispatch(&cx, op, json!({})).unwrap_or_else(|e| panic!("{op}: {e}"));
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig5_direct_cli_and_stdio_receive_the_caller_agent() {
+    // In a child process, so the environment is the child's own: the production constructors
+    // of the two no-daemon paths, the CLI's direct context and `mcp --no-daemon`'s server.
+    match std::env::var("RDY_SIG5_CHILD").as_deref() {
+        Ok("unset") => {
+            // no SSH_AUTH_SOCK: E_NO_AGENT, even with private key files in the caller's home
+            let agent = rdy_daemon::signing_transport::direct_agent();
+            assert_cause(
+                &agent.identities().map(|_| Value::Null),
+                NoAgentCause::Unset,
+            );
+            assert_cause(
+                &agent.sign(&key(1), &signed_data()).map(|_| Value::Null),
+                NoAgentCause::Unset,
+            );
+            return;
+        }
+        Ok("agent") => {
+            // the CLI's direct run: reads never ask the agent; the op's signer is the one the
+            // environment names
+            let dir = tempfile::tempdir().unwrap();
+            let local =
+                rdy_engine::engine::Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+            let s = Session::human("human:t".into(), Role::Writer);
+            let keys =
+                rdy_daemon::ops::with_direct_context(&local, &s, "human:t", dir.path(), |cx| {
+                    for op in ["status", "ls", "log", "tags"] {
+                        dispatch(cx, op, json!({})).unwrap_or_else(|e| panic!("{op}: {e}"));
+                    }
+                    cx.agent.identities()
+                })
+                .unwrap();
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].public_key, key(5));
+            // `mcp --no-daemon`: the session's server signs through the same agent
+            let dir = tempfile::tempdir().unwrap();
+            drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+            let (tx, rx) = std_mpsc::channel();
+            let _ = rdy_mcp::server::serve_stdio_with(
+                dir.path().to_path_buf(),
+                rdy_daemon::signing_transport::direct_agent(),
+                move |server| {
+                    let _ = tx.send(server.agent());
+                },
+            )
+            .await;
+            let agent = rx.recv().unwrap();
+            let keys = tokio::task::spawn_blocking(move || agent.identities())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].public_key, key(5));
+            return;
+        }
+        _ => {}
     }
+    run_child("unset", &[]);
+    let sock = short_tempdir();
+    let (path, served) = agent_socket(sock.path());
+    run_child("agent", &[("SSH_AUTH_SOCK", &path)]);
     assert_eq!(
-        fake.calls.load(Ordering::SeqCst),
-        0,
-        "reads never ask the agent"
-    );
-    assert_eq!(
-        cx.agent.identities().unwrap().len(),
-        1,
-        "the op's agent is the caller's"
+        served.load(Ordering::SeqCst),
+        2,
+        "each no-daemon path asked the configured caller agent"
     );
 
-    // An MCP state starts with no agent: nothing falls back to private files; a server takes
-    // the agent it is given.
-    let engine: Arc<dyn Engine> = Arc::new(local);
-    let st = rdy_mcp::tools::McpState::new(Arc::clone(&engine));
+    // An MCP state starts with no agent: nothing falls back to private files.
+    let dir = tempfile::tempdir().unwrap();
+    let engine: Arc<dyn Engine> = Arc::new(rdy_engine::engine::Local::new(
+        Rdy::init(dir.path(), "rdy-standard").unwrap(),
+    ));
+    let st = rdy_mcp::tools::McpState::new(engine);
     assert_cause(
         &st.agent.identities().map(|_| Value::Null),
         NoAgentCause::Unset,
     );
-    let server = rdy_mcp::server::RdyServer::new(
-        Arc::clone(&engine),
-        None,
-        rdy_mcp::notify::NotifyHub::new(),
-    )
-    .with_agent(fake.clone());
-    assert_eq!(server.agent().identities().unwrap().len(), 1);
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1036,4 +1150,465 @@ async fn sig5_stdin_eof_preserves_an_inflight_signed_request() {
     assert_eq!(v["id"], 1);
     assert_eq!(v["result"]["signature"], hex(&fake_signature(&key(1))));
     assert_eq!(m.proxy.await.unwrap(), 0);
+}
+
+// ---- the proxy against a raw host end (the test plays the daemon) ----
+
+/// The proxy's three other ends: the MCP client's stdin and stdout, and the daemon's socket end.
+struct Raw {
+    input: DuplexStream,
+    output: BufReader<DuplexStream>,
+    host: BufReader<DuplexStream>,
+}
+
+/// A proxy (not yet run) with `agent`, and its ends.
+fn raw(agent: Arc<dyn CallerSigner>) -> (Raw, impl std::future::Future<Output = i32>) {
+    let (client_end, host_end) = tokio::io::duplex(1 << 16);
+    let (input, proxy_in) = tokio::io::duplex(1 << 16);
+    let (proxy_out, output) = tokio::io::duplex(1 << 16);
+    let proxy = rdy_daemon::proxy::run_proxy(proxy_in, proxy_out, client_end, agent);
+    let ends = Raw {
+        input,
+        output: BufReader::new(output),
+        host: BufReader::new(host_end),
+    };
+    (ends, proxy)
+}
+
+/// The next line the host reads, as JSON.
+async fn host_json(p: &mut Raw) -> Value {
+    let l = line(&mut p.host).await;
+    serde_json::from_slice(&l).unwrap_or_else(|e| panic!("{e}: {:?}", String::from_utf8_lossy(&l)))
+}
+
+/// The next line the host reads, which must be a callback reply; its JSON.
+async fn host_callback(p: &mut Raw) -> Value {
+    callback(&mut p.host).await
+}
+
+fn sign_ask(id: u64) -> Vec<u8> {
+    cb(&format!(
+        r#"{{"id":{id},"op":"sign","key":"{}","payload":"{}"}}"#,
+        hex(&key(1)),
+        hex(&signed_data())
+    ))
+}
+
+fn refused(id: u64, cause: NoAgentCause) -> Value {
+    json!({"id": id, "error": {"code": E_NO_AGENT, "cause": cause.as_str()}})
+}
+
+/// A std receiver's signals, as an async receiver.
+fn bridged(rx: std_mpsc::Receiver<()>) -> mpsc::UnboundedReceiver<()> {
+    let (tx, out) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            if tx.send(()).is_err() {
+                return;
+            }
+        }
+    });
+    out
+}
+
+/// Releases a fake's calls when dropped, so a failed assertion leaves no worker behind.
+struct Unblock(Arc<Fake>);
+
+impl Drop for Unblock {
+    fn drop(&mut self) {
+        self.0.cleanup();
+        for _ in 0..8 {
+            self.0.release();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_cancel_before_the_first_callback_refuses_it() {
+    let fake = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    p.input.write_all(tool_call(7).as_bytes()).await.unwrap();
+    p.input.write_all(cancelled(7).as_bytes()).await.unwrap();
+    // both reach the host before the body's first callback
+    assert_eq!(host_json(&mut p).await["id"], 7);
+    assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
+    send(&mut p.host, &sign_ask(1)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(1, NoAgentCause::Cancelled)
+    );
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        0,
+        "the cancelled request never reaches the agent"
+    );
+    // an unrelated request after it still signs
+    p.input.write_all(tool_call(8).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 8);
+    send(&mut p.host, &cb(r#"{"id":2,"op":"identities"}"#)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        json!({"id": 2, "ok": {"keys": [hex(&key(1))]}})
+    );
+    send(
+        &mut p.host,
+        (json!({"jsonrpc": "2.0", "id": 8, "result": {}}).to_string() + "\n").as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw_out(&mut p.output).await).unwrap()["id"],
+        8
+    );
+    drop(p.input);
+    let mut rest = Vec::new();
+    p.host.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty(), "{:?}", String::from_utf8_lossy(&rest));
+    drop(p.host);
+    assert_eq!(proxy.await.unwrap(), 0);
+}
+
+async fn raw_out(output: &mut BufReader<DuplexStream>) -> String {
+    let mut l = Vec::new();
+    output.read_until(b'\n', &mut l).await.unwrap();
+    assert!(
+        !l.contains(&CALLBACK_MARK),
+        "a callback byte reached stdout"
+    );
+    String::from_utf8(l).unwrap()
+}
+
+/// An interrupt that reports on `armed` when it is made (just before the worker is spawned) and
+/// comes when `fire` changes.
+fn armed_interrupt(
+    fire: &tokio::sync::watch::Sender<u64>,
+) -> (InterruptSource, std_mpsc::Receiver<()>) {
+    let (armed_tx, armed) = std_mpsc::channel();
+    let armed_tx = Mutex::new(armed_tx);
+    let fire = fire.clone();
+    let source: InterruptSource = Arc::new(move || {
+        let mut rx = fire.subscribe();
+        let _ = armed_tx.lock().unwrap().send(());
+        Box::pin(async move {
+            let _ = rx.changed().await;
+        })
+    });
+    (source, armed)
+}
+
+#[test]
+fn sig5_cancel_reaches_a_queued_signing_worker() {
+    // one blocking thread: while it is busy, a signing worker can only queue
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let occupy = || {
+        let (free_tx, free_rx) = std_mpsc::channel::<()>();
+        let (busy_tx, busy_rx) = std_mpsc::channel();
+        rt.spawn_blocking(move || {
+            busy_tx.send(()).unwrap();
+            let _ = free_rx.recv();
+        });
+        busy_rx.recv().unwrap();
+        free_tx
+    };
+    let (fake, ready) = Fake::gated(vec![key(1)]);
+    let _unblock = Unblock(fake.clone());
+    let identities = br#"{"id":1,"op":"identities"}"#;
+
+    // 1. the request's cancel comes while its worker waits for the blocking thread
+    let free = occupy();
+    let (fire, _) = tokio::sync::watch::channel(0u64);
+    let (interrupt, armed) = armed_interrupt(&fire);
+    let mut link = CallerLink::new(Some(fake.clone()), interrupt);
+    let cancel = fresh();
+    let answering = {
+        let cancel = Arc::clone(&cancel);
+        rt.spawn(async move {
+            link.answer(identities, cancel, std::future::pending())
+                .await
+        })
+    };
+    armed.recv().unwrap();
+    cancel.cancel();
+    free.send(()).unwrap();
+    let reply = rt.block_on(answering).unwrap().expect("a reply");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply[1..]).unwrap(),
+        refused(1, NoAgentCause::Cancelled)
+    );
+    assert!(
+        ready.try_recv().is_err(),
+        "the queued worker never reaches the agent"
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+
+    // 2. so does the caller's interrupt (the CLI's SIGINT)
+    let free = occupy();
+    let (interrupt, armed) = armed_interrupt(&fire);
+    let mut link = CallerLink::new(Some(fake.clone()), interrupt);
+    let answering = rt.spawn(async move {
+        link.answer(identities, fresh(), std::future::pending())
+            .await
+    });
+    armed.recv().unwrap();
+    fire.send_replace(1);
+    free.send(()).unwrap();
+    let reply = rt.block_on(answering).unwrap().expect("a reply");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply[1..]).unwrap(),
+        refused(1, NoAgentCause::Cancelled)
+    );
+    assert_eq!(
+        fake.active.load(Ordering::SeqCst),
+        0,
+        "no signing worker remains"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_proxy_exit_joins_its_signing_worker() {
+    let (fake, ready) = Fake::lingering(vec![key(1)]);
+    let _unblock = Unblock(fake.clone());
+    let mut ready = bridged(ready);
+    let (mut p, proxy) = raw(fake.clone());
+    tokio::pin!(proxy);
+    // the steps run beside the proxy, which this task polls
+    macro_rules! beside {
+        ($f:expr) => {
+            tokio::select! {
+                biased;
+                r = &mut proxy => panic!("the proxy ended early ({r})"),
+                out = $f => out,
+            }
+        };
+    }
+    let call = tool_call(1);
+    beside!(p.input.write_all(call.as_bytes())).unwrap();
+    assert_eq!(beside!(host_json(&mut p))["id"], 1);
+    let ask = sign_ask(1);
+    beside!(send(&mut p.host, &ask));
+    beside!(ready.recv()).unwrap();
+    // stdin and the daemon's socket close while the agent is asked
+    drop(p.input);
+    drop(p.host);
+    let mut done = None;
+    let mut out = Vec::new();
+    loop {
+        tokio::select! {
+            biased;
+            r = &mut proxy, if done.is_none() => done = Some(r),
+            n = p.output.read_buf(&mut out) => if n.unwrap() == 0 { break },
+        }
+    }
+    assert_eq!(
+        done, None,
+        "run_proxy returned while its signing worker was still in the agent"
+    );
+    assert_eq!(
+        fake.active.load(Ordering::SeqCst),
+        1,
+        "the worker is in the agent"
+    );
+    // the worker may end once its cancel has come and the test lets it clean up
+    fake.cleanup();
+    let code = proxy.await;
+    assert_eq!(
+        fake.active.load(Ordering::SeqCst),
+        0,
+        "no signing worker outlives the proxy (exit {code})"
+    );
+    assert_eq!(
+        fake.cancels.load(Ordering::SeqCst),
+        1,
+        "the proxy cancelled the ask"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_stdin_eof_after_a_reply_over_the_tracked_bound() {
+    let fake = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 1);
+    // a complete reply over 16 MiB, forwarded as it streams
+    let big = 16 * 1024 * 1024 + 1024;
+    let reply =
+        json!({"jsonrpc": "2.0", "id": 1, "result": {"big": "y".repeat(big)}}).to_string() + "\n";
+    let len = reply.len();
+    let mut host = p.host;
+    let writing = tokio::spawn(async move {
+        host.get_mut().write_all(reply.as_bytes()).await.unwrap();
+        host.get_mut().flush().await.unwrap();
+        host
+    });
+    let got = raw_out(&mut p.output).await;
+    assert_eq!(got.len(), len, "the reply is forwarded whole");
+    p.host = writing.await.unwrap();
+    // request 1 is answered: a cancel of request 2 is a cancel of the active request
+    p.input.write_all(tool_call(2).as_bytes()).await.unwrap();
+    p.input.write_all(cancelled(2).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 2);
+    assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
+    send(&mut p.host, &cb(r#"{"id":1,"op":"identities"}"#)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(1, NoAgentCause::Cancelled)
+    );
+    // at stdin's end nothing is awaited: the proxy's EOF reaches the daemon
+    drop(p.input);
+    let mut rest = Vec::new();
+    p.host.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty(), "{:?}", String::from_utf8_lossy(&rest));
+    drop(p.host);
+    assert_eq!(proxy.await.unwrap(), 0);
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_proxy_fails_closed_on_an_oversized_callback() {
+    let open = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(open.clone());
+    let proxy = tokio::spawn(proxy);
+    p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 1);
+    // an oversized callback with a readable id, then a valid one: the first fails the channel
+    let mut over = br#"{"id":1,"op":"identities","pad":""#.to_vec();
+    over.extend(std::iter::repeat_n(b'x', MAX_CALLBACK_LINE_BYTES));
+    over.extend_from_slice(b"\"}");
+    send(&mut p.host, &cb(std::str::from_utf8(&over).unwrap())).await;
+    send(&mut p.host, &cb(r#"{"id":2,"op":"identities"}"#)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(1, NoAgentCause::InvalidReply)
+    );
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(2, NoAgentCause::InvalidReply),
+        "the channel is closed"
+    );
+    // one with no readable id is answered at the next id, so the host's waiter wakes
+    let mut junk = vec![CALLBACK_MARK];
+    junk.extend(std::iter::repeat_n(b'x', MAX_CALLBACK_LINE_BYTES + 1));
+    junk.push(b'\n');
+    send(&mut p.host, &junk).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(3, NoAgentCause::InvalidReply)
+    );
+    assert_eq!(open.calls.load(Ordering::SeqCst), 0);
+    drop(p.input);
+    drop(p.host);
+    let _ = proxy.await;
+
+    // an oversized callback while the agent is asked stops that ask
+    let (fake, ready) = Fake::gated(vec![key(1)]);
+    let _unblock = Unblock(fake.clone());
+    let mut ready = bridged(ready);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 1);
+    send(&mut p.host, &sign_ask(1)).await;
+    ready.recv().await.unwrap();
+    send(&mut p.host, &junk).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(1, NoAgentCause::InvalidReply)
+    );
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(2, NoAgentCause::InvalidReply)
+    );
+    assert_eq!(
+        fake.active.load(Ordering::SeqCst),
+        0,
+        "no signing worker remains"
+    );
+    assert_eq!(fake.cancels.load(Ordering::SeqCst), 1);
+    drop(p.input);
+    drop(p.host);
+    let _ = proxy.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_unexpected_bytes_while_the_agent_waits_fail_closed() {
+    let (host, caller) = tokio::io::duplex(1 << 16);
+    let (fake, mut ready) = Fake::gated(vec![key(1)]);
+    let _unblock = Unblock(fake.clone());
+    let mut link = CallerLink::new(Some(fake.clone()), never_interrupted());
+    let mut caller = BufReader::new(caller);
+    let mut host = BufReader::new(host);
+    send(&mut host, &cb(r#"{"id":1,"op":"identities"}"#)).await;
+    let reading = tokio::spawn(async move { read_reply(&mut link, &mut caller).await });
+    recv(&mut ready).await;
+    // one byte the host must not send while its callback is outstanding
+    host.get_mut().write_all(b"x").await.unwrap();
+    assert_eq!(
+        callback(&mut host).await,
+        refused(1, NoAgentCause::InvalidReply)
+    );
+    assert_eq!(fake.cancels.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fake.active.load(Ordering::SeqCst),
+        0,
+        "no signing worker remains"
+    );
+    drop(host);
+    let out = reading.await.unwrap();
+    assert!(matches!(out, Ok(None)), "{out:?}");
+
+    // an oversized or malformed callback line closes the caller's channel too, and its reply
+    // wakes the host (at the next id when none can be read); the reply after it still arrives
+    let (host, caller) = tokio::io::duplex(1 << 16);
+    let fake = Fake::open(vec![key(1)]);
+    let mut link = CallerLink::new(Some(fake.clone()), never_interrupted());
+    let mut caller = BufReader::new(caller);
+    let mut host = BufReader::new(host);
+    let reading = tokio::spawn(async move { read_reply(&mut link, &mut caller).await });
+    let mut junk = vec![CALLBACK_MARK];
+    junk.extend(std::iter::repeat_n(b'x', MAX_CALLBACK_LINE_BYTES + 1));
+    junk.push(b'\n');
+    send(&mut host, &junk).await;
+    assert_eq!(
+        callback(&mut host).await,
+        refused(1, NoAgentCause::InvalidReply)
+    );
+    send(&mut host, &cb("not json")).await;
+    assert_eq!(
+        callback(&mut host).await,
+        refused(2, NoAgentCause::InvalidReply)
+    );
+    send(&mut host, &cb(r#"{"id":3,"op":"identities"}"#)).await;
+    assert_eq!(
+        callback(&mut host).await,
+        refused(3, NoAgentCause::InvalidReply)
+    );
+    send(&mut host, b"{\"id\":1,\"ok\":{}}\n").await;
+    let out = reading.await.unwrap().unwrap().expect("the ctl reply");
+    assert_eq!(out, b"{\"id\":1,\"ok\":{}}");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_held_ctl_lines_are_bounded_by_count_and_bytes() {
+    let (mut c, _h) = served(Arc::new(Signer::default()));
+    // blank lines are dropped, not kept, while a callback is outstanding
+    send(&mut c, b"{\"id\":1,\"op\":\"identities\"}\n").await;
+    assert_eq!(callback(&mut c).await["id"], 1);
+    send(&mut c, &vec![b'\n'; 100_000]).await;
+    send(&mut c, &cb(r#"{"id":1,"ok":{"keys":[]}}"#)).await;
+    assert_eq!(reply(&mut c).await["ok"], json!([]));
+    // many small lines count by number as well as bytes
+    send(&mut c, b"{\"id\":2,\"op\":\"identities\"}\n").await;
+    assert_eq!(callback(&mut c).await["id"], 2);
+    send(&mut c, &b"{}\n".repeat(5000)).await;
+    send(&mut c, &cb(r#"{"id":2,"ok":{"keys":[]}}"#)).await;
+    let v = reply(&mut c).await;
+    assert_eq!(v["id"], 2);
+    assert_reply_cause(&v, NoAgentCause::InvalidReply);
 }

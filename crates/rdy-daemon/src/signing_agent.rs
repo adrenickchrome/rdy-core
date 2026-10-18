@@ -12,7 +12,9 @@
 //!
 //! A call can be cancelled at any point. It is registered before its connection is set up. Its
 //! connect, request and reply all run on the call's own thread: a cancel ends a pending connect
-//! through the sys seam (which closes that socket), and closes a connection in use.
+//! through the sys seam (which closes that socket), and closes a connection in use. A call made
+//! with a [`CallCancel`] also ends at once, before it connects, when that cancel came before the
+//! call started (for example while its worker waited for a thread).
 
 use crate::sys::{self, AgentCancel, AgentStream};
 use rdy_engine::signing_crypto::{
@@ -55,8 +57,74 @@ pub struct CallerAgent {
     socket: Option<PathBuf>,
     /// How the socket is reached: the daemon's sys seam (an in-memory one in unit tests).
     transport: Arc<dyn Transport>,
-    /// The connections of the calls in flight, so [`CallerAgent::cancel`] can close them.
-    active: Mutex<Active>,
+    /// The connections of the calls in flight, so [`CallerAgent::cancel`] and a call's
+    /// [`CallCancel`] can close them.
+    active: Arc<Mutex<Active>>,
+}
+
+/// The cancel of one call, latched: a cancel that comes before the call starts is kept, and the
+/// call then ends at once as `E_NO_AGENT` `request cancelled`, without reaching the agent.
+#[derive(Default)]
+pub struct CallCancel {
+    state: Mutex<CancelState>,
+}
+
+/// What runs at a cancel.
+type Hook = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: bool,
+    next: u64,
+    hooks: Vec<(u64, Hook)>,
+}
+
+impl CallCancel {
+    pub fn new() -> CallCancel {
+        CallCancel::default()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, CancelState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Cancels the call, now or when it starts. A second cancel does nothing.
+    pub fn cancel(&self) {
+        let hooks = {
+            let mut st = self.lock();
+            if st.cancelled {
+                return;
+            }
+            st.cancelled = true;
+            std::mem::take(&mut st.hooks)
+        };
+        for (_, hook) in hooks {
+            hook();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.lock().cancelled
+    }
+
+    /// Runs `hook` once at the cancel, unless [`CallCancel::forget`] comes first. `None`, and
+    /// the hook is dropped unrun, when the cancel has already come.
+    pub fn on_cancel(&self, hook: Hook) -> Option<u64> {
+        let mut st = self.lock();
+        if st.cancelled {
+            return None;
+        }
+        let id = st.next;
+        st.next = st.next.wrapping_add(1);
+        st.hooks.push((id, hook));
+        Some(id)
+    }
+
+    /// Drops the hook `id` unrun. A hook already taken by a cancel may still run: hooks are
+    /// harmless once their call has ended.
+    pub fn forget(&self, id: u64) {
+        self.lock().hooks.retain(|(h, _)| *h != id);
+    }
 }
 
 #[derive(Default)]
@@ -128,7 +196,7 @@ impl CallerAgent {
         CallerAgent {
             socket,
             transport: Arc::new(SysTransport),
-            active: Mutex::new(Active::default()),
+            active: Arc::new(Mutex::new(Active::default())),
         }
     }
 
@@ -148,21 +216,40 @@ impl CallerAgent {
     pub fn cancel(&self) {
         let mut active = self.lock();
         for call in &mut active.calls {
-            call.cancelled = true;
-            call.setup.cancel();
-            if let Some(close) = &call.closer {
-                close();
-            }
+            call.cancel();
         }
     }
 
+    /// The agent's identities, as [`SigningAgent::identities`], with `cancel` ending the call
+    /// whenever it comes, before the call starts included.
+    pub fn identities_until(&self, cancel: &CallCancel) -> Result<Vec<AgentIdentity>, RdyError> {
+        self.identities_with(Some(cancel))
+    }
+
+    /// A signature, as [`SigningAgent::sign`], with `cancel` ending the call whenever it comes,
+    /// before the call starts included.
+    pub fn sign_until(
+        &self,
+        public_key: &[u8],
+        payload: &[u8],
+        cancel: &CallCancel,
+    ) -> Result<Vec<u8>, RdyError> {
+        self.sign_with(public_key, payload, Some(cancel))
+    }
+
     fn lock(&self) -> MutexGuard<'_, Active> {
-        self.active.lock().unwrap_or_else(PoisonError::into_inner)
+        lock_active(&self.active)
     }
 
     /// Sends `request` (a message type and its body) on a new connection and returns the reply
-    /// body when the reply's type is `expected`.
-    fn call(&self, request: &[u8], expected: u8) -> Result<Vec<u8>, RdyError> {
+    /// body when the reply's type is `expected`. A call bound to `cancel` ends as `request
+    /// cancelled` when that cancel came first, without connecting.
+    fn call(
+        &self,
+        request: &[u8],
+        expected: u8,
+        cancel: Option<&CallCancel>,
+    ) -> Result<Vec<u8>, RdyError> {
         let socket = self
             .socket
             .as_ref()
@@ -182,7 +269,30 @@ impl CallerAgent {
             });
             id
         };
+        // The cancel's hook is set after the registration, so a cancel at any point reaches
+        // the call: before the hook, it is seen here; after it, the hook cancels the call.
+        let hook = match cancel {
+            None => None,
+            Some(cancel) => {
+                let active = Arc::clone(&self.active);
+                let hook = cancel.on_cancel(Box::new(move || {
+                    let mut active = lock_active(&active);
+                    if let Some(call) = active.calls.iter_mut().find(|c| c.id == id) {
+                        call.cancel();
+                    }
+                }));
+                if hook.is_none() {
+                    let mut active = self.lock();
+                    active.calls.retain(|c| c.id != id);
+                    return Err(no_agent(NoAgentCause::Cancelled));
+                }
+                hook
+            }
+        };
         let result = self.connect_and_exchange(id, socket, &setup, request, expected);
+        if let (Some(cancel), Some(hook)) = (cancel, hook) {
+            cancel.forget(hook);
+        }
         let cancelled = {
             let mut active = self.lock();
             let at = active.calls.iter().position(|c| c.id == id);
@@ -227,16 +337,37 @@ impl CallerAgent {
     }
 }
 
-impl SigningAgent for CallerAgent {
-    fn identities(&self) -> Result<Vec<AgentIdentity>, RdyError> {
+fn lock_active(active: &Mutex<Active>) -> MutexGuard<'_, Active> {
+    active.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Call {
+    /// Marks the call cancelled, ends its connect and closes its connection.
+    fn cancel(&mut self) {
+        self.cancelled = true;
+        self.setup.cancel();
+        if let Some(close) = &self.closer {
+            close();
+        }
+    }
+}
+
+impl CallerAgent {
+    fn identities_with(&self, cancel: Option<&CallCancel>) -> Result<Vec<AgentIdentity>, RdyError> {
         let body = self.call(
             &[SSH2_AGENTC_REQUEST_IDENTITIES],
             SSH2_AGENT_IDENTITIES_ANSWER,
+            cancel,
         )?;
         parse_identities(&body).ok_or_else(|| no_agent(NoAgentCause::InvalidReply))
     }
 
-    fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+    fn sign_with(
+        &self,
+        public_key: &[u8],
+        payload: &[u8],
+        cancel: Option<&CallCancel>,
+    ) -> Result<Vec<u8>, RdyError> {
         if public_key.len() > PUBLIC_KEY_MAX {
             return Err(signing_limit(&format!("{PUBLIC_KEY_MAX} bytes")));
         }
@@ -248,8 +379,18 @@ impl SigningAgent for CallerAgent {
         put_string(&mut request, public_key);
         put_string(&mut request, payload);
         request.extend(0u32.to_be_bytes()); // flags
-        let body = self.call(&request, SSH2_AGENT_SIGN_RESPONSE)?;
+        let body = self.call(&request, SSH2_AGENT_SIGN_RESPONSE, cancel)?;
         parse_sign_response(&body).ok_or_else(|| no_agent(NoAgentCause::InvalidReply))
+    }
+}
+
+impl SigningAgent for CallerAgent {
+    fn identities(&self) -> Result<Vec<AgentIdentity>, RdyError> {
+        self.identities_with(None)
+    }
+
+    fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+        self.sign_with(public_key, payload, None)
     }
 }
 
@@ -358,7 +499,7 @@ mod tests {
     //! transport (no socket): the call is registered, and can be cancelled, before it connects,
     //! and its connect runs on the call's own thread.
 
-    use super::{CallerAgent, Closer, Conn, Transport};
+    use super::{CallCancel, CallerAgent, Closer, Conn, Transport};
     use crate::sys::AgentCancel;
     use rdy_engine::signing_crypto::SigningAgent;
     use rdy_engine::{E_NO_AGENT, RdyError};
@@ -469,6 +610,19 @@ mod tests {
         (worker, rx)
     }
 
+    /// Starts an identities call bound to `cancel` on its own thread.
+    fn start_until(
+        agent: &Arc<CallerAgent>,
+        cancel: &Arc<CallCancel>,
+    ) -> (JoinHandle<()>, Receiver<Result<usize, RdyError>>) {
+        let (tx, rx) = channel();
+        let (agent, cancel) = (Arc::clone(agent), Arc::clone(cancel));
+        let worker = thread::spawn(move || {
+            let _ = tx.send(agent.identities_until(&cancel).map(|ids| ids.len()));
+        });
+        (worker, rx)
+    }
+
     fn assert_cancelled(r: Result<usize, RdyError>) {
         let e = r.expect_err("the cancelled call must fail");
         assert_eq!(e.code, E_NO_AGENT);
@@ -552,5 +706,35 @@ mod tests {
             worker.join().unwrap();
             assert_eq!(open.load(Ordering::SeqCst), 0, "attempt {attempt}");
         }
+    }
+
+    #[test]
+    fn sig5_a_cancel_before_the_call_starts_is_kept() {
+        let h = harness();
+        let cancel = Arc::new(CallCancel::new());
+        // cancelled while the call waits to be run (a queued worker)
+        cancel.cancel();
+        let (worker, done) = start_until(&h.agent, &cancel);
+        assert_cancelled(done.recv().unwrap());
+        worker.join().unwrap();
+        assert!(h.entered.try_recv().is_err(), "the call never connects");
+        assert!(h.written.lock().unwrap().is_empty());
+
+        // a cancel during the connect ends the call too, and only that call
+        let cancel = Arc::new(CallCancel::new());
+        let (_worker, done) = start_until(&h.agent, &cancel);
+        h.entered.recv().unwrap();
+        cancel.cancel();
+        h.release.send(()).unwrap();
+        assert_cancelled(done.recv().unwrap());
+        h.dropped.recv().unwrap();
+        assert!(
+            h.written.lock().unwrap().is_empty(),
+            "no exchange after cancel"
+        );
+        let fresh = Arc::new(CallCancel::new());
+        let (_worker, done) = start_until(&h.agent, &fresh);
+        h.release.send(()).unwrap();
+        assert_eq!(done.recv().unwrap().unwrap(), 0);
     }
 }

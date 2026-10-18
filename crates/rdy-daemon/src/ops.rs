@@ -63,6 +63,25 @@ pub struct OpContext<'a> {
     pub agent: &'a dyn SigningAgent,
 }
 
+/// Runs `f` with the context of a direct run (the CLI's `--no-daemon`): its signer is this
+/// process's own agent ([`crate::signing_transport::direct_agent`]), never a key file.
+pub fn with_direct_context<T>(
+    engine: &dyn Engine,
+    session: &Session,
+    human: &str,
+    cwd: &Path,
+    f: impl FnOnce(&OpContext<'_>) -> T,
+) -> T {
+    let agent = crate::signing_transport::direct_agent();
+    f(&OpContext {
+        engine,
+        session,
+        human,
+        cwd,
+        agent: &*agent,
+    })
+}
+
 /// Every ctl op, in the order the docs list them. `session` is answered by the connection
 /// host.
 pub const OPS: &[&str] = &[

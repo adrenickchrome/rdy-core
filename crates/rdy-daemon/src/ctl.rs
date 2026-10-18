@@ -250,28 +250,44 @@ async fn call_handler(
     }
 }
 
-/// Lines read while a request ran, kept for after its reply.
+/// What keeping one line costs beside its bytes, so that many short lines count too.
+const HELD_LINE_COST: usize = 64;
+/// The most lines kept while a request runs.
+const MAX_HELD_LINES: usize = 1024;
+
+/// Lines read while a request ran, kept for after its reply. Every kept line costs its bytes
+/// plus [`HELD_LINE_COST`], and both the count and the cost are bounded.
 #[derive(Default)]
 struct Held {
     lines: VecDeque<Got>,
-    /// The bytes of the kept request lines.
-    bytes: usize,
+    /// The cost of the kept lines.
+    cost: usize,
 }
 
 impl Held {
+    fn cost_of(got: &Got) -> usize {
+        HELD_LINE_COST
+            + match got {
+                Got::Bytes(l) | Got::Callback(l) => l.len(),
+                Got::Eof | Got::Over | Got::CallbackOver => 0,
+            }
+    }
+
     fn push(&mut self, got: Got) {
-        if let Got::Bytes(l) = &got {
-            self.bytes += l.len();
-        }
+        self.cost += Held::cost_of(&got);
         self.lines.push_back(got);
     }
 
     fn pop(&mut self) -> Option<Got> {
         let got = self.lines.pop_front()?;
-        if let Got::Bytes(l) = &got {
-            self.bytes -= l.len();
-        }
+        self.cost -= Held::cost_of(&got);
         Some(got)
+    }
+
+    /// Past either bound.
+    fn full(&self) -> bool {
+        self.lines.len() > MAX_HELD_LINES
+            || self.cost > crate::signing_transport::MAX_READ_AHEAD_BYTES
     }
 }
 
@@ -395,8 +411,9 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// Waits for the request `call`, writing the callback requests its agent makes and reading the
-/// replies to them. Lines that are not callback replies are kept in `held`; past
-/// [`crate::signing_transport::MAX_READ_AHEAD_BYTES`] of them the waiting callback fails, and
+/// replies to them. Blank lines are dropped (the loop ignores them anyway); other lines that are
+/// not callback replies are kept in `held`. Past [`MAX_HELD_LINES`] lines or
+/// [`crate::signing_transport::MAX_READ_AHEAD_BYTES`] of cost the waiting callback fails, and
 /// nothing more is read until the request ends. A write that fails closes the signing channel;
 /// the error is returned once the request has ended.
 async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
@@ -437,9 +454,10 @@ async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     reading = false;
                     held.push(Got::Eof);
                 }
+                Ok(Got::Bytes(l)) if l.is_empty() => {}
                 Ok(other) => {
                     held.push(other);
-                    if held.bytes > crate::signing_transport::MAX_READ_AHEAD_BYTES {
+                    if held.full() {
                         inbound.flooded();
                         reading = false;
                     }

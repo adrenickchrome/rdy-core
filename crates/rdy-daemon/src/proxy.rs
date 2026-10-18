@@ -13,23 +13,33 @@
 //!
 //! The proxy is the caller of its session's signing callbacks
 //! ([`crate::signing_transport`]): it answers them with its own SSH agent and never forwards
-//! them to stdout. The active request is the oldest tool call not yet answered or cancelled
-//! (the daemon runs a session's tool calls one at a time, in arrival order): the host's
-//! `notifications/cancelled` for it cancels the ask of the agent in flight, and one for any
-//! other request cancels nothing. At stdin's end, the socket's writing half stays open, for the
-//! callback replies only, until every tool call already sent is answered or cancelled: an act
-//! already submitted is never left without its caller's agent.
+//! them to stdout. A callback belongs to the active request: the oldest tool call not yet
+//! answered or cancelled (the daemon runs a session's tool calls one at a time, in arrival
+//! order). Each tool call has its own latched cancel: the host's `notifications/cancelled` for
+//! it cancels its ask of the agent, whether the ask is in flight, still waiting for a thread, or
+//! yet to come; one for another request cancels nothing of it. A callback read while no tool
+//! call is active belongs to a request no longer awaited, and is refused as `request
+//! cancelled` without asking the agent. (The daemon refuses the callbacks of a cancelled
+//! request on its side too: it knows which request is running.) Replies are followed as they
+//! stream, in constant memory, so a reply of any length settles its request.
+//!
+//! At stdin's end, the socket's writing half stays open, for the callback replies only, until
+//! every tool call already sent is answered or cancelled: an act already submitted is never left
+//! without its caller's agent. Whenever the proxy exits, it stops the ask in flight and waits
+//! for its signing worker first: no worker outlives the proxy.
 
 use crate::client::{StartOptions, connect_or_start};
 use crate::ctl::MAX_CTL_LINE_BYTES;
 use crate::layout::RunDir;
 use crate::session::Proto;
+use crate::signing_agent::CallCancel;
 use crate::signing_agent::CallerAgent;
 use crate::signing_transport::{
-    CALLBACK_MARK, CallerLink, CallerSigner, MAX_CALLBACK_LINE_BYTES, copy_with_replies, watched,
-    write_replies,
+    CALLBACK_MARK, CallerLink, CallerSigner, MAX_CALLBACK_LINE_BYTES, Stop, callback_id,
+    copy_with_replies, never_interrupted, write_replies,
 };
 use crate::spawn::{serve_command, spawn_serve};
+use rdy_mcp::server::LineScan;
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -45,9 +55,6 @@ const STDIN_GRACE: Duration = Duration::from_millis(150);
 /// How long, once a socket write has failed, the proxy waits for the replies the daemon wrote
 /// before it went.
 const REPLY_DRAIN: Duration = Duration::from_secs(2);
-/// The longest daemon reply line the proxy buffers to see its id; a longer one is forwarded
-/// unseen (and its request is then answered as gone if the daemon dies).
-const MAX_TRACKED_REPLY_BYTES: usize = 16 * 1024 * 1024;
 
 /// The ids of the JSON-RPC requests sent to the daemon and not yet answered, in send order.
 #[derive(Debug, Default)]
@@ -101,9 +108,14 @@ impl InFlight {
     }
 
     fn answered_object(&mut self, m: &Map<String, Value>) {
-        if let Some(id) = answer_id(m)
-            && let Some(i) = self.0.iter().position(|x| x == id)
-        {
+        if let Some(id) = answer_id(m) {
+            self.answered_id(id);
+        }
+    }
+
+    /// Forgets the first recorded request with the id `id`.
+    fn answered_id(&mut self, id: &Value) {
+        if let Some(i) = self.0.iter().position(|x| x == id) {
             self.0.remove(i);
         }
     }
@@ -148,46 +160,47 @@ fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Default)]
 struct Tracked {
     inflight: InFlight,
-    /// The tool calls not yet answered or cancelled, in send order; the first is the active one.
-    tools: VecDeque<Value>,
+    /// The tool calls not yet answered or cancelled, in send order, each with its cancel; the
+    /// first is the active one.
+    tools: VecDeque<(Value, Arc<CallCancel>)>,
     /// The socket's reading half reached its end.
     socket_closed: bool,
 }
 
 impl Tracked {
-    /// Records a line the host sent. A `notifications/cancelled` for the active tool call is
-    /// true: its ask of the agent is to be cancelled.
-    fn sent(&mut self, line: &[u8]) -> bool {
-        let Some(m) = object(line) else { return false };
+    /// Records a line the host sent. For a `notifications/cancelled` of a tool call still
+    /// awaited, the call is forgotten and its cancel returned, to be cancelled.
+    fn sent(&mut self, line: &[u8]) -> Option<Arc<CallCancel>> {
+        let m = object(line)?;
         self.inflight.sent_object(&m);
         let id = m.get("id").filter(|id| id.is_number() || id.is_string());
         match (m.get("method").and_then(Value::as_str), id) {
             (Some("tools/call"), Some(id)) => {
-                self.tools.push_back(id.clone());
-                false
+                self.tools
+                    .push_back((id.clone(), Arc::new(CallCancel::new())));
+                None
             }
             (Some("notifications/cancelled"), None) => {
-                let Some(target) = m.get("params").and_then(|p| p.get("requestId")) else {
-                    return false;
-                };
-                let active = self.tools.front() == Some(target);
+                let target = m.get("params").and_then(|p| p.get("requestId"))?;
+                let i = self.tools.iter().position(|(id, _)| id == target)?;
                 // a cancelled call is not answered: it is no longer awaited
-                self.tools.retain(|id| id != target);
-                active
+                self.tools.remove(i).map(|(_, cancel)| cancel)
             }
-            _ => false,
+            _ => None,
         }
     }
 
-    /// Records a reply line the daemon sent.
-    fn answered(&mut self, line: &[u8]) {
-        let Some(m) = object(line) else { return };
-        self.inflight.answered_object(&m);
-        if let Some(id) = answer_id(&m)
-            && let Some(i) = self.tools.iter().position(|x| x == id)
-        {
+    /// Records that the daemon answered the request `id`.
+    fn answered(&mut self, id: &Value) {
+        self.inflight.answered_id(id);
+        if let Some(i) = self.tools.iter().position(|(x, _)| x == id) {
             self.tools.remove(i);
         }
+    }
+
+    /// The cancel of the active request, the one a callback read now belongs to.
+    fn active(&self) -> Option<Arc<CallCancel>> {
+        self.tools.front().map(|(_, cancel)| Arc::clone(cancel))
     }
 
     /// Whether no callback can come for a request already sent.
@@ -201,8 +214,10 @@ struct Shared {
     tracked: Mutex<Tracked>,
     /// Bumped at every change of `tracked` that can settle it.
     changed: watch::Sender<u64>,
-    /// Bumped to cancel the ask of the agent in flight.
-    cancel: watch::Sender<u64>,
+    /// Set once a callback line broke the framing: the ask in flight stops, the link closes.
+    invalid: watch::Sender<bool>,
+    /// Set when the proxy exits: the ask in flight stops and the answerer ends.
+    stop: watch::Sender<bool>,
     /// True while the last byte written to stdout is not a newline.
     midline: AtomicBool,
 }
@@ -224,26 +239,67 @@ impl Shared {
             }
         }
     }
+
+    /// Ends when the ask of the agent in flight must stop: [`Stop::Gone`] at the socket's end
+    /// or the proxy's exit, [`Stop::Invalid`] once a callback line broke the framing.
+    async fn stopped(&self) -> Stop {
+        let mut changes = self.changed.subscribe();
+        let mut stop = self.stop.subscribe();
+        let mut invalid = self.invalid.subscribe();
+        loop {
+            if *stop.borrow_and_update() || locked(&self.tracked).socket_closed {
+                return Stop::Gone;
+            }
+            if *invalid.borrow_and_update() {
+                return Stop::Invalid;
+            }
+            // the senders live in `self`: none of these ends with an error
+            tokio::select! {
+                _ = changes.changed() => {}
+                _ = stop.changed() => {}
+                _ = invalid.changed() => {}
+            }
+        }
+    }
+}
+
+/// What the socket reader hands the callback answerer.
+enum Inbound {
+    /// A callback line, with the cancel of the request it belongs to; `None` when no tool call
+    /// is active, so the request that asked is no longer awaited.
+    Line(Vec<u8>, Option<Arc<CallCancel>>),
+    /// A callback line over its bound, read off and dropped, with its id when one was read.
+    Over(Option<u64>),
+}
+
+/// The line the socket reader is in.
+enum Reading {
+    /// An ordinary line: forwarded as it comes, its id followed as it streams.
+    Ordinary(LineScan),
+    /// A callback line, assembled up to its bound (`over` past it), its id followed too.
+    Callback {
+        bytes: Vec<u8>,
+        scan: LineScan,
+        over: bool,
+    },
 }
 
 /// Copies the socket's read half to `out`, flushing after each chunk, until the socket's EOF
-/// (or an error either side). Each complete line it forwarded is recorded as answered. A
-/// callback line is not forwarded: it goes, whole, to `callbacks` (one over its bound is
-/// dropped).
+/// (or an error either side). Each reply it forwarded is recorded as answered, whatever its
+/// length. A callback line is not forwarded: it goes, whole, to `callbacks`; one over its bound
+/// fails the signing channel at once (the ask in flight stops) and goes as [`Inbound::Over`].
 async fn socket_to_stdout<R, O>(
     mut sock_r: R,
     out: Arc<tokio::sync::Mutex<O>>,
     shared: Arc<Shared>,
-    callbacks: mpsc::UnboundedSender<Vec<u8>>,
+    callbacks: mpsc::UnboundedSender<Inbound>,
 ) where
     R: AsyncRead + Unpin,
     O: AsyncWrite + Unpin,
 {
     let mut buf = vec![0u8; 64 * 1024];
-    // the line being assembled; `None` while skipping an over-long one
-    let mut partial: Option<Vec<u8>> = Some(Vec::new());
-    // whether the line being read is a callback line; `None` before its first byte
-    let mut callback: Option<bool> = None;
+    // `None` before a line's first byte
+    let mut reading: Option<Reading> = None;
     loop {
         let n = match sock_r.read(&mut buf).await {
             Ok(0) | Err(_) => return,
@@ -252,44 +308,69 @@ async fn socket_to_stdout<R, O>(
         let mut rest = &buf[..n];
         let mut forward: Vec<u8> = Vec::with_capacity(n);
         while let Some(&first) = rest.first() {
-            let is_callback = *callback.get_or_insert(first == CALLBACK_MARK);
+            let line = reading.get_or_insert_with(|| {
+                if first == CALLBACK_MARK {
+                    Reading::Callback {
+                        bytes: Vec::new(),
+                        scan: LineScan::new(),
+                        over: false,
+                    }
+                } else {
+                    Reading::Ordinary(LineScan::new())
+                }
+            });
             let (seg, done) = match rest.iter().position(|&b| b == b'\n') {
                 Some(i) => (&rest[..i], true),
                 None => (rest, false),
             };
-            let max = if is_callback {
-                MAX_CALLBACK_LINE_BYTES + 1
-            } else {
-                MAX_TRACKED_REPLY_BYTES
-            };
-            if !is_callback {
-                forward.extend_from_slice(&rest[..seg.len() + usize::from(done)]);
-            }
-            if let Some(p) = &mut partial {
-                p.extend_from_slice(seg);
-                if p.len() > max {
-                    partial = None;
+            match line {
+                Reading::Ordinary(scan) => {
+                    forward.extend_from_slice(&rest[..seg.len() + usize::from(done)]);
+                    scan.feed(seg);
                 }
-            }
-            if done {
-                match (partial.take(), is_callback) {
-                    (Some(mut p), true) => {
-                        if p.last() == Some(&b'\r') {
-                            p.pop();
-                        }
-                        if p.len() <= MAX_CALLBACK_LINE_BYTES {
-                            let _ = callbacks.send(p);
-                        }
+                Reading::Callback { bytes, scan, over } => {
+                    scan.feed(seg);
+                    // room for a trailing \r, which does not count
+                    if !*over && bytes.len() + seg.len() > MAX_CALLBACK_LINE_BYTES + 1 {
+                        *over = true;
+                        *bytes = Vec::new();
+                    } else if !*over {
+                        bytes.extend_from_slice(seg);
                     }
-                    (Some(p), false) => locked(&shared.tracked).answered(&p),
-                    (None, _) => {}
                 }
-                partial = Some(Vec::new());
-                callback = None;
-                rest = &rest[seg.len() + 1..];
-            } else {
-                rest = &[];
             }
+            if !done {
+                break;
+            }
+            match reading.take() {
+                Some(Reading::Ordinary(scan)) => {
+                    let line = scan.finish();
+                    if line.response
+                        && let Some(id) = line.id
+                    {
+                        locked(&shared.tracked).answered(&id);
+                    }
+                }
+                Some(Reading::Callback {
+                    mut bytes,
+                    scan,
+                    over,
+                }) => {
+                    if bytes.last() == Some(&b'\r') {
+                        bytes.pop();
+                    }
+                    if over || bytes.len() > MAX_CALLBACK_LINE_BYTES {
+                        shared.invalid.send_replace(true);
+                        let _ =
+                            callbacks.send(Inbound::Over(callback_id(scan.finish().id.as_ref())));
+                    } else {
+                        let cancel = locked(&shared.tracked).active();
+                        let _ = callbacks.send(Inbound::Line(bytes, cancel));
+                    }
+                }
+                None => {}
+            }
+            rest = &rest[seg.len() + 1..];
         }
         if !forward.is_empty() {
             let mut out = out.lock().await;
@@ -301,6 +382,43 @@ async fn socket_to_stdout<R, O>(
                 .store(forward.last() != Some(&b'\n'), Ordering::SeqCst);
         }
         Shared::bump(&shared.changed);
+    }
+}
+
+/// Answers the session's callbacks with `agent`, one at a time, in the order the daemon asked,
+/// until the proxy stops. A callback of a request no longer awaited is refused as `request
+/// cancelled` without asking the agent; an oversized one closes the link.
+async fn answer_callbacks(
+    agent: Arc<dyn CallerSigner>,
+    shared: Arc<Shared>,
+    mut callbacks: mpsc::UnboundedReceiver<Inbound>,
+    replies: mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let mut link = CallerLink::new(Some(agent), never_interrupted());
+    let mut stopping = shared.stop.subscribe();
+    loop {
+        let inbound = tokio::select! {
+            biased;
+            _ = stopping.wait_for(|stop| *stop) => return,
+            inbound = callbacks.recv() => match inbound {
+                Some(inbound) => inbound,
+                None => return,
+            },
+        };
+        let reply = match inbound {
+            Inbound::Over(id) => Some(link.refuse(id)),
+            Inbound::Line(line, cancel) => {
+                let cancel = cancel.unwrap_or_else(|| {
+                    let cancelled = Arc::new(CallCancel::new());
+                    cancelled.cancel();
+                    cancelled
+                });
+                link.answer(&line, cancel, shared.stopped()).await
+            }
+        };
+        if let Some(reply) = reply {
+            let _ = replies.send(reply);
+        }
     }
 }
 
@@ -356,36 +474,21 @@ where
     let shared = Arc::new(Shared {
         tracked: Mutex::new(Tracked::default()),
         changed: watch::channel(0).0,
-        cancel: watch::channel(0).0,
+        invalid: watch::channel(false).0,
+        stop: watch::channel(false).0,
         midline: AtomicBool::new(false),
     });
     let output = Arc::new(tokio::sync::Mutex::new(output));
     let (replies_tx, mut replies) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (callbacks_tx, mut callbacks) = mpsc::unbounded_channel::<Vec<u8>>();
-    // the callback answerer: one ask of the agent at a time, in the order the daemon asked
-    let answerer = {
-        let shared = Arc::clone(&shared);
-        tokio::spawn(async move {
-            let mut link = CallerLink::new(Some(agent), watched(&shared.cancel));
-            while let Some(line) = callbacks.recv().await {
-                let gone = {
-                    let shared = Arc::clone(&shared);
-                    async move {
-                        let mut changes = shared.changed.subscribe();
-                        while !locked(&shared.tracked).socket_closed {
-                            if changes.changed().await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                };
-                if let Some(reply) = link.answer(&line, gone).await {
-                    let _ = replies_tx.send(reply);
-                }
-            }
-        })
-    };
-    let _answerer = AbortOnDrop(answerer);
+    let (callbacks_tx, callbacks) = mpsc::unbounded_channel::<Inbound>();
+    let answerer = tokio::spawn(answer_callbacks(
+        agent,
+        Arc::clone(&shared),
+        callbacks,
+        replies_tx,
+    ));
+    // dropped before its end, the proxy still stops the ask in flight
+    let _stop = StopOnDrop(Arc::clone(&shared));
     // stdin to the socket; the task's value is true when a socket write failed (the daemon is
     // gone); it ends only at stdin's EOF, after the write half is shut down
     let mut a = {
@@ -401,8 +504,9 @@ where
                         MAX_CTL_LINE_BYTES,
                         &mut |n, why| eprintln!("rdy mcp: dropped a {n}-byte request line: {why}"),
                         &mut |line| {
-                            if locked(&shared.tracked).sent(line) {
-                                Shared::bump(&shared.cancel);
+                            let cancel = locked(&shared.tracked).sent(line);
+                            if let Some(cancel) = cancel {
+                                cancel.cancel();
                             }
                         },
                     )
@@ -438,17 +542,18 @@ where
         }
     };
     tokio::pin!(b);
-    tokio::select! {
+    let gone = tokio::select! {
         biased;
         r = &mut a => match r {
             Ok(false) => {
                 // the daemon's session ends at the EOF and closes the socket
                 b.await;
-                return 0;
+                false
             }
             // a write to the socket failed: the daemon is gone; take what it wrote before it went
             Ok(true) | Err(_) => {
                 let _ = tokio::time::timeout(REPLY_DRAIN, &mut b).await;
+                true
             }
         },
         () = &mut b => {
@@ -456,19 +561,30 @@ where
             if tokio::time::timeout(STDIN_GRACE, &mut a).await.is_err() {
                 a.abort();
             }
+            true
         }
+    };
+    if gone {
+        answer_gone(&shared, &output).await;
     }
-    answer_gone(&shared, &output).await;
-    eprintln!("{GONE}");
-    1
+    // the output ends, then the ask in flight is stopped and its worker waited for: no signing
+    // worker outlives the proxy
+    let _ = output.lock().await.shutdown().await;
+    shared.stop.send_replace(true);
+    let _ = answerer.await;
+    if gone {
+        eprintln!("{GONE}");
+        return 1;
+    }
+    0
 }
 
-/// Aborts a spawned task when dropped.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+/// Stops the proxy's answerer, and the ask in flight, when dropped.
+struct StopOnDrop(Arc<Shared>);
 
-impl<T> Drop for AbortOnDrop<T> {
+impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        self.0.stop.send_replace(true);
     }
 }
 

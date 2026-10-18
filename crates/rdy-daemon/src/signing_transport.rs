@@ -32,12 +32,13 @@
 //! not a general signing service for the MCP client.
 
 use crate::handler::McpStream;
-use crate::signing_agent::CallerAgent;
+use crate::signing_agent::{CallCancel, CallerAgent};
 use rdy_engine::signing_crypto::{
     AgentIdentity, IDENTITIES_MAX, KEY_TYPES, NAMESPACES, PUBLIC_KEY_MAX, SSHSIG_MAX,
     STATEMENT_MAX, SigningAgent,
 };
 use rdy_engine::{E_NO_AGENT, NoAgentCause, RdyError, no_agent};
+use rdy_mcp::server::LineScan;
 use serde_json::Value;
 use std::future::Future;
 use std::io;
@@ -66,16 +67,39 @@ const SHA512: &[u8] = b"sha512";
 /// The length of a sha512 digest.
 const SHA512_LEN: usize = 64;
 
-/// The caller's signer: its own agent, which a cancel can stop.
-pub trait CallerSigner: SigningAgent {
-    /// Ends the calls in flight as `E_NO_AGENT` `request cancelled`.
-    fn cancel(&self);
+/// The caller's signer: its own agent. Each call is bound to a [`CallCancel`], which ends it as
+/// `E_NO_AGENT` `request cancelled` whenever it comes, before the call starts included (a worker
+/// still waiting for a thread never reaches the agent).
+pub trait CallerSigner: Send + Sync {
+    fn identities_until(&self, cancel: &CallCancel) -> Result<Vec<AgentIdentity>, RdyError>;
+
+    fn sign_until(
+        &self,
+        public_key: &[u8],
+        payload: &[u8],
+        cancel: &CallCancel,
+    ) -> Result<Vec<u8>, RdyError>;
 }
 
 impl CallerSigner for CallerAgent {
-    fn cancel(&self) {
-        CallerAgent::cancel(self);
+    fn identities_until(&self, cancel: &CallCancel) -> Result<Vec<AgentIdentity>, RdyError> {
+        CallerAgent::identities_until(self, cancel)
     }
+
+    fn sign_until(
+        &self,
+        public_key: &[u8],
+        payload: &[u8],
+        cancel: &CallCancel,
+    ) -> Result<Vec<u8>, RdyError> {
+        CallerAgent::sign_until(self, public_key, payload, cancel)
+    }
+}
+
+/// The signer of a run with no daemon (the CLI's `--no-daemon`, `mcp --no-daemon`): this
+/// process's own agent, from its own environment.
+pub fn direct_agent() -> Arc<CallerAgent> {
+    Arc::new(CallerAgent::from_env())
 }
 
 // ---- the wire ----
@@ -120,7 +144,7 @@ fn callback_line(json: &str) -> Vec<u8> {
 }
 
 /// A callback id: a nonzero u64.
-fn callback_id(v: Option<&Value>) -> Option<u64> {
+pub(crate) fn callback_id(v: Option<&Value>) -> Option<u64> {
     v?.as_u64().filter(|&id| id != 0)
 }
 
@@ -788,17 +812,30 @@ pub fn sigint() -> InterruptSource {
     })
 }
 
-/// An interrupt that comes when `watch` changes after the interrupt is made.
-pub(crate) fn watched(watch: &watch::Sender<u64>) -> InterruptSource {
-    let watch = watch.clone();
-    Arc::new(move || {
-        let mut rx = watch.subscribe();
-        Box::pin(async move {
-            if rx.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        })
-    })
+/// Why an ask of the caller's agent stopped before the agent answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// The connection is gone: there is no one to reply to.
+    Gone,
+    /// The host broke the callback protocol: the link closes, and the reply is `invalid reply`.
+    Invalid,
+}
+
+/// Cancels a call when dropped, unless disarmed: an ask dropped part way still ends its worker.
+struct CancelOnDrop(Option<Arc<CallCancel>>);
+
+impl CancelOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.0.take() {
+            cancel.cancel();
+        }
+    }
 }
 
 /// The caller's end of one connection's signing channel: it answers the host's callbacks with
@@ -843,87 +880,116 @@ impl CallerLink {
     }
 
     /// The reply line (mark and newline included) to the callback line `line` (newline taken
-    /// off, mark kept or not), asking the caller's agent on the blocking pool. An interrupt
-    /// cancels the ask (`request cancelled`); `gone` ending (the connection lost) cancels it and
-    /// there is no reply. `None` too when no id can be read off `line`.
+    /// off, mark kept or not), asking the caller's agent on the blocking pool with the call
+    /// bound to `cancel`. A cancel, before the ask or during it, and an interrupt during it, give
+    /// `request cancelled`; the worker is always waited for, so no signing worker outlives its
+    /// callback. When `stop` ends first the ask is cancelled too: [`Stop::Gone`] gives no reply,
+    /// [`Stop::Invalid`] closes the link and gives `invalid reply`. A line that is not a valid
+    /// callback request closes the link (see [`CallerLink::refuse`]).
     pub async fn answer(
         &mut self,
         line: &[u8],
-        gone: impl Future<Output = ()> + Send,
+        cancel: Arc<CallCancel>,
+        stop: impl Future<Output = Stop> + Send,
     ) -> Option<Vec<u8>> {
         let body = line.strip_prefix(&[CALLBACK_MARK]).unwrap_or(line);
         let (id, ask) = match parse_ask(body) {
             Ok(parsed) => parsed,
-            Err(id) => {
-                self.closed = true;
-                return id.map(|id| Answer::Refused(NoAgentCause::InvalidReply).line(id));
-            }
+            Err(id) => return Some(self.refuse(id)),
         };
         if self.closed || id <= self.last {
-            self.closed = true;
-            return Some(Answer::Refused(NoAgentCause::InvalidReply).line(id));
+            return Some(self.refuse(Some(id)));
         }
         self.last = id;
-        let answer = match self.ask(ask, gone).await {
-            Some(answer) => answer,
-            None => return None,
-        };
-        Some(answer.line(id))
+        match self.ask(ask, cancel, stop).await {
+            Ok(answer) => Some(answer.line(id)),
+            Err(Stop::Gone) => None,
+            Err(Stop::Invalid) => {
+                self.closed = true;
+                Some(Answer::Refused(NoAgentCause::InvalidReply).line(id))
+            }
+        }
     }
 
-    /// The answer to `ask`; `None` when `gone` ended first.
-    async fn ask(&self, ask: Ask, gone: impl Future<Output = ()> + Send) -> Option<Answer> {
+    /// The reply to a callback line that broke the protocol (oversized, malformed, a repeated
+    /// id, or anything after the link closed): the link closes, and the reply is `invalid
+    /// reply` for `id`, the line's id when one could be read. With none, it is the next id, so
+    /// the host's waiter still wakes: a reply to another id fails the host's channel closed too.
+    pub fn refuse(&mut self, id: Option<u64>) -> Vec<u8> {
+        self.closed = true;
+        let id = id.unwrap_or_else(|| self.last.checked_add(1).unwrap_or(self.last));
+        self.last = self.last.max(id);
+        Answer::Refused(NoAgentCause::InvalidReply).line(id)
+    }
+
+    /// The answer to `ask`; `Err` when `stop` ended first.
+    async fn ask(
+        &self,
+        ask: Ask,
+        cancel: Arc<CallCancel>,
+        stop: impl Future<Output = Stop> + Send,
+    ) -> Result<Answer, Stop> {
         let Some(agent) = self.agent.clone() else {
-            return Some(Answer::Refused(NoAgentCause::Unset));
+            return Ok(Answer::Refused(NoAgentCause::Unset));
         };
         if let Ask::Sign { key, payload } = &ask
             && !(signing_key_blob(key) && rdy_signed_data(payload))
         {
-            return Some(Answer::Refused(NoAgentCause::Refused));
+            return Ok(Answer::Refused(NoAgentCause::Refused));
+        }
+        if cancel.is_cancelled() {
+            return Ok(Answer::Refused(NoAgentCause::Cancelled));
         }
         // watched from before the agent is asked
         let interrupted = (self.interrupt)();
+        let mut armed = CancelOnDrop(Some(Arc::clone(&cancel)));
         let worker = {
-            let agent = Arc::clone(&agent);
+            let cancel = Arc::clone(&cancel);
             tokio::task::spawn_blocking(move || match ask {
                 Ask::Identities => agent
-                    .identities()
+                    .identities_until(&cancel)
                     .map(|ids| Answer::Keys(ids.into_iter().map(|i| i.public_key).collect())),
-                Ask::Sign { key, payload } => agent.sign(&key, &payload).map(Answer::Signature),
+                Ask::Sign { key, payload } => agent
+                    .sign_until(&key, &payload, &cancel)
+                    .map(Answer::Signature),
             })
         };
-        tokio::pin!(worker, gone);
-        let gone = tokio::select! {
+        tokio::pin!(worker, stop);
+        let outcome = tokio::select! {
             biased;
             out = &mut worker => {
-                return Some(match out {
+                armed.disarm();
+                return Ok(match out {
                     Ok(Ok(answer)) => answer,
                     Ok(Err(e)) => Answer::Refused(cause_of(&e)),
                     Err(_) => Answer::Refused(NoAgentCause::InvalidReply),
                 });
             }
-            () = interrupted => false,
-            () = &mut gone => true,
+            () = interrupted => Ok(Answer::Refused(NoAgentCause::Cancelled)),
+            why = &mut stop => Err(why),
         };
-        agent.cancel();
-        // the worker ends once cancelled: no signing worker outlives its callback
+        // the cancel is kept even if the worker has not started: it ends at once
+        cancel.cancel();
         let _ = (&mut worker).await;
-        (!gone).then_some(Answer::Refused(NoAgentCause::Cancelled))
+        armed.disarm();
+        outcome
     }
 }
 
 /// A line read with a cap.
 enum Capped {
     Line(Vec<u8>),
-    Over,
+    /// Over the cap: read off and dropped, with its top-level id when one could be read.
+    Over(Option<u64>),
     Eof,
 }
 
 /// Reads one line off `r`, newline (and a `\r` before it) taken off, never holding more than
-/// `max` bytes of it: a longer line is read off and dropped.
+/// `max` bytes of it: a longer line is read off and dropped, its id read as it streams.
 async fn read_capped<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) -> io::Result<Capped> {
     let mut line = Vec::new();
     let mut over = false;
+    let mut scan = LineScan::new();
     loop {
         let buf = r.fill_buf().await?;
         if buf.is_empty() {
@@ -934,6 +1000,7 @@ async fn read_capped<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) -> 
             None => (buf, false),
         };
         let used = chunk.len() + usize::from(done);
+        scan.feed(chunk);
         if !over {
             // room for a trailing \r, which does not count
             if line.len() + chunk.len() > max + 1 {
@@ -949,7 +1016,7 @@ async fn read_capped<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) -> 
                 line.pop();
             }
             return Ok(if over || line.len() > max {
-                Capped::Over
+                Capped::Over(callback_id(scan.finish().id.as_ref()))
             } else {
                 Capped::Line(line)
             });
@@ -957,18 +1024,22 @@ async fn read_capped<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) -> 
     }
 }
 
-/// Ends when `conn` reaches its end (or fails); waits for ever once a byte has arrived.
-async fn closed<S: AsyncRead + Unpin>(conn: &mut BufReader<S>) {
-    if matches!(conn.fill_buf().await, Ok(b) if !b.is_empty()) {
-        std::future::pending::<()>().await;
+/// What the host does while the caller's agent is asked: nothing is allowed then (its one
+/// callback is outstanding, and its reply comes after the callback's), so the connection's end
+/// is [`Stop::Gone`] and any byte is [`Stop::Invalid`].
+async fn watch_conn<S: AsyncRead + Unpin>(conn: &mut BufReader<S>) -> Stop {
+    match conn.fill_buf().await {
+        Ok(b) if !b.is_empty() => Stop::Invalid,
+        _ => Stop::Gone,
     }
 }
 
 /// Reads the next ordinary line off the caller's connection `conn`, without its newline,
 /// answering each callback line before it with the caller's agent. `Ok(None)` at the
 /// connection's end, a cut last line included, and when the connection ends while the agent is
-/// asked. A callback line over [`MAX_CALLBACK_LINE_BYTES`] is an `InvalidData` error: the
-/// connection is out of step.
+/// asked. Bytes that arrive while the agent is asked break the protocol: the ask is cancelled,
+/// the signing channel closes and the callback's reply is `invalid reply`; reading then goes on.
+/// So does a callback line over [`MAX_CALLBACK_LINE_BYTES`] or a malformed one.
 pub async fn read_reply<S>(
     link: &mut CallerLink,
     conn: &mut BufReader<S>,
@@ -989,18 +1060,16 @@ where
             }
             return Ok(Some(line));
         }
-        let line = match read_capped(conn, MAX_CALLBACK_LINE_BYTES).await? {
-            Capped::Line(line) => line,
-            Capped::Eof => return Ok(None),
-            Capped::Over => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("a callback line over {MAX_CALLBACK_LINE_BYTES} bytes"),
-                ));
+        let reply = match read_capped(conn, MAX_CALLBACK_LINE_BYTES).await? {
+            Capped::Line(line) => {
+                let cancel = Arc::new(CallCancel::new());
+                let Some(reply) = link.answer(&line, cancel, watch_conn(conn)).await else {
+                    return Ok(None);
+                };
+                reply
             }
-        };
-        let Some(reply) = link.answer(&line, closed(conn)).await else {
-            return Ok(None);
+            Capped::Eof => return Ok(None),
+            Capped::Over(id) => link.refuse(id),
         };
         let w = conn.get_mut();
         w.write_all(&reply).await?;
