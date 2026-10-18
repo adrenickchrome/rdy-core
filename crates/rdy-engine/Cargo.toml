@@ -23,6 +23,10 @@ ssh-encoding.workspace = true
 url.workspace = true
 ureq.workspace = true
 rustls-native-certs.workspace = true
+# The user CA bundle is checked with the TLS library's own trust-anchor parser before connecting
+# (ureq's store drops an unreadable root silently). Already in the tree through ureq, with the
+# same features; the transport tests' TLS fixture uses it too.
+rustls.workspace = true
 crc32fast.workspace = true
 time.workspace = true
 # Every log record is compiled out: ureq-proto writes raw request bytes, Authorization included,
@@ -42,8 +46,7 @@ rdy-graph.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 ed25519-dalek.workspace = true
-# the hub transport tests' local TLS fixture
-rustls.workspace = true
+# the hub transport tests' local TLS fixture (with rustls, a normal dependency)
 rcgen.workspace = true
 
 [[bench]]

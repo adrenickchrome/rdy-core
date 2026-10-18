@@ -4,6 +4,11 @@
 //! Nothing here sleeps: a test queues every reply before it calls the transport, the fixture
 //! thread serves exactly the connections `accept_n` names, and `finish` joins it and proves that
 //! no further connection is waiting.
+//!
+//! By default the fixture closes each connection after its one reply (close_notify, then a
+//! socket shutdown). [`Server::keep_alive`] instead holds every connection open after a reply and
+//! serves each further request on it until the client closes it, so a client that reused a
+//! connection would be seen.
 #![allow(dead_code)]
 
 use rcgen::{
@@ -12,9 +17,11 @@ use rcgen::{
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use std::collections::BTreeSet;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 /// The loopback address every fixture listens on.
@@ -157,6 +164,20 @@ struct Shared {
     log: Mutex<Vec<Recorded>>,
     replies: Mutex<mpsc::Receiver<Reply>>,
     config: Arc<ServerConfig>,
+    /// Hold each connection open after a reply and serve further requests on it.
+    keep_alive: bool,
+    /// The connections accepted so far.
+    accepted: AtomicUsize,
+    /// The connections that have ended: the client closed it, or the fixture did.
+    closed: Mutex<BTreeSet<usize>>,
+    closed_changed: Condvar,
+}
+
+impl Shared {
+    fn mark_closed(&self, conn: usize) {
+        self.closed.lock().expect("closed").insert(conn);
+        self.closed_changed.notify_all();
+    }
 }
 
 /// A loopback TLS hub.
@@ -176,8 +197,18 @@ impl Server {
         Server::with_names(&[LOOPBACK])
     }
 
+    /// A hub that holds every connection open after a reply, with no close_notify and no
+    /// shutdown, and reads each further request the client sends on it.
+    pub fn keep_alive() -> Server {
+        Server::build(&[LOOPBACK], true)
+    }
+
     /// A hub whose certificate, signed by its own CA, names only `names`.
     pub fn with_names(names: &[&str]) -> Server {
+        Server::build(names, false)
+    }
+
+    fn build(names: &[&str], keep_alive: bool) -> Server {
         let ca = Ca::new();
         let (chain, key) = ca.leaf(names);
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -198,6 +229,10 @@ impl Server {
                 log: Mutex::new(Vec::new()),
                 replies: Mutex::new(rx),
                 config: Arc::new(config),
+                keep_alive,
+                accepted: AtomicUsize::new(0),
+                closed: Mutex::new(BTreeSet::new()),
+                closed_changed: Condvar::new(),
             }),
             tx,
             threads: Vec::new(),
@@ -220,7 +255,8 @@ impl Server {
         self.tx.send(reply).expect("queue reply");
     }
 
-    /// Serves the next `n` connections on a fixture thread, one request each. A connection whose
+    /// Serves the next `n` connections on a fixture thread, one request each, or in keep-alive
+    /// mode each on its own thread for as long as the client keeps it. A connection whose
     /// handshake or request fails is counted and logs nothing.
     pub fn accept_n(&mut self, n: usize) {
         let listener = Arc::clone(&self.listener);
@@ -228,11 +264,35 @@ impl Server {
         let first = self.next_conn;
         self.next_conn += n;
         self.threads.push(std::thread::spawn(move || {
+            let mut held = Vec::new();
             for conn in first..first + n {
                 let (stream, _) = listener.accept().expect("accept");
-                serve(conn, stream, &shared);
+                shared.accepted.fetch_add(1, Ordering::SeqCst);
+                if shared.keep_alive {
+                    let shared = Arc::clone(&shared);
+                    held.push(std::thread::spawn(move || serve(conn, stream, &shared)));
+                } else {
+                    serve(conn, stream, &shared);
+                }
+            }
+            for t in held {
+                t.join().expect("connection thread");
             }
         }));
+    }
+
+    /// The connections accepted so far.
+    pub fn accepted(&self) -> usize {
+        self.shared.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Blocks until connection `conn` has ended. In keep-alive mode the fixture never ends one
+    /// itself, so this returns only once the client has closed it.
+    pub fn wait_closed(&self, conn: usize) {
+        let mut closed = self.shared.closed.lock().expect("closed");
+        while !closed.contains(&conn) {
+            closed = self.shared.closed_changed.wait(closed).expect("closed");
+        }
     }
 
     /// The requests read so far, in order.
@@ -263,17 +323,58 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn serve(conn: usize, stream: TcpStream, shared: &Shared) {
     let Ok(server) = ServerConnection::new(Arc::clone(&shared.config)) else {
+        shared.mark_closed(conn);
         return;
     };
     let mut tls = StreamOwned::new(server, stream);
     let mut buf = Vec::new();
+    loop {
+        let Some(request) = read_request(conn, &mut tls, &mut buf, shared.keep_alive) else {
+            // The client closed the connection, or its handshake or request failed.
+            let _ = tls.sock.shutdown(Shutdown::Both);
+            break;
+        };
+        shared.log.lock().expect("log").push(request);
+        // Every reply is queued before the call it answers; a missing one closes the connection.
+        let reply = shared.replies.lock().expect("replies").try_recv();
+        match reply {
+            Ok(Reply::Raw(bytes)) => {
+                let _ = tls.write_all(&bytes);
+                let _ = tls.flush();
+                if shared.keep_alive {
+                    // Held open: no close_notify and no shutdown, ready for another request.
+                    continue;
+                }
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+                let _ = tls.sock.shutdown(Shutdown::Both);
+            }
+            Ok(Reply::Close) | Err(_) => {
+                let _ = tls.sock.shutdown(Shutdown::Both);
+            }
+        }
+        break;
+    }
+    shared.mark_closed(conn);
+}
+
+/// Reads one request from `tls`, `buf` holding bytes already read past the previous one.
+/// `None` when the stream ends or fails first. A held connection's body is exactly its
+/// content-length, the rest kept for the next request; otherwise the body is every byte read
+/// after the head.
+fn read_request(
+    conn: usize,
+    tls: &mut StreamOwned<ServerConnection, TcpStream>,
+    buf: &mut Vec<u8>,
+    keep_alive: bool,
+) -> Option<Recorded> {
     let mut chunk = [0u8; 8192];
     let end = loop {
-        if let Some(i) = find(&buf, b"\r\n\r\n") {
+        if let Some(i) = find(buf, b"\r\n\r\n") {
             break i;
         }
         match tls.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => return None,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     };
@@ -293,33 +394,24 @@ fn serve(conn: usize, stream: TcpStream, shared: &Shared) {
         .iter()
         .find(|(n, _)| n == "content-length")
         .map_or(0, |(_, v)| v.parse::<usize>().expect("content-length"));
-    let mut body = buf[end + 4..].to_vec();
-    while body.len() < length {
+    buf.drain(..end + 4);
+    while buf.len() < length {
         match tls.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     }
-    shared.log.lock().expect("log").push(Recorded {
+    let body: Vec<u8> = if keep_alive {
+        buf.drain(..length).collect()
+    } else {
+        std::mem::take(buf)
+    };
+    Some(Recorded {
         conn,
         head,
         method,
         target,
         headers,
         body,
-    });
-    // Every reply is queued before the call it answers; a missing one closes the connection.
-    let reply = shared.replies.lock().expect("replies").try_recv();
-    match reply {
-        Ok(Reply::Raw(bytes)) => {
-            let _ = tls.write_all(&bytes);
-            let _ = tls.flush();
-            tls.conn.send_close_notify();
-            let _ = tls.conn.complete_io(&mut tls.sock);
-            let _ = tls.sock.shutdown(Shutdown::Both);
-        }
-        Ok(Reply::Close) | Err(_) => {
-            let _ = tls.sock.shutdown(Shutdown::Both);
-        }
-    }
+    })
 }

@@ -33,6 +33,7 @@ use crate::hub_types::{
 };
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use ssh_encoding::base64::{Base64, Encoding};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -60,6 +61,12 @@ const AUTH_PREFIX: &str = "/auth/";
 const MAX_PROOF_TEXT: usize = MAX_SIG_PROOF_BYTES.div_ceil(3) * 4;
 /// The length of a challenge nonce: 32 bytes in unpadded base64url.
 const NONCE_CHARS: usize = 43;
+/// The start of SIG's key fingerprints.
+const FINGERPRINT_PREFIX: &str = "SHA256:";
+/// The hub id prefixes of an account, a key and a key-binding challenge.
+const ACCOUNT_PREFIX: &str = "acc_";
+const KEY_PREFIX: &str = "skey_";
+const CHALLENGE_PREFIX: &str = "kch_";
 
 const FORM: &str = "application/x-www-form-urlencoded";
 const JSON: &str = "application/json";
@@ -308,17 +315,12 @@ fn check_inputs(op: &HubOperation) -> Result<(), RdyError> {
             proof,
         } => {
             plain(challenge, MAX_ID_BYTES)?;
+            protocol_unless(id_of(CHALLENGE_PREFIX, challenge))?;
             check_count(public_key.len(), MAX_SIG_KEY_BYTES, LimitUnit::Bytes)?;
-            // The OpenSSH line with no comment.
-            let ok = public_key.split(' ').count() == 2
-                && crate::signing_crypto::key_fingerprint(public_key).is_ok();
-            if !ok {
+            if !public_key_line(public_key) {
                 return Err(upstream_key_proof());
             }
-            check_count(proof.len(), MAX_PROOF_TEXT, LimitUnit::Bytes)?;
-            if proof.is_empty() || !standard_base64(proof) {
-                return Err(upstream_key_proof());
-            }
+            check_proof(proof)?;
         }
         HubOperation::FindKey { fingerprint } => {
             check_count(fingerprint.len(), MAX_ID_BYTES, LimitUnit::Bytes)?;
@@ -326,12 +328,16 @@ fn check_inputs(op: &HubOperation) -> Result<(), RdyError> {
                 return Err(signing_selector("key"));
             }
         }
-        HubOperation::Retire { key_id } => plain(key_id, MAX_ID_BYTES)?,
+        HubOperation::Retire { key_id } => {
+            plain(key_id, MAX_ID_BYTES)?;
+            protocol_unless(id_of(KEY_PREFIX, key_id))?;
+        }
         HubOperation::Revoke {
             key_id,
             compromised_from,
         } => {
             plain(key_id, MAX_ID_BYTES)?;
+            protocol_unless(id_of(KEY_PREFIX, key_id))?;
             if let Some(t) = compromised_from {
                 parse_compromised_since(t)?;
             }
@@ -340,17 +346,56 @@ fn check_inputs(op: &HubOperation) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// Standard base64 with padding and no line break.
-fn standard_base64(text: &str) -> bool {
-    let b = text.as_bytes();
-    if !b.len().is_multiple_of(4) {
-        return false;
+/// `E_UPSTREAM_PROTOCOL` unless `ok`.
+fn protocol_unless(ok: bool) -> Result<(), RdyError> {
+    if ok { Ok(()) } else { Err(upstream_protocol()) }
+}
+
+/// An SSHSIG proof in standard base64 with padding and no line break, of at most
+/// [`MAX_SIG_PROOF_BYTES`] decoded bytes. The text is bounded before it is decoded; the decoded
+/// length is computed with checked arithmetic, then a strict decoder refuses misplaced padding
+/// and set unused bits. Over the bound is `E_LIMIT`; anything else is `E_UPSTREAM_KEY_PROOF`.
+fn check_proof(proof: &str) -> Result<(), RdyError> {
+    check_count(proof.len(), MAX_PROOF_TEXT, LimitUnit::Bytes)?;
+    let b = proof.as_bytes();
+    if b.is_empty() || !b.len().is_multiple_of(4) {
+        return Err(upstream_key_proof());
     }
     let pad = b.iter().rev().take_while(|&&c| c == b'=').count();
-    pad <= 2
+    let shape = pad <= 2
         && b[..b.len() - pad]
             .iter()
-            .all(|&c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/');
+    if !shape {
+        return Err(upstream_key_proof());
+    }
+    let decoded = (b.len() / 4)
+        .checked_mul(3)
+        .and_then(|n| n.checked_sub(pad))
+        .ok_or_else(upstream_key_proof)?;
+    check_count(decoded, MAX_SIG_PROOF_BYTES, LimitUnit::Bytes)?;
+    let mut out = vec![0u8; decoded];
+    match Base64::decode(proof, &mut out) {
+        Ok(bytes) if bytes.len() == decoded => Ok(()),
+        _ => Err(upstream_key_proof()),
+    }
+}
+
+/// An OpenSSH public-key line with no comment, as SIG reads one: `<type> <base64>` with exactly
+/// one space, no other white space or line, and a whole key of a type SIG can read. A
+/// fingerprint names a key but is not one.
+fn public_key_line(text: &str) -> bool {
+    let mut fields = text.split(' ');
+    let (Some(kind), Some(blob), None) = (fields.next(), fields.next(), fields.next()) else {
+        return false;
+    };
+    let field_ok =
+        |f: &str| !f.is_empty() && !f.chars().any(|c| c.is_whitespace() || c.is_control());
+    text.len() <= MAX_SIG_KEY_BYTES
+        && field_ok(kind)
+        && field_ok(blob)
+        && !text.starts_with(FINGERPRINT_PREFIX)
+        && crate::signing_crypto::key_fingerprint(text).is_ok()
 }
 
 #[derive(Serialize)]
@@ -496,7 +541,8 @@ fn oauth_endpoint(install: &Origin, uri: &str) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 /// Reads the user CA bundle: an absolute path to a regular file of at most 1048576 bytes that
-/// holds 1-64 PEM certificates and no other block. Else `E_UPSTREAM_CA`.
+/// holds 1-64 PEM certificates and no other block, each one a trust anchor the TLS library can
+/// read. Else `E_UPSTREAM_CA`: the library's own store would drop an unreadable root silently.
 fn read_ca(path: &Path) -> Result<Vec<Certificate<'static>>, RdyError> {
     if !path.is_absolute() {
         return Err(upstream_ca());
@@ -519,7 +565,7 @@ fn read_ca(path: &Path) -> Result<Vec<Certificate<'static>>, RdyError> {
     for item in ureq::tls::parse_pem(&bytes) {
         match item {
             Ok(PemItem::Certificate(c)) => {
-                if certs.len() == MAX_CA_CERTS || !der_certificate(c.der()) {
+                if certs.len() == MAX_CA_CERTS || !trust_anchor(c.der()) {
                     return Err(upstream_ca());
                 }
                 certs.push(c.to_owned());
@@ -533,34 +579,12 @@ fn read_ca(path: &Path) -> Result<Vec<Certificate<'static>>, RdyError> {
     Ok(certs)
 }
 
-/// The tag and content length of the DER element at the start of `b`, and its header length.
-fn der_header(b: &[u8]) -> Option<(u8, usize, usize)> {
-    let tag = *b.first()?;
-    let first = *b.get(1)?;
-    if first < 0x80 {
-        return Some((tag, usize::from(first), 2));
-    }
-    let n = usize::from(first & 0x7f);
-    if n == 0 || n > 4 {
-        return None;
-    }
-    let mut len = 0usize;
-    for &byte in b.get(2..2 + n)? {
-        len = len.checked_mul(256)?.checked_add(usize::from(byte))?;
-    }
-    Some((tag, len, 2 + n))
-}
-
-/// The shape of an X.509 certificate: one DER SEQUENCE covering the bytes exactly, holding a
-/// SEQUENCE (the signed part). The TLS library parses the rest when it builds its trust store.
-fn der_certificate(b: &[u8]) -> bool {
-    let Some((0x30, len, head)) = der_header(b) else {
-        return false;
-    };
-    if head.checked_add(len) != Some(b.len()) {
-        return false;
-    }
-    matches!(der_header(&b[head..]), Some((0x30, inner, h)) if h + inner <= len)
+/// Whether `der` is a certificate the TLS library accepts as a trust anchor: the parser its
+/// trust store uses for every root.
+fn trust_anchor(der: &[u8]) -> bool {
+    rustls::RootCertStore::empty()
+        .add(rustls::pki_types::CertificateDer::from(der))
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -892,8 +916,8 @@ enum AccountState {
 struct EarlierHandle {
     #[serde(rename = "handle")]
     _handle: String,
-    #[serde(rename = "until")]
-    _until: String,
+    /// Discarded, but still a time.
+    until: String,
 }
 
 #[derive(Deserialize)]
@@ -915,8 +939,7 @@ struct Organization {
 struct MeDto {
     id: String,
     handle: String,
-    #[serde(rename = "earlier_handles")]
-    _earlier_handles: Vec<EarlierHandle>,
+    earlier_handles: Vec<EarlierHandle>,
     #[serde(rename = "display_name")]
     _display_name: String,
     #[serde(rename = "kind")]
@@ -933,12 +956,13 @@ struct MeDto {
     _organizations: Vec<Organization>,
     #[serde(rename = "can_create_organization")]
     _can_create_organization: bool,
-    #[serde(rename = "away_until", default)]
-    _away_until: Option<String>,
+    /// Discarded, but still a time when it is given.
+    #[serde(default)]
+    away_until: Option<String>,
     #[serde(rename = "version")]
     _version: String,
-    #[serde(rename = "created_at")]
-    _created_at: String,
+    /// Discarded, but still a time.
+    created_at: String,
 }
 
 /// A key list: `next` may be absent or null.
@@ -967,10 +991,16 @@ fn id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= MAX_ID_BYTES && !s.chars().any(char::is_control)
 }
 
-/// An RFC3339 time within its bound.
+/// The hub id of one kind of object: its `prefix` and at least one more byte, within the id
+/// bound and with no control character.
+fn id_of(prefix: &str, s: &str) -> bool {
+    id_ok(s) && s.len() > prefix.len() && s.starts_with(prefix)
+}
+
+/// An RFC3339 time within its 64-byte bound. The shared compromise-time check is used: the
+/// time parser alone takes any byte between date and time and any number of fractional digits.
 fn time_ok(s: &str) -> bool {
-    s.len() <= MAX_TIMESTAMP_BYTES
-        && time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).is_ok()
+    s.len() <= MAX_TIMESTAMP_BYTES && parse_compromised_since(s).is_ok()
 }
 
 /// A handle that can form a `human:` claim (the rule of [`RequestClaim::bind_human`]).
@@ -1079,8 +1109,8 @@ fn tokens(body: &[u8]) -> Result<TokenPair, HubFailure> {
     Ok(pair)
 }
 
-/// A key object's values: bounded ids, a fingerprint that is its public key's, a valid label
-/// and RFC3339 times.
+/// A key object's values: a key id and an account id, an OpenSSH public-key line with no
+/// comment whose fingerprint is the object's, a valid label and RFC3339 times.
 fn key_ok(key: &HubKey) -> bool {
     let times = [
         &key.expires_at,
@@ -1089,9 +1119,9 @@ fn key_ok(key: &HubKey) -> bool {
         &key.revoked_at,
         &key.compromised_from,
     ];
-    id_ok(&key.id)
-        && id_ok(&key.account)
-        && key.public_key.len() <= MAX_SIG_KEY_BYTES
+    id_of(KEY_PREFIX, &key.id)
+        && id_of(ACCOUNT_PREFIX, &key.account)
+        && public_key_line(&key.public_key)
         && crate::signing_crypto::key_fingerprint(&key.public_key).as_deref()
             == Ok(key.fingerprint.as_str())
         && check_label(&key.label).is_ok()
@@ -1135,6 +1165,13 @@ fn decode(call: &HubCall, status: u16, body: &[u8]) -> Result<HubReply, HubFailu
             let dto: DeviceDto = json(body)?;
             // The hub never sends a complete link: one would hold the user code.
             protocol_if(dto.verification_uri_complete.is_some())?;
+            // The link is exactly the install's device page, byte for byte: a URL parser would
+            // also accept a path that only normalizes to it (`/app/<code>/../device`, encoded
+            // dots), and the reply returns the raw text.
+            let device_page = install
+                .join(&["app", "device"])
+                .map_err(|_| HubFailure::Protocol)?;
+            protocol_if(dto.verification_uri != device_page)?;
             let reply = DeviceStartReply {
                 device_code: Secret::new(dto.device_code),
                 user_code: dto.user_code,
@@ -1203,7 +1240,10 @@ fn decode_api(
     match op {
         HubOperation::Me => {
             let dto: MeDto = json(body)?;
-            protocol_if(!id_ok(&dto.id) || !handle_ok(&dto.handle))?;
+            let times_ok = time_ok(&dto.created_at)
+                && dto.away_until.as_deref().is_none_or(time_ok)
+                && dto.earlier_handles.iter().all(|h| time_ok(&h.until));
+            protocol_if(!id_of(ACCOUNT_PREFIX, &dto.id) || !handle_ok(&dto.handle) || !times_ok)?;
             Ok(HubReply::Me(MeReply {
                 account: dto.id,
                 handle: dto.handle,
@@ -1213,8 +1253,8 @@ fn decode_api(
             let c: KeyChallenge = json(body)?;
             let want_label = label.as_deref().unwrap_or(kind.default_label());
             protocol_if(
-                !id_ok(&c.id)
-                    || !id_ok(&c.account)
+                !id_of(CHALLENGE_PREFIX, &c.id)
+                    || !id_of(ACCOUNT_PREFIX, &c.account)
                     || c.kind != *kind
                     || c.label != want_label
                     || c.namespace != KEYBIND_NAMESPACE

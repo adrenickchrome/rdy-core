@@ -156,6 +156,26 @@ fn success(op: &HubOperation, origin: &str) -> Reply {
     }
 }
 
+/// The fixture's Bind with `public_key` and `proof`.
+fn bind_with(public_key: &str, proof: &str) -> HubOperation {
+    HubOperation::Bind {
+        challenge: CHALLENGE_ID.into(),
+        public_key: public_key.into(),
+        proof: proof.into(),
+    }
+}
+
+/// The padded standard base64 of `n` zero bytes.
+fn zero_proof(n: usize) -> String {
+    let mut s = "A".repeat(n / 3 * 4);
+    match n % 3 {
+        1 => s.push_str("AA=="),
+        2 => s.push_str("AAA="),
+        _ => {}
+    }
+    s
+}
+
 fn is_key_route(op: &HubOperation) -> bool {
     matches!(
         op,
@@ -834,6 +854,30 @@ fn hsa4_verification_links_never_hold_the_code() {
             r#""verification_uri":"https://127.0.0.1:1/app/device""#,
         ),
         good.replace(&uri, &format!(r#""verification_uri":"{o}/app/device/""#)),
+        // Dot segments, literal or encoded, normalize away: the link must be exactly the
+        // install's device page, so a code hidden in a removed segment never comes back.
+        good.replace(
+            &uri,
+            &format!(r#""verification_uri":"{o}/app/{USER_CODE}/../device""#),
+        ),
+        good.replace(
+            &uri,
+            &format!(r#""verification_uri":"{o}/app/{USER_CODE}/%2e%2e/device""#),
+        ),
+        good.replace(
+            &uri,
+            &format!(r#""verification_uri":"{o}/app/{USER_CODE}/%2E%2E/device""#),
+        ),
+        good.replace(
+            &uri,
+            &format!(r#""verification_uri":"{o}/app/{USER_CODE}/.%2e/device""#),
+        ),
+        good.replace(&uri, &format!(r#""verification_uri":"{o}/app/./device""#)),
+        good.replace(&uri, &format!(r#""verification_uri":"{o}/app/%2e/device""#)),
+        good.replace(
+            &uri,
+            &format!(r#""verification_uri":"{o}/{USER_CODE}/../app/device""#),
+        ),
         good.replace(USER_CODE, "BCDFGHJ"),
         good.replace(USER_CODE, "BCDFGHJA"),
         good.replace(USER_CODE, "bcdfghjk"),
@@ -889,6 +933,10 @@ fn hsa4_a_user_ca_is_required_and_hostname_checks_remain() {
     just_fits.extend(std::iter::repeat_n(b'\n', MAX_CA_BYTES - just_fits.len()));
     let not_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
     let bad_base64 = "-----BEGIN CERTIFICATE-----\n@@@@\n-----END CERTIFICATE-----\n";
+    // Certificate-shaped DER the TLS library cannot read as a trust anchor: SEQUENCE {SEQUENCE
+    // {}} and SEQUENCE {SEQUENCE {INTEGER 1}}. Its trust store would drop them silently.
+    let empty_tbs = "-----BEGIN CERTIFICATE-----\nMAIwAA==\n-----END CERTIFICATE-----\n";
+    let serial_only = "-----BEGIN CERTIFICATE-----\nMAYwBAICAAE=\n-----END CERTIFICATE-----\n";
     let unusable: Vec<(PathBuf, &str)> = vec![
         (hub.dir.path().join("missing.pem"), "missing"),
         (PathBuf::from("relative/ca.pem"), "relative"),
@@ -903,6 +951,22 @@ fn hsa4_a_user_ca_is_required_and_hostname_checks_remain() {
         (hub.ca_file("big.pem", &too_big), "over 1 MiB"),
         (hub.ca_file("der.pem", not_der.as_bytes()), "not DER"),
         (hub.ca_file("b64.pem", bad_base64.as_bytes()), "bad base64"),
+        (
+            hub.ca_file("empty-tbs.pem", empty_tbs.as_bytes()),
+            "an empty signed part",
+        ),
+        (
+            hub.ca_file("serial.pem", serial_only.as_bytes()),
+            "a signed part with only a serial",
+        ),
+        (
+            hub.ca_file("mixed.pem", format!("{right}{empty_tbs}").as_bytes()),
+            "one good and one invalid certificate",
+        ),
+        (
+            hub.ca_file("mixed2.pem", format!("{serial_only}{right}").as_bytes()),
+            "one invalid and one good certificate",
+        ),
         (
             hub.ca_file(
                 "csr.pem",
@@ -1205,6 +1269,92 @@ fn hsa4_bad_tokens_are_refused_before_connect() {
             },
             local(E_LIMIT),
         ),
+        // The proof bound is on the decoded bytes: 16385 and 16386 bytes have the same base64
+        // length (21848) as 16384.
+        (bind_with(PUBLIC_KEY, &zero_proof(16385)), local(E_LIMIT)),
+        (bind_with(PUBLIC_KEY, &zero_proof(16386)), local(E_LIMIT)),
+        // Padding only at the end, at most two, and no unused bits set.
+        (bind_with(PUBLIC_KEY, "AB=="), local(E_UPSTREAM_KEY_PROOF)),
+        (bind_with(PUBLIC_KEY, "AAB="), local(E_UPSTREAM_KEY_PROOF)),
+        (bind_with(PUBLIC_KEY, "A==="), local(E_UPSTREAM_KEY_PROOF)),
+        (bind_with(PUBLIC_KEY, "===="), local(E_UPSTREAM_KEY_PROOF)),
+        (bind_with(PUBLIC_KEY, "AA=A"), local(E_UPSTREAM_KEY_PROOF)),
+        (
+            bind_with(PUBLIC_KEY, &format!("{}\n", &PROOF[..64])),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        // The public key is an OpenSSH line with no comment: never a fingerprint, an empty
+        // field, other white space or another line.
+        (bind_with(FINGERPRINT, PROOF), local(E_UPSTREAM_KEY_PROOF)),
+        (
+            bind_with(&format!("{FINGERPRINT} "), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (
+            bind_with(&format!("{PUBLIC_KEY} "), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (
+            bind_with(&format!(" {PUBLIC_KEY}"), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (
+            bind_with(&PUBLIC_KEY.replacen(' ', "  ", 1), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (
+            bind_with(&PUBLIC_KEY.replacen(' ', "\t", 1), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (
+            bind_with(&format!("{PUBLIC_KEY}\n"), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (
+            bind_with(&format!("{PUBLIC_KEY}\n{PUBLIC_KEY}"), PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        (bind_with("", PROOF), local(E_UPSTREAM_KEY_PROOF)),
+        (
+            bind_with("ssh-ed25519 ", PROOF),
+            local(E_UPSTREAM_KEY_PROOF),
+        ),
+        // Ids name their object: a challenge is `kch_…` and a key `skey_…`.
+        (
+            HubOperation::Bind {
+                challenge: ACCOUNT.into(),
+                public_key: PUBLIC_KEY.into(),
+                proof: PROOF.into(),
+            },
+            local(E_UPSTREAM_PROTOCOL),
+        ),
+        (
+            HubOperation::Bind {
+                challenge: "kch_".into(),
+                public_key: PUBLIC_KEY.into(),
+                proof: PROOF.into(),
+            },
+            local(E_UPSTREAM_PROTOCOL),
+        ),
+        (
+            HubOperation::Retire {
+                key_id: ACCOUNT.into(),
+            },
+            local(E_UPSTREAM_PROTOCOL),
+        ),
+        (
+            HubOperation::Revoke {
+                key_id: CHALLENGE_ID.into(),
+                compromised_from: None,
+            },
+            local(E_UPSTREAM_PROTOCOL),
+        ),
+        (
+            HubOperation::Retire {
+                key_id: "skey_".into(),
+            },
+            local(E_UPSTREAM_PROTOCOL),
+        ),
         (
             HubOperation::FindKey {
                 fingerprint: "SHA256:short".into(),
@@ -1238,9 +1388,17 @@ fn hsa4_bad_tokens_are_refused_before_connect() {
         ),
     ];
     for (op, want) in refusals {
-        let name = format!("{op:?}");
+        let name: String = format!("{op:?}").chars().take(240).collect();
         assert_eq!(hub.refuse(hub.call(op)), want, "{name}");
     }
+    // A proof of exactly 16384 bytes is sent.
+    let proof = zero_proof(MAX_SIG_PROOF_BYTES);
+    let (r, req) = hub.send(
+        Reply::json(201, &sub(BIND_REPLY, &hub.origin())),
+        hub.call(bind_with(PUBLIC_KEY, &proof)),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    assert!(req.body_text().contains(&proof));
     // The destination is checked before the token.
     let mut call = hub.call(HubOperation::Me);
     call.destination = "https://127.0.0.1:1/api/v1/me".into();
@@ -2054,6 +2212,105 @@ fn hsa4_hub_fixtures_round_trip() {
             200,
             ME_REPLY.replace(r#","created_at":"2026-08-01T08:00:00Z""#, ""),
         ),
+        // Every time is RFC3339 within 64 bytes, the ones `/me` discards included; the time
+        // parser's own leniency (any separator byte) is not enough.
+        (
+            HubOperation::Me,
+            200,
+            ME_REPLY.replace(
+                "2026-08-01T08:00:00Z",
+                &format!("2026-08-01T08:00:00.{}Z", "0".repeat(44)),
+            ),
+        ),
+        (
+            HubOperation::Me,
+            200,
+            ME_REPLY.replace("2026-08-01T08:00:00Z", "2026-08-01x08:00:00Z"),
+        ),
+        (
+            HubOperation::Me,
+            200,
+            ME_REPLY.replace("2026-09-01T08:00:00Z", "not a time"),
+        ),
+        (
+            HubOperation::Me,
+            200,
+            ME_REPLY.replace(r#","version""#, r#","away_until":"not a time","version""#),
+        ),
+        (
+            challenge(),
+            201,
+            CHALLENGE_REPLY.replace("2026-10-17T12:10:00Z", "2026-10-17 12:10:00Z"),
+        ),
+        (
+            retire(),
+            200,
+            RETIRE_REPLY.replace("2026-10-18T09:00:00Z", "2026-10-18x09:00:00Z"),
+        ),
+        (
+            revoke(),
+            200,
+            REVOKE_REPLY.replace("2026-10-17T11:00:00Z", "2026-10-17T11:00:00.0000000000Z"),
+        ),
+        (
+            find(),
+            200,
+            LIST_REPLY.replace("2026-10-17T12:05:00Z", "2026-10-17T12:05:00"),
+        ),
+        // Ids name their object: an account is `acc_…`, a key `skey_…`, a challenge `kch_…`.
+        (HubOperation::Me, 200, ME_REPLY.replace(ACCOUNT, KEY_ID)),
+        (HubOperation::Me, 200, ME_REPLY.replace(ACCOUNT, "acc_")),
+        (find(), 200, LIST_REPLY.replace(KEY_ID, ACCOUNT)),
+        (
+            find(),
+            200,
+            LIST_REPLY.replace(
+                &format!(r#""account":"{ACCOUNT}""#),
+                &format!(r#""account":"{KEY_ID}""#),
+            ),
+        ),
+        (
+            challenge(),
+            201,
+            CHALLENGE_REPLY.replace(CHALLENGE_ID, "challenge-2"),
+        ),
+        (
+            challenge(),
+            201,
+            CHALLENGE_REPLY.replace(CHALLENGE_ID, ACCOUNT),
+        ),
+        (
+            challenge(),
+            201,
+            CHALLENGE_REPLY.replace(
+                &format!(r#""account":"{ACCOUNT}""#),
+                r#""account":"someone""#,
+            ),
+        ),
+        (bind(), 201, bind_reply.replace(KEY_ID, ACCOUNT)),
+        // A key object's public key is the OpenSSH line, never its fingerprint or a commented
+        // or padded line.
+        (find(), 200, LIST_REPLY.replace(PUBLIC_KEY, FINGERPRINT)),
+        (
+            find(),
+            200,
+            LIST_REPLY.replace(PUBLIC_KEY, &format!("{FINGERPRINT} ")),
+        ),
+        (
+            find(),
+            200,
+            LIST_REPLY.replace(PUBLIC_KEY, &format!("{PUBLIC_KEY} laptop")),
+        ),
+        (
+            find(),
+            200,
+            LIST_REPLY.replace(PUBLIC_KEY, &format!("{PUBLIC_KEY} ")),
+        ),
+        (
+            retire(),
+            200,
+            RETIRE_REPLY.replace(PUBLIC_KEY, &format!("{PUBLIC_KEY}\\n")),
+        ),
     ];
     for (op, status, body) in contradictions {
         let (r, _) = hub.send(Reply::json(status, &body), hub.call(op));
@@ -2064,54 +2321,97 @@ fn hsa4_hub_fixtures_round_trip() {
 
 fn is_send_sync<T: Send + Sync + 'static>(_: &T) {}
 
+/// A reply with a length and no `connection: close`: a client may keep the connection.
+fn keep_alive_me() -> Reply {
+    Reply::with_headers(
+        200,
+        &[
+            "content-type: application/json".to_string(),
+            format!("content-length: {}", ME_REPLY.len()),
+        ],
+        ME_REPLY.as_bytes(),
+    )
+}
+
+/// The engine's own part of the blocking boundary: one synchronous `exchange` builds, uses and
+/// drops its client. It makes no claim about the MCP or daemon dispatch, which their own tests
+/// cover. The fixture holds every connection open, so a client kept across calls would send the
+/// second request on the first connection.
 #[test]
-fn hsa4_client_lifetime_stays_inside_blocking_dispatch() {
-    let mut server = Server::start();
+fn hsa4_each_exchange_builds_and_drops_its_own_client() {
+    let mut server = Server::keep_alive();
     let install = Origin::parse(server.origin()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let ca = dir.path().join("ca.pem");
     std::fs::write(&ca, server.ca_pem()).unwrap();
-    // Keep-alive replies: a client that kept its connection would send the second call on it.
-    let keep_alive = || {
-        Reply::with_headers(
-            200,
-            &[
-                "content-type: application/json".to_string(),
-                format!("content-length: {}", ME_REPLY.len()),
-            ],
-            ME_REPLY.as_bytes(),
+    let url = route(&install, &HubOperation::Me).unwrap().unwrap();
+
+    // The fixture works: a pooling client sends both its requests on one held connection.
+    server.reply(keep_alive_me());
+    server.reply(keep_alive_me());
+    server.accept_n(1);
+    let roots: Vec<_> = ureq::tls::parse_pem(server.ca_pem().as_bytes())
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(c)) => Some(c.to_owned()),
+            _ => None,
+        })
+        .collect();
+    let pooling: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(None)
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::Rustls)
+                .root_certs(ureq::tls::RootCerts::Specific(std::sync::Arc::new(roots)))
+                .build(),
         )
-    };
-    server.reply(keep_alive());
-    server.reply(keep_alive());
+        .build()
+        .into();
+    for _ in 0..2 {
+        let mut r = pooling.get(&url).call().expect("pooled call");
+        r.body_mut().read_to_vec().expect("pooled body");
+    }
+    drop(pooling);
+    server.wait_closed(0);
+    assert_eq!(server.accepted(), 1);
+    assert_eq!(
+        server.requests().iter().map(|r| r.conn).collect::<Vec<_>>(),
+        vec![0, 0],
+        "a pooling client reuses the held connection"
+    );
+
+    // The transport: two sequential exchanges on one transport, called directly on this thread
+    // with no runtime. Each opens its own connection while the first is still held open by the
+    // fixture, and each connection is closed by the client before the transport is dropped.
+    server.reply(keep_alive_me());
+    server.reply(keep_alive_me());
     server.accept_n(2);
     let call = HubCall {
         install: install.clone(),
-        destination: route(&install, &HubOperation::Me).unwrap().unwrap(),
+        destination: url,
         ca_file: Some(ca),
         claim: None,
         bearer: Some(Secret::new(ACCESS)),
         operation: HubOperation::Me,
     };
-    // The blocking closure a tool or op dispatch runs off its async task: the transport is
-    // built, used and dropped inside it, with no runtime of its own.
-    let fence = OriginFence::new(install.clone(), []).unwrap();
-    let worker = std::thread::spawn(move || {
-        let transport = HttpHubTransport::new(fence).expect("transport");
-        is_send_sync(&transport);
-        let first = transport.exchange(call.clone());
-        let second = transport.exchange(call);
-        drop(transport);
-        (first, second)
-    });
-    let (first, second) = worker.join().expect("worker");
+    let transport =
+        HttpHubTransport::new(OriginFence::new(install.clone(), []).unwrap()).expect("transport");
+    is_send_sync(&transport);
+    let first = transport.exchange(call.clone());
     assert!(first.is_ok(), "{first:?}");
+    let second = transport.exchange(call);
     assert!(second.is_ok(), "{second:?}");
-    let log = server.requests();
+    assert_eq!(server.accepted(), 3, "two exchanges open two connections");
     assert_eq!(
-        log.iter().map(|r| r.conn).collect::<Vec<_>>(),
-        vec![0, 1],
-        "each exchange opens its own connection"
+        server.requests()[2..]
+            .iter()
+            .map(|r| r.conn)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "no connection is reused across exchanges"
     );
+    // Nothing outlives a call: the client closed both connections while the transport lives.
+    server.wait_closed(1);
+    server.wait_closed(2);
+    drop(transport);
     assert_eq!(server.finish(), 0);
 }
