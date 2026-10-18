@@ -2,9 +2,12 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(not(unix))]
 compile_error!("rdy_qa::platform has no implementation for this platform yet (FW-XP1 Phase 4)");
@@ -80,6 +83,81 @@ pub fn no_op_command() -> Command {
     Command::new("true")
 }
 
+/// A fake SSH agent that records connections: a Unix socket listener (set its path as
+/// `SSH_AUTH_SOCK` for a child) that accepts each connection, counts it and closes it at once,
+/// so a client that waits for a reply gets end of file instead of hanging.
+pub struct RecordingAgent {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    listener: Arc<UnixListener>,
+    count: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RecordingAgent {
+    /// Binds a new socket in a fresh directory under [`short_tmp_root`] and starts accepting.
+    pub fn start() -> io::Result<Self> {
+        let dir = tempfile::Builder::new()
+            .prefix("rdy-agent-")
+            .tempdir_in(short_tmp_root())?;
+        let path = dir.path().join("agent.sock");
+        let listener = Arc::new(UnixListener::bind(&path)?);
+        listener.set_nonblocking(true)?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (listener, count, stop) = (listener.clone(), count.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if !accept_pending(&listener, &count) {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+            })
+        };
+        Ok(Self {
+            _dir: dir,
+            path,
+            listener,
+            count,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// The socket's path, for `SSH_AUTH_SOCK`.
+    pub fn socket_path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The number of connections so far, including any still waiting to be accepted.
+    pub fn connections(&self) -> usize {
+        accept_pending(&self.listener, &self.count);
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for RecordingAgent {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Accepts, counts and closes every waiting connection; whether there was one.
+fn accept_pending(listener: &UnixListener, count: &AtomicUsize) -> bool {
+    let mut any = false;
+    while let Ok((stream, _)) = listener.accept() {
+        count.fetch_add(1, Ordering::SeqCst);
+        drop(stream);
+        any = true;
+    }
+    any
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +213,19 @@ mod tests {
         symlink(&target, &link).expect("symlink");
         assert_eq!(std::fs::read_link(&link).expect("read_link"), target);
         assert!(no_op_command().status().expect("run true").success());
+    }
+
+    #[test]
+    fn sig2_a_recording_agent_counts_each_connection() {
+        let agent = RecordingAgent::start().expect("start the agent");
+        assert_eq!(agent.connections(), 0, "no connection yet");
+        drop(std::os::unix::net::UnixStream::connect(agent.socket_path()).expect("connect"));
+        let mut held =
+            std::os::unix::net::UnixStream::connect(agent.socket_path()).expect("connect");
+        // a client that waits for a reply gets end of file, not a hang
+        let mut buf = [0u8; 1];
+        use std::io::Read;
+        assert_eq!(held.read(&mut buf).expect("read"), 0);
+        assert_eq!(agent.connections(), 2);
     }
 }

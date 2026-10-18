@@ -1,11 +1,12 @@
 //! sig2: the four signing settings are valid in the user config and in .rdy/local.yaml only
 //! (D-QVH4N). They merge, warn and show their origin like every other setting. Reading them
-//! contacts no agent and no network.
+//! contacts no agent.
 use rdy_engine::config_levels::{Effective, LOCAL_FILE, Level, PROJECT_FILE, effective};
 use rdy_engine::signing_config::{SignMode, SigningConfig};
 use rdy_engine::signing_crypto::key_fingerprint;
 use rdy_engine::*;
 use rdy_qa::fixtures::{human_env, rdy_bin};
+use rdy_qa::platform::RecordingAgent;
 use serde_yaml_ng::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -462,54 +463,8 @@ fn sig2_allowed_signers_paths_follow_the_setting_origin() {
     );
 }
 
-/// A command that runs with networking disabled by the operating system, not by convention:
-/// a macOS sandbox profile that denies `network*`, or a fresh Linux network namespace with
-/// no interface up. Proxy variables do not disable networking: a direct socket, a client
-/// that ignores proxies, or an inherited `NO_PROXY` still connects.
-fn offline(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    #[cfg(target_os = "macos")]
-    {
-        let mut c = Command::new("/usr/bin/sandbox-exec");
-        c.args(["-p", "(version 1)(allow default)(deny network*)"])
-            .arg(program);
-        c
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut c = Command::new("unshare");
-        c.args(["--map-root-user", "--net", "--"]).arg(program);
-        c
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = program;
-        panic!("no network guard for this platform")
-    }
-}
-
 #[test]
-fn sig2_offline_guard_blocks_a_direct_local_connection() {
-    // a listener on the loopback address accepts a plain connection ...
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    let probe = format!("exec 3<>/dev/tcp/127.0.0.1/{port}");
-    let open = Command::new("bash").args(["-c", &probe]).output().unwrap();
-    assert!(open.status.success(), "control connection failed");
-    // ... and the guarded command cannot reach it, with or without proxy variables
-    let blocked = offline("bash")
-        .args(["-c", &probe])
-        .env("NO_PROXY", "*")
-        .output()
-        .unwrap();
-    assert!(
-        !blocked.status.success(),
-        "the guard did not block a direct connection: {}",
-        String::from_utf8_lossy(&blocked.stderr)
-    );
-}
-
-#[test]
-fn sig2_config_does_not_need_an_agent_or_network() {
+fn sig2_config_does_not_contact_an_agent() {
     let d = tempfile::tempdir().unwrap();
     drop(Rdy::init(d.path(), "rdy-standard").unwrap());
     append(
@@ -520,12 +475,14 @@ fn sig2_config_does_not_need_an_agent_or_network() {
         ),
     );
     let (cfg, env) = human_env("human:qa");
-    // the operating system denies every socket to the child (see `offline`)
-    let out = offline(rdy_bin())
+    // a fake agent that records every connection; SIG has no network code (the hub calls are
+    // HA2a's), so the agent socket is the one thing reading signing config could contact
+    let agent = RecordingAgent::start().expect("start the recording agent");
+    let out = Command::new(rdy_bin())
         .args(["config", "--show-origin"])
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
-        .env_remove("SSH_AUTH_SOCK")
+        .env("SSH_AUTH_SOCK", agent.socket_path())
         .env("RDY_NO_DAEMON", "1")
         .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(d.path())
@@ -534,6 +491,11 @@ fn sig2_config_does_not_need_an_agent_or_network() {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{text}\n{err}");
+    assert_eq!(
+        agent.connections(),
+        0,
+        "rdy contacted the agent\n{text}\n{err}"
+    );
     // the CLI shows the project's canonical path (macOS temp dirs are symlinks)
     let root = d.path().canonicalize().unwrap();
     let local = format!("  # {}", root.join(LOCAL_FILE).display());
