@@ -339,6 +339,47 @@ impl Graph {
         g
     }
 
+    /// pub2 (D-0VCQ5): the graph of the blocks in `keep` alone. An edge stays only when both its
+    /// endpoints are in `keep`, in the order this graph lists it, with its pin and part. Content
+    /// hashes, decision statuses and removal records stay only for blocks in `keep`; the tracking
+    /// fields are the same. An id in `keep` that this graph does not know adds nothing, and
+    /// `self` is unchanged. Queries on the result (status, suspects, impact, governing, removed
+    /// pins) can never reach a block outside `keep`.
+    pub fn induced(&self, keep: &BTreeSet<BlockId>) -> Graph {
+        fn edges(
+            map: &OrdMap<BlockId, Vec<Edge>>,
+            keep: &BTreeSet<BlockId>,
+        ) -> OrdMap<BlockId, Vec<Edge>> {
+            keep.iter()
+                .filter_map(|id| {
+                    let list: Vec<Edge> = map
+                        .get(id)?
+                        .iter()
+                        .filter(|e| keep.contains(&e.from) && keep.contains(&e.to))
+                        .cloned()
+                        .collect();
+                    (!list.is_empty()).then(|| (id.clone(), list))
+                })
+                .collect()
+        }
+        fn values<V: Clone>(
+            map: &OrdMap<BlockId, V>,
+            keep: &BTreeSet<BlockId>,
+        ) -> OrdMap<BlockId, V> {
+            keep.iter()
+                .filter_map(|id| Some((id.clone(), map.get(id)?.clone())))
+                .collect()
+        }
+        Graph {
+            out: edges(&self.out, keep),
+            inc: edges(&self.inc, keep),
+            decision_status: values(&self.decision_status, keep),
+            contents: values(&self.contents, keep),
+            redacted: values(&self.redacted, keep),
+            tracking: self.tracking.clone(),
+        }
+    }
+
     /// The removed targets `id` holds a pin to, each once, sorted by target id, with the request
     /// that removed it. The pin keeps its value; a removed target is never a `changed` or
     /// `deleted` suspect (D-3M81W).
