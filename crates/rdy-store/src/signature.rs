@@ -139,6 +139,19 @@ impl StoreReader {
         self.index().signatures_of(subject, MAX_PER_SUBJECT)
     }
 
+    /// The signatures of `subject` whose frames lie before `end` (a published state's log end),
+    /// in byte order of their hashes: [`StoreReader::signatures_of`] less the frames of a batch
+    /// that is still open or was sealed after that state. The bound counts only the signatures
+    /// returned.
+    pub fn signatures_before(
+        &self,
+        subject: &Hash,
+        end: crate::segment::Location,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.index()
+            .signatures_before(subject, MAX_PER_SUBJECT, end)
+    }
+
     /// Calls `f` with every stored signature, decoded, in subject then hash order, one at a
     /// time: the whole set is never collected.
     pub fn visit_signatures(

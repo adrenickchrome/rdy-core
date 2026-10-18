@@ -824,3 +824,150 @@ fn sig9_fsck_verbose_reports_signatures_and_refuses_cleanup_on_failure() {
     );
     assert!(quarantined.exists());
 }
+
+/// The verified log of `r`'s published state, with no trust file.
+fn verified(st: &rdy_engine::ReadState) -> Value {
+    rdy_engine::signing_read::verified_log(st, None, None, None).unwrap()
+}
+
+#[test]
+fn sig9_a_verified_read_never_shows_a_signature_of_an_unsealed_batch() {
+    let (d, r, _) = proj();
+    let landing = r.read().canon_head().unwrap();
+    let sig = approval_of(&r, landing, landing);
+    let shared = rdy_daemon::Shared::new(r);
+    let e = shared.engine();
+
+    // a writer appends a valid signature of the landing, then holds its batch unsealed
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let writer = {
+        let e = Arc::clone(&e);
+        std::thread::spawn(move || {
+            e.write(Box::new(move |r| {
+                r.store_mut()
+                    .write(rdy_store::signature::frames(&[sig]).unwrap())?;
+                held_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                r.store_mut().abandon_open_batch();
+                Err(rdy_engine::RdyError::new(
+                    rdy_engine::E_INTERNAL,
+                    "the test abandons the batch",
+                    "none",
+                ))
+            }))
+        })
+    };
+    held_rx.recv().unwrap();
+
+    // while the batch is held, the daemon's verified log reads the published state only
+    let s = Session::human("human:qa".into(), Role::Writer);
+    let cx = OpContext {
+        engine: &*e,
+        session: &s,
+        human: "human:qa",
+        cwd: d.path(),
+        agent: &UnavailableAgent,
+    };
+    let v = dispatch(&cx, "log", json!({"verify": true})).unwrap();
+    assert_eq!(v[0]["landing"], landing.to_string(), "{v}");
+    assert_eq!(
+        v[0]["signatures"],
+        json!([]),
+        "a signature of an unsealed batch is not in the published state: {v}"
+    );
+    assert_eq!(
+        verified(&e.read())[0]["signatures"],
+        json!([]),
+        "the engine's verified log reads the same: {v}"
+    );
+
+    // the batch is abandoned: after a reopen the landing is still unsigned
+    go_tx.send(()).unwrap();
+    assert!(writer.join().unwrap().is_err());
+    drop(e);
+    let _ = shared.shutdown();
+    drop(shared);
+    let mut r = Rdy::open(d.path()).unwrap();
+    assert_eq!(verified(&r.read())[0]["signatures"], json!([]));
+
+    // the same signature in a sealed batch is reported
+    let sig = approval_of(&r, landing, landing);
+    store(&mut r, &[sig]);
+    let v = verified(&r.read());
+    let c = &v[0]["signatures"][0];
+    assert_eq!(
+        (&c["signed"], &c["statement"]),
+        (&json!("valid"), &json!("match")),
+        "{v}"
+    );
+}
+
+/// An engine over `inner` that runs `after` once, right after the next write returns: another
+/// caller's write that takes the writer the instant it is released.
+struct ThenWrite {
+    inner: Local,
+    after: std::sync::Mutex<Option<rdy_engine::engine::WriteFn>>,
+}
+
+impl rdy_engine::engine::Engine for ThenWrite {
+    fn read(&self) -> Arc<rdy_engine::ReadState> {
+        self.inner.read()
+    }
+    fn write(&self, f: rdy_engine::engine::WriteFn) -> Result<Value, rdy_engine::RdyError> {
+        let out = self.inner.write(f);
+        if let Some(next) = self.after.lock().unwrap().take() {
+            self.inner.write(next).unwrap();
+        }
+        out
+    }
+    fn open_report(&self) -> rdy_engine::OpenReport {
+        self.inner.open_report()
+    }
+    fn root(&self) -> std::path::PathBuf {
+        self.inner.root()
+    }
+    fn briefs(&self) -> Arc<rdy_engine::BriefRegistry> {
+        self.inner.briefs()
+    }
+    fn leases(&self) -> Arc<rdy_engine::semantic::lease::LeaseRegistry> {
+        self.inner.leases()
+    }
+}
+
+#[test]
+fn sig9_a_verbose_fsck_reports_the_state_it_checked() {
+    let (d, r, _) = proj();
+    let landing = r.read().canon_head().unwrap();
+    // a tag of the landing commits the instant fsck's write releases the writer
+    let e = ThenWrite {
+        inner: Local::new(r),
+        after: std::sync::Mutex::new(Some(Box::new(|r| {
+            r.tag(&approver(), "v1.0.0", None, None)?;
+            Ok(Value::Null)
+        }))),
+    };
+    let s = Session::human("human:qa".into(), Role::Writer);
+    let cx = OpContext {
+        engine: &e,
+        session: &s,
+        human: "human:qa",
+        cwd: d.path(),
+        agent: &UnavailableAgent,
+    };
+    let v = dispatch(&cx, "fsck", json!({"verbose": true})).unwrap();
+    assert_eq!(v["versions"], 0, "the check ran before the tag: {v}");
+    assert_eq!(
+        v["signature_states"],
+        json!([{"landing": landing.to_string(), "signatures": [], "tag_signatures": {}}]),
+        "the signature states are of the checked state, without the later tag: {v}"
+    );
+    // the tag committed: the next verbose fsck checks it and lists it
+    let v = dispatch(&cx, "fsck", json!({"verbose": true})).unwrap();
+    assert_eq!(v["versions"], 1, "{v}");
+    assert_eq!(
+        v["signature_states"][0]["tag_signatures"],
+        json!({"v1.0.0": []}),
+        "{v}"
+    );
+}

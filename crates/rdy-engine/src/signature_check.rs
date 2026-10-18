@@ -333,21 +333,34 @@ pub fn read_check_context(
     subject_context(state, &signature.subject, current, sources)
 }
 
-/// The checks of every signature of `subject`, in signature hash order, against one context.
-/// More than [`MAX_PER_SUBJECT`] signatures is the shared signing `E_LIMIT`.
+/// The signatures of `subject` that `state` holds, in signature hash order: those whose frames
+/// lie before the state's log end. A signature of a batch that is still open, or one sealed
+/// after `state` was published, is not in it: the index already holds such a batch's entries,
+/// and the batch may yet be abandoned. More than [`MAX_PER_SUBJECT`] is the shared signing
+/// `E_LIMIT`.
+pub(crate) fn state_signatures(state: &ReadState, subject: &Hash) -> Result<Vec<Hash>, RdyError> {
+    state
+        .reader()
+        .signatures_before(subject, state.seq())
+        .map_err(|e| match e {
+            // signatures_before refuses only a subject over the response bound
+            StoreError::Refused(_) => {
+                signing_limit(&format!("{MAX_PER_SUBJECT} signatures per subject"))
+            }
+            e => e.into(),
+        })
+}
+
+/// The checks of every signature of `subject` that `state` holds ([`state_signatures`]), in
+/// signature hash order, against one context. More than [`MAX_PER_SUBJECT`] signatures is the
+/// shared signing `E_LIMIT`.
 pub fn signature_checks(
     state: &ReadState,
     subject: &Hash,
     trust: Option<&AllowedSigners>,
 ) -> Result<Vec<SignatureCheck>, RdyError> {
     let reader = state.reader();
-    let ids = reader.signatures_of(subject).map_err(|e| match e {
-        // signatures_of refuses only a subject over the response bound
-        StoreError::Refused(_) => {
-            signing_limit(&format!("{MAX_PER_SUBJECT} signatures per subject"))
-        }
-        e => e.into(),
-    })?;
+    let ids = state_signatures(state, subject)?;
     if ids.is_empty() {
         return Ok(vec![]);
     }

@@ -42,7 +42,7 @@ use crate::engine::{Engine, with_writer_result};
 use crate::gate::{LandInfo, LandOptions, PreparedApproval, ProposalRef};
 use crate::signature_check::{
     CheckContext, SIGNED_VALID, STATEMENT_MATCH, SignatureCheck, SignatureSubject, check_signature,
-    repo_ids, subject_context,
+    repo_ids, state_signatures, subject_context,
 };
 use crate::signing_config::{SignMode, SigningConfig};
 use crate::signing_crypto::{key_fingerprint, resolve_key, sign_sshsig};
@@ -58,7 +58,6 @@ use rdy_schema::{Issue, Pack, Severity};
 use rdy_store::StoreError;
 use rdy_store::kinds;
 use rdy_store::segment::Location;
-use rdy_store::signature::MAX_PER_SUBJECT;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -976,8 +975,9 @@ fn selected(config: &SigningConfig, setting: &str) -> Result<(String, String), R
     Ok((selector, fingerprint))
 }
 
-/// The checks of every stored signature of the context's subject, each checked once in this
-/// request: `seen` keeps the reports of hashes already checked.
+/// The checks of every signature of the context's subject that `st` holds (never one of a batch
+/// that is still open), each checked once in this request: `seen` keeps the reports of hashes
+/// already checked.
 fn observe<'s>(
     st: &crate::ReadState,
     context: &CheckContext,
@@ -985,14 +985,7 @@ fn observe<'s>(
     seen: &'s mut BTreeMap<Hash, SignatureCheck>,
 ) -> Result<Observed<'s>, RdyError> {
     let reader = st.reader();
-    let ids = reader
-        .signatures_of(&context.subject.hash())
-        .map_err(|e| match e {
-            StoreError::Refused(_) => {
-                signing_limit(&format!("{MAX_PER_SUBJECT} signatures per subject"))
-            }
-            e => e.into(),
-        })?;
+    let ids = state_signatures(st, &context.subject.hash())?;
     for id in ids {
         if let std::collections::btree_map::Entry::Vacant(slot) = seen.entry(id) {
             let record = reader.signature(&id)?;

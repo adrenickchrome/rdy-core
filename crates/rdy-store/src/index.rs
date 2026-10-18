@@ -1002,6 +1002,43 @@ impl Index {
         Ok(out)
     }
 
+    /// The signatures of `subject` whose frame lies before `end`, in ascending hash order: at
+    /// most `cap`, counted among those only. A frame at or after `end` (a batch that is still
+    /// open, or one sealed after the state that asks) is left out. Both tables are read in one
+    /// transaction. A signature entry with no typed frame entry is `NotFound`, as reading the
+    /// record would be.
+    pub fn signatures_before(
+        &self,
+        subject: &Hash,
+        cap: usize,
+        end: Location,
+    ) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(SIGNATURES).map_err(db)?;
+        let typed = r.open_table(TYPED).map_err(db)?;
+        let mut out = vec![];
+        for item in t.range(&subject.0[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&subject.0) {
+                break;
+            }
+            let id = signature_from(key)?.1;
+            let at = typed
+                .get(&typed_key(crate::kinds::SIGNATURE, &id)[..])
+                .map_err(db)?
+                .ok_or(StoreError::NotFound(id))?;
+            if dec(at.value())? >= end {
+                continue;
+            }
+            if out.len() == cap {
+                return Err(crate::signature::over_per_subject());
+            }
+            out.push(id);
+        }
+        Ok(out)
+    }
+
     /// Calls `f` with the hash of every signature, in subject then hash order, from one read
     /// transaction; nothing is collected.
     pub fn for_each_signature(
