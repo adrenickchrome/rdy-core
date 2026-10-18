@@ -224,6 +224,15 @@ fn spec_target(op: &str) -> Option<String> {
         "export_profile_md" => "no spec target: print selected docs as Markdown (reported)",
         "export_profile_html" => "no spec target: print selected docs as HTML (reported)",
         "export_profile_pdf" => "no spec target: print selected docs as PDF (reported)",
+        "signature_check" => {
+            "no spec target: one stored ssh-ed25519 signature checked offline against its landing, trust input parsed beforehand (reported; no ceiling)"
+        }
+        "signature_check_sk" => {
+            "no spec target: one stored sk-ssh-ed25519 signature checked offline against its landing, trust input parsed beforehand, no hardware touch (reported; no ceiling)"
+        }
+        "signature_lookup" => {
+            "no spec target: 100 signatures of one subject read through the derived table (reported; no ceiling)"
+        }
         "lexicon_build" => {
             "no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1)"
         }
@@ -3507,6 +3516,85 @@ fn tier_publication(
     std::fs::remove_dir_all(&copy).expect("remove the copy");
 }
 
+/// The runs of each signature op, in both tiers: the ops are pure reads of a few microseconds.
+const SIGNATURE_RUNS: usize = 200;
+
+/// `signature_check`, `signature_check_sk` and `signature_lookup`: the cost of the offline check
+/// of one stored signature, and of reading the signatures of one subject
+/// (D-1Z951, D-17AA8). Reported only: no ceiling, no baseline (D-PACK3).
+///
+/// The two checks run `check_signature` over a fixed public vector each, a plain Ed25519 key and
+/// a simulated security key whose flags report user presence ([`crate::signing::vector`]). The
+/// context and the parsed trust input are made outside the loop, and no agent, authenticator or
+/// touch is involved: the pure check is all that is measured. The lookup reads 100 signatures of
+/// one landing, the record and its derived-table row each, from a copy of the closed project
+/// `proj` made under `parent` and removed again, so the project never grows.
+fn tier_signatures(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) {
+    use rdy_engine::signature_check::check_signature;
+    use std::hint::black_box;
+    for (name, sk) in [("signature_check", false), ("signature_check_sk", true)] {
+        let v = crate::signing::vector(sk);
+        out.push(measure(&format!("{name}{sfx}"), runs, |_| {
+            let c = check_signature(black_box(&v.record), &v.context, Some(&v.trust));
+            assert!(c.code.is_none(), "the fixed vector is valid: {c:?}");
+            black_box(c);
+        }));
+    }
+    let work = parent.join(format!("sg{sfx}"));
+    copy_project(proj, &work);
+    let mut r = Rdy::open(&work).expect("open the copy");
+    let (subject, landing) = r
+        .read()
+        .landings()
+        .expect("landings")
+        .into_iter()
+        .find(|(_, l)| l.assurance == rdy_model::Assurance::Local)
+        .expect("a landing the person approved");
+    let repo = r.read().repo_id().expect("repo id");
+    let one = crate::signing::sign_record(
+        subject,
+        rdy_model::signature::StatementSource::Approval(&landing),
+        repo,
+        rdy_model::Provenance {
+            actor: "human:perf".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 0,
+        },
+        crate::signing::TestKey::Person,
+    );
+    // 100 records of one subject, told apart by who asked and when (not covered by the SSHSIG)
+    let many: Vec<_> = (0..100)
+        .map(|i| {
+            let mut g = one.clone();
+            g.signed_by.at_ms = i;
+            g
+        })
+        .collect();
+    let frames = rdy_store::signature::frames(&many).expect("frames");
+    r.store_mut().write(frames).expect("write the signatures");
+    r.seal_open().expect("seal");
+    {
+        let st = r.read();
+        let reader = st.reader();
+        out.push(measure(&format!("signature_lookup{sfx}"), runs, |_| {
+            let ids = reader.signatures_of(&subject).expect("lookup");
+            assert_eq!(ids.len(), 100);
+            for id in &ids {
+                black_box(reader.signature(id).expect("decode"));
+            }
+        }));
+    }
+    drop(r);
+    std::fs::remove_dir_all(&work).expect("remove the copy");
+}
+
 /// `diff_since`: the block and word diff from the tier's tag to canon, as the page of the changes
 /// since the tag reads it (`render` builds it among its pages). The tag's landing is found outside
 /// the timer. Only the 10k tier is tagged (F3).
@@ -3965,6 +4053,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_export(&mut out, &proj, dir.path(), 5);
     tier_clone(&mut out, &proj, dir.path(), "", 5);
     tier_publication(&mut out, &proj, dir.path(), 5);
+    tier_signatures(&mut out, &proj, dir.path(), "", SIGNATURE_RUNS);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -4720,6 +4809,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_dump(&mut out, &proj, parent, sfx, 3);
     tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);
     tier_clone(&mut out, &proj, parent, sfx, 3);
+    tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
@@ -5523,6 +5613,86 @@ mod tests {
         }
     }
 
+    const SIG10_OPS: [&str; 3] = ["signature_check", "signature_check_sk", "signature_lookup"];
+
+    /// Task 10: the three signature ops exist in both runners under their names, run at least
+    /// once, check valid fixed vectors, and carry no ceiling and no baseline entry. The test
+    /// asserts no duration (D-PACK3): the cost of the pure check is reported, not bounded.
+    #[test]
+    fn sig10_the_signature_ops_are_reported_without_ceilings() {
+        // the fixed vectors are valid: signed, covered and trusted; only the sk vector reports
+        // the authenticated presence bit
+        for (sk, presence) in [(false, "absent"), (true, "present")] {
+            let v = crate::signing::vector(sk);
+            let c =
+                rdy_engine::signature_check::check_signature(&v.record, &v.context, Some(&v.trust));
+            assert_eq!(
+                (c.signed.as_str(), c.statement.as_str(), c.trust.as_str()),
+                ("valid", "match", "trusted"),
+                "sk {sk}: {c:?}"
+            );
+            assert_eq!((c.code.as_deref(), c.presence.as_str()), (None, presence));
+            assert_eq!(
+                c.key_type.as_deref(),
+                Some(if sk {
+                    "sk-ssh-ed25519@openssh.com"
+                } else {
+                    "ssh-ed25519"
+                })
+            );
+            assert!(c.warnings.is_empty(), "{c:?}");
+        }
+        rdy_model::seed_ids_for_tests(0x7369_6731);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        drop(r);
+        let before = rdx16_segments(&proj);
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for sfx in ["", LARGE_SUFFIX] {
+            let mut out = vec![];
+            tier_signatures(&mut out, &proj, dir.path(), sfx, 3);
+            let names: Vec<String> = out.iter().map(|m| m.op.clone()).collect();
+            let want: Vec<String> = SIG10_OPS.iter().map(|o| format!("{o}{sfx}")).collect();
+            assert_eq!(names, want);
+            for m in &out {
+                assert!(m.runs >= 3, "{m:?}");
+                assert_eq!(spec_ceiling_ms(&m.op), None, "{} has a ceiling", m.op);
+                let target = spec_target(&m.op).unwrap_or_else(|| panic!("{} has no target", m.op));
+                assert!(target.starts_with("no spec target: "), "{target}");
+                assert!(target.contains("reported; no ceiling"), "{target}");
+                assert_eq!(
+                    target.contains(LARGE_TIER_NOTE),
+                    !sfx.is_empty(),
+                    "{target}"
+                );
+                for class in baseline["classes"].as_object().expect("classes").values() {
+                    assert!(class["ops"].get(&m.op).is_none(), "{} is baselined", m.op);
+                }
+            }
+        }
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(rdx16_segments(&proj), before, "the source log is unchanged");
+        // both runners call the tier with their own suffix and the shared run count
+        let src = include_str!("perf.rs");
+        let body = |name: &str| {
+            let from = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(
+            body("pub fn run_workload(")
+                .contains("tier_signatures(&mut out, &proj, dir.path(), \"\", SIGNATURE_RUNS);")
+        );
+        assert!(
+            body("fn run_large_tier(")
+                .contains("tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);")
+        );
+    }
+
     /// The export and clone ops run end to end on a small tree: the project is landed and closed,
     /// as in the tiers, and each op has a reported target and no spec ceiling.
     #[test]
@@ -5675,11 +5845,13 @@ mod tests {
         at("tier_export(&mut out, &proj, dir.path(), 5);");
         at("tier_clone(&mut out, &proj, dir.path(), \"\", 5);");
         at("tier_publication(&mut out, &proj, dir.path(), 5);");
+        at("tier_signatures(&mut out, &proj, dir.path(), \"\", SIGNATURE_RUNS);");
         let large = src.find("fn run_large_tier(").expect("run_large_tier");
         let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
         assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_dump(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_clone(&mut out, &proj, parent, sfx, 3);"));
+        assert!(large.contains("tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);"));
         assert!(large.contains("tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);"));
     }
 

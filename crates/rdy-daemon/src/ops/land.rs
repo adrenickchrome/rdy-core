@@ -1,7 +1,7 @@
 //! The landing ops: propose, approve and tag.
 use super::*;
-use rdy_engine::consequence::{land_and_report, propose_and_report};
-use rdy_engine::engine::write_typed;
+use rdy_engine::consequence::propose_and_report;
+use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_engine::{LandOptions, RdyError, Relay, alt};
 use rdy_model::RelayEvidence;
 use serde::Deserialize;
@@ -119,7 +119,18 @@ pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError>
         relay,
         evidence: None,
     };
-    let mut v = land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))?;
+    // the approval, signed as the signing settings say (D-1Z951): a relayed approval runs as the
+    // person, and the asking session (the relaying agent) is who asks for its signatures
+    let asking = if opts.relay.is_some() {
+        cx.session.clone()
+    } else {
+        s
+    };
+    let request = SigningAct::Approve {
+        proposal: a.proposal,
+        options: opts,
+    };
+    let mut v = run_signed_act(cx.engine, cx.agent, &asking, cx.human, request)?;
     if let Some(by) = recorded {
         v["relayed_by"] = json!(by);
     }
@@ -129,23 +140,18 @@ pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError>
 /// A tag. With no relay flags, as before: a human session tags, an agent session is refused
 /// (`AGENT_NOT_APPROVER`, O19). With them, the relayed tag (`tag_as`, D-DGCH7).
 pub(super) fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {
-    let Some(relay) = relay_of(a.relayed_by, a.evidence, a.question, a.session_ref) else {
-        let s = approver(cx.session)?;
-        return write_typed(cx.engine, move |r| {
-            r.tag(&s, &a.version, a.landing.as_deref(), a.message)
-        });
+    // with no relay flags a human tags as itself and an agent is refused, as before; either way
+    // the tag is signed as the signing settings say (D-1Z951)
+    let (s, relay) = match relay_of(a.relayed_by, a.evidence, a.question, a.session_ref) {
+        None => (approver(cx.session)?, RelayInput::default()),
+        Some(relay) => (cx.session.clone(), relay),
     };
-    let s = cx.session.clone();
-    let person = cx.human.to_string();
-    write_typed(cx.engine, move |r| {
-        r.tag_as(
-            &s,
-            &person,
-            &relay,
-            false,
-            &a.version,
-            a.landing.as_deref(),
-            a.message,
-        )
-    })
+    let request = SigningAct::Tag {
+        name: a.version,
+        landing: a.landing,
+        message: a.message,
+        relay,
+        implicit: false,
+    };
+    run_signed_act(cx.engine, cx.agent, &s, cx.human, request)
 }

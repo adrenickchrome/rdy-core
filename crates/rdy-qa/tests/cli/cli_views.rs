@@ -248,6 +248,7 @@ fn msw13_block_and_brief_strip_a_view_prefix_as_edit_block_does() {
         session: &h,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let b = dispatch(&cx, "block", json!({"id": c, "view": "view:foo"})).unwrap();
     assert_eq!(b["version"], want.as_str(), "{b}");
@@ -266,6 +267,7 @@ fn msw13_a_write_or_proposal_to_the_empty_view_name_is_refused() {
         session: &h,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     for view in ["view:", ""] {
         let err = dispatch(&cx, "new_doc", json!({"path": "a", "view": view})).unwrap_err();
@@ -288,6 +290,7 @@ fn msw13_a_proposal_to_an_over_long_view_name_is_e_limit() {
         session: &h,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let err = dispatch(
         &cx,

@@ -5,6 +5,7 @@ use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
+use rdy_model::signature::Signature;
 use rdy_model::{
     AltChoice, Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
     StateSnapshot, Tag, decision,
@@ -868,21 +869,60 @@ impl Store {
     ///
     /// Writes `tag` and the ref `tag/<name>` → its hash in one atomic write.
     pub fn put_tag(&mut self, tag: &Tag) -> Result<Hash, StoreError> {
-        let (id, items) = self.tag_items(tag);
-        self.write(items)?;
-        Ok(id)
+        let prepared = self.prepare_tag(tag, None)?;
+        Ok(self.commit_tag(prepared, &[])?.0)
     }
 
     /// `put_tag`, with the answer `a` that holds the person's relay in the same write (O14,
     /// D-DGCH7): the tag and its ref, then `a` with `targets` set to the tag, and its ref. The
     /// tag is encoded as `put_tag` encodes it (D-F0904). Returns the tag's id and the answer's.
     pub fn put_tag_answered(&mut self, tag: &Tag, a: Answer) -> Result<(Hash, Hash), StoreError> {
+        let prepared = self.prepare_tag(tag, Some(a))?;
+        let (id, answer) = self.commit_tag(prepared, &[])?;
+        Ok((id, answer.expect("an answered tag writes its answer")))
+    }
+
+    /// The write of `put_tag` (with `a` none) or `put_tag_answered` (with `a`), prepared without
+    /// writing: the tag and its ref, then the answer with `targets` set to the tag, and its ref.
+    /// The answer's rules are checked here. [`Store::commit_tag`] writes it.
+    pub fn prepare_tag(&self, tag: &Tag, a: Option<Answer>) -> Result<PreparedTag, StoreError> {
         let (id, items) = self.tag_items(tag);
-        let a = Answer {
-            targets: vec![id],
-            ..a
+        let (answer, items) = match a {
+            None => (None, items),
+            Some(a) => {
+                let a = Answer {
+                    targets: vec![id],
+                    ..a
+                };
+                let (aid, items) = self.answer_items(&a, items)?;
+                (Some((aid, a)), items)
+            }
         };
-        Ok((id, self.put_answer_with(&a, items)?))
+        Ok(PreparedTag {
+            items,
+            tag: tag.clone(),
+            hash: id,
+            answer,
+        })
+    }
+
+    /// Writes the tag `prepared` holds, with `signatures` (each of its tag, D-1Z951) in the same
+    /// batch, after the tag and its answer. Returns the tag's id and the answer's. A failed write
+    /// writes nothing.
+    pub fn commit_tag(
+        &mut self,
+        prepared: PreparedTag,
+        signatures: &[Signature],
+    ) -> Result<(Hash, Option<Hash>), StoreError> {
+        let PreparedTag {
+            mut items,
+            hash,
+            answer,
+            ..
+        } = prepared;
+        items.extend(crate::signature::frames(signatures)?);
+        self.write(items)?;
+        Ok((hash, answer.map(|(h, _)| h)))
     }
 
     /// The tag's id and the frames `put_tag` writes: the tag, then `tag/<name>` → its id.
@@ -892,6 +932,34 @@ impl Store {
         let mut items = vec![(kinds::TAG, bytes)];
         items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
         (id, items)
+    }
+}
+
+/// A tag built by [`Store::prepare_tag`] and not yet written: the tag, its hash and the final
+/// answer that relays it (its `targets` the tag), with private frames that only
+/// [`Store::commit_tag`] writes.
+#[derive(Clone, Debug)]
+pub struct PreparedTag {
+    items: Frames,
+    tag: Tag,
+    hash: Hash,
+    answer: Option<(Hash, Answer)>,
+}
+
+impl PreparedTag {
+    /// The tag the commit writes.
+    pub fn tag(&self) -> &Tag {
+        &self.tag
+    }
+
+    /// The final TAG hash.
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
+    /// The final ANSWER and its hash, `targets` included; none for a tag with no relay.
+    pub fn answer(&self) -> Option<(Hash, &Answer)> {
+        self.answer.as_ref().map(|(h, a)| (*h, a))
     }
 }
 

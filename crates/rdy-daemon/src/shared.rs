@@ -460,6 +460,7 @@ mod tests {
                 session: &s,
                 human: "human:t",
                 cwd: out.path(),
+                agent: &rdy_engine::signing_crypto::UnavailableAgent,
             };
             dispatch(
                 &cx,

@@ -33,12 +33,13 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
         session: s,
         human: "human:t",
         cwd,
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     }
 }
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 43);
+    assert_eq!(OPS.len(), 45);
     assert_eq!(OPS[0], "session");
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
@@ -51,6 +52,12 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
         OPS[render + 1],
         "publication_check",
         "pub9: publication_check follows render"
+    );
+    let answer = OPS.iter().position(|o| *o == "answer").unwrap();
+    assert_eq!(
+        &OPS[answer + 1..],
+        ["sign", "key_show"],
+        "sig9: sign and key_show follow answer"
     );
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
@@ -493,6 +500,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
                 session: &s,
                 human: "human:t",
                 cwd: &root,
+                agent: &rdy_engine::signing_crypto::UnavailableAgent,
             };
             dispatch(
                 &c,
@@ -525,6 +533,7 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
                 session: &s,
                 human: "human:t",
                 cwd: &root,
+                agent: &rdy_engine::signing_crypto::UnavailableAgent,
             };
             dispatch(
                 &c,
@@ -677,7 +686,7 @@ fn hd3_an_op_arg_typo_gets_a_did_you_mean() {
     assert_eq!(err.message, "log: unknown field \"limt\"");
     assert_eq!(
         err.fix,
-        "did you mean \"limit\"? the fields are limit, since"
+        "did you mean \"limit\"? the fields are limit, since, verify"
     );
 }
 

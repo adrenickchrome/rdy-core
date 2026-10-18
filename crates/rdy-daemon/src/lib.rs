@@ -8,6 +8,8 @@ pub mod handler;
 pub mod hello;
 pub mod layout;
 pub mod session;
+pub mod signing_agent;
+pub mod signing_transport;
 pub mod site;
 pub mod socket;
 pub mod sys;

@@ -6,7 +6,7 @@ use rdy_qa::mcp::{McpClient, Reply};
 use serde_json::{Map, Value, json};
 
 /// Tools that take no parameters, so none can be wrong-typed.
-const NO_PARAMS: [&str; 1] = ["rdy_tags"];
+const NO_PARAMS: [&str; 2] = ["rdy_tags", "rdy_key_show"];
 
 /// Whether the property's schema accepts a JSON string (its own type, or an anyOf branch's).
 fn takes_string(prop: &Value) -> bool {

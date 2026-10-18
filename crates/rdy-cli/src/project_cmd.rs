@@ -30,6 +30,9 @@ pub(crate) struct FsckArgs {
     /// Also remove the quarantine files a crash left (.torn- segment tails and damaged indexes). Human only.
     #[arg(long)]
     clean_quarantine: bool,
+    /// On a passing check, also list every canon landing and its tags with their signature reports.
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -112,14 +115,29 @@ pub(crate) fn reindex(env: &Env) -> Result<(Value, String), ErrorReply> {
 }
 
 pub(crate) fn fsck(env: &Env, a: FsckArgs) -> Result<(Value, String), ErrorReply> {
-    let FsckArgs { clean_quarantine } = a;
-    let v = call(env, "fsck", json!({"clean_quarantine": clean_quarantine}))?;
+    let FsckArgs {
+        clean_quarantine,
+        verbose,
+    } = a;
+    let args = if verbose {
+        json!({"clean_quarantine": clean_quarantine, "verbose": true})
+    } else {
+        json!({"clean_quarantine": clean_quarantine})
+    };
+    let v = call(env, "fsck", args)?;
     let mut t = format!(
         "ok: {} frames, {} landings, {} versions",
         num(&v["frames"]),
         num(&v["landings"]),
         num(&v["versions"]),
     );
+    for state in v["signature_states"].as_array().into_iter().flatten() {
+        t.push_str(&format!("\nlanding {}", text(&state["landing"])));
+        for line in rdy_engine::signing_read::verified_lines(state) {
+            t.push('\n');
+            t.push_str(&line);
+        }
+    }
     for name in v["removed"].as_array().into_iter().flatten() {
         t.push_str(&format!("\nremoved {}", text(name)));
     }

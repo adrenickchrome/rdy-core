@@ -32,6 +32,7 @@ fn fixture() -> Fixture {
         session: &s,
         human: "human:t",
         cwd: dir.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let seeded = write_typed(&e, |r| {
         write(

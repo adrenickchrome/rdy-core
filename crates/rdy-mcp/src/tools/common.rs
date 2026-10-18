@@ -2,6 +2,7 @@
 
 use crate::read_page;
 use rdy_engine::engine::Engine;
+use rdy_engine::signing_crypto::{SigningAgent, UnavailableAgent};
 use rdy_engine::*;
 use rdy_model::BlockId;
 use schemars::JsonSchema;
@@ -70,6 +71,9 @@ pub struct McpState {
     /// The sessions connected to this server (ib10): `rdy_session` tells it who this one is.
     /// `RdyServer::new` sets the shared hub; `McpState::new` starts with a hub of its own.
     pub hub: Arc<crate::notify::NotifyHub>,
+    /// The caller's SSH agent: the process at the other end of this session. `McpState::new`
+    /// starts with none ([`UnavailableAgent`]); `RdyServer::with_agent` sets it.
+    pub agent: Arc<dyn SigningAgent>,
 }
 
 impl McpState {
@@ -85,6 +89,7 @@ impl McpState {
             reads: Default::default(),
             lease_owner: rdy_engine::semantic::lease::LeaseRegistry::local_owner(),
             hub: crate::notify::NotifyHub::new(),
+            agent: Arc::new(UnavailableAgent),
         }
     }
 

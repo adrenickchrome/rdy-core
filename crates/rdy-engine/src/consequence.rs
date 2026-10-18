@@ -1321,6 +1321,12 @@ pub fn land_and_report(
     Ok(v)
 }
 
+/// Attaches the consequences of the version an approval's reply landed (its `version`), as
+/// `land_and_report` does: for a reply built after its write.
+pub(crate) fn report_approval(engine: &dyn Engine, v: &mut serde_json::Value) {
+    report_landing(engine, v, "version", None);
+}
+
 /// Attaches the landing consequences to the landing of an answer's reply, which is an
 /// `AnswerInfo` or a list of them: for each one with a `landing`, the consequences of the
 /// version it landed, as `land_and_report` attaches them to an approval. Other answers stay as

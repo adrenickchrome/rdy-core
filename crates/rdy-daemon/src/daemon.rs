@@ -831,11 +831,18 @@ impl Conn {
             }
             Proto::Mcp => {
                 let id = session.id;
+                // the signing channel comes out of the connection here; the pump joins the
+                // service's stream and the channel to the connection
+                let crate::signing_transport::HostMcp {
+                    stream,
+                    agent,
+                    pump,
+                } = crate::signing_transport::host_mcp(stream);
+                let mut pump = AbortOnDrop(tokio::spawn(pump));
                 // spawned so a panic in the handler's future surfaces as a JoinError here
-                let mut task =
-                    AbortOnDrop(tokio::spawn(self.handler.mcp(session, Box::new(stream))));
-                // on a stop the session's future is dropped (`task`'s drop aborts it), which
-                // closes the stream under it
+                let mut task = AbortOnDrop(tokio::spawn(self.handler.mcp(session, stream, agent)));
+                // on a stop the session's future and the pump are dropped (their drops abort
+                // them), which closes the stream under them
                 tokio::select! {
                     biased;
                     _ = stop.changed() => {}
@@ -844,6 +851,12 @@ impl Conn {
                             && e.is_panic()
                         {
                             log(&format!("mcp session {id} panicked"));
+                        }
+                        // the service's last bytes reach the connection before it closes
+                        tokio::select! {
+                            biased;
+                            _ = stop.changed() => {}
+                            _ = &mut pump.0 => {}
                         }
                     }
                 }

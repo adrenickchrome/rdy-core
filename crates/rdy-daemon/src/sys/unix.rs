@@ -299,6 +299,439 @@ impl StopSignals {
     }
 }
 
+// 7. The caller's SSH agent
+
+/// A blocking connection to the caller's SSH agent (the socket its `SSH_AUTH_SOCK` names). It
+/// is used only on a request's blocking worker, never on the daemon's writer, and lives for one
+/// signing call.
+pub type AgentStream = std::os::unix::net::UnixStream;
+
+/// How long a connect waits before it tries again when the agent's listen queue is full (Linux
+/// refuses a non-blocking connect then, with `EAGAIN`). It is a retry pace, not a timeout: the
+/// connect goes on until it connects, fails or is cancelled.
+const AGENT_CONNECT_RETRY_MS: libc::c_int = 20;
+
+/// Ends a pending [`agent_connect`] from another thread. Once set, it stays set.
+pub struct AgentCancel {
+    /// Shut down to set the cancel.
+    trigger: std::os::unix::net::UnixStream,
+    /// Readable (at its end) once the cancel is set.
+    watch: std::os::unix::net::UnixStream,
+}
+
+impl AgentCancel {
+    /// A new cancel, not set.
+    pub fn new() -> io::Result<AgentCancel> {
+        let (trigger, watch) = std::os::unix::net::UnixStream::pair()?;
+        Ok(AgentCancel { trigger, watch })
+    }
+
+    /// Sets the cancel: a connect that waits with it ends as `Interrupted`. Setting it again
+    /// does nothing.
+    pub fn cancel(&self) {
+        let _ = self.trigger.shutdown(std::net::Shutdown::Write);
+    }
+
+    /// Whether the cancel is set.
+    pub fn is_set(&self) -> bool {
+        let mut fds = [self.watch_fd()];
+        matches!(poll_fds(&mut fds, 0), Ok(n) if n > 0)
+    }
+
+    /// Waits until the cancel is set (or `poll` fails, which it does not on a live socket).
+    pub fn wait(&self) {
+        let mut fds = [self.watch_fd()];
+        let _ = poll_fds(&mut fds, -1);
+    }
+
+    fn watch_fd(&self) -> libc::pollfd {
+        libc::pollfd {
+            fd: self.watch.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }
+    }
+}
+
+/// `poll` on `fds` for at most `timeout_ms` (-1 waits without end), again after a signal.
+#[allow(unsafe_code)]
+fn poll_fds(fds: &mut [libc::pollfd], timeout_ms: libc::c_int) -> io::Result<libc::c_int> {
+    let n = libc::nfds_t::try_from(fds.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    loop {
+        // SAFETY: `fds` is a live, writable array of `n` pollfd records for the whole call.
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), n, timeout_ms) };
+        if r >= 0 {
+            return Ok(r);
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// The error of a cancelled connect.
+fn agent_cancelled() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "agent connect cancelled")
+}
+
+/// The socket address of `path`, and its length.
+#[allow(unsafe_code)]
+fn unix_addr(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    // SAFETY: `sockaddr_un` is plain integers and bytes, for which all zeros is a valid value.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    // One byte stays for the terminating NUL.
+    if bytes.contains(&0) || bytes.len() >= addr.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "agent socket path is too long or holds a NUL byte",
+        ));
+    }
+    addr.sun_family =
+        libc::sa_family_t::try_from(libc::AF_UNIX).map_err(|_| io::ErrorKind::InvalidInput)?;
+    for (to, from) in addr.sun_path.iter_mut().zip(bytes) {
+        *to = libc::c_char::from_ne_bytes([*from]);
+    }
+    let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        addr.sun_len = u8::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?;
+    }
+    let len = libc::socklen_t::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?;
+    Ok((addr, len))
+}
+
+/// A new non-blocking, close-on-exec Unix stream socket.
+///
+/// Where the platform has `SOCK_CLOEXEC`, the socket is close-on-exec from its creation, so a
+/// child that another thread forks at any moment never gets it. Elsewhere (macOS) the flag is set
+/// right after creation, as the standard library does there: such a platform has no atomic way.
+#[allow(unsafe_code)]
+fn nonblocking_unix_socket() -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "illumos"
+    ))]
+    {
+        // SAFETY: `socket` takes three integers and touches no memory of ours.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a new descriptor that nothing else owns; the OwnedFd closes it.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        #[cfg(test)]
+        tests::after_agent_socket(fd.as_raw_fd());
+        Ok(fd)
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "illumos"
+    )))]
+    {
+        // SAFETY: `socket` takes three integers and touches no memory of ours.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a new descriptor that nothing else owns; the OwnedFd closes it.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        #[cfg(test)]
+        tests::after_agent_socket(fd.as_raw_fd());
+        // SAFETY: `fcntl` with F_SETFD takes the open descriptor and integers.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fcntl` with F_GETFL takes the open descriptor and touches no memory of ours.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fcntl` with F_SETFL takes the open descriptor and integers.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(fd)
+    }
+}
+
+/// One `connect` of the socket `fd` to `addr` (`len` bytes long).
+#[allow(unsafe_code)]
+fn connect_once(
+    fd: &std::os::fd::OwnedFd,
+    addr: &libc::sockaddr_un,
+    len: libc::socklen_t,
+) -> io::Result<()> {
+    // SAFETY: `addr` is a valid socket address of at least `len` bytes for the whole call.
+    let r = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            std::ptr::from_ref(addr).cast::<libc::sockaddr>(),
+            len,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Connects to the SSH agent socket at `path`, on the caller's thread. The connect waits until
+/// it connects or fails, or until `cancel` is set from another thread: then it ends as
+/// `Interrupted`, and its socket is closed before it returns. A connect never runs on after
+/// its call: there is no helper thread.
+#[allow(unsafe_code)] // getsockopt
+pub fn agent_connect(path: &Path, cancel: &AgentCancel) -> io::Result<AgentStream> {
+    let (addr, len) = unix_addr(path)?;
+    let fd = nonblocking_unix_socket()?;
+    loop {
+        if cancel.is_set() {
+            return Err(agent_cancelled());
+        }
+        let Err(e) = connect_once(&fd, &addr, len) else {
+            break;
+        };
+        match e.raw_os_error() {
+            // The connect goes on in the background: wait for it, or for the cancel.
+            Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR) => {
+                let mut fds = [
+                    libc::pollfd {
+                        fd: fd.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    },
+                    cancel.watch_fd(),
+                ];
+                poll_fds(&mut fds, -1)?;
+                if fds[1].revents != 0 {
+                    return Err(agent_cancelled());
+                }
+                let mut err: libc::c_int = 0;
+                let mut err_len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
+                    .map_err(|_| io::ErrorKind::InvalidInput)?;
+                // SAFETY: `err` and `err_len` are live, writable and sized for SO_ERROR.
+                let r = unsafe {
+                    libc::getsockopt(
+                        fd.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        (&raw mut err).cast::<libc::c_void>(),
+                        &mut err_len,
+                    )
+                };
+                if r < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if err != 0 {
+                    return Err(io::Error::from_raw_os_error(err));
+                }
+                break;
+            }
+            // A connect interrupted earlier has finished meanwhile.
+            Some(libc::EISCONN) => break,
+            // The listen queue is full (Linux): try again, unless the cancel comes first.
+            Some(libc::EAGAIN) => {
+                let mut fds = [cancel.watch_fd()];
+                if poll_fds(&mut fds, AGENT_CONNECT_RETRY_MS)? > 0 {
+                    return Err(agent_cancelled());
+                }
+            }
+            _ => return Err(e),
+        }
+    }
+    let stream = AgentStream::from(fd);
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+/// A second handle on `stream`, so another thread can close it while a read waits.
+pub fn agent_handle(stream: &AgentStream) -> io::Result<AgentStream> {
+    stream.try_clone()
+}
+
+/// Closes `stream` both ways: a read or write that waits on it, through any handle, ends. An
+/// error (the stream is already closed) is ignored.
+pub fn agent_close(stream: &AgentStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+// 8. The caller's interrupt while it signs
+
+/// The write end of the pipe the `SIGINT` handler writes to; -1 until the pipe exists. It is
+/// never closed, so the handler never writes to a reused descriptor.
+static INTERRUPT_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Who catches `SIGINT` now.
+struct InterruptState {
+    /// The guards alive; the handler is installed while there is one.
+    holders: usize,
+    /// The action the first guard replaced, put back by the last.
+    previous: Option<libc::sigaction>,
+    /// Counts the interrupts, for every guard; made with the pipe, by the first guard.
+    count: Option<tokio::sync::watch::Sender<u64>>,
+}
+
+static INTERRUPT_STATE: std::sync::Mutex<InterruptState> = std::sync::Mutex::new(InterruptState {
+    holders: 0,
+    previous: None,
+    count: None,
+});
+
+fn interrupt_state() -> std::sync::MutexGuard<'static, InterruptState> {
+    INTERRUPT_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `SIGINT` caught while the guard lives: [`InterruptGuard::recv`] ends at the next one. With no
+/// guard alive, `SIGINT` has the action it had before the first guard.
+pub struct InterruptGuard {
+    seen: tokio::sync::watch::Receiver<u64>,
+}
+
+impl InterruptGuard {
+    /// Waits for a `SIGINT` caught since the guard was made.
+    pub async fn recv(&mut self) {
+        if self.seen.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        let mut st = interrupt_state();
+        st.holders = st.holders.saturating_sub(1);
+        if st.holders == 0
+            && let Some(previous) = st.previous.take()
+        {
+            // SAFETY: `previous` is the action `sigaction` reported for SIGINT; putting it back
+            // touches no memory of ours.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::sigaction(libc::SIGINT, &previous, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
+/// The `SIGINT` handler: one byte on the pipe. It does only async-signal-safe work and keeps
+/// `errno`.
+extern "C" fn on_interrupt(_signal: libc::c_int) {
+    let fd = INTERRUPT_FD.load(std::sync::atomic::Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: `errno_location` returns this thread's errno; `write` is async-signal-safe and
+    // writes one byte from a live buffer to a non-blocking descriptor that is never closed.
+    #[allow(unsafe_code)]
+    unsafe {
+        let errno = errno_location();
+        let saved = *errno;
+        libc::write(fd, [1u8].as_ptr().cast(), 1);
+        *errno = saved;
+    }
+}
+
+/// This thread's `errno`.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+#[allow(unsafe_code)]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: returns the caller's thread's errno; no other effect.
+    unsafe { libc::__error() }
+}
+
+/// This thread's `errno`.
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+#[allow(unsafe_code)]
+unsafe fn errno_location() -> *mut libc::c_int {
+    // SAFETY: returns the caller's thread's errno; no other effect.
+    unsafe { libc::__errno_location() }
+}
+
+/// Makes the pipe, and the thread that counts what the handler writes to it.
+fn interrupt_count() -> io::Result<tokio::sync::watch::Sender<u64>> {
+    use std::io::Read;
+    use std::os::fd::IntoRawFd;
+    let (mut read, write) = std::os::unix::net::UnixStream::pair()?;
+    write.set_nonblocking(true)?;
+    let (count, _) = tokio::sync::watch::channel(0u64);
+    let counter = count.clone();
+    std::thread::Builder::new()
+        .name("rdy-sigint".into())
+        .spawn(move || {
+            let mut buf = [0u8; 64];
+            while let Ok(n) = read.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                counter.send_modify(|c| *c = c.wrapping_add(1));
+            }
+        })?;
+    INTERRUPT_FD.store(write.into_raw_fd(), std::sync::atomic::Ordering::Relaxed);
+    Ok(count)
+}
+
+/// Catches `SIGINT` until the guard is dropped (guards may overlap). Call it before the work an
+/// interrupt should stop begins, so an interrupt during that work is never missed.
+pub fn catch_interrupt() -> io::Result<InterruptGuard> {
+    let mut st = interrupt_state();
+    let count = match &st.count {
+        Some(c) => c.clone(),
+        None => {
+            let c = interrupt_count()?;
+            st.count = Some(c.clone());
+            c
+        }
+    };
+    let seen = count.subscribe();
+    if st.holders == 0 {
+        // SAFETY: zeroed `sigaction` structs are valid; the new action names a handler that does
+        // only async-signal-safe work, and the old action is written into memory we own.
+        #[allow(unsafe_code)]
+        let previous = unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            previous
+        };
+        st.previous = Some(previous);
+    }
+    st.holders += 1;
+    Ok(InterruptGuard { seen })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sys::{
@@ -545,6 +978,198 @@ mod tests {
         assert_eq!(exit_code(ExitStatus::from_raw(libc::SIGTERM)), 128 + 15);
         assert_eq!(exit_code(ExitStatus::from_raw(3 << 8)), 3);
         assert_eq!(exit_code(ExitStatus::from_raw(0)), 0);
+    }
+
+    /// Lowers the listen backlog of `listener` to 1, so a few queued connections fill it (macOS
+    /// reads a backlog of 0 as the system maximum).
+    #[allow(unsafe_code)]
+    fn lower_backlog(listener: &std::os::unix::net::UnixListener) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `listen` takes the listener's own open descriptor and an integer.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    }
+
+    /// The connections waiting in `listener`'s queue, accepted until none is left.
+    fn drain(listener: &std::os::unix::net::UnixListener) -> usize {
+        listener.set_nonblocking(true).unwrap();
+        let mut n = 0;
+        loop {
+            match listener.accept() {
+                Ok(_) => n += 1,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return n,
+                Err(e) => panic!("accept: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sig3_agent_connect_cancel_ends_a_pending_connect_and_drops_its_socket() {
+        use crate::sys::{AgentCancel, agent_connect};
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        use std::sync::mpsc::channel;
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("agent.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        // A cancel set before the connect: nothing reaches the listener.
+        let cancel = AgentCancel::new().unwrap();
+        cancel.cancel();
+        let e = agent_connect(&path, &cancel).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(drain(&listener), 0, "a cancelled connect never connects");
+
+        // Fill the listen queue with non-blocking connects until one is turned away. On Linux a
+        // further connect then waits for room; on macOS it is refused at once (a Unix connect
+        // never waits there).
+        lower_backlog(&listener);
+        let (addr, len) = super::unix_addr(&path).unwrap();
+        let mut held = Vec::new();
+        while held.len() < 4096 {
+            let fd = super::nonblocking_unix_socket().unwrap();
+            if super::connect_once(&fd, &addr, len).is_err() {
+                break;
+            }
+            held.push(fd);
+        }
+        // Repeated cancelled attempts: each ends, and none is left to connect later.
+        for _ in 0..3 {
+            let cancel = Arc::new(AgentCancel::new().unwrap());
+            let (started_tx, started) = channel();
+            let attempt = {
+                let cancel = Arc::clone(&cancel);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    agent_connect(&path, &cancel)
+                })
+            };
+            started.recv().unwrap();
+            cancel.cancel();
+            let e = attempt.join().unwrap().unwrap_err();
+            if cfg!(target_os = "linux") {
+                assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+            } else {
+                assert!(matches!(
+                    e.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::ConnectionRefused
+                ));
+            }
+        }
+        // Only the connections made to fill the queue are in it: the cancelled attempts' sockets
+        // are gone, so none connects once there is room.
+        assert_eq!(drain(&listener), held.len());
+        drop(held);
+        assert_eq!(drain(&listener), 0);
+        // With room, an uncancelled connect succeeds.
+        let _c = agent_connect(&path, &AgentCancel::new().unwrap()).unwrap();
+        assert_eq!(drain(&listener), 1);
+    }
+
+    #[test]
+    fn sig3_agent_stream_connects_and_close_wakes_a_blocked_read() {
+        use crate::sys::{AgentCancel, agent_close, agent_connect, agent_handle};
+        use std::io::{Read, Write};
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("agent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (got_tx, got_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut req = [0u8; 5];
+            conn.read_exact(&mut req).unwrap();
+            got_tx.send(req).unwrap();
+            // hold the connection open without replying until the client closes it
+            let mut rest = Vec::new();
+            conn.read_to_end(&mut rest).unwrap();
+        });
+        let mut stream = agent_connect(&path, &AgentCancel::new().unwrap()).unwrap();
+        let handle = agent_handle(&stream).unwrap();
+        stream.write_all(&[0, 0, 0, 1, 11]).unwrap();
+        assert_eq!(got_rx.recv().unwrap(), [0, 0, 0, 1, 11]);
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4];
+            stream.read(&mut buf)
+        });
+        // closing through the second handle ends the blocked read: no reply arrives
+        agent_close(&handle);
+        assert!(matches!(reader.join().unwrap(), Ok(0) | Err(_)));
+        // The server's end sees end-of-file once the last handle is gone, as when a call drops
+        // its connection. (macOS can miss the write-side shutdown that races a blocked read, so
+        // the test does not wait on it while the handle is open.)
+        drop(handle);
+        server.join().unwrap();
+        // no listener at a path: connect fails
+        assert!(agent_connect(&d.path().join("none.sock"), &AgentCancel::new().unwrap()).is_err());
+    }
+
+    /// A step run on the agent socket's descriptor in a test.
+    type SocketHook = Box<dyn FnMut(std::os::fd::RawFd)>;
+
+    thread_local! {
+        /// Runs on this thread right after the agent socket is created, before anything else
+        /// is done to it.
+        static AFTER_AGENT_SOCKET: std::cell::RefCell<Option<SocketHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_agent_socket(fd: std::os::fd::RawFd) {
+        AFTER_AGENT_SOCKET.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(fd);
+            }
+        });
+    }
+
+    #[test]
+    fn sig3_agent_socket_is_non_blocking_and_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        let fd = super::nonblocking_unix_socket().unwrap();
+        // SAFETY: `fcntl` with F_GETFD and F_GETFL takes the open descriptor only.
+        #[allow(unsafe_code)]
+        let (fd_flags, fl_flags) = unsafe {
+            (
+                libc::fcntl(fd.as_raw_fd(), libc::F_GETFD),
+                libc::fcntl(fd.as_raw_fd(), libc::F_GETFL),
+            )
+        };
+        assert!(fd_flags >= 0 && fl_flags >= 0);
+        assert_ne!(fd_flags & libc::FD_CLOEXEC, 0, "close-on-exec");
+        assert_ne!(fl_flags & libc::O_NONBLOCK, 0, "non-blocking");
+    }
+
+    /// A child process started at any moment after the agent socket exists never gets it: the
+    /// socket is close-on-exec from its creation, not from a later step a concurrent fork can
+    /// come before.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn sig3_agent_socket_is_never_inherited_by_a_child_started_at_its_creation() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let inherited: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
+        AFTER_AGENT_SOCKET.with(|h| {
+            let inherited = Rc::clone(&inherited);
+            *h.borrow_mut() = Some(Box::new(move |fd| {
+                let link = fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+                let link = link.to_str().unwrap().to_owned();
+                assert!(link.starts_with("socket:"), "{link}");
+                // The child is a shell: it reports whether its own descriptor `fd` is this socket.
+                let status = Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("[ \"$(readlink /proc/$$/fd/{fd})\" = '{link}' ]"))
+                    .status()
+                    .unwrap();
+                inherited.set(Some(status.success()));
+            }));
+        });
+        let fd = super::nonblocking_unix_socket();
+        AFTER_AGENT_SOCKET.with(|h| *h.borrow_mut() = None);
+        drop(fd.unwrap());
+        assert_eq!(
+            inherited.get(),
+            Some(false),
+            "a child started right after the socket's creation holds the agent socket"
+        );
     }
 
     #[test]

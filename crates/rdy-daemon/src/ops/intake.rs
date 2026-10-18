@@ -5,9 +5,8 @@
 //! unknown fields (FW-HD1).
 use super::*;
 use rdy_engine::answer::AnswerRequest;
-use rdy_engine::consequence::report_answer_landings;
-use rdy_engine::engine::write_typed;
 use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
+use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_mcp::tools::evidence_kind;
 
 #[derive(Deserialize)]
@@ -77,7 +76,6 @@ pub(super) fn answer(cx: &OpContext, a: AnswerArgs) -> Result<Value, RdyError> {
         session_ref: a.session_ref,
         kind: evidence_kind(a.kind.as_deref())?,
     };
-    let (s, person) = (cx.session.clone(), cx.human.to_string());
     if let Some(entries) = a.all_recommended {
         if a.r#ref.is_some() || a.option.is_some() || a.card_hash.is_some() {
             return Err(bad(
@@ -103,11 +101,13 @@ pub(super) fn answer(cx: &OpContext, a: AnswerArgs) -> Result<Value, RdyError> {
             ));
         }
         let refs: Vec<String> = entries.into_iter().map(|e| e.r#ref).collect();
-        let mut v = write_typed(cx.engine, move |r| {
-            r.answer_all_recommended(&s, &person, &refs, &hashes, relay)
-        })?;
-        report_answer_landings(cx.engine, &mut v);
-        return Ok(v);
+        // each approval of the list is signed in its own batch (D-1Z951)
+        let request = SigningAct::Recommended {
+            refs,
+            card_hashes: hashes,
+            relay,
+        };
+        return run_signed_act(cx.engine, cx.agent, cx.session, cx.human, request);
     }
     let (Some(r#ref), Some(option)) = (a.r#ref, a.option) else {
         return Err(bad(
@@ -123,7 +123,11 @@ pub(super) fn answer(cx: &OpContext, a: AnswerArgs) -> Result<Value, RdyError> {
         relay,
         brief: a.brief,
     };
-    let mut v = write_typed(cx.engine, move |r| r.answer(&s, &person, req))?;
-    report_answer_landings(cx.engine, &mut v);
-    Ok(v)
+    run_signed_act(
+        cx.engine,
+        cx.agent,
+        cx.session,
+        cx.human,
+        SigningAct::Answer(req),
+    )
 }

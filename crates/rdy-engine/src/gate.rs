@@ -256,6 +256,52 @@ pub(crate) fn moved(
     ))
 }
 
+/// The freshness check of removal request `request` for the landing of `pref`
+/// (`redaction::check_fresh`, with `prospective` the landing's own new changes). A stale report
+/// is `E_REDACTION_STALE`, never refreshed, and its `corrected` holds the corrected card when it
+/// can be computed: `{"ref", "request", "report"}`, the version and the stale request, with the
+/// complete report a new request with the same targets and reason would record now (the dry
+/// run's result). Nothing is written and the approval is not tried again.
+fn fresh_removal(
+    st: &ReadState,
+    request: &Hash,
+    prospective: &[Change],
+    pref: &ProposalRef,
+) -> Result<(), RdyError> {
+    crate::redaction::check_fresh(st, request, prospective).map_err(|e| {
+        if e.code != E_REDACTION_STALE {
+            return e;
+        }
+        match corrected_removal(st, request, pref) {
+            Some(card) => e.with_corrected(card),
+            None => e,
+        }
+    })
+}
+
+/// The corrected card of stale removal request `request` of `pref` (see [`fresh_removal`]), or
+/// none when the request or the fresh report cannot be read.
+fn corrected_removal(
+    st: &ReadState,
+    request: &Hash,
+    pref: &ProposalRef,
+) -> Option<serde_json::Value> {
+    use crate::redaction::{RedactInput, dry_run, targets};
+    let r = st.reader().redaction_request(request).ok()?;
+    let input = RedactInput {
+        targets: r.targets.iter().map(targets::selector_text).collect(),
+        reason_class: targets::reason_class_name(r.reason_class).to_string(),
+        reason: r.reason.clone(),
+        dry_run: true,
+    };
+    let report = serde_json::to_value(dry_run(st, &input).ok()?).ok()?;
+    Some(serde_json::json!({
+        "ref": pref.to_string(),
+        "request": request.to_string(),
+        "report": report,
+    }))
+}
+
 /// A store refusal on the approve path, worded for the approver: an `E_STALE_BASE` or
 /// `E_ALREADY_EXISTS` keeps its code, names the block and the version's view `view`, and gives
 /// the author's fix, never "re-read and retry", which is a writer's. Any other error converts as
@@ -2351,6 +2397,19 @@ impl Rdy {
         proposal: &str,
         opts: LandOptions,
     ) -> Result<LandInfo, RdyError> {
+        let prepared = self.prepare_landing(s, proposal, opts)?;
+        self.commit_landing(prepared, &[])
+    }
+
+    /// Every check of `land_with` and the complete landing it would write, under the writer and
+    /// without writing anything: the acceptance work, the frames and the landing record, with
+    /// every clock value it uses already read. [`Rdy::commit_landing`] writes it.
+    pub(crate) fn prepare_landing(
+        &mut self,
+        s: &Session,
+        proposal: &str,
+        opts: LandOptions,
+    ) -> Result<PreparedApproval, RdyError> {
         if !s.role.can_land() {
             // D-CC90E: an agent that asks to land a content removal is told who must approve it
             if !s.is_human() && self.carries_removal(proposal) {
@@ -2580,25 +2639,81 @@ impl Rdy {
         // log yet: one that would copy or quote the content outside the approved removal (a new
         // version of an all-versions target) is stale too, never a silently grown removal
         for r in &requests {
-            crate::redaction::check_fresh(&st, r, accept.as_slice())?;
+            fresh_removal(&st, r, accept.as_slice(), &pref)?;
         }
 
-        // 4. land in one write (atom1): the acceptance change, the final proposal version, the
-        // snapshot, the landing, the view's rebase and the refs. A failed landing writes nothing,
-        // so the published state stays as it is.
-        let out = match self.store.land_atomic(LandRequest {
+        // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
+        // the snapshot, the landing, the view's rebase and the refs. Nothing is written yet.
+        let store = match self.store.prepare_land(LandRequest {
             proposal: pid,
-            accept,
+            accept: accept.clone(),
             approver: s.provenance(),
             alt,
             relay: opts.relay,
             evidence,
         }) {
-            Ok(out) => out,
+            Ok(prepared) => prepared,
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
                 return Err(moved(&st, &pref, &latest, &p.view)?);
             }
             Err(e) => return Err(approver_stale(e, &p.view)),
+        };
+        Ok(PreparedApproval {
+            store,
+            pref,
+            title: p.title.clone(),
+            summary: p.summary.clone(),
+            changes: p.changes.len(),
+            view: p.view.clone(),
+            issues,
+            landed_ops,
+            requests,
+            accept,
+            chosen,
+            keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
+        })
+    }
+
+    /// The freshness check of the removal requests a prepared landing lands, run again under the
+    /// writer before its commit (D-6B1W1, D-14SAY): a report that changed is
+    /// `E_REDACTION_STALE` with the corrected card ([`fresh_removal`]), never refreshed.
+    pub(crate) fn recheck_removals(&self, prepared: &PreparedApproval) -> Result<(), RdyError> {
+        if prepared.requests.is_empty() {
+            return Ok(());
+        }
+        let st = self.read();
+        for r in &prepared.requests {
+            fresh_removal(&st, r, prepared.accept.as_slice(), &prepared.pref)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the landing `prepared` holds, with `signatures` of it in the same batch, and
+    /// publishes it: what `land_with` does after its checks. A failed landing writes nothing, so
+    /// the published state stays as it is.
+    pub(crate) fn commit_landing(
+        &mut self,
+        prepared: PreparedApproval,
+        signatures: &[rdy_model::signature::Signature],
+    ) -> Result<LandInfo, RdyError> {
+        let PreparedApproval {
+            store,
+            pref,
+            title,
+            summary,
+            changes,
+            view,
+            issues,
+            landed_ops,
+            requests,
+            chosen,
+            keys,
+            ..
+        } = prepared;
+        let pid = pref.version;
+        let out = match self.store.commit_land(store, signatures) {
+            Ok(out) => out,
+            Err(e) => return Err(approver_stale(e, &view)),
         };
         // 5. publish canon incrementally: the previous canon with the landed ops (snap1). A
         // landing that applies removal requests seals its batch with the moves computed against
@@ -2608,7 +2723,7 @@ impl Rdy {
             self.publish_removal(&requests)?;
         } else if let Err(e) = self.publish(Delta::Landed {
             landing: out.landing,
-            view: p.view.clone(),
+            view: view.clone(),
             ops: landed_ops,
             rebased: out.rebased.iter().map(|r| r.view.clone()).collect(),
             closed: out.closed.clone(),
@@ -2627,9 +2742,9 @@ impl Rdy {
             landing: out.landing.to_string(),
             approved: pref.to_string(),
             version: pid.to_string(),
-            title: p.title.clone(),
-            summary: p.summary.clone(),
-            changes: p.changes.len(),
+            title,
+            summary,
+            changes,
             assurance,
             warnings: issues,
             rebased: out
@@ -2643,8 +2758,44 @@ impl Rdy {
                 .collect(),
             chosen: chosen.filter(|_| out.alt_version.is_some()),
             closed: out.closed,
-            keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
+            keys,
         })
+    }
+}
+
+/// A landing prepared under the writer by [`Rdy::prepare_landing`] and not yet written: the
+/// store's prepared batch, and what the commit publishes and reports. It holds no writer guard
+/// and no reference into the project.
+pub(crate) struct PreparedApproval {
+    pub(crate) store: rdy_store::PreparedLanding,
+    pref: ProposalRef,
+    title: String,
+    summary: Option<String>,
+    changes: usize,
+    view: String,
+    issues: Vec<Issue>,
+    landed_ops: Vec<Op>,
+    requests: Vec<Hash>,
+    accept: Option<Change>,
+    chosen: Option<AltRef>,
+    keys: BTreeMap<String, String>,
+}
+
+impl PreparedApproval {
+    /// The proposal version this landing approves.
+    pub(crate) fn pref(&self) -> ProposalRef {
+        self.pref
+    }
+
+    /// The refusal of this landing when it was prepared again for an approval first bound to
+    /// `pinned`, and the proposal's latest version is now this one's: `pinned` moved (pver1). An
+    /// approval never moves to a newer version on its own.
+    pub(crate) fn moved_from(
+        &self,
+        st: &ReadState,
+        pinned: &ProposalRef,
+    ) -> Result<RdyError, RdyError> {
+        moved(st, pinned, &self.pref.version, &self.view)
     }
 }
 

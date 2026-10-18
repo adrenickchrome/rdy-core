@@ -11,6 +11,7 @@ pub mod key;
 mod order;
 pub mod redaction;
 pub mod repo_id;
+pub mod signature;
 pub mod tree;
 mod value;
 

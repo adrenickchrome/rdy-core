@@ -22,9 +22,13 @@ postcard.workspace = true
 clap.workspace = true
 tokio.workspace = true
 regex.workspace = true
+ssh-key.workspace = true
 
 [dev-dependencies]
 rdy-graph.workspace = true
+# the gate's signing tests sign with fixed in-memory test keys only
+ed25519-dalek.workspace = true
+ssh-key.workspace = true
 
 [lints]
 workspace = true

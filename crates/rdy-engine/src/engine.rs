@@ -269,6 +269,31 @@ pub fn write_typed<T: serde::Serialize + 'static>(
     }))
 }
 
+/// Runs `f` on the writer, serialized with every other write, and returns its owned result once
+/// the write has succeeded (its batch sealed and the state published). The result travels
+/// through a one-shot channel while the write itself returns JSON null: nothing is serialized,
+/// and no writer guard outlives the call. A seal that fails after `f` returned `Ok` drops the
+/// result and returns the seal's error.
+pub fn with_writer_result<T: Send + 'static>(
+    engine: &dyn Engine,
+    f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<T, RdyError> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
+    engine.write(Box::new(move |r| {
+        let v = f(r)?;
+        // the receiver lives until the write returns: a full or closed channel cannot happen
+        let _ = tx.send(v);
+        Ok(serde_json::Value::Null)
+    }))?;
+    rx.try_recv().map_err(|_| {
+        RdyError::new(
+            crate::E_INTERNAL,
+            "a write returned without its result",
+            "report this as a bug in rdy",
+        )
+    })
+}
+
 /// The in-process engine: a mutex around the project. Used by `--no-daemon`, `rdy mcp
 /// --no-daemon` and tests.
 pub struct Local(Mutex<Rdy>);

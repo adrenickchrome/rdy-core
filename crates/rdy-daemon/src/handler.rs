@@ -3,8 +3,10 @@
 use crate::ctl::CtlRequest;
 use crate::error::ErrorReply;
 use crate::session::SessionInfo;
+use rdy_engine::signing_crypto::SigningAgent;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// A byte stream an MCP session runs on: the daemon's socket today, any transport later.
 pub trait DuplexStream:
@@ -18,19 +20,25 @@ pub type McpStream = Box<dyn DuplexStream>;
 
 pub trait Handler: Send + Sync + 'static {
     /// One ctl request. Called on the blocking pool, one at a time per session, in request order.
+    /// `agent` is the signer of the process at the other end of this connection (the daemon has
+    /// none of its own); a call to it waits for that process, never for the writer.
     fn ctl(
         &self,
         session: &SessionInfo,
         request: CtlRequest,
+        agent: Arc<dyn SigningAgent>,
     ) -> Result<serde_json::Value, ErrorReply>;
 
-    /// An `mcp` connection after its hello. The default closes the stream (M2b serves rmcp on it).
+    /// An `mcp` connection after its hello, its signing channel already taken out of `stream`;
+    /// `agent` is the signer of the process at the other end. The default closes the stream (M2b
+    /// serves rmcp on it).
     fn mcp(
         &self,
         session: SessionInfo,
         stream: McpStream,
+        agent: Arc<dyn SigningAgent>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        drop((session, stream));
+        drop((session, stream, agent));
         Box::pin(async {})
     }
 
@@ -61,7 +69,12 @@ mod tests {
     struct EchoLine;
 
     impl Handler for EchoLine {
-        fn ctl(&self, _: &SessionInfo, _: CtlRequest) -> Result<serde_json::Value, ErrorReply> {
+        fn ctl(
+            &self,
+            _: &SessionInfo,
+            _: CtlRequest,
+            _: Arc<dyn SigningAgent>,
+        ) -> Result<serde_json::Value, ErrorReply> {
             unreachable!()
         }
 
@@ -69,6 +82,7 @@ mod tests {
             &self,
             _session: SessionInfo,
             stream: McpStream,
+            _agent: Arc<dyn SigningAgent>,
         ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
             Box::pin(async move {
                 let mut r = BufReader::new(stream);
@@ -92,7 +106,11 @@ mod tests {
             connected_at_ms: 0,
         };
         let h = EchoLine;
-        let task = tokio::spawn(h.mcp(session, Box::new(a)));
+        let task = tokio::spawn(h.mcp(
+            session,
+            Box::new(a),
+            Arc::new(rdy_engine::signing_crypto::UnavailableAgent),
+        ));
         let mut b = BufReader::new(b);
         b.get_mut().write_all(b"one line\n").await.unwrap();
         let mut echo = String::new();

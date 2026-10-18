@@ -6,6 +6,7 @@
 use rdy_engine::answer::relay::{RelayInput, RelayRefusal, relayed};
 use rdy_engine::engine::Engine;
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
+use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::tensions::api::{TensionsRequest, run_resolve, run_tensions};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Relay, Scope, Session, alt, intent,
@@ -28,6 +29,7 @@ mod publication;
 mod read;
 mod redaction;
 mod search;
+mod signing;
 mod site;
 mod site_url;
 mod wc;
@@ -44,6 +46,7 @@ use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use redaction::redact;
 use search::search;
+use signing::{key_show, sign};
 use site::{EXPORT_SHAPE, export, import, render};
 pub(crate) use site::{export_print, render_static};
 use site_url::site_url;
@@ -51,13 +54,36 @@ pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
 
 /// What an op runs against: the engine, the calling session, the project's human actor (the
-/// one the session was classified against) and the session's working directory.
+/// one the session was classified against), the session's working directory and the calling
+/// process's own signer.
 pub struct OpContext<'a> {
     pub engine: &'a dyn Engine,
     pub session: &'a Session,
     /// The human actor: a relayed approval is recorded as this person's (D-HA7YZ).
     pub human: &'a str,
     pub cwd: &'a Path,
+    /// The caller's SSH agent: through the daemon, the process at the other end of the
+    /// request's connection; in a direct CLI run, that process's own. Reads never ask it.
+    pub agent: &'a dyn SigningAgent,
+}
+
+/// Runs `f` with the context of a direct run (the CLI's `--no-daemon`): its signer is this
+/// process's own agent ([`crate::signing_transport::direct_agent`]), never a key file.
+pub fn with_direct_context<T>(
+    engine: &dyn Engine,
+    session: &Session,
+    human: &str,
+    cwd: &Path,
+    f: impl FnOnce(&OpContext<'_>) -> T,
+) -> T {
+    let agent = crate::signing_transport::direct_agent();
+    f(&OpContext {
+        engine,
+        session,
+        human,
+        cwd,
+        agent: &*agent,
+    })
 }
 
 /// Every ctl op, in the order the docs list them. `session` is answered by the connection
@@ -106,6 +132,8 @@ pub const OPS: &[&str] = &[
     "site_url",
     "pending",
     "answer",
+    "sign",
+    "key_show",
 ];
 
 #[derive(Deserialize)]
@@ -330,7 +358,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         }
         "show" => show(cx, parse(op, args, "{id, scope?, blame?}")?),
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
-        "log" => log(cx, parse(op, args, "{limit?, since?}")?),
+        "log" => log(cx, parse(op, args, "{limit?, since?, verify?}")?),
         "impact" => impact(cx, parse(op, args, "{id, depth?, scope?}")?),
         "suspects" => suspects(cx, parse(op, args, "{scope?}")?),
         "tags" => {
@@ -418,7 +446,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             reindex(cx)
         }
-        "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?}")?),
+        "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?, verbose?}")?),
         "view" => view_api::run_view(
             cx.engine,
             cx.session,
@@ -497,6 +525,8 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{ref?, option?, card_hash?, note?, brief?, relayed_by?, evidence?, question?, session_ref?, kind?, all_recommended?}",
             )?,
         ),
+        "sign" => sign(cx, parse(op, args, "{target, kind?}")?),
+        "key_show" => key_show(cx, parse(op, args, "{}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

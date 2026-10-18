@@ -38,6 +38,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a Path) -> OpContext<'a> {
         session: s,
         human: "human:t",
         cwd,
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     }
 }
 

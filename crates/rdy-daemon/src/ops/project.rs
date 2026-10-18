@@ -1,6 +1,6 @@
 //! The project ops: check, reindex and fsck, and the quarantine files an open leaves behind.
 use super::*;
-use rdy_engine::engine::{open_report_json, write_typed};
+use rdy_engine::engine::open_report_json;
 use rdy_engine::{E_PERMISSION, RdyError, Scope, check_path, check_wc, resolve_pack};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -11,6 +11,9 @@ use std::path::Path;
 pub(super) struct FsckArgs {
     #[serde(default)]
     clean_quarantine: bool,
+    /// On a passing check, list the signature state of every canon landing and its tags.
+    #[serde(default)]
+    verbose: bool,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +123,9 @@ pub(super) fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
 
 /// `fsck`; with `clean_quarantine`, a passing check then removes the quarantine files (the
 /// human's only: an agent is refused before the check runs). A failed check removes nothing.
+/// With `verbose`, a passing check adds `signature_states` (no trust file is read), read in the
+/// same write as the check: no other write can land between them, so the states are of exactly
+/// the records the check counted.
 pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
     if a.clean_quarantine && !cx.session.is_human() {
         return Err(RdyError::new(
@@ -128,7 +134,14 @@ pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
             "run rdy fsck --clean-quarantine as the human (unset RDY_ACTOR)",
         ));
     }
-    let mut v = write_typed(cx.engine, |r| r.fsck())?;
+    let verbose = a.verbose;
+    let mut v = cx.engine.write(Box::new(move |r| {
+        let mut v = to_json(&r.fsck()?);
+        if verbose {
+            v["signature_states"] = rdy_engine::signing_read::signature_states(&r.read())?;
+        }
+        Ok(v)
+    }))?;
     if a.clean_quarantine {
         let c = clean_quarantine(&cx.engine.root());
         v["removed"] = json!(c.removed);

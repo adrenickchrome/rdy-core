@@ -8,9 +8,8 @@
 use super::*;
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
-use rdy_engine::consequence::report_answer_landings;
-use rdy_engine::engine::write_typed;
 use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
+use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_engine::*;
 use rdy_model::EvidenceKind;
 use schemars::JsonSchema;
@@ -135,11 +134,13 @@ pub fn rdy_answer(st: &mut McpState, p: AnswerParams) -> Result<Value, RdyError>
         }
         let (refs, hashes): (Vec<String>, Vec<String>) =
             entries.into_iter().map(|e| (e.r#ref, e.card_hash)).unzip();
-        let mut v = write_typed(&*st.engine, move |r| {
-            r.answer_all_recommended(&s, &person, &refs, &hashes, relay)
-        })?;
-        report_answer_landings(&*st.engine, &mut v);
-        return Ok(v);
+        // each approval of the list is signed in its own batch (D-1Z951)
+        let request = SigningAct::Recommended {
+            refs,
+            card_hashes: hashes,
+            relay,
+        };
+        return run_signed_act(&*st.engine, &*st.agent, &s, &person, request);
     }
     let (Some(r#ref), Some(option)) = (p.r#ref, p.option) else {
         return Err(bad(
@@ -155,7 +156,11 @@ pub fn rdy_answer(st: &mut McpState, p: AnswerParams) -> Result<Value, RdyError>
         relay,
         brief: p.brief,
     };
-    let mut v = write_typed(&*st.engine, move |r| r.answer(&s, &person, req))?;
-    report_answer_landings(&*st.engine, &mut v);
-    Ok(v)
+    run_signed_act(
+        &*st.engine,
+        &*st.agent,
+        &s,
+        &person,
+        SigningAct::Answer(req),
+    )
 }

@@ -60,3 +60,6 @@ pub const BRIEF_DOC: &str = "rdy_brief {ids?, path?, code_path?, page?, scope?, 
 
 /// What a consequence entry means and what to do with it, in `rdy_schema` (sg10).
 pub const CONSEQUENCES_DOC: &str = "Every write, rdy_view include/exclude/undo and propose reply carries consequences. Each entry names a block, its kind (suspect, dependent, conflict or tension), because (the edge and the changed block) and a follow_up (update, confirm, reaffirm or resolve). Answer each one before you propose: change the block, or say why it stays. Consequences are advice; the gate does not check the answers yet.";
+
+/// The signing topic of `rdy_schema` (D-1Z951, D-QVH4N).
+pub const SIGNING_DOC: &str = "Signing uses only the caller's SSH agent. Accepted key types are ssh-ed25519 and sk-ssh-ed25519@openssh.com. signing.sign is never, auto or always; the default is auto. Presence is an authenticated flag, not proof that a person read the act.";
