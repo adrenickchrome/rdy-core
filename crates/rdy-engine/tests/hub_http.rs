@@ -2247,10 +2247,11 @@ fn hsa4_hub_fixtures_round_trip() {
             200,
             RETIRE_REPLY.replace("2026-10-18T09:00:00Z", "2026-10-18x09:00:00Z"),
         ),
+        // A second 60 that is not a leap second is not an RFC3339 time.
         (
             revoke(),
             200,
-            REVOKE_REPLY.replace("2026-10-17T11:00:00Z", "2026-10-17T11:00:00.0000000000Z"),
+            REVOKE_REPLY.replace("2026-10-17T11:00:00Z", "2026-10-17T11:00:60Z"),
         ),
         (
             find(),
@@ -2315,6 +2316,61 @@ fn hsa4_hub_fixtures_round_trip() {
     for (op, status, body) in contradictions {
         let (r, _) = hub.send(Reply::json(status, &body), hub.call(op));
         assert_eq!(failure(r), "Protocol", "{body}");
+    }
+
+    // A reply time is RFC3339 within 64 bytes. The compromise-input rules (nine fractional
+    // digits, no leap second) bind only what rdy sends, so a hub time beyond them is kept as
+    // the hub wrote it.
+    let ten_digits = "2026-10-17T11:00:00.0000000000Z";
+    let max_len = format!("2026-10-17T11:00:00.{}Z", "1".repeat(43));
+    assert_eq!(max_len.len(), 64);
+    let leap = "2016-12-31T23:59:60Z";
+    let leap_fraction = "2016-12-31T23:59:60.5Z";
+    for (revoked_at, from) in [
+        ("2026-10-18T09:00:00Z", ten_digits),
+        ("2026-10-18T09:00:00Z", max_len.as_str()),
+        (leap, "2026-10-17T11:00:00Z"),
+        (leap_fraction, leap),
+    ] {
+        let body = REVOKE_REPLY
+            .replace("2026-10-18T09:00:00Z", revoked_at)
+            .replace("2026-10-17T11:00:00Z", from);
+        let (r, _) = hub.send(Reply::json(200, &body), hub.call(revoke()));
+        assert_eq!(
+            r.expect("a bounded RFC3339 reply time"),
+            HubReply::Revoke(key(
+                KeyState::Revoked,
+                bound,
+                None,
+                Some(revoked_at),
+                Some(from),
+            )),
+            "{body}"
+        );
+    }
+    for body in [
+        ME_REPLY.replace("2026-08-01T08:00:00Z", leap),
+        ME_REPLY.replace("2026-08-01T08:00:00Z", &max_len),
+        ME_REPLY.replace("2026-09-01T08:00:00Z", ten_digits),
+        ME_REPLY.replace(
+            r#","version""#,
+            &format!(r#","away_until":"{leap_fraction}","version""#),
+        ),
+        CHALLENGE_REPLY.replace("2026-10-17T12:10:00Z", "2026-10-17T12:10:00.0000000000Z"),
+        LIST_REPLY.replace("2026-10-17T12:05:00Z", leap),
+        RETIRE_REPLY.replace("2026-10-18T09:00:00Z", &max_len),
+    ] {
+        let (op, status) = if body.starts_with(r#"{"id":"acc_"#) {
+            (HubOperation::Me, 200)
+        } else if body.starts_with(r#"{"id":"kch_"#) {
+            (challenge(), 201)
+        } else if body.starts_with(r#"{"items""#) {
+            (find(), 200)
+        } else {
+            (retire(), 200)
+        };
+        let (r, _) = hub.send(Reply::json(status, &body), hub.call(op));
+        assert!(r.is_ok(), "a bounded RFC3339 reply time: {r:?} for {body}");
     }
     hub.finish();
 }

@@ -997,10 +997,18 @@ fn id_of(prefix: &str, s: &str) -> bool {
     id_ok(s) && s.len() > prefix.len() && s.starts_with(prefix)
 }
 
-/// An RFC3339 time within its 64-byte bound. The shared compromise-time check is used: the
-/// time parser alone takes any byte between date and time and any number of fractional digits.
+/// A reply time: RFC3339 within its 64-byte bound. The time parser alone takes any byte
+/// between date and time, so the `T`/`t` separator is checked first. The compromise-input rules
+/// (at most nine fractional digits, no leap second) bind only what rdy sends, not hub times:
+/// any number of fractional digits within the bound and a valid leap second are accepted, and
+/// the reply keeps the hub's text.
 fn time_ok(s: &str) -> bool {
-    s.len() <= MAX_TIMESTAMP_BYTES && parse_compromised_since(s).is_ok()
+    let b = s.as_bytes();
+    b.len() <= MAX_TIMESTAMP_BYTES
+        && s.is_ascii()
+        && b.len() >= 20
+        && matches!(b[10], b'T' | b't')
+        && time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).is_ok()
 }
 
 /// A handle that can form a `human:` claim (the rule of [`RequestClaim::bind_human`]).
