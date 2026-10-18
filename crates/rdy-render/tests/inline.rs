@@ -17,6 +17,8 @@ fn spans(src: &str) -> String {
         &Ctx {
             link: &link,
             doc_page: "",
+            unavailable: inline::UNRESOLVED,
+            local_link: None,
         },
     )
 }
@@ -26,6 +28,8 @@ fn body(src: &str) -> String {
         &Ctx {
             link: &link,
             doc_page: "",
+            unavailable: inline::UNRESOLVED,
+            local_link: None,
         },
     )
 }
@@ -135,6 +139,8 @@ fn md1_relative_links_are_rebased_to_the_page_that_shows_the_text() {
             &Ctx {
                 link: &link,
                 doc_page,
+                unavailable: inline::UNRESOLVED,
+                local_link: None,
             },
         )
     };
@@ -210,6 +216,8 @@ fn key1_a_key_typed_reference_shows_the_targets_current_key() {
             &Ctx {
                 link: l,
                 doc_page: "",
+                unavailable: inline::UNRESOLVED,
+                local_link: None,
             },
         )
     };
@@ -291,7 +299,9 @@ fn md1_bodies_hold_paragraphs_and_nested_lists() {
             "One *para*.",
             &Ctx {
                 link: &link,
-                doc_page: ""
+                doc_page: "",
+                unavailable: inline::UNRESOLVED,
+                local_link: None,
             }
         ),
         "One <em>para</em>."
@@ -301,7 +311,9 @@ fn md1_bodies_hold_paragraphs_and_nested_lists() {
             "A\n\nB",
             &Ctx {
                 link: &link,
-                doc_page: ""
+                doc_page: "",
+                unavailable: inline::UNRESOLVED,
+                local_link: None,
             }
         ),
         "<p>A</p><p>B</p>"
@@ -329,6 +341,8 @@ fn md1_labels_take_code_spans_only() {
             &Ctx {
                 link: &link,
                 doc_page: "",
+                unavailable: inline::UNRESOLVED,
+                local_link: None,
             },
         )
     };

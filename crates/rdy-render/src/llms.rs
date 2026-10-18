@@ -168,7 +168,8 @@ fn blurb(p: &PageContext, site: &Site) -> Option<String> {
 
 /// What both files open with, as the home page shows it: the site's name, its description when
 /// the project has one, and the colophon every page's footer carries. The range is where the
-/// label's text went.
+/// label's text went; a named profile with no chosen tag has no label, so its colophon is the
+/// name alone and the range is empty.
 fn head(
     site_name: &str,
     description: Option<&str>,
@@ -178,6 +179,11 @@ fn head(
     let mut t = format!("# {name}\n\n");
     if let Some(d) = description.map(one_line).filter(|d| !d.is_empty()) {
         t.push_str(&format!("> {d}\n\n"));
+    }
+    if version.text.is_empty() {
+        t.push_str(&format!("{name}.\n\n"));
+        let at = t.len()..t.len();
+        return (t, at);
     }
     if version.frozen {
         t.push_str(&format!("A snapshot of {name} at "));

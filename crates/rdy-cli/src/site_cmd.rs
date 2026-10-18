@@ -13,6 +13,9 @@ pub(crate) struct RenderArgs {
     /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
+    /// A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -29,6 +32,9 @@ pub(crate) struct ExportArgs {
     /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
+    /// A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -69,11 +75,15 @@ pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply
 }
 
 pub(crate) fn render(env: &Env, a: RenderArgs) -> Result<(Value, String), ErrorReply> {
-    let RenderArgs { out, scope } = a;
+    let RenderArgs {
+        out,
+        scope,
+        profile,
+    } = a;
     let v = call(
         env,
         "render",
-        json!({"out": path_arg(&out)?, "scope": scope}),
+        json!({"out": path_arg(&out)?, "scope": scope, "profile": profile}),
     )?;
     let t = format!(
         "rendered {} pages, {} permalinks and {} assets to {}{}",
@@ -95,11 +105,12 @@ pub(crate) fn export(env: &Env, a: ExportArgs) -> Result<(Value, String), ErrorR
         format,
         layout,
         scope,
+        profile,
     } = a;
     let v = call(
         env,
         "export",
-        json!({"out": path_arg(&out)?, "format": format, "layout": layout, "scope": scope}),
+        json!({"out": path_arg(&out)?, "format": format, "layout": layout, "scope": scope, "profile": profile}),
     )?;
     let mut t = format!(
         "exported {} docs in {} folders as {format} to {} ({} bytes)",

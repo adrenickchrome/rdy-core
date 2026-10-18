@@ -505,7 +505,8 @@ impl Layout<'_> {
 }
 
 impl Layout<'_> {
-    /// The title part: the project's name, its description, the version label and the scope.
+    /// The title part: the project's name, its description, the version label and the scope,
+    /// each of the last two only when it is not empty.
     fn title_part(&mut self, p: &Print) {
         self.new_page();
         self.y = self.top() - TITLE_DROP;
@@ -526,11 +527,22 @@ impl Layout<'_> {
                 SUBTITLE_LINE,
             );
         }
+        // an empty label or scope (a named profile's, RULING F3) leaves no line; with neither,
+        // no gap follows the title either; an affected chosen tag's label keeps its redacted
+        // marker
+        let lines: Vec<String> = [
+            ("Version", &p.label, p.redacted_suffix()),
+            ("Scope", &p.scope, ""),
+        ]
+        .into_iter()
+        .filter(|(_, value, _)| !value.is_empty())
+        .map(|(name, value, suffix)| format!("{name}: {value}{suffix}"))
+        .collect();
+        if lines.is_empty() {
+            return;
+        }
         self.y -= TITLE_GAP;
-        for line in [
-            format!("Version: {}", p.label),
-            format!("Scope: {}", p.scope),
-        ] {
+        for line in lines {
             self.flow(x, w, &Styled::of(&line, Face::Sans, BODY_SIZE), BODY_LINE);
         }
     }
@@ -938,6 +950,7 @@ mod tests {
             description: Some("How the wallet works.".into()),
             label: "v1.2".into(),
             scope: "canon".into(),
+            tag_redacted: false,
             docs,
             blobs: BTreeMap::new(),
             warnings: vec![],

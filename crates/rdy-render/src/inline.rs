@@ -5,7 +5,8 @@
 //! `{{` is the rdy escape (a literal `{{`). Then, outside atoms: backslash escapes, code spans,
 //! links and emphasis (`*` and `**` only: an underscore is always literal, FW-F1a). A body is
 //! grouped into paragraphs and lists. Anything else is text, escaped.
-use crate::html::{Link, UNRESOLVED, escape};
+pub use crate::html::UNRESOLVED;
+use crate::html::{Link, escape};
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{BlockId, RefMode, RefSpan, ref_spans};
 
@@ -16,7 +17,27 @@ pub struct Ctx<'a> {
     /// The href of the page of the doc that holds the text, from the page being written, with no
     /// anchor; `""` when that is the page being written.
     pub doc_page: &'a str,
+    /// What a reference that leads nowhere reads as when the author gave no display text: the
+    /// source's [`UNRESOLVED`], or a named profile's [`UNAVAILABLE`].
+    pub unavailable: &'a str,
+    /// A named profile's filter of authored local links (D-0VCQ5): it takes a local href that
+    /// passed the safety checks, as the page being written sees it, and gives the canonical href
+    /// of a selected page and an anchor emitted on it, or none. None for a source output, whose
+    /// local links keep their existing rules. With it, a reference that leads nowhere is plain
+    /// words with no marker, hover or link.
+    pub local_link: Option<LocalLink<'a>>,
 }
+
+/// A named profile's filter of authored local links ([`Ctx::local_link`]).
+pub type LocalLink<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// What a reference to a block outside a named profile's selection reads as when the author gave
+/// no display text (D-0VCQ5): never the target's label, key or id.
+pub const UNAVAILABLE: &str = "unavailable reference";
+
+/// The longest authored link target, local or external, in UTF-8 bytes, a named profile keeps a
+/// link for.
+pub const MAX_LOCAL_URL: usize = 2048;
 
 /// Which part of the subset a text is read in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -673,13 +694,27 @@ fn href(target: &str, doc_page: &str) -> Option<(String, bool)> {
     Some((format!("{path}{tail}"), false))
 }
 
+/// [`href`] of an authored link target, then, for a named profile, its filter: a target longer
+/// than [`MAX_LOCAL_URL`], local or external, leads nowhere; a local target leads only to a
+/// selected page and an anchor emitted on it, by its canonical href. An external target within
+/// the bound keeps its href.
+fn local_href(target: &str, ctx: &Ctx) -> Option<(String, bool)> {
+    let (h, away) = href(target, ctx.doc_page)?;
+    match ctx.local_link {
+        Some(_) if target.len() > MAX_LOCAL_URL => None,
+        Some(_) if away => Some((h, away)),
+        Some(local) => local(&h).map(|h| (h, false)),
+        None => Some((h, away)),
+    }
+}
+
 // ---- output -------------------------------------------------------------------------------
 
 /// What a reference reads as in words: the notice when its target is removed (whatever display
 /// text the author gave, D-3M81W), its display text, the target's key when the author typed a
-/// key and the target still has one, else the target's label (the unresolved marker's words when
-/// it leads nowhere, unless the author gave display text).
-fn ref_words(span: &RefSpan, link: Option<&Link>) -> String {
+/// key and the target still has one, else the target's label (`unavailable`, the unresolved
+/// marker's words, when it leads nowhere, unless the author gave display text).
+fn ref_words(span: &RefSpan, link: Option<&Link>, unavailable: &str) -> String {
     if link.is_some_and(|l| l.removed) {
         return CONTENT_REMOVED.to_string();
     }
@@ -691,7 +726,7 @@ fn ref_words(span: &RefSpan, link: Option<&Link>) -> String {
             (Some(k), true) if !k.is_empty() => k.clone(),
             _ => l.label.clone(),
         },
-        None => UNRESOLVED.to_string(),
+        None => unavailable.to_string(),
     }
 }
 
@@ -712,9 +747,11 @@ fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: 
             Node::Ref(k) => {
                 let span = &refs[*k];
                 let link = target_of(span, ctx);
-                let words = text_html(&ref_words(span, link.as_ref()));
+                let words = text_html(&ref_words(span, link.as_ref(), ctx.unavailable));
                 match link {
                     _ if in_link => out.push_str(&words),
+                    // a named profile: a reference outside the selection is its words alone
+                    None if ctx.local_link.is_some() => out.push_str(&words),
                     // the target resolves but has no place on the site: its words, unlinked
                     Some(Link { href: None, .. }) => out.push_str(&words),
                     Some(Link {
@@ -753,7 +790,7 @@ fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: 
                 render_html(c, refs, ctx, in_link, out);
                 out.push_str("</em>");
             }
-            Node::Link { target, children } => match href(target, ctx.doc_page) {
+            Node::Link { target, children } => match local_href(target, ctx) {
                 Some((h, away)) => {
                     out.push_str(&format!(
                         "<a href=\"{}\"{}>",

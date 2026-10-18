@@ -221,6 +221,22 @@ impl RdyServer {
         result(self.blocking(tool, true, move |st| f(st, p)).await)
     }
 
+    /// `run` for a tool whose reply is a closed, size-checked object: no pack notice rides on
+    /// it, and the notice stays pending for the next ordinary tool reply (the CLI prints it on
+    /// stderr, apart from the report).
+    pub(crate) async fn run_closed<P: Send + 'static>(
+        &self,
+        tool: &'static str,
+        p: Result<P, RdyError>,
+        f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
+    ) -> CallToolResult {
+        let p = match p {
+            Ok(p) => p,
+            Err(e) => return result(Err(e)),
+        };
+        result(self.blocking(tool, false, move |st| f(st, p)).await)
+    }
+
     /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
     /// under the state lock. Inside a tool call, `f` sees the call's own signer ([`CallAgent`]),
     /// whose ask in progress ends at the call's cancel. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean

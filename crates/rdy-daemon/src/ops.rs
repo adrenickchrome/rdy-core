@@ -25,6 +25,7 @@ mod edit;
 mod intake;
 mod land;
 mod project;
+mod publication;
 mod read;
 mod redaction;
 mod search;
@@ -36,17 +37,18 @@ mod wc;
 use brief::brief;
 use clone::clone;
 use dump::dump;
-use edit::{edit_block, keys_assign, new_doc, new_folder};
+use edit::{edit_block, keys_assign, new_doc, new_folder, new_profile};
 use intake::{answer, pending};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
+use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use redaction::redact;
 use search::search;
 use signing::{key_show, sign};
-pub(crate) use site::export_print;
 use site::{EXPORT_SHAPE, export, import, render};
+pub(crate) use site::{export_print, render_static};
 use site_url::site_url;
 pub use wc::wc_in_flight;
 use wc::{wc_commit, wc_nonce, wc_put_blob, wc_view};
@@ -99,6 +101,7 @@ pub const OPS: &[&str] = &[
     "brief",
     "search",
     "render",
+    "publication_check",
     "export",
     "dump",
     "clone",
@@ -106,6 +109,7 @@ pub const OPS: &[&str] = &[
     "check",
     "new_folder",
     "new_doc",
+    "new_profile",
     "keys_assign",
     "edit_block",
     "propose",
@@ -378,7 +382,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?, coverage_below?, sort?}",
             )?,
         ),
-        "render" => render(cx, parse(op, args, "{out, scope?}")?),
+        "render" => render(cx, parse(op, args, "{out, scope?, profile?}")?),
+        "publication_check" => {
+            publication_check(cx, parse(op, args, "{profile, scope?, against?}")?)
+        }
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out}")?),
         "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),
@@ -393,6 +400,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
+        "new_profile" => new_profile(
+            cx,
+            parse(
+                op,
+                args,
+                "{key, parent, title, audience, select, description?, trail?, view?}",
+            )?,
+        ),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(
             cx,

@@ -237,6 +237,20 @@ fn advise_blocking(r: &mut Rdy, x: &BlockId, y: &BlockId) {
 /// `case`: one finding on `y` with `note`, and a semantic tension with `advice` that does not
 /// block (a REVIEW and a TENSION whose text a removal report can find as quotes).
 pub fn verdict(r: &mut Rdy, x: &BlockId, y: &BlockId, case: Hash, note: &str, advice: &str) {
+    verdict_with_reason(r, x, y, case, note, advice, "");
+}
+
+/// `verdict` with the review's own `reason` text, and the stored review's hash back (the hash the
+/// semantic tension names, so a caller can read the record again).
+pub fn verdict_with_reason(
+    r: &mut Rdy,
+    x: &BlockId,
+    y: &BlockId,
+    case: Hash,
+    note: &str,
+    advice: &str,
+    reason: &str,
+) -> Hash {
     let m = r.read().materialized(&Scope::Inflight).unwrap();
     let content = |id: &BlockId| m.get(id).unwrap().content_hash_with(r.store().tracking());
     let mut items = vec![
@@ -258,7 +272,7 @@ pub fn verdict(r: &mut Rdy, x: &BlockId, y: &BlockId, case: Hash, note: &str, ad
         },
         case_hash: Some(case),
         verdict: Verdict::Tension,
-        reason: String::new(),
+        reason: reason.into(),
         findings: vec![Finding {
             block: y.clone(),
             note: note.into(),
@@ -270,10 +284,11 @@ pub fn verdict(r: &mut Rdy, x: &BlockId, y: &BlockId, case: Hash, note: &str, ad
             at_ms: 1,
         },
     };
+    let review_hash = Hash::of(&postcard::to_allocvec(&review).unwrap());
     let first = SemanticTension {
         key,
         items,
-        review: Hash::of(&postcard::to_allocvec(&review).unwrap()),
+        review: review_hash,
         advice: Some(advice.into()),
         blocking: false,
         relay: None,
@@ -282,6 +297,7 @@ pub fn verdict(r: &mut Rdy, x: &BlockId, y: &BlockId, case: Hash, note: &str, ad
         provenance: review.provenance.clone(),
     };
     r.record_verdict(&review, Some(&first)).unwrap();
+    review_hash
 }
 
 /// The person's approve item of proposal version `r#ref` in their queue.

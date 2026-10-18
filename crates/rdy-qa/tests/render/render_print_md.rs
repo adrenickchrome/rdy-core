@@ -360,6 +360,7 @@ fn hand(blocks: Vec<PBlock>, blobs: BTreeMap<rdy_model::Hash, Blob>) -> Print {
         description: None,
         label: "v1".into(),
         scope: "canon".into(),
+        tag_redacted: false,
         docs: vec![
             PrintDoc {
                 kind: PageKind::Folder,

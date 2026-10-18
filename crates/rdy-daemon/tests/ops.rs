@@ -39,8 +39,20 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 43);
+    assert_eq!(OPS.len(), 45);
     assert_eq!(OPS[0], "session");
+    let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
+    assert_eq!(
+        OPS[new_doc + 1],
+        "new_profile",
+        "pub5: new_profile follows new_doc"
+    );
+    let render = OPS.iter().position(|o| *o == "render").unwrap();
+    assert_eq!(
+        OPS[render + 1],
+        "publication_check",
+        "pub9: publication_check follows render"
+    );
     let answer = OPS.iter().position(|o| *o == "answer").unwrap();
     assert_eq!(
         &OPS[answer + 1..],
@@ -1103,4 +1115,174 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
             .collect::<Vec<_>>(),
         ["index.redb.damaged-8", "index.redb.damaged-9"]
     );
+}
+
+/// The profile request every refusal below changes one thing of.
+fn profile_args(parent: &str, select: &str) -> Value {
+    json!({"key": "site", "parent": parent, "title": "Site", "audience": "public", "select": [select]})
+}
+
+#[test]
+fn pub5_profile_create_is_strict_and_uses_normal_write_rules() {
+    let (d, e) = project();
+    let s = human();
+    let guide = doc(&e, "guide")["created"]["$d"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let other = doc(&e, "other")["created"]["$d"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c = cx(&e, &s, d.path());
+    let end = e.read().seq();
+
+    // an unknown request key fails before the write, and the nearest key is named
+    let mut args = profile_args(&guide, &other);
+    let list = args.as_object_mut().unwrap().remove("select").unwrap();
+    args["selects"] = list;
+    let err = dispatch(&c, "new_profile", args).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "new_profile: unknown field \"selects\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"select\"? the fields are key, parent, title, audience, select, description, trail, view"
+    );
+    // a required key left out is the op's shape error
+    let mut args = profile_args(&guide, &other);
+    args.as_object_mut().unwrap().remove("title");
+    let err = dispatch(&c, "new_profile", args).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert!(err.message.contains("missing field `title`"), "{err}");
+    // a parent that is no block, and the schema's refusal of a wrong audience, come from the
+    // write path
+    let err = dispatch(&c, "new_profile", profile_args("d-ZZZZZ", &other)).unwrap_err();
+    assert_ne!(err.code, "E_VIEW_OWNER", "{err}");
+    let mut args = profile_args(&guide, &other);
+    args["audience"] = json!("everyone");
+    let err = dispatch(&c, "new_profile", args).unwrap_err();
+    assert_eq!(err.code, "E_VALIDATION", "{err}");
+    // view ownership: an agent never writes the human's view
+    let a = Session::agent("agent:a".into(), Some("r1".into()), Role::Writer).unwrap();
+    let mut args = profile_args(&guide, &other);
+    args["view"] = json!("work");
+    let err = dispatch(&cx(&e, &a, d.path()), "new_profile", args).unwrap_err();
+    assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
+    assert_eq!(e.read().seq(), end, "every refusal wrote nothing");
+
+    // the same request, valid: one create of a profile, the ordinary write result, and a change
+    // message of exactly `new publication profile site`
+    let v = dispatch(&c, "new_profile", profile_args(&guide, &other)).unwrap();
+    assert_eq!(v["view"], "work");
+    let id = v["created"]["$profile"].as_str().unwrap().to_string();
+    assert!(id.starts_with("pf-"), "{id}");
+    assert!(e.read().seq() > end);
+    let st = e.read();
+    let b = st
+        .block(&Scope::View("work".into()), &id.parse().unwrap())
+        .unwrap();
+    assert_eq!(b.block_type, "publication_profile");
+    assert_eq!(
+        b.parent.as_ref().map(|p| p.to_string()),
+        Some(guide.clone())
+    );
+    assert_eq!(b.fields["key"].as_str(), Some("site"));
+    assert!(!b.fields.contains_key("trail"), "{:?}", b.fields);
+    assert!(b.body.is_empty() && b.links.is_empty());
+    let change: rdy_model::Hash = v["change"].as_str().unwrap().parse().unwrap();
+    let ch: rdy_model::Change = st
+        .reader()
+        .get_typed(rdy_store::kinds::CHANGE, &change)
+        .unwrap();
+    assert_eq!(ch.message, "new publication profile site");
+    assert_eq!(ch.ops.len(), 1);
+}
+
+/// pub9: the `publication_check` op reads one snapshot for every session role, refuses an unknown
+/// key by name, takes only canon, tags and landings, and writes nothing, even when the policy
+/// result is blocked.
+#[test]
+fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
+    let (d, e) = project();
+    let s = human();
+    let w = write_typed(&e, |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]))
+        .unwrap();
+        r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+    })
+    .unwrap();
+    let (a, out, admin) = (
+        w["created"]["$a"].as_str().unwrap().to_string(),
+        w["created"]["$out"].as_str().unwrap().to_string(),
+        w["created"]["$admin"].as_str().unwrap().to_string(),
+    );
+    write_typed(&e, move |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "prose", "parent": a, "body": format!("See {{{{{out}}}}}.")},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "open", "title": "Open", "audience": "public", "select": [a]}}
+        ]))
+        .unwrap();
+        r.write(
+            &human(),
+            WriteRequest {
+                view: "work".into(),
+                ops,
+                justification: None,
+                message: String::new(),
+            },
+        )?;
+        let approver = Session::human("human:t".into(), Role::Approver);
+        let p = r.propose(&human(), "work", "pub", Some("summary"))?;
+        r.land(&approver, &p.id)
+    })
+    .unwrap();
+    let c = cx(&e, &s, d.path());
+    let end = e.read().seq();
+
+    // every role inspects; a blocked policy is a result
+    for role in [Role::Reader, Role::Writer, Role::Reviewer, Role::Approver] {
+        let who = Session::human("human:t".into(), role);
+        let v = dispatch(
+            &cx(&e, &who, d.path()),
+            "publication_check",
+            json!({"profile": "open"}),
+        )
+        .unwrap();
+        assert_eq!(v["references"]["status"], "blocked", "{role:?}: {v}");
+        assert_eq!(v["warnings"], json!([]));
+        assert_eq!(v["scope"]["kind"], "canon");
+    }
+    // the closed keys: a misspelt one is named, a missing profile is the op's shape error
+    let err = dispatch(
+        &c,
+        "publication_check",
+        json!({"profile": "open", "againts": "canon"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "publication_check: unknown field \"againts\"");
+    assert!(err.fix.starts_with("did you mean \"against\"?"), "{err}");
+    let err = dispatch(&c, "publication_check", json!({})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert!(err.message.contains("missing field `profile`"), "{err}");
+    // a view is no scope
+    for key in ["scope", "against"] {
+        let err = dispatch(
+            &c,
+            "publication_check",
+            json!({"profile": "open", key: "view:work"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{err}");
+        assert_eq!(
+            err.message,
+            format!("Publication check {key} must be canon, tag:<name>, or landing:<hash>.")
+        );
+    }
+    assert_eq!(e.read().seq(), end, "no check wrote anything");
 }

@@ -44,6 +44,16 @@ static ID_SHAPED: LazyLock<Regex> =
 /// page.
 pub const RATIONALE: &str = "rationale";
 
+/// A publication profile: administrative, off every site and print output, removed or not. It
+/// has no item, anchor, permalink, search entry or text of its own; a link to it leads to its
+/// doc's page and reads as that doc.
+pub const PUBLICATION_PROFILE: &str = "publication_profile";
+
+/// Whether `b` is a publication profile ([`PUBLICATION_PROFILE`]).
+pub fn is_profile(b: &Block) -> bool {
+    b.block_type == PUBLICATION_PROFILE
+}
+
 /// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
 const NUMBERED: [&str; 3] = ["table", "code", "diagram"];
 
@@ -54,10 +64,11 @@ const LABEL_DEPTH: usize = 3;
 /// The key a reference typed as a key (`{{id|@key}}`) reads as, if the target has one. A doc, a
 /// folder or a section has a title a reader knows it by, so a key-typed reference to one reads as
 /// that title, as `{{id}}` does (FW-F2b); a value reads as its value (FW-EN2); any other keyed
-/// block reads as its key (FW-F2a).
+/// block reads as its key (FW-F2a). A publication profile's key is its own text, off the site:
+/// a key-typed reference to one reads as its doc, as `{{id}}` does.
 pub fn typed_key(b: &Block) -> Option<&str> {
     match b.block_type.as_str() {
-        tree::DOC | tree::FOLDER | "section" | entity::VALUE => None,
+        tree::DOC | tree::FOLDER | "section" | entity::VALUE | PUBLICATION_PROFILE => None,
         _ => b.field_str("key"),
     }
 }
@@ -235,6 +246,10 @@ pub struct Site<'a> {
     /// Every block's doc worked out so far (see `doc_of`).
     /// The doc's id, not the block: a reference held in a cell would make `Site` invariant.
     docs: RefCell<HashMap<BlockId, Option<BlockId>>>,
+    /// A named profile's words for a reference that leads nowhere ([`inline::UNAVAILABLE`]): every
+    /// label, summary, description and search text reads it in place of its source wording.
+    /// None for a source output.
+    unavailable: Option<&'static str>,
     /// Test hook: how many times `doc_of` was asked.
     #[cfg(test)]
     doc_calls: std::cell::Cell<usize>,
@@ -242,6 +257,17 @@ pub struct Site<'a> {
 
 impl<'a> Site<'a> {
     pub fn new(m: &'a Materialized, pack: &Pack, project: &str) -> Site<'a> {
+        Site::with_unavailable(m, pack, project, None)
+    }
+
+    /// [`Site::new`]; a named profile's site passes `unavailable`, the words every reference that
+    /// leads nowhere reads as, whatever its source wording (D-0VCQ5).
+    pub fn with_unavailable(
+        m: &'a Materialized,
+        pack: &Pack,
+        project: &str,
+        unavailable: Option<&'static str>,
+    ) -> Site<'a> {
         // `level` folders are above `parent`'s children; only a damaged store nests deeper than
         // MAX_FOLDER_DEPTH, and what lies below it gets no page
         #[allow(clippy::too_many_arguments)]
@@ -392,6 +418,7 @@ impl<'a> Site<'a> {
             summaries: RefCell::default(),
             urls: RefCell::default(),
             docs: RefCell::default(),
+            unavailable,
             #[cfg(test)]
             doc_calls: Default::default(),
         };
@@ -462,8 +489,9 @@ impl<'a> Site<'a> {
             let mut taken = reserved_ids();
             for b in self.blocks_of(doc) {
                 // a decision has no place in the text: it is linked through what it governs; a
-                // rationale is off the page
-                if b.block_type == decision::DECISION || b.block_type == RATIONALE {
+                // rationale and a publication profile are off the page
+                if b.block_type == decision::DECISION || b.block_type == RATIONALE || is_profile(b)
+                {
                     continue;
                 }
                 anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
@@ -816,7 +844,7 @@ impl<'a> Site<'a> {
             });
         }
         let doc = self.doc_of(id)?;
-        if b.block_type == RATIONALE {
+        if b.block_type == RATIONALE || is_profile(b) {
             return Some(Url {
                 page: self.page(&doc.id)?,
                 anchor: None,
@@ -838,6 +866,10 @@ impl<'a> Site<'a> {
                 return None;
             }
             let b = self.m.get(at)?;
+            // a publication profile is off the site: a link to it lands on its doc
+            if is_profile(b) {
+                return self.doc_of(&b.id);
+            }
             if b.block_type != decision::DECISION {
                 return Some(b);
             }
@@ -870,12 +902,20 @@ impl<'a> Site<'a> {
     }
 
     fn label_uncached(&self, b: &Block, depth: usize) -> String {
+        // a publication profile, removed or not, has no words on the site: it is called by its
+        // doc, where a link to it leads
+        if is_profile(b) {
+            return self
+                .doc_of(&b.id)
+                .map(|d| self.label_at(d, depth))
+                .unwrap_or_default();
+        }
         // a removed block is called by the notice, never by its id path or old words (D-3M81W)
         if b.is_redacted() {
             return CONTENT_REMOVED.to_string();
         }
         if let Some(v) = entity::value_text(b) {
-            return v;
+            return self.as_written_at(&v, depth);
         }
         let tree = tree::is_tree_type(&b.block_type);
         let said = b
@@ -891,8 +931,14 @@ impl<'a> Site<'a> {
                 .unwrap_or_default(),
             None if b.block_type == "code" => {
                 let k = self.number(b);
-                match b.field_str("lang").filter(|l| !l.trim().is_empty()) {
-                    Some(l) => format!("{} code {k}", crate::highlight::human_name(l)),
+                // for a named profile, a language that holds a reference reads as its words
+                // exactly, never worded as a language's name
+                let lang = b
+                    .field_str("lang")
+                    .map(|l| (l, self.as_written_at(l, depth)));
+                match lang.filter(|(_, w)| !w.trim().is_empty()) {
+                    Some((l, w)) if self.reads_ref_words(l) => format!("{} code {k}", w.trim()),
+                    Some((_, w)) => format!("{} code {k}", crate::highlight::human_name(&w)),
                     None => format!("Code {k}"),
                 }
             }
@@ -928,6 +974,29 @@ impl<'a> Site<'a> {
         self.plain(text, RefMode::Strict, Form::Label, depth, &|_| {
             crate::html::UNRESOLVED.to_string()
         })
+    }
+
+    /// A field read as written (a value and its unit, a code language, a profile's title):
+    /// unchanged for a source output; for a named profile, each reference in it reads as
+    /// [`Site::ref_text`] says (the display words, the target's key or label, else the profile's
+    /// unavailable words), never its token, and nothing else changes but `\{{` as `{{`.
+    pub(crate) fn as_written(&self, text: &str) -> String {
+        self.as_written_at(text, 0)
+    }
+
+    /// Whether a field read as written ([`Site::as_written`]) holds a reference that a named
+    /// profile reads as words. Always false for a source output.
+    fn reads_ref_words(&self, text: &str) -> bool {
+        self.unavailable.is_some() && !rdy_model::ref_spans(text, RefMode::Strict).is_empty()
+    }
+
+    fn as_written_at(&self, text: &str, depth: usize) -> String {
+        match self.unavailable {
+            None => text.to_string(),
+            Some(_) => inline::source_plain(text, RefMode::Strict, &|span| {
+                self.ref_text(span, depth, &|_| String::new())
+            }),
+        }
     }
 
     /// `text` as plain words in `form` ([`inline::plain_refs_every`]): a reference reads as
@@ -998,7 +1067,10 @@ impl<'a> Site<'a> {
                 Some(k) => k.to_string(),
                 None => self.label_at(t, depth + 1),
             },
-            None => unresolved(&span.token),
+            None => match self.unavailable {
+                Some(words) => words.to_string(),
+                None => unresolved(&span.token),
+            },
         }
     }
 
@@ -1024,6 +1096,14 @@ impl<'a> Site<'a> {
     }
 
     fn summary_words_uncached(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        // a publication profile, removed or not, has no words on the site: a trail's reference
+        // to one reads as its doc, where the reference leads (as its label does)
+        if is_profile(b) {
+            return self
+                .doc_of(&b.id)
+                .map(|d| self.summary_words(d, depth, keep_token))
+                .unwrap_or_default();
+        }
         if b.is_redacted() {
             return CONTENT_REMOVED.to_string();
         }

@@ -1,5 +1,6 @@
 use crate::glob::Glob;
 use crate::pack::*;
+use crate::publication;
 use rdy_model::decision as d;
 use rdy_model::tree;
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,6 +134,12 @@ impl PackSet {
             )));
         }
         check_folder_extension(&pack)?;
+        if pack.block_types.contains_key(publication::PROFILE_TYPE) {
+            return Err(SchemaError::Invalid(format!(
+                "{} is an engine type and cannot be declared by a pack",
+                publication::PROFILE_TYPE
+            )));
+        }
         inject_engine_types(&mut pack);
         check(&pack)?;
         Ok(pack)
@@ -259,6 +266,18 @@ fn inject_engine_types(pack: &mut Pack) {
         .get_mut(tree::FOLDER)
         .expect("forced above")
         .children = vec![tree::FOLDER.to_string(), tree::DOC.to_string()];
+    // A publication profile (D-KDFZ3): one closed definition, a direct child of a doc only.
+    pack.block_types.insert(
+        publication::PROFILE_TYPE.to_string(),
+        publication::type_def(),
+    );
+    let doc_children = &mut pack
+        .block_types
+        .get_mut(tree::DOC)
+        .expect("forced above")
+        .children;
+    doc_children.retain(|c| c != publication::PROFILE_TYPE);
+    doc_children.push(publication::PROFILE_TYPE.to_string());
     let decision_core: BTreeMap<String, FieldDef> = [
         ("statement", f(FieldKind::Str, true, &[])),
         (

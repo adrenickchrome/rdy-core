@@ -150,6 +150,10 @@ pub(crate) fn own_text_coded(b: &Block, site: &Site) -> String {
 }
 
 fn own_text_in(b: &Block, r: Read) -> String {
+    // a publication profile, removed or not, is off every output: it has no words here
+    if crate::site::is_profile(b) {
+        return String::new();
+    }
     // a removed block of any other type says the notice, before its type's fields are read
     // (D-3M81W); a decision, removed or not, has no place in the text
     if b.is_redacted() && b.block_type != decision::DECISION {
@@ -167,7 +171,10 @@ fn own_text_in(b: &Block, r: Read) -> String {
             format!("{}: {}", r.field(b, "name"), body())
         }
         "value" => {
-            let v = r.raw(&entity::value_text(b).unwrap_or_default());
+            let v = r.raw(
+                &r.site
+                    .as_written(&entity::value_text(b).unwrap_or_default()),
+            );
             format!("{}: {v} {}", r.field(b, "name"), body())
                 .trim_end()
                 .to_string()
@@ -211,7 +218,10 @@ fn own_text_in(b: &Block, r: Read) -> String {
 fn section_text(sec: &Block, m: &Materialized, site: &Site) -> String {
     let mut out = plain(&sec.body, RefMode::Strict, Form::Body, site);
     for c in m.children(Some(&sec.id)) {
-        if c.block_type == "section" || c.block_type == crate::site::RATIONALE {
+        if c.block_type == "section"
+            || c.block_type == crate::site::RATIONALE
+            || crate::site::is_profile(c)
+        {
             continue;
         }
         out.push(' ');

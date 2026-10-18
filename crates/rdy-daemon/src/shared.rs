@@ -8,7 +8,7 @@ use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
-use rdy_engine::engine::{Engine, ExportRequest, SiteLink, WriteFn};
+use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteLink, WriteFn};
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_scope::ScopeRef;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState};
@@ -233,18 +233,29 @@ impl Engine for DaemonEngine {
 
     /// `rdy_export`: the `export` op's print. A relative `out` is under the project directory;
     /// the scope defaults to canon. The session's own view reads as the `export` op reads it.
+    /// One read state serves the whole print.
     fn export(&self, req: ExportRequest) -> Result<Value, RdyError> {
         let st = self.read();
-        let scope = match req.scope.as_deref() {
-            Some(text) => st.resolve_read_scope(text, req.view.as_deref())?,
-            None => rdy_engine::Scope::Canon,
-        };
         crate::ops::export_print(
             &st,
-            &scope,
+            req.scope.as_deref().unwrap_or("canon"),
+            req.view.as_deref(),
             &self.0.root.join(&req.out),
             &req.format,
             req.layout.as_deref(),
+            req.profile.as_deref(),
+        )
+    }
+
+    /// `rdy_render`: the `render` op's static site, from one read state, as `export` reads it.
+    fn render(&self, req: RenderRequest) -> Result<Value, RdyError> {
+        let st = self.read();
+        crate::ops::render_static(
+            &st,
+            req.scope.as_deref().unwrap_or("canon"),
+            req.view.as_deref(),
+            &self.0.root.join(&req.out),
+            req.profile.as_deref(),
         )
     }
 }
@@ -470,6 +481,7 @@ mod tests {
                     format: ExportFormat::Html,
                     layout: None,
                     scope: Some(scope.into()),
+                    profile: None,
                 },
             )
         };

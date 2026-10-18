@@ -16,6 +16,9 @@ use std::path::Path;
 
 /// The sheet of the file, after the fonts.
 const PRINT_CSS: &str = include_str!("../../theme/rdy-standard/print.css");
+/// The `redacted` badge a named profile's site writes beside an affected chosen tag's name
+/// (`version::chosen_header_html`).
+const REDACTED_BADGE: &str = "<span class=\"badge badge-redacted\">redacted</span>";
 
 /// Writes the print as one HTML file at `out`. O29's path rules come first: the directory of
 /// `out` must exist and must not be in the project's `.rdy` directory. `out` must not
@@ -76,12 +79,34 @@ pub fn single_html(p: &Print) -> Vec<u8> {
     if let Some(d) = p.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = writeln!(h, "<p class=\"description\">{}</p>", esc(d));
     }
-    let _ = writeln!(
-        h,
-        "<p class=\"colophon\">{} <span class=\"scope\">({})</span></p>",
-        esc(&p.label),
-        esc(&p.scope)
-    );
+    // a named profile's print has no scope, and a label only for a chosen tag (RULING F3): no
+    // colophon without either; an affected chosen tag's label keeps the site's redacted badge
+    // (D-3M81W)
+    let label = if p.tag_redacted {
+        format!("{} {REDACTED_BADGE}", esc(&p.label))
+    } else {
+        esc(&p.label)
+    };
+    match (p.label.is_empty(), p.scope.is_empty()) {
+        (true, true) => {}
+        (false, true) => {
+            let _ = writeln!(h, "<p class=\"colophon\">{label}</p>");
+        }
+        (true, false) => {
+            let _ = writeln!(
+                h,
+                "<p class=\"colophon\"><span class=\"scope\">({})</span></p>",
+                esc(&p.scope)
+            );
+        }
+        (false, false) => {
+            let _ = writeln!(
+                h,
+                "<p class=\"colophon\">{label} <span class=\"scope\">({})</span></p>",
+                esc(&p.scope)
+            );
+        }
+    }
     h.push_str("</header>\n");
 
     contents(&mut h, &p.docs);

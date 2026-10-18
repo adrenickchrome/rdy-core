@@ -52,6 +52,28 @@ pub trait Engine: Send + Sync {
             "drop --no-daemon, or run rdy export --out <path> --format <pdf|html|md>",
         ))
     }
+    /// Renders a static site (an output seam like [`Engine::export`]). An engine with no
+    /// renderer refuses.
+    fn render(&self, _req: RenderRequest) -> Result<serde_json::Value, RdyError> {
+        Err(RdyError::new(
+            crate::E_BAD_INPUT,
+            "rdy_render runs in the daemon, and this session runs without one",
+            "drop --no-daemon, or run rdy render --out <path>",
+        ))
+    }
+}
+
+/// What `rdy_render` asks for, as its parameters give it.
+#[derive(Clone, Debug)]
+pub struct RenderRequest {
+    /// The directory to write, resolved by the caller.
+    pub out: PathBuf,
+    /// The scope's text; canon when none.
+    pub scope: Option<String>,
+    /// A publication profile (an id, a key, or `implicit:org`); the full source when none.
+    pub profile: Option<String>,
+    /// The asking session's view, as for [`ExportRequest::view`].
+    pub view: Option<String>,
 }
 
 /// What `rdy_export` asks for, as its parameters give it; the daemon parses `format` and `layout`.
@@ -65,6 +87,8 @@ pub struct ExportRequest {
     pub layout: Option<String>,
     /// The scope's text; canon when none.
     pub scope: Option<String>,
+    /// A publication profile (an id, a key, or `implicit:org`); the full source when none.
+    pub profile: Option<String>,
     /// The asking session's view. A scope naming it needs no record yet (the session's first
     /// write makes one), as for every read (`ReadState::resolve_read_scope`); another view with
     /// no record is not found.

@@ -266,4 +266,14 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "the act was saved without signatures: {code}: {message}",
         SIGNING_FAILED_FIX,
     ),
+    (
+        E_PUBLICATION_REFERENCE,
+        "a public profile refers to blocks outside its selection",
+        "Include the target docs or remove these references. Run the publication check again.",
+    ),
+    (
+        W_PUBLICATION_REFERENCE,
+        "an org profile refers to blocks outside its selection",
+        "Review these references before you share the output.",
+    ),
 ];

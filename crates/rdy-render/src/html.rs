@@ -42,23 +42,35 @@ pub struct Link {
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
 /// reader may not see, so the marker's own words stand in for it.
-pub(crate) const UNRESOLVED: &str = "unresolved reference";
+pub const UNRESOLVED: &str = "unresolved reference";
 
 /// A label as HTML ([`inline::label_html`] on the page being written): escaped, its code spans
 /// as `<code>` and its references as links. A newline is a `<br>`.
 pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    inline::label_html(text, &inline::Ctx { link, doc_page: "" })
+    inline::label_html(
+        text,
+        &inline::Ctx {
+            link,
+            doc_page: "",
+            unavailable: UNRESOLVED,
+            local_link: None,
+        },
+    )
 }
 
 /// A label as plain words ([`inline::Form::Label`]), escaped, each reference read as its display
-/// text or its target's label (see [`diagram_label`]): for an attribute, a caption or a place a
-/// link may not go.
-pub fn words_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+/// text or its target's label (see [`diagram_label`]; `unavailable` for one that leads nowhere):
+/// for an attribute, a caption or a place a link may not go.
+pub fn words_html(
+    text: &str,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     escape(&inline::plain_refs_every(
         text,
         RefMode::Strict,
         inline::Form::Label,
-        &|span| diagram_label(span, link),
+        &|span| diagram_label(span, link, unavailable),
     ))
 }
 
@@ -97,9 +109,13 @@ fn mermaid_label(s: &str) -> String {
 }
 
 /// The words a reference reads as where no link may go: its display text, the target's key for
-/// a key-typed reference whose target still has one, the target's label, else the unresolved
-/// marker's words; never the id.
-fn diagram_label(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+/// a key-typed reference whose target still has one, the target's label, else `unavailable` (the
+/// unresolved marker's words, or a named profile's); never the id.
+fn diagram_label(
+    span: &RefSpan,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     let target = BlockId::parse(&span.token).ok().and_then(|id| link(&id));
     // a removed target reads as the notice, whatever display text the author gave (D-3M81W)
     if target.as_ref().is_some_and(|l| l.removed) {
@@ -111,24 +127,32 @@ fn diagram_label(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> Str
     match target {
         Some(Link { key: Some(k), .. }) if span.key_typed && !k.is_empty() => k,
         Some(l) => l.label,
-        None => UNRESOLVED.to_string(),
+        None => unavailable.to_string(),
     }
 }
 
 /// Escaped diagram source with each id-shaped `{{id}}` replaced by its label (see
 /// [`diagram_label`]), escaped for Mermaid and then for HTML, so the diagram renderer sees plain
 /// text. Other `{{…}}` (e.g. Mermaid hexagons) is kept as written.
-pub fn diagram_source(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+pub fn diagram_source(
+    text: &str,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     with_refs(text, RefMode::IdShaped, &|span| {
-        escape(&mermaid_label(&diagram_label(span, link)))
+        escape(&mermaid_label(&diagram_label(span, link, unavailable)))
     })
 }
 
 /// The diagram's source as a reader reads it under "Diagram source": escaped, its references as
 /// labels (see [`diagram_label`]), so no id is shown.
-fn readable_source(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+fn readable_source(
+    text: &str,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     with_refs(text, RefMode::IdShaped, &|span| {
-        escape(&diagram_label(span, link))
+        escape(&diagram_label(span, link, unavailable))
     })
 }
 
@@ -149,14 +173,80 @@ fn with_refs(text: &str, mode: RefMode, r: &dyn Fn(&RefSpan) -> String) -> Strin
 
 /// A file's media type as a reader names it: `PDF`, `Text`, `Image`, else the subtype upper-cased.
 fn human_media(media: &str) -> String {
-    let (kind, sub) = media.split_once('/').unwrap_or((media, ""));
-    let sub = sub.split(';').next().unwrap_or("").trim();
-    match (kind.trim(), sub) {
+    media_name(media, &[], &|_| String::new())
+}
+
+/// A figure's media type as its page shows it ([`human_media`]). For a named profile, each
+/// reference in it reads as its words ([`diagram_label`]) exactly, never its token: only the
+/// author's own text is upper-cased. A source output shows it as before.
+fn media_words(media: &str, ctx: &BlockCtx) -> String {
+    if !reads_ref_words(media, ctx) {
+        return human_media(media);
+    }
+    let spans = ref_spans(media, RefMode::Strict);
+    media_name(media, &spans, &|span| {
+        diagram_label(span, ctx.link, ctx.unavailable)
+    })
+}
+
+/// [`human_media`] of `media`, whose references `spans` read as `words`: the type and subtype
+/// split at the first `/` and the parameters at the first `;` outside a reference, so no
+/// reference is cut or upper-cased.
+fn media_name(media: &str, spans: &[RefSpan], words: &dyn Fn(&RefSpan) -> String) -> String {
+    let outside = |i: usize| !spans.iter().any(|s| s.range.contains(&i));
+    let find = |from: usize, c: char| {
+        media[from..]
+            .char_indices()
+            .find(|(i, x)| *x == c && outside(from + i))
+            .map(|(i, _)| from + i)
+    };
+    let (kind, sub) = match find(0, '/') {
+        Some(slash) => {
+            let end = find(slash + 1, ';').unwrap_or(media.len());
+            (&media[..slash], slash + 1..end)
+        }
+        None => (media, media.len()..media.len()),
+    };
+    // the subtype's own range, without its surrounding whitespace
+    let text = &media[sub.clone()];
+    let start = sub.start + (text.len() - text.trim_start().len());
+    let end = sub.end - (text.len() - text.trim_end().len());
+    match (kind.trim(), &media[start..end.max(start)]) {
         (_, "pdf") => "PDF".into(),
         ("text", _) => "Text".into(),
         ("image", _) => "Image".into(),
         (_, "") => "File".into(),
-        (_, s) => s.to_uppercase(),
+        _ => {
+            // the author's own text: as written, upper-cased (with the rdy escape read when the
+            // text holds references, as their words are)
+            let own = |t: &str| match spans.is_empty() {
+                true => t.to_uppercase(),
+                false => inline::unescape_braces(t).to_uppercase(),
+            };
+            let mut out = String::new();
+            let mut last = start;
+            for span in spans
+                .iter()
+                .filter(|s| s.range.start >= start && s.range.end <= end)
+            {
+                out.push_str(&own(&media[last..span.range.start]));
+                out.push_str(&words(span));
+                last = span.range.end;
+            }
+            out.push_str(&own(&media[last..end]));
+            out
+        }
+    }
+}
+
+/// The media type a figure's asset carries (its file's extension, a print's embedded type):
+/// as written, except that a named profile's media type holding a reference carries none of
+/// it, only the neutral `application/octet-stream`.
+fn asset_media<'m>(media: &'m str, ctx: &BlockCtx) -> &'m str {
+    if reads_ref_words(media, ctx) {
+        "application/octet-stream"
+    } else {
+        media
     }
 }
 
@@ -176,19 +266,19 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let h = b.field_str("blob").unwrap_or("");
     let alt_text = b.field_str("alt").unwrap_or("");
     // the alt attribute, the caption and the download link's text are plain words
-    let alt = words_html(alt_text, ctx.link);
+    let alt = words_html(alt_text, ctx.link, ctx.unavailable);
     let caption = alt.clone();
     let media = b.field_str("media_type").unwrap_or("");
     let image = media.starts_with("image/");
     match h.parse::<Hash>() {
         Ok(hash) if (ctx.present)(&hash) => {
-            let src = escape(&(ctx.asset_href)(&hash, media));
+            let src = escape(&(ctx.asset_href)(&hash, asset_media(media, ctx)));
             if image {
                 format!(
                     "<figure class=\"figure\"><img src=\"{src}\" alt=\"{alt}\" loading=\"lazy\"><figcaption>{caption}</figcaption></figure>"
                 )
             } else {
-                let mut meta = human_media(media);
+                let mut meta = media_words(media, ctx);
                 if let Some(n) = (ctx.blob_len)(&hash) {
                     let _ = write!(meta, ", {}", human_size(n));
                 }
@@ -279,6 +369,10 @@ pub struct BlockCtx<'a> {
     pub table_number: Option<usize>,
     /// The blocks that `describes`-link to this one.
     pub described_by: &'a [Link],
+    /// What a reference that leads nowhere reads as ([`inline::Ctx::unavailable`]).
+    pub unavailable: &'a str,
+    /// A named profile's filter of authored local links ([`inline::Ctx::local_link`]).
+    pub local_link: Option<inline::LocalLink<'a>>,
 }
 
 /// A type's name as a reader reads it: the type id with `_` as a space and its first letter
@@ -292,15 +386,60 @@ fn display_name(block_type: &str) -> String {
     }
 }
 
+/// A field the page shows as written (an alias, an entity's kind, a value and its unit, a code
+/// language): unchanged for a source output; for a named profile (`local_link` is set), each
+/// reference in it reads as its words ([`diagram_label`]: the display words, the target's key or
+/// label, else `unavailable`), never its token. Not escaped.
+fn as_written(text: &str, ctx: &BlockCtx) -> String {
+    match ctx.local_link {
+        None => text.to_string(),
+        Some(_) => inline::source_plain(text, RefMode::Strict, &|span| {
+            diagram_label(span, ctx.link, ctx.unavailable)
+        }),
+    }
+}
+
+/// Whether a field the page shows as written holds a reference that a named profile reads as
+/// words ([`as_written`]). Always false for a source output, which shows the field unchanged.
+fn reads_ref_words(text: &str, ctx: &BlockCtx) -> bool {
+    ctx.local_link.is_some() && !ref_spans(text, RefMode::Strict).is_empty()
+}
+
+/// An entity's kind as its eyebrow: the kind worded as a name ([`display_name`]). For a named
+/// profile, each reference in it reads as its words ([`diagram_label`]) exactly, never worded
+/// as a name: only the author's own text around it is (`_` as a space, and a first letter in
+/// upper case when the kind starts with that text).
+fn kind_eyebrow(kind: &str, ctx: &BlockCtx) -> String {
+    if !reads_ref_words(kind, ctx) {
+        return display_name(&as_written(kind, ctx));
+    }
+    let own = |t: &str| inline::unescape_braces(t).replace('_', " ");
+    let spans = ref_spans(kind, RefMode::Strict);
+    let starts_own = spans.first().is_some_and(|s| s.range.start > 0);
+    let mut out = String::new();
+    let mut last = 0;
+    for span in &spans {
+        out.push_str(&own(&kind[last..span.range.start]));
+        out.push_str(&diagram_label(span, ctx.link, ctx.unavailable));
+        last = span.range.end;
+    }
+    out.push_str(&own(&kind[last..]));
+    let mut chars = out.chars();
+    match chars.next() {
+        Some(c) if starts_own => c.to_uppercase().chain(chars).collect(),
+        _ => out,
+    }
+}
+
 /// The `Also: …` line of a block that has aliases, else nothing.
-fn aliases_html(b: &Block) -> String {
+fn aliases_html(b: &Block, ctx: &BlockCtx) -> String {
     let aliases = entity::aliases(b);
     if aliases.is_empty() {
         return String::new();
     }
     let joined = aliases
         .iter()
-        .map(|a| escape(a))
+        .map(|a| escape(&as_written(a, ctx)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("<p class=\"entity-aliases\">Also: {joined}</p>")
@@ -324,6 +463,8 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
     let ictx = inline::Ctx {
         link,
         doc_page: ctx.doc_page,
+        unavailable: ctx.unavailable,
+        local_link: ctx.local_link,
     };
     let t = b.block_type.as_str();
     // a title or a name is a label: its code spans and references, which link like the body's
@@ -367,14 +508,14 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 body()
             )
         }
-        // supporting text: off the site (FW-D10)
-        "rationale" => String::new(),
+        // supporting text: off the site (FW-D10); a publication profile is administrative
+        "rationale" | crate::site::PUBLICATION_PROFILE => String::new(),
         "term" => format!(
             "<dl class=\"term\"><dt id=\"{}\">{}</dt><dd>{}{}</dd></dl>",
             escape(ctx.anchor),
             f("name"),
             inline::body_inline_html(&b.body, &ictx),
-            aliases_html(b)
+            aliases_html(b, ctx)
         ),
         "component" | "actor" | "interface" | "value" | "entity" => {
             let described = if ctx.described_by.is_empty() {
@@ -391,18 +532,21 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             };
             // an entity's kind is its eyebrow, when it has one
             let eyebrow = match b.field_str("kind").map(str::trim).filter(|k| !k.is_empty()) {
-                Some(k) if t == entity::ENTITY => display_name(k),
+                Some(k) if t == entity::ENTITY => kind_eyebrow(k, ctx),
                 _ => display_name(t),
             };
             let value = match entity::value_text(b) {
-                Some(v) => format!("<p class=\"entity-value\">{}</p>", escape(&v)),
+                Some(v) => format!(
+                    "<p class=\"entity-value\">{}</p>",
+                    escape(&as_written(&v, ctx))
+                ),
                 None => String::new(),
             };
             format!(
                 "<div class=\"entity entity-{t}\">{}<h{item_level} class=\"entity-name\">{}</h{item_level}>{value}{}{}{described}</div>",
                 marker(ctx, t, &eyebrow),
                 f("name"),
-                aliases_html(b),
+                aliases_html(b, ctx),
                 body()
             )
         }
@@ -430,12 +574,12 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             let alt = b
                 .field_str("alt")
                 .filter(|a| !a.trim().is_empty())
-                .map(|a| words_html(a, link));
+                .map(|a| words_html(a, link, ctx.unavailable));
             // only Mermaid has a renderer on the site; any other language shows its source
             let canvas = if lang == "mermaid" {
                 format!(
                     "<div class=\"diagram-canvas\" aria-hidden=\"true\"><pre class=\"mermaid\">{}</pre></div>",
-                    diagram_source(&b.body, link)
+                    diagram_source(&b.body, link, ctx.unavailable)
                 )
             } else {
                 String::new()
@@ -448,15 +592,20 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             format!(
                 "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{hidden}</p>{canvas}{caption}<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
                 escape(lang),
-                readable_source(&b.body, link)
+                readable_source(&b.body, link, ctx.unavailable)
             )
         }
         "figure" => figure_html(b, ctx),
         "code" => {
-            // with no language: the label `Code`, plain text, and no class on `<code>`
-            let lang = b.field_str("lang").unwrap_or("").trim();
+            // with no language: the label `Code`, plain text, and no class on `<code>`; for a
+            // named profile, a language that holds a reference is labelled with its words exactly
+            let written = b.field_str("lang").unwrap_or("");
+            let lang = as_written(written, ctx);
+            let lang = lang.trim();
             let human = match highlight::human_name(lang) {
-                n if n.is_empty() || lang.is_empty() => "Code".to_string(),
+                _ if lang.is_empty() => "Code".to_string(),
+                _ if reads_ref_words(written, ctx) => lang.to_string(),
+                n if n.is_empty() => "Code".to_string(),
                 n => n,
             };
             let class = if lang.is_empty() {
@@ -552,7 +701,7 @@ fn table_html(b: &Block, ctx: &BlockCtx, ictx: &inline::Ctx) -> String {
         })
         .collect();
     let caption = match b.field_str("caption").filter(|c| !c.trim().is_empty()) {
-        Some(c) => words_html(c, ctx.link),
+        Some(c) => words_html(c, ctx.link, ctx.unavailable),
         None => format!("Table {}", ctx.table_number.unwrap_or(1)),
     };
     let normative = matches!(b.fields.get("normative"), Some(FieldValue::Bool(true)));
@@ -606,6 +755,30 @@ mod tests {
         assert_eq!(human_size(512), "512 bytes");
         assert_eq!(human_size(12 * 1024), "12 KB");
         assert_eq!(human_size(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
+    }
+
+    /// Final fix round 1: a named profile's media type reads each reference as its words, never
+    /// cut at a `/` or `;` inside it and never upper-cased; the source's reading is unchanged.
+    #[test]
+    fn pub_media_type_references_read_as_words() {
+        let words = |m: &str| {
+            let spans = ref_spans(m, RefMode::Strict);
+            media_name(m, &spans, &|s| {
+                s.display
+                    .clone()
+                    .unwrap_or_else(|| "unavailable reference".into())
+            })
+        };
+        assert_eq!(words("application/{{d-2ZGWX}}"), "unavailable reference");
+        assert_eq!(words("application/x-{{d-2ZGWX|a/b; c}}; v=1"), "X-a/b; c");
+        assert_eq!(words(" application / zip ; v={{d-2ZGWX}}"), "ZIP");
+        assert_eq!(words("{{d-2ZGWX}}"), "File");
+        assert_eq!(words("image/{{d-2ZGWX}}"), "Image");
+        assert_eq!(words("application/{{d-2ZGWX|pdf}}"), "pdf");
+        assert_eq!(words("application/   "), "File");
+        // the source reads the token as written, upper-cased, as before
+        assert_eq!(human_media("application/{{d-2ZGWX}}"), "{{D-2ZGWX}}");
+        assert_eq!(human_media("application/x-zip; v=1"), "X-ZIP");
     }
 
     #[test]

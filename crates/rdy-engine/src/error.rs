@@ -162,6 +162,13 @@ pub const W_REDACTION_QUARANTINE_MESSAGE: &str = "Quarantine files may hold the 
 pub const W_REDACTION_SECRET_MESSAGE: &str =
     "Rotate or revoke the secret. Redaction does not undo its exposure.";
 
+/// A public publication profile whose selection references blocks outside it (D-0VCQ5): its
+/// output is blocked.
+pub const E_PUBLICATION_REFERENCE: &str = "E_PUBLICATION_REFERENCE";
+/// An org publication profile whose selection references blocks outside it (D-0VCQ5): a warning
+/// on its output.
+pub const W_PUBLICATION_REFERENCE: &str = "W_PUBLICATION_REFERENCE";
+
 /// `E_REDACTION_TARGET` for `target` (its normalized spelling, or `[]` for no targets) and one of
 /// the `REDACTION_CAUSE_*` texts.
 pub fn redaction_target(target: &str, cause: &str) -> RdyError {

@@ -15,6 +15,7 @@ mod io_keys;
 mod io_link_keys;
 mod io_load;
 mod io_onboarding;
+mod io_publication;
 mod io_reader;
 mod io_redaction_load;
 mod io_tree;

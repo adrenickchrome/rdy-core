@@ -3,10 +3,13 @@
 //!
 //! A print holds a title part (the project's name, its description, the version label and the
 //! scope), then every folder and doc page in tree order, then the glossary when the site has one
-//! (O2). It holds the words of the site's own pages: the blocks each page builds, read back from
-//! the renderer's HTML ([`ir::from_html`]). Nothing on the site that acts is printed: no button,
-//! script, navigation, search, review mark, change summary, version pill or "Why?" trail
-//! (D-X61DT). A diagram prints as its source (O3). No id is shown (O4).
+//! (O2). A named profile's print ([`build_profile`]) is built the same way from its selected view
+//! alone, under the profile's title and description, with no scope and only the explicitly chosen
+//! tag's name as its label (D-5CVWB, RULING F3). It holds the words of the site's own pages: the
+//! blocks each page builds, read back from the renderer's HTML ([`ir::from_html`]). Nothing on
+//! the site that acts is printed: no button, script, navigation, search, review mark, change
+//! summary, version pill or "Why?" trail (D-X61DT). A diagram prints as its source (O3). No id
+//! is shown (O4).
 pub mod fonts;
 pub mod image;
 pub mod ir;
@@ -18,7 +21,9 @@ pub mod single;
 pub use md::Layout;
 
 use crate::page::{self, Kind};
-use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
+use crate::prepare::{self, Prepared, Purpose};
+use crate::site::Site;
+use crate::{Mode, env, tpl, version};
 use rdy_engine::{E_BAD_INPUT, E_IO, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use serde::Serialize;
@@ -40,7 +45,7 @@ pub enum Format {
 /// applies to the Markdown tree only; `None` lays it out plainly. Refuses `inflight`. O29's path
 /// rules (`check_out`) come before the print is built, the same for every format. The writer of
 /// the format never overwrites: a file must not exist, a directory may be empty. It writes no
-/// format-3 tree (O12).
+/// format-3 tree (O12). Without a profile the print is the full source (RULING F2).
 pub fn export(
     rdy: &ReadState,
     scope: &Scope,
@@ -48,6 +53,35 @@ pub fn export(
     format: Format,
     layout: Option<Layout>,
 ) -> Result<PrintSummary, RdyError> {
+    check_layout(format, layout)?;
+    // O29 before the print is built: no format writes into the store
+    check_out(&rdy.root().join(".rdy"), out)?;
+    let p = build(rdy, scope)?;
+    write(&p, out, format, layout)
+}
+
+/// Prints the publication profile `profile` (an id or key) at `scope_text` (`canon`,
+/// `tag:<name>` or `landing:<hash>`) as `format` at `out` (D-5CVWB): the same selected view and
+/// reference check as the profile's site, with [`export`]'s layout, path and no-overwrite rules
+/// and its writers. The profile resolves and its check runs once, before anything is written: a
+/// public profile whose check is blocked refuses with `E_PUBLICATION_REFERENCE` and leaves no
+/// file, directory or staging behind. An org profile's warning comes first in the warnings.
+pub fn export_profile(
+    read: &ReadState,
+    scope_text: &str,
+    profile: &str,
+    out: &Path,
+    format: Format,
+    layout: Option<Layout>,
+) -> Result<PrintSummary, RdyError> {
+    check_layout(format, layout)?;
+    check_out(&read.root().join(".rdy"), out)?;
+    let p = build_profile(read, scope_text, profile)?;
+    write(&p, out, format, layout)
+}
+
+/// A layout applies to the Markdown tree only.
+fn check_layout(format: Format, layout: Option<Layout>) -> Result<(), RdyError> {
     if layout.is_some() && !matches!(format, Format::Md) {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -55,13 +89,21 @@ pub fn export(
             "drop --layout, or export with --format md",
         ));
     }
-    // O29 before the print is built: no format writes into the store
-    check_out(&rdy.root().join(".rdy"), out)?;
-    let p = build(rdy, scope)?;
+    Ok(())
+}
+
+/// Writes the print `p` as `format` at `out`: every export, with or without a profile, writes
+/// through here.
+fn write(
+    p: &Print,
+    out: &Path,
+    format: Format,
+    layout: Option<Layout>,
+) -> Result<PrintSummary, RdyError> {
     match format {
-        Format::Pdf => pdf::write_pdf(&p, out),
-        Format::Html => single::write_single_html(&p, out),
-        Format::Md => md::write_markdown(&p, out, layout.unwrap_or(Layout::Plain)),
+        Format::Pdf => pdf::write_pdf(p, out),
+        Format::Html => single::write_single_html(p, out),
+        Format::Md => md::write_markdown(p, out, layout.unwrap_or(Layout::Plain)),
     }
 }
 
@@ -127,11 +169,16 @@ pub(crate) fn check_out(rdy_dir: &Path, out: &Path) -> Result<(), RdyError> {
 pub struct Print {
     pub title: String,
     pub description: Option<String>,
-    /// The version label as the colophon writes it.
+    /// The version label as the colophon writes it. A named profile's is its chosen tag's name,
+    /// else empty (RULING F3); a writer leaves out an empty label.
     pub label: String,
     /// The scope's text: `canon`, `view:<name>`, `tag:<version>`, `landing:<hash>` or
-    /// `proposal:<hash>`.
+    /// `proposal:<hash>`. Empty for a named profile; a writer leaves out an empty scope.
     pub scope: String,
+    /// A named profile's chosen tag's history holds content a redaction removed
+    /// (`VersionInfo::redacted`): each writer marks the label `redacted`, as the profile's site
+    /// does beside the tag's name (D-3M81W). False without a chosen tag and for a source print.
+    pub tag_redacted: bool,
     /// Folders and docs in tree order, then the glossary (O2).
     pub docs: Vec<PrintDoc>,
     /// Every figure blob a doc names.
@@ -141,6 +188,18 @@ pub struct Print {
     /// The project's `.rdy` directory, as the project path names it. The writers refuse an
     /// `out` that resolves into it (O29). It is not part of any output.
     pub rdy_dir: std::path::PathBuf,
+}
+
+impl Print {
+    /// What the Markdown and PDF version line writes after the label: ` (redacted)` for an
+    /// affected chosen tag (D-3M81W), else nothing; nothing without a label (RULING F3).
+    pub(crate) fn redacted_suffix(&self) -> &'static str {
+        if self.tag_redacted && !self.label.is_empty() {
+            " (redacted)"
+        } else {
+            ""
+        }
+    }
 }
 
 /// A figure's file.
@@ -247,23 +306,6 @@ pub struct PrintSummary {
     pub warnings: Vec<String>,
 }
 
-/// The scope as rdy reads it back: a version by its tag.
-fn scope_text(rdy: &ReadState, scope: &Scope) -> Result<String, RdyError> {
-    Ok(match scope {
-        Scope::Canon => "canon".to_string(),
-        Scope::View(v) => format!("view:{v}"),
-        Scope::At(h) => {
-            let hex = h.to_string();
-            match rdy.versions()?.into_iter().find(|v| v.landing == hex) {
-                Some(v) => format!("tag:{}", v.name),
-                None => format!("landing:{hex}"),
-            }
-        }
-        Scope::Proposal(v) => format!("proposal:{v}"),
-        Scope::Inflight => rdy_engine::INFLIGHT_SCOPE.to_string(),
-    })
-}
-
 /// How deep a page sits: a folder's page is `<folder>/index.html`, one level below the folder.
 fn depth_of(page_url: &str, kind: PageKind) -> usize {
     page_url
@@ -277,22 +319,51 @@ fn depth_of(page_url: &str, kind: PageKind) -> usize {
 /// state and scope give an equal print.
 pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Print, RdyError> {
     rdy_engine::refuse_inflight_export(scope)?;
-    read_scope(rdy, scope, |read| build_from(rdy, scope, read))
+    build_from(prepare::source(rdy, scope, Purpose::Print)?)
 }
 
-fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, RdyError> {
-    let ScopeRead {
-        position,
-        versions,
-        landed_ms,
+/// The print of the publication profile `profile` (an id or key) at `scope_text` (`canon`,
+/// `tag:<name>` or `landing:<hash>`) (D-5CVWB, D-0VCQ5): built as [`build`] builds, from the
+/// profile's selected state, induced graph and selected figures alone. Its title and description
+/// are the profile's; its label is the explicitly chosen tag's name, else empty (RULING F3); its
+/// scope is empty, so it names no source scope or hash. A public profile whose reference check is
+/// blocked refuses with `E_PUBLICATION_REFERENCE`.
+pub fn build_profile(read: &ReadState, scope_text: &str, profile: &str) -> Result<Print, RdyError> {
+    build_from(crate::publication::prepare(
+        read,
+        scope_text,
+        profile,
+        Purpose::Print,
+    )?)
+}
+
+/// [`build`] and [`build_profile`] from what [`prepare::source`] or `publication::prepare`
+/// read: it reads no source.
+fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
+    let Prepared {
         m,
+        g,
+        pack,
         blobs,
         site_name,
         description,
-        pack,
-        g,
-        site,
-    } = read;
+        position,
+        versions,
+        landed_ms,
+        disagreements,
+        scope_text,
+        rdy_dir,
+        history,
+        profile,
+    } = prepared;
+    let m: &rdy_engine::Materialized = &m;
+    let mut site = Site::with_unavailable(
+        m,
+        &pack,
+        &site_name,
+        profile.as_ref().map(|_| crate::inline::UNAVAILABLE),
+    );
+    site.set_disagreements(disagreements);
     // the Markdown tree writes a file per page: two siblings that would be one file refuse every
     // format alike, before anything is built or written
     if let Some(e) = site.path_clash("export") {
@@ -300,12 +371,9 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
     }
     // the label as the colophon writes it, which names the view or proposal version a print of
     // one shows; the pages show no review mark
-    let listed = review::listed(rdy, scope)?;
-    let reviewed = match listed.as_ref().map(|rv| rv.changed_blocks()) {
-        Some(blocks) => crate::reviewed_of(rdy, scope, blocks)?,
-        None => None,
-    };
-    let label = version::text_label(&position, reviewed.as_ref()).text;
+    let local = profile
+        .as_ref()
+        .map(|_| crate::publication::LocalTargets::of(&site));
     let sh = page::Shared {
         site: &site,
         m,
@@ -328,6 +396,17 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
         inline_diffs: Default::default(),
         changes_page: false,
         since_page: false,
+        profile: profile.as_ref(),
+        local: local.as_ref(),
+        unavailable: match profile {
+            Some(_) => crate::inline::UNAVAILABLE,
+            None => crate::inline::UNRESOLVED,
+        },
+    };
+    // a named profile's label is its chosen tag's name (RULING F3)
+    let label = match &profile {
+        Some(_) => sh.label().text,
+        None => version::text_label(&position, history.reviewed.as_ref()).text,
     };
 
     // the pages in the order a reader meets them in the tree, then the glossary
@@ -422,29 +501,48 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
     }
     // a link leads to a page of the print and an anchor a block of that page has: a link to a
     // page the print leaves out reads as its words; a block's id (the site's id anchor) reads as
-    // the anchor the print gives that block; an anchor no printed block has is dropped
+    // the anchor the print gives that block, and a page's own id leads to the page; an anchor no
+    // printed block has is dropped from a source print's link, and a named profile's link to it
+    // reads as its words, as a link to a site-only page does (D-5CVWB)
     let mut on_page: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for d in &docs {
         ir::anchors(&d.blocks, on_page.entry(d.page.clone()).or_default());
     }
+    let profiled = profile.is_some();
     let to = |h: &Href| -> Option<Href> {
         let Href::Page { page, anchor } = h else {
             return Some(h.clone());
         };
         let on = on_page.get(page)?;
-        let anchor = anchor.as_deref().and_then(|a| {
-            let a = match a.parse::<BlockId>() {
+        // the printed anchor `anchor` asks for: `Some(None)` for the page itself, `None` when no
+        // printed block has it
+        let printed: Option<Option<String>> = match anchor.as_deref() {
+            None => Some(None),
+            Some(a) => match a.parse::<BlockId>() {
                 Ok(id) if m.get(&id).is_some() => {
-                    site.url_of(&id).filter(|u| u.page == *page)?.anchor?
+                    match site.url_of(&id).filter(|u| u.page == *page) {
+                        // a page's own id leads to the page
+                        Some(u) => match u.anchor {
+                            None => Some(None),
+                            Some(a) => on.contains(&a).then_some(Some(a)),
+                        },
+                        None => None,
+                    }
                 }
-                _ => a.to_string(),
-            };
-            on.contains(&a).then_some(a)
-        });
-        Some(Href::Page {
-            page: page.clone(),
-            anchor,
-        })
+                _ => on.contains(a).then(|| Some(a.to_string())),
+            },
+        };
+        match printed {
+            Some(anchor) => Some(Href::Page {
+                page: page.clone(),
+                anchor,
+            }),
+            None if profiled => None,
+            None => Some(Href::Page {
+                page: page.clone(),
+                anchor: None,
+            }),
+        }
     };
     for d in &mut docs {
         ir::map_links(&mut d.blocks, &to);
@@ -470,24 +568,17 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
             },
         );
     }
-    // the site build's warnings: a summary page a doc keeps, and the glossary's
-    let since = crate::since_of(rdy, scope, &position);
-    let warnings = crate::scope_warnings(
-        m,
-        &site,
-        reviewed.is_some() && listed.is_some(),
-        since.as_ref().map(|(name, ..)| name.as_str()),
-    );
-
     Ok(Print {
         title: site_name.clone(),
         description: description.clone(),
         label,
-        scope: scope_text(rdy, scope)?,
+        scope: scope_text,
+        tag_redacted: profile.as_ref().is_some_and(|p| p.tag_redacted),
         docs,
         blobs: print_blobs,
-        warnings,
-        rdy_dir: rdy.root().join(".rdy"),
+        // the site build's warnings: a summary page a doc keeps, and the glossary's
+        warnings: history.warnings,
+        rdy_dir,
     })
 }
 
