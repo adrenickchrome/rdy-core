@@ -12,6 +12,7 @@ mod cli_daemon;
 mod cli_dump;
 mod cli_entities;
 mod cli_export;
+mod cli_hub_config;
 mod cli_inbox;
 mod cli_intake;
 mod cli_intents;

@@ -16,7 +16,14 @@
 //! `.rdy/local.yaml`, else its entry in the user config ([`linked_repos`]). So `code_paths` has
 //! one origin per entry that applies (`code_paths.<name>`, from the file that supplied it), and
 //! `merged` holds those entries as one mapping.
+//!
+//! `remotes` and `hub.installs` merge entry by entry too (`hub_config`): one row per remote and
+//! one per install field. Unlike other unknown keys, an unknown, wrong-level or invalid hub
+//! setting is dropped, and its warning never quotes a value. Every file is bounded (1 MiB, depth
+//! 32, 4096 entries, 16384-byte scalars, no alias) before it is parsed, and a file that does not
+//! parse names only the file.
 
+use crate::hub_types::{LimitUnit, MAX_CONFIG_BYTES};
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
 use serde::Serialize;
@@ -348,6 +355,22 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         ty: Ty::OptStr,
         default: None,
     },
+    // remotes (D-B8N21): one entry per name at any level, the most specific whole entry wins;
+    // `hub_config` checks and merges them, one row per remote
+    KeyRule {
+        key: crate::hub_config::REMOTES_KEY,
+        levels: ANY,
+        ty: Ty::Any,
+        default: None,
+    },
+    // install settings (n-XZDQD): ca_file in the user config only, pinned_origins in the user
+    // config or .rdy/local.yaml, never .rdy.yaml; one row per install field
+    KeyRule {
+        key: crate::hub_config::HUB_INSTALLS_KEY,
+        levels: PERSON,
+        ty: Ty::Any,
+        default: None,
+    },
 ];
 
 /// The signing settings, by their dotted keys.
@@ -483,7 +506,7 @@ pub(crate) fn user_file_of(xdg: Option<&Path>, home: Option<&Path>) -> Option<Pa
 }
 
 /// One level's file as the name a message uses for it.
-fn file_name(level: Level, user_file: Option<&Path>) -> String {
+pub(crate) fn file_name(level: Level, user_file: Option<&Path>) -> String {
     match level {
         Level::Local => LOCAL_FILE.to_string(),
         Level::Project => PROJECT_FILE.to_string(),
@@ -504,24 +527,49 @@ fn path_of(project: &Path, level: Level, user_file: Option<&Path>) -> Option<Pat
 }
 
 /// A file read as a mapping of settings: `None` if it does not exist; an empty file is an empty
-/// mapping.
-fn read_file(path: &Path, shown: &str) -> Result<Option<Mapping>, RdyError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(RdyError::new(
-                E_IO,
-                format!("{shown}: {e}"),
-                "check the file's permissions",
-            ));
-        }
+/// mapping. At most 1 MiB is read: a longer file is `E_LIMIT` before it is parsed.
+pub(crate) fn read_file(path: &Path, shown: &str) -> Result<Option<Mapping>, RdyError> {
+    use std::io::Read;
+    let io_error = |e: std::io::Error| {
+        RdyError::new(
+            E_IO,
+            format!("{shown}: {e}"),
+            "check the file's permissions",
+        )
     };
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error(e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(crate::hub_config::config_limit(
+            MAX_CONFIG_BYTES,
+            LimitUnit::Bytes,
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        RdyError::new(
+            E_IO,
+            format!("{shown}: stream did not contain valid UTF-8"),
+            "check the file's permissions",
+        )
+    })?;
     parse_file(&text, shown).map(Some)
 }
 
 /// A file's bytes, already read, as a mapping of settings (`read_file` without the read).
 fn parse_bytes(bytes: &[u8], shown: &str) -> Result<Mapping, RdyError> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(crate::hub_config::config_limit(
+            MAX_CONFIG_BYTES,
+            LimitUnit::Bytes,
+        ));
+    }
     let text = std::str::from_utf8(bytes).map_err(|e| {
         RdyError::new(
             E_IO,
@@ -532,18 +580,23 @@ fn parse_bytes(bytes: &[u8], shown: &str) -> Result<Mapping, RdyError> {
     parse_file(text, shown)
 }
 
-/// A file's text as a mapping of settings; an empty file is an empty mapping.
+/// A file's text as a mapping of settings; an empty file is an empty mapping. The resource
+/// bounds (size, depth, entries, scalar size, no alias) are checked before the parse. A syntax
+/// error, a duplicate key, an alias or a key that is not a string names only the file: the
+/// parser's text, which can quote a line, is never kept.
 fn parse_file(text: &str, shown: &str) -> Result<Mapping, RdyError> {
-    let fix = format!("fix {shown}");
-    match serde_yaml_ng::from_str::<Value>(text) {
-        Ok(Value::Null) => Ok(Mapping::new()),
-        Ok(Value::Mapping(m)) => Ok(m),
-        Ok(_) => Err(RdyError::new(
+    use crate::hub_config::settings_invalid;
+    let value = crate::hub_config::parse_bounded(text)
+        .map_err(|r| r.into_error(|| settings_invalid(Some(shown))))?;
+    match value {
+        Value::Null => Ok(Mapping::new()),
+        Value::Mapping(m) if m.keys().all(Value::is_string) => Ok(m),
+        Value::Mapping(_) => Err(settings_invalid(Some(shown))),
+        _ => Err(RdyError::new(
             E_CONFIG,
             format!("{shown} must be a mapping of settings"),
-            fix,
+            format!("fix {shown}"),
         )),
-        Err(e) => Err(RdyError::new(E_CONFIG, e.to_string(), fix)),
     }
 }
 
@@ -1074,10 +1127,22 @@ fn build(
     // per file in precedence order: its unknown keys, then its keys that belong in another file
     // (removed here, so they never reach the type check)
     let mut warnings: Vec<Issue> = Vec::new();
+    // the hub subtree and the remotes leave each file first: `hub_config` checks them, and no
+    // value of theirs reaches the passes below (or a message of theirs)
+    let mut hub_parts = Vec::new();
+    let mut hub_notes = Vec::new();
+    for (level, map) in &mut files {
+        let (part, notes) =
+            crate::hub_config::take_level(*level, map, &file_name(*level, user_file));
+        hub_parts.push((*level, part));
+        hub_notes.extend(notes);
+    }
+    let hub = crate::hub_config::merge(hub_parts, hub_notes, Some(project), user_file);
     for (level, map) in &mut files {
         warnings.extend(unknown_warnings(*level, map, user_file));
         warnings.extend(wrong_file_warnings(*level, map, user_file));
     }
+    warnings.extend(hub.warnings.iter().cloned());
     for (level, map) in &mut files {
         for rule in KEY_LEVELS {
             let Some(why) = wrong_type(map, rule) else {
@@ -1122,6 +1187,20 @@ fn build(
     );
     let mut origins = Vec::new();
     for rule in KEY_LEVELS {
+        if rule.key == crate::hub_config::REMOTES_KEY {
+            if let Some(v) = hub.remotes_value() {
+                set_path(&mut merged, rule.key, v);
+            }
+            origins.extend(hub.remote_rows.iter().cloned());
+            continue;
+        }
+        if rule.key == crate::hub_config::HUB_INSTALLS_KEY {
+            if let Some(v) = hub.installs_value() {
+                set_path(&mut merged, rule.key, v);
+            }
+            origins.extend(hub.install_rows.iter().cloned());
+            continue;
+        }
         if rule.key == CODE_PATHS_KEY {
             if let Ok((linked, _)) = &code {
                 let rows = code_path_origins(project, linked, map_of, user_file);

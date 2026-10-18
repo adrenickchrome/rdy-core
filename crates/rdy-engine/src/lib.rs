@@ -26,6 +26,7 @@ mod fsck;
 mod gate;
 mod handle;
 mod history;
+pub mod hub_config;
 pub mod hub_types;
 pub mod inbox;
 pub mod inflight;
