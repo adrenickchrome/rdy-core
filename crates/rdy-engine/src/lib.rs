@@ -29,6 +29,7 @@ mod history;
 pub mod hub_config;
 pub mod hub_credentials;
 pub mod hub_http;
+pub mod hub_remotes;
 pub mod hub_types;
 pub mod inbox;
 pub mod inflight;
