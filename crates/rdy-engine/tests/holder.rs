@@ -888,3 +888,217 @@ fn ha7_holder_fsck_checks_answer_tag_refs() {
     forge(&mut h, "answer/tag:v9.0.0", good);
     refused(&h, "answer/tag:v9.0.0");
 }
+
+/// A holder at `dir` with one linear history of `n` empty landings, the i-th (from 0) tagged
+/// `v{i+1}.0.0`: the higher version on the newer landing. Returns it and the landings, oldest
+/// first.
+fn linear_holder(dir: &Path, n: usize) -> (Rdy, Vec<Hash>) {
+    let mut h = Rdy::create_holder(dir, RepoId([3; 16])).unwrap();
+    let prov = Provenance {
+        actor: "human:a".into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 1,
+    };
+    let s = h.store_mut();
+    let state = s.put(kinds::SNAPSHOT, &StateSnapshot::default()).unwrap();
+    let proposal = s
+        .put(
+            kinds::PROPOSAL,
+            &Proposal {
+                stable: None,
+                prev: None,
+                title: "t".into(),
+                view: "work".into(),
+                changes: vec![],
+                alternative: None,
+                provenance: prov.clone(),
+                canon_at: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+    let mut landings: Vec<Hash> = vec![];
+    for _ in 0..n {
+        let l = h
+            .store_mut()
+            .put(
+                kinds::LANDING,
+                &LandingRecord {
+                    proposal,
+                    prev: landings.last().copied(),
+                    state,
+                    approved_by: prov.clone(),
+                    changes: vec![],
+                    chosen: None,
+                    checks: vec![],
+                    assurance: Assurance::Local,
+                    relayed_by: None,
+                    relay_evidence: None,
+                    approved_version: None,
+                    rebased_from: vec![],
+                    evidence: None,
+                },
+            )
+            .unwrap();
+        put_tag(&mut h, &format!("v{}.0.0", landings.len() + 1), l);
+        landings.push(l);
+    }
+    h.seal_open().unwrap();
+    h.close().unwrap();
+    (Rdy::open_holder(dir).unwrap(), landings)
+}
+
+#[test]
+fn ha7_holder_landing_lookup_reads_each_landing_once() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fsck_reads = vec![];
+    for n in [64usize, 128] {
+        let (h, landings) = linear_holder(&root.path().join(format!("h{n}")), n);
+        let st = h.read();
+        let head = *landings.last().unwrap();
+        let before = h.store().frames_read();
+        assert_eq!(
+            st.resolve_scope(&format!("landing:{head}")).unwrap(),
+            Scope::At(head)
+        );
+        assert_eq!(
+            h.store().frames_read() - before,
+            n as u64,
+            "one full-hash lookup reads each landing once"
+        );
+        drop(st);
+        let before = h.store().frames_read();
+        let report = h.fsck().unwrap();
+        assert_eq!((report.landings, report.versions), (n, n));
+        fsck_reads.push(h.store().frames_read() - before);
+    }
+    // twice the history is about twice the reads, never four times
+    assert!(
+        fsck_reads[1] <= 2 * fsck_reads[0] + 16,
+        "fsck frame reads {fsck_reads:?}"
+    );
+}
+
+#[test]
+fn ha7_holder_never_reloads_its_pack() {
+    let d = divergent();
+    let dir = d.root.path().join("holder");
+    let mut h = d.holder();
+    let name = h.read().project_name().to_string();
+    let fingerprint = h.pack_fingerprint().clone();
+    let reads = pack_source_reads();
+    std::fs::create_dir_all(dir.join(".rdy/packs")).unwrap();
+    // valid files, then malformed ones: none is read, and the holder keeps its fixed context
+    for (file, text) in [
+        (
+            ".rdy.yaml",
+            "pack: rdy-standard\nname: Injected holder settings\n",
+        ),
+        (
+            ".rdy/local.yaml",
+            "serve:\n  site_lan_address: 192.168.1.20\n",
+        ),
+        (
+            ".rdy/packs/proj.yaml",
+            "name: proj\nversion: '1'\nextends: rdy-standard\n",
+        ),
+        (".rdy.yaml", "pack: proj\nname: Injected holder settings\n"),
+        (".rdy.yaml", "pack: [unclosed\n"),
+        (".rdy/local.yaml", ":::"),
+        (".rdy/packs/broken.yaml", "{{{ not yaml"),
+    ] {
+        std::fs::write(dir.join(file), text).unwrap();
+        let out = h.reload_pack().unwrap();
+        assert!(matches!(out, ReloadOutcome::Unchanged), "{file}: {out:?}");
+        assert_eq!(h.read().project_name(), name, "{file}");
+        assert_eq!(h.pack().name, "rdy-standard", "{file}");
+        assert_eq!(h.read().pack().name, "rdy-standard", "{file}");
+        assert_eq!(h.pack_fingerprint(), &fingerprint, "{file}");
+    }
+    assert_eq!(pack_source_reads(), reads, "no pack-defining file was read");
+    assert_reads(&h, &d, ["base", "left", "right"]);
+    h.fsck().unwrap();
+}
+
+#[test]
+fn ha7_holder_fsck_refuses_a_snapshot_version_of_another_block() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("h");
+    let mut h = Rdy::create_holder(&dir, RepoId([4; 16])).unwrap();
+    let prov = Provenance {
+        actor: "human:a".into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 1,
+    };
+    let block = Block {
+        id: BlockId::parse("b-00001").unwrap(),
+        block_type: "no-such-type".into(),
+        parent: None,
+        order: "a".into(),
+        fields: BTreeMap::new(),
+        body: "text".into(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        read_identity: None,
+    };
+    let s = h.store_mut();
+    let v = s.put(kinds::BLOCK, &block).unwrap();
+    let other = BlockId::parse("b-00002").unwrap();
+    let state = s
+        .put(
+            kinds::SNAPSHOT,
+            &StateSnapshot {
+                blocks: BTreeMap::from([(other.clone(), v)]),
+            },
+        )
+        .unwrap();
+    let proposal = s
+        .put(
+            kinds::PROPOSAL,
+            &Proposal {
+                stable: None,
+                prev: None,
+                title: "t".into(),
+                view: "work".into(),
+                changes: vec![],
+                alternative: None,
+                provenance: prov.clone(),
+                canon_at: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+    let landing = s
+        .put(
+            kinds::LANDING,
+            &LandingRecord {
+                proposal,
+                prev: None,
+                state,
+                approved_by: prov,
+                changes: vec![],
+                chosen: None,
+                checks: vec![],
+                assurance: Assurance::Local,
+                relayed_by: None,
+                relay_evidence: None,
+                approved_version: None,
+                rebased_from: vec![],
+                evidence: None,
+            },
+        )
+        .unwrap();
+    put_tag(&mut h, "v1.0.0", landing);
+    h.seal_open().unwrap();
+    let e = h.fsck().unwrap_err();
+    assert_eq!(e.code, E_IO, "{e}");
+    assert!(
+        e.message.ends_with(&format!(
+            "snapshot {state}: block {other} names version {v}, which is a version of {}",
+            block.id
+        )),
+        "{e}"
+    );
+}

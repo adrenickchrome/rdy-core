@@ -5,8 +5,11 @@
 //!
 //! The check reads every object a tag reaches through its object links (`object_refs::refs_of`),
 //! once per `ObjectKey`: snapshot versions, change dependencies, proposal, approval and relay
-//! links, blob manifests and chunks. Then it checks each chain: the relay and evidence rules of
-//! each landing (the project's own rule), each change landed once in the chain, and each landed
+//! links, blob manifests and chunks. Each object it reads is checked by its own rules too: every
+//! landing it reaches, by any link, keeps the relay and evidence rules (the project's own rule);
+//! every snapshot entry names a version of that entry's block (a removed version reads as its
+//! stub); every blob keeps the rules a blob read keeps (canonical manifest, chunk count, chunk
+//! lengths). Then it checks each chain: each change landed once in the chain, and each landed
 //! change's dependencies landed at or before its landing in that chain. The dependency DAG has no
 //! cycle, the answers keep the answer rules, the signature table holds exactly its records, and
 //! (O11) each `answer/tag:<name>` names the stored answer that relays its tag. There is no pack
@@ -22,8 +25,11 @@ use crate::holder::{ANSWER_TAG_REF, StoreMode, TAG_REF, not_allowed};
 use crate::index::hash_from;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, PORTABLE_KINDS, refs_of};
-use rdy_model::{Answer, AnswerAct, Change, Hash, LandingRecord, Tag};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use crate::store::decode;
+use rdy_model::{
+    Answer, AnswerAct, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag,
+};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The most landings one tag's chain may hold.
@@ -82,6 +88,13 @@ struct Closure<'a> {
     seen: HashSet<ObjectKey>,
     stack: Vec<ObjectKey>,
     edges: usize,
+    /// Every landing read, each checked by the landing rules once.
+    landings: HashMap<Hash, Arc<LandingRecord>>,
+    /// The block id of each block version read.
+    ids: HashMap<Hash, BlockId>,
+    /// The snapshot entries whose version was not read yet, each with the first snapshot that
+    /// holds it: checked once the walk has read every version it reaches.
+    pending: BTreeMap<(BlockId, Hash), Hash>,
 }
 
 impl<'a> Closure<'a> {
@@ -92,25 +105,37 @@ impl<'a> Closure<'a> {
             seen: HashSet::new(),
             stack: Vec::new(),
             edges: 0,
+            landings: HashMap::new(),
+            ids: HashMap::new(),
+            pending: BTreeMap::new(),
         }
     }
 
     /// Adds `key` to what the walk reads, once.
     fn add(&mut self, key: ObjectKey) -> Result<(), StoreError> {
+        if self.mark(key)? {
+            self.stack.push(key);
+        }
+        Ok(())
+    }
+
+    /// Counts `key` as read, once, without reading it (again): true the first time.
+    fn mark(&mut self, key: ObjectKey) -> Result<bool, StoreError> {
         if self.seen.contains(&key) {
-            return Ok(());
+            return Ok(false);
         }
         if self.seen.len() >= self.limits.objects {
             return Err(exceeds(format!("{} objects", self.limits.objects)));
         }
         self.seen.insert(key);
-        self.stack.push(key);
-        Ok(())
+        Ok(true)
     }
 
     /// Reads every object the added ones reach. A missing object is `Decode` naming the object
     /// whose link named it; a payload a removal erased has no links to follow (the removal's own
-    /// checks cover it).
+    /// checks cover it). Once an object's links are known to be stored, its own structure is
+    /// checked: each landing by the landing rules, each snapshot entry's version as a version of
+    /// that entry's block, and each blob by the rules a blob read keeps.
     fn run(&mut self) -> Result<(), StoreError> {
         while let Some(key) = self.stack.pop() {
             let payload = match self.reader.get_kind(key.kind, &key.hash) {
@@ -120,6 +145,7 @@ impl<'a> Closure<'a> {
             };
             let refs =
                 refs_of(key.kind, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
+            let mut children = Vec::with_capacity(refs.len());
             for r in refs {
                 self.edges += 1;
                 if self.edges > self.limits.edges {
@@ -140,7 +166,58 @@ impl<'a> Closure<'a> {
                     }
                     None => self.resolve(&key, &r.hash)?,
                 };
-                self.add(ObjectKey { kind, hash: r.hash })?;
+                children.push(ObjectKey { kind, hash: r.hash });
+            }
+            // a blob's chunks are read and checked with it, and not read again
+            let mut chunks_read = false;
+            match key.kind {
+                kinds::LANDING => {
+                    let rec: LandingRecord = decode(&payload)?;
+                    self.reader.check_landing_fields(&key.hash, &rec)?;
+                    self.landings.insert(key.hash, Arc::new(rec));
+                }
+                kinds::BLOCK => {
+                    let b: Block = decode(&payload)?;
+                    self.ids.insert(key.hash, b.id);
+                }
+                kinds::SNAPSHOT => {
+                    let state: StateSnapshot = decode(&payload)?;
+                    for (id, v) in state.blocks {
+                        match self.ids.get(&v) {
+                            Some(of) => check_entry(&key.hash, &id, &v, of)?,
+                            None => {
+                                self.pending.entry((id, v)).or_insert(key.hash);
+                            }
+                        }
+                    }
+                }
+                kinds::BLOB_MANIFEST => chunks_read = self.reader.check_blob(&key.hash)?,
+                _ => {}
+            }
+            for child in children {
+                if chunks_read && child.kind == kinds::BLOB_CHUNK {
+                    self.mark(child)?;
+                } else {
+                    self.add(child)?;
+                }
+            }
+        }
+        self.check_pending()
+    }
+
+    /// The snapshot entries whose version the walk read after their snapshot. A version whose
+    /// payload a removal erased reads as its stub, by the removal's projection rules; one that
+    /// no residue reads has nothing to check.
+    fn check_pending(&mut self) -> Result<(), StoreError> {
+        for ((id, v), snapshot) in std::mem::take(&mut self.pending) {
+            if let Some(of) = self.ids.get(&v) {
+                check_entry(&snapshot, &id, &v, of)?;
+                continue;
+            }
+            match self.reader.get_block(&v) {
+                Ok(b) => check_entry(&snapshot, &id, &v, &b.id)?,
+                Err(StoreError::Redacted { .. }) => {}
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -162,6 +239,17 @@ impl<'a> Closure<'a> {
         }
         found.ok_or_else(|| bad(format!("object {from} names {h}, which is not stored")))
     }
+}
+
+/// Snapshot `snapshot`'s entry for block `id` names version `v`, a version of block `of`: the
+/// two must be the same block.
+fn check_entry(snapshot: &Hash, id: &BlockId, v: &Hash, of: &BlockId) -> Result<(), StoreError> {
+    if of != id {
+        return Err(bad(format!(
+            "snapshot {snapshot}: block {id} names version {v}, which is a version of {of}"
+        )));
+    }
+    Ok(())
 }
 
 impl StoreReader {
@@ -202,6 +290,63 @@ impl StoreReader {
             .into_iter()
             .map(|(h, rec)| (h, (*rec).clone()))
             .collect())
+    }
+
+    /// The distinct landings of the chains that start at `heads`, in hash order. The chains
+    /// are walked together: a walk stops at a landing an earlier one read, so each landing is
+    /// read once. Each chain keeps its own bound: more than [`MAX_LANDING_DEPTH`] landings in
+    /// one is `holder check exceeds 100000 landing depth`; a landing met twice is `Decode`.
+    pub fn tag_histories(&self, heads: &[Hash]) -> Result<Vec<Hash>, StoreError> {
+        self.histories_within(heads, MAX_LANDING_DEPTH)
+    }
+
+    /// Test hook: [`StoreReader::tag_histories`] with a lower depth bound.
+    #[doc(hidden)]
+    pub fn tag_histories_bounded_for_tests(
+        &self,
+        heads: &[Hash],
+        depth: usize,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.histories_within(heads, depth)
+    }
+
+    fn histories_within(&self, heads: &[Hash], depth: usize) -> Result<Vec<Hash>, StoreError> {
+        // each walked landing's chain length: the landing and every landing before it
+        let mut len: HashMap<Hash, usize> = HashMap::new();
+        for head in heads {
+            if len.contains_key(head) {
+                continue;
+            }
+            // the landings this walk reads, newest first, down to one an earlier walk read
+            let mut path: Vec<Hash> = vec![];
+            let mut on: HashSet<Hash> = HashSet::new();
+            let mut below = 0;
+            let mut cur = Some(*head);
+            while let Some(h) = cur {
+                if let Some(n) = len.get(&h) {
+                    below = *n;
+                    break;
+                }
+                if path.len() >= depth {
+                    return Err(exceeds(format!("{depth} landing depth")));
+                }
+                if !on.insert(h) {
+                    return Err(bad(format!("landing {h} is on its own chain twice")));
+                }
+                cur = self.landing(&h)?.prev;
+                path.push(h);
+            }
+            if path.len() + below > depth {
+                return Err(exceeds(format!("{depth} landing depth")));
+            }
+            let n = path.len();
+            for (i, h) in path.into_iter().enumerate() {
+                len.insert(h, n - i + below);
+            }
+        }
+        let mut out: Vec<Hash> = len.into_keys().collect();
+        out.sort_unstable();
+        Ok(out)
     }
 
     fn chain_within(
@@ -250,9 +395,9 @@ impl StoreReader {
             })?;
         }
         closure.run()?;
-        // each chain on its own: never the global change -> landing index
-        let mut landings: HashMap<Hash, Arc<LandingRecord>> = HashMap::new();
-        let mut fields_checked: HashSet<Hash> = HashSet::new();
+        // each chain on its own: never the global change -> landing index. The walk read and
+        // checked every landing the chains hold.
+        let mut landings = std::mem::take(&mut closure.landings);
         let mut changes: HashMap<Hash, Option<Arc<Change>>> = HashMap::new();
         let mut landed: BTreeSet<Hash> = BTreeSet::new();
         let mut relayed: BTreeSet<Hash> = BTreeSet::new();
@@ -261,9 +406,6 @@ impl StoreReader {
             // where each change of the chain landed: its position, newest first
             let mut at: HashMap<Hash, usize> = HashMap::new();
             for (i, (l, rec)) in chain.iter().enumerate() {
-                if fields_checked.insert(*l) {
-                    self.check_landing_fields(l, rec)?;
-                }
                 if rec.relayed_by.is_some() {
                     relayed.insert(*l);
                 }

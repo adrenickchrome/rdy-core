@@ -2157,6 +2157,17 @@ impl StoreReader {
         Ok(out)
     }
 
+    /// Checks blob `h` by the rules a read keeps (`read_blob`), reading its chunks one at a time
+    /// and keeping none: true when every rule holds, false when an authorized removal masks the
+    /// manifest or a chunk (the removal's own checks cover it). Any other failure is the read's.
+    pub(crate) fn check_blob(&self, h: &Hash) -> Result<bool, StoreError> {
+        match self.read_blob(h, &mut |_| {}) {
+            Ok(()) => Ok(true),
+            Err(StoreError::Redacted { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Validates the manifest-kind object at `h` against what `put_blob` writes, then hands each
     /// chunk to `sink` in order. Nothing is read before the manifest is known to be canonical.
     fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {

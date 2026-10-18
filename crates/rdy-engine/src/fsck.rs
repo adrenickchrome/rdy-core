@@ -104,19 +104,19 @@ impl Rdy {
             .store
             .check_holder()
             .map_err(crate::holder::holder_error)?;
-        // the distinct landings of every tag's chain, read from the store's tags as checked
-        let mut landings = std::collections::BTreeSet::new();
-        for (_, _, tag) in self.store.tags()? {
-            if landings.contains(&tag.landing) {
-                continue;
-            }
-            let chain = self
-                .store
-                .tag_chain(&tag.landing)
-                .map_err(crate::holder::holder_error)?;
-            landings.extend(chain.into_iter().map(|(h, _)| h));
-        }
-        let landings = landings.len();
+        // the distinct landings of every tag's chain, read from the store's tags as checked;
+        // the chains are walked together, so each landing is read once
+        let heads: Vec<rdy_model::Hash> = self
+            .store
+            .tags()?
+            .into_iter()
+            .map(|(_, _, tag)| tag.landing)
+            .collect();
+        let landings = self
+            .store
+            .tag_histories(&heads)
+            .map_err(crate::holder::holder_error)?
+            .len();
         let signatures = self.check_signatures()?;
         Ok(FsckReport {
             frames: verified.frames,

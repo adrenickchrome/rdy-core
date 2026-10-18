@@ -820,19 +820,16 @@ impl ReadState {
     }
 
     /// The distinct landings of every tag's chain, in hash order: a holder's landings.
+    /// The chains are walked together, so each landing is read once.
     pub(crate) fn tag_landings(&self) -> Result<Vec<Hash>, RdyError> {
-        let mut out = BTreeSet::new();
-        for (_, t) in self.version_tags()? {
-            if out.contains(&t.landing) {
-                continue;
-            }
-            let chain = self
-                .reader
-                .tag_chain(&t.landing)
-                .map_err(crate::holder::holder_error)?;
-            out.extend(chain.into_iter().map(|(h, _)| h));
-        }
-        Ok(out.into_iter().collect())
+        let heads: Vec<Hash> = self
+            .version_tags()?
+            .into_iter()
+            .map(|(_, t)| t.landing)
+            .collect();
+        self.reader
+            .tag_histories(&heads)
+            .map_err(crate::holder::holder_error)
     }
 
     /// scope1: like `resolve_scope`, for reads. A view must have a record (it was written,

@@ -74,7 +74,19 @@ fn land(
             .map(|b| (b.id.clone(), b.version_hash()))
             .collect(),
     };
-    let state = s.put(kinds::SNAPSHOT, &state).unwrap();
+    land_state(s, prev, &state, changes, title, |_| {})
+}
+
+/// [`land`] with the state `state`, and the landing record as `edit` leaves it.
+fn land_state(
+    s: &mut Store,
+    prev: Option<Hash>,
+    state: &StateSnapshot,
+    changes: &[Hash],
+    title: &str,
+    edit: impl FnOnce(&mut LandingRecord),
+) -> Hash {
+    let state = s.put(kinds::SNAPSHOT, state).unwrap();
     let proposal = Proposal {
         stable: None,
         prev: None,
@@ -102,6 +114,8 @@ fn land(
         rebased_from: vec![],
         evidence: None,
     };
+    let mut rec = rec;
+    edit(&mut rec);
     s.put(kinds::LANDING, &rec).unwrap()
 }
 
@@ -506,4 +520,208 @@ fn ha7_check_holder_refuses_damaged_tags_and_projects() {
     let dir = tempfile::tempdir().unwrap();
     let p = Store::create(&dir.path().join("p")).unwrap();
     assert_eq!(decode_text(p.check_holder()), "the store is not a holder");
+}
+
+/// The state with `blocks` at their versions.
+fn snapshot(blocks: &[&Block]) -> StateSnapshot {
+    StateSnapshot {
+        blocks: blocks
+            .iter()
+            .map(|b| (b.id.clone(), b.version_hash()))
+            .collect(),
+    }
+}
+
+#[test]
+fn ha7_check_holder_refuses_a_snapshot_version_of_another_block() {
+    let (_d, mut s) = holder();
+    // a block type no pack knows: the check is structural, never a schema verdict
+    let b = block("b-00001", "no-such-type", "text");
+    let v = put_block(&mut s, &b);
+    let c1 = put_change(
+        &mut s,
+        &change(vec![Op::Create { block: b.clone() }], vec![], "one"),
+    );
+    let l1 = land(&mut s, None, &[&b], &[c1], "first");
+    tag(&mut s, "v1.0.0", l1);
+    s.check_holder().unwrap();
+    // the next snapshot holds the version again, under another block's id
+    let other = BlockId::parse("b-00002").unwrap();
+    let state = StateSnapshot {
+        blocks: BTreeMap::from([(b.id.clone(), v), (other.clone(), v)]),
+    };
+    let l2 = land_state(&mut s, Some(l1), &state, &[], "second", |_| {});
+    tag(&mut s, "v2.0.0", l2);
+    let snap = s.landing(&l2).unwrap().state;
+    assert_eq!(
+        decode_text(s.check_holder()),
+        format!(
+            "snapshot {snap}: block {other} names version {v}, which is a version of {}",
+            b.id
+        )
+    );
+    // the same, where the walk reads the version before the snapshot that misnames it
+    let (_d, mut s) = holder();
+    let v = put_block(&mut s, &b);
+    let bad = StateSnapshot {
+        blocks: BTreeMap::from([(other.clone(), v)]),
+    };
+    let l1 = land_state(&mut s, None, &bad, &[], "first", |_| {});
+    let l2 = land(&mut s, Some(l1), &[&b], &[], "second");
+    tag(&mut s, "v1.0.0", l2);
+    let snap = s.landing(&l1).unwrap().state;
+    assert_eq!(
+        decode_text(s.check_holder()),
+        format!(
+            "snapshot {snap}: block {other} names version {v}, which is a version of {}",
+            b.id
+        )
+    );
+}
+
+/// A holder whose tag v1.0.0 lands a figure naming the blob manifest that `put` writes.
+fn figure_holder(put: impl FnOnce(&mut Store) -> Hash) -> (tempfile::TempDir, Store, Hash) {
+    let (d, mut s) = holder();
+    let m = put(&mut s);
+    let mut b = block("b-00001", "figure", "a figure");
+    b.fields
+        .insert("blob".into(), FieldValue::Str(m.to_string()));
+    put_block(&mut s, &b);
+    let c1 = put_change(
+        &mut s,
+        &change(vec![Op::Create { block: b.clone() }], vec![], "one"),
+    );
+    let l1 = land(&mut s, None, &[&b], &[c1], "first");
+    tag(&mut s, "v1.0.0", l1);
+    (d, s, m)
+}
+
+/// Writes one raw chunk of `bytes`.
+fn put_chunk(s: &mut Store, bytes: &[u8]) -> Hash {
+    s.write(vec![(kinds::BLOB_CHUNK, bytes.to_vec())]).unwrap()[0]
+}
+
+#[test]
+fn ha7_check_holder_checks_blob_manifests_and_chunks() {
+    // what put_blob writes checks clean
+    let (_d, s, m) = figure_holder(|s| s.put_blob(b"a figure's bytes").unwrap());
+    s.check_holder().unwrap();
+    assert_eq!(s.get_blob(&m).unwrap(), b"a figure's bytes");
+    // a manifest of two bytes whose one chunk holds one: a read refuses it, and so does fsck
+    let (_d, s, m) = figure_holder(|s| {
+        let c = put_chunk(s, &[1]);
+        s.put(
+            kinds::BLOB_MANIFEST,
+            &kinds::BlobManifest {
+                len: 2,
+                chunks: vec![c],
+            },
+        )
+        .unwrap()
+    });
+    let text = format!("blob {m} has a chunk of 1 bytes where 2 are due");
+    assert_eq!(decode_text(s.get_blob(&m)), text);
+    assert_eq!(decode_text(s.check_holder()), text);
+    // a manifest listing two chunks for one byte
+    let (_d, s, m) = figure_holder(|s| {
+        let c = put_chunk(s, &[1]);
+        s.put(
+            kinds::BLOB_MANIFEST,
+            &kinds::BlobManifest {
+                len: 1,
+                chunks: vec![c, c],
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        decode_text(s.check_holder()),
+        format!("blob {m} lists 2 chunks for 1 bytes")
+    );
+}
+
+#[test]
+fn ha7_check_holder_checks_every_reached_landing() {
+    // a relayed landing with no relay fields, reached by another link than a tag's prev chain
+    for link in ["rebased_from", "approved_version"] {
+        let (_d, mut s) = holder();
+        let b = block("b-00001", "widget", "base");
+        put_block(&mut s, &b);
+        let c1 = put_change(
+            &mut s,
+            &change(vec![Op::Create { block: b.clone() }], vec![], "one"),
+        );
+        let bad = land_state(&mut s, None, &snapshot(&[&b]), &[c1], "bad", |r| {
+            r.assurance = Assurance::Relayed;
+        });
+        // a proposal version whose base is that landing
+        let approved = s
+            .put(
+                kinds::PROPOSAL,
+                &Proposal {
+                    stable: None,
+                    prev: None,
+                    title: "approved".into(),
+                    view: "work".into(),
+                    changes: vec![c1],
+                    alternative: None,
+                    provenance: prov(2),
+                    canon_at: Some(bad),
+                    summary: None,
+                },
+            )
+            .unwrap();
+        let good = land_state(&mut s, None, &snapshot(&[&b]), &[c1], "good", |r| {
+            if link == "rebased_from" {
+                r.rebased_from = vec![bad];
+            } else {
+                r.approved_version = Some(approved);
+            }
+        });
+        tag(&mut s, "v1.0.0", good);
+        assert_eq!(
+            decode_text(s.check_holder()),
+            format!("landing {bad}: assurance is relayed but the relay fields are unset"),
+            "{link}"
+        );
+    }
+}
+
+#[test]
+fn ha7_tag_histories_read_each_landing_once() {
+    for n in [64usize, 128] {
+        let (_d, mut s) = holder();
+        let state = StateSnapshot::default();
+        let mut prev = None;
+        let mut heads = vec![];
+        for i in 0..n {
+            let l = land_state(&mut s, prev, &state, &[], &format!("l{i}"), |_| {});
+            tag(&mut s, &format!("v{i}.0.0"), l);
+            heads.push(l);
+            prev = Some(l);
+        }
+        // oldest first: each newer head's history holds every older one
+        let before = s.frames_read();
+        let all = s.tag_histories(&heads).unwrap();
+        assert_eq!(
+            s.frames_read() - before,
+            n as u64,
+            "each landing is read once"
+        );
+        assert_eq!(all.len(), n);
+        assert!(all.iter().all(|h| heads.contains(h)));
+        let c = s.check_holder().unwrap();
+        assert_eq!(c.landed_changes, 0);
+    }
+    // the depth bound is each history's own, also where it joins one already walked
+    let (_d, mut s) = holder();
+    let state = StateSnapshot::default();
+    let l1 = land_state(&mut s, None, &state, &[], "l1", |_| {});
+    let l2 = land_state(&mut s, Some(l1), &state, &[], "l2", |_| {});
+    let l3 = land_state(&mut s, Some(l2), &state, &[], "l3", |_| {});
+    s.tag_histories_bounded_for_tests(&[l1, l3], 3).unwrap();
+    let e = s.tag_histories_bounded_for_tests(&[l1, l3], 2).unwrap_err();
+    assert_eq!(holder_check_limit(&e), Some("2 landing depth"), "{e}");
+    let e = s.tag_histories_bounded_for_tests(&[l3], 2).unwrap_err();
+    assert_eq!(holder_check_limit(&e), Some("2 landing depth"), "{e}");
 }

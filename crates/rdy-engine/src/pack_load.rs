@@ -216,7 +216,13 @@ impl Rdy {
     /// fingerprint, or a failed republish. A republish that fails or panics restores the
     /// previous pack, config and fingerprint before it returns its error or resumes its panic,
     /// so the previous pack stays loaded and the next reload sees the files as changed.
+    ///
+    /// A holder has no config or pack files (D-BPYN8): its reload reads nothing and is
+    /// `Unchanged`, so its fixed context and fingerprint stay.
     pub fn reload_pack(&mut self) -> Result<ReloadOutcome, RdyError> {
+        if self.is_holder() {
+            return Ok(ReloadOutcome::Unchanged);
+        }
         let sources = read_sources(&self.root)?;
         let fp = sources.fingerprint;
         if fp.hash == self.fingerprint.hash {
