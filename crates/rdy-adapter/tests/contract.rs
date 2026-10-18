@@ -233,3 +233,32 @@ fn ha3_nesting_depth_is_bounded_before_encoding() {
         }
     }
 }
+
+#[test]
+fn ha3_wide_values_encode_as_core_encodes_them() {
+    use rdy_model::FieldValue;
+    // A shallow value of any width is within the depth bound: bytes equal core's encoding.
+    let wide_list = FieldValue::List(vec![FieldValue::Null; 1_000_000]);
+    let wide_map = FieldValue::Map(
+        (0..100_000)
+            .map(|i| (format!("k{i:06}"), FieldValue::Int(i)))
+            .collect(),
+    );
+    for wide in [wide_list, wide_map] {
+        let mut b = block();
+        b.fields.insert("wide".to_string(), wide);
+        assert_eq!(
+            encode_block(&b).unwrap(),
+            postcard::to_allocvec(&b).unwrap()
+        );
+    }
+    // A wide level above a too-deep one is still refused.
+    let mut b = block();
+    b.fields.insert(
+        "wide".to_string(),
+        FieldValue::List(vec![FieldValue::Null; 100_000]),
+    );
+    b.fields.insert("deep".to_string(), nested(129, false));
+    assert_eq!(encode_block(&b).unwrap_err().code, "E_LIMIT");
+    dismantle(b.fields.remove("deep").unwrap());
+}

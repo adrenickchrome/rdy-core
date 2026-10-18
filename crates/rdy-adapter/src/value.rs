@@ -20,18 +20,12 @@ pub fn hash_bytes(bytes: &[u8]) -> Hash {
 /// is refused with `E_REDACTED`: its text is gone, and its version is not the hash of any bytes
 /// this could produce. Map entries encode in key order, as core encodes them. A field value that
 /// nests more than `MAX_FIELD_DEPTH` (128) lists and maps is refused with `E_LIMIT` before any
-/// recursion.
+/// recursion, and the check holds memory for the nesting depth only, never for the width.
 pub fn encode_block(block: &Block) -> Result<Vec<u8>, RdyError> {
     if let Some(request) = block.redaction() {
         return Err(rdy_store::StoreError::Redacted { request }.into());
     }
-    if too_deep(block) {
-        return Err(RdyError::new(
-            E_LIMIT,
-            format!("a field value nests deeper than {MAX_FIELD_DEPTH} levels"),
-            "reduce the nesting of the field value to the stated limit",
-        ));
-    }
+    check_nesting(block, MAX_WALK_FRAMES).map_err(nesting_error)?;
     match postcard::serialize_with_flavor(block, Capped(Vec::new())) {
         Ok(bytes) => Ok(bytes),
         Err(postcard::Error::SerializeBufferFull) => Err(RdyError::new(
@@ -47,29 +41,81 @@ pub fn encode_block(block: &Block) -> Result<Vec<u8>, RdyError> {
     }
 }
 
-/// Whether any field value nests past `MAX_FIELD_DEPTH`. Walks with an explicit stack, so the
-/// check itself never recurses; the stack holds one entry per pending value, at most the number
-/// of values in the block, and a branch deeper than the bound is never pushed further.
-fn too_deep(block: &Block) -> bool {
-    let mut pending: Vec<(&FieldValue, usize)> = block.fields.values().map(|v| (v, 1)).collect();
-    while let Some((value, depth)) = pending.pop() {
-        match value {
-            FieldValue::List(items) => {
-                if depth > MAX_FIELD_DEPTH {
-                    return true;
-                }
-                pending.extend(items.iter().map(|v| (v, depth + 1)));
-            }
-            FieldValue::Map(map) => {
-                if depth > MAX_FIELD_DEPTH {
-                    return true;
-                }
-                pending.extend(map.values().map(|v| (v, depth + 1)));
-            }
-            _ => {}
+/// The most walk frames the depth check ever holds: the block's fields plus one frame for each
+/// of the `MAX_FIELD_DEPTH` levels a list or map may open.
+const MAX_WALK_FRAMES: usize = MAX_FIELD_DEPTH + 1;
+
+/// An iterator over the children of one block or container being walked.
+enum Frame<'a> {
+    Fields(std::collections::btree_map::Values<'a, String, FieldValue>),
+    List(std::slice::Iter<'a, FieldValue>),
+}
+
+impl<'a> Iterator for Frame<'a> {
+    type Item = &'a FieldValue;
+
+    fn next(&mut self) -> Option<&'a FieldValue> {
+        match self {
+            Frame::Fields(it) => it.next(),
+            Frame::List(it) => it.next(),
         }
     }
-    false
+}
+
+/// Why the nesting check stopped.
+enum Nesting {
+    TooDeep,
+    NoMemory,
+}
+
+/// Maps `Nesting` to the refusal `encode_block` returns.
+fn nesting_error(why: Nesting) -> RdyError {
+    match why {
+        Nesting::TooDeep => RdyError::new(
+            E_LIMIT,
+            format!("a field value nests deeper than {MAX_FIELD_DEPTH} levels"),
+            "reduce the nesting of the field value to the stated limit",
+        ),
+        Nesting::NoMemory => RdyError::new(
+            E_LIMIT,
+            "the block could not be checked: out of memory".to_string(),
+            "reduce the block to the stated limit",
+        ),
+    }
+}
+
+/// Checks that no field value nests past `MAX_FIELD_DEPTH`. Walks with an explicit stack of
+/// iterator frames, one per open list or map, so the check never recurses and its memory is
+/// bounded by the nesting depth, never by how many siblings a list or map holds. The stack is
+/// reserved once, fallibly, for `frames` entries and never grown past that; a branch deeper than the bound is refused before
+/// it is pushed, so `frames` of `MAX_WALK_FRAMES` is always enough.
+fn check_nesting(block: &Block, frames: usize) -> Result<(), Nesting> {
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    stack
+        .try_reserve_exact(frames)
+        .map_err(|_| Nesting::NoMemory)?;
+    stack.push(Frame::Fields(block.fields.values()));
+    while let Some(top) = stack.last_mut() {
+        let Some(value) = top.next() else {
+            stack.pop();
+            continue;
+        };
+        // The level of `value`: the top frame holds the children of the container at level
+        // `stack.len() - 1`, so these children sit at level `stack.len()`.
+        let frame = match value {
+            FieldValue::List(items) => Frame::List(items.iter()),
+            FieldValue::Map(map) => Frame::Fields(map.values()),
+            _ => continue,
+        };
+        if stack.len() > MAX_FIELD_DEPTH {
+            return Err(Nesting::TooDeep);
+        }
+        if stack.len() >= frames {
+            return Err(Nesting::NoMemory);
+        }
+        stack.push(frame);
+    }
+    Ok(())
 }
 
 /// A postcard output that refuses to grow past `MAX_RECORD_BYTES` and reserves fallibly.
@@ -100,8 +146,56 @@ impl Flavor for Capped {
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_WALK_FRAMES, Nesting, check_nesting};
     use crate::StoreHandle;
     use rdy_engine::Rdy;
+    use rdy_model::{Block, FieldValue};
+
+    fn block_with(value: FieldValue) -> Block {
+        Block {
+            id: rdy_model::BlockId::parse("d-00001").unwrap(),
+            block_type: "doc".to_string(),
+            parent: None,
+            order: "a0".to_string(),
+            fields: [("wide".to_string(), value)].into(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            read_identity: None,
+        }
+    }
+
+    /// The check holds frames for the nesting depth only: a list or map of any width needs two
+    /// frames (the fields, then the container), so a width of a million costs no more than three.
+    #[test]
+    fn ha3_nesting_check_memory_follows_depth_not_width() {
+        let list = FieldValue::List(vec![FieldValue::Null; 1_000_000]);
+        let map = FieldValue::Map(
+            (0..100_000)
+                .map(|i| (format!("k{i:06}"), FieldValue::Int(i)))
+                .collect(),
+        );
+        for wide in [list, map] {
+            let b = block_with(wide);
+            assert!(check_nesting(&b, 2).is_ok());
+            assert!(check_nesting(&b, MAX_WALK_FRAMES).is_ok());
+            // One frame holds the fields alone; opening the container needs a second.
+            assert!(matches!(check_nesting(&b, 1), Err(Nesting::NoMemory)));
+        }
+    }
+
+    /// A refused reservation is an error, never an abort.
+    #[test]
+    fn ha3_nesting_check_refuses_when_memory_is_refused() {
+        let b = block_with(FieldValue::List(vec![FieldValue::Null]));
+        assert!(matches!(
+            check_nesting(&b, usize::MAX),
+            Err(Nesting::NoMemory)
+        ));
+        let e = super::nesting_error(Nesting::NoMemory);
+        assert_eq!(e.code, "E_LIMIT");
+        assert_eq!(e.message, "the block could not be checked: out of memory");
+    }
 
     /// Sibling modules read a snapshot through its crate-private accessors, never its fields.
     #[test]
