@@ -16,7 +16,7 @@ use rdy_model::{
     ActorRun, AltChoice, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence, Block, BlockId,
     Change, ChangeLinks, EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
 };
-use rdy_schema::{Issue, Severity, validate_block, validate_prefix};
+use rdy_schema::{Issue, Severity, validate_prefix, validate_read_block};
 use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1517,7 +1517,10 @@ impl Rdy {
                 };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
             issues.extend(validate_prefix(st.pack(), b));
-            issues.extend(validate_block(st.pack(), b, parent));
+            // the read schema (D-3M81W): every block here is a stored version, and the store refuses
+            // any write of a stub, so a stub is a trusted, unchanged version a redaction removed
+            // (a view resolved to a landed side that was removed later still lands)
+            issues.extend(validate_read_block(st.pack(), b, parent));
             // two views can each be fine alone and clash or loop once both are in canon
             let mut walk = b.parent.clone();
             for _ in 0..=next.len() {

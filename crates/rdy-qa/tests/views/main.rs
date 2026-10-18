@@ -1,6 +1,7 @@
 //! The `views` area of the rdy-qa suite: one test binary (`cargo qa --only views`).
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
+mod views_cf1;
 mod views_conflicts;
 mod views_consequences;
 mod views_create;

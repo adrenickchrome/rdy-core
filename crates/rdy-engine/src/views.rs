@@ -17,9 +17,11 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 mod own;
+mod resolve;
 mod undo;
 
 pub use own::{OwnInfo, StaleClose};
+pub use resolve::ResolveResult;
 pub use undo::{CloseResult, UndoResult};
 pub(crate) use undo::{kind_name, net_undone};
 

@@ -29,6 +29,16 @@ pub enum ViewCmd {
         #[arg(long)]
         cascade: bool,
     },
+    /// Resolve a conflict on an accepted or rejected decision by taking the landed side: the
+    /// view's block then reads canon's frozen version, and the change depends on every side.
+    Resolve {
+        view: String,
+        /// The conflicted block: id, key or path.
+        block: String,
+        /// Take the landed side (required; the one side resolve takes).
+        #[arg(long, required = true)]
+        landed: bool,
+    },
     /// What differs between two scopes (b defaults to canon).
     Compare { a: String, b: Option<String> },
     /// List the open views.
@@ -108,6 +118,11 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
             changes,
             cascade,
         } => json!({"op": "exclude", "view": view, "changes": changes, "cascade": cascade}),
+        ViewCmd::Resolve {
+            view,
+            block,
+            landed,
+        } => json!({"op": "resolve", "view": view, "block": block, "landed": landed}),
         ViewCmd::Compare { a, b } => json!({"op": "compare", "a": a, "b": b}),
         ViewCmd::Ls { all, stale } => json!({"op": "list", "all": all, "stale": stale}),
         ViewCmd::Show { view, .. } => json!({"op": "show", "view": view}),
@@ -446,7 +461,7 @@ pub fn render_view(cmd: &ViewCmd, reply: &Value) -> String {
 }
 
 /// The text of the `view` op's reply to a request of kind `op` (`create`, `fork`, `include`,
-/// `exclude`, `compare`, `list`, `show`, `close`, `own` or `undo`). Include, exclude and undo
+/// `exclude`, `compare`, `list`, `show`, `close`, `own`, `resolve` or `undo`). Include, exclude and undo
 /// end with their consequences.
 pub fn render(op: &str, reply: &Value) -> String {
     match op {
@@ -476,6 +491,14 @@ pub fn render(op: &str, reply: &Value) -> String {
             out.push_str(&crate::brief_text::consequences_text(reply));
             out
         }
+        "resolve" => format!(
+            "resolved conflict {} on {} in {}: took the landed side {} (change {})",
+            short(text(&reply["conflict"])),
+            text(&reply["block"]),
+            text(&reply["view"]),
+            short(text(&reply["version"])),
+            short(text(&reply["change"]))
+        ),
         "compare" => compare_text(reply),
         "list" => ls_text(reply),
         "show" => show_text(reply, false),
