@@ -333,6 +333,38 @@ fn as_written(text: &str, ctx: &BlockCtx) -> String {
     }
 }
 
+/// Whether a field the page shows as written holds a reference that a named profile reads as
+/// words ([`as_written`]). Always false for a source output, which shows the field unchanged.
+fn reads_ref_words(text: &str, ctx: &BlockCtx) -> bool {
+    ctx.local_link.is_some() && !ref_spans(text, RefMode::Strict).is_empty()
+}
+
+/// An entity's kind as its eyebrow: the kind worded as a name ([`display_name`]). For a named
+/// profile, each reference in it reads as its words ([`diagram_label`]) exactly, never worded
+/// as a name: only the author's own text around it is (`_` as a space, and a first letter in
+/// upper case when the kind starts with that text).
+fn kind_eyebrow(kind: &str, ctx: &BlockCtx) -> String {
+    if !reads_ref_words(kind, ctx) {
+        return display_name(&as_written(kind, ctx));
+    }
+    let own = |t: &str| inline::unescape_braces(t).replace('_', " ");
+    let spans = ref_spans(kind, RefMode::Strict);
+    let starts_own = spans.first().is_some_and(|s| s.range.start > 0);
+    let mut out = String::new();
+    let mut last = 0;
+    for span in &spans {
+        out.push_str(&own(&kind[last..span.range.start]));
+        out.push_str(&diagram_label(span, ctx.link, ctx.unavailable));
+        last = span.range.end;
+    }
+    out.push_str(&own(&kind[last..]));
+    let mut chars = out.chars();
+    match chars.next() {
+        Some(c) if starts_own => c.to_uppercase().chain(chars).collect(),
+        _ => out,
+    }
+}
+
 /// The `Also: …` line of a block that has aliases, else nothing.
 fn aliases_html(b: &Block, ctx: &BlockCtx) -> String {
     let aliases = entity::aliases(b);
@@ -434,7 +466,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             };
             // an entity's kind is its eyebrow, when it has one
             let eyebrow = match b.field_str("kind").map(str::trim).filter(|k| !k.is_empty()) {
-                Some(k) if t == entity::ENTITY => display_name(&as_written(k, ctx)),
+                Some(k) if t == entity::ENTITY => kind_eyebrow(k, ctx),
                 _ => display_name(t),
             };
             let value = match entity::value_text(b) {
@@ -499,11 +531,15 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         }
         "figure" => figure_html(b, ctx),
         "code" => {
-            // with no language: the label `Code`, plain text, and no class on `<code>`
-            let lang = as_written(b.field_str("lang").unwrap_or(""), ctx);
+            // with no language: the label `Code`, plain text, and no class on `<code>`; for a
+            // named profile, a language that holds a reference is labelled with its words exactly
+            let written = b.field_str("lang").unwrap_or("");
+            let lang = as_written(written, ctx);
             let lang = lang.trim();
             let human = match highlight::human_name(lang) {
-                n if n.is_empty() || lang.is_empty() => "Code".to_string(),
+                _ if lang.is_empty() => "Code".to_string(),
+                _ if reads_ref_words(written, ctx) => lang.to_string(),
+                n if n.is_empty() => "Code".to_string(),
                 n => n,
             };
             let class = if lang.is_empty() {

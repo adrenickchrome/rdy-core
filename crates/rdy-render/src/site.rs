@@ -931,11 +931,14 @@ impl<'a> Site<'a> {
                 .unwrap_or_default(),
             None if b.block_type == "code" => {
                 let k = self.number(b);
-                match b.field_str("lang").filter(|l| !l.trim().is_empty()) {
-                    Some(l) => format!(
-                        "{} code {k}",
-                        crate::highlight::human_name(&self.as_written_at(l, depth))
-                    ),
+                // for a named profile, a language that holds a reference reads as its words
+                // exactly, never worded as a language's name
+                let lang = b
+                    .field_str("lang")
+                    .map(|l| (l, self.as_written_at(l, depth)));
+                match lang.filter(|(_, w)| !w.trim().is_empty()) {
+                    Some((l, w)) if self.reads_ref_words(l) => format!("{} code {k}", w.trim()),
+                    Some((_, w)) => format!("{} code {k}", crate::highlight::human_name(&w)),
                     None => format!("Code {k}"),
                 }
             }
@@ -979,6 +982,12 @@ impl<'a> Site<'a> {
     /// unavailable words), never its token, and nothing else changes but `\{{` as `{{`.
     pub(crate) fn as_written(&self, text: &str) -> String {
         self.as_written_at(text, 0)
+    }
+
+    /// Whether a field read as written ([`Site::as_written`]) holds a reference that a named
+    /// profile reads as words. Always false for a source output.
+    fn reads_ref_words(&self, text: &str) -> bool {
+        self.unavailable.is_some() && !rdy_model::ref_spans(text, RefMode::Strict).is_empty()
     }
 
     fn as_written_at(&self, text: &str, depth: usize) -> String {

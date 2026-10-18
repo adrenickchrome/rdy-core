@@ -602,7 +602,14 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
             {"op": "create", "type": "prose", "parent": "$rs", "body": "See VALREF {{$val}} now."},
             {"op": "create", "type": "term", "parent": "$rs", "fields": {"name": "Aliased term", "aliases": ["Alias {{$hp}}", "Shown {{$hp|Alias words}}"]}, "body": "Has aliases."},
             {"op": "create", "type": "entity", "parent": "$rs", "fields": {"name": "Kinded thing", "kind": "kind {{$hp}}"}, "body": "Has a kind."},
-            {"op": "create", "type": "code", "parent": "$rs", "fields": {"lang": "{{$hp}}"}, "body": "x = 1"}
+            {"op": "create", "type": "code", "parent": "$rs", "fields": {"lang": "{{$hp}}"}, "body": "x = 1"},
+            // fix round 2: a reference's words stay verbatim in a kind and a code language; the
+            // author's own words around them, and a field with no reference, keep their format
+            {"op": "create", "type": "entity", "parent": "$rs", "fields": {"name": "Explicit kinded thing", "kind": "{{$hp|api_v2}}"}, "body": "Has an explicit kind."},
+            {"op": "create", "type": "entity", "parent": "$rs", "fields": {"name": "Mixed kinded thing", "kind": "side_kind {{$hp|api_v2}}"}, "body": "Has a mixed kind."},
+            {"op": "create", "type": "entity", "parent": "$rs", "fields": {"name": "Plain kinded thing", "kind": "api_v2"}, "body": "Has a plain kind."},
+            {"op": "create", "type": "code", "parent": "$rs", "fields": {"lang": "{{$hp|python}}"}, "body": "y = 2"},
+            {"op": "create", "type": "code", "parent": "$rs", "fields": {"lang": "python"}, "body": "z = 3"}
         ]),
     );
     land(&mut r, "w1").unwrap();
@@ -679,11 +686,27 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
         format!(">5 {u} per Unit words</a> now."),
         format!("<p class=\"entity-aliases\">Also: Alias {u}, Shown Alias words</p>"),
         format!("<span class=\"marker\">Kind {u}</span>"),
-        "<span class=\"lang\">Unavailable reference</span>".to_string(),
+        format!("<span class=\"lang\">{u}</span>"),
         format!("class=\"language-{u}\""),
+        "<span class=\"marker\">api_v2</span>".to_string(),
+        "<span class=\"marker\">Side kind api_v2</span>".to_string(),
+        "<span class=\"marker\">Api v2</span>".to_string(),
+        "<span class=\"lang\">python</span>".to_string(),
+        "<span class=\"lang\">Python</span>".to_string(),
     ] {
         assert!(refs.contains(&want), "{want}\n{refs}");
     }
+    // the marker words are exact on every surface: never capitalized or reworded
+    assert_absent_pages(&s, "Unavailable reference");
+    // a code block's label: a reference's words as written, else the language's own name
+    for label in [
+        format!("{u} code 1"),
+        "python code 2".into(),
+        "Python code 3".into(),
+    ] {
+        assert!(!holding(&s, &label).is_empty(), "{label}");
+    }
+    assert_absent_pages(&s, "Python code 2");
     // the drawn canvas and the readable source read the same words
     assert!(
         refs.contains(&format!("<pre class=\"mermaid\">graph TD\n  A[{u}]")),
