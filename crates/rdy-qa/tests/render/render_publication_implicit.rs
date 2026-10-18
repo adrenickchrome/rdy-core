@@ -283,3 +283,87 @@ fn pub12_unprofiled_outputs_stay_full_source() {
     let p = print::build(&st, &Scope::Canon).unwrap();
     assert_eq!(p.scope, "canon");
 }
+
+/// Fix round 1: canon's next landing holds a snapshot that gives the doc `kept` an absent parent. The
+/// implicit profile refuses it with the named profile's tree error on the site and on print;
+/// neither output is built without `kept`.
+#[test]
+fn pub12_implicit_outputs_refuse_a_stored_orphan_doc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let ids = put(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "kept", "title": "ORPHANDOC", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let (id, admin) = (ids["$doc"].clone(), ids["$admin"].clone());
+    put(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "parent": id.to_string(), "body": "ORPHANWORDS"},
+            {"op": "create", "type": "publication_profile", "parent": admin.to_string(),
+             "fields": {"key": "site", "title": "Site", "audience": "org", "select": [id.to_string()]}}
+        ]),
+    );
+    land(&mut r, "work").unwrap();
+    // the valid canon builds both outputs with the doc
+    {
+        let st = r.read();
+        let s = build_profile_site(&st, "canon", IMPLICIT).unwrap();
+        assert!(page(&s, "kept.html").contains("ORPHANWORDS"));
+        print::build_profile(&st, "canon", IMPLICIT).unwrap();
+    }
+    let head = r.read().canon_head().unwrap();
+    let m = r.read().materialized(&Scope::Canon).unwrap();
+    let mut snapshot = m.snapshot();
+    let mut orphan = m.get(&id).unwrap().clone();
+    orphan.parent = Some(bid("fd-G0NE1"));
+    let hash = r.store_mut().put(rdy_store::kinds::BLOCK, &orphan).unwrap();
+    snapshot.blocks.insert(id.clone(), hash);
+    let state = r
+        .store_mut()
+        .put(rdy_store::kinds::SNAPSHOT, &snapshot)
+        .unwrap();
+    let mut landing = r.store().landing(&head).unwrap();
+    landing.state = state;
+    landing.prev = Some(head);
+    let damaged = r
+        .store_mut()
+        .put(rdy_store::kinds::LANDING, &landing)
+        .unwrap();
+    // the damaged landing becomes the next landing of canon
+    r.store_mut()
+        .set_refs(vec![("canon".into(), damaged.0.to_vec())])
+        .unwrap();
+    r.invalidate();
+    let st = r.read();
+    assert_eq!(st.canon_head(), Some(damaged));
+    let scope = format!("landing:{damaged}");
+    let tree_error = |e: rdy_engine::RdyError| {
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_BAD_INPUT,
+                "Publication selection has an invalid document tree.",
+                "Run rdy fsck and fix the document tree."
+            ),
+            "{e}"
+        );
+    };
+    for name in ["site", IMPLICIT] {
+        tree_error(
+            build_profile_site(&st, &scope, name)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: the site omitted the orphan doc")),
+        );
+        tree_error(
+            print::build_profile(&st, &scope, name)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: the print omitted the orphan doc")),
+        );
+    }
+}

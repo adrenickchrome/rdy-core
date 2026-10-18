@@ -476,3 +476,187 @@ fn pub12_implicit_diff_uses_the_same_rules() {
     );
     assert_eq!(d.before_selection_hash, d.after_selection_hash);
 }
+
+// ---------------------------------------------------------------------------------------------
+// fix round 1: the implicit profile checks the tree as a named profile does
+
+/// A block for a state built in memory, outside any store.
+fn blk(id: &str, ty: &str, parent: Option<&str>, name: &str) -> Block {
+    Block {
+        id: bid(id),
+        block_type: ty.into(),
+        parent: parent.map(bid),
+        order: "a".into(),
+        fields: [("name".to_string(), FieldValue::Str(name.into()))].into(),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        read_identity: None,
+    }
+}
+
+/// A state of `blocks` alone, built in memory.
+fn synth(blocks: Vec<Block>) -> Materialized {
+    Materialized::build(
+        StateSnapshot {
+            blocks: BTreeMap::new(),
+        },
+        blocks.into_iter().map(|b| (b.id.clone(), b)).collect(),
+    )
+}
+
+const INVALID_TREE: (&str, &str) = (
+    "Publication selection has an invalid document tree.",
+    "Run rdy fsck and fix the document tree.",
+);
+
+#[test]
+fn pub12_implicit_refuses_an_invalid_tree() {
+    let (_dir, r) = project();
+    let st = r.read();
+    // a valid tree resolves: a folder, a doc in it, a section and a decision in the doc
+    let valid = vec![
+        blk("fd-0KAY1", "folder", None, "ok"),
+        blk("d-0KAY2", "doc", Some("fd-0KAY1"), "okdoc"),
+        blk("s-0KAY3", "section", Some("d-0KAY2"), "oksec"),
+        blk("D-0KAY4", "decision", Some("s-0KAY3"), "okdec"),
+    ];
+    let res = publication::resolve_in_for_tests(&st, &synth(valid.clone()), IMPLICIT).unwrap();
+    assert_eq!(res.entries.len(), 4);
+    let cases: Vec<(&str, Vec<Block>)> = vec![
+        (
+            "orphan doc",
+            vec![blk("d-0RPH1", "doc", Some("fd-G0NE1"), "orphan")],
+        ),
+        (
+            "orphan prose",
+            vec![blk("p-0RPH2", "prose", Some("d-G0NE2"), "orphan")],
+        ),
+        (
+            "folder loop holding a doc",
+            vec![
+                blk("fd-R00P1", "folder", Some("fd-R00P2"), "loop1"),
+                blk("fd-R00P2", "folder", Some("fd-R00P1"), "loop2"),
+                blk("d-R00P3", "doc", Some("fd-R00P1"), "inloop"),
+            ],
+        ),
+        (
+            "bare folder loop",
+            vec![
+                blk("fd-R00P1", "folder", Some("fd-R00P2"), "loop1"),
+                blk("fd-R00P2", "folder", Some("fd-R00P1"), "loop2"),
+            ],
+        ),
+        (
+            "block loop",
+            vec![
+                blk("s-R00P4", "section", Some("s-R00P5"), "loop4"),
+                blk("s-R00P5", "section", Some("s-R00P4"), "loop5"),
+            ],
+        ),
+        (
+            "doc in a doc",
+            vec![
+                blk("d-0VTER", "doc", None, "outer"),
+                blk("d-NEST1", "doc", Some("d-0VTER"), "nested"),
+            ],
+        ),
+        (
+            "decision with no home doc",
+            vec![
+                blk("fd-H0ME1", "folder", None, "homeless"),
+                blk("D-N0D0C", "decision", Some("fd-H0ME1"), "decision"),
+            ],
+        ),
+        (
+            "top-level decision",
+            vec![blk("D-T0P01", "decision", None, "top")],
+        ),
+    ];
+    for (label, extra) in cases {
+        let mut blocks = valid.clone();
+        blocks.extend(extra);
+        let e = publication::resolve_in_for_tests(&st, &synth(blocks), IMPLICIT)
+            .err()
+            .unwrap_or_else(|| panic!("{label}: an invalid tree resolved"));
+        assert_err(&e, E_BAD_INPUT, INVALID_TREE.0, INVALID_TREE.1);
+    }
+    // the tree is checked before any text is scanned: a doc in a doc with a body past the text
+    // bound gives the tree error, not the limit
+    let _g = publication::override_limits_for_tests(publication::Limits {
+        text_value: 8,
+        ..publication::Limits::default()
+    });
+    let mut nested = blk("d-NEST1", "doc", Some("d-0VTER"), "nested");
+    nested.body = "far more than eight bytes".into();
+    let e = publication::resolve_in_for_tests(
+        &st,
+        &synth(vec![blk("d-0VTER", "doc", None, "outer"), nested]),
+        IMPLICIT,
+    )
+    .unwrap_err();
+    assert_err(&e, E_BAD_INPUT, INVALID_TREE.0, INVALID_TREE.1);
+}
+
+/// Lands a doc `kept` with prose and a named profile `site` selecting it, then stores a landing
+/// whose snapshot gives `kept` the absent parent `fd-G0NE1`. Returns that landing and `kept`.
+fn orphan_landing(r: &mut Rdy) -> (Hash, BlockId) {
+    let w = write(
+        r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "kept", "title": "ORPHANDOC", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let id = created(&w, "$doc");
+    let admin = created(&w, "$admin");
+    write(
+        r,
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "parent": id.to_string(), "body": "ORPHANWORDS"},
+            {"op": "create", "type": "publication_profile", "parent": admin.to_string(),
+             "fields": {"key": "site", "title": "Site", "audience": "org", "select": [id.to_string()]}}
+        ]),
+    );
+    land(r, "work");
+    let head = r.read().canon_head().unwrap();
+    let m = r.read().materialized(&Scope::Canon).unwrap();
+    let mut snapshot = m.snapshot();
+    let mut orphan = m.get(&id).unwrap().clone();
+    orphan.parent = Some(bid("fd-G0NE1"));
+    let hash = r.store_mut().put(rdy_store::kinds::BLOCK, &orphan).unwrap();
+    snapshot.blocks.insert(id.clone(), hash);
+    let state = r
+        .store_mut()
+        .put(rdy_store::kinds::SNAPSHOT, &snapshot)
+        .unwrap();
+    let mut landing = r.store().landing(&head).unwrap();
+    landing.state = state;
+    landing.prev = Some(head);
+    let damaged = r
+        .store_mut()
+        .put(rdy_store::kinds::LANDING, &landing)
+        .unwrap();
+    r.invalidate();
+    (damaged, id)
+}
+
+#[test]
+fn pub12_implicit_refuses_a_stored_orphan_doc_as_a_named_profile_does() {
+    let (_dir, mut r) = project();
+    let (damaged, _) = orphan_landing(&mut r);
+    let st = r.read();
+    let scope = Scope::At(damaged);
+    for name in ["site", IMPLICIT] {
+        let e = publication::resolve(&st, &scope, name)
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the orphan doc resolved"));
+        assert_err(&e, E_BAD_INPUT, INVALID_TREE.0, INVALID_TREE.1);
+    }
+    // the canon before the damage still resolves both
+    for name in ["site", IMPLICIT] {
+        publication::resolve(&st, &Scope::Canon, name).unwrap();
+    }
+}

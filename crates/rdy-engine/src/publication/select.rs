@@ -342,8 +342,8 @@ fn retain(keep: &mut BTreeSet<BlockId>, id: &BlockId, l: &Limits) -> Result<bool
 }
 
 /// Steps 2 and 3: each selector's whole subtree, then each selector's ancestor folders, with
-/// the tree checked on the way up and every retained node's placement checked after, all before
-/// any text is scanned. Iterative: a damaged store may nest deep or loop.
+/// the tree checked on the way up and then by [`check_tree`], all before any text is scanned.
+/// Iterative: a damaged store may nest deep or loop.
 fn select(
     m: &Materialized,
     selectors: &[BlockId],
@@ -385,11 +385,33 @@ fn select(
             cur = p;
         }
     }
-    // every retained node, descendants included, sits where the tree allows: a doc or folder at
-    // the top or in a folder, and any other block in a doc or in another such block. Every chain
-    // up from a descendant passes its selector, so the first tree node above other content is
-    // its home doc.
-    for id in &keep {
+    check_tree(m, &keep)?;
+    Ok(keep)
+}
+
+/// The tree check every retained set passes before any text is scanned, for a named profile and
+/// the implicit one alike. Every retained node's chain of parents reaches the top through
+/// retained nodes, with no missing parent and no loop; then every retained node sits where the
+/// tree allows: a doc or folder at the top or in a folder, and any other block in a doc or in
+/// another such block. With every chain rooted, the first tree node above other content is its
+/// home doc. Iterative, and each chain is walked once.
+fn check_tree(m: &Materialized, keep: &BTreeSet<BlockId>) -> Result<(), RdyError> {
+    let mut rooted: BTreeSet<&BlockId> = BTreeSet::new();
+    for id in keep {
+        let mut chain: BTreeSet<&BlockId> = BTreeSet::new();
+        let mut cur = id;
+        while !rooted.contains(cur) {
+            if !chain.insert(cur) {
+                return Err(invalid_tree());
+            }
+            match &m.get(cur).ok_or_else(invalid_tree)?.parent {
+                Some(p) => cur = keep.get(p).ok_or_else(invalid_tree)?,
+                None => break,
+            }
+        }
+        rooted.extend(chain);
+    }
+    for id in keep {
         let b = m.get(id).ok_or_else(invalid_tree)?;
         let parent = match &b.parent {
             Some(p) => Some(m.get(p).ok_or_else(invalid_tree)?),
@@ -404,7 +426,7 @@ fn select(
             return Err(invalid_tree());
         }
     }
-    Ok(keep)
+    Ok(())
 }
 
 /// Whether the store can read blob `h`, judged from its manifest and the redaction marks on the
@@ -509,7 +531,8 @@ fn resolve_in(
     let (profile, keep) = match request(name)? {
         // the implicit profile reads no profile block and selects every block of the snapshot,
         // profile blocks included (O12); every ancestor is already selected, so the selector
-        // and ancestor steps do not apply. The selection bound still does (O14).
+        // and ancestor steps do not apply. The selection bound (O14) and the named profile's
+        // tree check still do, before any text is scanned.
         Request::Implicit(audience) => {
             let profile = ResolvedProfile {
                 id: None,
@@ -524,6 +547,7 @@ fn resolve_in(
             for b in m.iter() {
                 retain(&mut keep, &b.id, l)?;
             }
+            check_tree(m, &keep)?;
             (profile, keep)
         }
         Request::Named => {
