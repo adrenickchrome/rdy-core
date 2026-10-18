@@ -116,11 +116,25 @@ fn print_digests(p: &Print) -> [String; 5] {
     let one = |b: &[u8]| Digest::default().piece(b).hex();
     [
         one(o.model.as_bytes()),
-        one(&o.pdf),
+        one(&versionless(&o.pdf)),
         one(&o.html),
         tree_digest(&o.md),
         tree_digest(&o.mkdocs),
     ]
+}
+
+/// The PDF with its `/Producer (rdy <version>)` text masked to the same length, so a version
+/// bump keeps the digest.
+fn versionless(pdf: &[u8]) -> Vec<u8> {
+    let producer = format!("rdy {}", env!("CARGO_PKG_VERSION")).into_bytes();
+    let mask = [b"rdy ".as_slice(), &vec![b'#'; producer.len() - 4]].concat();
+    let mut out = pdf.to_vec();
+    let at = out
+        .windows(producer.len())
+        .position(|w| w == producer.as_slice())
+        .expect("the producer text in the PDF");
+    out[at..at + producer.len()].copy_from_slice(&mask);
+    out
 }
 
 /// The golden project's `v1.0.0` landing.
@@ -204,7 +218,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "canon",
         [
             "84fbbf923af3bea784c101f69f0c8bde48b5de7f587d02ce62132eba628728b9",
-            "065ebd334c3b745ea466b00f1e9dc2309a79a787855f5fdec7f6966ac7a628ea",
+            "b143bcd40d82b3e6bf4ef8ad6c7d37dc3b66194539b88159f27ca64280b1ded1",
             "1254c1001737892e1f0ea20ec3ab4993f9ce684c97b193f5ada6bb09d8445142",
             "a943098d24ccf984658403df96a3f311b142c90e7b764eef247562699e2cd8d7",
             "6984953d91796ef67f268dc7bdc3bfbf076253aa1356c77eb46c9d4bacb3c24d",
@@ -214,7 +228,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "tag",
         [
             "855eab380b64b94361c87f775b60a406e78a7d0e8fea00b5da8ffec1f0f384c8",
-            "f50a228becc6ad0daa3739a10bfd6e2779902b609caf2299c3f0c2b495ae054e",
+            "1f71c6bd5b3ee470e6373166aed0fc7bfacb0cbca90e7fe7ec4e943de1e1ce1b",
             "53ce7675b9e938c31ce92b8160230b6af99d10d6ca48af11e72d16c92667a015",
             "9cffc2a308540e6ad7610e2af7c3973fc8655d15f34668682f5219cc490ce4be",
             "b561e223280d7fabc9c6d01dc1f629e59181ea4bea1360aa9f443ef09f3205be",
@@ -224,7 +238,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "view",
         [
             "fcbe79bc01b641aee08d7ad7794cff02a96208e7b503ce21c7b9128c18bae49b",
-            "fd1d70279c6e5aa5bcf0243f85d499723aa4d9f8304a3d334d5c5543da02f273",
+            "5af427d8a0591d192d477033b81e4c4bf402385823c02d98a2f4386b67592e71",
             "21001f066775b54d02924d382c65a73ea776a315612b3e0e930cb9bacb5e2d77",
             "6dbce21b6ae082807d92313182695e098d5737ca9de9e63af530d24f10f02689",
             "6d41c3661756568ca0957040786ecab66dd94cdb9f1b664804eedd5460376704",
@@ -234,7 +248,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "proposal",
         [
             "4de53923b9900182e01c67ccd1643c993e6c326baf4f5c5778270ca5a8ed680a",
-            "6add27f1150acd3a46770df020de1754135d953004bfc2f2d97bad4cb8c535a2",
+            "6d7d178cd4dfa7b931f72b9ba1a747a4c7bcc01e159bb49fdf3501cf6e928432",
             "4b10693e6304e921edaf44bac4315b3331b0be5fa9f17ec517ea5cd3c0e5139e",
             "eed98db235160352f5118b7c057ea1d69914af9a4acb0f15b798db983187d8d9",
             "f22bf84190f83a8e13dcbe3f893e71b79143d545ab734e4990af9003a7974957",
