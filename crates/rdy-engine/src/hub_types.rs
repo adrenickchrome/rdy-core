@@ -302,23 +302,62 @@ impl Origin {
         &self.0
     }
 
-    /// The URL of this origin with `segments` appended, each encoded as exactly one path segment
-    /// (`/`, `?`, `#` and `%` included). An empty, `.` or `..` segment, which cannot stay one
-    /// segment, is `E_UPSTREAM_PROTOCOL`; a segment over 4096 bytes is `E_LIMIT`.
+    /// The URL of this origin with `segments` appended, each encoded as exactly one path segment:
+    /// every byte outside RFC 3986's unreserved set (`/`, `?`, `#` and `%` included) is
+    /// percent-encoded, so no byte is lost or reread as a separator. An empty, `.` or `..`
+    /// segment, which cannot stay one segment, and a segment with a control character, which a
+    /// URL parser would drop, are `E_UPSTREAM_PROTOCOL`. A joined URL over 4096 bytes, origin,
+    /// separators and encoding counted, is `E_LIMIT`; it is refused before it is built.
     pub fn join(&self, segments: &[&str]) -> Result<String, RdyError> {
+        let grow = |total: usize, n: usize| {
+            total
+                .checked_add(n)
+                .filter(|&t| t <= MAX_URL_BYTES)
+                .ok_or_else(|| hub_limit(MAX_URL_BYTES, LimitUnit::Bytes))
+        };
+        // With no segment the path is `/`, as a URL parser writes it.
+        let mut total = grow(self.0.len(), usize::from(segments.is_empty()))?;
         for s in segments {
-            check_count(s.len(), MAX_ID_BYTES, LimitUnit::Bytes)?;
-            if matches!(*s, "" | "." | "..") {
+            if matches!(*s, "" | "." | "..") || s.chars().any(char::is_control) {
                 return Err(upstream_protocol());
             }
+            total = grow(total, 1)?;
+            for &b in s.as_bytes() {
+                total = grow(total, if segment_byte_kept(b) { 1 } else { 3 })?;
+            }
         }
-        let mut url = url::Url::parse(&self.0).map_err(|_| upstream_protocol())?;
-        url.path_segments_mut()
-            .map_err(|_| upstream_protocol())?
-            .clear()
-            .extend(segments);
-        Ok(url.into())
+        let mut out = String::with_capacity(total);
+        out.push_str(&self.0);
+        if segments.is_empty() {
+            out.push('/');
+        }
+        for s in segments {
+            out.push('/');
+            for &b in s.as_bytes() {
+                if segment_byte_kept(b) {
+                    out.push(char::from(b));
+                } else {
+                    out.push('%');
+                    out.push(char::from(HEX_UPPER[usize::from(b >> 4)]));
+                    out.push(char::from(HEX_UPPER[usize::from(b & 0xf)]));
+                }
+            }
+        }
+        // The URL parser must read back exactly this text, with one path segment per segment.
+        let url = url::Url::parse(&out).map_err(|_| upstream_protocol())?;
+        let count = url.path_segments().map_or(0, Iterator::count);
+        if url.as_str() != out || count != segments.len().max(1) {
+            return Err(upstream_protocol());
+        }
+        Ok(out)
     }
+}
+
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
+/// A byte that stays as it is in a path segment: RFC 3986's unreserved set.
+fn segment_byte_kept(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
 }
 
 impl fmt::Debug for Origin {
@@ -499,13 +538,15 @@ impl<'de> Deserialize<'de> for Secret {
 const HUMAN_PREFIX: &str = "human:";
 const ACTOR_PREFIXES: [&str; 3] = [HUMAN_PREFIX, "agent:", "ci:"];
 
-/// Header-safe claim text: printable ASCII (space included) with no space at either end, so the
-/// bytes reach the hub unchanged.
+/// Header-safe claim text, which reaches the hub byte for byte: a value the transport's header
+/// type accepts unchanged (UTF-8 included), no control character (tab, DEL and C1 included) and
+/// no space at either end, which HTTP would strip.
 fn header_safe(text: &str) -> bool {
     !text.is_empty()
-        && text.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        && !text.chars().any(char::is_control)
         && !text.starts_with(' ')
         && !text.ends_with(' ')
+        && ureq::http::HeaderValue::from_str(text).is_ok_and(|h| h.as_bytes() == text.as_bytes())
 }
 
 fn check_actor(actor: &str) -> Result<(), RdyError> {
@@ -565,7 +606,8 @@ impl RequestClaim {
 
     /// The install-bound claim for the account handle `handle`: a genuine human session's
     /// `human:` actor becomes `human:<handle>`; any agent or CI actor stays byte for byte. A
-    /// handle that cannot form a header-safe actor is `E_UPSTREAM_PROTOCOL`.
+    /// handle that is not 1 or more visible ASCII characters within the actor bound is
+    /// `E_UPSTREAM_PROTOCOL`.
     pub fn bind_human(&self, handle: &str) -> Result<RequestClaim, RdyError> {
         if !(self.human_session && self.actor.starts_with(HUMAN_PREFIX)) {
             return Ok(self.clone());
@@ -786,7 +828,8 @@ pub enum KeyState {
 }
 
 /// The hub's key object: the twelve members of every reply that holds a key, under their wire
-/// names. `id` is the hub id (`skey_…`) that key routes take.
+/// names. `id` is the hub id (`skey_…`) that key routes take. Every member must be present; the
+/// five times may be null.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HubKey {
@@ -797,11 +840,22 @@ pub struct HubKey {
     pub label: String,
     pub kind: KeyKind,
     pub state: KeyState,
+    #[serde(deserialize_with = "nullable")]
     pub expires_at: Option<String>,
+    #[serde(deserialize_with = "nullable")]
     pub bound_at: Option<String>,
+    #[serde(deserialize_with = "nullable")]
     pub retired_at: Option<String>,
+    #[serde(deserialize_with = "nullable")]
     pub revoked_at: Option<String>,
+    #[serde(deserialize_with = "nullable")]
     pub compromised_from: Option<String>,
+}
+
+/// A member every reply holds whose value may be null. With `deserialize_with`, serde refuses an
+/// absent member instead of reading it as null.
+fn nullable<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(d)
 }
 
 /// A key-binding challenge (HTTP 201).

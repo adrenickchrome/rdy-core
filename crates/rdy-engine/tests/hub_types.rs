@@ -272,6 +272,45 @@ fn hsa1_origins_compare_scheme_host_and_port() {
     for segment in ["", ".", ".."] {
         protocol(install.join(&["api", "v1", "me", "keys", segment, "retire"]));
     }
+    // A URL parser drops tab, LF and CR inside a path, which would turn one key id into another
+    // or a disguised dot segment into a climb: a control character is refused, never dropped.
+    for segment in [
+        "skey_0000000000000000000000000\n3",
+        "skey_0000000000000000000000000\r3",
+        "skey_0000000000000000000000000\t3",
+        "skey_0000000000000000000000000\r\n3",
+        ".\n.",
+        "\r..",
+        ".\t.",
+        ".\n",
+        "\t",
+        "\n",
+        "a\u{0}b",
+        "a\u{7f}b",
+        "a\u{85}b",
+    ] {
+        protocol(install.join(&["api", "v1", "me", "keys", segment, "retire"]));
+    }
+    // A percent-encoded dot is text: it stays one segment, with its `%` encoded.
+    assert_eq!(
+        install
+            .join(&["api", "v1", "me", "keys", "%2e%2E", "retire"])
+            .unwrap(),
+        "https://hub.test/api/v1/me/keys/%252e%252E/retire"
+    );
+    assert_eq!(
+        install.join(&["api", "v1", "me", "keys", "..."]).unwrap(),
+        "https://hub.test/api/v1/me/keys/..."
+    );
+    // Other bytes are kept, encoded, and a URL parser reads back exactly the given segments.
+    let joined = install.join(&["keys", "é \\;", "%2e"]).unwrap();
+    assert_eq!(joined, "https://hub.test/keys/%C3%A9%20%5C%3B/%252e");
+    let parsed = url::Url::parse(&joined).unwrap();
+    assert_eq!(parsed.as_str(), joined, "the parser keeps the joined text");
+    assert_eq!(
+        parsed.path_segments().unwrap().collect::<Vec<_>>(),
+        ["keys", "%C3%A9%20%5C%3B", "%252e"]
+    );
 }
 
 #[test]
@@ -351,12 +390,25 @@ fn hsa1_claims_keep_agent_actor_and_run() {
         ("agent:Claude Code", Some("run:2026-10-18.1")),
         ("ci:build-42", None),
         ("agent:x", Some("r")),
+        // UTF-8 is header-valid: it reaches the hub byte for byte.
+        ("agent:é", Some("r7")),
+        ("agent:Клод", Some("прогон-1")),
+        ("ci:ビルド", None),
+        ("agent:claude", Some("ré")),
+        ("agent:x\u{a0}", Some("\u{a0}r")),
     ] {
         let session = agent_session(actor, run);
         let before = session.clone();
         let claim = RequestClaim::from_session(&session).unwrap();
         assert_eq!(claim.actor.as_bytes(), actor.as_bytes());
         assert_eq!(claim.run.as_deref(), run, "an absent run remains absent");
+        // The transport's header type takes the same bytes unchanged.
+        let header = ureq::http::HeaderValue::from_str(&claim.actor).unwrap();
+        assert_eq!(header.as_bytes(), actor.as_bytes());
+        if let Some(run) = run {
+            let header = ureq::http::HeaderValue::from_str(run).unwrap();
+            assert_eq!(header.as_bytes(), run.as_bytes());
+        }
         claim.validate_for_send().unwrap();
         let bound = claim.bind_human("test-person").unwrap();
         assert_eq!(bound.actor.as_bytes(), actor.as_bytes());
@@ -409,7 +461,8 @@ fn hsa1_claims_keep_agent_actor_and_run() {
         "agent:a\tb",
         "agent:a\u{0}",
         "agent:a\u{7f}",
-        "agent:é",
+        "agent:a\u{85}",
+        "agent:a\u{9f}",
         "agent:x ",
         " agent:x",
     ] {
@@ -419,7 +472,7 @@ fn hsa1_claims_keep_agent_actor_and_run() {
         )));
     }
     unbound(RequestClaim::from_session(&human_session("nick")));
-    for run in ["", "r\n7", "r7\u{7f}", " r7", "r7 ", "ré"] {
+    for run in ["", "r\n7", "r\t7", "r7\u{7f}", "r7\u{85}", " r7", "r7 "] {
         unbound(RequestClaim::from_session(&agent_session(
             "agent:claude",
             Some(run),
@@ -484,12 +537,46 @@ fn hsa1_bounds_fail_before_unbounded_growth() {
         fence.check(&path(MAX_URL_BYTES + 1)).unwrap_err().code,
         E_LIMIT
     );
+    // A joined URL: 4096 bytes in all, counting the origin, every `/` and the encoding.
     let install = origin("https://hub.test");
-    install.join(&["k".repeat(MAX_ID_BYTES).as_str()]).unwrap();
+    let room = MAX_URL_BYTES - "https://hub.test/".len();
+    let joined = install.join(&["k".repeat(room).as_str()]).unwrap();
+    assert_eq!(joined.len(), MAX_URL_BYTES);
+    limit(install.join(&["k".repeat(room + 1).as_str()]), "4096 bytes");
+    // Encoding writes `/` as three bytes: 1359 of them and two letters fill the room exactly.
+    let slashes = "/".repeat(1359);
+    assert_eq!(1359 * 3 + 2, room);
+    let joined = install.join(&[format!("{slashes}kk").as_str()]).unwrap();
+    assert_eq!(joined.len(), MAX_URL_BYTES);
+    limit(
+        install.join(&[format!("{slashes}kkk").as_str()]),
+        "4096 bytes",
+    );
+    limit(
+        install.join(&[format!("{slashes}/").as_str()]),
+        "4096 bytes",
+    );
+    // Each separator counts: 2040 one-letter segments fill the room, 2041 do not fit.
+    let many = vec!["k"; 2040];
+    assert_eq!(install.join(&many).unwrap().len(), MAX_URL_BYTES);
+    limit(install.join(&vec!["k"; 2041]), "4096 bytes");
+    // An over-long key id in a route, and one id over 4096 bytes.
+    let long = "k".repeat(MAX_ID_BYTES);
+    limit(
+        install.join(&["api", "v1", "me", "keys", &long, "retire"]),
+        "4096 bytes",
+    );
     limit(
         install.join(&["k".repeat(MAX_ID_BYTES + 1).as_str()]),
         "4096 bytes",
     );
+    let port = origin("https://hub.test:8443");
+    let room = MAX_URL_BYTES - "https://hub.test:8443/".len();
+    assert_eq!(
+        port.join(&["k".repeat(room).as_str()]).unwrap().len(),
+        MAX_URL_BYTES
+    );
+    limit(port.join(&["k".repeat(room + 1).as_str()]), "4096 bytes");
 
     // Token: exactly 53 bytes.
     assert_eq!(TOKEN_BYTES, 53);
@@ -961,4 +1048,111 @@ fn hsa1_compromised_time_preserves_the_instant() {
     ] {
         bad_time(parse_compromised_since(input));
     }
+}
+
+/// The settled pending-key fixture (bind reply's `key`).
+const PENDING_KEY: &str = r#"{"id":"skey_00000000000000000000000003","account":"acc_00000000000000000000000001","fingerprint":"SHA256:RHFBqxmd4FLrdHDM2DGtlKdMxg/nN9xD3ZpkWHSvlaM","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMxZFwIQHLofF5C/SY2UPr6zgqjzUfcX6+XICjAhsvur","label":"laptop key","kind":"person","state":"pending","expires_at":null,"bound_at":null,"retired_at":null,"revoked_at":null,"compromised_from":null}"#;
+
+/// The twelve members of the key object.
+const KEY_MEMBERS: [&str; 12] = [
+    "id",
+    "account",
+    "fingerprint",
+    "public_key",
+    "label",
+    "kind",
+    "state",
+    "expires_at",
+    "bound_at",
+    "retired_at",
+    "revoked_at",
+    "compromised_from",
+];
+
+/// The five key members whose value may be null.
+const NULLABLE_KEY_MEMBERS: [&str; 5] = [
+    "expires_at",
+    "bound_at",
+    "retired_at",
+    "revoked_at",
+    "compromised_from",
+];
+
+#[test]
+fn hsa1_key_replies_hold_every_member() {
+    let full: serde_json::Value = serde_json::from_str(PENDING_KEY).unwrap();
+    let key: HubKey = serde_json::from_value(full.clone()).unwrap();
+    assert_eq!(key.id, "skey_00000000000000000000000003");
+    assert_eq!((key.kind, key.state), (KeyKind::Person, KeyState::Pending));
+    assert_eq!(
+        (
+            &key.expires_at,
+            &key.bound_at,
+            &key.retired_at,
+            &key.revoked_at,
+            &key.compromised_from
+        ),
+        (&None, &None, &None, &None, &None),
+        "an explicit null is None"
+    );
+    // The key writes back every member, nulls included.
+    let written = serde_json::to_value(&key).unwrap();
+    assert_eq!(written, full);
+
+    // A nullable member may hold a time.
+    for member in NULLABLE_KEY_MEMBERS {
+        let mut v = full.clone();
+        v[member] = serde_json::Value::from("2026-10-17T12:05:00Z");
+        let key: HubKey = serde_json::from_value(v).unwrap();
+        let value = serde_json::to_value(&key).unwrap();
+        assert_eq!(value[member], "2026-10-17T12:05:00Z", "{member}");
+    }
+
+    // Every reply holds every member: an absent one, nullable or not, is a refusal.
+    let without = |member: &str| {
+        let mut v = full.clone();
+        v.as_object_mut().unwrap().remove(member).unwrap();
+        v
+    };
+    for member in KEY_MEMBERS {
+        assert!(
+            serde_json::from_value::<HubKey>(without(member)).is_err(),
+            "a key without {member} was accepted"
+        );
+    }
+    // A null where a value is required, and an unknown member, are refusals too.
+    for member in KEY_MEMBERS {
+        if NULLABLE_KEY_MEMBERS.contains(&member) {
+            continue;
+        }
+        let mut v = full.clone();
+        v[member] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<HubKey>(v).is_err(),
+            "{member}: null"
+        );
+    }
+    let mut v = full.clone();
+    v["extra"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<HubKey>(v).is_err());
+
+    // The same holds for the key nested in a bind reply.
+    let bind = |key: serde_json::Value| {
+        serde_json::json!({
+            "key": key,
+            "confirm_url": "https://hub.test/app/settings/keys/skey_00000000000000000000000003/confirm",
+        })
+    };
+    let result: BindResult = serde_json::from_value(bind(full.clone())).unwrap();
+    assert_eq!(result.key, key_from(PENDING_KEY));
+    for member in KEY_MEMBERS {
+        assert!(
+            serde_json::from_value::<BindResult>(bind(without(member))).is_err(),
+            "a bind reply whose key lacks {member} was accepted"
+        );
+    }
+}
+
+fn key_from(json: &str) -> HubKey {
+    serde_json::from_str(json).unwrap()
 }
