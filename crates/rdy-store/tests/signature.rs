@@ -406,7 +406,7 @@ fn dump_as(s: &Store, store_format: u32) -> Result<Vec<u8>, StoreError> {
 
 #[test]
 fn sig4_dump_pairs_keep_their_own_kind_sets() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (2, 14));
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (2, 15));
     assert!(READS.contains(&(2, 14)));
     assert!(frame_kinds(2, 14).unwrap().contains(&kinds::SIGNATURE));
     for pair in [(1, 10), (1, 11), (1, 12), (2, 13)] {
@@ -425,14 +425,14 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
     want.push(11);
     want.sort();
     assert_eq!(frame_kinds(2, 14).unwrap(), &want[..]);
-    // a store with a signature dumps as (2, 14) and reads back with its frame
+    // a store with a signature dumps as (2, 15) and reads back with its frame
     let (_d, _p, mut s) = store();
     let t = s.put_tag(&tag("v1.0.0", Hash([3; 32]))).unwrap();
     let g = sig(t, "rdy-tag-v1", b"tag", &[1]);
     let id = s.put_signature(&g).unwrap();
     let bytes = dump_as(&s, STORE_FORMAT).unwrap();
     let (mut r, format, h) = DumpReader::open(&bytes[..]).unwrap();
-    assert_eq!((format, h.store_format), (2, 14));
+    assert_eq!((format, h.store_format), (2, 15));
     let mut found = false;
     while let Some(item) = r.next().unwrap() {
         if let DumpItem::Batch(b) = item {

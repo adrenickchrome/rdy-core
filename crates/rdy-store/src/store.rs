@@ -2,6 +2,7 @@ use crate::error::StoreError;
 use crate::fileid::FileId;
 use crate::format::{self, Format};
 use crate::fsutil;
+use crate::holder::{Creation, FirstBatch, RefRules, RefWrite, StoreMode, Walk};
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
@@ -12,7 +13,7 @@ use crate::segment::{
 use crate::transition::Transitions;
 use crate::view::ViewOp;
 use rdy_model::{
-    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot, Tracking,
+    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, RepoId, StateSnapshot, Tracking,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::cmp::Reverse;
@@ -155,6 +156,9 @@ pub struct Store {
     /// checkpoint may make it durable, and the close removes it. The next open rebuilds it from
     /// the log, and a reindex rebuilds it at once.
     stale_index: bool,
+    /// What the log's first sealed batch set (store format 15): the store's mode, which the ref
+    /// rules of every write and replay follow, and where that batch ends.
+    creation: Creation,
 }
 
 /// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
@@ -489,6 +493,34 @@ impl Drop for Store {
     }
 }
 
+/// What the opened log's first sealed batch set: its mode and where it ends, read from the
+/// origin to the first marker.
+fn read_creation(log: &SegmentLog) -> Result<Creation, StoreError> {
+    let mut first = FirstBatch::default();
+    let walked = log.for_each_view(ORIGIN, |_, v, next| {
+        match first.frame(v.kind, v.payload, next) {
+            Ok(true) => Err(Walk::Done),
+            Ok(false) => Ok(()),
+            Err(e) => Err(Walk::Failed(e)),
+        }
+    });
+    match walked {
+        Ok(()) | Err(Walk::Done) => Ok(first.creation(log.end())),
+        Err(Walk::Failed(e)) => Err(e),
+    }
+}
+
+/// The refusal of a holder's creation where a store, or anything else, already is.
+fn already_exists(dir: &Path) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "{} already holds something: a holder is created only in an empty directory",
+            dir.display()
+        ),
+    ))
+}
+
 /// Frames a catch-up applies to the index in one commit.
 pub const CATCH_UP_CHUNK: usize = 1000;
 
@@ -502,20 +534,41 @@ struct CatchUp {
 /// Replays the frames of `log` from `from` to its end into `index`, applying their entries every
 /// `CATCH_UP_CHUNK` frames, so it never holds more than one chunk. The commits are not durable.
 /// `fail_after` is a test fault: the replay fails before it indexes that frame (counting from 0).
+///
+/// Every ref replayed meets the holder rules (`crate::holder::RefRules`) of the mode the log's
+/// first batch set (`creation`): a replay from a later point starts from the index's tags.
 fn replay_into(
     log: &SegmentLog,
     index: &Index,
     from: Location,
     fail_after: Option<u64>,
+    creation: Creation,
 ) -> Result<CatchUp, StoreError> {
     let end = log.end();
     let mut done = CatchUp::default();
     let mut entries = vec![];
     let mut in_chunk = 0usize;
     let auth = log.authorization();
+    let tags = if creation.mode == StoreMode::Holder && from != ORIGIN {
+        index
+            .refs_with_prefix(crate::holder::TAG_REF)?
+            .into_iter()
+            .map(|(name, _)| name[crate::holder::TAG_REF.len()..].to_string())
+            .collect()
+    } else {
+        Default::default()
+    };
+    let mut rules = RefRules::new(creation.mode, tags);
     log.for_each_view(from, |loc, v, next| {
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
+        }
+        match (v.kind, v.payload) {
+            (kinds::REF_UPDATE, Some(payload)) => {
+                rules.on_ref_frame(creation.in_first(loc), payload)?
+            }
+            (kinds::BATCH_COMMIT, _) => rules.on_marker()?,
+            _ => {}
         }
         // the redaction rows come from the validated stream only: an apply the bootstrap did not
         // validate is never a row, and a removed payload's entries come from its residue
@@ -572,7 +625,28 @@ impl Store {
         };
         format::write_format_file(dir, Format::CURRENT)?;
         synced.push(dir.to_path_buf());
-        Store::open_current_format(dir, synced, None)
+        Store::open_current_format(dir, synced, None, None)
+    }
+
+    /// Creates a holder store (D-BPYN8) with repo id `repo_id`, in a directory that does not
+    /// exist or is wholly empty; a directory holding anything is `StoreError::Io` of kind
+    /// `AlreadyExists`, and nothing is written into it. The holder's first sealed batch holds its
+    /// format, its repo id and its mode (`meta/store_mode` = `holder`), then a checkpoint makes
+    /// the index durable. No origin is written. `FORMAT` is written last, so a crash before it
+    /// leaves a directory that no open accepts, never a project: retry in a new directory. The
+    /// store holds its lock as any open store does.
+    pub fn create_holder(dir: &Path, repo_id: RepoId) -> Result<Store, StoreError> {
+        let mut synced = match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_dir() && std::fs::read_dir(dir)?.next().is_none() => vec![],
+            Ok(_) => return Err(already_exists(dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fsutil::create_dir_durable(dir)?,
+            Err(e) => return Err(e.into()),
+        };
+        synced.push(dir.to_path_buf());
+        let mut store = Store::open_current_format(dir, synced, None, Some(repo_id))?;
+        format::write_format_file(dir, Format::CURRENT)?;
+        store.synced.push(dir.to_path_buf());
+        Ok(store)
     }
 
     /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
@@ -580,7 +654,7 @@ impl Store {
     /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         Store::check_existing(dir)?;
-        Store::open_current_format(dir, vec![], None)
+        Store::open_current_format(dir, vec![], None, None)
     }
 
     /// Opens an existing store as [`Store::open`] does, under `lock`, which the caller took on
@@ -592,7 +666,7 @@ impl Store {
         if !lock.guards(dir) {
             return Err(StoreError::Locked(dir.to_path_buf()));
         }
-        Store::open_current_format(dir, vec![], Some(lock.clone()))
+        Store::open_current_format(dir, vec![], Some(lock.clone()), None)
     }
 
     /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
@@ -612,11 +686,14 @@ impl Store {
         }
     }
 
-    /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).
+    /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`). With
+    /// `holder`, the log must be empty (`AlreadyExists` otherwise): its first batch makes the
+    /// store a holder with that repo id.
     fn open_current_format(
         dir: &Path,
         mut synced: Vec<PathBuf>,
         held: Option<StoreLock>,
+        holder: Option<RepoId>,
     ) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
         // dur1: each directory created here is fsynced into its parent before any write is acked.
@@ -682,6 +759,11 @@ impl Store {
         // two passes: the redaction bootstrap validates every apply from the log's own frames,
         // then the marker rule's scan hashes every payload but the authorized holes
         let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
+        // the mode comes from the log's first batch, before any other ref is judged
+        let creation = read_creation(&log)?;
+        if holder.is_some() && log.end() != ORIGIN {
+            return Err(already_exists(dir));
+        }
         let report = OpenReport {
             quarantined,
             unclean_shutdown: unclean,
@@ -726,6 +808,7 @@ impl Store {
             held: false,
             open: None,
             stale_index: false,
+            creation,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -756,7 +839,9 @@ impl Store {
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
-        store.ensure_format()?;
+        store.ensure_format(holder)?;
+        // the index's mode and a holder's refs are the ones the log's first batch allows
+        store.check_mode_against(store.creation)?;
         // an authorized removal finishes before any reader escapes this open
         store.finish_redactions_at_open()?;
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
@@ -798,8 +883,11 @@ impl Store {
     /// rebuild), so the index is first rebuilt from the log and asked again. A new store (an
     /// empty log; `create` wrote `FORMAT` first) gets the ref and its repo id (`meta/repo_id`) as
     /// one marked batch, then a checkpoint. A crash before that leaves `FORMAT` and an empty log,
-    /// which the next open finishes.
-    fn ensure_format(&mut self) -> Result<(), StoreError> {
+    /// which the next open finishes. (`create_holder` writes `FORMAT` only after this.)
+    ///
+    /// With `holder`, the new store's batch is a holder's: the format, the repo id `holder`
+    /// names and `meta/store_mode`.
+    fn ensure_format(&mut self, holder: Option<RepoId>) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
                 segment: 0,
@@ -824,17 +912,33 @@ impl Store {
             }
             None => {
                 // one batch of the format and the repo id (D-DAGNB): set_refs refuses meta/ refs
-                let items = self.ref_items(vec![
+                let mut refs = vec![
                     (
                         format::REF_STORE_FORMAT.into(),
                         format::encode_u32(Format::CURRENT.store_format),
                     ),
                     (
                         crate::meta::REF_REPO_ID.into(),
-                        crate::meta::encode_repo_id(&rdy_model::RepoId::new()),
+                        crate::meta::encode_repo_id(&holder.unwrap_or_else(RepoId::new)),
                     ),
-                ]);
-                self.write(items)?;
+                ];
+                // a holder's mode is the creation's (D-BPYN8): this batch is the only place
+                if holder.is_some() {
+                    refs.push((
+                        crate::holder::REF_STORE_MODE.into(),
+                        crate::holder::HOLDER_MODE.to_vec(),
+                    ));
+                }
+                let items = self.ref_items(refs);
+                self.write_refs(items, RefWrite::Unchecked)?;
+                self.creation = Creation {
+                    mode: if holder.is_some() {
+                        StoreMode::Holder
+                    } else {
+                        StoreMode::Project
+                    },
+                    end: self.log.end(),
+                };
                 // a new store is durable from its first open
                 self.checkpoint()?;
             }
@@ -941,6 +1045,7 @@ impl Store {
         // the store's checked redaction writers write one) or an item that would bring back a
         // removed hash is refused with the batch still open, and nothing poisoned
         crate::redaction::refuse_redaction_kinds(&last)?;
+        self.check_refs(&last, RefWrite::Public)?;
         self.refuse_removed(&last)?;
         self.check_new_signatures(&last)?;
         // a held batch that holds a redaction apply seals through the apply hook, which never
@@ -1147,7 +1252,7 @@ impl Store {
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
         let fail_after = self.faults.replay_after.take();
-        let done = replay_into(&self.log, self.index(), from, fail_after)?;
+        let done = replay_into(&self.log, self.index(), from, fail_after, self.creation)?;
         // the replayed frames are in the log, not yet in the durable index
         self.checkpoint()?;
         Ok(done)
@@ -1191,7 +1296,7 @@ impl Store {
         let fail_after = self.faults.replay_after.take();
         // an error at any step, the open of the temp included, removes the temp
         let built = Index::open(&tmp).and_then(|ix| {
-            replay_into(&self.log, &ix, ORIGIN, fail_after)?;
+            replay_into(&self.log, &ix, ORIGIN, fail_after, self.creation)?;
             // durable before it becomes the index
             ix.checkpoint()?;
             crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
@@ -1231,9 +1336,41 @@ impl Store {
     /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
     /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
     /// chunk, nor a change that embeds a removed block version. Nothing is written then.
+    ///
+    /// The mode ref is never written (`store mode cannot change`); in a holder, a ref outside its
+    /// families, or an `answer/tag:` ref, is refused (`crate::holder`).
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        self.write_refs(items, RefWrite::Public)
+    }
+
+    /// `write` with the ref rules `how` names.
+    fn write_refs(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        how: RefWrite,
+    ) -> Result<Vec<Hash>, StoreError> {
         crate::redaction::refuse_redaction_kinds(&items)?;
-        self.write_guarded(items)
+        self.write_checked(items, how)
+    }
+
+    /// The take's write (Task 11 is its caller): `write`, where a holder's `answer/tag:<name>`
+    /// stands beside `tag/<name>` in `items` or in the store (O11).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn write_take(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.write_refs(items, RefWrite::Take)
+    }
+
+    /// The ref rules of a write or seal of `items`, before anything is appended.
+    fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
+        crate::holder::check_ref_writes(self.creation.mode, items, how, |t| {
+            Ok(self
+                .index()
+                .get_ref(&format!("{}{t}", crate::holder::TAG_REF))?
+                .is_some())
+        })
     }
 
     /// `write` for the store's own checked writers: any kind, with the removed-hash refusal.
@@ -1241,9 +1378,19 @@ impl Store {
         &mut self,
         items: Vec<(u8, Vec<u8>)>,
     ) -> Result<Vec<Hash>, StoreError> {
+        self.write_checked(items, RefWrite::Public)
+    }
+
+    /// `write_guarded` with the ref rules `how` names.
+    fn write_checked(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        how: RefWrite,
+    ) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
             return Err(self.poisoned_err());
         }
+        self.check_refs(&items, how)?;
         // a held batch that holds a redaction apply takes only its seal: its TRANSITION is the
         // last data frame, and no copy of the content it removes can join it before the seal
         if self.held
@@ -1683,7 +1830,7 @@ impl Store {
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<(), StoreError> {
         let items = self.ref_items(refs);
-        self.write(items)?;
+        self.write_refs(items, RefWrite::Unchecked)?;
         Ok(())
     }
 
@@ -2698,6 +2845,7 @@ impl Store {
             ));
         }
         crate::redaction_io::refuse_oversized_records(&items)?;
+        self.check_refs(&items, RefWrite::Public)?;
         self.refuse_removed(&items)?;
         self.check_new_signatures(&items)?;
         let (_, batch) = self.dedupe(items)?;

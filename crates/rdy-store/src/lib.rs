@@ -7,6 +7,7 @@ pub mod error;
 pub mod fileid;
 pub mod format;
 pub mod fsutil;
+pub mod holder;
 pub mod inbox;
 pub mod index;
 pub mod ingest;

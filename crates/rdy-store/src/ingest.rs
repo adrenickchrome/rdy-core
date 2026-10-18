@@ -24,6 +24,10 @@
 //! own authorization bootstrap must authorize the frame's exact span, by the apply and with the
 //! residue the record names. A dangling or forged drop refuses the load, and no store is made.
 //!
+//! Every batch's refs meet the holder rules (`crate::holder`) before the batch writes a byte:
+//! the first batch sets the mode, a mode ref in a later batch is refused, and a holder's refs
+//! stay in its families. The refusal is the store's own (`StoreError::Decode`).
+//!
 //! The zeros a dropped frame claims are bounded before they are written (ruling task-9, from
 //! tb-A4DAV): one frame claims at most `MAX_BLOB_BYTES` (the reader refuses more, and `batch`
 //! refuses more before its batch writes a byte), and the frames whose authorization has not been
@@ -40,6 +44,7 @@ use crate::dump::{
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
+use crate::holder::{FirstBatch, RefRules};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_REPO_ID, encode_repo_id};
 use crate::redaction_io;
@@ -83,6 +88,8 @@ pub struct Ingest {
     /// The zero bytes written for dropped frames not yet released, at most
     /// `MAX_UNAUTHORIZED_BYTES`.
     unauthorized: u64,
+    /// The ref rules of the log so far: None until the first batch set the mode.
+    rules: Option<RefRules>,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -127,6 +134,7 @@ impl Ingest {
             has_apply: false,
             pending: Vec::new(),
             unauthorized: 0,
+            rules: None,
         })
     }
 
@@ -142,7 +150,8 @@ impl Ingest {
     /// authorization is validated first (`release_authorized`); if it still would, the frame is
     /// refused before it is written (`drop_text::BUDGET`). The marker's digest must equal the
     /// batch's digest.
-    /// Each failure is `StoreError::Dump`. Nothing is synced until `finish`.
+    /// Each failure is `StoreError::Dump`, but a ref the holder rules refuse is the store's own
+    /// `StoreError::Decode`, before the batch writes a byte. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
         for f in &b.frames {
             if let Frame::Dropped { len, .. } = f
@@ -151,6 +160,7 @@ impl Ingest {
                 return Err(dump_error(drop_text::claim(*len)));
             }
         }
+        self.check_refs(b)?;
         let end = self.log.end();
         if b.start.segment == end.segment.wrapping_add(1) && b.start.offset == 0 && end.offset > 0 {
             self.log.roll()?;
@@ -219,9 +229,56 @@ impl Ingest {
         self.log
             .append_marker_digest(b.start, hashes.len() as u32, digest)?;
         self.has_repo_id |= sets_repo_id;
+        if let Some(r) = &mut self.rules {
+            r.commit_batch();
+        }
         self.batches += 1;
         self.frames += hashes.len() as u64;
         Ok(())
+    }
+
+    /// Judges batch `b`'s refs by the holder rules (`crate::holder::RefRules`) before it is
+    /// written: the first batch's mode refs set the mode, then each present ref of `b` is judged,
+    /// then its end. A dropped frame is never a ref (only blocks, changes and chunks are
+    /// removable). `b`'s tags count for later batches only once `batch` takes it
+    /// (`commit_batch`).
+    fn check_refs(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
+        let first = self.batches == 0;
+        if first {
+            self.rules = None;
+        }
+        let refs = || {
+            b.frames.iter().filter_map(|f| match f {
+                Frame::Present {
+                    kind: kinds::REF_UPDATE,
+                    payload,
+                    ..
+                } => Some(&payload[..]),
+                _ => None,
+            })
+        };
+        let rules = match &mut self.rules {
+            Some(r) => r,
+            None => {
+                let mut scan = FirstBatch::default();
+                for p in refs() {
+                    scan.frame(kinds::REF_UPDATE, Some(p), b.start)?;
+                }
+                self.rules.insert(RefRules::new(
+                    scan.creation(b.start).mode,
+                    Default::default(),
+                ))
+            }
+        };
+        // a batch refused earlier left its refs: they never count
+        rules.abandon_batch();
+        let judged = refs()
+            .try_for_each(|p| rules.on_ref_frame(first, p))
+            .and_then(|()| rules.check_marker());
+        if judged.is_err() {
+            rules.abandon_batch();
+        }
+        judged
     }
 
     /// Releases from the bound the bytes of every dropped frame not yet released whose exact span

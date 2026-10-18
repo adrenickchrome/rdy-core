@@ -157,7 +157,7 @@ fn ec1_check_refuses_an_unknown_meta_ref() {
     .unwrap();
     assert_eq!(
         fsck_text(&s),
-        "\"meta/a\" is not a meta ref this rdy knows (meta/store_format, meta/repo_id, meta/origin)"
+        "\"meta/a\" is not a meta ref this rdy knows (meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
     );
     // a good origin and repo id check clean
     let (_e, mut t) = new_store();
