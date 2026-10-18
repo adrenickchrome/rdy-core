@@ -335,6 +335,18 @@ impl Local {
         r.close()
     }
 
+    /// Runs `read` on the project under the lock, with an immutable borrow, and returns its
+    /// owned result. It neither seals nor publishes: a typed read of what `Engine::read`
+    /// (which returns only the published state) cannot reach, such as the store's refs and
+    /// `Rdy::fsck`, without the seal a write closure runs after it. A poisoned lock recovers as
+    /// every other entry does.
+    pub fn inspect<T>(
+        &self,
+        read: impl FnOnce(&Rdy) -> Result<T, RdyError>,
+    ) -> Result<T, RdyError> {
+        read(&self.lock())
+    }
+
     /// Checkpoints if writes are waiting and the store has been idle long enough.
     pub fn checkpoint_if_idle(&self) -> Result<bool, RdyError> {
         self.lock().checkpoint_if_idle()
