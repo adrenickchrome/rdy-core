@@ -39,7 +39,7 @@ use crate::answer::relay::RelayInput;
 use crate::answer::{AnswerInfo, AnswerRequest, AnswerStep, Answerer, PreparedAnswer};
 use crate::config_levels::{effective, user_file_from_env};
 use crate::engine::{Engine, with_writer_result};
-use crate::gate::{LandInfo, LandOptions, PreparedApproval};
+use crate::gate::{LandInfo, LandOptions, PreparedApproval, ProposalRef};
 use crate::signature_check::{
     CheckContext, SIGNED_VALID, STATEMENT_MATCH, SignatureCheck, SignatureSubject, check_signature,
     repo_ids, subject_context,
@@ -430,13 +430,19 @@ fn run_single(
     person: &str,
     act: Single,
 ) -> Result<Value, RdyError> {
+    // the proposal version the first preparation resolved: a retry approves that version or
+    // is refused as moved, never a newer one a versionless name now resolves to
+    let mut pin: Option<ProposalRef> = None;
     for _ in 0..ATTEMPTS {
         let (s, p, a) = (session.clone(), person.to_string(), act.clone());
-        let step = with_writer_result(engine, move |r| prepare(r, &s, &p, a))?;
+        let step = with_writer_result(engine, move |r| prepare(r, &s, &p, a, pin))?;
         let attempt = match step {
             Step::Done(done) => return Ok(reply(*done)),
             Step::Prepared(attempt) => attempt,
         };
+        if pin.is_none() {
+            pin = attempt.act.landing().map(PreparedApproval::pref);
+        }
         let signed = match sign_act(agent, &attempt) {
             Ok(signed) => Signed {
                 signatures: signed,
@@ -468,8 +474,15 @@ struct Signed {
 }
 
 /// Step 1, under the writer: validates and prepares the act, reads the signing settings, and
-/// commits at once when no agent is needed.
-fn prepare(r: &mut Rdy, s: &Session, person: &str, act: Single) -> Result<Step, RdyError> {
+/// commits at once when no agent is needed. With `pin` (a retry), a landing must approve that
+/// version: a newer one is the existing refusal of a moved proposal.
+fn prepare(
+    r: &mut Rdy,
+    s: &Session,
+    person: &str,
+    act: Single,
+    pin: Option<ProposalRef>,
+) -> Result<Step, RdyError> {
     let (prepared, own) = match act {
         Single::Approve {
             approver,
@@ -522,6 +535,11 @@ fn prepare(r: &mut Rdy, s: &Session, person: &str, act: Single) -> Result<Step, 
             StatementKind::Tag,
         ),
     };
+    if let (Some(pin), Some(l)) = (pin, prepared.landing())
+        && l.pref().version != pin.version
+    {
+        return Err(l.moved_from(&r.read(), &pin)?);
+    }
     // the settings are read only after the act's own validation passed
     let config = signing_config(r.root())?;
     let mode = config.sign;

@@ -256,6 +256,52 @@ pub(crate) fn moved(
     ))
 }
 
+/// The freshness check of removal request `request` for the landing of `pref`
+/// (`redaction::check_fresh`, with `prospective` the landing's own new changes). A stale report
+/// is `E_REDACTION_STALE`, never refreshed, and its `corrected` holds the corrected card when it
+/// can be computed: `{"ref", "request", "report"}`, the version and the stale request, with the
+/// complete report a new request with the same targets and reason would record now (the dry
+/// run's result). Nothing is written and the approval is not tried again.
+fn fresh_removal(
+    st: &ReadState,
+    request: &Hash,
+    prospective: &[Change],
+    pref: &ProposalRef,
+) -> Result<(), RdyError> {
+    crate::redaction::check_fresh(st, request, prospective).map_err(|e| {
+        if e.code != E_REDACTION_STALE {
+            return e;
+        }
+        match corrected_removal(st, request, pref) {
+            Some(card) => e.with_corrected(card),
+            None => e,
+        }
+    })
+}
+
+/// The corrected card of stale removal request `request` of `pref` (see [`fresh_removal`]), or
+/// none when the request or the fresh report cannot be read.
+fn corrected_removal(
+    st: &ReadState,
+    request: &Hash,
+    pref: &ProposalRef,
+) -> Option<serde_json::Value> {
+    use crate::redaction::{RedactInput, dry_run, targets};
+    let r = st.reader().redaction_request(request).ok()?;
+    let input = RedactInput {
+        targets: r.targets.iter().map(targets::selector_text).collect(),
+        reason_class: targets::reason_class_name(r.reason_class).to_string(),
+        reason: r.reason.clone(),
+        dry_run: true,
+    };
+    let report = serde_json::to_value(dry_run(st, &input).ok()?).ok()?;
+    Some(serde_json::json!({
+        "ref": pref.to_string(),
+        "request": request.to_string(),
+        "report": report,
+    }))
+}
+
 /// A store refusal on the approve path, worded for the approver: an `E_STALE_BASE` or
 /// `E_ALREADY_EXISTS` keeps its code, names the block and the version's view `view`, and gives
 /// the author's fix, never "re-read and retry", which is a writer's. Any other error converts as
@@ -2593,7 +2639,7 @@ impl Rdy {
         // log yet: one that would copy or quote the content outside the approved removal (a new
         // version of an all-versions target) is stale too, never a silently grown removal
         for r in &requests {
-            crate::redaction::check_fresh(&st, r, accept.as_slice())?;
+            fresh_removal(&st, r, accept.as_slice(), &pref)?;
         }
 
         // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
@@ -2630,14 +2676,14 @@ impl Rdy {
 
     /// The freshness check of the removal requests a prepared landing lands, run again under the
     /// writer before its commit (D-6B1W1, D-14SAY): a report that changed is
-    /// `E_REDACTION_STALE`, never refreshed.
+    /// `E_REDACTION_STALE` with the corrected card ([`fresh_removal`]), never refreshed.
     pub(crate) fn recheck_removals(&self, prepared: &PreparedApproval) -> Result<(), RdyError> {
         if prepared.requests.is_empty() {
             return Ok(());
         }
         let st = self.read();
         for r in &prepared.requests {
-            crate::redaction::check_fresh(&st, r, prepared.accept.as_slice())?;
+            fresh_removal(&st, r, prepared.accept.as_slice(), &prepared.pref)?;
         }
         Ok(())
     }
@@ -2733,6 +2779,24 @@ pub(crate) struct PreparedApproval {
     accept: Option<Change>,
     chosen: Option<AltRef>,
     keys: BTreeMap<String, String>,
+}
+
+impl PreparedApproval {
+    /// The proposal version this landing approves.
+    pub(crate) fn pref(&self) -> ProposalRef {
+        self.pref
+    }
+
+    /// The refusal of this landing when it was prepared again for an approval first bound to
+    /// `pinned`, and the proposal's latest version is now this one's: `pinned` moved (pver1). An
+    /// approval never moves to a newer version on its own.
+    pub(crate) fn moved_from(
+        &self,
+        st: &ReadState,
+        pinned: &ProposalRef,
+    ) -> Result<RdyError, RdyError> {
+        moved(st, pinned, &self.pref.version, &self.view)
+    }
 }
 
 impl ReadState {

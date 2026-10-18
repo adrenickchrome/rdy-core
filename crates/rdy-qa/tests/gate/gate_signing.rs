@@ -9,7 +9,7 @@ use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::engine::{Engine, Local, with_writer_result};
 use rdy_engine::pending::{CARD_MAX_TOKENS, PendingQuery};
-use rdy_engine::redaction::RedactInput;
+use rdy_engine::redaction::{RedactInput, dry_run};
 use rdy_engine::signature_check::{SIGNED_VALID, STATEMENT_MATCH, signature_checks};
 use rdy_engine::signing_act::{SigningAct, run_sign, run_signed_act};
 use rdy_engine::signing_crypto::{AgentIdentity, SigningAgent, blob_fingerprint};
@@ -1222,8 +1222,58 @@ fn sig8_changed_cards_and_redaction_reports_are_never_reapproved() {
     );
     assert_eq!(p.signature_count(), before);
 
-    // a changed redaction report while the agent signs: E_REDACTION_STALE, no removal, no retry
+    // a versionless approval is pinned to the version its first preparation resolved: a new
+    // version while the agent signs is the existing refusal of a moved proposal, never a
+    // silent approval of the new version
+    let p = project();
+    p.config("always", Some(person_ed()), None);
+    let (id1, ref1) = p.proposal();
+    let view = format!("v{}", p.n.load(Ordering::SeqCst) - 1);
+    let stable = ref1.split('@').next().unwrap().to_string();
+    let second = Arc::new(Mutex::new(None::<String>));
+    let (e, section, s2) = (Arc::clone(&p.e), p.section.clone(), Arc::clone(&second));
+    let agent = FakeAgent::hooked(&[person_ed()], false, move |_| {
+        let (section, view) = (section.clone(), view.clone());
+        let id2 = on(&e, move |r| {
+            write(
+                r,
+                &view,
+                json!([{"op": "create", "type": "claim", "parent": section, "body": "More."}]),
+            )
+            .unwrap();
+            r.propose(&rdy_qa::fixtures::writer(), &view, &view, Some("Adds two."))
+                .unwrap()
+                .id
+        });
+        *s2.lock().unwrap() = Some(id2);
+    });
+    let end = p.log_end();
+    let err = p.approve_local(&agent, &stable).unwrap_err();
+    assert_err(
+        &err,
+        E_PROPOSAL_MOVED,
+        &format!("proposal {ref1} moved: the latest version is {stable}@2"),
+    );
+    assert_eq!(agent.signs(), 1, "one attempt, never signed again");
+    assert_eq!(p.signature_count(), 0);
+    assert_ne!(p.log_end(), end, "only the new version was written");
+    let id2 = second.lock().unwrap().clone().expect("the new version");
+    let landed = p.e.read().landings().unwrap().iter().any(|(_, rec)| {
+        let v = rec.approved_version.map(|h| h.to_string());
+        v == Some(id1.clone()) || v == Some(id2.clone())
+    });
+    assert!(!landed, "no version of the proposal landed");
+
+    // a changed redaction report while the agent signs: E_REDACTION_STALE with the corrected
+    // card (the fresh report of the same request), no removal, no retry
     let (p, id, prose) = removal_project();
+    let input = RedactInput {
+        targets: vec![prose.clone()],
+        reason_class: "secret".into(),
+        reason: "a leaked code".into(),
+        dry_run: true,
+    };
+    let recorded = dry_run(&p.e.read(), &input).unwrap();
     p.config("auto", Some(person_ed()), None);
     let (e, section) = (Arc::clone(&p.e), p.section.clone());
     let agent = FakeAgent::hooked(&[person_ed()], false, move |_| {
@@ -1240,6 +1290,24 @@ fn sig8_changed_cards_and_redaction_reports_are_never_reapproved() {
     let end_before = p.log_end();
     let err = p.approve_local(&agent, &id).unwrap_err();
     assert_eq!(err.code, E_REDACTION_STALE, "{err}");
+    let corrected = err.corrected.clone().expect("the corrected card");
+    let r#ref = corrected["ref"].as_str().unwrap();
+    assert!(
+        r#ref.starts_with("P-") && r#ref.ends_with("@1"),
+        "{corrected}"
+    );
+    let request = corrected["request"].as_str().unwrap();
+    assert!(request.parse::<Hash>().is_ok(), "{corrected}");
+    let fresh = serde_json::to_value(dry_run(&p.e.read(), &input).unwrap()).unwrap();
+    assert_eq!(
+        corrected["report"], fresh,
+        "the fresh report of the same request"
+    );
+    assert_ne!(
+        corrected["report"]["report"]["report_hash"],
+        serde_json::to_value(&recorded).unwrap()["report"]["report_hash"],
+        "the report changed"
+    );
     assert_eq!(agent.signs(), 1, "no retry");
     assert_ne!(p.log_end(), end_before, "only the quote was written");
     assert_eq!(p.signature_count(), 0);
