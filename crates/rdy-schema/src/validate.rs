@@ -1,5 +1,6 @@
 use crate::glob::Glob;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
+use crate::publication;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use rdy_model::{decision, tree};
 use serde::Serialize;
@@ -28,6 +29,9 @@ const QUESTION_OPTIONS: &str = "options";
 
 /// The most path globs one `reflects` field may hold.
 pub const MAX_REFLECTS_GLOBS: usize = 32;
+
+/// The fix of a publication profile placed anywhere but directly under a doc.
+const PROFILE_PARENT_FIX: &str = "set parent to a doc id";
 
 fn err(block: &Block, code: &'static str, message: String, fix: String) -> Issue {
     Issue {
@@ -305,11 +309,15 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
         }
     }
     let top_ok = tree::is_tree_type(&block.block_type);
+    // a publication profile sits directly under a doc, whatever a pack lists
+    let profile = block.block_type == publication::PROFILE_TYPE;
     match (parent, &block.parent) {
         (Some(p), Some(_)) => {
             // docs and folders have paths: they sit only in folders, whatever a pack lists
             let allowed = if top_ok {
                 p.block_type == tree::FOLDER
+            } else if profile {
+                p.block_type == tree::DOC
             } else {
                 pack.block_types
                     .get(&p.block_type)
@@ -323,6 +331,8 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                     format!("a {} cannot contain a {}", p.block_type, block.block_type),
                     if top_ok {
                         "put it at the top level or inside a folder".into()
+                    } else if profile {
+                        PROFILE_PARENT_FIX.into()
                     } else {
                         "place it under a section (or another allowed parent type)".into()
                     },
@@ -343,7 +353,11 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             block,
             "E_ORPHAN",
             format!("{} must have a parent", block.block_type),
-            "set parent to the section that should contain it".into(),
+            if profile {
+                PROFILE_PARENT_FIX.into()
+            } else {
+                "set parent to the section that should contain it".into()
+            },
         )),
     }
     if top_ok
@@ -398,6 +412,9 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                     .into()
             },
         ));
+    }
+    if profile && !projection {
+        publication::check_values(block, &mut out);
     }
     out
 }

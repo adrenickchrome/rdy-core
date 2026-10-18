@@ -1,5 +1,6 @@
 mod glob;
 mod pack;
+pub mod publication;
 mod resolve;
 mod validate;
 
