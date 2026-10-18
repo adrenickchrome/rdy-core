@@ -232,16 +232,6 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (W_REDACTION_QUARANTINE, W_REDACTION_QUARANTINE_MESSAGE, ""),
     (W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE, ""),
     (
-        E_PUBLICATION_REFERENCE,
-        "a public profile refers to blocks outside its selection",
-        "Include the target docs or remove these references. Run the publication check again.",
-    ),
-    (
-        W_PUBLICATION_REFERENCE,
-        "an org profile refers to blocks outside its selection",
-        "Review these references before you share the output.",
-    ),
-    (
         E_SIGNING_KEY_MISSING,
         "{setting} is not set",
         "set {setting} in the user config or .rdy/local.yaml",
@@ -275,5 +265,15 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         W_SIGNING_FAILED,
         "the act was saved without signatures: {code}: {message}",
         SIGNING_FAILED_FIX,
+    ),
+    (
+        E_PUBLICATION_REFERENCE,
+        "a public profile refers to blocks outside its selection",
+        "Include the target docs or remove these references. Run the publication check again.",
+    ),
+    (
+        W_PUBLICATION_REFERENCE,
+        "an org profile refers to blocks outside its selection",
+        "Review these references before you share the output.",
     ),
 ];
