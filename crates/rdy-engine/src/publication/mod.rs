@@ -4,9 +4,11 @@
 //! attachments, and the check of every reference that leaves the selection. It produces no
 //! artifact and authorizes no disclosure; output callers ask [`Resolved::require_output`].
 
+mod diff;
 mod references;
 mod select;
 
+pub use diff::{ChangedAttachment, ChangedDoc, ChangedFolder, DisclosureDiff, disclosure_diff};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
 pub use select::{
