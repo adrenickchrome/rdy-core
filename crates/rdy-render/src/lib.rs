@@ -12,6 +12,7 @@ mod nav;
 mod page;
 mod prepare;
 pub mod print;
+mod publication;
 pub mod review;
 mod search;
 mod site;
@@ -613,8 +614,36 @@ fn scope_warnings(
 }
 
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
+/// Without a profile it is the full source (RULING F2).
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
     build_site_from(prepare::source(rdy, scope, prepare::Purpose::Site)?, mode)
+}
+
+/// Builds the static site of the publication profile `profile` (an id or key) at `scope_text`
+/// (`canon`, `tag:<name>` or `landing:<hash>`) in memory (D-0VCQ5): every page, link, permalink,
+/// trail, glossary, question, search entry, figure and agent file reads the profile's selected
+/// state alone. A public profile whose reference check is blocked refuses with
+/// `E_PUBLICATION_REFERENCE`; an org profile's warning comes first in the summary's warnings.
+pub fn build_profile_site(
+    read: &ReadState,
+    scope_text: &str,
+    profile: &str,
+) -> Result<SiteFiles, RdyError> {
+    let prepared = publication::prepare(read, scope_text, profile, prepare::Purpose::Site)?;
+    build_site_from(prepared, Mode::Static)
+}
+
+/// Renders [`build_profile_site`] at `out`, as [`render_site`] places a site. The whole site is
+/// built and checked first: a refusal leaves `out` as it was and stages nothing. A placed site
+/// replaces `out` as a whole, so no file of an earlier, wider selection stays.
+pub fn render_profile_site(
+    read: &ReadState,
+    scope_text: &str,
+    profile: &str,
+    out: &Path,
+) -> Result<RenderSummary, RdyError> {
+    let files = build_profile_site(read, scope_text, profile)?;
+    place_site(out, || Ok(files))
 }
 
 /// [`build_site`] from what [`prepare::source`] read: it reads no source.
@@ -631,10 +660,21 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         landed_ms,
         disagreements,
         history,
+        profile,
         ..
     } = prepared;
     let m: &Materialized = &m;
-    let mut site = Site::new(m, &pack, &site_name);
+    // a named profile reads every reference outside its selection in neutral words
+    let unavailable = match profile {
+        Some(_) => inline::UNAVAILABLE,
+        None => html::UNRESOLVED,
+    };
+    let mut site = Site::with_unavailable(
+        m,
+        &pack,
+        &site_name,
+        profile.as_ref().map(|_| inline::UNAVAILABLE),
+    );
     site.set_disagreements(disagreements);
     // a static site is written as files: two siblings that would be one file refuse before
     // anything is built, so the last rendered site stays as it was (a live site's pages are not
@@ -654,7 +694,15 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
     } = history;
     // the review marks on the pages read only a base a scope names (the task-8 ruling)
     let review = listed.as_ref().filter(|_| review_marks);
-    let header = version::header(&position, reviewed.as_ref());
+    let header = match &profile {
+        Some(p) => version::chosen_header(p.tag_name.as_deref(), position.frozen),
+        None => version::header(&position, reviewed.as_ref()),
+    };
+    // the pages and anchors a named profile's authored local links may lead to, known before
+    // any page body is written
+    let local = profile
+        .as_ref()
+        .map(|_| publication::LocalTargets::of(&site));
     let mut summary = RenderSummary {
         pages: 0,
         assets: 0,
@@ -684,6 +732,9 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         inline_diffs,
         changes_page: changes_summary.is_some(),
         since_page: since_summary.is_some(),
+        profile: profile.as_ref(),
+        local: local.as_ref(),
+        unavailable,
     };
 
     // the pages, in the order a reader meets them: the home page, the tree, the collected pages
@@ -780,7 +831,7 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         summary.redirects += 1;
     }
 
-    let label = version::text_label(&position, reviewed.as_ref());
+    let label = sh.label();
     let header = match mode {
         Mode::Live { .. } => sh.header_html(""),
         Mode::Static => String::new(),
@@ -789,13 +840,18 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         "search-index.json".into(),
         search::bytes(&index, &site_name),
     );
+    // a label slot takes bytes: a named profile with no chosen tag writes no label
     let (llms, at) =
         llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
     files.insert("llms.txt".into(), llms);
-    label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
+    if !at.is_empty() {
+        label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
+    }
     let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
     files.insert("llms-full.txt".into(), llms);
-    label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
+    if !at.is_empty() {
+        label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
+    }
     for (path, bytes) in assets::files(has_mermaid) {
         files.insert(path.into(), bytes);
     }

@@ -1,1 +1,1 @@
-<span class="version{% if version.frozen %} frozen{% endif %}" data-rdy-version>{{ header | header }}</span>
+{% if header %}<span class="version{% if version.frozen %} frozen{% endif %}" data-rdy-version>{{ header | header }}</span>{% endif %}

@@ -48,6 +48,22 @@ pub(crate) struct Prepared {
     /// The project's `.rdy` directory: for output safety only, never written into an output.
     pub rdy_dir: PathBuf,
     pub history: History,
+    /// How a named profile's output presents itself (`publication::prepare`); none for a source
+    /// output, which keeps its existing rules.
+    pub profile: Option<ProfilePresentation>,
+}
+
+/// What a named profile's output reads beyond its selected state (RULING F3, D-0VCQ5): whether
+/// it shows the decision trail, and the explicitly chosen tag's name with its `redacted` mark.
+/// Only this mode chooses the neutral wording of a reference outside the selection and filters
+/// authored local links.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProfilePresentation {
+    pub trail: bool,
+    /// The chosen tag's stored name; none for canon and a bare landing.
+    pub tag_name: Option<String>,
+    /// The chosen tag's history holds content a redaction removed (`VersionInfo::redacted`).
+    pub tag_redacted: bool,
 }
 
 /// What an output reads of the scope's history: its review, the view or proposal version it
@@ -129,6 +145,7 @@ pub(crate) fn source(
         scope_text,
         rdy_dir: rdy.root().join(".rdy"),
         history,
+        profile: None,
     })
 }
 
@@ -284,6 +301,16 @@ pub(crate) struct FigureBlobs {
 }
 
 impl FigureBlobs {
+    /// The blobs of a named profile's selection: the bytes its bounded asset reader read, and the
+    /// blobs a redaction removed content of, by the request that did.
+    pub(crate) fn selected(bytes: BTreeMap<Hash, Vec<u8>>, removed: BTreeMap<Hash, Hash>) -> Self {
+        FigureBlobs {
+            bytes,
+            removed,
+            readable: BTreeSet::new(),
+        }
+    }
+
     /// The blocks of `scope`, each figure whose blob lost content read as removed. `keep` keeps
     /// the bytes of each readable blob (the scope a build pages); a change summary's other side
     /// only learns which blobs lost content.
@@ -324,7 +351,7 @@ impl FigureBlobs {
     /// `m` with each figure whose blob lost content read as a removed block: its id, type,
     /// parent and order, the notice, no fields, and its own recorded version (Task 3's
     /// projection). Its alt text, caption and file name are never read again.
-    fn project(&self, m: Arc<Materialized>) -> Arc<Materialized> {
+    pub(crate) fn project(&self, m: Arc<Materialized>) -> Arc<Materialized> {
         let ops: Vec<Op> = m
             .iter()
             .filter_map(|b| {
@@ -354,7 +381,7 @@ fn figure_blob(b: &Block) -> Option<Hash> {
 
 /// The request an `E_REDACTED` refusal names (`Content removed by redaction {hash}.`); none for
 /// any other error.
-fn removed_by(e: &RdyError) -> Option<Hash> {
+pub(crate) fn removed_by(e: &RdyError) -> Option<Hash> {
     if e.code != E_REDACTED {
         return None;
     }

@@ -42,23 +42,35 @@ pub struct Link {
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
 /// reader may not see, so the marker's own words stand in for it.
-pub(crate) const UNRESOLVED: &str = "unresolved reference";
+pub const UNRESOLVED: &str = "unresolved reference";
 
 /// A label as HTML ([`inline::label_html`] on the page being written): escaped, its code spans
 /// as `<code>` and its references as links. A newline is a `<br>`.
 pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    inline::label_html(text, &inline::Ctx { link, doc_page: "" })
+    inline::label_html(
+        text,
+        &inline::Ctx {
+            link,
+            doc_page: "",
+            unavailable: UNRESOLVED,
+            local_link: None,
+        },
+    )
 }
 
 /// A label as plain words ([`inline::Form::Label`]), escaped, each reference read as its display
-/// text or its target's label (see [`diagram_label`]): for an attribute, a caption or a place a
-/// link may not go.
-pub fn words_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+/// text or its target's label (see [`diagram_label`]; `unavailable` for one that leads nowhere):
+/// for an attribute, a caption or a place a link may not go.
+pub fn words_html(
+    text: &str,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     escape(&inline::plain_refs_every(
         text,
         RefMode::Strict,
         inline::Form::Label,
-        &|span| diagram_label(span, link),
+        &|span| diagram_label(span, link, unavailable),
     ))
 }
 
@@ -97,9 +109,13 @@ fn mermaid_label(s: &str) -> String {
 }
 
 /// The words a reference reads as where no link may go: its display text, the target's key for
-/// a key-typed reference whose target still has one, the target's label, else the unresolved
-/// marker's words; never the id.
-fn diagram_label(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+/// a key-typed reference whose target still has one, the target's label, else `unavailable` (the
+/// unresolved marker's words, or a named profile's); never the id.
+fn diagram_label(
+    span: &RefSpan,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     let target = BlockId::parse(&span.token).ok().and_then(|id| link(&id));
     // a removed target reads as the notice, whatever display text the author gave (D-3M81W)
     if target.as_ref().is_some_and(|l| l.removed) {
@@ -111,24 +127,32 @@ fn diagram_label(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> Str
     match target {
         Some(Link { key: Some(k), .. }) if span.key_typed && !k.is_empty() => k,
         Some(l) => l.label,
-        None => UNRESOLVED.to_string(),
+        None => unavailable.to_string(),
     }
 }
 
 /// Escaped diagram source with each id-shaped `{{id}}` replaced by its label (see
 /// [`diagram_label`]), escaped for Mermaid and then for HTML, so the diagram renderer sees plain
 /// text. Other `{{…}}` (e.g. Mermaid hexagons) is kept as written.
-pub fn diagram_source(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+pub fn diagram_source(
+    text: &str,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     with_refs(text, RefMode::IdShaped, &|span| {
-        escape(&mermaid_label(&diagram_label(span, link)))
+        escape(&mermaid_label(&diagram_label(span, link, unavailable)))
     })
 }
 
 /// The diagram's source as a reader reads it under "Diagram source": escaped, its references as
 /// labels (see [`diagram_label`]), so no id is shown.
-fn readable_source(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+fn readable_source(
+    text: &str,
+    link: &dyn Fn(&BlockId) -> Option<Link>,
+    unavailable: &str,
+) -> String {
     with_refs(text, RefMode::IdShaped, &|span| {
-        escape(&diagram_label(span, link))
+        escape(&diagram_label(span, link, unavailable))
     })
 }
 
@@ -176,7 +200,7 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let h = b.field_str("blob").unwrap_or("");
     let alt_text = b.field_str("alt").unwrap_or("");
     // the alt attribute, the caption and the download link's text are plain words
-    let alt = words_html(alt_text, ctx.link);
+    let alt = words_html(alt_text, ctx.link, ctx.unavailable);
     let caption = alt.clone();
     let media = b.field_str("media_type").unwrap_or("");
     let image = media.starts_with("image/");
@@ -279,6 +303,10 @@ pub struct BlockCtx<'a> {
     pub table_number: Option<usize>,
     /// The blocks that `describes`-link to this one.
     pub described_by: &'a [Link],
+    /// What a reference that leads nowhere reads as ([`inline::Ctx::unavailable`]).
+    pub unavailable: &'a str,
+    /// A named profile's filter of authored local links ([`inline::Ctx::local_link`]).
+    pub local_link: Option<inline::LocalLink<'a>>,
 }
 
 /// A type's name as a reader reads it: the type id with `_` as a space and its first letter
@@ -324,6 +352,8 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
     let ictx = inline::Ctx {
         link,
         doc_page: ctx.doc_page,
+        unavailable: ctx.unavailable,
+        local_link: ctx.local_link,
     };
     let t = b.block_type.as_str();
     // a title or a name is a label: its code spans and references, which link like the body's
@@ -430,12 +460,12 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             let alt = b
                 .field_str("alt")
                 .filter(|a| !a.trim().is_empty())
-                .map(|a| words_html(a, link));
+                .map(|a| words_html(a, link, ctx.unavailable));
             // only Mermaid has a renderer on the site; any other language shows its source
             let canvas = if lang == "mermaid" {
                 format!(
                     "<div class=\"diagram-canvas\" aria-hidden=\"true\"><pre class=\"mermaid\">{}</pre></div>",
-                    diagram_source(&b.body, link)
+                    diagram_source(&b.body, link, ctx.unavailable)
                 )
             } else {
                 String::new()
@@ -448,7 +478,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             format!(
                 "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{hidden}</p>{canvas}{caption}<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
                 escape(lang),
-                readable_source(&b.body, link)
+                readable_source(&b.body, link, ctx.unavailable)
             )
         }
         "figure" => figure_html(b, ctx),
@@ -552,7 +582,7 @@ fn table_html(b: &Block, ctx: &BlockCtx, ictx: &inline::Ctx) -> String {
         })
         .collect();
     let caption = match b.field_str("caption").filter(|c| !c.trim().is_empty()) {
-        Some(c) => words_html(c, ctx.link),
+        Some(c) => words_html(c, ctx.link, ctx.unavailable),
         None => format!("Table {}", ctx.table_number.unwrap_or(1)),
     };
     let normative = matches!(b.fields.get("normative"), Some(FieldValue::Bool(true)));

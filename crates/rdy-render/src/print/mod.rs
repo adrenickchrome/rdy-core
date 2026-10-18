@@ -281,9 +281,15 @@ fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         scope_text,
         rdy_dir,
         history,
+        profile,
     } = prepared;
     let m: &rdy_engine::Materialized = &m;
-    let mut site = Site::new(m, &pack, &site_name);
+    let mut site = Site::with_unavailable(
+        m,
+        &pack,
+        &site_name,
+        profile.as_ref().map(|_| crate::inline::UNAVAILABLE),
+    );
     site.set_disagreements(disagreements);
     // the Markdown tree writes a file per page: two siblings that would be one file refuse every
     // format alike, before anything is built or written
@@ -292,7 +298,9 @@ fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
     }
     // the label as the colophon writes it, which names the view or proposal version a print of
     // one shows; the pages show no review mark
-    let label = version::text_label(&position, history.reviewed.as_ref()).text;
+    let local = profile
+        .as_ref()
+        .map(|_| crate::publication::LocalTargets::of(&site));
     let sh = page::Shared {
         site: &site,
         m,
@@ -315,6 +323,17 @@ fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         inline_diffs: Default::default(),
         changes_page: false,
         since_page: false,
+        profile: profile.as_ref(),
+        local: local.as_ref(),
+        unavailable: match profile {
+            Some(_) => crate::inline::UNAVAILABLE,
+            None => crate::inline::UNRESOLVED,
+        },
+    };
+    // a named profile's label is its chosen tag's name (RULING F3)
+    let label = match &profile {
+        Some(_) => sh.label().text,
+        None => version::text_label(&position, history.reviewed.as_ref()).text,
     };
 
     // the pages in the order a reader meets them in the tree, then the glossary

@@ -60,6 +60,9 @@ pub struct Home {
     pub cards: Vec<Card>,
     /// Newest first.
     pub versions: Vec<Version>,
+    /// The page has a Versions section: a source output does; a named profile's has none, and
+    /// no version list or target (RULING F3).
+    pub show_versions: bool,
 }
 
 pub fn build(
@@ -69,6 +72,7 @@ pub fn build(
     landed_ms: &BTreeMap<String, i64>,
     description: Option<&str>,
     facts: SiteFacts,
+    show_versions: bool,
 ) -> Home {
     let mut cards: Vec<Card> = m
         .children(None)
@@ -133,6 +137,7 @@ pub fn build(
                 redacted: v.redacted,
             })
             .collect(),
+        show_versions,
     }
 }
 

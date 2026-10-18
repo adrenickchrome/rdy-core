@@ -116,6 +116,47 @@ pub fn header(p: &VersionPosition, reviewed: Option<&Reviewed>) -> Header {
     }
 }
 
+/// A named profile's label (RULING F3): the explicitly chosen tag's name, or empty for canon and
+/// a bare landing. It never falls back to `unversioned` and never counts landings.
+pub fn chosen_label(tag: Option<&str>, frozen: bool) -> Label {
+    Label {
+        text: tag.unwrap_or_default().to_string(),
+        frozen,
+    }
+}
+
+/// A named profile's header words (RULING F3): the chosen tag's name as the pill, or an empty
+/// pill for canon and a bare landing; no landings chip and no review chip.
+pub fn chosen_header(tag: Option<&str>, frozen: bool) -> Header {
+    Header {
+        pill: tag.unwrap_or_default().to_string(),
+        frozen,
+        since: None,
+        review: None,
+    }
+}
+
+/// A named profile's header markup (RULING F3): the chosen tag's pill as a `<span>`, with no
+/// link, menu, snapshot suffix or count, then the `redacted` badge when the tag's history holds
+/// removed content. Empty when no tag was chosen: the page then writes no version wrapper.
+pub fn chosen_header_html(h: &Header, redacted: bool) -> String {
+    if h.pill.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<span class=\"pill\">");
+    if h.frozen {
+        out.push_str(LOCK);
+    }
+    out.push_str(&format!(
+        "<span class=\"pill-text\">{}</span></span>",
+        escape(&h.pill)
+    ));
+    if redacted {
+        out.push_str(" <span class=\"badge badge-redacted\">redacted</span>");
+    }
+    out
+}
+
 /// Where the header's pill and chips lead (RULING F4). A chip whose link is none is a `<span>`.
 /// `menu` marks the pill as the live site's version menu button.
 pub struct HeaderLinks<'a> {

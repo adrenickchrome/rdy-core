@@ -116,6 +116,10 @@ struct Cx<'a> {
     /// The href of the page of the doc that holds a block, from the page being written (`""` for
     /// that page itself): a statement's relative links are read from there.
     doc_page: &'a dyn Fn(&BlockId) -> String,
+    /// What a reference that leads nowhere reads as ([`inline::Ctx::unavailable`]).
+    unavailable: &'a str,
+    /// A named profile's filter of authored local links ([`inline::Ctx::local_link`]).
+    local_link: Option<inline::LocalLink<'a>>,
 }
 
 impl Cx<'_> {
@@ -153,6 +157,8 @@ impl Cx<'_> {
             &inline::Ctx {
                 link: self.link,
                 doc_page: &(self.doc_page)(&of.id),
+                unavailable: self.unavailable,
+                local_link: self.local_link,
             },
         )
     }
@@ -366,8 +372,18 @@ fn link_in<'a>(
 }
 
 /// The trail of `b`: its governing decisions, what became of each, and the open questions that
-/// mention it. A block with nothing to tell has no events.
-pub fn for_block(b: &Block, g: &Graph, m: &Materialized, site: &Site, from: &str) -> Trail {
+/// mention it, read from `g` and `m` alone (a named profile's selected graph and state). A block
+/// with nothing to tell has no events. `unavailable` and `local_link` read references and
+/// authored links as [`inline::Ctx`] does.
+pub fn for_block(
+    b: &Block,
+    g: &Graph,
+    m: &Materialized,
+    site: &Site,
+    from: &str,
+    unavailable: &str,
+    local_link: Option<inline::LocalLink>,
+) -> Trail {
     let link = link_in(m, site, from);
     let doc_page = |id: &BlockId| match m.doc_of(id).and_then(|d| site.page(&d.id)) {
         Some(p) if p != from => rel(from, &p),
@@ -378,6 +394,8 @@ pub fn for_block(b: &Block, g: &Graph, m: &Materialized, site: &Site, from: &str
         m,
         link: &link,
         doc_page: &doc_page,
+        unavailable,
+        local_link,
     };
     let mut events: BTreeMap<Key, Event> = BTreeMap::new();
     for id in cx.chain(cx.governing(b)) {

@@ -1,6 +1,8 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
 use crate::html::{self, BlockCtx, Link};
-use crate::inline::{self, Ctx};
+use crate::inline::{self, Ctx, LocalLink};
+use crate::prepare::ProfilePresentation;
+use crate::publication::LocalTargets;
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
 use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
@@ -59,6 +61,14 @@ pub struct Shared<'a> {
     pub changes_page: bool,
     /// The build writes `changes-since.html`; the landings chip links it only then.
     pub since_page: bool,
+    /// A named profile's presentation (trail, chosen tag); none for a source output.
+    pub profile: Option<&'a ProfilePresentation>,
+    /// The pages and anchors a named profile's authored local links may lead to; none for a
+    /// source output.
+    pub local: Option<&'a LocalTargets>,
+    /// What a reference that leads nowhere reads as: the source's unresolved marker words, or a
+    /// named profile's [`inline::UNAVAILABLE`].
+    pub unavailable: &'a str,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -358,6 +368,10 @@ impl Shared<'_> {
     /// to `/~versions/`, whose menu the pill opens, and to the change pages under the scope's
     /// path, the same on every page. Each distinct markup is rendered once.
     pub fn header_html(&self, root: &str) -> String {
+        // a named profile's pill leads nowhere: the same on every page (RULING F3)
+        if let Some(p) = self.profile {
+            return version::chosen_header_html(&self.header, p.tag_redacted);
+        }
         let key = match self.mode {
             Mode::Static => root,
             Mode::Live { .. } => "",
@@ -395,6 +409,32 @@ impl Shared<'_> {
             .borrow_mut()
             .insert(key.to_string(), html.clone());
         html
+    }
+
+    /// The colophon's and the llms files' label: a named profile's chosen tag name, or empty
+    /// (RULING F3); else the source's label.
+    pub fn label(&self) -> version::Label {
+        match self.profile {
+            Some(p) => version::chosen_label(p.tag_name.as_deref(), self.position.frozen),
+            None => version::text_label(self.position, self.reviewed.as_ref()),
+        }
+    }
+
+    /// Whether blocks show their decision trail: a source output does; a named profile only
+    /// when it permits it.
+    fn trail_on(&self) -> bool {
+        self.profile.is_none_or(|p| p.trail)
+    }
+
+    /// The canonical href, from page `from`, of an authored local link `h` (as `from` sees it)
+    /// that a named profile permits; none otherwise.
+    fn local_href(&self, from: &str, h: &str) -> Option<String> {
+        self.local?.href(from, h)
+    }
+
+    /// `f` as the inline filter of authored local links, for a named profile only.
+    fn local_link<'b>(&self, f: LocalLink<'b>) -> Option<LocalLink<'b>> {
+        self.local.map(|_| f)
     }
 
     /// A link from `from` to the block `id`, if the store resolves it; with no href when the
@@ -616,6 +656,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 sh.landed_ms,
                 sh.description,
                 facts,
+                sh.profile.is_none(),
             ));
         }
         Kind::Folder(id) => {
@@ -637,6 +678,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                     })
                     .collect();
             let link = |id: &BlockId| sh.link(&page_url, id);
+            let local = |h: &str| sh.local_href(&page_url, h);
             let description = f.field_str("description");
             body.folder = Some(FolderBody {
                 title: title.clone(),
@@ -647,6 +689,8 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                         &Ctx {
                             link: &link,
                             doc_page: "",
+                            unavailable: sh.unavailable,
+                            local_link: sh.local_link(&local),
                         },
                     )
                 }),
@@ -693,7 +737,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         title,
         root,
         init_js: assets::INIT_JS,
-        version: version::text_label(sh.position, sh.reviewed.as_ref()),
+        version: sh.label(),
         header,
         crumbs: if redirect {
             vec![]
@@ -759,33 +803,13 @@ pub fn finish(sh: &Shared, ctx: &PageContext, index: &mut search::Index) {
 fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>, bool) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
-    // the lede: the doc's first child when it is a prose of one paragraph (content directly in
-    // the doc), else the first block of the first section when it is such a prose and the doc
-    // has more sections (a one-section doc keeps all its text under its heading); a prose of
-    // several paragraphs or with a list renders in place
-    let children = m.children(Some(&doc.id));
-    let one_paragraph = |p: &Block| p.block_type == "prose" && inline::is_one_paragraph(&p.body);
-    let lede_block = children
-        .first()
-        .copied()
-        .filter(|p| one_paragraph(p))
-        .or_else(|| {
-            children
-                .first()
-                .filter(|s| {
-                    s.block_type == "section"
-                        && children
-                            .iter()
-                            .filter(|c| c.block_type == "section")
-                            .count()
-                            > 1
-                })
-                .and_then(|s| m.children(Some(&s.id)).into_iter().next())
-                .filter(|p| one_paragraph(p))
-        });
+    let local = |h: &str| sh.local_href(page, h);
+    let lede_block = lede_of(m, doc);
     let own = Ctx {
         link: &link,
         doc_page: "",
+        unavailable: sh.unavailable,
+        local_link: sh.local_link(&local),
     };
     let eyebrow = doc
         .parent
@@ -855,6 +879,8 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             blob_len: &blob_len,
             table_number: (b.block_type == "table").then(|| site.number(b)),
             described_by: &described_by,
+            unavailable: sh.unavailable,
+            local_link: sh.local_link(&local),
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
         let presentational = sh.pack.is_presentational(&b.block_type);
@@ -886,10 +912,19 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
                 html::block_html(b, &ctx)
             },
             presentational,
-            trail: if presentational {
+            // a named profile that does not permit the trail shows none: no markup, no data
+            trail: if presentational || !sh.trail_on() {
                 Trail::default()
             } else {
-                trail::for_block(b, sh.g, m, site, page)
+                trail::for_block(
+                    b,
+                    sh.g,
+                    m,
+                    site,
+                    page,
+                    sh.unavailable,
+                    sh.local_link(&local),
+                )
             },
             ref_head,
             ref_,
@@ -919,6 +954,33 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
     (doc_body, items, has_mermaid)
 }
 
+/// A doc's lede: its first child when it is a prose of one paragraph (content directly in the
+/// doc), else the first block of the first section when it is such a prose and the doc has more
+/// sections (a one-section doc keeps all its text under its heading); a prose of several
+/// paragraphs or with a list renders in place.
+pub(crate) fn lede_of<'m>(m: &'m Materialized, doc: &Block) -> Option<&'m Block> {
+    let children = m.children(Some(&doc.id));
+    let one_paragraph = |p: &Block| p.block_type == "prose" && inline::is_one_paragraph(&p.body);
+    children
+        .first()
+        .copied()
+        .filter(|p| one_paragraph(p))
+        .or_else(|| {
+            children
+                .first()
+                .filter(|s| {
+                    s.block_type == "section"
+                        && children
+                            .iter()
+                            .filter(|c| c.block_type == "section")
+                            .count()
+                            > 1
+                })
+                .and_then(|s| m.children(Some(&s.id)).into_iter().next())
+                .filter(|p| one_paragraph(p))
+        })
+}
+
 /// The word diff a block marked Edited carries on a review page (sr6); none for any other block.
 fn edited_diff(sh: &Shared, id: &BlockId) -> Option<String> {
     let edited = sh.review.and_then(|r| r.mark(id)) == Some(review::Mark::Edited);
@@ -929,9 +991,12 @@ fn edited_diff(sh: &Shared, id: &BlockId) -> Option<String> {
 /// is a plain paragraph (the page's outline stays the draft's), and no element has an id.
 fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
     let link = |id: &BlockId| sh.link(page, id);
+    let local = |h: &str| sh.local_href(page, h);
     let ictx = Ctx {
         link: &link,
         doc_page: "",
+        unavailable: sh.unavailable,
+        local_link: sh.local_link(&local),
     };
     let used = &sh.used_blobs;
     let present = |h: &Hash| sh.blobs.contains_key(h);
@@ -954,6 +1019,8 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
         blob_len: &blob_len,
         table_number: None,
         described_by: &[],
+        unavailable: sh.unavailable,
+        local_link: sh.local_link(&local),
     };
     let mut out = String::new();
     for b in blocks {
@@ -1024,6 +1091,7 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
 /// The glossary entries of `terms`: each term, its body and where it is defined.
 fn term_rows(sh: &Shared, page: &str, terms: &[BlockId]) -> Vec<TermRow> {
     let link = |id: &BlockId| sh.link(page, id);
+    let local = |h: &str| sh.local_href(page, h);
     terms
         .iter()
         .filter_map(|id| {
@@ -1038,6 +1106,8 @@ fn term_rows(sh: &Shared, page: &str, terms: &[BlockId]) -> Vec<TermRow> {
                     &Ctx {
                         link: &link,
                         doc_page: &sh.doc_page(page, id),
+                        unavailable: sh.unavailable,
+                        local_link: sh.local_link(&local),
                     },
                 ),
                 href: section.map(|s| s.href_from(page)),
@@ -1137,6 +1207,7 @@ fn tell_apart(built: Vec<(DisagreementLink, String)>) -> Vec<DisagreementLink> {
 
 fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
     let link = |id: &BlockId| sh.link(page, id);
+    let local = |h: &str| sh.local_href(page, h);
     let mut groups: Vec<QuestionGroup> = vec![];
     // `open_questions` is in reading order, so one doc's questions are together
     let mut last: Option<BlockId> = None;
@@ -1166,6 +1237,8 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
                     &Ctx {
                         link: &link,
                         doc_page: &sh.doc_page(page, id),
+                        unavailable: sh.unavailable,
+                        local_link: sh.local_link(&local),
                     },
                 ),
             },

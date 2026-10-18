@@ -246,6 +246,10 @@ pub struct Site<'a> {
     /// Every block's doc worked out so far (see `doc_of`).
     /// The doc's id, not the block: a reference held in a cell would make `Site` invariant.
     docs: RefCell<HashMap<BlockId, Option<BlockId>>>,
+    /// A named profile's words for a reference that leads nowhere ([`inline::UNAVAILABLE`]): every
+    /// label, summary, description and search text reads it in place of its source wording.
+    /// None for a source output.
+    unavailable: Option<&'static str>,
     /// Test hook: how many times `doc_of` was asked.
     #[cfg(test)]
     doc_calls: std::cell::Cell<usize>,
@@ -253,6 +257,17 @@ pub struct Site<'a> {
 
 impl<'a> Site<'a> {
     pub fn new(m: &'a Materialized, pack: &Pack, project: &str) -> Site<'a> {
+        Site::with_unavailable(m, pack, project, None)
+    }
+
+    /// [`Site::new`]; a named profile's site passes `unavailable`, the words every reference that
+    /// leads nowhere reads as, whatever its source wording (D-0VCQ5).
+    pub fn with_unavailable(
+        m: &'a Materialized,
+        pack: &Pack,
+        project: &str,
+        unavailable: Option<&'static str>,
+    ) -> Site<'a> {
         // `level` folders are above `parent`'s children; only a damaged store nests deeper than
         // MAX_FOLDER_DEPTH, and what lies below it gets no page
         #[allow(clippy::too_many_arguments)]
@@ -403,6 +418,7 @@ impl<'a> Site<'a> {
             summaries: RefCell::default(),
             urls: RefCell::default(),
             docs: RefCell::default(),
+            unavailable,
             #[cfg(test)]
             doc_calls: Default::default(),
         };
@@ -1022,7 +1038,10 @@ impl<'a> Site<'a> {
                 Some(k) => k.to_string(),
                 None => self.label_at(t, depth + 1),
             },
-            None => unresolved(&span.token),
+            None => match self.unavailable {
+                Some(words) => words.to_string(),
+                None => unresolved(&span.token),
+            },
         }
     }
 
