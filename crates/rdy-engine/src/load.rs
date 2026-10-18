@@ -118,7 +118,7 @@ pub(crate) fn open_dump(file: &Path) -> Result<File, RdyError> {
 /// item, the dump format and the header.
 pub(crate) struct Opened<R: Read> {
     reader: DumpReader<R>,
-    dump_format: u32,
+    pub(crate) dump_format: u32,
     pub(crate) header: DumpHeader,
 }
 

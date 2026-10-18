@@ -27,6 +27,16 @@ pub const E_NOT_FOUND: &str = "E_NOT_FOUND";
 pub const E_IO: &str = "E_IO";
 pub const E_RESERVED_VIEW: &str = "E_RESERVED_VIEW";
 pub const E_TAG_EXISTS: &str = "E_TAG_EXISTS";
+/// A sync stream record is bad (D-D2NPN; `stream_error`).
+pub const E_BAD_RECORD: &str = "E_BAD_RECORD";
+/// A sync stream record needs an object the stream does not hold.
+pub const E_UNRESOLVED_REF: &str = "E_UNRESOLVED_REF";
+/// A sync stream's trailer is missing or does not match.
+pub const E_STREAM_TRUNCATED: &str = "E_STREAM_TRUNCATED";
+/// A sync stream's purpose is not the one asked for.
+pub const E_STREAM_PURPOSE: &str = "E_STREAM_PURPOSE";
+/// A sync stream or batch belongs to another repo.
+pub const E_REPO_MISMATCH: &str = "E_REPO_MISMATCH";
 pub const E_BAD_TAG_NAME: &str = "E_BAD_TAG_NAME";
 pub const E_VERSION_ORDER: &str = "E_VERSION_ORDER";
 pub const E_BAD_NAME: &str = "E_BAD_NAME";
