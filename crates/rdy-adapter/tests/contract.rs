@@ -172,3 +172,64 @@ fn ha3_projection_encoding_is_refused() {
     );
     assert!(!e.message.contains(&projection.body), "{e}");
 }
+
+/// `depth` nested singleton lists (or maps) around one scalar, built without recursion.
+fn nested(depth: usize, maps: bool) -> rdy_model::FieldValue {
+    use rdy_model::FieldValue;
+    let mut v = FieldValue::Int(1);
+    for _ in 0..depth {
+        v = if maps {
+            FieldValue::Map(BTreeMap::from([("k".to_string(), v)]))
+        } else {
+            FieldValue::List(vec![v])
+        };
+    }
+    v
+}
+
+/// Takes a nested value apart level by level, so dropping it does not recurse.
+fn dismantle(mut v: rdy_model::FieldValue) {
+    use rdy_model::FieldValue;
+    loop {
+        v = match v {
+            FieldValue::List(mut items) => match items.pop() {
+                Some(inner) => inner,
+                None => return,
+            },
+            FieldValue::Map(mut m) => match m.pop_first() {
+                Some((_, inner)) => inner,
+                None => return,
+            },
+            _ => return,
+        };
+    }
+}
+
+#[test]
+fn ha3_nesting_depth_is_bounded_before_encoding() {
+    // The deepest nesting that encodes: bytes equal core's own encoding.
+    for maps in [false, true] {
+        let mut b = block();
+        b.fields.insert("deep".to_string(), nested(128, maps));
+        assert_eq!(
+            encode_block(&b).unwrap(),
+            postcard::to_allocvec(&b).unwrap()
+        );
+        let before = b.fields.remove("deep").unwrap();
+        dismantle(before);
+        // One level more, and a hostile depth far below the byte limit, are refused with no
+        // recursion into the serializer (65,536 levels overflowed the stack before this bound).
+        for depth in [129, 65_536, 1_000_000] {
+            let mut b = block();
+            b.fields.insert("deep".to_string(), nested(depth, maps));
+            let e = encode_block(&b).unwrap_err();
+            assert_eq!(e.code, "E_LIMIT", "depth {depth}: {e}");
+            assert_eq!(e.message, "a field value nests deeper than 128 levels");
+            assert_eq!(
+                e.fix,
+                "reduce the nesting of the field value to the stated limit"
+            );
+            dismantle(b.fields.remove("deep").unwrap());
+        }
+    }
+}
