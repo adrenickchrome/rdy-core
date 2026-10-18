@@ -1,6 +1,13 @@
 //! `rdy fsck`: the store's consistency report.
 
-use crate::{Rdy, RdyError};
+use crate::signature_check::{CheckContext, STATEMENT_MATCH, check_signature, read_check_context};
+use crate::{E_LIMIT, E_SIG_INVALID, Rdy, RdyError, sig_invalid, sig_object_mismatch};
+use rdy_schema::{Issue, Severity};
+use rdy_store::StoreError;
+
+/// The most signature issues one failed fsck returns: past it, the first
+/// `MAX_SIGNATURE_ISSUES - 1` and one `E_LIMIT` issue that counts the rest.
+pub const MAX_SIGNATURE_ISSUES: usize = 1000;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct FsckReport {
@@ -20,6 +27,10 @@ pub struct FsckReport {
     /// The moves a reconcile would log now: not zero when the pack or the rdy build changed
     /// since the last write. Not an error.
     pub unlogged_moves: usize,
+    /// The stored signatures, each checked against its subject with no trust file. Present only
+    /// when not zero: an unsigned store's report has no such member.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub signatures: usize,
     /// The redaction counts, present only when an active redaction exists: an ordinary store's
     /// report has none of these members.
     #[serde(flatten)]
@@ -51,6 +62,7 @@ impl Rdy {
         let versions = self.check_tags(&chain)?;
         let objects = self.store.check_objects()?;
         let unlogged = crate::transitions::reconcile_moves(&self.read(), None, &[], None)?;
+        let signatures = self.check_signatures()?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),
@@ -62,6 +74,7 @@ impl Rdy {
             reviews: objects.reviews,
             transitions: objects.transitions,
             unlogged_moves: crate::transitions::count(&unlogged),
+            signatures,
             redaction: verified.redaction.map(|c| FsckRedaction {
                 redacted_objects: c.objects,
                 redacted_frames: c.frames,
@@ -70,6 +83,89 @@ impl Rdy {
             }),
         })
     }
+}
+
+impl Rdy {
+    /// Checks every stored signature, streamed in subject then hash order, with the same check
+    /// as every other surface and no trust file: an unknown key is no issue. Returns the count;
+    /// an invalid or mismatched signature fails with the first issue's code, message and fix and
+    /// at most [`MAX_SIGNATURE_ISSUES`] issues.
+    fn check_signatures(&self) -> Result<usize, RdyError> {
+        let st = self.read();
+        let mut count = 0usize;
+        let mut failed = 0usize;
+        let mut issues: Vec<Issue> = Vec::new();
+        let mut context: Option<CheckContext> = None;
+        let mut read_error: Option<RdyError> = None;
+        let visited = st.reader().visit_signatures(&mut |hash, g| {
+            count += 1;
+            // the visit is in subject order: one context serves a subject's signatures
+            if context
+                .as_ref()
+                .is_none_or(|c| c.subject.hash() != g.subject)
+            {
+                match read_check_context(&st, g) {
+                    Ok(c) => context = Some(c),
+                    Err(e) => {
+                        read_error = Some(e);
+                        return Err(StoreError::Refused("fsck stopped".into()));
+                    }
+                }
+            }
+            let Some(c) = context.as_ref() else {
+                return Ok(());
+            };
+            let check = check_signature(g, c, None);
+            if check.statement == STATEMENT_MATCH {
+                return Ok(());
+            }
+            failed += 1;
+            if issues.len() < MAX_SIGNATURE_ISSUES {
+                let hash = hash.to_string();
+                let e = if check.code.as_deref() == Some(E_SIG_INVALID) {
+                    sig_invalid(&hash)
+                } else {
+                    sig_object_mismatch(&hash)
+                };
+                issues.push(Issue {
+                    severity: Severity::Error,
+                    code: e.code,
+                    block: None,
+                    message: e.message,
+                    fix: e.fix,
+                });
+            }
+            Ok(())
+        });
+        if let Some(e) = read_error {
+            return Err(e);
+        }
+        visited?;
+        if failed == 0 {
+            return Ok(count);
+        }
+        if failed > MAX_SIGNATURE_ISSUES {
+            issues.truncate(MAX_SIGNATURE_ISSUES - 1);
+            issues.push(Issue {
+                severity: Severity::Error,
+                code: E_LIMIT,
+                block: None,
+                message: format!(
+                    "fsck omitted {} signature issues",
+                    failed - (MAX_SIGNATURE_ISSUES - 1)
+                ),
+                fix: "fix the reported signatures, then run rdy fsck again".into(),
+            });
+        }
+        let first = &issues[0];
+        let mut e = RdyError::new(first.code, first.message.clone(), first.fix.clone());
+        e.issues = issues;
+        Err(e)
+    }
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[cfg(test)]
@@ -88,6 +184,7 @@ mod tests {
             reviews: 0,
             transitions: 0,
             unlogged_moves: 0,
+            signatures: 0,
             redaction,
         }
     }

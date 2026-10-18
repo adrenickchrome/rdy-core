@@ -1,4 +1,5 @@
 pub mod accept;
+pub mod allowed_signers;
 pub mod alt;
 pub mod answer;
 mod areas;
@@ -49,6 +50,7 @@ pub mod search;
 pub mod section;
 pub mod semantic;
 mod session;
+pub mod signature_check;
 pub mod signing_config;
 pub mod signing_crypto;
 pub mod site_scope;
