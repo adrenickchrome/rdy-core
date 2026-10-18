@@ -54,6 +54,9 @@ pub struct FsckRedaction {
 
 impl Rdy {
     pub fn fsck(&self) -> Result<FsckReport, RdyError> {
+        if self.is_holder() {
+            return self.fsck_holder();
+        }
         let verified = self.store.verify_report()?;
         let frames = verified.frames;
         let landings = self.store.landings()?;
@@ -88,6 +91,54 @@ impl Rdy {
 }
 
 impl Rdy {
+    /// A holder's fsck (D-BPYN8): the log's frames and any active removal, the tags by the
+    /// rules every store keeps (no canon membership, no chronological order), then the store's
+    /// holder check of every tag's history (`StoreReader::check_holder`) and the signatures.
+    /// The report has the project report's members: `landings` and `landed_changes` count the
+    /// distinct landings and landed changes across the tags' chains; a holder has no views,
+    /// transitions or unlogged moves. No pack validates anything.
+    fn fsck_holder(&self) -> Result<FsckReport, RdyError> {
+        let verified = self.store.verify_report()?;
+        let versions = self.check_holder_tags()?;
+        let objects = self
+            .store
+            .check_holder()
+            .map_err(crate::holder::holder_error)?;
+        // the distinct landings of every tag's chain, read from the store's tags as checked
+        let mut landings = std::collections::BTreeSet::new();
+        for (_, _, tag) in self.store.tags()? {
+            if landings.contains(&tag.landing) {
+                continue;
+            }
+            let chain = self
+                .store
+                .tag_chain(&tag.landing)
+                .map_err(crate::holder::holder_error)?;
+            landings.extend(chain.into_iter().map(|(h, _)| h));
+        }
+        let landings = landings.len();
+        let signatures = self.check_signatures()?;
+        Ok(FsckReport {
+            frames: verified.frames,
+            landings,
+            versions,
+            views: objects.views,
+            landed_changes: objects.landed_changes,
+            intents: objects.intents,
+            alt_sets: objects.alt_sets,
+            reviews: objects.reviews,
+            transitions: objects.transitions,
+            unlogged_moves: 0,
+            signatures,
+            redaction: verified.redaction.map(|c| FsckRedaction {
+                redacted_objects: c.objects,
+                redacted_frames: c.frames,
+                redacted_bytes: c.bytes,
+                checked_payloads: c.checked_payloads,
+            }),
+        })
+    }
+
     /// Checks every stored signature, streamed in subject then hash order, with the same check
     /// as every other surface and no trust file: an unknown key is no issue. Returns the count;
     /// an invalid or mismatched signature fails with the first issue's code, message and fix and

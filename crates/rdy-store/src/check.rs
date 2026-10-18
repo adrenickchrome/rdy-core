@@ -176,7 +176,7 @@ impl StoreReader {
     /// record` otherwise), and the signature table holds exactly its rows. A decodable record's
     /// subject is not checked here: a missing or wrong-kind subject is the engine's
     /// E_SIG_OBJECT_MISMATCH, and its statement text the engine's E_SIG_INVALID.
-    fn check_signatures(&self) -> Result<(), StoreError> {
+    pub(crate) fn check_signatures(&self) -> Result<(), StoreError> {
         let matches = self
             .index()
             .signature_rows_match(&mut |h| Ok(self.signature(&h)?.subject))?;
@@ -548,7 +548,11 @@ impl StoreReader {
     }
 
     /// The relay and evidence rules of one landing, and its references to other objects.
-    fn check_landing_fields(&self, l: &Hash, rec: &LandingRecord) -> Result<(), StoreError> {
+    pub(crate) fn check_landing_fields(
+        &self,
+        l: &Hash,
+        rec: &LandingRecord,
+    ) -> Result<(), StoreError> {
         if rec.relayed_by.is_some() != rec.relay_evidence.is_some() {
             return Err(bad(format!(
                 "landing {l}: relayed_by and relay_evidence must both be set or both unset"
@@ -616,7 +620,7 @@ impl StoreReader {
 
     /// A change that the check follows, or None when it is not stored (its absence is reported
     /// where a change of the checked sets names it).
-    fn change_for_dag(
+    pub(crate) fn change_for_dag(
         &self,
         cache: &mut HashMap<Hash, Option<Arc<Change>>>,
         c: &Hash,
@@ -705,7 +709,7 @@ impl StoreReader {
     }
 
     /// An iterative depth-first search over the deps of `roots`, following into deps outside them.
-    fn check_acyclic(
+    pub(crate) fn check_acyclic(
         &self,
         roots: &BTreeSet<Hash>,
         cache: &mut HashMap<Hash, Option<Arc<Change>>>,

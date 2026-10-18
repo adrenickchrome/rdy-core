@@ -137,9 +137,10 @@ impl Rdy {
     }
 
     /// Which moves a batch of `frames` logs, by the closed rule of `seal_with_moves`: `None`,
-    /// nothing to compute; `Some(None)`, the batch's own cause; `Some(Some(c))`, cause `c`.
+    /// nothing to compute; `Some(None)`, the batch's own cause; `Some(Some(c))`, cause `c`. A
+    /// holder's batches never compute moves: it has no canon, views or open-move tables.
     fn batch_cause(&self, frames: &[(u8, Hash)], recheck: Option<Cause>) -> Option<Option<Cause>> {
-        if !frames.is_empty() && transitions::can_move(&self.store.reader(), frames) {
+        let cause = if !frames.is_empty() && transitions::can_move(&self.store.reader(), frames) {
             Some(None)
         } else {
             match recheck {
@@ -147,7 +148,8 @@ impl Rdy {
                 Some(c) => Some(Some(c)),
                 None => None,
             }
-        }
+        };
+        cause.filter(|_| !self.is_holder())
     }
 
     /// The moves between the logged state (or, with nothing logged since open, the store's

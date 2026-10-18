@@ -9,6 +9,7 @@ use crate::{
 };
 use arc_swap::ArcSwap;
 use rdy_schema::Pack;
+use rdy_store::holder::StoreMode;
 use rdy_store::{Store, layout};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -37,6 +38,40 @@ impl EpochCaches {
             canon_step_cache: Arc::default(),
         }
     }
+}
+
+/// What a handle reads besides its store: the pack resolved for it with its lineage, the pack
+/// files' fingerprint, and the config. A project reads them from its files (`project_context`);
+/// a holder's are fixed values that no file supplies (`holder::holder_context`).
+pub(crate) struct Context {
+    pub(crate) pack: Pack,
+    pub(crate) lineage: Vec<String>,
+    pub(crate) fingerprint: PackFingerprint,
+    pub(crate) config: Config,
+}
+
+/// A project's context, read from its files. Each file is read once: the config and pack are
+/// loaded from the bytes the fingerprint hashed, so the watch's fingerprint is exactly what is
+/// loaded. The config's own error comes first (not a project, a bad config); an unreadable pack
+/// file fails the open before the store is locked. `.rdy.yaml` with no store is refused in the
+/// words every path uses, after the config's and the pack's own errors.
+fn project_context(project: &Path) -> Result<Context, RdyError> {
+    let sources = match read_sources(project) {
+        Ok(s) => s,
+        Err(e) => {
+            read_config(project)?;
+            return Err(e);
+        }
+    };
+    let config = parse_config(project, &sources.config, sources.local.as_deref())?;
+    let (pack, lineage) = load_pack_from(&sources.packs, &config.pack)?;
+    crate::config_levels::require_project(project)?;
+    Ok(Context {
+        pack,
+        lineage,
+        fingerprint: sources.fingerprint,
+        config,
+    })
 }
 
 impl Rdy {
@@ -95,39 +130,51 @@ impl Rdy {
         Rdy::open_with(project, None)
     }
 
-    /// Opens `project` as [`Rdy::open`] does, under `lock`, the store lock the caller took and
-    /// keeps (a load, from before the rename of its store until it ends). A lock that is not
-    /// this project's store's is `E_LOCKED`.
+    /// Opens `project` under `lock`, the store lock the caller took and keeps (a load, from
+    /// before the rename of its store until it ends), in the mode its store holds: a holder as
+    /// [`Rdy::open_holder`] does, with no config or pack file read; a project as [`Rdy::open`]
+    /// does, with its config read once the mode is known. A lock that is not this project's
+    /// store's is `E_LOCKED`.
     pub(crate) fn open_locked(
         project: &Path,
         lock: &rdy_store::StoreLock,
     ) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, Some(lock))
+        let store = layout::open_project_store_locked(&project.join(".rdy"), lock)?;
+        let context = match store.mode()? {
+            StoreMode::Holder => crate::holder::holder_context()?,
+            StoreMode::Project => project_context(project)?,
+        };
+        Rdy::from_store(project, store, context)
     }
 
     fn open_with(project: &Path, lock: Option<&rdy_store::StoreLock>) -> Result<Rdy, RdyError> {
-        // each file read once: the config and pack are loaded from the bytes the fingerprint
-        // hashed, so the watch's fingerprint is exactly what is loaded. The config's own error
-        // comes first (not a project, a bad config); an unreadable pack file fails the open
-        // before the store is locked.
-        let sources = match read_sources(project) {
-            Ok(s) => s,
-            Err(e) => {
-                read_config(project)?;
-                return Err(e);
-            }
-        };
-        let cfg = parse_config(project, &sources.config, sources.local.as_deref())?;
-        let fingerprint = sources.fingerprint;
-        let (pack, lineage) = load_pack_from(&sources.packs, &cfg.pack)?;
-        // .rdy.yaml with no store is refused in the words every path uses, after the config's
-        // and the pack's own errors
-        crate::config_levels::require_project(project)?;
+        let context = project_context(project)?;
         let dot = project.join(".rdy");
-        let mut store = match lock {
+        let store = match lock {
             Some(lock) => layout::open_project_store_locked(&dot, lock)?,
             None => layout::open_project_store(&dot)?,
         };
+        // a holder is never read as a project: it has no canon, config or pack (D-BPYN8)
+        if store.mode()? == StoreMode::Holder {
+            return Err(crate::holder::is_a_holder());
+        }
+        Rdy::from_store(project, store, context)
+    }
+
+    /// The handle over `store`, already open, for the project or holder at `project` with
+    /// `context`: the pack, its lineage and fingerprint, and the config that fill the handle's
+    /// fields. The first publish reads the store's state.
+    pub(crate) fn from_store(
+        project: &Path,
+        mut store: Store,
+        context: Context,
+    ) -> Result<Rdy, RdyError> {
+        let Context {
+            pack,
+            lineage,
+            fingerprint,
+            config: cfg,
+        } = context;
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());
         // plan M2e2 (D-Z0EMP): every write joins the open batch, and `publish` seals it with
