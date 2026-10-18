@@ -216,6 +216,14 @@ fn spec_target(op: &str) -> Option<String> {
         "clone" => {
             "no spec target: a clone of this project, with the index build, the origin and fsck (reported)"
         }
+        "publication_resolve" => {
+            "no spec target: resolve a profile and check its references (reported)"
+        }
+        "publication_diff" => "no spec target: compare two resolved selections (reported)",
+        "render_profile" => "no spec target: build and write a selected static site (reported)",
+        "export_profile_md" => "no spec target: print selected docs as Markdown (reported)",
+        "export_profile_html" => "no spec target: print selected docs as HTML (reported)",
+        "export_profile_pdf" => "no spec target: print selected docs as PDF (reported)",
         "lexicon_build" => {
             "no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1)"
         }
@@ -3331,6 +3339,174 @@ fn tier_clone(
     }));
 }
 
+/// The profile key of the publication ops' fixtures.
+const PUBLICATION_KEY: &str = "perf-pub";
+
+/// The most ids the benchmark profile selects: the profile type's own limit
+/// (`rdy_schema::publication::MAX_SELECT_IDS`).
+const PUBLICATION_SELECT_CAP: usize = 1024;
+
+/// Creates and lands, in `view`, an admin doc holding one org profile that selects `select`, and
+/// returns nothing: the profile is read back by its key. Org is the benchmark audience (F4).
+fn land_org_profile(r: &mut Rdy, view: &str, key: &str, select: &[String]) {
+    write(
+        r,
+        view,
+        json!([
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "pub-admin", "title": "Publication admin", "doc_type": "page"}},
+            {"op": "create", "type": "publication_profile", "id": "$pf", "parent": "$admin",
+             "fields": {"key": key, "title": "Perf publication", "audience": "org", "select": select}}
+        ]),
+    )
+    .expect("write the profile");
+    land(r, view).expect("land the profile");
+}
+
+/// The comparison fixture of `publication_diff`: a project with one folder and two docs, a
+/// profile that selects the folder, then a landing that changes the first doc's first prose block
+/// and adds a third doc under the folder. Returns the selection before and after. The project is
+/// removed before this returns; both selections are in memory.
+fn publication_diff_fixture(
+    parent: &std::path::Path,
+) -> (
+    rdy_engine::publication::Resolved,
+    rdy_engine::publication::Resolved,
+) {
+    use rdy_engine::publication::resolve;
+    let dir = parent.join("pubdiff");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut r = Rdy::init(&dir, "rdy-standard").expect("init");
+    let doc_ops = |tag: &str, parent: &str| {
+        json!([
+            {"op": "create", "type": "doc", "id": format!("${tag}"), "parent": parent,
+             "fields": {"name": format!("doc-{tag}"), "title": format!("Doc {tag}"), "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": format!("${tag}s"), "parent": format!("${tag}"),
+             "fields": {"title": "Notes"}},
+            {"op": "create", "type": "claim", "id": format!("${tag}c"), "parent": format!("${tag}s"),
+             "body": format!("Prose of doc {tag}.")}
+        ])
+    };
+    let made = write(
+        &mut r,
+        "pd0",
+        json!([{"op": "create", "type": "folder", "id": "$f", "fields": {"name": "pub-area"}}]),
+    )
+    .expect("write the folder");
+    let folder = made.created["$f"].clone();
+    let mut ops = vec![];
+    for tag in ["a", "b"] {
+        ops.extend(doc_ops(tag, &folder).as_array().expect("ops").clone());
+    }
+    let made = write(&mut r, "pd0", json!(ops)).expect("write the docs");
+    let claim = made.created["$ac"].clone();
+    land(&mut r, "pd0").expect("land the docs");
+    land_org_profile(
+        &mut r,
+        "pd1",
+        PUBLICATION_KEY,
+        std::slice::from_ref(&folder),
+    );
+    let before = resolve(&r.read(), &Scope::Canon, PUBLICATION_KEY).expect("resolve before");
+    let mut ops = vec![json!({"op": "update", "id": claim, "body": "Prose of doc a, revised."})];
+    ops.extend(doc_ops("c", &folder).as_array().expect("ops").clone());
+    write(&mut r, "pd2", json!(ops)).expect("write the candidate");
+    land(&mut r, "pd2").expect("land the candidate");
+    let after = resolve(&r.read(), &Scope::Canon, PUBLICATION_KEY).expect("resolve after");
+    assert_eq!(before.docs.len(), 2, "two selected docs before");
+    assert_eq!(after.docs.len(), 3, "three selected docs after");
+    drop(r);
+    std::fs::remove_dir_all(&dir).expect("remove the comparison fixture");
+    (before, after)
+}
+
+/// The publication ops (D-0VCQ5, D-5CVWB), all reported with no ceiling. `proj` is closed. A copy
+/// of it gets an org profile that selects the first half of its doc ids in sorted order, rounded
+/// up and capped at [`PUBLICATION_SELECT_CAP`]; the profile is created and landed, and the copy's
+/// handle opened and warmed, outside every timer. The copy is removed before this returns.
+///
+/// - `publication_resolve`: `publication::resolve` of the profile against the warm state, not
+///   cached, so each run resolves and checks references afresh. No store is opened in the timer.
+/// - `publication_diff`: `publication::disclosure_diff` of two selections resolved beforehand in
+///   a small fixture (see [`publication_diff_fixture`]). Only the comparison is timed.
+/// - `render_profile`, `export_profile_md`, `export_profile_html`, `export_profile_pdf`: the
+///   profile's static site and prints at a fresh path, with resolution, check, model build and
+///   final placement inside the timer. Each output is removed outside it.
+fn tier_publication(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    runs: usize,
+) {
+    use rdy_engine::publication::{disclosure_diff, resolve};
+    use rdy_render::print::{Format, export_profile};
+    let copy = parent.join("p-pub");
+    copy_project(proj, &copy);
+    let mut r = Rdy::open(&copy).expect("open the copy");
+    let m = r.read().materialized(&Scope::Canon).expect("canon");
+    let mut docs: Vec<BlockId> = m
+        .iter()
+        .filter(|b| b.block_type == rdy_model::tree::DOC)
+        .map(|b| b.id.clone())
+        .collect();
+    docs.sort();
+    drop(m);
+    let take = docs.len().div_ceil(2).min(PUBLICATION_SELECT_CAP);
+    let select: Vec<String> = docs[..take].iter().map(ToString::to_string).collect();
+    land_org_profile(&mut r, "pubp", PUBLICATION_KEY, &select);
+
+    let st = r.read();
+    st.materialized(&Scope::Canon).expect("warm");
+    let first = resolve(&st, &Scope::Canon, PUBLICATION_KEY).expect("resolve the profile");
+    assert_eq!(first.docs.len(), take, "the profile selects the first half");
+    drop(first);
+    out.push(measure("publication_resolve", runs, |_| {
+        let got = resolve(&st, &Scope::Canon, PUBLICATION_KEY).expect("resolve");
+        std::hint::black_box(got);
+    }));
+
+    let (before, after) = publication_diff_fixture(parent);
+    let first = disclosure_diff(&before, &after).expect("compare");
+    assert_eq!(first.added_docs.len(), 1, "one doc is added");
+    assert_eq!(first.changed_docs.len(), 1, "one doc changed");
+    out.push(measure("publication_diff", runs, |_| {
+        let got = disclosure_diff(&before, &after).expect("compare");
+        std::hint::black_box(got);
+    }));
+
+    let remove = |to: &std::path::Path| {
+        if to.is_dir() {
+            std::fs::remove_dir_all(to).expect("remove the output tree");
+        } else {
+            std::fs::remove_file(to).expect("remove the output file");
+        }
+    };
+    out.push(measure_timed("render_profile", runs, |i| {
+        let to = parent.join(format!("render_profile-{i}"));
+        let s = Instant::now();
+        rdy_render::render_profile_site(&st, "canon", PUBLICATION_KEY, &to).expect("render");
+        let t = s.elapsed();
+        remove(&to);
+        t
+    }));
+    for (name, format, ext) in [
+        ("export_profile_md", Format::Md, "md"),
+        ("export_profile_html", Format::Html, "html"),
+        ("export_profile_pdf", Format::Pdf, "pdf"),
+    ] {
+        out.push(measure_timed(name, runs, |i| {
+            let to = parent.join(format!("{name}-{i}.{ext}"));
+            let s = Instant::now();
+            export_profile(&st, "canon", PUBLICATION_KEY, &to, format, None).expect("export");
+            let t = s.elapsed();
+            remove(&to);
+            t
+        }));
+    }
+    drop(st);
+    drop(r);
+    std::fs::remove_dir_all(&copy).expect("remove the copy");
+}
+
 /// `diff_since`: the block and word diff from the tier's tag to canon, as the page of the changes
 /// since the tag reads it (`render` builds it among its pages). The tag's landing is found outside
 /// the timer. Only the 10k tier is tagged (F3).
@@ -3788,6 +3964,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_redaction(&mut out, &proj, dir.path(), &fx.claim, "", 5);
     tier_export(&mut out, &proj, dir.path(), 5);
     tier_clone(&mut out, &proj, dir.path(), "", 5);
+    tier_publication(&mut out, &proj, dir.path(), 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -5378,6 +5555,85 @@ mod tests {
         assert_eq!(left, [std::ffi::OsString::from("p")]);
     }
 
+    /// Task 11: the publication ops are information only (D-0VCQ5, D-5CVWB, F4): exactly six, with
+    /// the exact target texts in operation order, no ceiling and no entry in the baseline file.
+    #[test]
+    fn pub11_perf_operations_have_closed_targets() {
+        let want = [
+            (
+                "publication_resolve",
+                "no spec target: resolve a profile and check its references (reported)",
+            ),
+            (
+                "publication_diff",
+                "no spec target: compare two resolved selections (reported)",
+            ),
+            (
+                "render_profile",
+                "no spec target: build and write a selected static site (reported)",
+            ),
+            (
+                "export_profile_md",
+                "no spec target: print selected docs as Markdown (reported)",
+            ),
+            (
+                "export_profile_html",
+                "no spec target: print selected docs as HTML (reported)",
+            ),
+            (
+                "export_profile_pdf",
+                "no spec target: print selected docs as PDF (reported)",
+            ),
+        ];
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for (op, text) in want {
+            assert_eq!(spec_target(op).as_deref(), Some(text), "{op}");
+            assert_eq!(spec_ceiling_ms(op), None, "{op} has a ceiling");
+            for class in baseline["classes"].as_object().expect("classes").values() {
+                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+            }
+        }
+    }
+
+    /// Task 11: the publication ops run end to end on a small tree with two runs. The checks are
+    /// on results, order and cleanup: no duration is asserted.
+    #[test]
+    fn pub11_perf_operations_run_on_a_small_fixture() {
+        rdy_model::seed_ids_for_tests(0x7075_6231);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        drop(r);
+        let mut out = vec![];
+        tier_publication(&mut out, &proj, dir.path(), 2);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "publication_resolve",
+                "publication_diff",
+                "render_profile",
+                "export_profile_md",
+                "export_profile_html",
+                "export_profile_pdf"
+            ]
+        );
+        for m in &out {
+            assert_eq!(m.runs, 2, "{m:?}");
+            assert!(m.median_ms >= 0.0 && m.p95_ms >= 0.0, "{m:?}");
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("p")]);
+    }
+
     /// The intake ops run end to end on a small tree with two proposals, and each has a reported
     /// target and no spec ceiling.
     #[test]
@@ -5424,6 +5680,7 @@ mod tests {
         at("tier_dump(&mut out, &proj, dir.path(), \"\", 5);");
         at("tier_export(&mut out, &proj, dir.path(), 5);");
         at("tier_clone(&mut out, &proj, dir.path(), \"\", 5);");
+        at("tier_publication(&mut out, &proj, dir.path(), 5);");
         let large = src.find("fn run_large_tier(").expect("run_large_tier");
         let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
         assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));

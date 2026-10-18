@@ -1400,6 +1400,41 @@ are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed he
 Deep gate (bench): <orchestrator fills in>
 
 
+## Publications (core) (<merge date>)
+
+Six ops, reported with no target and no spec ceiling (D-0VCQ5, D-5CVWB; quality gate k-CMC06).
+They run on the typical tier only, right after `clone`. An org profile (the benchmark audience,
+F4) selects the first half of the tier's doc ids in sorted order, rounded up and capped at 1,024.
+It is made and landed in a copy of the closed project, and the copy's handle is opened and
+warmed, outside every timer. `publication_diff` runs on a small fixture of its own: one folder
+selected, two docs before and three after, the first doc's first prose block changed. Both
+selections are resolved outside the timer, and each output is removed outside it.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `publication_resolve` | `publication::resolve` of the profile against the same warm `ReadState`: the selection, the induced graph, the digests and the reference check, not cached; no store is opened | 5 | no spec target: resolve a profile and check its references (reported) |
+| `publication_diff` | `publication::disclosure_diff` of the two pre-resolved selections of the comparison fixture: the pure comparison only | 5 | no spec target: compare two resolved selections (reported) |
+| `render_profile` | `render_profile_site` of the profile at a fresh path: resolution, check, model build, every page, and the final placement | 5 | no spec target: build and write a selected static site (reported) |
+| `export_profile_md` | `print::export_profile` of the profile as a Markdown tree at a fresh path | 5 | no spec target: print selected docs as Markdown (reported) |
+| `export_profile_html` | the same, as one HTML file | 5 | no spec target: print selected docs as HTML (reported) |
+| `export_profile_pdf` | the same, laid out and written as one PDF file | 5 | no spec target: print selected docs as PDF (reported) |
+
+What each cost grows with:
+
+- `publication_resolve` grows with the retained blocks, the candidate graph edges and the
+  reference occurrences in the selection, and with the attachment rows.
+- `publication_diff` grows with the selected docs, folders, attachments and reference rows of
+  the two selections. It reads no store.
+- `render_profile` and the three exports grow with the selected blocks printed, plus one
+  `publication_resolve`. The PDF also pays for the page layout and the font subsetting; Markdown
+  pays for one file per page.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
+are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+
 ## Export and clone (2026-10-16)
 
 Five ops, reported with no target (D-9QV85, D-WQSAY, O42). The three exports run on the typical
