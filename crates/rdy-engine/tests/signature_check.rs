@@ -1,7 +1,7 @@
 //! sig6: one signature checked offline against its subject (D-1Z951, D-17AA8). Validity,
 //! coverage, trust and presence are separate results; the allowed-signers parser is strict; a
-//! fork falls back only to the source id in its current `meta/origin` (O7); fsck checks every
-//! signature with no agent and no trust file.
+//! signature may name the project's own repo id or the source id of any fork its log records
+//! (ruling task-6); fsck checks every signature with no agent and no trust file.
 //!
 //! The signatures are made by a test-only software signer from fixed in-memory seeds (as in
 //! `signing_crypto.rs`): no private key is read or committed.
@@ -221,7 +221,7 @@ fn ctx(subject: SignatureSubject) -> CheckContext {
     CheckContext {
         subject,
         current_repo: REPO,
-        source_repo: None,
+        source_repos: vec![],
     }
 }
 
@@ -922,6 +922,170 @@ fn sig6_trust_uses_the_structured_relay_actor() {
     refused(format!("agent:a/b {cert}"), 1, "invalid key");
 }
 
+/// The `E_BAD_INPUT` of `file`, as (message, fix).
+fn trust_refusal(file: &[u8]) -> (String, String) {
+    let e = AllowedSigners::parse(file).expect_err("the file is refused");
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    (e.message, e.fix)
+}
+
+fn invalid_line(line: usize, cause: &str) -> (String, String) {
+    (
+        format!("signing.allowed_signers line {line} is invalid: {cause}"),
+        format!("fix line {line} in signing.allowed_signers"),
+    )
+}
+
+/// OpenSSH reads a line as a C string, so a NUL ends it there; it then refuses the file. With
+/// a key from `ssh-keygen -t ed25519` and a `rdy-approval-v1` signature by it, OpenSSH 10.3p1
+/// `ssh-keygen -Y verify -I human:founder -n rdy-approval-v1` printed `a1:1: invalid line` for
+/// `*,!human:founder<NUL> <key>`, `a1b:2: invalid line` for that line after `agent:x <key>`,
+/// and `a1c:1: invalid options` for `human:founder namespaces="rdy-*,!rdy-approval-v1<NUL>"
+/// <key>`; each time `Could not verify signature.` (exit 255). No NUL can make a negative
+/// pattern miss its principal.
+#[test]
+fn sig6_a_nul_in_a_trust_line_refuses_the_whole_file() {
+    let rec = landing(Assurance::Local);
+    let c = ctx(landing_subject(rec.clone()));
+    let a = approval_sig(&rec, Key::Ed);
+    let line = Key::Ed.line();
+    // without the NUL the negation excludes the founder, and the file parses
+    let excluded = trust(&format!("*,!human:founder {line}"));
+    assert_eq!(check_signature(&a, &c, Some(&excluded)).trust, "unknown");
+
+    assert_eq!(
+        trust_refusal(format!("*,!human:founder\0 {line}").as_bytes()),
+        invalid_line(1, "invalid principal list")
+    );
+    // a good line first does not survive a refused later line
+    assert_eq!(
+        trust_refusal(format!("agent:x {line}\n*,!human:founder\0 {line}\n").as_bytes()),
+        invalid_line(2, "invalid principal list")
+    );
+    assert_eq!(
+        trust_refusal(format!("\"*,!human:founder\0\" {line}").as_bytes()),
+        invalid_line(1, "invalid principal list")
+    );
+    // in an option value or name
+    assert_eq!(
+        trust_refusal(
+            format!("human:founder namespaces=\"rdy-*,!rdy-approval-v1\0\" {line}").as_bytes()
+        ),
+        invalid_line(1, "invalid option")
+    );
+    assert_eq!(
+        trust_refusal(format!("human:founder valid-after\0=\"1\" {line}").as_bytes()),
+        invalid_line(1, "invalid option")
+    );
+}
+
+/// OpenSSH finds the end of the options field with `sshkey_advance_past_options`: a `\` skips
+/// the next byte only when that byte is `"`, and the value is read with `opt_dequote`, the same
+/// rule. With the key and signature above, OpenSSH 10.3p1 accepted
+/// `human:founder namespaces="rdy-approval-v1,unused\\" text" <key>`: `Good "rdy-approval-v1"
+/// signature for human:founder with ED25519 key ...` (exit 0).
+#[test]
+fn sig6_quoted_options_end_where_openssh_ends_them() {
+    let rec = landing(Assurance::Local);
+    let c = ctx(landing_subject(rec.clone()));
+    let a = approval_sig(&rec, Key::Ed);
+    let line = Key::Ed.line();
+    // two backslashes, a quote, a space, `text`, the closing quote
+    let file = format!("human:founder namespaces=\"rdy-approval-v1,unused\\\\\" text\" {line}");
+    assert_eq!(
+        check_signature(&a, &c, Some(&trust(&file))).trust,
+        "trusted"
+    );
+    // the value holds `unused\" text`: an escaped quote, then the space, inside the quotes
+    let file = format!("human:founder namespaces=\"unused\\\\\" text,rdy-approval-v1\" {line}");
+    assert_eq!(
+        check_signature(&a, &c, Some(&trust(&file))).trust,
+        "trusted"
+    );
+    // a `\` before any other byte is itself
+    let file = format!("human:founder namespaces=\"a\\b,rdy-approval-v1\" {line}");
+    assert_eq!(
+        check_signature(&a, &c, Some(&trust(&file))).trust,
+        "trusted"
+    );
+    let file = format!("human:founder namespaces=\"rdy-approval-v\\1\" {line}");
+    assert_eq!(
+        check_signature(&a, &c, Some(&trust(&file))).trust,
+        "unknown"
+    );
+}
+
+/// The pure checker refuses a record over the shared bounds before it verifies or copies any
+/// field: `E_SIG_INVALID`, never a valid match, with no field of the record in the report.
+#[test]
+fn sig6_the_checker_refuses_records_over_the_shared_bounds() {
+    use rdy_model::signature::{MAX_NAMESPACE, MAX_SIG, MAX_SIGNER_TEXT, MAX_STATEMENT};
+    let rec = landing(Assurance::Local);
+    let c = ctx(landing_subject(rec.clone()));
+    let good = approval_sig(&rec, Key::Ed);
+    let refused = |g: &Signature, what: &str| {
+        let got = check_signature(g, &c, None);
+        assert_eq!(
+            json_of(&got),
+            json!({
+                "kind": null, "key": null, "key_type": null,
+                "signed": "invalid", "statement": "mismatch", "trust": "unknown",
+                "presence": "absent", "signed_by": {"actor": "", "run": null},
+                "at_ms": 1000, "code": E_SIG_INVALID, "warnings": []
+            }),
+            "{what}"
+        );
+    };
+    let matched = |g: &Signature, what: &str| {
+        let got = check_signature(g, &c, None);
+        assert_eq!(statement_of(&got), ("match", None), "{what}");
+        assert_eq!(got.signed_by.actor, g.signed_by.actor, "{what}");
+        assert_eq!(got.signed_by.run, g.signed_by.run, "{what}");
+    };
+    // signed_by is not signed: the actor and run at their bound still match
+    let mut g = good.clone();
+    g.signed_by.actor = "a".repeat(MAX_SIGNER_TEXT);
+    matched(&g, "actor at its bound");
+    g.signed_by.actor.push('a');
+    refused(&g, "actor one past its bound");
+    g.signed_by.actor = "a".repeat(70_000);
+    refused(&g, "a 70000-byte actor");
+    let mut g = good.clone();
+    g.signed_by.run = Some("r".repeat(MAX_SIGNER_TEXT));
+    matched(&g, "run at its bound");
+    g.signed_by.run = Some("r".repeat(MAX_SIGNER_TEXT + 1));
+    refused(&g, "run one past its bound");
+    // the namespace, statement and SSHSIG blob
+    let mut g = good.clone();
+    g.namespace = "n".repeat(MAX_NAMESPACE + 1);
+    refused(&g, "namespace");
+    let mut g = good.clone();
+    g.statement.resize(MAX_STATEMENT + 1, b'x');
+    refused(&g, "statement");
+    let mut g = good.clone();
+    g.sig.resize(MAX_SIG + 1, 0);
+    refused(&g, "sig");
+    let mut g = good.clone();
+    g.sig.resize(70_000, 0);
+    refused(&g, "a 70000-byte sig");
+    // every field at its bound encodes within the 65536-byte record bound (the store's bounded
+    // encoder accepts it), so the field bounds imply the total bound
+    let mut g = good.clone();
+    g.namespace = "n".repeat(MAX_NAMESPACE);
+    g.statement = vec![b'x'; MAX_STATEMENT];
+    g.sig = vec![0; MAX_SIG];
+    g.signed_by.actor = "a".repeat(MAX_SIGNER_TEXT);
+    g.signed_by.run = Some("r".repeat(MAX_SIGNER_TEXT));
+    g.signed_by.at_ms = i64::MIN;
+    rdy_store::signature::frames(std::slice::from_ref(&g)).unwrap();
+    let got = check_signature(&g, &c, None);
+    assert_eq!(
+        (got.signed.as_str(), got.signed_by.actor.len()),
+        ("invalid", MAX_SIGNER_TEXT),
+        "a record within the bounds keeps its signer in the report"
+    );
+}
+
 // ---- projects ----
 
 fn session(role: Role) -> Session {
@@ -990,8 +1154,15 @@ fn matched(n: usize) -> Vec<(String, Option<String>)> {
     vec![("match".to_string(), None); n]
 }
 
+/// The repo ids a signature may name: the project's own, and the source of every fork its log
+/// records (ruling task-6: every `meta/origin` with `fork: true`, current or earlier).
+fn lineage(r: &Rdy, g: &Signature) -> (RepoId, Vec<RepoId>) {
+    let c = read_check_context(&r.read(), g).unwrap();
+    (c.current_repo, c.source_repos)
+}
+
 #[test]
-fn sig6_fork_source_uses_only_current_origin() {
+fn sig6_fork_sources_follow_the_logged_fork_lineage() {
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join("src")).unwrap();
     let mut src = Rdy::init(&d.path().join("src"), "rdy-standard").unwrap();
@@ -1013,15 +1184,15 @@ fn sig6_fork_source_uses_only_current_origin() {
         .signature(&src.store().reader().signatures_of(&l1).unwrap()[0])
         .unwrap();
     let c = read_check_context(&st, &g).unwrap();
-    assert_eq!((c.current_repo, c.source_repo), (source_id, None));
     assert!(matches!(c.subject, SignatureSubject::Landing { hash, .. } if hash == l1));
+    // a project that was never forked accepts only its own repo id
+    assert_eq!(lineage(&src, &g), (source_id, vec![]));
 
     // an ordinary clone keeps the source's repo id: no alternate id is needed or allowed
     let plain = d.path().join("clone");
     clone(CloneSource::State(&st), &plain, false).unwrap();
     let mut cl = Rdy::open(&plain).unwrap();
-    let c = read_check_context(&cl.read(), &g).unwrap();
-    assert_eq!((c.current_repo, c.source_repo), (source_id, None));
+    assert_eq!(lineage(&cl, &g), (source_id, vec![]));
     assert_eq!(statements(&cl, &l1), matched(2));
 
     // a fork has a new repo id; its origin's id covers the retained source signatures
@@ -1031,51 +1202,89 @@ fn sig6_fork_source_uses_only_current_origin() {
     let mut fk = Rdy::open(&forked).unwrap();
     let fork_id = fk.read().repo_id().unwrap();
     assert_ne!(fork_id, source_id);
-    let c = read_check_context(&fk.read(), &g).unwrap();
-    assert_eq!((c.current_repo, c.source_repo), (fork_id, Some(source_id)));
+    assert_eq!(lineage(&fk, &g), (fork_id, vec![source_id]));
     assert_eq!(statements(&fk, &l1), matched(2));
-    let report = fk.fsck().unwrap();
     assert_eq!(
-        report.signatures, 2,
+        fk.fsck().unwrap().signatures,
+        2,
         "the fork's fsck checks them through its origin"
     );
-    // a new signature in the fork uses the fork's own id; an unrelated id never matches
+    // a new signature in the fork uses the fork's own id
     put(&mut fk, |x| stored_approval(x, &l2, fork_id, Key::Sk, 2));
-    put(&mut fk, |x| stored_approval(x, &l2, OTHER_REPO, Key::Sk, 3));
-    let mut got = statements(&fk, &l2);
-    got.sort();
-    assert_eq!(
-        got,
-        vec![
-            ("match".to_string(), None),
-            (
+    assert_eq!(statements(&fk, &l2), matched(1));
+
+    // original -> fork -> ordinary clone: the clone keeps the fork's id, its log keeps the
+    // fork's origin batch, so the source's signatures still verify, and the clone's own fsck
+    // (run by the clone itself) passes
+    let fst = fk.read();
+    let fork_clone = d.path().join("fork-clone");
+    clone(CloneSource::State(&fst), &fork_clone, false).unwrap();
+    let fc = Rdy::open(&fork_clone).unwrap();
+    assert_eq!(fc.read().origin().unwrap().map(|o| o.fork), Some(false));
+    assert_eq!(lineage(&fc, &g), (fork_id, vec![source_id]));
+    assert_eq!(statements(&fc, &l1), matched(2));
+    assert_eq!(statements(&fc, &l2), matched(1));
+    assert_eq!(fc.fsck().unwrap().signatures, 3);
+
+    // original -> fork -> fork: both ancestors' ids are accepted
+    let fork_fork = d.path().join("fork-fork");
+    clone(CloneSource::State(&fst), &fork_fork, true).unwrap();
+    drop(fst);
+    let mut ff = Rdy::open(&fork_fork).unwrap();
+    let ff_id = ff.read().repo_id().unwrap();
+    assert!(ff_id != fork_id && ff_id != source_id);
+    let mut ancestors = vec![source_id, fork_id];
+    ancestors.sort();
+    assert_eq!(lineage(&ff, &g), (ff_id, ancestors.clone()));
+    assert_eq!(statements(&ff, &l1), matched(2));
+    assert_eq!(statements(&ff, &l2), matched(1));
+    assert_eq!(ff.fsck().unwrap().signatures, 3);
+    put(&mut ff, |x| stored_approval(x, &l2, ff_id, Key::Ed, 5));
+    assert_eq!(statements(&ff, &l2), matched(2));
+
+    // a forged signature naming an unrelated repo id is still refused, in a fork and in a
+    // fork of a fork
+    let forged = |r: &mut Rdy, at_ms: i64| {
+        put(r, |x| stored_approval(x, &l2, OTHER_REPO, Key::Sk, at_ms));
+        let mut got = statements(r, &l2);
+        got.sort();
+        assert_eq!(
+            got.last().unwrap(),
+            &(
                 "mismatch".to_string(),
                 Some(E_SIG_OBJECT_MISMATCH.to_string())
             )
-        ]
-    );
+        );
+        assert_eq!(got.iter().filter(|s| s.1.is_some()).count(), 1);
+        assert_eq!(r.fsck().unwrap_err().code, E_SIG_OBJECT_MISMATCH);
+    };
+    forged(&mut fk, 3);
+    forged(&mut ff, 6);
 
-    // the fallback is the single current origin id, and only for a fork
-    let fork_ctx = read_check_context(&fk.read(), &g).unwrap();
-    let source_only = check_signature(&g, &fork_ctx, None);
-    assert_eq!(statement_of(&source_only), ("match", None));
-    let no_origin = CheckContext {
-        source_repo: None,
+    // the pure check accepts exactly the ids its context names; crypto does not run again
+    let fork_ctx = read_check_context(&ff.read(), &g).unwrap();
+    assert_eq!(
+        statement_of(&check_signature(&g, &fork_ctx, None)),
+        ("match", None)
+    );
+    let with = |source_repos: Vec<RepoId>| CheckContext {
+        source_repos,
         ..fork_ctx.clone()
     };
-    assert_eq!(
-        statement_of(&check_signature(&g, &no_origin, None)),
-        ("mismatch", Some(E_SIG_OBJECT_MISMATCH))
-    );
-    let unrelated = CheckContext {
-        source_repo: Some(OTHER_REPO),
-        ..fork_ctx
-    };
-    assert_eq!(
-        statement_of(&check_signature(&g, &unrelated, None)),
-        ("mismatch", Some(E_SIG_OBJECT_MISMATCH))
-    );
-    // a clone (origin with fork: false) that holds another id's signature gets no fallback
+    for (repos, want) in [
+        (vec![], ("mismatch", Some(E_SIG_OBJECT_MISMATCH))),
+        (vec![OTHER_REPO], ("mismatch", Some(E_SIG_OBJECT_MISMATCH))),
+        (vec![fork_id], ("mismatch", Some(E_SIG_OBJECT_MISMATCH))),
+        (vec![OTHER_REPO, source_id], ("match", None)),
+    ] {
+        assert_eq!(
+            statement_of(&check_signature(&g, &with(repos.clone()), None)),
+            want,
+            "{repos:?}"
+        );
+    }
+    // a clone of a project that was never forked, holding another id's signature, gets no
+    // fallback
     put(&mut cl, |x| {
         stored_approval(x, &l2, SOURCE_REPO, Key::Ed, 4)
     });
@@ -1086,9 +1295,9 @@ fn sig6_fork_source_uses_only_current_origin() {
             Some(E_SIG_OBJECT_MISMATCH.to_string())
         )]
     );
-    cl.close().unwrap();
-    fk.close().unwrap();
-    src.close().unwrap();
+    for r in [cl, fk, fc, ff, src] {
+        r.close().unwrap();
+    }
 }
 
 #[test]

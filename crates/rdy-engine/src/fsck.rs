@@ -1,6 +1,8 @@
 //! `rdy fsck`: the store's consistency report.
 
-use crate::signature_check::{CheckContext, STATEMENT_MATCH, check_signature, read_check_context};
+use crate::signature_check::{
+    CheckContext, STATEMENT_MATCH, check_signature, repo_ids, subject_context,
+};
 use crate::{E_LIMIT, E_SIG_INVALID, Rdy, RdyError, sig_invalid, sig_object_mismatch};
 use rdy_schema::{Issue, Severity};
 use rdy_store::StoreError;
@@ -97,6 +99,8 @@ impl Rdy {
         let mut issues: Vec<Issue> = Vec::new();
         let mut context: Option<CheckContext> = None;
         let mut read_error: Option<RdyError> = None;
+        // the repo ids a signature may name, read once, at the first signature
+        let mut repos: Option<(rdy_model::RepoId, Vec<rdy_model::RepoId>)> = None;
         let visited = st.reader().visit_signatures(&mut |hash, g| {
             count += 1;
             // the visit is in subject order: one context serves a subject's signatures
@@ -104,7 +108,13 @@ impl Rdy {
                 .as_ref()
                 .is_none_or(|c| c.subject.hash() != g.subject)
             {
-                match read_check_context(&st, g) {
+                let read = match &repos {
+                    Some(r) => Ok(r.clone()),
+                    None => repo_ids(&st).inspect(|r| repos = Some(r.clone())),
+                };
+                match read.and_then(|(current, sources)| {
+                    subject_context(&st, &g.subject, current, sources)
+                }) {
                     Ok(c) => context = Some(c),
                     Err(e) => {
                         read_error = Some(e);

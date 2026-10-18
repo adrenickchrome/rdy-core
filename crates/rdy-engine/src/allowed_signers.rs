@@ -158,6 +158,10 @@ fn invalid_line(line: usize, cause: &str) -> RdyError {
 /// One entry, from its first non-space byte.
 fn parse_entry(line: &[u8]) -> Result<Entry, LineError> {
     let (field, rest) = principals_field(line)?;
+    // OpenSSH reads a line as a C string: a NUL ends it there, before any key (O6)
+    if field.contains(&0) {
+        return Err(INVALID_PRINCIPALS.into());
+    }
     let text = std::str::from_utf8(field).map_err(|_| INVALID_PRINCIPALS)?;
     let mut patterns = 0usize;
     let principals = pattern_list(text, &mut patterns, INVALID_PRINCIPALS)?;
@@ -202,21 +206,23 @@ fn principals_field(line: &[u8]) -> Result<(&[u8], &[u8]), LineError> {
     Ok((field, rest))
 }
 
-/// The field up to the next space or tab outside double quotes (where `\` escapes the next
-/// byte), and what follows it. An unclosed quote is an invalid option.
+/// The field up to the next space or tab outside double quotes, and what follows it, by
+/// OpenSSH's `sshkey_advance_past_options`: a `\` skips the next byte only when that byte is
+/// `"`, inside quotes or out, the rule [`quoted_value`] (OpenSSH's `opt_dequote`) reads the
+/// value by. An unclosed quote is an invalid option.
 fn option_field(s: &[u8]) -> Result<(&[u8], &[u8]), LineError> {
     let mut quoted = false;
     let mut i = 0;
     while i < s.len() {
         match s[i] {
-            b'\\' if quoted => i += 1,
+            b'\\' if s.get(i + 1) == Some(&b'"') => i += 1,
             b'"' => quoted = !quoted,
             b if !quoted && is_space(b) => break,
             _ => {}
         }
         i += 1;
     }
-    if quoted || i > s.len() {
+    if quoted {
         return Err(INVALID_OPTION.into());
     }
     Ok(s.split_at(i))
@@ -234,6 +240,10 @@ fn looks_like_key_type(field: &[u8]) -> bool {
 /// The options field: the `namespaces` patterns when present. Every pattern counts toward
 /// `patterns`.
 fn options(field: &[u8], patterns: &mut usize) -> Result<Option<Vec<String>>, LineError> {
+    // as for the principals, a NUL ends OpenSSH's line inside the options
+    if field.contains(&0) {
+        return Err(INVALID_OPTION.into());
+    }
     let text = std::str::from_utf8(field).map_err(|_| INVALID_OPTION)?;
     let mut seen = [false; OPTIONS.len()];
     let mut namespaces = None;

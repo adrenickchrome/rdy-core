@@ -7,8 +7,8 @@
 //!   the grammar and its kind's namespace is the record's, and the statement names the key that
 //!   signed it. Otherwise `invalid` (`E_SIG_INVALID`).
 //! - **statement**: the statement rebuilt from the subject, for the current repo id and then for
-//!   the fork source (when the caller gives one), equals the signed bytes exactly. Otherwise
-//!   `mismatch` (`E_SIG_OBJECT_MISMATCH` for a valid signature).
+//!   each fork source the caller gives, equals the signed bytes exactly. Otherwise `mismatch`
+//!   (`E_SIG_OBJECT_MISMATCH` for a valid signature).
 //! - **trust**: a covered signature's key is trusted for its principal and namespace by the
 //!   caller's allowed-signers data. Otherwise `unknown`, with one `W_SIG_UNKNOWN_KEY` warning for
 //!   a covered signature only.
@@ -18,19 +18,24 @@
 //! `signed_by` and `at_ms` are the record's own claim, never a trusted time.
 //!
 //! [`read_check_context`] and [`signature_checks`] read the subject, the current repo id and the
-//! fork source from one immutable read state through the typed readers.
+//! fork sources of the log's fork lineage from one immutable read state through the typed
+//! readers.
 
 use crate::allowed_signers::AllowedSigners;
 use crate::read_state::ReadState;
 use crate::signing_crypto::verify_sshsig;
 use crate::{E_SIG_INVALID, E_SIG_OBJECT_MISMATCH, RdyError, sig_unknown_key, signing_limit};
 use rdy_model::signature::{
-    ParsedStatement, Signature, StatementKind, StatementSource, parse_statement, statement,
+    MAX_NAMESPACE, MAX_SIG, MAX_SIGNATURE, MAX_SIGNER_TEXT, MAX_STATEMENT, ParsedStatement,
+    Signature, StatementKind, StatementSource, parse_statement, statement,
 };
 use rdy_model::{ActorRun, Answer, Hash, LandingRecord, RepoId, Tag};
+use rdy_store::kinds::RefUpdate;
+use rdy_store::meta::{REF_ORIGIN, decode_origin};
 use rdy_store::signature::MAX_PER_SUBJECT;
 use rdy_store::{StoreError, kinds};
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 /// `signed`: the signature verifies and names its key.
 pub const SIGNED_VALID: &str = "valid";
@@ -76,15 +81,16 @@ impl SignatureSubject {
     }
 }
 
-/// What a signature is checked against: its subject, the current repo id, and the source repo
-/// id of a fork (O7). It claims nothing about when a signature was made or where it sits in the
-/// log.
+/// What a signature is checked against: its subject, the current repo id, and the other repo
+/// ids it may name: locally, the source of every fork the log records ([`read_check_context`]).
+/// It claims nothing about when a signature was made or where it sits in the log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckContext {
     pub subject: SignatureSubject,
     pub current_repo: RepoId,
-    /// The current `meta/origin` repo id of a fork; `None` for a project that is not a fork.
-    pub source_repo: Option<RepoId>,
+    /// The other repo ids a signature may name, tried in order after `current_repo`; locally
+    /// the fork sources, ascending, and empty for a project never forked.
+    pub source_repos: Vec<RepoId>,
 }
 
 /// An advisory result of a check, such as `W_SIG_UNKNOWN_KEY`.
@@ -137,6 +143,25 @@ pub fn check_signature(
     context: &CheckContext,
     trust: Option<&AllowedSigners>,
 ) -> SignatureCheck {
+    if !within_bounds(record) {
+        // refused before anything is verified or copied: no field of the record is reported
+        return SignatureCheck {
+            kind: None,
+            key: None,
+            key_type: None,
+            signed: SIGNED_INVALID.into(),
+            statement: STATEMENT_MISMATCH.into(),
+            trust: TRUST_UNKNOWN.into(),
+            presence: PRESENCE_ABSENT.into(),
+            signed_by: ActorRun {
+                actor: String::new(),
+                run: None,
+            },
+            at_ms: record.signed_by.at_ms,
+            code: Some(E_SIG_INVALID.into()),
+            warnings: vec![],
+        };
+    }
     let parsed = parse_statement(&record.statement).ok();
     // one cryptographic verification, whatever repo ids the coverage then tries
     let crypto = verify_sshsig(&record.namespace, &record.statement, &record.sig);
@@ -181,10 +206,52 @@ pub fn check_signature(
     out
 }
 
+/// Whether `record` keeps the shared bounds a stored SIGNATURE keeps: each field within its own
+/// bound, and the whole postcard encoding within [`MAX_SIGNATURE`] bytes, counted with checked
+/// arithmetic and without encoding it.
+fn within_bounds(record: &Signature) -> bool {
+    let g = record;
+    let run = g.signed_by.run.as_ref();
+    let fields = [
+        (g.namespace.len(), MAX_NAMESPACE),
+        (g.statement.len(), MAX_STATEMENT),
+        (g.sig.len(), MAX_SIG),
+        (g.signed_by.actor.len(), MAX_SIGNER_TEXT),
+        (run.map_or(0, String::len), MAX_SIGNER_TEXT),
+    ];
+    if fields.iter().any(|(len, limit)| len > limit) {
+        return false;
+    }
+    // a length-prefixed field: its varint length, then its bytes
+    let field = |len: usize| varint_len(len as u64).checked_add(len);
+    let at_ms = g.signed_by.at_ms;
+    let zigzag = ((at_ms << 1) ^ (at_ms >> 63)) as u64;
+    let total = [
+        Some(32),
+        field(g.namespace.len()),
+        field(g.statement.len()),
+        field(g.sig.len()),
+        field(g.signed_by.actor.len()),
+        // the run's option tag, then the run
+        run.map_or(Some(1), |r| field(r.len()).and_then(|n| n.checked_add(1))),
+        // the role's variant
+        Some(1),
+        Some(varint_len(zigzag)),
+    ]
+    .into_iter()
+    .try_fold(0usize, |sum, n| sum.checked_add(n?));
+    total.is_some_and(|n| n <= MAX_SIGNATURE)
+}
+
+/// The bytes of `v` as a LEB128 varint.
+fn varint_len(v: u64) -> usize {
+    (64 - v.max(1).leading_zeros() as usize).div_ceil(7)
+}
+
 /// The principal trust is checked for, when the statement `parsed` of `record` (signed by `key`)
 /// covers the subject of `context`: the record names the subject, the statement's form fits it,
-/// and the statement rebuilt for the current repo id, or else the fork source's, equals the
-/// signed bytes. `None` otherwise.
+/// and the statement rebuilt for the current repo id, or else for one of the fork sources,
+/// equals the signed bytes. `None` otherwise.
 fn covered<'c>(
     record: &Signature,
     parsed: &ParsedStatement<'_>,
@@ -241,7 +308,9 @@ fn covered<'c>(
         _ => return None,
     };
     let fallback = context
-        .source_repo
+        .source_repos
+        .iter()
+        .copied()
         .filter(|source| *source != context.current_repo);
     for repo in std::iter::once(context.current_repo).chain(fallback) {
         match statement(source, Some(repo), key) {
@@ -255,12 +324,13 @@ fn covered<'c>(
 }
 
 /// The context of `signature` in `state`: its subject, read through the typed readers, the
-/// current repo id, and the source repo id when the current `meta/origin` is a fork's.
+/// current repo id, and the source repo id of every fork the log records.
 pub fn read_check_context(
     state: &ReadState,
     signature: &Signature,
 ) -> Result<CheckContext, RdyError> {
-    context_of(state, &signature.subject)
+    let (current, sources) = repo_ids(state)?;
+    subject_context(state, &signature.subject, current, sources)
 }
 
 /// The checks of every signature of `subject`, in signature hash order, against one context.
@@ -281,16 +351,51 @@ pub fn signature_checks(
     if ids.is_empty() {
         return Ok(vec![]);
     }
-    let context = context_of(state, subject)?;
+    let (current, sources) = repo_ids(state)?;
+    let context = subject_context(state, subject, current, sources)?;
     ids.iter()
         .map(|id| Ok(check_signature(&reader.signature(id)?, &context, trust)))
         .collect()
 }
 
-/// The context of a signature of `subject` in `state`.
-pub(crate) fn context_of(state: &ReadState, subject: &Hash) -> Result<CheckContext, RdyError> {
-    let current_repo = state.repo_id()?;
-    let source_repo = state.origin()?.filter(|o| o.fork).map(|o| o.repo_id);
+/// The repo ids a signature in `state` may name (ruling task-6, D-17AA8, D-DAGNB): the
+/// project's own `meta/repo_id`, and the `repo_id` of every `meta/origin` value with
+/// `fork: true` that the log records, in any batch, current or earlier, ascending and without
+/// the project's own. A clone keeps its source's log (D-C8C70), so an ordinary clone of a fork
+/// keeps the fork's origin batch, and a fork of a fork both of its ancestors'. One pass over the
+/// stored ref updates; nothing is written. A project with no `meta/origin` was never cloned:
+/// only a clone's origin batch writes that ref, and nothing removes it, so its log holds no
+/// origin value and the pass is skipped.
+pub(crate) fn repo_ids(state: &ReadState) -> Result<(RepoId, Vec<RepoId>), RdyError> {
+    let current = state.repo_id()?;
+    if state.origin()?.is_none() {
+        return Ok((current, vec![]));
+    }
+    let reader = state.reader();
+    let mut sources = BTreeSet::new();
+    reader.for_each_object_of(kinds::REF_UPDATE, |hash| {
+        let update: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &hash)?;
+        if update.name == REF_ORIGIN {
+            // a value that does not decode names no repo id: it widens nothing
+            if let Some(origin) = decode_origin(&update.value)
+                && origin.fork
+                && origin.repo_id != current
+            {
+                sources.insert(origin.repo_id);
+            }
+        }
+        Ok(())
+    })?;
+    Ok((current, sources.into_iter().collect()))
+}
+
+/// The context of a signature of `subject` in `state`, with the repo ids [`repo_ids`] read.
+pub(crate) fn subject_context(
+    state: &ReadState,
+    subject: &Hash,
+    current_repo: RepoId,
+    source_repos: Vec<RepoId>,
+) -> Result<CheckContext, RdyError> {
     let reader = state.reader();
     let subject = if reader.has_kind(kinds::LANDING, subject)? {
         SignatureSubject::Landing {
@@ -311,6 +416,26 @@ pub(crate) fn context_of(state: &ReadState, subject: &Hash) -> Result<CheckConte
     Ok(CheckContext {
         subject,
         current_repo,
-        source_repo,
+        source_repos,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::varint_len;
+
+    #[test]
+    fn sig6_varint_lengths_follow_leb128() {
+        for (v, want) in [
+            (0u64, 1usize),
+            (127, 1),
+            (128, 2),
+            (16_383, 2),
+            (16_384, 3),
+            (65_536, 3),
+            (u64::MAX, 10),
+        ] {
+            assert_eq!(varint_len(v), want, "{v}");
+        }
+    }
 }
