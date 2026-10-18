@@ -28,7 +28,8 @@ impl RdyServer {
         &self,
         Parameters(p): Parameters<PublicationCheckParams>,
     ) -> CallToolResult {
-        self.run("rdy_publication_check", p, tools::rdy_publication_check)
+        // the report is closed and size-checked: a pack notice must not be added to it
+        self.run_closed("rdy_publication_check", p, tools::rdy_publication_check)
             .await
     }
 }

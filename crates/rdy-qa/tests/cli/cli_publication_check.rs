@@ -152,6 +152,101 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("--profile"));
 }
 
+/// The closed keys of the report (RULING F4, D-KQ4CA): nothing rides beside them.
+const REPORT_KEYS: [&str; 7] = [
+    "against",
+    "disclosure",
+    "profile",
+    "references",
+    "scope",
+    "selection",
+    "warnings",
+];
+
+fn keys_of(v: &Value) -> Vec<&str> {
+    let mut k: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    k.sort();
+    k
+}
+
+#[test]
+fn pub9_a_pending_pack_notice_stays_outside_the_report() {
+    const PACK_A: &str = "name: proj\nversion: '1'\nextends: rdy-standard\n";
+    const PACK_BAD: &str = "name: proj\nversion: '1'\nextends: no-such-pack\n";
+    let s = Served::new();
+    seed(s.dir.path());
+    let packs = s.dir.path().join(".rdy/packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let config = std::fs::read_to_string(s.dir.path().join(".rdy.yaml")).unwrap();
+    let config: String = config
+        .lines()
+        .filter(|l| !l.starts_with("pack:"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let mut c = McpClient::start_proxy(&s);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:p", "role": "reader", "view": "canon"}),
+    )
+    .ok();
+    let args = ["--json", "publication", "check", "--profile", "site"];
+    let chat = json!({"profile": "site"});
+    let quiet = c.call("rdy_publication_check", chat.clone()).ok();
+    assert_eq!(keys_of(&quiet), REPORT_KEYS, "{quiet}");
+
+    // a pack edit followed by a write: the pack reloads and this session has not heard of it
+    std::fs::write(packs.join("proj.yaml"), PACK_A).unwrap();
+    std::fs::write(
+        s.dir.path().join(".rdy.yaml"),
+        format!("pack: proj\n{config}"),
+    )
+    .unwrap();
+    let out = s.rdy(&["new", "doc", "fresh", "--title", "Fresh"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (ok, cli) = s.json(&args);
+    assert!(ok, "{cli}");
+    let mcp = c.call("rdy_publication_check", chat.clone()).ok();
+    assert_eq!(
+        keys_of(&mcp),
+        REPORT_KEYS,
+        "the notice is not a report key: {mcp}"
+    );
+    assert_eq!(cli, mcp);
+    assert_eq!(cli.to_string(), mcp.to_string());
+    // the notice is deferred, not lost: the next tool reply carries it
+    let next = c.call("rdy_overview", json!({})).ok();
+    assert!(
+        next["notice"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("pack_changed")),
+        "{next}"
+    );
+
+    // a standing pack error is repeated on every reply, and still stays out of the report
+    std::fs::write(packs.join("proj.yaml"), PACK_BAD).unwrap();
+    let out = s.rdy(&["new", "doc", "again", "--title", "Again"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.rdy(&args);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("notice: pack_error: "),
+        "the CLI prints the notice on stderr"
+    );
+    let cli: Value = serde_json::from_slice(&out.stdout).unwrap();
+    for _ in 0..2 {
+        let mcp = c.call("rdy_publication_check", chat.clone()).ok();
+        assert_eq!(keys_of(&mcp), REPORT_KEYS, "{mcp}");
+        assert_eq!(cli, mcp);
+    }
+}
+
 #[test]
 fn pub9_check_is_read_only_and_works_without_a_daemon() {
     let s = Served::new();
