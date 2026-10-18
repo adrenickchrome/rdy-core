@@ -9,6 +9,7 @@ pub mod clone;
 pub mod code_brief;
 pub mod code_index;
 mod config;
+pub mod config_edit;
 pub mod config_levels;
 pub mod consequence;
 pub mod coord_graph;

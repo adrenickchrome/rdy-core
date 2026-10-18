@@ -1,11 +1,11 @@
 //! The Unix side of `sys`: every item, each body the code it replaces.
 
 use std::ffi::OsStr;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -99,71 +99,26 @@ pub fn peer_pid(stream: &Stream) -> Option<u32> {
         .and_then(|p| u32::try_from(p).ok())
 }
 
-/// This process's effective uid.
-#[allow(unsafe_code)]
-pub fn own_uid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
-}
+/// This process's effective uid (moved to `rdy_store::pio`, re-exported here).
+pub use rdy_store::pio::own_uid;
 
 // 3. No-follow opens
 
-/// Opens `path` with `opts` and `O_NOFOLLOW`: a run-dir file that is a symlink is refused, never
-/// followed, so a checkout cannot point `.rdy/run/<file>` at a file elsewhere for rdy to write,
-/// chmod or read.
-pub fn open_no_follow(opts: &mut OpenOptions, path: &Path) -> io::Result<File> {
-    match opts.custom_flags(libc::O_NOFOLLOW).open(path) {
-        Ok(f) => Ok(f),
-        Err(e)
-            if e.raw_os_error() == Some(libc::ELOOP)
-                && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) =>
-        {
-            Err(io::Error::other(format!(
-                "{} is a symbolic link, which rdy does not follow",
-                path.display()
-            )))
-        }
-        Err(e) => Err(e),
-    }
-}
+/// Opening with `O_NOFOLLOW` (moved to `rdy_store::pio`, re-exported here): a run-dir file that
+/// is a symlink is refused, never followed.
+pub use rdy_store::pio::open_no_follow;
 
 // 4. Private files and directories
 
-/// Makes a file that `opts` creates private to this user (mode 0o600).
-pub fn private_file(opts: &mut OpenOptions) -> &mut OpenOptions {
-    opts.mode(0o600)
-}
-
-/// Sets the open file `f` to mode 0o600: a file left by an older run keeps its mode through
-/// open.
-pub fn make_private_file(f: &File) -> io::Result<()> {
-    f.set_permissions(fs::Permissions::from_mode(0o600))
-}
+/// Private files and directories, and a file's owner (moved to `rdy_store::pio`, re-exported
+/// here): modes 0o600 and 0o700.
+pub use rdy_store::pio::{
+    create_private_dir, is_private_dir, make_private_dir, make_private_file, owner, private_file,
+};
 
 /// Sets the file at `path` (the socket) to mode 0o600.
 pub fn make_private_path(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-/// Creates the directory `path` with mode 0o700; an existing `path` is an error, as with
-/// `DirBuilder::create`.
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new().mode(0o700).create(path)
-}
-
-/// Sets the directory `path` to mode 0o700.
-pub fn make_private_dir(path: &Path) -> io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-/// Whether `meta`'s mode is exactly 0o700.
-pub fn is_private_dir(meta: &Metadata) -> bool {
-    meta.permissions().mode() & 0o777 == 0o700
-}
-
-/// The uid that owns the file `meta` describes.
-pub fn owner(meta: &Metadata) -> u32 {
-    meta.uid()
 }
 
 /// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
