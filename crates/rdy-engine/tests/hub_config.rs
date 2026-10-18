@@ -562,8 +562,17 @@ fn hsa3_credential_codec_is_closed_and_bounded() {
     assert_eq!(f.get(&a), None);
     assert_eq!(f.len(), 2);
     // empty and missing files are an empty map
-    for empty in ["", "installs: {}\n", "# nothing\n"] {
+    for empty in ["", "installs: {}\n", "# nothing\n", "\n", "---\n"] {
         assert!(parse_credentials(empty.as_bytes()).unwrap().is_empty());
+    }
+    // an explicit null document is not an empty file: it fails closed
+    for null in ["null\n", "~\n", "---\nnull\n", "Null\n", "!!null ''\n"] {
+        let e = cred_err(null.as_bytes());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (E_CONFIG, CRED_MESSAGE, CRED_FIX),
+            "{null:?}"
+        );
     }
     assert_eq!(
         encode_credentials(&CredentialFile::default()).unwrap(),
@@ -913,4 +922,216 @@ fn hsa3_settings_updates_preserve_unrelated_values() {
         (E_LIMIT, "config input exceeds 16 origins")
     );
     assert_eq!(m, before, "refused edits change nothing");
+}
+
+#[test]
+fn hsa3_tagged_keys_fail_closed() {
+    // a tagged key is not a string key: refused before any setting, warning or value sees it
+    let user_only = format!("!label \"hub.installs.{O}.refresh_token\": {SENTINEL}\n");
+    for text in [
+        user_only.clone(),
+        format!("!label hub:\n  installs:\n    \"{O}\":\n      refresh_token: {SENTINEL}\n"),
+        format!("!label remotes:\n  origin: {{url: \"{O}\", mode: {SENTINEL}}}\n"),
+        format!("hub:\n  !label installs:\n    \"{O}\":\n      ca_file: {SENTINEL}\n"),
+        format!("later:\n  !label key: {SENTINEL}\n"),
+        format!("!label \"remotes.origin\": {SENTINEL}\n"),
+    ] {
+        let e = settings_err(text.as_bytes());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_CONFIG,
+                "config is not a valid bounded mapping",
+                SYNTAX_FIX
+            ),
+            "{text}"
+        );
+        assert!(!format!("{e:?}").contains(SENTINEL), "{e:?}");
+        // in each file: no warning, origin or merged value is built from it
+        let in_project = Fx::new(&text, None, None);
+        let in_local = Fx::new("", Some(&text), None);
+        let in_user = Fx::new("", None, Some(&text));
+        let uf = in_user.user_file().display().to_string();
+        for (fx, shown) in [
+            (&in_project, ".rdy.yaml"),
+            (&in_local, ".rdy/local.yaml"),
+            (&in_user, uf.as_str()),
+        ] {
+            let ufile = fx.user_file();
+            for e in [
+                effective(fx.project(), Some(&ufile)).unwrap_err(),
+                fx.load().unwrap_err(),
+            ] {
+                assert_eq!(
+                    (e.code, e.message.as_str(), e.fix.as_str()),
+                    (
+                        E_CONFIG,
+                        format!("config is not a valid bounded mapping in {shown}").as_str(),
+                        SYNTAX_FIX
+                    ),
+                    "{text}"
+                );
+                assert!(!format!("{e:?}").contains(SENTINEL), "{e:?}");
+            }
+            let lenient = effective_lenient(fx.project(), Some(&ufile));
+            let all = format!(
+                "{:?}{:?}{:?}",
+                lenient.origins, lenient.merged, lenient.warnings
+            );
+            assert!(!all.contains(SENTINEL), "{all}");
+        }
+    }
+    // the credential file too
+    for text in [
+        format!("installs:\n  !label \"{O}\": {{state: reauth_required}}\n"),
+        "!label installs: {}\n".to_string(),
+        ready_text("").replace("    handle: ada\n", "    !label handle: ada\n"),
+    ] {
+        let e = cred_err(text.as_bytes());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (E_CONFIG, CRED_MESSAGE, CRED_FIX),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn hsa3_settings_edits_refuse_containers_the_loader_ignores() {
+    let entry = |url: &str, mode| RemoteEntry {
+        url: RemoteUrl::parse(url).unwrap(),
+        mode,
+    };
+    let refused = |e: rdy_engine::RdyError, path: &str| {
+        assert_eq!(
+            (e.code, e.message, e.fix),
+            (
+                E_CONFIG,
+                format!("invalid value for {path}"),
+                format!("set {path} to a map within the stated limits")
+            )
+        );
+    };
+    // a remotes section that is not a plain mapping: the loader drops it, so an edit refuses
+    // it and changes nothing
+    for text in [
+        "remotes: !keep {old: {url: 'https://example.com', mode: publish}}\n",
+        "remotes: 5\n",
+    ] {
+        let mut m = parse_settings(format!("actor: human:ada\n{text}").as_bytes()).unwrap();
+        let before = m.clone();
+        for mode in [RemoteMode::Publish, RemoteMode::Share] {
+            let e =
+                set_remote(&mut m, "new", Some(entry("https://example.com/n", mode))).unwrap_err();
+            refused(e, "remotes");
+            assert_eq!(m, before, "{text}");
+        }
+        set_remote(&mut m, "old", None).unwrap();
+        assert_eq!(m, before, "nothing to remove: {text}");
+    }
+    // an empty section is no section
+    let mut m = parse_settings(b"remotes:\n").unwrap();
+    set_remote(&mut m, "a", Some(entry(O, RemoteMode::Share))).unwrap();
+    assert_eq!(m["remotes"]["a"]["mode"], Value::from("share"));
+    // a tagged entry is no share remote, as the loader reads it: another share remote is added
+    // beside it, and the entry stays
+    let mut m =
+        parse_settings(b"remotes:\n  old: !keep {url: 'https://example.com', mode: share}\n")
+            .unwrap();
+    set_remote(&mut m, "new", Some(entry(O, RemoteMode::Share))).unwrap();
+    assert!(m["remotes"].get("old").is_some());
+    assert_eq!(m["remotes"]["new"]["mode"], Value::from("share"));
+    // each container on the way to an install field
+    let o = Origin::parse(O).unwrap();
+    for (text, path) in [
+        "hub: !keep {installs: {}}\n".to_string(),
+        "hub: 1\n".to_string(),
+        "hub: {installs: !keep {}}\n".to_string(),
+        "hub: {installs: [1]}\n".to_string(),
+        format!("hub: {{installs: {{\"{O}\": !keep {{ca_file: /a.pem}}}}}}\n"),
+        format!("hub: {{installs: {{\"{O}\": x}}}}\n"),
+    ]
+    .into_iter()
+    .zip([
+        "hub".to_string(),
+        "hub".to_string(),
+        "hub.installs".to_string(),
+        "hub.installs".to_string(),
+        format!("hub.installs.{O}"),
+        format!("hub.installs.{O}"),
+    ]) {
+        let mut m = parse_settings(text.as_bytes()).unwrap();
+        let before = m.clone();
+        for field in [
+            InstallField::CaFile(Some(PathBuf::from("/ca.pem"))),
+            InstallField::PinnedOrigins(Some(vec![o.clone()])),
+        ] {
+            let e = set_install_field(&mut m, &o, field).unwrap_err();
+            refused(e, &path);
+            assert_eq!(m, before, "{text}");
+        }
+        for field in [
+            InstallField::CaFile(None),
+            InstallField::PinnedOrigins(None),
+        ] {
+            set_install_field(&mut m, &o, field).unwrap();
+            assert_eq!(m, before, "nothing to remove: {text}");
+        }
+    }
+    let mut m = parse_settings(b"hub:\n  installs:\n").unwrap();
+    set_install_field(
+        &mut m,
+        &o,
+        InstallField::CaFile(Some(PathBuf::from("/ca.pem"))),
+    )
+    .unwrap();
+    assert_eq!(m["hub"]["installs"][O]["ca_file"], Value::from("/ca.pem"));
+}
+
+#[test]
+fn hsa3_nested_dotted_hub_keys_name_only_safe_paths() {
+    // a dotted key below the top level is no setting either: its path is the static section,
+    // or hub.installs.credential for a reserved secret segment, and never the key itself
+    let text = format!(
+        "hub:\n  installs.{SENTINEL}/bad.refresh_token: ignored\n  installs.{SENTINEL}/bad: {SENTINEL}\n  installs:\n    \"{O}\":\n      ca_file: /ca.pem\n      ca_file.{SENTINEL}: x\n      pinned_origins.access_token: {SENTINEL}\n    {SENTINEL}/x.device_code: {SENTINEL}\nremotes:\n  origin:\n    url: \"{O}/team\"\n    mode: share\n    url.{SENTINEL}: x\n    mode.credential: x\n"
+    );
+    let fx = Fx::new("", None, Some(&text));
+    let c = fx.load().unwrap();
+    assert_eq!(
+        texts(&c.warnings),
+        [
+            pair("unknown hub setting hub.installs", "remove hub.installs"),
+            pair("unknown hub setting hub.installs", "remove hub.installs"),
+            pair(
+                "unknown hub setting hub.installs.credential",
+                "remove hub.installs.credential"
+            ),
+            pair(
+                "unknown hub setting hub.installs.credential",
+                "remove hub.installs.credential"
+            ),
+            pair(
+                "unknown hub setting hub.installs.credential",
+                "remove hub.installs.credential"
+            ),
+            pair(
+                "unknown hub setting hub.installs.credential",
+                "remove hub.installs.credential"
+            ),
+            pair("unknown hub setting remotes", "remove remotes"),
+        ]
+    );
+    // the valid settings beside them still apply
+    assert_eq!(c.remote("origin").map(|r| r.mode), Some(RemoteMode::Share));
+    assert_eq!(
+        c.install(&Origin::parse(O).unwrap())
+            .and_then(|i| i.ca_file.clone()),
+        Some(PathBuf::from("/ca.pem"))
+    );
+    let e = effective(fx.project(), Some(&fx.user_file())).unwrap();
+    let all = format!("{:?}{:?}{:?}", e.origins, e.merged, e.warnings);
+    assert!(!all.contains(SENTINEL), "{all}");
+    for secret in ["refresh_token", "access_token", "device_code"] {
+        assert!(!all.contains(secret), "{secret}: {all}");
+    }
 }

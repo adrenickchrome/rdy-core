@@ -13,7 +13,9 @@
 //! [`parse_credentials`] and [`encode_credentials`] read and write. Every helper here is pure: it
 //! never reads a path or logs its input, and the caller reads the bytes under its file lock. Both
 //! codecs bound their input (1 MiB, depth 32, 4096 entries a collection, 16384-byte scalars, no
-//! alias) before the semantic parse, and rely on serde_yaml_ng's own duplicate-key refusal.
+//! alias, no tagged key) before the semantic parse, and rely on serde_yaml_ng's own duplicate-key
+//! refusal. Encoding checks the same bounds on the borrowed value and writes through a buffer
+//! that stops at 1 MiB.
 use crate::config_levels::{
     self, LOCAL_FILE, Level, Origin as SettingOrigin, PROJECT_FILE, is_repo_name,
 };
@@ -28,7 +30,7 @@ use crate::hub_types::{
     check_user_code, token_form,
 };
 use rdy_schema::{Issue, Severity};
-use saphyr_parser::{Event, Parser};
+use saphyr_parser::{Event, Parser, ScalarStyle};
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::BTreeMap;
@@ -152,40 +154,54 @@ impl Refusal {
 }
 
 /// The resource checks the event scan makes before serde_yaml_ng builds a value: the text size,
-/// no alias, at most 32 nested collections, at most 4096 entries in one collection and at most
-/// 16384 bytes in one scalar. A syntax error the scan meets is [`Refusal::Syntax`].
-fn scan(text: &str) -> Result<(), Refusal> {
+/// no alias, no tagged mapping key, at most 32 nested collections, at most 4096 entries in one
+/// collection and at most 16384 bytes in one scalar. A syntax error the scan meets is
+/// [`Refusal::Syntax`]. `Ok(true)` when the text holds a node other than an empty plain
+/// scalar: an explicit `null` document, not an empty or comment-only one.
+fn scan(text: &str) -> Result<bool, Refusal> {
     if text.len() > MAX_CONFIG_BYTES {
         return Err(Refusal::Limit(MAX_CONFIG_BYTES, LimitUnit::Bytes));
     }
     // per open collection: whether it is a mapping, and the child nodes seen
     let mut open: Vec<(bool, usize)> = Vec::new();
+    let mut explicit = false;
     for ev in Parser::new_from_str(text) {
         let (ev, _) = ev.map_err(|_| Refusal::Syntax)?;
-        let child = |open: &mut Vec<(bool, usize)>| -> Result<(), Refusal> {
-            if let Some((map, n)) = open.last_mut() {
-                *n += 1;
-                let entries = if *map { n.div_ceil(2) } else { *n };
-                if entries > MAX_MEMBERS {
-                    return Err(Refusal::Limit(MAX_MEMBERS, LimitUnit::Entries));
-                }
+        // counts one node in its collection; whether it is a mapping key
+        let child = |open: &mut Vec<(bool, usize)>| -> Result<bool, Refusal> {
+            let Some((map, n)) = open.last_mut() else {
+                return Ok(false);
+            };
+            *n += 1;
+            let entries = if *map { n.div_ceil(2) } else { *n };
+            if entries > MAX_MEMBERS {
+                return Err(Refusal::Limit(MAX_MEMBERS, LimitUnit::Entries));
+            }
+            Ok(*map && *n % 2 == 1)
+        };
+        // a tagged key is not a string key: a key-based removal would miss it
+        let tagged_key = |key: bool, tag: bool| -> Result<(), Refusal> {
+            if key && tag {
+                return Err(Refusal::Syntax);
             }
             Ok(())
         };
         match ev {
             Event::Alias(_) => return Err(Refusal::Syntax),
-            Event::Scalar(s, ..) => {
-                child(&mut open)?;
+            Event::Scalar(s, style, _, tag) => {
+                tagged_key(child(&mut open)?, tag.is_some())?;
                 if s.len() > MAX_SCALAR_BYTES {
                     return Err(Refusal::Limit(MAX_SCALAR_BYTES, LimitUnit::Bytes));
                 }
+                explicit |= !s.is_empty() || style != ScalarStyle::Plain || tag.is_some();
             }
-            Event::SequenceStart(..) | Event::MappingStart(..) => {
-                child(&mut open)?;
+            Event::SequenceStart(_, ref tag) | Event::MappingStart(_, ref tag) => {
+                tagged_key(child(&mut open)?, tag.is_some())?;
                 open.push((matches!(ev, Event::MappingStart(..)), 0));
                 if open.len() > MAX_DEPTH {
                     return Err(Refusal::Limit(MAX_DEPTH, LimitUnit::Levels));
                 }
+                explicit = true;
             }
             Event::SequenceEnd | Event::MappingEnd => {
                 open.pop();
@@ -193,40 +209,32 @@ fn scan(text: &str) -> Result<(), Refusal> {
             _ => {}
         }
     }
-    Ok(())
+    Ok(explicit)
 }
 
 /// A YAML text as one value, after [`scan`]. serde_yaml_ng refuses a duplicate mapping key; its
 /// message is never kept.
 pub(crate) fn parse_bounded(text: &str) -> Result<Value, Refusal> {
-    scan(text)?;
-    serde_yaml_ng::from_str::<Value>(text).map_err(|_| Refusal::Syntax)
+    parse_explicit(text).map(|(v, _)| v)
+}
+
+/// [`parse_bounded`], and whether the text held a node: `false` for an empty or comment-only
+/// document, `true` for an explicit `null`.
+fn parse_explicit(text: &str) -> Result<(Value, bool), Refusal> {
+    let explicit = scan(text)?;
+    let value = serde_yaml_ng::from_str::<Value>(text).map_err(|_| Refusal::Syntax)?;
+    Ok((value, explicit))
 }
 
 /// The bounds of [`scan`] over a value about to be encoded; `depth` counts the collections
 /// around `v`.
 fn value_bounds(v: &Value, depth: usize) -> Result<(), RdyError> {
-    let nested = |len: usize| {
-        if depth + 1 > MAX_DEPTH {
-            return Err(config_limit(MAX_DEPTH, LimitUnit::Levels));
-        }
-        if len > MAX_MEMBERS {
-            return Err(config_limit(MAX_MEMBERS, LimitUnit::Entries));
-        }
-        Ok(())
-    };
     match v {
         Value::Sequence(items) => {
-            nested(items.len())?;
+            nested_bounds(items.len(), depth)?;
             items.iter().try_for_each(|i| value_bounds(i, depth + 1))
         }
-        Value::Mapping(m) => {
-            nested(m.len())?;
-            m.iter().try_for_each(|(k, v)| {
-                value_bounds(k, depth + 1)?;
-                value_bounds(v, depth + 1)
-            })
-        }
+        Value::Mapping(m) => mapping_bounds(m, depth),
         Value::String(s) if s.len() > MAX_SCALAR_BYTES => {
             Err(config_limit(MAX_SCALAR_BYTES, LimitUnit::Bytes))
         }
@@ -235,14 +243,94 @@ fn value_bounds(v: &Value, depth: usize) -> Result<(), RdyError> {
     }
 }
 
-/// `value` as YAML bytes within the bounds, or `invalid` when it does not encode.
-fn encode_bounded(value: &Value, invalid: fn() -> RdyError) -> Result<Vec<u8>, RdyError> {
-    value_bounds(value, 0)?;
-    let text = serde_yaml_ng::to_string(value).map_err(|_| invalid())?;
-    if text.len() > MAX_CONFIG_BYTES {
-        return Err(config_limit(MAX_CONFIG_BYTES, LimitUnit::Bytes));
+/// [`value_bounds`] of a borrowed mapping, so it need not be copied into a value first.
+fn mapping_bounds(m: &Mapping, depth: usize) -> Result<(), RdyError> {
+    nested_bounds(m.len(), depth)?;
+    m.iter().try_for_each(|(k, v)| {
+        value_bounds(k, depth + 1)?;
+        value_bounds(v, depth + 1)
+    })
+}
+
+/// A collection of `len` entries inside `depth` others.
+fn nested_bounds(len: usize, depth: usize) -> Result<(), RdyError> {
+    if depth + 1 > MAX_DEPTH {
+        return Err(config_limit(MAX_DEPTH, LimitUnit::Levels));
     }
-    Ok(text.into_bytes())
+    if len > MAX_MEMBERS {
+        return Err(config_limit(MAX_MEMBERS, LimitUnit::Entries));
+    }
+    Ok(())
+}
+
+/// `value` (already within the bounds) as YAML bytes, at most 1 MiB, or `invalid` when it does
+/// not encode.
+fn encode_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    invalid: fn() -> RdyError,
+) -> Result<Vec<u8>, RdyError> {
+    let mut out = BoundedBuf::new(MAX_CONFIG_BYTES);
+    write_bounded(value, &mut out, invalid)?;
+    Ok(out.buf)
+}
+
+/// An output buffer that never holds, or reserves, more than `limit` bytes: a write past it
+/// fails and is remembered.
+pub(crate) struct BoundedBuf {
+    buf: Vec<u8>,
+    limit: usize,
+    over: bool,
+}
+
+impl BoundedBuf {
+    pub(crate) fn new(limit: usize) -> BoundedBuf {
+        BoundedBuf {
+            buf: Vec::new(),
+            limit,
+            over: false,
+        }
+    }
+}
+
+impl std::io::Write for BoundedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let need = self
+            .buf
+            .len()
+            .checked_add(data.len())
+            .filter(|n| *n <= self.limit);
+        let Some(need) = need else {
+            self.over = true;
+            return Err(std::io::Error::other("over the output bound"));
+        };
+        if need > self.buf.capacity() {
+            // grow by doubling, but never past the limit
+            let target = need
+                .max(self.buf.capacity().saturating_mul(2))
+                .min(self.limit);
+            self.buf.reserve_exact(target - self.buf.len());
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `value` as YAML into `out`, which stops the encoder at its limit: past it is `E_LIMIT`, any
+/// other failure `invalid`. The encoder's own error text is never kept.
+pub(crate) fn write_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    out: &mut BoundedBuf,
+    invalid: fn() -> RdyError,
+) -> Result<(), RdyError> {
+    match serde_yaml_ng::to_writer(&mut *out, value) {
+        Ok(()) => Ok(()),
+        Err(_) if out.over => Err(config_limit(out.limit, LimitUnit::Bytes)),
+        Err(_) => Err(invalid()),
+    }
 }
 
 fn string_keyed(m: &Mapping) -> bool {
@@ -267,9 +355,11 @@ pub fn parse_settings(bytes: &[u8]) -> Result<Mapping, RdyError> {
     }
 }
 
-/// A settings mapping as YAML bytes, within the bounds. Comments are not kept.
+/// A settings mapping as YAML bytes, within the bounds. Comments are not kept. The borrowed
+/// mapping is checked, then written through a buffer that stops at 1 MiB; it is never copied.
 pub fn encode_settings(map: &Mapping) -> Result<Vec<u8>, RdyError> {
-    encode_bounded(&Value::Mapping(map.clone()), || settings_invalid(None))
+    mapping_bounds(map, 0)?;
+    encode_bounded(map, || settings_invalid(None))
 }
 
 /// Whether `s` is a remote name: 1 to 64 ASCII bytes, a letter or digit first, then letters,
@@ -321,23 +411,50 @@ impl RemoteEntry {
     }
 }
 
-/// The mapping at `key` of `m`, made when absent; a value that is not a mapping is replaced.
-fn child_map<'a>(m: &'a mut Mapping, key: &str) -> &'a mut Mapping {
-    let slot = m
-        .entry(Value::from(key))
-        .or_insert_with(|| Value::Mapping(Mapping::new()));
-    if !slot.is_mapping() {
+/// `E_CONFIG` for a settings section at `path` that the loader does not read as a mapping.
+fn container_invalid(path: &str) -> RdyError {
+    RdyError::new(
+        E_CONFIG,
+        format!("invalid value for {path}"),
+        format!("set {path} to {MAP_FORM}"),
+    )
+}
+
+/// The mapping at `key` of `m`, made when absent or null. Any other value, a tagged mapping
+/// included, is one the loader drops with a warning: it is `E_CONFIG` for `path`, and `m` is
+/// unchanged. (A section is only made when it was absent, so every section below it is absent
+/// too and a refusal never follows a change.)
+fn child_map<'a>(m: &'a mut Mapping, key: &str, path: &str) -> Result<&'a mut Mapping, RdyError> {
+    let slot = m.entry(Value::from(key)).or_insert(Value::Null);
+    if matches!(slot, Value::Null) {
         *slot = Value::Mapping(Mapping::new());
     }
     match slot {
-        Value::Mapping(inner) => inner,
-        _ => unreachable!("made a mapping above"),
+        Value::Mapping(inner) => Ok(inner),
+        _ => Err(container_invalid(path)),
     }
+}
+
+/// Whether `(k, v)` of a remotes section is a share remote as the loader reads it: a remote
+/// name, a plain mapping, a valid url and mode `share`.
+fn is_share_entry(k: &Value, v: &Value) -> bool {
+    let Value::Mapping(e) = v else {
+        return false;
+    };
+    k.as_str().is_some_and(is_remote_name)
+        && e.get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|u| RemoteUrl::parse(u).is_ok())
+        && e.get("mode")
+            .and_then(Value::as_str)
+            .and_then(RemoteMode::parse)
+            == Some(RemoteMode::Share)
 }
 
 /// Sets remote `name` of one settings mapping to `entry`, or removes it (and a `remotes` section
 /// it leaves empty). Every other value stays. A second share remote in the same mapping is
-/// `E_REMOTE_EXISTS`, and the mapping is unchanged.
+/// `E_REMOTE_EXISTS`, and a `remotes` section that is not a plain mapping `E_CONFIG`; the
+/// mapping is then unchanged.
 pub fn set_remote(
     map: &mut Mapping,
     name: &str,
@@ -349,19 +466,13 @@ pub fn set_remote(
     match entry {
         Some(e) => {
             let other_share = e.mode == RemoteMode::Share
-                && map
-                    .get(REMOTES_KEY)
-                    .and_then(Value::as_mapping)
-                    .is_some_and(|rs| {
-                        rs.iter().any(|(k, v)| {
-                            k.as_str() != Some(name)
-                                && v.get("mode").and_then(Value::as_str) == Some("share")
-                        })
-                    });
+                && matches!(map.get(REMOTES_KEY), Some(Value::Mapping(rs)) if rs
+                    .iter()
+                    .any(|(k, v)| k.as_str() != Some(name) && is_share_entry(k, v)));
             if other_share {
                 return Err(remote_exists());
             }
-            child_map(map, REMOTES_KEY).insert(Value::from(name), e.to_value());
+            child_map(map, REMOTES_KEY, REMOTES_KEY)?.insert(Value::from(name), e.to_value());
         }
         None => {
             if let Some(Value::Mapping(rs)) = map.get_mut(REMOTES_KEY) {
@@ -386,7 +497,8 @@ pub enum InstallField {
 
 /// Sets one field of `hub.installs.<install>` in one settings mapping, or removes it (and each
 /// section it leaves empty). Every other value stays. A value that is not the field's form is
-/// `E_BAD_INPUT`, more than 16 origins `E_LIMIT`; the mapping is then unchanged.
+/// `E_BAD_INPUT`, more than 16 origins `E_LIMIT`, and a section on the way that is not a plain
+/// mapping `E_CONFIG`; the mapping is then unchanged.
 pub fn set_install_field(
     map: &mut Mapping,
     install: &Origin,
@@ -415,8 +527,10 @@ pub fn set_install_field(
     };
     match value {
         Some(v) => {
-            let installs = child_map(child_map(map, HUB_KEY), "installs");
-            child_map(installs, install.as_str()).insert(Value::from(key), v);
+            let hub = child_map(map, HUB_KEY, HUB_KEY)?;
+            let installs = child_map(hub, "installs", HUB_INSTALLS_KEY)?;
+            let base = format!("{HUB_INSTALLS_KEY}.{install}");
+            child_map(installs, install.as_str(), &base)?.insert(Value::from(key), v);
         }
         None => {
             let Some(Value::Mapping(hub)) = map.get_mut(HUB_KEY) else {
@@ -509,10 +623,15 @@ impl Walk<'_> {
     }
 
     /// An unknown key `key` under `parent`, whose known keys are `known`: a reserved secret
-    /// spelling is [`SECRET_PATH`], whatever its parent.
+    /// spelling is [`SECRET_PATH`], whatever its parent, and a dotted key has the path of a
+    /// dotted key at the top level ([`dotted_path`]), never its own.
     fn unknown_key(&mut self, parent: &str, key: &str, known: &[&str]) {
         if SECRET_WORDS.contains(&key) {
             self.unknown(SECRET_PATH, None);
+            return;
+        }
+        if key.contains('.') {
+            self.unknown(dotted_path(&format!("{parent}.{key}")), None);
             return;
         }
         let near = nearest(key, known).map(|k| format!("{parent}.{k}"));
@@ -562,6 +681,7 @@ impl Walk<'_> {
                 Some(key) if SECRET_WORDS.contains(&key) => self.unknown(SECRET_PATH, None),
                 Some(key) => match canonical_origin(key) {
                     Some(origin) => self.install(origin, v),
+                    None if has_secret_segment(key) => self.unknown(SECRET_PATH, None),
                     None => self.invalid(HUB_INSTALLS_KEY, MAP_FORM),
                 },
                 None => self.invalid(HUB_INSTALLS_KEY, MAP_FORM),
@@ -671,10 +791,16 @@ fn origin_list(v: &Value) -> Option<Vec<Origin>> {
     (list.len() == n).then_some(list)
 }
 
-/// The diagnostic path of a top-level dotted key under the hub or remotes: a reserved secret
-/// spelling anywhere is [`SECRET_PATH`]; else only the static section, never a dynamic key.
+/// Whether a reserved secret spelling is one of `key`'s dot-separated segments.
+fn has_secret_segment(key: &str) -> bool {
+    key.split('.').any(|seg| SECRET_WORDS.contains(&seg))
+}
+
+/// The diagnostic path of a dotted key under the hub or remotes, as its full dotted path: a
+/// reserved secret spelling anywhere is [`SECRET_PATH`]; else only the static section, never a
+/// dynamic key.
 fn dotted_path(key: &str) -> &'static str {
-    if key.split('.').any(|seg| SECRET_WORDS.contains(&seg)) {
+    if has_secret_segment(key) {
         SECRET_PATH
     } else if key.starts_with("remotes.") {
         REMOTES_KEY
@@ -695,22 +821,31 @@ pub(crate) fn take_level(level: Level, map: &mut Mapping, file: &str) -> (LevelH
         part: LevelHub::default(),
         notes: Vec::new(),
     };
-    let dotted: Vec<String> = map
+    // each entry is removed by its own key, so a key that reads as one of these strings but is
+    // not a plain string (the parsers refuse a tagged key) cannot stay behind
+    let ours = |k: &str| {
+        k == HUB_KEY || k == REMOTES_KEY || k.starts_with("hub.") || k.starts_with("remotes.")
+    };
+    let keys: Vec<Value> = map
         .keys()
-        .filter_map(Value::as_str)
-        .filter(|k| k.starts_with("hub.") || k.starts_with("remotes."))
-        .map(str::to_string)
+        .filter(|k| k.as_str().is_some_and(ours))
+        .cloned()
         .collect();
-    for k in dotted {
-        map.shift_remove(k.as_str());
-        w.unknown(dotted_path(&k), None);
+    let mut hub = Vec::new();
+    let mut remotes = Vec::new();
+    for k in keys {
+        let Some(v) = map.shift_remove(&k) else {
+            continue;
+        };
+        match k.as_str() {
+            Some(HUB_KEY) => hub.push(v),
+            Some(REMOTES_KEY) => remotes.push(v),
+            Some(dotted) => w.unknown(dotted_path(dotted), None),
+            None => {}
+        }
     }
-    if let Some(v) = map.shift_remove(HUB_KEY) {
-        w.hub(v);
-    }
-    if let Some(v) = map.shift_remove(REMOTES_KEY) {
-        w.remotes(v);
-    }
+    hub.into_iter().for_each(|v| w.hub(v));
+    remotes.into_iter().for_each(|v| w.remotes(v));
     (w.part, w.notes)
 }
 
@@ -1219,8 +1354,9 @@ impl fmt::Debug for CredentialFile {
     }
 }
 
-/// The credential file's bytes. Empty bytes are an empty file. A syntax error, a duplicate or
-/// non-canonical origin, an alias, an explicit null, a missing field, a field of another state,
+/// The credential file's bytes. Empty or comment-only bytes are an empty file; an explicit null
+/// document is not. A syntax error, a duplicate or non-canonical origin, an alias, a tagged key,
+/// an explicit null, a missing field, a field of another state,
 /// a wrong state and a bad token, code or URI form are all the one `E_CONFIG` text; an unknown
 /// key is named only by its nearest known field; over the bounds or 32 installs is `E_LIMIT`. No
 /// error quotes the input.
@@ -1229,9 +1365,9 @@ pub fn parse_credentials(bytes: &[u8]) -> Result<CredentialFile, RdyError> {
         return Err(config_limit(MAX_CONFIG_BYTES, LimitUnit::Bytes));
     }
     let text = std::str::from_utf8(bytes).map_err(|_| credentials_invalid())?;
-    let top = match parse_bounded(text).map_err(|r| r.into_error(credentials_invalid))? {
-        Value::Null => return Ok(CredentialFile::default()),
-        Value::Mapping(m) => m,
+    let top = match parse_explicit(text).map_err(|r| r.into_error(credentials_invalid))? {
+        (Value::Null, false) => return Ok(CredentialFile::default()),
+        (Value::Mapping(m), _) => m,
         _ => return Err(credentials_invalid()),
     };
     let mut installs = None;
@@ -1341,5 +1477,53 @@ pub fn encode_credentials(file: &CredentialFile) -> Result<Vec<u8>, RdyError> {
     }
     let mut top = Mapping::new();
     top.insert(Value::from("installs"), Value::Mapping(installs));
-    encode_bounded(&Value::Mapping(top), credentials_invalid)
+    mapping_bounds(&top, 0)?;
+    encode_bounded(&top, credentials_invalid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hsa3_encoding_refuses_before_its_buffer_passes_the_bound() {
+        // 256 entries of 16384 bytes: inside the entry, depth and scalar bounds, 4 MiB encoded
+        let mut m = Mapping::new();
+        for i in 0..256 {
+            m.insert(
+                Value::from(format!("k{i:03}")),
+                Value::from("x".repeat(16384)),
+            );
+        }
+        let mut out = BoundedBuf::new(MAX_CONFIG_BYTES);
+        let e = write_bounded(&m, &mut out, || settings_invalid(None)).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "config input exceeds 1048576 bytes",
+                CONFIG_LIMIT_FIX
+            )
+        );
+        assert!(
+            out.buf.capacity() <= MAX_CONFIG_BYTES,
+            "the output buffer grew to {} bytes before the refusal",
+            out.buf.capacity()
+        );
+        // the public encoders go through it
+        assert_eq!(encode_settings(&m).unwrap_err().code, E_LIMIT);
+        // within the bound it is the whole encoding
+        let mut small = Mapping::new();
+        small.insert(Value::from("a"), Value::from("b"));
+        let mut out = BoundedBuf::new(MAX_CONFIG_BYTES);
+        write_bounded(&small, &mut out, || settings_invalid(None)).unwrap();
+        assert_eq!(out.buf, b"a: b\n");
+        // a limit met exactly is within it
+        let mut out = BoundedBuf::new(5);
+        write_bounded(&small, &mut out, || settings_invalid(None)).unwrap();
+        let mut out = BoundedBuf::new(4);
+        let e = write_bounded(&small, &mut out, || settings_invalid(None)).unwrap_err();
+        assert_eq!(e.message, "config input exceeds 4 bytes");
+        assert!(out.buf.capacity() <= 4);
+    }
 }

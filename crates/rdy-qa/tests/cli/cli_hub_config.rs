@@ -145,3 +145,73 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
     write(&uf, "actor: human:qa\n");
     rdy_qa::platform::set_mode(&cred, 0o600).unwrap();
 }
+
+#[test]
+fn hsa3_config_cli_refuses_tagged_keys_and_hides_nested_dotted_secrets() {
+    let s = Served::new();
+    let uf = s.user_config();
+    let project_file = s.dir.path().join(".rdy.yaml");
+    let original = std::fs::read_to_string(&project_file).unwrap();
+    // a tagged key names only its file, in every file and every view
+    for tagged in [
+        format!("!label \"hub.installs.{O}.refresh_token\": {SENTINEL}\n"),
+        format!("!label hub:\n  installs:\n    \"{O}\":\n      refresh_token: {SENTINEL}\n"),
+        format!("!label remotes:\n  origin: {{url: \"{O}\", mode: {SENTINEL}}}\n"),
+    ] {
+        std::fs::write(&project_file, format!("{original}{tagged}")).unwrap();
+        for args in [
+            &["config"][..],
+            &["config", "--json"],
+            &["config", "--show-origin"],
+        ] {
+            let (ok, out) = run_clean(&s, args);
+            assert!(!ok, "{out}");
+            assert!(
+                out.contains("config is not a valid bounded mapping in .rdy.yaml"),
+                "{args:?}: {out}"
+            );
+        }
+        run_clean(&s, &["status"]);
+        std::fs::write(&project_file, &original).unwrap();
+        write(&uf, &format!("actor: human:qa\n{tagged}"));
+        let (ok, out) = run_clean(&s, &["config", "--show-origin"]);
+        assert!(!ok, "{out}");
+        assert!(
+            out.contains(&format!(
+                "config is not a valid bounded mapping in {}",
+                uf.display()
+            )),
+            "{out}"
+        );
+        write(&uf, "actor: human:qa\n");
+    }
+    // a dotted key below the top level prints only a static path
+    write(
+        &uf,
+        &format!(
+            "actor: human:qa\nhub:\n  installs.{SENTINEL}/bad.refresh_token: ignored\n  installs.{SENTINEL}/bad: {SENTINEL}\n  installs:\n    \"{O}\":\n      ca_file: /etc/rdy/ca.pem\n      pinned_origins.access_token: {SENTINEL}\n"
+        ),
+    );
+    for args in [
+        &["config"][..],
+        &["config", "--json"],
+        &["config", "--show-origin"],
+        &["status"],
+    ] {
+        let (ok, out) = run_clean(&s, args);
+        assert!(ok, "{args:?}: {out}");
+        if args == ["config", "--show-origin"] {
+            for expected in [
+                "warning W_CONFIG_UNKNOWN: unknown hub setting hub.installs.credential; remove hub.installs.credential",
+                "warning W_CONFIG_UNKNOWN: unknown hub setting hub.installs; remove hub.installs",
+            ] {
+                assert!(out.contains(expected), "{expected}\n---\n{out}");
+            }
+            assert!(
+                !out.contains("refresh_token") && !out.contains("access_token"),
+                "{out}"
+            );
+        }
+    }
+    write(&uf, "actor: human:qa\n");
+}
