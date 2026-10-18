@@ -4,6 +4,7 @@
 //! Private and settings replacements reach every mode call through [`crate::pio`].
 use crate::pio;
 use std::cell::RefCell;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -145,78 +146,109 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 /// one raced in after the removal fails the write. Something that cannot be removed there (a
 /// directory) fails the write with an error that names the temp path.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    replace_durable(path, bytes, TempMode::Plain)
+    let tmp = temp_beside(path)?;
+    let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+    record(path);
+    sync_dir(parent_of(path))
 }
 
 /// As [`write_durable`], for a secret: the temp file is created private (mode 0o600, whatever
 /// the umask) before any byte is written, so the target ends 0o600. A failure before the rename
 /// removes the temp file and leaves the target as it was. A failure of the directory fsync after
-/// the rename is an error, with the new bytes possibly in place.
+/// the rename is an error, with the new bytes possibly in place. The parent directory is opened
+/// once (links in its path are followed), and every later step goes through that handle, as in
+/// [`replace_in_dir`].
 pub fn write_private_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    replace_durable(path, bytes, TempMode::Private)
+    let (dir, name) = open_parent(path)?;
+    replace_in_dir(&dir, parent_of(path), name, bytes, None)
 }
 
 /// As [`write_private_durable`], for a settings file: an existing regular file at `path` keeps
 /// its permissions (the temp file gets them before any byte is written); a new file is 0o600.
 pub fn write_settings_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let keep = match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_file() => Some(m.permissions()),
-        Ok(_) => None,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+    let (dir, name) = open_parent(path)?;
+    let keep = match pio::open_read_at(&dir, name) {
+        Ok(f) => {
+            let m = f.metadata()?;
+            m.is_file().then(|| m.permissions())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound || pio::is_link_refusal(&e) => None,
         Err(e) => return Err(e),
     };
-    replace_durable(path, bytes, TempMode::Settings(keep))
+    replace_in_dir(&dir, parent_of(path), name, bytes, keep.as_ref())
 }
 
-/// The mode of a replacement's temp file.
-enum TempMode {
-    /// No mode is set ([`write_durable`]): no probe, and no cleanup on failure.
-    Plain,
-    /// 0o600.
-    Private,
-    /// These permissions, or 0o600 when there are none.
-    Settings(Option<Permissions>),
+/// The open parent directory of `path`, and `path`'s file name.
+fn open_parent(path: &Path) -> io::Result<(File, &OsStr)> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    Ok((pio::open_dir(parent_of(path))?, name))
 }
 
-/// The one replacement: temp write, file sync, rename, directory sync.
-fn replace_durable(path: &Path, bytes: &[u8], mode: TempMode) -> io::Result<()> {
-    let parent = parent_of(path);
-    let tmp = temp_beside(path)?;
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    if let TempMode::Plain = mode {
-        let mut f = opts.open(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, path)?;
-        record(path);
-        return sync_dir(parent);
+/// Makes `bytes` the durable content of the entry `name` of the open directory `dir`: the
+/// private and settings replacement. Every step names an entry of `dir`, never a path, so a
+/// directory moved or replaced after `dir` was opened cannot redirect the write.
+///
+/// Whatever stands at the temp name `.<name>.tmp` is removed (a directory there fails the write),
+/// then the temp file is created new (`O_EXCL`, never through a link) and set to `perms` (an
+/// existing settings file's permissions) or to 0o600, before any byte is written. It is written,
+/// fsynced and renamed over `name`, then `dir` is fsynced. A failure before the rename removes the
+/// temp file and leaves the target as it was; a failure of the directory fsync is an error, with
+/// the new bytes possibly in place. `dir_path` names `dir` for the probe and the sync recorder only.
+pub fn replace_in_dir(
+    dir: &File,
+    dir_path: &Path,
+    name: &OsStr,
+    bytes: &[u8],
+    perms: Option<&Permissions>,
+) -> io::Result<()> {
+    let tmp_name = temp_name(name);
+    let tmp = dir_path.join(&tmp_name);
+    let target = dir_path.join(name);
+    match pio::remove_file_at(dir, &tmp_name) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot remove {} to write through it ({e}); move it aside",
+                    tmp.display()
+                ),
+            ));
+        }
+        _ => {}
     }
-    let f = pio::private_file(&mut opts).open(&tmp)?;
+    let f = pio::create_private_at(dir, &tmp_name)?;
     // from here the temp file is this call's: a failure before the rename removes it
-    let staged = stage_private(f, &tmp, path, bytes, mode);
+    let staged = stage_private(f, dir, &tmp, &tmp_name, name, bytes, perms);
     if let Err(e) = staged {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = pio::remove_file_at(dir, &tmp_name);
         return Err(e);
     }
-    record(path);
-    probe(PrivateWriteStage::Renamed, path)?;
-    sync_dir(parent)?;
-    probe(PrivateWriteStage::DirSynced, parent)
+    record(&target);
+    probe(PrivateWriteStage::Renamed, &target)?;
+    dir.sync_all()?;
+    record(dir_path);
+    probe(PrivateWriteStage::DirSynced, dir_path)
 }
 
-/// Sets the temp file's mode, writes and fsyncs it, then renames it over `path`.
+/// Sets the temp file's mode, writes and fsyncs it, then renames it over `name`.
 fn stage_private(
     mut f: File,
+    dir: &File,
     tmp: &Path,
-    path: &Path,
+    tmp_name: &OsStr,
+    name: &OsStr,
     bytes: &[u8],
-    mode: TempMode,
+    perms: Option<&Permissions>,
 ) -> io::Result<()> {
-    match mode {
-        TempMode::Settings(Some(keep)) => f.set_permissions(keep)?,
-        _ => pio::make_private_file(&f)?,
+    match perms {
+        Some(keep) => f.set_permissions(keep.clone())?,
+        None => pio::make_private_file(&f)?,
     }
     probe(PrivateWriteStage::Created, tmp)?;
     f.write_all(bytes)?;
@@ -224,7 +256,7 @@ fn stage_private(
     f.sync_all()?;
     probe(PrivateWriteStage::Synced, tmp)?;
     drop(f);
-    std::fs::rename(tmp, path)
+    pio::rename_at(dir, tmp_name, name)
 }
 
 /// As [`write_durable`] for many files at once, with the same temp-name rules and the same crash
@@ -271,10 +303,7 @@ fn temp_beside(path: &Path) -> io::Result<PathBuf> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(".tmp");
-    let tmp = parent_of(path).join(tmp_name);
+    let tmp = parent_of(path).join(temp_name(name));
     match std::fs::remove_file(&tmp) {
         // a directory (or anything else rdy cannot remove) at the temp name: the person moves it
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
@@ -286,6 +315,14 @@ fn temp_beside(path: &Path) -> io::Result<PathBuf> {
         )),
         _ => Ok(tmp),
     }
+}
+
+/// `.<name>.tmp`: the temp name of a replacement of `name`.
+fn temp_name(name: &OsStr) -> OsString {
+    let mut tmp = OsString::from(".");
+    tmp.push(name);
+    tmp.push(".tmp");
+    tmp
 }
 
 fn stage_all(

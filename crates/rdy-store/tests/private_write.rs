@@ -237,3 +237,125 @@ fn hsa2_pio_privacy_helpers_judge_files_by_owner_kind_and_mode() {
     pio::make_private_file(&file).unwrap();
     assert_eq!(mode(&d.path().join("new")), 0o600);
 }
+
+// Fix round 1: calls in an open directory.
+
+#[test]
+fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
+    use std::ffi::OsStr;
+    let d = tempfile::tempdir().unwrap();
+    let dir = pio::open_dir(d.path()).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::write(elsewhere.path().join("victim"), b"keep").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), d.path().join("ldir")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path().join("victim"), d.path().join("lfile")).unwrap();
+    fs::write(d.path().join("plain"), b"plain").unwrap();
+    // a link, or a file where a directory is opened, is a link refusal
+    for name in ["ldir", "plain"] {
+        let e = pio::open_dir_at(&dir, OsStr::new(name)).unwrap_err();
+        assert!(pio::is_link_refusal(&e), "{name}: {e}");
+    }
+    let e = pio::open_read_at(&dir, OsStr::new("lfile")).unwrap_err();
+    assert!(pio::is_link_refusal(&e), "{e}");
+    let e = pio::open_read_at(&dir, OsStr::new("missing")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    assert!(!pio::is_link_refusal(&e));
+    // create_new never follows a link at the entry
+    let e = pio::create_private_at(&dir, OsStr::new("lfile")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(elsewhere.path().join("victim")).unwrap(), b"keep");
+    // one entry name only
+    for bad in ["", ".", "..", "a/b"] {
+        let e = pio::open_read_at(&dir, OsStr::new(bad)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+    }
+    // a new directory, made 0700, then a file in it, renamed and removed through handles
+    pio::create_private_dir_at(&dir, OsStr::new("sub")).unwrap();
+    let e = pio::create_private_dir_at(&dir, OsStr::new("sub")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+    let sub = pio::open_dir_at(&dir, OsStr::new("sub")).unwrap();
+    fs::set_permissions(d.path().join("sub"), fs::Permissions::from_mode(0o500)).unwrap();
+    pio::make_private_open_dir(&sub).unwrap();
+    assert_eq!(mode(&d.path().join("sub")), 0o700);
+    let f = pio::create_private_at(&sub, OsStr::new("a")).unwrap();
+    pio::make_private_file(&f).unwrap();
+    drop(f);
+    // the directory's path changes; the handle still names the same directory
+    fs::rename(d.path().join("sub"), d.path().join("moved")).unwrap();
+    pio::rename_at(&sub, OsStr::new("a"), OsStr::new("b")).unwrap();
+    assert_eq!(names(&d.path().join("moved")), ["b"]);
+    let read = pio::open_read_at(&sub, OsStr::new("b")).unwrap();
+    assert!(pio::is_private_file(&read.metadata().unwrap()));
+    pio::remove_file_at(&sub, OsStr::new("b")).unwrap();
+    assert!(names(&d.path().join("moved")).is_empty());
+    // the mode tests
+    for (m, shared, owner_only) in [
+        (0o755, false, false),
+        (0o700, false, true),
+        (0o400, false, true),
+        (0o775, true, false),
+        (0o757, true, false),
+        (0o1777, true, false),
+        (0o640, false, false),
+    ] {
+        fs::set_permissions(d.path().join("plain"), fs::Permissions::from_mode(m)).unwrap();
+        let meta = fs::symlink_metadata(d.path().join("plain")).unwrap();
+        assert_eq!(pio::is_shared_writable(&meta), shared, "{m:o}");
+        assert_eq!(pio::is_owner_only(&meta), owner_only, "{m:o}");
+    }
+}
+
+#[test]
+fn hsa2_a_replacement_in_a_directory_handle_ignores_later_path_changes() {
+    use std::ffi::OsStr;
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir(d.path().join("a")).unwrap();
+    fs::create_dir(d.path().join("b")).unwrap();
+    fs::write(d.path().join("b/f.yaml"), b"b bytes").unwrap();
+    let a = pio::open_dir(&d.path().join("a")).unwrap();
+    // a is renamed aside and replaced by a link to b: the handle still writes into a
+    fs::rename(d.path().join("a"), d.path().join("a-aside")).unwrap();
+    std::os::unix::fs::symlink(d.path().join("b"), d.path().join("a")).unwrap();
+    let a_path = d.path().join("a");
+    let seen: std::rc::Rc<std::cell::RefCell<Vec<(PrivateWriteStage, PathBuf)>>> =
+        Default::default();
+    let log = seen.clone();
+    with_private_write_probe_for_tests(
+        move |stage, p: &Path| {
+            log.borrow_mut().push((stage, p.to_path_buf()));
+            Ok(())
+        },
+        || rdy_store::fsutil::replace_in_dir(&a, &a_path, OsStr::new("f.yaml"), b"new", None),
+    )
+    .unwrap();
+    assert_eq!(fs::read(d.path().join("a-aside/f.yaml")).unwrap(), b"new");
+    assert_eq!(mode(&d.path().join("a-aside/f.yaml")), 0o600);
+    assert_eq!(fs::read(d.path().join("b/f.yaml")).unwrap(), b"b bytes");
+    assert_eq!(names(&d.path().join("b")), ["f.yaml"]);
+    assert_eq!(names(&d.path().join("a-aside")), ["f.yaml"]);
+    // the probe is told the paths the handle had at open, for the record only
+    let a_path = d.path().join("a");
+    assert_eq!(
+        *seen.borrow(),
+        [
+            (PrivateWriteStage::Created, a_path.join(".f.yaml.tmp")),
+            (PrivateWriteStage::Written, a_path.join(".f.yaml.tmp")),
+            (PrivateWriteStage::Synced, a_path.join(".f.yaml.tmp")),
+            (PrivateWriteStage::Renamed, a_path.join("f.yaml")),
+            (PrivateWriteStage::DirSynced, a_path.clone()),
+        ]
+    );
+    // kept permissions are applied to the temp file before the bytes
+    let keep = fs::Permissions::from_mode(0o640);
+    let aside = pio::open_dir(&d.path().join("a-aside")).unwrap();
+    rdy_store::fsutil::replace_in_dir(
+        &aside,
+        &d.path().join("a-aside"),
+        OsStr::new("f.yaml"),
+        b"kept",
+        Some(&keep),
+    )
+    .unwrap();
+    assert_eq!(mode(&d.path().join("a-aside/f.yaml")), 0o640);
+    assert_eq!(fs::read(d.path().join("a-aside/f.yaml")).unwrap(), b"kept");
+}

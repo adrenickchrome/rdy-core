@@ -4,48 +4,83 @@
 //! A [`LockedConfig`] holds the exclusive lock of the file's stable sibling `<file>.lock` from
 //! [`LockedConfig::open`] until it is dropped, so two processes that edit one file take turns.
 //! The lock file is created private and is never unlinked, so every process locks the same
-//! file. The type knows bytes only: the caller selects the path, parses the bytes and keeps the
-//! values of other layers.
+//! file. The type knows bytes only: the caller selects the config home and the file below it,
+//! parses the bytes and keeps the values of other layers.
 //!
-//! The file, its lock and its parent directory must be this user's: a symbolic link at any of
-//! them, a target that is not a regular file and a foreign owner are refused. A secret file
-//! (`private`) must also be mode 0o600; a settings file keeps its mode through a replacement.
-//! Nothing here changes the mode of an existing file or directory.
+//! The caller's config home is trusted as given, links included. Below it, every directory,
+//! the file and its lock are opened one entry at a time without following links, and must be
+//! this user's: a symbolic link, a foreign owner and a target that is not a regular file are
+//! refused. The directory that holds the file must not be writable by group or others, so no
+//! other user can swap a temp file or the target. A secret file (`private`) must also be mode
+//! 0o600, and a lock must give group and others no access; a settings file keeps its mode
+//! through a replacement. Nothing here changes the mode of an existing file or directory; a
+//! directory this open makes is set to 0o700.
+//!
+//! The lock, the read and the replacement all go through the handle of the directory checked
+//! at open, so a path changed later cannot redirect them, and a replacement first checks that
+//! the path still leads to that directory.
 
 use crate::error::{E_IO, E_LIMIT, RdyError};
+use rdy_store::fileid::FileId;
 use rdy_store::{fsutil, pio};
-use std::fs::{self, File, OpenOptions};
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 /// A config file's bytes, read under its sibling lock, which is held until drop.
 pub struct LockedConfig {
-    path: PathBuf,
+    home: PathBuf,
+    rel: PathBuf,
     private: bool,
     limit: usize,
     bytes: Vec<u8>,
+    /// The directory that holds the file, as checked at open.
+    dir: File,
+    dir_id: FileId,
+    /// `dir`'s path at open, for the sync recorder and test probe only.
+    dir_path: PathBuf,
+    name: OsString,
     lock: File,
 }
 
 impl LockedConfig {
-    /// Locks `path` through `<path>.lock` (waiting for another holder), then reads the file.
-    /// A missing file reads as empty bytes and is not created. Missing parent directories are
-    /// created private, durably. `private` is true for a secret file, which must be mode 0o600.
-    /// A file over `limit` bytes is `E_LIMIT`.
-    pub fn open(path: &Path, private: bool, limit: usize) -> Result<LockedConfig, RdyError> {
-        let lock = lock_path(path)?;
-        ensure_parent(parent_of(path))?;
-        let lock = open_lock(&lock)?;
+    /// Locks the file `rel` below the config home `home` through `<file>.lock` (waiting for
+    /// another holder), then reads the file. `home` is the directory the caller selected (the
+    /// user config directory, or a project root); it must exist and is trusted as given.
+    /// `rel` is a plain relative path (no `.`, `..`, root or empty component), such as
+    /// `rdy/credentials.yaml`.
+    ///
+    /// A missing file reads as empty bytes and is not created. Missing directories below
+    /// `home` are created 0o700, durably. `private` is true for a secret file, which must be
+    /// mode 0o600. A file over `limit` bytes is `E_LIMIT`.
+    pub fn open(
+        home: &Path,
+        rel: &Path,
+        private: bool,
+        limit: usize,
+    ) -> Result<LockedConfig, RdyError> {
+        let (dirs, name) = split_rel(rel)?;
+        let (dir, dir_path) = walk(home, &dirs, true)?;
+        let dir_id = FileId::of_file(&dir).map_err(|_| save_failed())?;
+        let lock = open_lock(&dir, &lock_name(name))?;
         lock.lock().map_err(|_| save_failed())?;
         // the lock is held from here; dropping `held` releases it on every error below
         let mut held = LockedConfig {
-            path: path.to_path_buf(),
+            home: home.to_path_buf(),
+            rel: rel.to_path_buf(),
             private,
             limit,
             bytes: vec![],
+            dir,
+            dir_id,
+            dir_path,
+            name: name.to_os_string(),
             lock,
         };
-        held.bytes = read_target(path, private, limit)?;
+        // the wait for the lock may be long: the path must still lead to the same directory
+        held.check_bound()?;
+        held.bytes = read_target(&held.dir, &held.name, private, limit)?;
         Ok(held)
     }
 
@@ -57,20 +92,45 @@ impl LockedConfig {
     /// Replaces the file's bytes durably while the lock is held: the old bytes stay until the
     /// complete new bytes are renamed into place. A secret file ends 0o600; a settings file keeps
     /// its mode, and a new one is 0o600. Bytes over the limit are `E_LIMIT`, refused before any
-    /// temp file is made. A failure of the directory fsync after the rename is an error, with the
-    /// new bytes possibly in place.
+    /// temp file is made.
+    ///
+    /// The path must still lead to the directory checked at open, with the same checks, and a
+    /// link or other non-regular file at the target is refused, before any temp file is made.
+    /// The write goes through that directory's handle. If the path no longer leads to it after
+    /// the write, that is a privacy error, with the new bytes in the directory checked at open.
+    /// A failure of the directory fsync after the rename is an error, with the new bytes
+    /// possibly in place.
     pub fn replace(&mut self, bytes: &[u8]) -> Result<(), RdyError> {
         if bytes.len() > self.limit {
             return Err(too_large(self.limit));
         }
-        let written = if self.private {
-            fsutil::write_private_durable(&self.path, bytes)
-        } else {
-            fsutil::write_settings_durable(&self.path, bytes)
+        self.check_bound()?;
+        let keep = match pio::open_read_at(&self.dir, &self.name) {
+            Ok(f) => {
+                let m = f.metadata().map_err(|_| save_failed())?;
+                check_target(&m, self.private)?;
+                (!self.private).then(|| m.permissions())
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(open_failed(&e)),
         };
-        written.map_err(|_| save_failed())?;
+        fsutil::replace_in_dir(&self.dir, &self.dir_path, &self.name, bytes, keep.as_ref())
+            .map_err(|_| save_failed())?;
+        self.check_bound()?;
         self.bytes = bytes.to_vec();
         Ok(())
+    }
+
+    /// Whether the path from the home still leads to the directory checked at open, with every
+    /// check of [`walk`] passing again; nothing is created.
+    fn check_bound(&self) -> Result<(), RdyError> {
+        let (dirs, _) = split_rel(&self.rel)?;
+        let (dir, _) = walk(&self.home, &dirs, false)?;
+        match FileId::of_file(&dir) {
+            Ok(id) if id == self.dir_id => Ok(()),
+            Ok(_) => Err(not_private()),
+            Err(_) => Err(save_failed()),
+        }
     }
 }
 
@@ -109,129 +169,149 @@ fn too_large(limit: usize) -> RdyError {
     )
 }
 
-fn parent_of(path: &Path) -> &Path {
-    match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
+/// The directories of `rel` and its file name. `rel` must be valid UTF-8 and plain: relative,
+/// not empty, with no `.`, `..` or empty component (a programming error guard: callers pass
+/// constants).
+fn split_rel(rel: &Path) -> Result<(Vec<&OsStr>, &OsStr), RdyError> {
+    let text = rel.to_str().ok_or_else(not_private)?;
+    let mut parts: Vec<&OsStr> = vec![];
+    for part in text.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(not_private());
+        }
+        parts.push(OsStr::new(part));
     }
+    let name = parts.pop().ok_or_else(not_private)?;
+    Ok((parts, name))
 }
 
-/// `<path>.lock`.
-fn lock_path(path: &Path) -> Result<PathBuf, RdyError> {
-    let Some(name) = path.file_name() else {
-        return Err(save_failed());
-    };
+/// `<name>.lock`.
+fn lock_name(name: &OsStr) -> OsString {
     let mut lock = name.to_os_string();
     lock.push(".lock");
-    Ok(path.with_file_name(lock))
+    lock
 }
 
-/// Whether `m` is a real directory (not a link to one) that this user owns, in any mode.
-fn own_dir(m: &fs::Metadata) -> bool {
-    m.is_dir() && pio::owner(m) == pio::own_uid()
-}
-
-/// Checks the file's parent directory: an existing one is a real directory this user owns
-/// (any mode, never changed); a missing one is created, with its missing ancestors, private
-/// and durably.
-fn ensure_parent(parent: &Path) -> Result<(), RdyError> {
-    match fs::symlink_metadata(parent) {
-        Ok(m) if own_dir(&m) => Ok(()),
-        Ok(_) => Err(not_private()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => create_private_parents(parent),
-        Err(_) => Err(save_failed()),
-    }
-}
-
-/// Creates `dir` and its missing ancestors (mode 0o700), each followed by an fsync of its
-/// parent, nearest the root first. The existing ancestor they are made in is the config home
-/// or above it, which the caller selects; it is not judged.
-fn create_private_parents(dir: &Path) -> Result<(), RdyError> {
-    let mut missing = vec![];
-    let mut cur = Some(dir);
-    while let Some(d) = cur {
-        if d.as_os_str().is_empty() {
-            break;
-        }
-        match fs::metadata(d) {
-            Ok(m) if m.is_dir() => break,
-            Ok(_) => return Err(save_failed()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(d),
-            Err(_) => return Err(save_failed()),
-        }
-        cur = d.parent();
-    }
-    for d in missing.into_iter().rev() {
-        match pio::create_private_dir(d) {
-            Ok(()) => {}
-            // another process made it first; it is judged below as an existing parent
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(save_failed()),
-        }
-        fsutil::sync_dir(parent_of(d)).map_err(|_| save_failed())?;
-    }
-    match fs::symlink_metadata(dir) {
-        Ok(m) if own_dir(&m) => Ok(()),
-        Ok(_) => Err(not_private()),
-        Err(_) => Err(save_failed()),
-    }
-}
-
-/// Opens the lock file, never through a link; a new one is made 0o600 whatever the umask.
-fn open_lock(lock: &Path) -> Result<File, RdyError> {
-    let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create_new(true);
-    let (file, created) = match pio::open_no_follow(pio::private_file(&mut opts), lock) {
-        Ok(f) => (f, true),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let mut opts = OpenOptions::new();
-            opts.read(true).write(true);
-            match pio::open_no_follow(&mut opts, lock) {
-                Ok(f) => (f, false),
-                Err(_) => return Err(refused_or_failed(lock)),
+/// Opens `home` (links followed: the caller trusts it), then each of `dirs` below it, one entry
+/// at a time and never through a link. Each must be a directory this user owns that group and
+/// others cannot write; so must the last one, which holds the file, even when it is the home.
+/// With `create`, a missing directory is made, set to 0o700 and synced with its parent; without
+/// it, a missing directory means the path changed. Returns the last directory and its path.
+fn walk(home: &Path, dirs: &[&OsStr], create: bool) -> Result<(File, PathBuf), RdyError> {
+    let mut cur = pio::open_dir(home).map_err(|_| not_private())?;
+    let mut cur_path = home.to_path_buf();
+    for &part in dirs {
+        let next = match pio::open_dir_at(&cur, part) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
+                make_dir(&cur, &cur_path, part)?
             }
-        }
-        Err(_) => return Err(refused_or_failed(lock)),
-    };
-    if created {
-        pio::make_private_file(&file).map_err(|_| save_failed())?;
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_private()),
+            Err(e) => return Err(open_failed(&e)),
+        };
+        check_dir(&next)?;
+        cur = next;
+        cur_path.push(part);
     }
+    if dirs.is_empty() {
+        check_dir(&cur)?;
+    }
+    Ok((cur, cur_path))
+}
+
+/// Makes the directory `part` in `parent` (at `parent_path`) and opens it. A directory this
+/// call made is set to 0o700, whatever the umask, then synced with its parent. One that another
+/// process made first is opened and judged as an existing one; it is never chmodded.
+fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, RdyError> {
+    let made = match pio::create_private_dir_at(parent, part) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(_) => return Err(save_failed()),
+    };
+    let dir = match pio::open_dir_at(parent, part) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_private()),
+        Err(e) => return Err(open_failed(&e)),
+    };
+    if made {
+        // only a directory this user owns is set: one swapped in by another user is refused
+        let m = dir.metadata().map_err(|_| save_failed())?;
+        if pio::owner(&m) != pio::own_uid() {
+            return Err(not_private());
+        }
+        pio::make_private_open_dir(&dir).map_err(|_| save_failed())?;
+        dir.sync_all().map_err(|_| save_failed())?;
+        parent.sync_all().map_err(|_| save_failed())?;
+        fsutil::record(parent_path);
+    }
+    Ok(dir)
+}
+
+/// A directory of the config path: this user's, and not writable by group or others.
+fn check_dir(dir: &File) -> Result<(), RdyError> {
+    let m = dir.metadata().map_err(|_| save_failed())?;
+    if m.is_dir() && pio::owner(&m) == pio::own_uid() && !pio::is_shared_writable(&m) {
+        Ok(())
+    } else {
+        Err(not_private())
+    }
+}
+
+/// The target, judged from its open handle: a regular file this user owns, and 0o600 when
+/// `private`.
+fn check_target(m: &Metadata, private: bool) -> Result<(), RdyError> {
+    let ours = m.is_file() && pio::owner(m) == pio::own_uid();
+    if ours && (!private || pio::is_private_file(m)) {
+        Ok(())
+    } else {
+        Err(not_private())
+    }
+}
+
+/// The error of an open in a directory that failed for a reason other than a missing entry: a
+/// link (or a non-directory where a directory is needed) is refused as not private; anything
+/// else is a failed save.
+fn open_failed(e: &io::Error) -> RdyError {
+    if pio::is_link_refusal(e) {
+        not_private()
+    } else {
+        save_failed()
+    }
+}
+
+/// Opens the lock file `name` in `dir`, never through a link. A new one is made 0o600 whatever
+/// the umask. An existing one must be a regular file this user owns that gives group and others
+/// no access; it is opened for reading, which is all the lock needs, and never chmodded.
+fn open_lock(dir: &File, name: &OsStr) -> Result<File, RdyError> {
+    let file = match pio::create_private_at(dir, name) {
+        Ok(f) => {
+            pio::make_private_file(&f).map_err(|_| save_failed())?;
+            f
+        }
+        // whatever stands there, a link included, is opened without following it, and judged
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            pio::open_read_at(dir, name).map_err(|e| open_failed(&e))?
+        }
+        Err(e) => return Err(open_failed(&e)),
+    };
     let m = file.metadata().map_err(|_| save_failed())?;
-    if !m.is_file() || pio::owner(&m) != pio::own_uid() {
+    if !m.is_file() || pio::owner(&m) != pio::own_uid() || !pio::is_owner_only(&m) {
         return Err(not_private());
     }
     Ok(file)
 }
 
-/// The error of an open of `path` that failed: a link (or anything else that is not a regular
-/// file) at `path` is refused as not private; anything else is a failed save.
-fn refused_or_failed(path: &Path) -> RdyError {
-    match fs::symlink_metadata(path) {
-        Ok(m) if !m.is_file() => not_private(),
-        _ => save_failed(),
-    }
-}
-
-/// Reads the target under the lock: empty bytes when it is missing; at most `limit` bytes.
-fn read_target(path: &Path, private: bool, limit: usize) -> Result<Vec<u8>, RdyError> {
-    // judged before the open, so a FIFO or a device is never opened
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.is_file() => {}
-        Ok(_) => return Err(not_private()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(_) => return Err(save_failed()),
-    }
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    let file = match pio::open_no_follow(&mut opts, path) {
+/// Reads the target `name` in `dir` under the lock: empty bytes when it is missing; at most
+/// `limit` bytes. It is opened without following a link and without waiting on a FIFO, then
+/// judged from the handle.
+fn read_target(dir: &File, name: &OsStr, private: bool, limit: usize) -> Result<Vec<u8>, RdyError> {
+    let file = match pio::open_read_at(dir, name) {
         Ok(f) => f,
-        Err(_) => return Err(refused_or_failed(path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(open_failed(&e)),
     };
     let m = file.metadata().map_err(|_| save_failed())?;
-    let ours = m.is_file() && pio::owner(&m) == pio::own_uid();
-    if !ours || (private && !pio::is_private_file(&m)) {
-        return Err(not_private());
-    }
+    check_target(&m, private)?;
     let cap = u64::try_from(limit)
         .ok()
         .and_then(|l| l.checked_add(1))
