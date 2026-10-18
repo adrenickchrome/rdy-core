@@ -270,6 +270,59 @@ fn assert_no_change(d: &DisclosureDiff, what: &str) {
     assert_eq!(d.before_selection_hash, d.after_selection_hash, "{what}");
 }
 
+/// A closed store holding doc `top/plan` with two prose blocks and a figure whose blob shares
+/// its one full chunk with `removed_blob`, all selected by the public profile `pubsite`.
+struct RedactionStore {
+    dir: tempfile::TempDir,
+    doc: BlockId,
+    prose: BlockId,
+    figure: BlockId,
+    removed_blob: Hash,
+    shared_blob: Hash,
+    before: Resolved,
+}
+
+fn redaction_store() -> RedactionStore {
+    let (dir, mut r) = project();
+    let removed_bytes = vec![7u8; 1 << 20];
+    let mut shared_bytes = removed_bytes.clone();
+    shared_bytes.extend_from_slice(b"tail");
+    let removed_blob = r.store_mut().put_blob(&removed_bytes).unwrap();
+    let shared_blob = r.store_mut().put_blob(&shared_bytes).unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$top", "fields": {"name": "top"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$top", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p1", "parent": "$d", "body": "CANARY body."},
+            {"op": "create", "type": "prose", "id": "$p2", "parent": "$d", "body": "Readable sibling."},
+            {"op": "create", "type": "figure", "id": "$f", "parent": "$d", "fields": {"blob": shared_blob.to_string(), "media_type": "application/octet-stream", "alt": "shared"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let (d_id, p1, f) = (created(&w, "$d"), created(&w, "$p1"), created(&w, "$f"));
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "publication_profile", "id": "$pf", "parent": created(&w, "$admin").to_string(),
+            "fields": {"key": "pubsite", "title": "Site", "audience": "public", "select": [d_id.to_string()]}}]),
+    );
+    land(&mut r, "work");
+    let before = publication::resolve(&r.read(), &Scope::Canon, "pubsite").unwrap();
+    assert!(att_entry(&before, f.as_str()).available);
+    r.close().unwrap();
+    RedactionStore {
+        dir,
+        doc: d_id,
+        prose: p1,
+        figure: f,
+        removed_blob,
+        shared_blob,
+        before,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // tests
 
@@ -480,36 +533,73 @@ fn pub7_child_asset_path_and_redaction_changes_are_visible() {
     drop(st);
     drop(r);
 
+    // [RD] in a store, availability alone: removing only the figure's blob keeps every block
+    // entry, path, blob hash and home doc, and still changes the owning doc's digest
+    let iso = redaction_store();
+    let fixture = authorized_batch_fixture(
+        &iso.dir.path().join(".rdy/store"),
+        &[RequestSpec::new(
+            "redact blob",
+            vec![RedactTarget::Blob(iso.shared_blob)],
+        )],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    assert_eq!(fixture.requests.len(), 1);
+    let r = Rdy::open(iso.dir.path()).unwrap();
+    let after = publication::resolve(&r.read(), &Scope::Canon, "pubsite").unwrap();
+    let before = &iso.before;
+    assert_eq!(after.entries, before.entries, "no block entry changes");
+    let (b_doc, a_doc) = (
+        doc_entry(before, iso.doc.as_str()),
+        doc_entry(&after, iso.doc.as_str()),
+    );
+    assert_eq!(b_doc.path, a_doc.path);
+    let (b_att, a_att) = (
+        att_entry(before, iso.figure.as_str()),
+        att_entry(&after, iso.figure.as_str()),
+    );
+    assert_eq!(
+        (&b_att.blob, &b_att.home_doc),
+        (&a_att.blob, &a_att.home_doc)
+    );
+    assert_eq!((b_att.available, a_att.available), (true, false));
+    assert_ne!(
+        b_doc.digest, a_doc.digest,
+        "availability alone changes the doc digest"
+    );
+    let d = diff(before, &after);
+    assert_eq!(
+        d.changed_docs,
+        vec![changed_doc(before, &after, iso.doc.as_str())]
+    );
+    assert_eq!(
+        d.changed_attachments,
+        vec![ChangedAttachment {
+            block: iso.figure.clone(),
+            before_home_doc: iso.doc.clone(),
+            after_home_doc: iso.doc.clone(),
+            before_blob: iso.shared_blob,
+            after_blob: iso.shared_blob,
+            before_available: true,
+            after_available: false,
+        }]
+    );
+    assert!(d.added_docs.is_empty() && d.removed_docs.is_empty());
+    assert!(d.added_attachments.is_empty() && d.removed_attachments.is_empty());
+    assert!(d.changed_folders.is_empty() && d.new_references.is_empty());
+    assert!(!d.profile_changed);
+    drop(r);
+
     // [RD] in a store: a redaction changes the request and the shared blob's availability
-    let (dir, mut r) = project();
-    let removed_bytes = vec![7u8; 1 << 20];
-    let mut shared_bytes = removed_bytes.clone();
-    shared_bytes.extend_from_slice(b"tail");
-    let removed_blob = r.store_mut().put_blob(&removed_bytes).unwrap();
-    let shared_blob = r.store_mut().put_blob(&shared_bytes).unwrap();
-    let w = write(
-        &mut r,
-        "work",
-        json!([
-            {"op": "create", "type": "folder", "id": "$top", "fields": {"name": "top"}},
-            {"op": "create", "type": "doc", "id": "$d", "parent": "$top", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
-            {"op": "create", "type": "prose", "id": "$p1", "parent": "$d", "body": "CANARY body."},
-            {"op": "create", "type": "prose", "id": "$p2", "parent": "$d", "body": "Readable sibling."},
-            {"op": "create", "type": "figure", "id": "$f", "parent": "$d", "fields": {"blob": shared_blob.to_string(), "media_type": "application/octet-stream", "alt": "shared"}},
-            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
-        ]),
-    );
-    let (d_id, p1, f) = (created(&w, "$d"), created(&w, "$p1"), created(&w, "$f"));
-    write(
-        &mut r,
-        "work",
-        json!([{"op": "create", "type": "publication_profile", "id": "$pf", "parent": created(&w, "$admin").to_string(),
-            "fields": {"key": "pubsite", "title": "Site", "audience": "public", "select": [d_id.to_string()]}}]),
-    );
-    land(&mut r, "work");
-    let before = publication::resolve(&r.read(), &Scope::Canon, "pubsite").unwrap();
-    assert!(att_entry(&before, f.as_str()).available);
-    r.close().unwrap();
+    let RedactionStore {
+        dir,
+        doc: d_id,
+        prose: p1,
+        figure: f,
+        removed_blob,
+        shared_blob,
+        before,
+    } = redaction_store();
     let fixture = authorized_batch_fixture(
         &dir.path().join(".rdy/store"),
         &[RequestSpec::new(
