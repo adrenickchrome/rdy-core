@@ -163,6 +163,16 @@ impl Cx<'_> {
         )
     }
 
+    /// The words of a superseded part: as written, escaped, for a source output; for a named
+    /// profile its references read as plain words through the selection (display words, else
+    /// the target's label, else `unavailable`), never a token.
+    fn part(&self, part: &str) -> String {
+        match self.local_link {
+            None => html::escape(part),
+            Some(_) => html::words_html(part, self.link, self.unavailable),
+        }
+    }
+
     fn at<'b>(&self, d: &'b Block) -> Option<&'b str> {
         d.field_str("decided_at")
     }
@@ -327,7 +337,7 @@ impl Cx<'_> {
                                 &format!("{}/{part}", y.id),
                                 format!(
                                     "Partly superseded ({}): {}{}",
-                                    html::escape(part),
+                                    self.part(part),
                                     self.html(y, &new),
                                     stop(&new)
                                 ),

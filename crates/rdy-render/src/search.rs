@@ -171,7 +171,10 @@ fn own_text_in(b: &Block, r: Read) -> String {
             format!("{}: {}", r.field(b, "name"), body())
         }
         "value" => {
-            let v = r.raw(&entity::value_text(b).unwrap_or_default());
+            let v = r.raw(
+                &r.site
+                    .as_written(&entity::value_text(b).unwrap_or_default()),
+            );
             format!("{}: {v} {}", r.field(b, "name"), body())
                 .trim_end()
                 .to_string()

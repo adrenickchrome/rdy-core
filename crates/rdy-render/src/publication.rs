@@ -66,8 +66,16 @@ pub(crate) fn prepare(
     // a figure whose blob lost content reads as removed from here on, as in source preparation
     let m = blobs.project(Arc::new(m));
     let pack = read.pack().clone();
-    let site_name = chosen.title.clone();
-    let description = chosen.description.clone();
+    // the profile's title and description read their references through the selection, as every
+    // other text does: display words kept, else the target's label, else `unavailable reference`
+    // (the profile's own doc need not be selected)
+    let (site_name, description) = {
+        let words = Site::with_unavailable(&m, &pack, "", Some(inline::UNAVAILABLE));
+        (
+            words.as_written(&chosen.title),
+            chosen.description.as_deref().map(|d| words.as_written(d)),
+        )
+    };
     let site = Site::with_unavailable(&m, &pack, &site_name, Some(inline::UNAVAILABLE));
     // an entry stays only when every side is selected and has a page: an excluded side's text,
     // count or existence never reaches the page (canon and the head landing; an older landing

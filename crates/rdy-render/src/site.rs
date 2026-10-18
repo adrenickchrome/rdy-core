@@ -915,7 +915,7 @@ impl<'a> Site<'a> {
             return CONTENT_REMOVED.to_string();
         }
         if let Some(v) = entity::value_text(b) {
-            return v;
+            return self.as_written_at(&v, depth);
         }
         let tree = tree::is_tree_type(&b.block_type);
         let said = b
@@ -932,7 +932,10 @@ impl<'a> Site<'a> {
             None if b.block_type == "code" => {
                 let k = self.number(b);
                 match b.field_str("lang").filter(|l| !l.trim().is_empty()) {
-                    Some(l) => format!("{} code {k}", crate::highlight::human_name(l)),
+                    Some(l) => format!(
+                        "{} code {k}",
+                        crate::highlight::human_name(&self.as_written_at(l, depth))
+                    ),
                     None => format!("Code {k}"),
                 }
             }
@@ -968,6 +971,23 @@ impl<'a> Site<'a> {
         self.plain(text, RefMode::Strict, Form::Label, depth, &|_| {
             crate::html::UNRESOLVED.to_string()
         })
+    }
+
+    /// A field read as written (a value and its unit, a code language, a profile's title):
+    /// unchanged for a source output; for a named profile, each reference in it reads as
+    /// [`Site::ref_text`] says (the display words, the target's key or label, else the profile's
+    /// unavailable words), never its token, and nothing else changes but `\{{` as `{{`.
+    pub(crate) fn as_written(&self, text: &str) -> String {
+        self.as_written_at(text, 0)
+    }
+
+    fn as_written_at(&self, text: &str, depth: usize) -> String {
+        match self.unavailable {
+            None => text.to_string(),
+            Some(_) => inline::source_plain(text, RefMode::Strict, &|span| {
+                self.ref_text(span, depth, &|_| String::new())
+            }),
+        }
     }
 
     /// `text` as plain words in `form` ([`inline::plain_refs_every`]): a reference reads as

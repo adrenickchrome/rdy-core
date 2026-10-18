@@ -595,7 +595,14 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
             {"op": "create", "type": "figure", "parent": "$rs", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "Alt {{$hp}}"}},
             {"op": "create", "type": "diagram", "parent": "$rs", "fields": {"lang": "mermaid", "alt": "Diagram alt {{$hp}}"}, "body": "graph TD\n  A[{{$hp}}] --> B[{{$hs|Diagram display}}]"},
             {"op": "create", "type": "term", "parent": "$rs", "fields": {"name": "Glossed term"}, "body": "Defined via {{$ht}}."},
-            {"op": "create", "type": "question", "parent": "$rs", "fields": {"prompt": "Ask about {{$hp}}?"}}
+            {"op": "create", "type": "question", "parent": "$rs", "fields": {"prompt": "Ask about {{$hp}}?"}},
+            // fields read as written: a value and its unit, an alias, an entity's kind, a code
+            // language, and a prose reference to the value, which reads as its value
+            {"op": "create", "type": "value", "id": "$val", "parent": "$rs", "fields": {"name": "Budget", "value": "5 {{$hp}}", "unit": "per {{$hs|Unit words}}"}},
+            {"op": "create", "type": "prose", "parent": "$rs", "body": "See VALREF {{$val}} now."},
+            {"op": "create", "type": "term", "parent": "$rs", "fields": {"name": "Aliased term", "aliases": ["Alias {{$hp}}", "Shown {{$hp|Alias words}}"]}, "body": "Has aliases."},
+            {"op": "create", "type": "entity", "parent": "$rs", "fields": {"name": "Kinded thing", "kind": "kind {{$hp}}"}, "body": "Has a kind."},
+            {"op": "create", "type": "code", "parent": "$rs", "fields": {"lang": "{{$hp}}"}, "body": "x = 1"}
         ]),
     );
     land(&mut r, "w1").unwrap();
@@ -668,6 +675,12 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
         format!("A[{u}] --&gt; B[Diagram display]"),
         format!("<p>Missing {u} here.</p>"),
         format!("Ask about {u}?"),
+        format!("<p class=\"entity-value\">5 {u} per Unit words</p>"),
+        format!(">5 {u} per Unit words</a> now."),
+        format!("<p class=\"entity-aliases\">Also: Alias {u}, Shown Alias words</p>"),
+        format!("<span class=\"marker\">Kind {u}</span>"),
+        "<span class=\"lang\">Unavailable reference</span>".to_string(),
+        format!("class=\"language-{u}\""),
     ] {
         assert!(refs.contains(&want), "{want}\n{refs}");
     }
@@ -693,6 +706,166 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
     assert!(
         page(&s, "llms-full.txt").contains(&format!("Explicit Shown display words and bare {u}"))
     );
+    // a field read as written reads its references the same way on every surface
+    let value = format!("5 {u} per Unit words");
+    assert!(
+        page(&s, "search-index.json").contains(&format!("Budget: {value}")),
+        "search"
+    );
+    assert!(
+        refs.contains(&format!("See VALREF {value} now.")),
+        "data-ref"
+    );
+    assert!(page(&s, "llms-full.txt").contains(&value), "llms-full");
+    assert!(
+        holding(&s, &value).iter().any(|p| p.starts_with("go/")),
+        "permalink"
+    );
+    // the source reads these fields as written, as before
+    let full = build_site(&st, &Scope::Canon, rdy_render::Mode::Static).unwrap();
+    let source = page(&full, "refs.html");
+    let hp = ids["$hp"].to_string();
+    for want in [
+        format!(
+            "<p class=\"entity-value\">5 {{{{{hp}}}}} per {{{{{}|Unit words}}}}</p>",
+            ids["$hs"]
+        ),
+        format!("Also: Alias {{{{{hp}}}}}, Shown {{{{{hp}|Alias words}}}}"),
+        format!("class=\"language-{{{{{hp}}}}}\""),
+    ] {
+        assert!(source.contains(&want), "{want}\n{source}");
+    }
+}
+
+/// Fix round 1: the profile's own title and description read their references through the
+/// selection, though the profile's home doc is excluded; the source keeps the project's name.
+#[test]
+fn pub6_profile_metadata_reads_references_through_the_selection() {
+    let (_dir, mut r) = tiny();
+    let ids = put_land(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$hid", "fields": {"name": "hidden", "title": "HIDDENCANARY doc", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$hp", "parent": "$hid", "body": "HIDDENCANARY prose."},
+            {"op": "create", "type": "doc", "id": "$pub", "fields": {"name": "shown", "title": "Shown page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$pub", "body": "Shown words."}
+        ]),
+    );
+    let (hp, shown) = (ids["$hp"].to_string(), &ids["$pub"]);
+    let admin = put(
+        &mut r,
+        "admin",
+        json!([{"op": "create", "type": "doc", "id": "$admin",
+            "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}]),
+    )["$admin"]
+        .clone();
+    let mut op = profile_op("meta", "org", &admin, &[shown]);
+    op["fields"]["title"] = json!(format!("Guide {{{{{hp}}}}}"));
+    op["fields"]["description"] = json!(format!("Description {{{{{hp}|Author words}}}}"));
+    put(&mut r, "admin", json!([op]));
+    land(&mut r, "admin").expect("land the profile");
+    let st = r.read();
+    let s = site(&st, "canon", "meta");
+    for word in ["HIDDENCANARY", hp.as_str(), "Admin page", "{{"] {
+        assert_absent_pages(&s, word);
+    }
+    let u = UNAVAILABLE;
+    let (title, description) = (format!("Guide {u}"), "Description Author words");
+    let home = page(&s, "index.html");
+    assert!(home.contains(&title), "{home}");
+    assert!(home.contains(description), "{home}");
+    assert!(page(&s, "shown.html").contains(&title));
+    for llms in ["llms.txt", "llms-full.txt"] {
+        let t = page(&s, llms);
+        assert!(
+            t.starts_with(&format!("# {title}\n\n> {description}\n")),
+            "{t}"
+        );
+    }
+    // the source names the project, never the profile
+    let full = build_site(&st, &Scope::Canon, rdy_render::Mode::Static).unwrap();
+    assert!(page(&full, "llms.txt").starts_with("# Tiny\n"));
+    assert_eq!(holding(&full, "Author words"), Vec::<String>::new());
+}
+
+/// Fix round 1: a partial supersession's part reads its references through the selection, with
+/// the author's display words kept; the source trail keeps its existing text.
+#[test]
+fn pub6_partial_supersession_reads_references_through_the_selection() {
+    let (_dir, mut r) = tiny();
+    let ids = put(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$hid", "fields": {"name": "hidden", "title": "HIDDENCANARY doc", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$hp", "parent": "$hid", "body": "HIDDENCANARY prose."},
+            {"op": "create", "type": "doc", "id": "$gov", "fields": {"name": "governed", "title": "Governed page", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$gs", "parent": "$gov", "fields": {"title": "Governed section"}},
+            {"op": "create", "type": "prose", "id": "$gp", "parent": "$gs", "body": "Governed words."}
+        ]),
+    );
+    let hp = ids["$hp"].to_string();
+    let old = r
+        .decide(
+            &writer(),
+            "w1",
+            rdy_engine::DecisionInput {
+                parent: ids["$gs"].to_string(),
+                statement: format!("Rule {{{{{hp}}}}} and clause {{{{{hp}|Clause words}}}}."),
+                affects: vec![ids["$gp"].to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let old = old.created["$decision"].clone();
+    land(&mut r, "w1").unwrap();
+    for (view, part, statement) in [
+        ("w2", format!("Rule {{{{{hp}}}}}"), "Replacement rule."),
+        (
+            "w3",
+            format!("clause {{{{{hp}|Part words}}}}"),
+            "Replacement clause.",
+        ),
+    ] {
+        r.supersede(
+            &writer(),
+            view,
+            &old,
+            Some(part),
+            rdy_engine::DecisionInput {
+                parent: ids["$gs"].to_string(),
+                statement: statement.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        land(&mut r, view).unwrap();
+    }
+    profiles(&mut r, &[("trailorg", "org", vec![&ids["$gov"]])]);
+    let st = r.read();
+    // the source trail reads the part as written, as before
+    let full = build_site(&st, &Scope::Canon, rdy_render::Mode::Static).unwrap();
+    assert!(
+        page(&full, "governed.html").contains(&format!(
+            "Partly superseded (Rule {{{{{hp}}}}}): Replacement rule."
+        )),
+        "source"
+    );
+
+    let s = site(&st, "canon", "trailorg");
+    for word in ["HIDDENCANARY", hp.as_str()] {
+        assert_absent(&s, word);
+    }
+    let u = UNAVAILABLE;
+    let gov = page(&s, "governed.html");
+    for want in [
+        format!("Rule {u} and clause Clause words."),
+        format!("Partly superseded (Rule {u}): Replacement rule."),
+        "Partly superseded (clause Part words): Replacement clause.".to_string(),
+    ] {
+        assert!(gov.contains(&want), "{want}\n{gov}");
+    }
 }
 
 // --- 5. authored local links --------------------------------------------------------------------
@@ -703,6 +876,10 @@ fn pub6_authored_local_links_cannot_reach_excluded_output() {
     let ok_2048 = format!("{}b.html", "./".repeat(1021));
     assert_eq!(ok_2048.len(), 2048);
     let long_2049 = format!("{ok_2048}#");
+    // an external target is bounded the same way, in UTF-8 bytes
+    let ext_2048 = format!("https://example.com/é{}", "a".repeat(2048 - 22));
+    assert_eq!(ext_2048.len(), 2048);
+    let ext_2049 = format!("{ext_2048}a");
     let body = [
         "[LINK01](b.html)",
         "[LINK02](b.html#target-section)",
@@ -722,6 +899,8 @@ fn pub6_authored_local_links_cannot_reach_excluded_output() {
         "[LINK16](#own-section)",
         "[LINK17](../secret.html#hidden-section)",
         "[LINK18](../index.html)",
+        &format!("[LINK19]({ext_2048})"),
+        &format!("[LINK20]({ext_2049})"),
     ]
     .join(" ");
     let ids = put(
@@ -748,6 +927,10 @@ fn pub6_authored_local_links_cannot_reach_excluded_output() {
         link_of(&page(&full, "docs/a.html"), "LINK05").as_deref(),
         Some("../secret.html")
     );
+    assert_eq!(
+        link_of(&page(&full, "docs/a.html"), "LINK20").as_deref(),
+        Some(ext_2049.as_str())
+    );
 
     let s = site(&st, "canon", "links");
     let a = page(&s, "docs/a.html");
@@ -770,6 +953,8 @@ fn pub6_authored_local_links_cannot_reach_excluded_output() {
         ("LINK16", Some("#own-section")),
         ("LINK17", None),
         ("LINK18", Some("../index.html")),
+        ("LINK19", Some(ext_2048.as_str())),
+        ("LINK20", None),
     ] {
         assert_eq!(link_of(&a, text).as_deref(), want, "{text}");
     }

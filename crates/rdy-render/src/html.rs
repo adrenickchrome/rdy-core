@@ -320,15 +320,28 @@ fn display_name(block_type: &str) -> String {
     }
 }
 
+/// A field the page shows as written (an alias, an entity's kind, a value and its unit, a code
+/// language): unchanged for a source output; for a named profile (`local_link` is set), each
+/// reference in it reads as its words ([`diagram_label`]: the display words, the target's key or
+/// label, else `unavailable`), never its token. Not escaped.
+fn as_written(text: &str, ctx: &BlockCtx) -> String {
+    match ctx.local_link {
+        None => text.to_string(),
+        Some(_) => inline::source_plain(text, RefMode::Strict, &|span| {
+            diagram_label(span, ctx.link, ctx.unavailable)
+        }),
+    }
+}
+
 /// The `Also: …` line of a block that has aliases, else nothing.
-fn aliases_html(b: &Block) -> String {
+fn aliases_html(b: &Block, ctx: &BlockCtx) -> String {
     let aliases = entity::aliases(b);
     if aliases.is_empty() {
         return String::new();
     }
     let joined = aliases
         .iter()
-        .map(|a| escape(a))
+        .map(|a| escape(&as_written(a, ctx)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("<p class=\"entity-aliases\">Also: {joined}</p>")
@@ -404,7 +417,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             escape(ctx.anchor),
             f("name"),
             inline::body_inline_html(&b.body, &ictx),
-            aliases_html(b)
+            aliases_html(b, ctx)
         ),
         "component" | "actor" | "interface" | "value" | "entity" => {
             let described = if ctx.described_by.is_empty() {
@@ -421,18 +434,21 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             };
             // an entity's kind is its eyebrow, when it has one
             let eyebrow = match b.field_str("kind").map(str::trim).filter(|k| !k.is_empty()) {
-                Some(k) if t == entity::ENTITY => display_name(k),
+                Some(k) if t == entity::ENTITY => display_name(&as_written(k, ctx)),
                 _ => display_name(t),
             };
             let value = match entity::value_text(b) {
-                Some(v) => format!("<p class=\"entity-value\">{}</p>", escape(&v)),
+                Some(v) => format!(
+                    "<p class=\"entity-value\">{}</p>",
+                    escape(&as_written(&v, ctx))
+                ),
                 None => String::new(),
             };
             format!(
                 "<div class=\"entity entity-{t}\">{}<h{item_level} class=\"entity-name\">{}</h{item_level}>{value}{}{}{described}</div>",
                 marker(ctx, t, &eyebrow),
                 f("name"),
-                aliases_html(b),
+                aliases_html(b, ctx),
                 body()
             )
         }
@@ -484,7 +500,8 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         "figure" => figure_html(b, ctx),
         "code" => {
             // with no language: the label `Code`, plain text, and no class on `<code>`
-            let lang = b.field_str("lang").unwrap_or("").trim();
+            let lang = as_written(b.field_str("lang").unwrap_or(""), ctx);
+            let lang = lang.trim();
             let human = match highlight::human_name(lang) {
                 n if n.is_empty() || lang.is_empty() => "Code".to_string(),
                 n => n,

@@ -35,7 +35,8 @@ pub type LocalLink<'a> = &'a dyn Fn(&str) -> Option<String>;
 /// no display text (D-0VCQ5): never the target's label, key or id.
 pub const UNAVAILABLE: &str = "unavailable reference";
 
-/// The longest authored link target, in UTF-8 bytes, a named profile keeps a local link for.
+/// The longest authored link target, local or external, in UTF-8 bytes, a named profile keeps a
+/// link for.
 pub const MAX_LOCAL_URL: usize = 2048;
 
 /// Which part of the subset a text is read in.
@@ -693,14 +694,15 @@ fn href(target: &str, doc_page: &str) -> Option<(String, bool)> {
     Some((format!("{path}{tail}"), false))
 }
 
-/// [`href`] of an authored link target, then, for a named profile, its local filter: a local
-/// target leads only to a selected page and an anchor emitted on it, by its canonical href, and
-/// one longer than [`MAX_LOCAL_URL`] leads nowhere. An external target keeps its href.
+/// [`href`] of an authored link target, then, for a named profile, its filter: a target longer
+/// than [`MAX_LOCAL_URL`], local or external, leads nowhere; a local target leads only to a
+/// selected page and an anchor emitted on it, by its canonical href. An external target within
+/// the bound keeps its href.
 fn local_href(target: &str, ctx: &Ctx) -> Option<(String, bool)> {
     let (h, away) = href(target, ctx.doc_page)?;
     match ctx.local_link {
-        Some(_) if away => Some((h, away)),
         Some(_) if target.len() > MAX_LOCAL_URL => None,
+        Some(_) if away => Some((h, away)),
         Some(local) => local(&h).map(|h| (h, false)),
         None => Some((h, away)),
     }
