@@ -349,6 +349,22 @@ mod tests {
         assert_ne!(c.key, Some(QaAgent::fingerprint(TestKey::Agent)));
     }
 
+    /// Runs the simulator with `program`. `None` when the program is not installed; any other
+    /// launch error fails the test.
+    fn run_simulator(program: &str, path: &str) -> Option<std::process::Output> {
+        match std::process::Command::new(program).arg(path).output() {
+            Ok(out) => Some(out),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => panic!("cannot launch {program}: {e}"),
+        }
+    }
+
+    /// Task 10 fix round 3: a missing python3 is a counted skip, never a silent pass.
+    #[test]
+    fn sig10_a_missing_python_is_reported_not_passed_silently() {
+        assert!(run_simulator("rdy-no-such-python-for-qa", "x.py").is_none());
+    }
+
     const SK_SCRIPT: &str = include_str!("../fixtures/signing/sk_vector_sim.py");
 
     /// Task 10 fix round 2: the security-key vector comes from a standalone producer that does
@@ -374,8 +390,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/signing/sk_vector_sim.py"
         );
-        let Ok(out) = std::process::Command::new("python3").arg(path).output() else {
-            return; // no python3 on this host: the checksum above still pins the script
+        let Some(out) = run_simulator("python3", path) else {
+            crate::skip::skip(
+                "signing::tests::sig10_the_sk_vector_comes_from_the_standalone_simulator",
+                crate::skip::Why::Prerequisite,
+                "python3 is not installed: the simulator's output was not reproduced",
+            );
+            return;
         };
         assert!(out.status.success(), "{out:?}");
         let text = String::from_utf8(out.stdout).expect("utf8");
