@@ -15,7 +15,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Relay the person's answer to one card: ref, option (an option id of the card), card_hash (of the card you showed) and the person's words as evidence. It records the person as the one who answered and you as the relay. A card or version that changed is refused with the fresh card in corrected; show it and ask again. An approval waits until every exception beside the batch has a confirm answer. Pass all_recommended: [{ref, card_hash}] to answer each item with its recommended option. kind is card (default) or text. brief is for a question under stable content."
+        description = "Relay the person's answer to one card: ref, option (an option id of the card), card_hash (of the card you showed) and the person's words as evidence. It records the person as the one who answered and you as the relay. A card or version that changed is refused with the fresh card in corrected; show it and ask again. An approval waits until every exception beside the batch has a confirm answer. Pass all_recommended: [{ref, card_hash}] to answer each item with its recommended option. kind is card (default) or text. brief is for a question under stable content. With signing on, the act and its signatures share one batch. The result adds signatures. Under signing.sign auto, a signing failure saves the act unsigned and adds W_SIGNING_FAILED. Under always, the act is refused."
     )]
     async fn rdy_answer(&self, Parameters(p): Parameters<AnswerParams>) -> CallToolResult {
         self.run("rdy_answer", p, tools::rdy_answer).await

@@ -10,9 +10,11 @@ use crate::coord::{ALT_REF, chosen_reason};
 use crate::error::StoreError;
 use crate::kinds;
 use crate::merge::{Conflict, MergeChange, merge_on_blocks};
+use crate::redaction::PreparedRedactionApply;
 use crate::state::{open_ref, proposal_ref, view_ref};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind, decode_head};
+use rdy_model::signature::Signature;
 use rdy_model::{
     ActorRun, AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, BlockId, Change,
     EvidenceKind, Hash, LandingRecord, Op, Proposal, Provenance, RelayEvidence,
@@ -59,6 +61,30 @@ pub struct RebasedView {
     pub conflicts: Vec<Conflict>,
 }
 
+/// A landing built by [`Store::prepare_land`] and not yet written: its frames, its landing
+/// record and hash, and the outcome its write reports. Its frames are private: only
+/// [`Store::commit_land`] writes them, with the signatures of its landing.
+#[derive(Debug)]
+pub struct PreparedLanding {
+    items: Vec<(u8, Vec<u8>)>,
+    applies: Option<PreparedRedactionApply>,
+    landing: LandingRecord,
+    hash: Hash,
+    outcome: LandOutcome,
+}
+
+impl PreparedLanding {
+    /// The landing record the commit writes.
+    pub fn landing(&self) -> &LandingRecord {
+        &self.landing
+    }
+
+    /// The hash of that landing record.
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+}
+
 /// What a landing wrote: the landing, the proposal version it landed (the request's when there is
 /// no acceptance change), the acceptance change's id, every view it rebased, in `view/` ref
 /// order (the proposing view included), the alternative set's chosen version (with `alt`), and
@@ -98,6 +124,16 @@ impl Store {
     /// append the TRANSITION last. A pre-seal preview reads through
     /// `Store::redaction_preview_reader`.
     pub fn land_atomic(&mut self, req: LandRequest) -> Result<LandOutcome, StoreError> {
+        let prepared = self.prepare_land(req)?;
+        self.commit_land(prepared, &[])
+    }
+
+    /// The landing `land_atomic` would write for `req`, prepared without writing anything: every
+    /// check of `land_atomic` runs, and the frames, the landing record and the outcome are built
+    /// against the store as it is now. [`Store::commit_land`] writes them. The preparation stays
+    /// current only while the log does not move: a caller that releases the writer between the
+    /// two checks the log position itself.
+    pub fn prepare_land(&self, req: LandRequest) -> Result<PreparedLanding, StoreError> {
         // 1. the proposal, and the version check: the request names its stable's latest version
         let p = self.proposal(&req.proposal)?;
         let stable = p.stable.unwrap_or(req.proposal);
@@ -212,6 +248,7 @@ impl Store {
             self.prepare_redaction_apply(&p.view, &included, &landing, accept_change.as_ref())?;
         let lbytes = encode(&landing);
         let lid = Hash::of(&lbytes);
+        let landing_record = landing;
         items.push((kinds::LANDING, lbytes));
         // 6b. the set's next version, chosen by this landing
         let mut alt_ref = None;
@@ -402,6 +439,38 @@ impl Store {
             refs.push((open, vec![]));
         }
         items.extend(self.ref_items_pub(refs));
+        Ok(PreparedLanding {
+            items,
+            applies,
+            landing: landing_record,
+            hash: lid,
+            outcome: LandOutcome {
+                landing: lid,
+                proposal: final_id,
+                accept: aid,
+                rebased,
+                alt_version,
+                closed,
+            },
+        })
+    }
+
+    /// Writes the landing `prepared` holds, with `signatures` (each of its landing, D-1Z951) in
+    /// the same batch: after the landing and the refs, before any REDACTION_APPLY. A failed write
+    /// writes nothing. With no signatures this is the write `land_atomic` makes.
+    pub fn commit_land(
+        &mut self,
+        prepared: PreparedLanding,
+        signatures: &[Signature],
+    ) -> Result<LandOutcome, StoreError> {
+        let PreparedLanding {
+            mut items,
+            applies,
+            hash: lid,
+            outcome,
+            ..
+        } = prepared;
+        items.extend(crate::signature::frames(signatures)?);
         // 9. one write. With applies, one REDACTION_APPLY per request (in request-hash order)
         // ends the data frames. Unheld, the checked apply writer validates the batch with the log,
         // seals it and finishes the removal before it returns; held, the frames join the open
@@ -420,14 +489,7 @@ impl Store {
                 self.write(items)?;
             }
         }
-        Ok(LandOutcome {
-            landing: lid,
-            proposal: final_id,
-            accept: aid,
-            rebased,
-            alt_version,
-            closed,
-        })
+        Ok(outcome)
     }
 
     /// The set version a landing that chooses `alt` builds on: `alt.prev` must be the latest

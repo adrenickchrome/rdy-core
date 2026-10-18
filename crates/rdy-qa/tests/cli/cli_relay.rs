@@ -242,6 +242,7 @@ fn relay1_the_approve_op_refuses_half_a_relay() {
         session: &h,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let a = agent("agent:r", Some("x"));
     let ax = OpContext {
@@ -249,6 +250,7 @@ fn relay1_the_approve_op_refuses_half_a_relay() {
         session: &a,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     let err = dispatch(
         &ax,
@@ -440,6 +442,7 @@ fn msw2_the_approve_op_refuses_an_empty_relay_actor_run_or_session_ref() {
         session: &a,
         human: "human:qa",
         cwd: d.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
     // an empty actor or run is never the session's own (D-HA7YZ)
     for (by, sref, code) in [

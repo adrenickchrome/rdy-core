@@ -26,6 +26,7 @@ mod read_cmd;
 mod redact_cmd;
 mod search_cmd;
 mod serve_cmd;
+mod signing_cmd;
 mod site_cmd;
 mod tension_cmd;
 mod view_cmd;
@@ -151,6 +152,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: project_cmd::KeysCmd,
     },
+    /// Sign an existing landing or tag through your SSH agent: a person signs their own act, an agent a relay or the person's relayed act. Works when signing.sign is never. The chat path is rdy_sign.
+    Sign(signing_cmd::SignArgs),
+    /// Signing keys: show the configured person and agent keys (rdy key show). The chat path is rdy_key_show.
+    Key {
+        #[command(subcommand)]
+        cmd: signing_cmd::KeyCmd,
+    },
     /// Run the project's daemon in the foreground (every other command starts one as needed).
     Serve(serve_cmd::ServeArgs),
     /// Show the settings in effect, one row per key (no daemon is started).
@@ -168,6 +176,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Mcp => serve_cmd::mcp(env),
         Cmd::Pack { cmd } => project_cmd::pack(env, cmd),
         Cmd::Keys { cmd } => project_cmd::keys(env, cmd),
+        Cmd::Sign(a) => signing_cmd::sign(env, a),
+        Cmd::Key { cmd } => signing_cmd::key(env, cmd),
         Cmd::Status => read_cmd::status(env),
         Cmd::Show(a) => read_cmd::show(env, a),
         Cmd::New { what } => edit_cmd::new(env, what),
@@ -204,6 +214,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
         Cmd::Check(_) | Cmd::Serve(_) => unreachable!("handled in main"),
     }
+}
+
+/// One configuration warning as the CLI prints it: `warning <code>: <message>; <fix>`.
+pub(crate) fn config_warning_line(w: &rdy_schema::Issue) -> String {
+    format!("warning {}: {}; {}", w.code, w.message, w.fix)
 }
 
 fn main() -> ExitCode {
@@ -253,13 +268,15 @@ fn main() -> ExitCode {
     let own_warnings = match &cli.cmd {
         Cmd::Status | Cmd::Mcp => true,
         Cmd::Config(a) => a.show_origin && !as_json,
+        // key show prints them after its three lines
+        Cmd::Key { .. } => !as_json,
         _ => false,
     };
     match run(cli, &env) {
         Ok((v, text)) => {
             if !own_warnings {
                 for w in rdy_engine::config_levels::config_warnings_for_env(&env.project) {
-                    eprintln!("warning {}: {}; {}", w.code, w.message, w.fix);
+                    eprintln!("{}", config_warning_line(&w));
                 }
             }
             if v.is_null() {

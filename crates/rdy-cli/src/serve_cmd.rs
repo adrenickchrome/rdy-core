@@ -45,7 +45,9 @@ pub(crate) fn mcp(env: &Env) -> Result<(Value, String), ErrorReply> {
         std::process::exit(code);
     }
     let rt = tokio::runtime::Runtime::new().map_err(|e| io_error(e, "retry"))?;
-    rt.block_on(rdy_mcp::server::serve_stdio(env.project.clone()))
+    // the session signs through this process's own agent, never a private key file
+    let agent = rdy_daemon::signing_transport::direct_agent();
+    rt.block_on(rdy_mcp::server::serve_stdio(env.project.clone(), agent))
         .map_err(|e| ErrorReply::new(E_IO, e.to_string(), "check the project path"))?;
     Ok((Value::Null, String::new()))
 }

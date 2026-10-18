@@ -29,7 +29,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Name a landing (default: canon's head) as a version, e.g. v1.2.0, on the person's word. A tag is the person's act: ask them, then pass their words as evidence and your question. The tag records the person, and an answer records your relay. Every tag rule holds: the version is new and above the current one."
+        description = "Name a landing (default: canon's head) as a version, e.g. v1.2.0, on the person's word. A tag is the person's act: ask them, then pass their words as evidence and your question. The tag records the person, and an answer records your relay. Every tag rule holds: the version is new and above the current one. With signing on, the act and its signatures share one batch. The result adds signatures. Under signing.sign auto, a signing failure saves the act unsigned and adds W_SIGNING_FAILED. Under always, the act is refused."
     )]
     async fn rdy_tag(&self, Parameters(p): Parameters<TagParams>) -> CallToolResult {
         self.run("rdy_tag", p, tools::rdy_tag).await

@@ -24,6 +24,7 @@ mod engine_repin;
 mod engine_retype;
 mod engine_semantic_accept;
 mod engine_session;
+mod engine_signature_check;
 mod engine_splitbrain;
 mod engine_supersede;
 mod engine_write;

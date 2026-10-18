@@ -16,6 +16,7 @@ mod review;
 mod schema;
 mod search;
 mod session;
+mod signing;
 mod site;
 mod store;
 mod tension;
@@ -28,6 +29,7 @@ use crate::notify::{NotifyHub, Sink};
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
+use rdy_engine::signing_crypto::{CallCancel, SigningAgent, SigningCall};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -63,6 +65,75 @@ pub struct RdyServer {
     engine: Arc<dyn Engine>,
 }
 
+tokio::task_local! {
+    /// The tool call this task runs, set by `call_tool` for the call's own task.
+    static CALL: ToolCall;
+}
+
+/// Whether rmcp has cancelled a tool call's request token.
+type RequestCancelled = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// One tool call, as its body sees it.
+#[derive(Clone)]
+struct ToolCall {
+    /// The call's request id and its cancel, which `call_tool` sets when rmcp cancels the
+    /// request (the client's `notifications/cancelled` for it, or the session's end).
+    signing: SigningCall,
+    /// Reads rmcp's request token itself, so a cancel that came before an ask stops that ask
+    /// however late the call's task is polled.
+    cancelled: RequestCancelled,
+}
+
+/// The signer of one tool call: the session's agent serving that call
+/// ([`SigningAgent::for_call`]), which names the call's request in each ask and stops an ask in
+/// progress at the call's cancel. After the cancel it asks no more, and an answer that comes
+/// after the cancel is dropped, both as `E_NO_AGENT` `request cancelled`.
+struct CallAgent {
+    inner: Arc<dyn SigningAgent>,
+    cancel: Arc<CallCancel>,
+    request_cancelled: RequestCancelled,
+}
+
+impl CallAgent {
+    fn new(session: &Arc<dyn SigningAgent>, call: &ToolCall) -> CallAgent {
+        CallAgent {
+            inner: session
+                .for_call(&call.signing)
+                .unwrap_or_else(|| Arc::clone(session)),
+            cancel: Arc::clone(&call.signing.cancel),
+            request_cancelled: Arc::clone(&call.cancelled),
+        }
+    }
+
+    /// Refuses once the call is cancelled. A request token rmcp has cancelled latches the
+    /// call's cancel here, before the ask, if `call_tool` has not latched it yet.
+    fn check(&self) -> Result<(), RdyError> {
+        if (self.request_cancelled)() {
+            self.cancel.cancel();
+        }
+        if self.cancel.is_cancelled() {
+            return Err(rdy_engine::no_agent(rdy_engine::NoAgentCause::Cancelled));
+        }
+        Ok(())
+    }
+}
+
+impl SigningAgent for CallAgent {
+    fn identities(&self) -> Result<Vec<rdy_engine::signing_crypto::AgentIdentity>, RdyError> {
+        self.check()?;
+        let ids = self.inner.identities()?;
+        self.check()?;
+        Ok(ids)
+    }
+
+    fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+        self.check()?;
+        let sig = self.inner.sign(public_key, payload)?;
+        self.check()?;
+        Ok(sig)
+    }
+}
+
 fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
     match r {
         Ok(v) => CallToolResult::success(vec![ContentBlock::text(v.to_string())]),
@@ -90,9 +161,20 @@ impl RdyServer {
         }
     }
 
+    /// This server with `agent` as its session's signer: the caller's own SSH agent.
+    pub fn with_agent(self, agent: Arc<dyn SigningAgent>) -> Self {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).agent = agent;
+        self
+    }
+
+    /// The session's signer.
+    pub fn agent(&self) -> Arc<dyn SigningAgent> {
+        Arc::clone(&self.state.lock().unwrap_or_else(|p| p.into_inner()).agent)
+    }
+
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 21] {
+    fn family_routers() -> [ToolRouter<Self>; 22] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -115,6 +197,7 @@ impl RdyServer {
             Self::intake_router(),
             Self::site_router(),
             Self::store_router(),
+            Self::signing_router(),
         ]
     }
 
@@ -139,7 +222,8 @@ impl RdyServer {
     }
 
     /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
-    /// under the state lock. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean
+    /// under the state lock. Inside a tool call, `f` sees the call's own signer ([`CallAgent`]),
+    /// whose ask in progress ends at the call's cancel. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean
     /// state (the invalidate runs on the writer, where `Rdy` is); if that fails, the error says
     /// so. With `notice` set, a pack notice rides on an object result; a resource read leaves
     /// the notice for the next tool reply.
@@ -153,9 +237,17 @@ impl RdyServer {
         F: FnOnce(&mut McpState) -> Result<serde_json::Value, RdyError> + Send + 'static,
     {
         let state = Arc::clone(&self.state);
+        let call = CALL.try_with(ToolCall::clone).ok();
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+            let session_agent = call.map(|call| {
+                let agent = Arc::new(CallAgent::new(&st.agent, &call));
+                std::mem::replace(&mut st.agent, agent)
+            });
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st)));
+            if let Some(agent) = session_agent {
+                st.agent = agent;
+            }
             match out {
                 Ok(mut r) => {
                     if notice && let Ok(serde_json::Value::Object(m)) = &mut r {
@@ -235,8 +327,39 @@ impl ServerHandler for RdyServer {
             )))
             .into());
         }
+        // the call's body signs through a signer that names this request and stops at its
+        // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
+        // cancels every request's token then), reaches an ask of the agent in progress
+        let ct = context.ct.clone();
+        let cancel = Arc::new(CallCancel::new());
+        // a call cancelled before it got here (while it waited for its turn) is cancelled
+        // before its body is first polled, so the body never asks the agent
+        if ct.is_cancelled() {
+            cancel.cancel();
+        }
+        let call = ToolCall {
+            signing: SigningCall {
+                request: serde_json::to_value(&context.id).unwrap_or(serde_json::Value::Null),
+                cancel: Arc::clone(&cancel),
+            },
+            cancelled: {
+                let ct = ct.clone();
+                Arc::new(move || ct.is_cancelled())
+            },
+        };
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        let run = CALL.scope(call, self.tool_router.call(tcc));
+        tokio::pin!(run);
+        // the cancel goes first when both are ready; the body is then awaited, never dropped,
+        // so its worker on the blocking pool is joined
+        tokio::select! {
+            biased;
+            () = ct.cancelled() => {
+                cancel.cancel();
+                run.await
+            }
+            out = &mut run => out,
+        }
     }
 
     async fn list_resources(
@@ -342,16 +465,19 @@ impl std::fmt::Display for Dropped {
 /// buffering the line: it tracks string and escape state and nesting depth, and captures the
 /// value of the `"id"` key of the top-level object wherever it occurs (the TypeScript SDK
 /// writes it after `params`). Keys and values at deeper levels are ignored.
-#[derive(Default)]
 struct IdScanner {
+    /// The longest id value captured; a longer one counts as no id.
+    id_limit: usize,
     depth: usize,
     top_is_object: bool,
     in_string: bool,
     escaped: bool,
     /// At depth 1 of the top-level object, the next string is a key.
     expect_key: bool,
-    /// Bytes of the depth-1 key being read (capped: only `id` matters).
+    /// Bytes of the depth-1 key being read (capped: only `id`, `result` and `error` matter).
     key: Option<Vec<u8>>,
+    /// A depth-1 key `result` or `error` was seen: the line is a response.
+    response: bool,
     /// The depth-1 key just closed was `id`; `Some` until its `:`.
     key_was_id: Option<bool>,
     /// After `"id":`, waiting for the value's first byte.
@@ -365,7 +491,32 @@ struct IdScanner {
     id: Option<String>,
 }
 
+impl Default for IdScanner {
+    fn default() -> IdScanner {
+        IdScanner::with_id_limit(MAX_ID_BYTES)
+    }
+}
+
 impl IdScanner {
+    fn with_id_limit(id_limit: usize) -> IdScanner {
+        IdScanner {
+            id_limit,
+            depth: 0,
+            top_is_object: false,
+            in_string: false,
+            escaped: false,
+            expect_key: false,
+            key: None,
+            response: false,
+            key_was_id: None,
+            value_is_id: false,
+            capture: None,
+            capture_is_string: false,
+            id_over_limit: false,
+            id: None,
+        }
+    }
+
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.byte(b);
@@ -374,9 +525,10 @@ impl IdScanner {
 
     fn byte(&mut self, b: u8) {
         if self.in_string {
-            // keep up to 4 bytes: `id` plus its closing quote is 3, so 4 tells `id` from `idx`
+            // keep up to 8 bytes: `result` plus its closing quote is 7, so 8 tells `result`
+            // from `resultx` (and `id` from `idx`)
             if let Some(k) = &mut self.key
-                && k.len() < 4
+                && k.len() < 8
             {
                 k.push(b);
             }
@@ -393,6 +545,9 @@ impl IdScanner {
                 self.in_string = false;
                 if let Some(k) = self.key.take() {
                     self.key_was_id = Some(k == b"id\"");
+                    if k == b"result\"" || k == b"error\"" {
+                        self.response = true;
+                    }
                 }
                 if self.capture_is_string {
                     self.finish_capture();
@@ -401,7 +556,7 @@ impl IdScanner {
             if self
                 .capture
                 .as_ref()
-                .is_some_and(|c| c.len() > MAX_ID_BYTES)
+                .is_some_and(|c| c.len() > self.id_limit)
             {
                 self.capture = None;
                 self.capture_is_string = false;
@@ -412,7 +567,7 @@ impl IdScanner {
         if let Some(c) = &mut self.capture {
             if matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
                 c.push(b);
-                if c.len() > MAX_ID_BYTES {
+                if c.len() > self.id_limit {
                     self.capture = None;
                     self.id_over_limit = true;
                 }
@@ -479,6 +634,54 @@ impl IdScanner {
             None if !self.top_is_object => Err(Dropped::NotAnObject),
             None if self.id_over_limit => Err(Dropped::IdOverLimit),
             None => Err(Dropped::NoTopLevelId),
+        }
+    }
+}
+
+/// What [`LineScan`] found in one JSON line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scanned {
+    /// The top-level `"id"`, when it is a string or a number.
+    pub id: Option<serde_json::Value>,
+    /// The top-level object has a `"result"` or an `"error"` key: the line is a response.
+    pub response: bool,
+}
+
+/// Scans one JSON line as it streams, never holding the line: its top-level `"id"` and whether
+/// it is a response. It holds no more than the id, up to its id limit (an id over the limit
+/// counts as none). It is the scanner [`pump_lines`] reads an oversized request's id with, so a
+/// line of any length can be followed by its id.
+#[derive(Default)]
+pub struct LineScan(IdScanner);
+
+impl LineScan {
+    /// A scanner that keeps an id of up to 1024 bytes, as [`pump_lines`] does.
+    pub fn new() -> LineScan {
+        LineScan::default()
+    }
+
+    /// A scanner that keeps an id of up to `id_limit` bytes. A reader that must match a reply
+    /// to any request it forwarded sets the request lines' own bound: an id is never longer than
+    /// the line that carried it, and a reply writes the id no longer than the request did.
+    pub fn with_id_limit(id_limit: usize) -> LineScan {
+        LineScan(IdScanner::with_id_limit(id_limit))
+    }
+
+    /// The next bytes of the line, its newline excluded.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.0.feed(bytes);
+    }
+
+    /// What the line held, once all of it has been fed.
+    pub fn finish(mut self) -> Scanned {
+        self.0.finish_capture();
+        Scanned {
+            id: self
+                .0
+                .id
+                .as_deref()
+                .and_then(|id| serde_json::from_str(id).ok()),
+            response: self.0.response,
         }
     }
 }
@@ -621,14 +824,33 @@ impl IdleCheckpointLog {
 /// (`spawn_blocking`) holding the state lock for the call. Writes apply, and replies leave, in
 /// request order because the calls are stamped at the transport ([`serve`]), not because of the
 /// runtime.
-pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
+///
+/// `agent` is the caller's own SSH agent, which this process made from its own environment: the
+/// session signs only through it.
+pub async fn serve_stdio(project: PathBuf, agent: Arc<dyn SigningAgent>) -> anyhow::Result<()> {
+    serve_stdio_with(project, agent, |_| {}).await
+}
+
+/// [`serve_stdio`], calling `inspect` with the session's server once it is made, before it
+/// serves: a test seam that shows which signer the session got.
+#[doc(hidden)]
+pub async fn serve_stdio_with(
+    project: PathBuf,
+    agent: Arc<dyn SigningAgent>,
+    inspect: impl FnOnce(&RdyServer) + Send + 'static,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    tokio::task::spawn_blocking(move || rt.block_on(serve_stdio_inner(project))).await?
+    tokio::task::spawn_blocking(move || rt.block_on(serve_stdio_inner(project, agent, inspect)))
+        .await?
 }
 
-async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
+async fn serve_stdio_inner(
+    project: PathBuf,
+    agent: Arc<dyn SigningAgent>,
+    inspect: impl FnOnce(&RdyServer),
+) -> anyhow::Result<()> {
     let local = Arc::new(Local::open(&project)?);
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
@@ -644,7 +866,9 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         Arc::clone(&local) as Arc<dyn Engine>,
         None,
         NotifyHub::new(),
-    );
+    )
+    .with_agent(agent);
+    inspect(&server);
     let ticker = {
         let local = Arc::clone(&local);
         tokio::spawn(async move {
@@ -718,7 +942,8 @@ where
 /// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
 /// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id,
 /// and `hub` the daemon's hub of connected sessions (ib11): the session joins it under `sid`,
-/// and the daemon removes it when the session ends.
+/// and the daemon removes it when the session ends. `agent` is the signer of the process at the
+/// other end of the session's connection.
 /// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
 /// runtime. Dropping the returned future ends the session: the service is cancelled and the
 /// stream closed; a tool call already on the blocking pool finishes first.
@@ -726,6 +951,7 @@ pub async fn serve_on<R, W>(
     engine: Arc<dyn Engine>,
     sid: u64,
     hub: Arc<NotifyHub>,
+    agent: Arc<dyn SigningAgent>,
     r: R,
     w: W,
 ) -> anyhow::Result<()>
@@ -748,7 +974,11 @@ where
         );
     };
     let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
-    let served = serve(RdyServer::new(engine, Some(sid), hub), from_pump, w);
+    let served = serve(
+        RdyServer::new(engine, Some(sid), hub).with_agent(agent),
+        from_pump,
+        w,
+    );
     tokio::pin!(served);
     // the session ends when `serve` does (the peer closed, or the session failed to start);
     // when the pump ends first (the peer closed its side), `serve` reads EOF and ends after it
@@ -843,9 +1073,362 @@ mod tests {
         assert_eq!(ok, serde_json::json!({"a": 1}));
     }
 
+    /// An agent that counts its calls, records the requests it serves, and can cancel a call
+    /// while it answers.
+    #[derive(Default)]
+    struct Counting {
+        calls: std::sync::atomic::AtomicUsize,
+        flip: Mutex<Option<Arc<CallCancel>>>,
+        served: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl SigningAgent for Counting {
+        fn identities(&self) -> Result<Vec<rdy_engine::signing_crypto::AgentIdentity>, RdyError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(cancel) = &*self.flip.lock().unwrap() {
+                cancel.cancel();
+            }
+            Ok(Vec::new())
+        }
+
+        fn sign(&self, _key: &[u8], _payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![1])
+        }
+
+        fn for_call(&self, call: &SigningCall) -> Option<Arc<dyn SigningAgent>> {
+            self.served.lock().unwrap().push(call.request.clone());
+            None
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sig5_a_cancelled_tool_call_asks_its_agent_no_more() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let agent = Arc::new(Counting::default());
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new())
+            .with_agent(agent.clone());
+        // a call whose request token rmcp never cancels: only its own cancel stops it
+        let call = |id: u64| ToolCall {
+            signing: SigningCall {
+                request: serde_json::json!(id),
+                cancel: Arc::new(CallCancel::new()),
+            },
+            cancelled: Arc::new(|| false),
+        };
+        let keys = |st: &mut McpState| st.agent.identities().map(|k| serde_json::json!(k.len()));
+        let sign = |st: &mut McpState| st.agent.sign(&[1], &[2]).map(|_| serde_json::Value::Null);
+        let cause = |r: Result<serde_json::Value, RdyError>| {
+            let e = r.expect_err("a cancelled call");
+            assert_eq!(e.code, rdy_engine::E_NO_AGENT, "{e:?}");
+            e.message
+        };
+        let cancelled_text = "the SSH agent could not sign: request cancelled";
+        // a call its client has not cancelled asks the session's agent, for its own request
+        let r = CALL.scope(call(1), server.blocking("t", false, keys)).await;
+        assert_eq!(r.unwrap(), serde_json::json!(0));
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
+        // an answer that comes after the cancel is dropped
+        let two = call(2);
+        *agent.flip.lock().unwrap() = Some(Arc::clone(&two.signing.cancel));
+        let r = CALL
+            .scope(two.clone(), server.blocking("t", false, keys))
+            .await;
+        assert_eq!(cause(r), cancelled_text);
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 2);
+        // once cancelled, the call asks no more
+        let r = CALL.scope(two, server.blocking("t", false, sign)).await;
+        assert_eq!(cause(r), cancelled_text);
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 2);
+        // the session's signer is unchanged for the next call, and outside a tool call
+        *agent.flip.lock().unwrap() = None;
+        let r = CALL.scope(call(3), server.blocking("t", false, sign)).await;
+        assert_eq!(r.unwrap(), serde_json::Value::Null);
+        assert_eq!(server.agent().identities().unwrap().len(), 0);
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            *agent.served.lock().unwrap(),
+            [1, 2, 2, 3].map(|n| serde_json::json!(n)),
+            "each call is served for its own request"
+        );
+    }
+
+    /// How long a test waits for a step it signals; a deadline, never a measured time.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// A held step: it reports on the sender, then waits for the receiver.
+    type Hold = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+    /// An agent that records each call it is bound to (with whether that call's cancel had
+    /// already come), counts its identities asks, and can hold its first bind or first ask.
+    #[derive(Default)]
+    struct Gated {
+        asks: std::sync::atomic::AtomicUsize,
+        bound: Mutex<Vec<(serde_json::Value, bool)>>,
+        hold_bind: Mutex<Option<Hold>>,
+        hold_ask: Mutex<Option<Hold>>,
+    }
+
+    fn hold(h: &Mutex<Option<Hold>>) {
+        let held = h.lock().unwrap().take();
+        if let Some((reached, go)) = held {
+            reached.send(()).unwrap();
+            go.recv_timeout(DEADLINE)
+                .expect("the test lets the step go");
+        }
+    }
+
+    impl SigningAgent for Gated {
+        fn identities(&self) -> Result<Vec<rdy_engine::signing_crypto::AgentIdentity>, RdyError> {
+            self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            hold(&self.hold_ask);
+            Ok(Vec::new())
+        }
+
+        fn sign(&self, _key: &[u8], _payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+            panic!("key show never signs");
+        }
+
+        fn for_call(&self, call: &SigningCall) -> Option<Arc<dyn SigningAgent>> {
+            self.bound
+                .lock()
+                .unwrap()
+                .push((call.request.clone(), call.cancel.is_cancelled()));
+            hold(&self.hold_bind);
+            None
+        }
+    }
+
+    /// A server on a new project whose person key is set (so `rdy_key_show` asks the agent),
+    /// with a reader session and `agent` as its signer.
+    async fn key_show_server(agent: Arc<Gated>) -> (tempfile::TempDir, RdyServer) {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let fp = rdy_engine::signing_crypto::blob_fingerprint(b"a key the agent does not hold");
+        std::fs::write(
+            dir.path().join(".rdy/local.yaml"),
+            format!("signing:\n  key: {fp:?}\n"),
+        )
+        .unwrap();
+        let server =
+            RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new()).with_agent(agent);
+        let p = SessionParams {
+            actor: "agent:a".into(),
+            run: Some("r1".into()),
+            role: "reader".into(),
+            view: None,
+            areas: None,
+        };
+        let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
+            .unwrap();
+        assert_ne!(out["isError"], true, "{out}");
+        (dir, server)
+    }
+
+    /// A session of `server` over an in-memory stream, after the handshake, for the peer a tool
+    /// call's context names. The client end is returned so that the session stays up.
+    async fn session_peer(
+        server: RdyServer,
+    ) -> (
+        rmcp::service::RunningService<rmcp::RoleServer, RdyServer>,
+        tokio::io::DuplexStream,
+    ) {
+        let (mut client, end) = tokio::io::duplex(1 << 16);
+        for line in [
+            serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": {"name": "sig5", "version": "0"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        ] {
+            client
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        let (r, w) = tokio::io::split(end);
+        let session = server
+            .serve(rmcp::transport::async_rw::AsyncRwTransport::new_server(
+                r, w,
+            ))
+            .await
+            .unwrap();
+        (session, client)
+    }
+
+    fn key_show() -> CallToolRequestParams {
+        CallToolRequestParams::new("rdy_key_show").with_arguments(serde_json::Map::new())
+    }
+
+    /// The text of a tool reply.
+    fn reply_text(out: Result<CallToolResponse, rmcp::ErrorData>) -> String {
+        let CallToolResponse::Complete(r) = out.expect("a tool reply") else {
+            panic!("a complete tool reply");
+        };
+        serde_json::to_value(&r).unwrap().to_string()
+    }
+
+    fn assert_cancelled(text: &str) {
+        assert!(
+            text.contains("E_NO_AGENT") && text.contains("request cancelled"),
+            "the call ends as cancelled: {text}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sig5_a_call_cancelled_before_call_tool_never_asks_its_agent() {
+        use std::sync::atomic::Ordering;
+        let agent = Arc::new(Gated::default());
+        let (_dir, server) = key_show_server(Arc::clone(&agent)).await;
+        let (session, _client) = session_peer(server.clone()).await;
+        let ctx = RequestContext::new(
+            rmcp::model::NumberOrString::Number(7),
+            session.peer().clone(),
+        );
+        // the client's cancel came while the call waited (rmcp has already cancelled its token)
+        ctx.ct.cancel();
+        let text = reply_text(ServerHandler::call_tool(&server, key_show(), ctx).await);
+        assert_cancelled(&text);
+        assert_eq!(agent.asks.load(Ordering::SeqCst), 0, "the agent was asked");
+        assert_eq!(
+            *agent.bound.lock().unwrap(),
+            [(serde_json::json!(7), true)],
+            "the body saw its call's cancel before it ran"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sig5_a_cancel_before_the_ask_stops_it_however_the_server_is_polled() {
+        use std::sync::atomic::Ordering;
+        let agent = Arc::new(Gated::default());
+        let (bound_tx, bound) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel();
+        *agent.hold_bind.lock().unwrap() = Some((bound_tx, go_rx));
+        let (_dir, server) = key_show_server(Arc::clone(&agent)).await;
+        let (session, _client) = session_peer(server.clone()).await;
+        let ctx = RequestContext::new(
+            rmcp::model::NumberOrString::Number(8),
+            session.peer().clone(),
+        );
+        let ct = ctx.ct.clone();
+        let call = ServerHandler::call_tool(&server, key_show(), ctx);
+        tokio::pin!(call);
+        // one poll: the body starts on the blocking pool and binds its call's signer
+        let first = std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the body runs on the blocking pool");
+        bound
+            .recv_timeout(DEADLINE)
+            .expect("the body binds its signer");
+        // the client cancels before the body asks; the call's task is not polled in between
+        ct.cancel();
+        go.send(()).unwrap();
+        // the body holds the state lock until it ends: it ends before the call is polled again
+        drop(server.state.lock().unwrap_or_else(|p| p.into_inner()));
+        assert_eq!(agent.asks.load(Ordering::SeqCst), 0, "the agent was asked");
+        assert_cancelled(&reply_text(call.await));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sig5_a_queued_call_cancelled_before_its_turn_never_asks_its_agent() {
+        use std::sync::atomic::Ordering;
+        let agent = Arc::new(Gated::default());
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *agent.hold_ask.lock().unwrap() = Some((asked_tx, release_rx));
+        let (_dir, server) = key_show_server(Arc::clone(&agent)).await;
+        let (client, end) = tokio::io::duplex(1 << 16);
+        let (sr, sw) = tokio::io::split(end);
+        let served = tokio::spawn(serve(server, sr, sw));
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut cr = BufReader::new(cr);
+        let call = |id: u64| {
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": {"name": "rdy_key_show", "arguments": {}}})
+        };
+        async fn line(w: &mut (impl AsyncWriteExt + Unpin), v: serde_json::Value) {
+            w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
+        }
+        async fn recv(r: &mut (impl AsyncBufReadExt + Unpin)) -> serde_json::Value {
+            let mut line = String::new();
+            tokio::time::timeout(DEADLINE, r.read_line(&mut line))
+                .await
+                .expect("a reply before the deadline")
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+        line(
+            &mut cw,
+            serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "sig5", "version": "0"}}}),
+        )
+        .await;
+        assert_eq!(recv(&mut cr).await["id"], 0);
+        line(
+            &mut cw,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        // call 2 holds the agent, so call 3 waits for its turn
+        line(&mut cw, call(2)).await;
+        asked.recv_timeout(DEADLINE).expect("call 2 asks the agent");
+        line(&mut cw, call(3)).await;
+        line(
+            &mut cw,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": 3, "reason": "the person went away"}}),
+        )
+        .await;
+        // the session reads in order: once the ping is answered, call 3's cancel has come
+        line(
+            &mut cw,
+            serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}),
+        )
+        .await;
+        assert_eq!(recv(&mut cr).await["id"], 4);
+        release.send(()).unwrap();
+        line(&mut cw, call(5)).await;
+        // call 3's reply is dropped; call 5 runs after call 3's turn has ended
+        assert_eq!(recv(&mut cr).await["id"], 2);
+        let five = recv(&mut cr).await;
+        assert_eq!(five["id"], 5, "{five}");
+        assert_eq!(
+            agent.asks.load(Ordering::SeqCst),
+            2,
+            "calls 2 and 5 ask the agent, the cancelled call 3 does not"
+        );
+        assert_eq!(
+            *agent.bound.lock().unwrap(),
+            [
+                (serde_json::json!(2), false),
+                (serde_json::json!(3), true),
+                (serde_json::json!(5), false)
+            ],
+            "call 3 saw its cancel before its body ran"
+        );
+        drop((cr, cw));
+        let _ = tokio::time::timeout(DEADLINE, served).await;
+    }
+
     #[test]
     fn mrt1_every_tool_is_in_exactly_one_family_router() {
         let families = RdyServer::family_routers();
+        // sig9: the signing family follows the store family and holds its two tools
+        let mut signing: Vec<String> = families[21]
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        signing.sort();
+        assert_eq!(signing, ["rdy_key_show", "rdy_sign"]);
+        assert!(
+            families[20]
+                .list_all()
+                .iter()
+                .any(|t| t.name == "rdy_clone"),
+            "the store family precedes the signing family"
+        );
         let mut names: Vec<String> = families
             .iter()
             .flat_map(|r| r.list_all().into_iter().map(|t| t.name.to_string()))
@@ -1208,5 +1791,56 @@ mod mcp1_id_tests {
         assert!(b64 + 4096 <= tools::MAX_REQUEST_BYTES);
         let next = (tools::MAX_ASSET_BYTES_STDIO + 3).div_ceil(3) * 4;
         assert!(next + 4096 > tools::MAX_REQUEST_BYTES);
+    }
+
+    #[test]
+    fn sig5_line_scan_finds_a_response_id_in_constant_memory() {
+        let scan = |parts: &[&[u8]]| {
+            let mut s = LineScan::new();
+            for p in parts {
+                s.feed(p);
+            }
+            s.finish()
+        };
+        let big = vec![b'y'; 1 << 20];
+        let r = scan(&[
+            br#"{"jsonrpc":"2.0","result":{"big":""#,
+            &big,
+            br#""},"id":7}"#,
+        ]);
+        assert_eq!(r.id, Some(serde_json::json!(7)));
+        assert!(r.response);
+        let r = scan(&[br#"{"id":"a","error":{"code":1}}"#]);
+        assert_eq!(r.id, Some(serde_json::json!("a")));
+        assert!(r.response);
+        // a request or a notification is not a response; nested keys do not count
+        let r = scan(&[br#"{"id":3,"method":"ping","params":{"result":1,"error":2}}"#]);
+        assert_eq!(r.id, Some(serde_json::json!(3)));
+        assert!(!r.response);
+        let r = scan(&[br#"{"method":"notifications/message","params":{"id":1}}"#]);
+        assert_eq!(r.id, None);
+        assert!(!r.response);
+        // a longer key that starts like one is not it
+        let r = scan(&[br#"{"id":4,"resultx":1,"errors":2}"#]);
+        assert!(!r.response);
+        // a callback body with junk after its id still yields the id
+        let r = scan(&[br#"{"id":12,"op":"identities","pad":""#, &big]);
+        assert_eq!(r.id, Some(serde_json::json!(12)));
+    }
+
+    #[test]
+    fn sig5_line_scan_keeps_an_id_up_to_its_limit() {
+        let long = serde_json::Value::from("i".repeat(4000));
+        let line = serde_json::json!({"jsonrpc": "2.0", "id": long, "result": {}}).to_string();
+        let scan = |mut s: LineScan| {
+            s.feed(line.as_bytes());
+            s.finish()
+        };
+        // the default keeps 1024 bytes, as pump_lines does
+        assert_eq!(scan(LineScan::new()).id, None);
+        let r = scan(LineScan::with_id_limit(8000));
+        assert_eq!(r.id, Some(long));
+        assert!(r.response);
+        assert_eq!(scan(LineScan::with_id_limit(2000)).id, None);
     }
 }

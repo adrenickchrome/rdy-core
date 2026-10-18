@@ -25,6 +25,9 @@ pub(crate) struct LogArgs {
     /// Only landings after this one: a landing id (at least 6 hex characters), landing:<id> or tag:<version>.
     #[arg(long)]
     since: Option<String>,
+    /// Check every signature offline and show the report under each landing and tag. Needs no SSH agent or hub.
+    #[arg(long)]
+    verify: bool,
 }
 
 #[derive(clap::Args)]
@@ -77,8 +80,17 @@ pub(crate) fn show(env: &Env, a: ShowArgs) -> Result<(Value, String), ErrorReply
 }
 
 pub(crate) fn log(env: &Env, a: LogArgs) -> Result<(Value, String), ErrorReply> {
-    let LogArgs { limit, since } = a;
-    let v = call(env, "log", json!({"limit": limit, "since": since}))?;
+    let LogArgs {
+        limit,
+        since,
+        verify,
+    } = a;
+    let args = if verify {
+        json!({"limit": limit, "since": since, "verify": true})
+    } else {
+        json!({"limit": limit, "since": since})
+    };
+    let v = call(env, "log", args)?;
     let t = log_text(&v);
     Ok((v, t))
 }
@@ -394,6 +406,13 @@ fn log_text(v: &Value) -> String {
             .collect();
         if !from.is_empty() {
             out.push_str(&format!("    rebased from {}\n", from.join(", ")));
+        }
+        // sig9: a verified row carries its signature reports
+        if row.get("signatures").is_some() {
+            for line in rdy_engine::signing_read::verified_lines(row) {
+                out.push_str(&line);
+                out.push('\n');
+            }
         }
     }
     out

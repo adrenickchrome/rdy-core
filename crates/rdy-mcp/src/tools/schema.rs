@@ -95,6 +95,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "edit_loop": EDIT_LOOP_DOC,
                 "brief": BRIEF_DOC,
                 "consequences": CONSEQUENCES_DOC,
+                "signing": SIGNING_DOC,
             }))
         }
     }

@@ -3,9 +3,9 @@
 //! [`compute_report`] reads the log, never only current blocks: every stored block version
 //! (closed views and withdrawn proposals included), every change that embeds a selected version,
 //! every chunk of a selected blob and every blob that shares one. It names every landing, tag,
-//! view, proposal, state snapshot, review, tension and answer that references affected content,
-//! and every record that quotes a complete source string of a selected version. Quoted text is
-//! returned in the transient quote rows only; the manifest a request binds holds record
+//! view, proposal, state snapshot, review, tension, answer and signature that references affected
+//! content, and every record that quotes a complete source string of a selected version. Quoted
+//! text is returned in the transient quote rows only; the manifest a request binds holds record
 //! identities, never the text.
 use super::scan::{Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
 use super::targets::{Checked, check_input, selector_text};
@@ -17,7 +17,7 @@ use crate::error::{
     W_REDACTION_INVENTORY, W_REDACTION_INVENTORY_MESSAGE, W_REDACTION_QUARANTINE,
     W_REDACTION_QUARANTINE_MESSAGE, W_REDACTION_QUOTES, W_REDACTION_QUOTES_MESSAGE,
     W_REDACTION_REUSE, W_REDACTION_REUSE_MESSAGE, W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE,
-    redaction_limit, redaction_target,
+    redaction_limit, redaction_target, sig_invalid,
 };
 use rdy_model::redaction::{
     AssessmentSupport, BlockResidue, ChangeResidue, CopyKind, CopyRow, CopyStatus, DropSpan,
@@ -914,6 +914,7 @@ pub(crate) fn compute_excluding(
     let mut reviews: Vec<(Hash, Review)> = vec![];
     let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
+    let mut signatures: Vec<(Hash, Hash)> = vec![];
     let audit = ImpactKind::AuditText;
     for (i, f) in frames.iter().enumerate() {
         // the request's own batches are left out before the first-seen check, so the same
@@ -1030,6 +1031,25 @@ pub(crate) fn compute_excluding(
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
                 quotes.scan(audit, &rec, false, &r.name)?;
             }
+            kinds::SIGNATURE => {
+                // the statement is stored as bytes, which the string visitor skips: it is read
+                // as bounded UTF-8 text here. The SSHSIG blob stays opaque, and the signer's
+                // role and time hold no text.
+                let g = reader.signature(&h)?;
+                let statement = std::str::from_utf8(&g.statement).map_err(|_| sig_invalid(&rec))?;
+                quotes.scan(
+                    audit,
+                    &rec,
+                    false,
+                    &(
+                        &g.namespace,
+                        statement,
+                        &g.signed_by.actor,
+                        &g.signed_by.run,
+                    ),
+                )?;
+                signatures.push((h, g.subject));
+            }
             // residues report under their original identity; the rest hold no text
             _ => {}
         }
@@ -1106,6 +1126,12 @@ pub(crate) fn compute_excluding(
         if snap || history.contains(landing) {
             affected_tags.insert(*h);
             row(ImpactKind::Tag, name.clone(), refs, false);
+        }
+    }
+    // a signature references its subject: an affected landing or tag
+    for (h, subject) in &signatures {
+        if affected_landings.contains(subject) || affected_tags.contains(subject) {
+            row(audit, h.to_string(), refs, false);
         }
     }
     let mut affected_reviews: HashSet<Hash> = HashSet::new();

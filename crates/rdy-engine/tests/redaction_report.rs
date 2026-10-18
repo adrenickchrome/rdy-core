@@ -19,12 +19,14 @@ use rdy_engine::redaction::{
 };
 use rdy_engine::{
     E_BAD_INPUT, E_REDACTION_BUDGET, E_REDACTION_LIMIT, E_REDACTION_REASON, E_REDACTION_STALE,
-    E_REDACTION_TARGET, Rdy, RdyError, Scope, Session, WriteRequest, WriteResult, pin_clock,
+    E_REDACTION_TARGET, E_SIG_INVALID, Rdy, RdyError, Scope, Session, WriteRequest, WriteResult,
+    pin_clock,
 };
 use rdy_model::redaction::{
     AssessmentSupport, CARRIER_MESSAGE, CopyKind, CopyRow, CopyStatus, ImpactKind, ImpactRelation,
     ImpactRow, ReasonClass, RedactTarget, encode_into,
 };
+use rdy_model::signature::Signature;
 use rdy_model::{
     ActorRun, AltSet, AltStatus, Answer, AnswerAct, BlockId, Finding, Hash, Intent, IntentStatus,
     PairItem, Provenance, RelayEvidence, Review, ReviewSubject, Role, SemanticTension, Verdict,
@@ -909,8 +911,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 10 and 13 to 22; 11 and 12 are unassigned
-    let expected: Vec<u8> = (1..=10).chain(13..=22).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 22; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=22).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -924,6 +926,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::REF_UPDATE,
             kinds::TAG,
             kinds::ANSWER,
+            kinds::SIGNATURE,
             kinds::VIEW_OP,
             kinds::BATCH_COMMIT,
             kinds::INTENT,
@@ -950,7 +953,8 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
         };
         assert_eq!(text_policy(k), Some(want), "kind {k}");
     }
-    for k in [0, 11, 12, 23, 255] {
+    assert_eq!(text_policy(kinds::SIGNATURE), Some(TextPolicy::Strings));
+    for k in [0, 12, 23, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1007,6 +1011,22 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
         provenance: prov("agent:a"),
     };
     let sh = p.r.store_mut().put(kinds::ALT_SET, &set).unwrap();
+    // a signature of the landing whose signer holds it
+    let gh =
+        p.r.store_mut()
+            .put_signature(&Signature {
+                subject: h(&landing),
+                namespace: "rdy-approval-v1".into(),
+                statement: b"a statement".to_vec(),
+                sig: vec![1, 2, 3],
+                signed_by: Provenance {
+                    actor: format!("agent:{TOKEN}"),
+                    run: None,
+                    role: Role::Writer,
+                    at_ms: 9,
+                },
+            })
+            .unwrap();
     p.r.invalidate();
     // a redaction request whose reason holds it
     let mut other = input(&[p.term.to_string()], false);
@@ -1026,6 +1046,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     assert!(has(ImpactKind::AuditText, &ih.to_string()), "{quoted:?}");
     assert!(has(ImpactKind::AuditText, &sh.to_string()), "{quoted:?}");
     assert!(has(ImpactKind::AuditText, &req.to_string()), "{quoted:?}");
+    assert!(has(ImpactKind::AuditText, &gh.to_string()), "{quoted:?}");
     // the view's ref update and view op are audit text; its change quotes through its view
     let st = p.r.read();
     let mut ref_or_op = 0;
@@ -1783,7 +1804,7 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
         e.message.contains("no text policy for object kind 23"),
         "{e}"
     );
-    assert!(require_text_policies(&[11]).is_err());
+    assert!(require_text_policies(&[12]).is_err());
 }
 
 #[test]
@@ -2663,4 +2684,190 @@ fn rdx5_the_pre_scan_expansion_reads_every_stored_version() {
         assert_eq!(e.code, E_REDACTION_LIMIT, "{e}");
         assert_eq!(e.message, "The redaction exceeds 100000 selected objects.");
     }
+}
+
+/// A signature of `subject` with the given text fields and SSHSIG bytes.
+fn signature(
+    subject: Hash,
+    namespace: &str,
+    statement: &[u8],
+    actor: &str,
+    run: Option<&str>,
+    sig: &[u8],
+) -> Signature {
+    Signature {
+        subject,
+        namespace: namespace.into(),
+        statement: statement.to_vec(),
+        sig: sig.to_vec(),
+        signed_by: Provenance {
+            actor: actor.into(),
+            run: run.map(str::to_string),
+            role: Role::Approver,
+            at_ms: 11,
+        },
+    }
+}
+
+#[test]
+fn sig4_redaction_scan_reports_signature_text() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    let vp = version(&p.r, "work", &p.prose);
+    let pi = p.r.propose(&writer(), "work", "seed", None).unwrap();
+    let landing = h(&p.r.land(&approver(), &pi.id).unwrap());
+    let tag = h(&p.r.tag(&approver(), "v1.0.0", None, None).unwrap().tag);
+    let statement = format!("rdy-statement: 1\nkind: approval\nnote: {SECRET}\n");
+    let sigs = [
+        // the statement quotes the source string
+        signature(
+            landing,
+            "rdy-approval-v1",
+            statement.as_bytes(),
+            "human:t",
+            None,
+            &[1],
+        ),
+        // the namespace does
+        signature(tag, SECRET, b"plain", "human:t", None, &[2]),
+        // the signer's actor and run both do: one quote row
+        signature(
+            tag,
+            "rdy-tag-v1",
+            b"plain",
+            &format!("agent:{SECRET}"),
+            Some(SECRET),
+            &[3],
+        ),
+        // the run alone does
+        signature(
+            landing,
+            "rdy-relay-v1",
+            b"plain",
+            "agent:a",
+            Some(SECRET),
+            &[4],
+        ),
+        // only the opaque SSHSIG bytes hold it: no quote
+        signature(
+            landing,
+            "rdy-approval-v1",
+            b"plain",
+            "human:t",
+            None,
+            SECRET.as_bytes(),
+        ),
+    ];
+    let ids: Vec<Hash> = sigs
+        .iter()
+        .map(|g| p.r.store_mut().put_signature(g).unwrap())
+        .collect();
+    p.r.invalidate();
+    let d = dry(&p.r, &[format!("{}@{vp}", p.prose)]);
+    // every signature names an affected subject: a reference row each; the four with text in a
+    // visited string also quote, in the predecessor's row order
+    let mut want: Vec<ImpactRow> = vec![];
+    let mut order: Vec<(String, usize)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.to_string(), i))
+        .collect();
+    order.sort();
+    for (record, i) in &order {
+        want.push(row(
+            ImpactKind::AuditText,
+            record,
+            ImpactRelation::References,
+            false,
+        ));
+        if *i < 4 {
+            want.push(row(
+                ImpactKind::AuditText,
+                record,
+                ImpactRelation::Quotes,
+                false,
+            ));
+        }
+    }
+    let ids_text: BTreeSet<String> = ids.iter().map(Hash::to_string).collect();
+    let got: Vec<ImpactRow> = d
+        .inside
+        .iter()
+        .filter(|r| ids_text.contains(&r.record))
+        .cloned()
+        .collect();
+    assert_eq!(got, want);
+    assert!(
+        got.iter()
+            .all(|r| r.kind == ImpactKind::AuditText && !r.erasable)
+    );
+    // the transient quote rows: one per quoting signature, the complete source string
+    let mut want_quotes: Vec<QuoteRow> = order
+        .iter()
+        .filter(|(_, i)| *i < 4)
+        .map(|(record, _)| quote(ImpactKind::AuditText, record, SECRET, false))
+        .collect();
+    want_quotes.sort_by(|a, b| a.record.cmp(&b.record));
+    let got_quotes: Vec<QuoteRow> = d
+        .quotes
+        .iter()
+        .filter(|q| ids_text.contains(&q.record))
+        .cloned()
+        .collect();
+    assert_eq!(got_quotes, want_quotes);
+    // the subjects are still reported as themselves
+    assert!(d.inside.contains(&row(
+        ImpactKind::Landing,
+        landing,
+        ImpactRelation::References,
+        false
+    )));
+    assert!(d.inside.contains(&row(
+        ImpactKind::Tag,
+        "v1.0.0",
+        ImpactRelation::References,
+        false
+    )));
+    // a completed removal keeps every signature frame and its bytes
+    let target = RedactTarget::Version {
+        id: p.prose.clone(),
+        version: vp,
+    };
+    let p = apply_fixture(p, vec![target]);
+    let st = p.r.read();
+    for (g, id) in sigs.iter().zip(&ids) {
+        assert_eq!(&st.reader().signature(id).unwrap(), g);
+    }
+    drop(st);
+    let present: Vec<Hash> = frames_from(&p.r, ORIGIN)
+        .into_iter()
+        .filter(|(k, _, payload)| *k == kinds::SIGNATURE && payload.is_some())
+        .map(|(_, h, _)| h)
+        .collect();
+    assert_eq!(present.len(), ids.len());
+    assert!(ids.iter().all(|g| present.contains(g)));
+    // a statement that is not UTF-8 text is an invalid signature for that frame
+    let mut p = p;
+    let bad =
+        p.r.store_mut()
+            .put_signature(&signature(
+                landing,
+                "rdy-approval-v1",
+                &[0xff, 0xfe],
+                "human:t",
+                None,
+                &[5],
+            ))
+            .unwrap();
+    p.r.invalidate();
+    let e =
+        p.r.read()
+            .redaction_report(&input(&[p.term.to_string()], true))
+            .unwrap_err();
+    assert_eq!(e.code, E_SIG_INVALID, "{e}");
+    assert_eq!(e.message, format!("signature {bad} is invalid"));
+    assert_eq!(
+        e.fix,
+        "check the source of this signature; it may be damaged or forged"
+    );
 }

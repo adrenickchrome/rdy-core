@@ -58,6 +58,9 @@ const REDACTION_ACTIVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("re
 /// kind byte, the object's hash, the payload length (u32 little-endian) and the residue's hash (or
 /// nothing). The earliest apply in log order keeps a frame.
 const REDACTION_SPANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_spans");
+/// A signature's subject (32 bytes), then the signature's hash (32 bytes) -> empty: every
+/// signature of every subject (kind SIGNATURE, D-1Z951), derived from the frames alone.
+const SIGNATURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("signatures");
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
 
@@ -122,6 +125,11 @@ pub enum IndexEntry {
         apply: Hash,
         request: Hash,
         loc: Location,
+    },
+    /// SIGNATURE record `signature` names `subject`; every signature of a subject is kept.
+    Signature {
+        subject: Hash,
+        signature: Hash,
     },
 }
 
@@ -190,6 +198,7 @@ pub struct IndexDump {
     pub redaction_applied: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_active: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_spans: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub signatures: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 fn dump_table(
@@ -243,6 +252,28 @@ fn hashes_under(
         }
     }
     Ok(out)
+}
+
+/// The `signatures` table's key: the subject's 32 bytes, then the signature's.
+fn signature_key(subject: &Hash, signature: &Hash) -> [u8; 64] {
+    let mut key = [0u8; 64];
+    key[..32].copy_from_slice(&subject.0);
+    key[32..].copy_from_slice(&signature.0);
+    key
+}
+
+/// The subject and signature of a `signatures` key; any other length is damage.
+fn signature_from(key: &[u8]) -> Result<(Hash, Hash), StoreError> {
+    if key.len() != 64 {
+        return Err(StoreError::Decode(format!(
+            "signature entry is {} bytes, expected 64",
+            key.len()
+        )));
+    }
+    Ok((
+        hash_from(&key[..32], "signature entry")?,
+        hash_from(&key[32..], "signature entry")?,
+    ))
 }
 
 /// A frame location as a key: the segment (u32) then the offset (u64), big-endian, so keys sort
@@ -551,12 +582,22 @@ impl Index {
 
     fn with_tables(database: Database) -> Result<Index, StoreError> {
         let w = database.begin_write().map_err(db)?;
-        // an index written before the open-proposal table existed gets it filled from its refs,
-        // once, in this commit
-        let had_open = w
+        let names: Vec<String> = w
             .list_tables()
             .map_err(db)?
-            .any(|t| t.name() == OPEN_PROPOSALS.name());
+            .map(|t| t.name().to_string())
+            .collect();
+        let has = |name: &str| names.iter().any(|n| n == name);
+        // an index that holds objects but no signature table cannot say a subject is unsigned:
+        // it is refused, and the open sets it aside and rebuilds it from the log
+        if has(OBJECTS.name()) && !has(SIGNATURES.name()) {
+            return Err(StoreError::Db(
+                "the index has no signatures table; it is rebuilt from the log".into(),
+            ));
+        }
+        // an index written before the open-proposal table existed gets it filled from its refs,
+        // once, in this commit
+        let had_open = has(OPEN_PROPOSALS.name());
         {
             w.open_table(OBJECTS).map_err(db)?;
             w.open_table(TYPED).map_err(db)?;
@@ -574,6 +615,7 @@ impl Index {
             w.open_table(REDACTION_APPLIED).map_err(db)?;
             w.open_table(REDACTION_ACTIVE).map_err(db)?;
             w.open_table(REDACTION_SPANS).map_err(db)?;
+            w.open_table(SIGNATURES).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
                 let refs = w.open_table(REFS).map_err(db)?;
@@ -653,8 +695,10 @@ impl Index {
             let mut open_tensions = w.open_table(OPEN_TENSIONS).map_err(db)?;
             let mut open_suspects = w.open_table(OPEN_SUSPECTS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
-            // the redaction tables are opened only for a batch with a redaction record
+            // the redaction tables are opened only for a batch with a redaction record, and the
+            // signature table only for a batch with a signature
             let mut redaction: Option<RedactionTables<'_>> = None;
+            let mut signatures: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
@@ -737,6 +781,14 @@ impl Index {
                             None => redaction.insert(RedactionTables::open(&w)?),
                         };
                         t.apply(&self.redacted, apply, request, loc)?;
+                    }
+                    IndexEntry::Signature { subject, signature } => {
+                        let t = match &mut signatures {
+                            Some(t) => t,
+                            None => signatures.insert(w.open_table(SIGNATURES).map_err(db)?),
+                        };
+                        t.insert(&signature_key(subject, signature)[..], &[][..])
+                            .map_err(db)?;
                     }
                 }
             }
@@ -926,7 +978,119 @@ impl Index {
             redaction_applied: dump_table(&r, REDACTION_APPLIED)?,
             redaction_active: dump_table(&r, REDACTION_ACTIVE)?,
             redaction_spans: dump_table(&r, REDACTION_SPANS)?,
+            signatures: dump_table(&r, SIGNATURES)?,
         })
+    }
+
+    /// The signatures of `subject`, in ascending hash order: at most `cap`. Reading one more
+    /// entry stops the read with `signing input exceeds {cap} signatures per subject`.
+    pub fn signatures_of(&self, subject: &Hash, cap: usize) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(SIGNATURES).map_err(db)?;
+        let mut out = vec![];
+        for item in t.range(&subject.0[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&subject.0) {
+                break;
+            }
+            if out.len() == cap {
+                return Err(crate::signature::over_per_subject());
+            }
+            out.push(signature_from(key)?.1);
+        }
+        Ok(out)
+    }
+
+    /// The signatures of `subject` whose frame lies before `end`, in ascending hash order: at
+    /// most `cap`, counted among those only. A frame at or after `end` (a batch that is still
+    /// open, or one sealed after the state that asks) is left out. Both tables are read in one
+    /// transaction. A signature entry with no typed frame entry is `NotFound`, as reading the
+    /// record would be.
+    pub fn signatures_before(
+        &self,
+        subject: &Hash,
+        cap: usize,
+        end: Location,
+    ) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(SIGNATURES).map_err(db)?;
+        let typed = r.open_table(TYPED).map_err(db)?;
+        let mut out = vec![];
+        for item in t.range(&subject.0[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&subject.0) {
+                break;
+            }
+            let id = signature_from(key)?.1;
+            let at = typed
+                .get(&typed_key(crate::kinds::SIGNATURE, &id)[..])
+                .map_err(db)?
+                .ok_or(StoreError::NotFound(id))?;
+            if dec(at.value())? >= end {
+                continue;
+            }
+            if out.len() == cap {
+                return Err(crate::signature::over_per_subject());
+            }
+            out.push(id);
+        }
+        Ok(out)
+    }
+
+    /// Calls `f` with the hash of every signature, in subject then hash order, from one read
+    /// transaction; nothing is collected.
+    pub fn for_each_signature(
+        &self,
+        f: &mut dyn FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(SIGNATURES).map_err(db)?;
+        for item in t.iter().map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            f(signature_from(k.value())?.1)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the signature table holds exactly one row per stored SIGNATURE object, read in one
+    /// read transaction, so a live writer's new signature is not a false failure (rdr1).
+    /// `subject_of` reads each object's subject; its error stops the check.
+    pub fn signature_rows_match(
+        &self,
+        subject_of: &mut dyn FnMut(Hash) -> Result<Hash, StoreError>,
+    ) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let typed = r.open_table(TYPED).map_err(db)?;
+        let rows = r.open_table(SIGNATURES).map_err(db)?;
+        let mut n: u64 = 0;
+        for item in typed.iter().map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if key.len() != 33 || key[32] != crate::kinds::SIGNATURE {
+                continue;
+            }
+            let h = hash_from(&key[..32], "typed entry")?;
+            let subject = subject_of(h)?;
+            if rows
+                .get(&signature_key(&subject, &h)[..])
+                .map_err(db)?
+                .is_none()
+            {
+                return Ok(false);
+            }
+            n += 1;
+        }
+        Ok(redb::ReadableTableMetadata::len(&rows).map_err(db)? == n)
+    }
+
+    /// Drops the signature table in a durable commit (`Store::drop_signature_table_for_tests`).
+    pub(crate) fn drop_signature_table_for_tests(&self) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        w.delete_table(SIGNATURES).map_err(db)?;
+        w.commit().map_err(db)?;
+        Ok(())
     }
 
     /// The open tensions: (id, the record that opened it), in id order.

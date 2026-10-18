@@ -3,7 +3,7 @@
 
 use super::*;
 use rdy_engine::answer::relay::RelayInput;
-use rdy_engine::engine::write_typed;
+use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -37,15 +37,13 @@ pub fn rdy_tag(st: &mut McpState, p: TagParams) -> Result<Value, RdyError> {
         session_ref: p.session_ref,
         kind: None,
     };
-    write_typed(&*st.engine, move |r| {
-        r.tag_as(
-            &s,
-            &person,
-            &relay,
-            true,
-            &p.version,
-            p.landing.as_deref(),
-            p.message,
-        )
-    })
+    // signed as the signing settings say, in the tag's own batch (D-1Z951)
+    let request = SigningAct::Tag {
+        name: p.version,
+        landing: p.landing,
+        message: p.message,
+        relay,
+        implicit: true,
+    };
+    run_signed_act(&*st.engine, &*st.agent, &s, &person, request)
 }

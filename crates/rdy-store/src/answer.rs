@@ -46,7 +46,7 @@
 //! `put_answer` refuses an answer that breaks a rule of the record with `StoreError::Refused`.
 use crate::error::StoreError;
 use crate::index::hash_from;
-use crate::store::encode;
+use crate::store::{Frames, encode};
 use crate::{Store, StoreReader, kinds};
 use rdy_model::{Answer, AnswerAct, EvidenceKind, Hash};
 
@@ -116,6 +116,18 @@ impl Store {
         a: &Answer,
         extra: Vec<(u8, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
+        let (id, items) = self.answer_items(a, extra)?;
+        self.write(items)?;
+        Ok(id)
+    }
+
+    /// The answer's id and the frames `put_answer_with` writes: `extra`, then the answer and its
+    /// ref. Checks the answer's rules and its targets as `put_answer_with` does; writes nothing.
+    pub(crate) fn answer_items(
+        &self,
+        a: &Answer,
+        extra: Vec<(u8, Vec<u8>)>,
+    ) -> Result<(Hash, Frames), StoreError> {
         let bytes = encode(a);
         let id = Hash::of(&bytes);
         if let Some(rule) = invalid(a) {
@@ -133,8 +145,7 @@ impl Store {
         let mut items = extra;
         items.push((kinds::ANSWER, bytes));
         items.extend(self.ref_items_pub(vec![(ref_of(a), id.0.to_vec())]));
-        self.write(items)?;
-        Ok(id)
+        Ok((id, items))
     }
 }
 

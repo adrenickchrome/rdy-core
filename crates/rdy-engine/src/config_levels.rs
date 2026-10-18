@@ -323,7 +323,41 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         ty: Ty::OptStr,
         default: None,
     },
+    // signing (D-QVH4N): local and user levels only; `signing_config` reads them
+    KeyRule {
+        key: SIGNING_KEY,
+        levels: PERSON,
+        ty: Ty::OptStr,
+        default: None,
+    },
+    KeyRule {
+        key: SIGNING_AGENT_KEY,
+        levels: PERSON,
+        ty: Ty::OptStr,
+        default: None,
+    },
+    KeyRule {
+        key: SIGNING_SIGN,
+        levels: PERSON,
+        ty: Ty::Choice(SIGN_MODES),
+        default: Some("auto"),
+    },
+    KeyRule {
+        key: SIGNING_ALLOWED_SIGNERS,
+        levels: PERSON,
+        ty: Ty::OptStr,
+        default: None,
+    },
 ];
+
+/// The signing settings, by their dotted keys.
+pub const SIGNING_KEY: &str = "signing.key";
+pub const SIGNING_AGENT_KEY: &str = "signing.agent_key";
+pub const SIGNING_SIGN: &str = "signing.sign";
+pub const SIGNING_ALLOWED_SIGNERS: &str = "signing.allowed_signers";
+
+/// The choices of `signing.sign`.
+pub const SIGN_MODES: &[&str] = &["never", "auto", "always"];
 
 /// One key's winning value and where it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -928,6 +962,49 @@ fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
     out
 }
 
+/// The warning for a user-config `signing.allowed_signers` that is a relative path, the value
+/// removed from `map` so that no level answers instead. The path is used as written: no tilde,
+/// environment variable or glob is expanded. An empty string stays for the signing path's own
+/// error.
+fn user_path_warnings(map: &mut Mapping, user_file: Option<&Path>) -> Vec<Issue> {
+    let relative = get_path(map, SIGNING_ALLOWED_SIGNERS)
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty() && !Path::new(s).is_absolute());
+    if !relative {
+        return Vec::new();
+    }
+    remove_path(map, SIGNING_ALLOWED_SIGNERS);
+    vec![config_warning(
+        format!(
+            "{SIGNING_ALLOWED_SIGNERS} in {} must be absolute; rdy ignores it",
+            file_name(Level::User, user_file)
+        ),
+        format!("set {SIGNING_ALLOWED_SIGNERS} to an absolute path"),
+    )]
+}
+
+/// The warning for a winning `signing.agent_key` that names the same key as the winning
+/// `signing.key`, from the merged settings. The agent value is removed from `merged`, so no lower
+/// level answers instead; its origin stays for `--show-origin`. The selectors are compared by
+/// fingerprint only: a malformed one is left for the signing path's error, and no agent or file
+/// is asked.
+fn signing_agent_warning(merged: &mut Mapping) -> Option<Issue> {
+    let key = get_path(merged, SIGNING_KEY)?.as_str()?;
+    let agent = get_path(merged, SIGNING_AGENT_KEY)?.as_str()?;
+    let same = crate::signing_crypto::key_fingerprint(key)
+        .ok()
+        .zip(crate::signing_crypto::key_fingerprint(agent).ok())
+        .is_some_and(|(a, b)| a == b);
+    if !same {
+        return None;
+    }
+    remove_path(merged, SIGNING_AGENT_KEY);
+    Some(config_warning(
+        format!("{SIGNING_AGENT_KEY} equals {SIGNING_KEY}; rdy ignores {SIGNING_AGENT_KEY}"),
+        format!("set {SIGNING_AGENT_KEY} to a different key"),
+    ))
+}
+
 /// The warning for `serve.site_lan_address` while `serve.site_lan` is not true, from the merged
 /// settings. The value stays: it applies once the setting is on.
 fn lan_address_warning(merged: &Mapping) -> Option<Issue> {
@@ -1022,8 +1099,11 @@ fn build(
             }
         }
     }
-    for (_, map) in &mut files {
+    for (level, map) in &mut files {
         warnings.extend(range_warnings(map));
+        if *level == Level::User {
+            warnings.extend(user_path_warnings(map, user_file));
+        }
     }
     let mut merged = files
         .iter()
@@ -1091,6 +1171,7 @@ fn build(
         }
     }
     warnings.extend(lan_address_warning(&merged));
+    warnings.extend(signing_agent_warning(&mut merged));
     if let Ok((_, code)) = code {
         warnings.extend(code);
     }

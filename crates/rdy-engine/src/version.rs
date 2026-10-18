@@ -219,8 +219,9 @@ fn label_of(
     out
 }
 
-/// The candidates `text` names: a full hash, or a unique hex prefix of at least 6 characters.
-pub(crate) fn match_prefix(candidates: &[Hash], text: &str) -> Result<Hash, RdyError> {
+/// `text` as a landing id spells it, lowercased: a full hash, or a hex prefix of at least 6
+/// characters. Anything else is `E_NOT_FOUND`.
+pub(crate) fn landing_spelling(text: &str) -> Result<String, RdyError> {
     let want = text.to_ascii_lowercase();
     if want.len() < 6 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(RdyError::new(
@@ -229,6 +230,12 @@ pub(crate) fn match_prefix(candidates: &[Hash], text: &str) -> Result<Hash, RdyE
             "pass a landing hash, or at least 6 of its leading hex characters (see rdy log)",
         ));
     }
+    Ok(want)
+}
+
+/// The candidates `text` names: a full hash, or a unique hex prefix of at least 6 characters.
+pub(crate) fn match_prefix(candidates: &[Hash], text: &str) -> Result<Hash, RdyError> {
+    let want = landing_spelling(text)?;
     let hits: Vec<Hash> = candidates
         .iter()
         .copied()
@@ -378,16 +385,34 @@ impl Rdy {
         landing: Option<&str>,
         message: Option<String>,
     ) -> Result<TagInfo, RdyError> {
+        let prepared = self.prepare_tag_as(s, person, relay, implicit, name, landing, message)?;
+        self.commit_tag_as(prepared, &[])
+    }
+
+    /// Every rule of `tag_as` and the tag (with its relay's `ANSWER`) it would write, under the
+    /// writer and without writing anything. [`Rdy::commit_tag_as`] writes it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_tag_as(
+        &self,
+        s: &Session,
+        person: &str,
+        relay: &RelayInput,
+        implicit: bool,
+        name: &str,
+        landing: Option<&str>,
+        message: Option<String>,
+    ) -> Result<PreparedTagAct, RdyError> {
         let (who, relay) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
         let Some(relay) = relay else {
             let s = Session {
                 role: Role::Approver,
                 ..s.clone()
             };
-            return Ok(TagInfo {
-                version: self.tag(&s, name, landing, message)?,
+            let tag = self.new_tag(&s, name, landing, message)?;
+            let store = self.store.prepare_tag(&tag, None)?;
+            return Ok(PreparedTagAct {
+                store,
                 relayed_by: None,
-                answer: None,
             });
         };
         let tag = self.new_tag(&who, name, landing, message)?;
@@ -405,15 +430,40 @@ impl Rdy {
             evidence_kind: Some(EvidenceKind::Text),
             note: None,
         };
+        let store = self
+            .store
+            .prepare_tag(&tag, Some(a))
+            .map_err(answer_write_error)?;
+        Ok(PreparedTagAct {
+            store,
+            relayed_by: Some(relay.by),
+        })
+    }
+
+    /// Writes the tag `prepared` holds, with `signatures` of it in the same batch after the tag
+    /// and its answer, and publishes it.
+    pub(crate) fn commit_tag_as(
+        &mut self,
+        prepared: PreparedTagAct,
+        signatures: &[rdy_model::signature::Signature],
+    ) -> Result<TagInfo, RdyError> {
+        let tag = prepared.store.tag().clone();
+        let relayed = prepared.relayed_by.is_some();
         let (_, answer) = self
             .store
-            .put_tag_answered(&tag, a)
-            .map_err(answer_write_error)?;
+            .commit_tag(prepared.store, signatures)
+            .map_err(|e| {
+                if relayed {
+                    answer_write_error(e)
+                } else {
+                    e.into()
+                }
+            })?;
         self.publish(crate::Delta::Tags)?;
         Ok(TagInfo {
             version: self.read().version_info(&tag)?,
-            relayed_by: Some(relay.by),
-            answer: Some(answer.to_string()),
+            relayed_by: prepared.relayed_by,
+            answer: answer.map(|a| a.to_string()),
         })
     }
 
@@ -496,6 +546,13 @@ impl Rdy {
             tagged_by: s.provenance(),
         })
     }
+}
+
+/// A tag prepared under the writer by [`Rdy::prepare_tag_as`] and not yet written: the store's
+/// prepared batch and, for a relayed tag, the agent that relayed it.
+pub(crate) struct PreparedTagAct {
+    pub(crate) store: rdy_store::PreparedTag,
+    pub(crate) relayed_by: Option<ActorRun>,
 }
 
 /// A store error from a write with an `ANSWER`. A refusal means rdy built an answer the store's

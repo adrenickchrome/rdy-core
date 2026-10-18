@@ -66,7 +66,14 @@ impl Client {
     async fn start(engine: Arc<dyn Engine>) -> Client {
         let (client, server) = tokio::io::duplex(1 << 20);
         let (sr, sw) = tokio::io::split(server);
-        tokio::spawn(serve_on(engine, 1, NotifyHub::new(), sr, sw));
+        tokio::spawn(serve_on(
+            engine,
+            1,
+            NotifyHub::new(),
+            Arc::new(rdy_engine::signing_crypto::UnavailableAgent),
+            sr,
+            sw,
+        ));
         let (cr, cw) = tokio::io::split(client);
         let mut c = Client {
             r: BufReader::new(cr),
@@ -258,6 +265,7 @@ async fn rdx12_all_registered_ops_tools_and_resources_cross_the_epoch_guard() {
         session: &s,
         human: "human:t",
         cwd: dir.path(),
+        agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
 
     // while the engine serves the current state: the host lists, and responses go through

@@ -1,6 +1,8 @@
+use rdy_daemon::ops::with_direct_context;
+use rdy_daemon::signing_agent::CallerAgent;
 use rdy_daemon::{
-    Client, ErrorReply, OpContext, Proto, RunDir, StartOptions, connect_or_start, dispatch,
-    serve_command, spawn_serve,
+    Client, ErrorReply, Proto, RunDir, StartOptions, connect_or_start, dispatch, serve_command,
+    spawn_serve,
 };
 use rdy_engine::engine::Local;
 use rdy_engine::wc::state::{POINTER_FILE, Place, WcState, pointer_project};
@@ -12,6 +14,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -198,7 +201,10 @@ impl Conn {
             let run_dir = RunDir::of_project(&env.project);
             let opts = start_options(&env.project, &env.cwd, Proto::Ctl);
             let mut client = rt.block_on(async {
-                let mut c = connect_or_start(&run_dir, opts).await?;
+                // the daemon asks this process, on this connection, to sign: with its own agent
+                let mut c = connect_or_start(&run_dir, opts)
+                    .await?
+                    .with_agent(Arc::new(CallerAgent::from_env()));
                 c.ctl("session", json!({"actor": actor, "run": run}))
                     .await?;
                 Ok::<Client, ErrorReply>(c)
@@ -221,13 +227,9 @@ impl Conn {
                 human,
                 cwd,
             } => {
-                let cx = OpContext {
-                    engine: &**local,
-                    session,
-                    human,
-                    cwd,
-                };
-                dispatch(&cx, op, args).map_err(ErrorReply::from)
+                // signed, if at all, by this process's own agent
+                with_direct_context(&**local, session, human, cwd, |cx| dispatch(cx, op, args))
+                    .map_err(ErrorReply::from)
             }
             Conn::Daemon {
                 rt,

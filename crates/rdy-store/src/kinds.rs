@@ -13,7 +13,11 @@ pub const TAG: u8 = 9;
 /// An answer (`rdy_model::Answer`; plan Decision intake): refs `answer/<item>` and
 /// `pending/<person>/<item>` name the latest one (`crate::answer`).
 pub const ANSWER: u8 = 10;
-// Codes 11-12 are unassigned.
+/// A detached signature (`rdy_model::signature::Signature`, D-1Z951): it names its subject, a
+/// landing or a tag, and never changes it. The index maps each subject to its signatures
+/// (`crate::signature`).
+pub const SIGNATURE: u8 = 11;
+// Code 12 is unassigned.
 /// One op of a view's chain (`crate::view::ViewOp`).
 pub const VIEW_OP: u8 = 13;
 /// Ends every write batch: names the batch's first frame, its frame count and a digest of the

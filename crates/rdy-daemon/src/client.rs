@@ -6,6 +6,7 @@ use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
 use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
 use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
+use crate::signing_transport::{CallerLink, CallerSigner, InterruptSource, read_reply, sigint};
 use crate::socket::MAX_SOCKET_PATH;
 use crate::spawn::Spawned;
 use crate::sys;
@@ -13,8 +14,9 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// How long `connect_or_start` waits for a daemon to become ready, by default.
 pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -215,6 +217,8 @@ pub struct Client {
     gone: bool,
     /// The `notice` of the last reply.
     notice: Option<String>,
+    /// How this process answers the daemon's signing callbacks: with its own agent.
+    link: CallerLink,
 }
 
 impl Client {
@@ -226,7 +230,22 @@ impl Client {
             next_id: 1,
             gone: false,
             notice: None,
+            link: CallerLink::new(None, sigint()),
         }
+    }
+
+    /// This client with `agent`, this process's own SSH agent, as the signer the daemon asks
+    /// for this connection's requests. Without one, each ask is `E_NO_AGENT`
+    /// `SSH_AUTH_SOCK is not set`.
+    pub fn with_agent(mut self, agent: Arc<dyn CallerSigner>) -> Client {
+        self.link.set_agent(agent);
+        self
+    }
+
+    /// This client with `interrupt` in place of `SIGINT` as what cancels an ask of its agent.
+    pub fn with_interrupt(mut self, interrupt: InterruptSource) -> Client {
+        self.link.set_interrupt(interrupt);
+        self
     }
 
     /// The session id the daemon gave this connection.
@@ -247,6 +266,8 @@ impl Client {
 
     /// Sends one `ctl` request and reads its reply. Ids count from 1. A closed connection, an
     /// unreadable reply or a reply to another id is `E_DAEMON_GONE`, and so is every later call.
+    /// The daemon's signing callbacks before the reply are answered with this client's agent; a
+    /// `SIGINT` (or the client's interrupt) while the agent is asked cancels that ask.
     pub async fn ctl(&mut self, op: &str, args: Value) -> Result<Value, ErrorReply> {
         let gone = |message: String| ErrorReply::new(E_DAEMON_GONE, message, GONE_FIX);
         let closed = || gone(format!("the daemon closed the connection during {op}"));
@@ -263,15 +284,14 @@ impl Client {
             self.gone = true;
             return Err(closed());
         }
-        let mut buf = Vec::new();
-        match self.stream.read_until(b'\n', &mut buf).await {
+        let buf = match read_reply(&mut self.link, &mut self.stream).await {
+            Ok(Some(buf)) => buf,
             // EOF before the newline counts as no reply
-            Ok(_) if buf.last() == Some(&b'\n') => {}
-            Ok(_) | Err(_) => {
+            Ok(None) | Err(_) => {
                 self.gone = true;
                 return Err(closed());
             }
-        }
+        };
         let mut reply = match serde_json::from_slice::<Value>(&buf) {
             Ok(Value::Object(m)) => m,
             Ok(_) | Err(_) => {
