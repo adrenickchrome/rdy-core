@@ -309,7 +309,8 @@ fn retain(keep: &mut BTreeSet<BlockId>, id: &BlockId, l: &Limits) -> Result<bool
 }
 
 /// Steps 2 and 3: each selector's whole subtree, then each selector's ancestor folders, with
-/// the tree checked on the way up. Iterative: a damaged store may nest deep or loop.
+/// the tree checked on the way up and every retained node's placement checked after, all before
+/// any text is scanned. Iterative: a damaged store may nest deep or loop.
 fn select(
     m: &Materialized,
     selectors: &[BlockId],
@@ -351,6 +352,25 @@ fn select(
             cur = p;
         }
     }
+    // every retained node, descendants included, sits where the tree allows: a doc or folder at
+    // the top or in a folder, and any other block in a doc or in another such block. Every chain
+    // up from a descendant passes its selector, so the first tree node above other content is
+    // its home doc.
+    for id in &keep {
+        let b = m.get(id).ok_or_else(invalid_tree)?;
+        let parent = match &b.parent {
+            Some(p) => Some(m.get(p).ok_or_else(invalid_tree)?),
+            None => None,
+        };
+        let placed = if tree::is_tree_type(&b.block_type) {
+            parent.is_none_or(|p| p.block_type == tree::FOLDER)
+        } else {
+            parent.is_some_and(|p| p.block_type != tree::FOLDER)
+        };
+        if !placed {
+            return Err(invalid_tree());
+        }
+    }
     Ok(keep)
 }
 
@@ -370,14 +390,15 @@ fn available(reader: &StoreReader, h: &Hash) -> Result<bool, RdyError> {
 }
 
 /// Step 6: one row per selected figure whose `blob` field is a hash, sorted by (home doc, block,
-/// blob). A removed figure's stub has no fields, so no row.
+/// blob). A removed figure's stub has no fields, so no row. The rows are bounded and sorted
+/// first, then each distinct blob is checked once in that order, so the first damaged manifest
+/// reported is the first row's.
 fn attachments(
     reader: &StoreReader,
     sel: &Materialized,
     l: &Limits,
 ) -> Result<Vec<AttachmentEntry>, RdyError> {
     let mut rows = vec![];
-    let mut seen: BTreeMap<Hash, bool> = BTreeMap::new();
     for b in sel.iter() {
         if b.block_type != "figure" || b.is_redacted() {
             continue;
@@ -389,22 +410,25 @@ fn attachments(
             return Err(limit("attachments", l.attachments, "rows"));
         }
         let home_doc = sel.doc_of(&b.id).ok_or_else(invalid_tree)?.id.clone();
-        let ok = match seen.get(&blob) {
-            Some(ok) => *ok,
-            None => {
-                let ok = available(reader, &blob)?;
-                seen.insert(blob, ok);
-                ok
-            }
-        };
         rows.push(AttachmentEntry {
             block: b.id.clone(),
             home_doc,
             blob,
-            available: ok,
+            available: false,
         });
     }
     rows.sort_by(|a, b| (&a.home_doc, &a.block, &a.blob).cmp(&(&b.home_doc, &b.block, &b.blob)));
+    let mut seen: BTreeMap<Hash, bool> = BTreeMap::new();
+    for row in &mut rows {
+        row.available = match seen.get(&row.blob) {
+            Some(ok) => *ok,
+            None => {
+                let ok = available(reader, &row.blob)?;
+                seen.insert(row.blob, ok);
+                ok
+            }
+        };
+    }
     Ok(rows)
 }
 

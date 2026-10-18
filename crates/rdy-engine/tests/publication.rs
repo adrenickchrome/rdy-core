@@ -1320,6 +1320,32 @@ fn pub4_hostile_selection_is_bounded() {
         ],
         &["d-NEST1"],
     );
+    // the outer doc selected: the doc nested in it is checked too, before the text bound
+    let outer = || named(blk("d-0VTER", "doc", None, "a"), "outer");
+    let nested = || named(blk("d-NEST1", "doc", Some("d-0VTER"), "a"), "nested");
+    invalid(vec![outer(), nested()], &["d-0VTER"]);
+    {
+        let _g = publication::override_limits_for_tests(Limits {
+            text_value: 8,
+            ..Limits::default()
+        });
+        invalid(
+            vec![outer(), with_body(nested(), "far more than eight bytes")],
+            &["d-0VTER"],
+        );
+    }
+    // a decision directly in a selected folder has no home doc
+    invalid(
+        vec![
+            named(blk("fd-H0ME1", "folder", None, "a"), "homeless"),
+            with_field(
+                blk("D-N0D0C", "decision", Some("fd-H0ME1"), "a"),
+                "statement",
+                s("No doc holds this."),
+            ),
+        ],
+        &["fd-H0ME1"],
+    );
 }
 
 #[test]
@@ -1473,4 +1499,48 @@ fn pub4_asset_limits_precede_byte_reads() {
     let m = st.materialized(&Scope::View("damaged".into())).unwrap();
     let e = publication::resolve_in_for_tests(&st, &m, "pubsite").unwrap_err();
     assert_eq!(e.code, E_IO, "{e}");
+    drop(st);
+
+    // several damaged manifests: the first failure is the first row in (home doc, block, blob)
+    // order, not in figure id order
+    let empty = r
+        .store_mut()
+        .write(vec![(kinds::BLOB_MANIFEST, vec![])])
+        .unwrap()[0];
+    let ff = r
+        .store_mut()
+        .write(vec![(kinds::BLOB_MANIFEST, vec![0xff; 12])])
+        .unwrap()[0];
+    let st = r.read();
+    let order = |select: &[&str]| {
+        let figure = |id: &str, parent: &str, blob: &Hash| {
+            with_field(
+                blk(id, "figure", Some(parent), "a"),
+                "blob",
+                s(&blob.to_string()),
+            )
+        };
+        let m = synth(vec![
+            named(blk("d-ADM1N", "doc", None, "a"), "admin"),
+            profile_block("pf-0RDER", "d-ADM1N", "order", "org", select),
+            named(blk("d-AAAAA", "doc", None, "b"), "first"),
+            named(blk("d-ZZZZZ", "doc", None, "c"), "second"),
+            figure("fg-ZZZZZ", "d-AAAAA", &empty),
+            figure("fg-AAAAA", "d-ZZZZZ", &ff),
+        ]);
+        publication::resolve_in_for_tests(&st, &m, "order").unwrap_err()
+    };
+    let first = order(&["d-AAAAA"]);
+    let second = order(&["d-ZZZZZ"]);
+    assert_eq!((first.code, second.code), (E_IO, E_IO));
+    assert_ne!(
+        first.message, second.message,
+        "two distinct decoding errors"
+    );
+    let both = order(&["d-AAAAA", "d-ZZZZZ"]);
+    assert_eq!(
+        (both.code, both.message.as_str()),
+        (first.code, first.message.as_str()),
+        "the first doc's figure fails first"
+    );
 }
