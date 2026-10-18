@@ -1,0 +1,303 @@
+//! The read surfaces of signing (D-1Z951, D-QVH4N, D-KQ4CA): key show, the verified log and the
+//! signature states of a verbose fsck, with the text lines every surface prints.
+//!
+//! Nothing here writes, contacts a hub or reads a private key. The verified log and the fsck
+//! states never ask an SSH agent: each row's checks are the one offline check
+//! ([`signature_checks`]). Only [`key_show`] asks the caller's agent, and only for the
+//! identities it holds, when a key is configured.
+
+use crate::allowed_signers::{AllowedSigners, read_allowed_signers};
+use crate::config_levels::{SIGNING_AGENT_KEY, SIGNING_KEY, effective, user_file_from_env};
+use crate::read_state::ReadState;
+use crate::signature_check::{
+    PRESENCE_ABSENT, SIGNED_INVALID, STATEMENT_MISMATCH, SignatureCheck, signature_checks,
+};
+use crate::signing_config::{SignMode, SigningConfig};
+use crate::signing_crypto::{SigningAgent, blob_fingerprint, blob_type, key_fingerprint};
+use crate::{E_INTERNAL, E_SIG_INVALID, RdyError, signing_selector};
+use rdy_model::Hash;
+use rdy_store::StoreError;
+use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+/// The signing settings of the project at `root`, for the person of this process (the user
+/// config named by the environment, then `.rdy/local.yaml`). Reads no key and asks no agent.
+pub fn signing_config(root: &Path) -> Result<SigningConfig, RdyError> {
+    let eff = effective(root, user_file_from_env().as_deref())?;
+    SigningConfig::from_effective(root, &eff)
+}
+
+/// The configured trust file of the project at `root`, parsed once: `None` when none is
+/// configured. A configured file that cannot be read or parsed is an error; no key becomes
+/// trusted through a partial parse.
+pub fn configured_trust(root: &Path) -> Result<Option<AllowedSigners>, RdyError> {
+    let config = signing_config(root)?;
+    read_allowed_signers(config.allowed_signers.as_deref())
+}
+
+/// The word of `mode`, as `signing.sign` spells it.
+pub fn sign_mode_word(mode: SignMode) -> &'static str {
+    match mode {
+        SignMode::Never => "never",
+        SignMode::Auto => "auto",
+        SignMode::Always => "always",
+    }
+}
+
+/// A configured key selector, read by the pure parser: its fingerprint and, for a public-key
+/// line, the line's key type.
+struct Selected {
+    fingerprint: String,
+    key_type: Option<String>,
+}
+
+/// The selector of `setting`: `None` when it is unset or blank; a malformed one is the shared
+/// signing `E_BAD_INPUT`.
+fn selected(setting: &str, selector: Option<&str>) -> Result<Option<Selected>, RdyError> {
+    let Some(text) = selector.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let fingerprint = key_fingerprint(text).map_err(|_| signing_selector(setting))?;
+    // the parser accepted a public-key line only when its first field is the blob's own type
+    let key_type = (!text.starts_with("SHA256:"))
+        .then(|| text.split_ascii_whitespace().next().map(str::to_string))
+        .flatten();
+    Ok(Some(Selected {
+        fingerprint,
+        key_type,
+    }))
+}
+
+/// `rdy key show` / `rdy_key_show`: exactly `{key, agent_key, sign}`. Each configured key is
+/// `{fingerprint, type, held}`; an unset key, or an agent key the settings ignore, is `null`.
+/// `type` is the key's public-key algorithm: a public-key line's own type, else the type of the
+/// identity the agent returned for the fingerprint, else `null`. `held` is true only when the
+/// agent returned the key.
+///
+/// Both selectors are parsed before any agent request; with neither set, no agent is asked.
+/// An agent that cannot be reached is `E_NO_AGENT`, never a claim that it lacks the key.
+pub fn key_show(config: &SigningConfig, agent: &dyn SigningAgent) -> Result<Value, RdyError> {
+    let person = selected(SIGNING_KEY, config.key.as_deref())?;
+    let machine = selected(SIGNING_AGENT_KEY, config.agent_key.as_deref())?;
+    let identities = if person.is_some() || machine.is_some() {
+        agent.identities()?
+    } else {
+        vec![]
+    };
+    let row = |s: Option<Selected>| -> Value {
+        let Some(s) = s else {
+            return Value::Null;
+        };
+        let held = identities
+            .iter()
+            .find(|id| blob_fingerprint(&id.public_key) == s.fingerprint);
+        let key_type = s
+            .key_type
+            .or_else(|| held.and_then(|id| blob_type(&id.public_key)));
+        json!({"fingerprint": s.fingerprint, "type": key_type, "held": held.is_some()})
+    };
+    Ok(json!({
+        "key": row(person),
+        "agent_key": row(machine),
+        "sign": sign_mode_word(config.sign),
+    }))
+}
+
+/// The text of a key show reply: three lines, person, agent, then the mode.
+pub fn key_show_text(v: &Value) -> String {
+    let line = |who: &str, k: &Value| -> String {
+        if !k.is_object() {
+            return format!("{who}: not set");
+        }
+        let held = if k["held"] == Value::Bool(true) {
+            "yes"
+        } else {
+            "no"
+        };
+        format!(
+            "{who}: {} ({}), held {held}",
+            k["fingerprint"].as_str().unwrap_or("unknown"),
+            k["type"].as_str().unwrap_or("unknown")
+        )
+    };
+    format!(
+        "{}\n{}\nsign: {}",
+        line("person", &v["key"]),
+        line("agent", &v["agent_key"]),
+        v["sign"].as_str().unwrap_or("unknown")
+    )
+}
+
+/// The hash of the tag `name`, from its `tag/` ref.
+fn tag_hash(state: &ReadState, name: &str) -> Result<Option<Hash>, RdyError> {
+    let Some(value) = state.reader().get_ref(&format!("tag/{name}"))? else {
+        return Ok(None);
+    };
+    let bytes = <[u8; 32]>::try_from(value.as_slice()).map_err(|_| {
+        RdyError::from(StoreError::Decode(format!(
+            "tag ref of {name} is not a hash"
+        )))
+    })?;
+    Ok(Some(Hash(bytes)))
+}
+
+fn checks_json(checks: Vec<SignatureCheck>) -> Result<Value, RdyError> {
+    serde_json::to_value(checks).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("a signature report did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })
+}
+
+/// The signatures of the landing `landing` and of each of its tags `tags`, with `trust`:
+/// `(signatures, tag_signatures)`. Tag keys sort by name; each list is in signature-hash order;
+/// an empty list is an unsigned subject.
+fn subject_reports(
+    state: &ReadState,
+    landing: &str,
+    tags: &[String],
+    trust: Option<&AllowedSigners>,
+) -> Result<(Value, Value), RdyError> {
+    let hash: Hash = landing.parse().map_err(|_| {
+        RdyError::from(StoreError::Decode(format!(
+            "log row landing {landing:?} is not a hash"
+        )))
+    })?;
+    let signatures = checks_json(signature_checks(state, &hash, trust)?)?;
+    let mut by_tag: BTreeMap<&str, Value> = BTreeMap::new();
+    for name in tags {
+        let checks = match tag_hash(state, name)? {
+            Some(h) => signature_checks(state, &h, trust)?,
+            None => vec![],
+        };
+        by_tag.insert(name, checks_json(checks)?);
+    }
+    let tag_signatures: Map<String, Value> = by_tag
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    Ok((signatures, Value::Object(tag_signatures)))
+}
+
+/// The tag names of a serialized log row.
+fn row_tags(row: &Value) -> Vec<String> {
+    row["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// `rdy log --verify` / `rdy_log {verify: true}`: the log page `log_page` gives, in its order
+/// and with its fields, each row with `signatures` (the landing's checks) and `tag_signatures`
+/// (`{<tag name>: [check]}` for every tag the row lists, unsigned ones included). `trust` is the
+/// parsed allowed-signers data of the call, used by every check. No agent and no hub is asked.
+/// An invalid signature is data here: the read succeeds.
+pub fn verified_log(
+    state: &ReadState,
+    since: Option<&str>,
+    limit: Option<usize>,
+    trust: Option<&AllowedSigners>,
+) -> Result<Value, RdyError> {
+    let rows = serde_json::to_value(state.log_page(since, limit)?).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("the log did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })?;
+    let Value::Array(mut rows) = rows else {
+        return Ok(rows);
+    };
+    for row in &mut rows {
+        let landing = row["landing"].as_str().unwrap_or_default().to_string();
+        let (signatures, tag_signatures) = subject_reports(state, &landing, &row_tags(row), trust)?;
+        row["signatures"] = signatures;
+        row["tag_signatures"] = tag_signatures;
+    }
+    Ok(Value::Array(rows))
+}
+
+/// The `signature_states` of a verbose fsck: every current canon landing in log order, each
+/// `{landing, signatures, tag_signatures}`, unsigned ones included. Checked as fsck checks, with
+/// no trust file.
+pub fn signature_states(state: &ReadState) -> Result<Value, RdyError> {
+    let rows = serde_json::to_value(state.log_rows()?).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("the log did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })?;
+    let mut out = vec![];
+    for row in rows.as_array().into_iter().flatten() {
+        let landing = row["landing"].as_str().unwrap_or_default().to_string();
+        let (signatures, tag_signatures) = subject_reports(state, &landing, &row_tags(row), None)?;
+        out.push(json!({
+            "landing": landing,
+            "signatures": signatures,
+            "tag_signatures": tag_signatures,
+        }));
+    }
+    Ok(Value::Array(out))
+}
+
+/// The text of one signature check: `signed <kind> <valid|invalid> by <key> (<key type>), key
+/// <trusted|unknown>, presence <present|absent>`. An invalid signature prints `E_SIG_INVALID`
+/// in place of its key trust; a valid one whose statement does not match ends with `, statement
+/// mismatch`. An unreadable kind, key or key type prints `unknown`.
+pub fn signature_line(check: &Value) -> String {
+    let word = |k: &str| check[k].as_str().unwrap_or("unknown");
+    let signed = word("signed");
+    let middle = if signed == SIGNED_INVALID {
+        E_SIG_INVALID.to_string()
+    } else {
+        format!("key {}", word("trust"))
+    };
+    let presence = check["presence"].as_str().unwrap_or(PRESENCE_ABSENT);
+    let mut line = format!(
+        "signed {} {signed} by {} ({}), {middle}, presence {presence}",
+        word("kind"),
+        word("key"),
+        word("key_type"),
+    );
+    if signed != SIGNED_INVALID && check["statement"].as_str() == Some(STATEMENT_MISMATCH) {
+        line.push_str(", statement mismatch");
+    }
+    line
+}
+
+/// The lines of a list of checks, each indented `indent` spaces; `signed: no` for an empty list.
+pub fn signature_lines(checks: &Value, indent: usize) -> Vec<String> {
+    let pad = " ".repeat(indent);
+    let list = checks.as_array().map(Vec::as_slice).unwrap_or_default();
+    if list.is_empty() {
+        return vec![format!("{pad}signed: no")];
+    }
+    list.iter()
+        .map(|c| format!("{pad}{}", signature_line(c)))
+        .collect()
+}
+
+/// The verification lines under one verified row (a log row or an fsck state): the landing's
+/// signatures at four spaces, then each tag by name, `tag <name>:` at four spaces and its
+/// signatures at eight.
+pub fn verified_lines(row: &Value) -> Vec<String> {
+    let mut out = signature_lines(&row["signatures"], 4);
+    let mut tags: Vec<(&String, &Value)> = row["tag_signatures"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .collect();
+    tags.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, checks) in tags {
+        out.push(format!("    tag {name}:"));
+        out.extend(signature_lines(checks, 8));
+    }
+    out
+}

@@ -134,6 +134,15 @@ pub fn blob_fingerprint(blob: &[u8]) -> String {
     format!("{FP_PREFIX}{}", Base64Unpadded::encode_string(&digest))
 }
 
+/// The public-key algorithm of the blob `blob`: the type of a whole key or certificate rdy can
+/// read, else the printable type name at its start; `None` when neither can be read. Key show
+/// reports it for a held identity; it decides nothing about signing.
+pub fn blob_type(blob: &[u8]) -> Option<String> {
+    public_key_type(blob)
+        .or_else(|| blob_key_type(blob))
+        .map(str::to_string)
+}
+
 /// The canonical SHA256 fingerprint `selector` names: a fingerprint in canonical spelling, or a
 /// public-key line (`<type> <base64> [comment]`, the comment ignored) whose blob is one whole
 /// public key or certificate of a type rdy can read, that type being the line's. `Err` for

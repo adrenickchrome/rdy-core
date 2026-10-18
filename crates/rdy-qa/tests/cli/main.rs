@@ -27,6 +27,7 @@ mod cli_repo_id;
 mod cli_search;
 mod cli_search_filters;
 mod cli_semantic;
+mod cli_signing;
 mod cli_signing_config;
 mod cli_site;
 mod cli_state;

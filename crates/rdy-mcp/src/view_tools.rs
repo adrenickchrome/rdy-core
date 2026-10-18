@@ -68,6 +68,8 @@ pub struct LogParams {
     /// Only landings after this one: a landing id, landing:<id> or tag:<version>.
     pub since: Option<String>,
     pub max_tokens: Option<usize>,
+    /// true: check every signature offline; each row adds signatures and tag_signatures (default false).
+    pub verify: Option<bool>,
 }
 
 /// `rdy_schema`'s paragraph on views.
@@ -126,10 +128,21 @@ pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
     }
 }
 
-/// `rdy_log`: canon's landings, newest first.
+/// `rdy_log`: canon's landings, newest first; with `verify`, each row with its signature reports
+/// (`signing_read::verified_log`), checked offline with the configured trust file.
 pub fn rdy_log(st: &mut McpState, p: LogParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
+    if p.verify == Some(true) {
+        let trust = rdy_engine::signing_read::configured_trust(&st.engine.root())?;
+        let rows = rdy_engine::signing_read::verified_log(
+            &st.engine.read(),
+            p.since.as_deref(),
+            p.limit,
+            trust.as_ref(),
+        )?;
+        return verified_budget(rows, p.max_tokens);
+    }
     let st_ = st.engine.read();
     let rows = serde_json::to_value(st_.log_page(p.since.as_deref(), p.limit)?).map_err(|e| {
         RdyError::new(
@@ -139,4 +152,23 @@ pub fn rdy_log(st: &mut McpState, p: LogParams) -> Result<Value, RdyError> {
         )
     })?;
     Ok(budget(rows, p.max_tokens))
+}
+
+/// The budget of a verified log: `budget` cuts whole rows only, so no signature report is ever
+/// cut; a page that had rows and keeps none is refused instead of answered empty.
+fn verified_budget(rows: Value, max_tokens: Option<usize>) -> Result<Value, RdyError> {
+    let had_rows = rows.as_array().is_some_and(|a| !a.is_empty());
+    let v = budget(rows, max_tokens);
+    let kept_none = v
+        .get("items")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty);
+    if had_rows && kept_none {
+        return Err(RdyError::new(
+            E_LIMIT,
+            "the token budget cannot hold one verified log row",
+            "increase max_tokens",
+        ));
+    }
+    Ok(v)
 }

@@ -16,6 +16,7 @@ mod review;
 mod schema;
 mod search;
 mod session;
+mod signing;
 mod site;
 mod store;
 mod tension;
@@ -147,7 +148,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 21] {
+    fn family_routers() -> [ToolRouter<Self>; 22] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -170,6 +171,7 @@ impl RdyServer {
             Self::intake_router(),
             Self::site_router(),
             Self::store_router(),
+            Self::signing_router(),
         ]
     }
 
@@ -1095,6 +1097,21 @@ mod tests {
     #[test]
     fn mrt1_every_tool_is_in_exactly_one_family_router() {
         let families = RdyServer::family_routers();
+        // sig9: the signing family follows the store family and holds its two tools
+        let mut signing: Vec<String> = families[21]
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        signing.sort();
+        assert_eq!(signing, ["rdy_key_show", "rdy_sign"]);
+        assert!(
+            families[20]
+                .list_all()
+                .iter()
+                .any(|t| t.name == "rdy_clone"),
+            "the store family precedes the signing family"
+        );
         let mut names: Vec<String> = families
             .iter()
             .flat_map(|r| r.list_all().into_iter().map(|t| t.name.to_string()))

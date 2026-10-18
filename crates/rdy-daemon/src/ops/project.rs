@@ -11,6 +11,9 @@ use std::path::Path;
 pub(super) struct FsckArgs {
     #[serde(default)]
     clean_quarantine: bool,
+    /// On a passing check, list the signature state of every canon landing and its tags.
+    #[serde(default)]
+    verbose: bool,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +123,7 @@ pub(super) fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
 
 /// `fsck`; with `clean_quarantine`, a passing check then removes the quarantine files (the
 /// human's only: an agent is refused before the check runs). A failed check removes nothing.
+/// With `verbose`, a passing check adds `signature_states` (no trust file is read).
 pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
     if a.clean_quarantine && !cx.session.is_human() {
         return Err(RdyError::new(
@@ -129,6 +133,9 @@ pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
         ));
     }
     let mut v = write_typed(cx.engine, |r| r.fsck())?;
+    if a.verbose {
+        v["signature_states"] = rdy_engine::signing_read::signature_states(&cx.engine.read())?;
+    }
     if a.clean_quarantine {
         let c = clean_quarantine(&cx.engine.root());
         v["removed"] = json!(c.removed);

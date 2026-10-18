@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 pub(super) struct LogArgs {
     limit: Option<usize>,
     since: Option<String>,
+    /// Check every signature offline: each row adds `signatures` and `tag_signatures`.
+    #[serde(default)]
+    verify: bool,
 }
 
 #[derive(Deserialize)]
@@ -187,7 +190,19 @@ pub(super) fn ls(cx: &OpContext, a: LsArgs) -> Result<Value, RdyError> {
     Ok(to_json(&st.tree(&scope, a.path.as_deref(), a.depth)?))
 }
 
+/// `log`; with `verify`, each row with its signature reports, checked offline with the
+/// configured trust file, parsed once (no agent is asked).
 pub(super) fn log(cx: &OpContext, a: LogArgs) -> Result<Value, RdyError> {
+    if a.verify {
+        let trust = rdy_engine::signing_read::configured_trust(&cx.engine.root())?;
+        let st = cx.engine.read();
+        return rdy_engine::signing_read::verified_log(
+            &st,
+            a.since.as_deref(),
+            a.limit,
+            trust.as_ref(),
+        );
+    }
     let st = cx.engine.read();
     Ok(to_json(&st.log_page(a.since.as_deref(), a.limit)?))
 }

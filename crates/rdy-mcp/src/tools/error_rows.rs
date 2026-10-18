@@ -231,4 +231,39 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (W_REDACTION_REUSE, W_REDACTION_REUSE_MESSAGE, ""),
     (W_REDACTION_QUARANTINE, W_REDACTION_QUARANTINE_MESSAGE, ""),
     (W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE, ""),
+    (
+        E_SIGNING_KEY_MISSING,
+        "{setting} is not set",
+        "set {setting} in the user config or .rdy/local.yaml",
+    ),
+    (
+        E_SIGNING_KEY_TYPE,
+        "{key} has unsupported signing key type {type}",
+        SIGNING_KEY_TYPE_FIX,
+    ),
+    (
+        E_NO_AGENT,
+        "the SSH agent could not sign: {cause}",
+        NO_AGENT_FIX,
+    ),
+    (
+        E_SIG_INVALID,
+        "signature {hash} is invalid",
+        SIG_INVALID_FIX,
+    ),
+    (
+        E_SIG_OBJECT_MISMATCH,
+        "signature {hash} does not match its subject",
+        SIG_OBJECT_MISMATCH_FIX,
+    ),
+    (
+        W_SIG_UNKNOWN_KEY,
+        "key {key} is not trusted for {principal} in {namespace}",
+        SIG_UNKNOWN_KEY_FIX,
+    ),
+    (
+        W_SIGNING_FAILED,
+        "the act was saved without signatures: {code}: {message}",
+        SIGNING_FAILED_FIX,
+    ),
 ];

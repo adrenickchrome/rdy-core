@@ -28,6 +28,7 @@ mod project;
 mod read;
 mod redaction;
 mod search;
+mod signing;
 mod site;
 mod site_url;
 mod wc;
@@ -43,6 +44,7 @@ use project::{check, fsck, reindex};
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use redaction::redact;
 use search::search;
+use signing::{key_show, sign};
 pub(crate) use site::export_print;
 use site::{EXPORT_SHAPE, export, import, render};
 use site_url::site_url;
@@ -126,6 +128,8 @@ pub const OPS: &[&str] = &[
     "site_url",
     "pending",
     "answer",
+    "sign",
+    "key_show",
 ];
 
 #[derive(Deserialize)]
@@ -350,7 +354,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         }
         "show" => show(cx, parse(op, args, "{id, scope?, blame?}")?),
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
-        "log" => log(cx, parse(op, args, "{limit?, since?}")?),
+        "log" => log(cx, parse(op, args, "{limit?, since?, verify?}")?),
         "impact" => impact(cx, parse(op, args, "{id, depth?, scope?}")?),
         "suspects" => suspects(cx, parse(op, args, "{scope?}")?),
         "tags" => {
@@ -427,7 +431,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             reindex(cx)
         }
-        "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?}")?),
+        "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?, verbose?}")?),
         "view" => view_api::run_view(
             cx.engine,
             cx.session,
@@ -506,6 +510,8 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{ref?, option?, card_hash?, note?, brief?, relayed_by?, evidence?, question?, session_ref?, kind?, all_recommended?}",
             )?,
         ),
+        "sign" => sign(cx, parse(op, args, "{target, kind?}")?),
+        "key_show" => key_show(cx, parse(op, args, "{}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

@@ -54,6 +54,7 @@ pub mod signature_check;
 pub mod signing_act;
 pub mod signing_config;
 pub mod signing_crypto;
+pub mod signing_read;
 pub mod site_scope;
 pub mod suggest;
 pub mod tensions;
