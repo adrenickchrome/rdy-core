@@ -1,4 +1,5 @@
 pub mod answer;
+pub mod bounded;
 mod check;
 pub mod coord;
 pub mod dump;
@@ -14,6 +15,7 @@ mod land;
 pub mod layout;
 pub mod merge;
 pub mod meta;
+pub mod object_refs;
 pub mod pio;
 pub mod redaction;
 pub mod redaction_io;
@@ -21,6 +23,7 @@ pub mod review;
 pub mod segment;
 pub mod signature;
 mod store;
+pub mod stream_error;
 pub mod transition;
 pub mod view;
 
