@@ -29,7 +29,7 @@ use crate::notify::{NotifyHub, Sink};
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
-use rdy_engine::signing_crypto::SigningAgent;
+use rdy_engine::signing_crypto::{CallCancel, SigningAgent, SigningCall};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -65,27 +65,34 @@ pub struct RdyServer {
     engine: Arc<dyn Engine>,
 }
 
-/// Whether the tool call being run was cancelled: its client sent `notifications/cancelled`
-/// for it, or the session ended.
-type CallCancelled = Arc<dyn Fn() -> bool + Send + Sync>;
-
 tokio::task_local! {
-    /// The cancel of the tool call this task runs, set by `call_tool` for the call's own task.
-    static CALL_CANCELLED: CallCancelled;
+    /// The tool call this task runs, set by `call_tool` for the call's own task: its request id
+    /// and its cancel, which its client's `notifications/cancelled` for it, or the session's
+    /// end, sets.
+    static CALL: SigningCall;
 }
 
-/// The signer of one tool call: the session's agent until the call is cancelled. After that it
-/// asks no more, and an answer that comes after the cancel is dropped, both as `E_NO_AGENT`
-/// `request cancelled`. The session's agent cannot tell which request a callback serves; this
-/// can, because the call's body runs inside it.
+/// The signer of one tool call: the session's agent serving that call
+/// ([`SigningAgent::for_call`]), which names the call's request in each ask and stops an ask in
+/// progress at the call's cancel. After the cancel it asks no more, and an answer that comes
+/// after the cancel is dropped, both as `E_NO_AGENT` `request cancelled`.
 struct CallAgent {
     inner: Arc<dyn SigningAgent>,
-    cancelled: CallCancelled,
+    cancel: Arc<CallCancel>,
 }
 
 impl CallAgent {
+    fn new(session: &Arc<dyn SigningAgent>, call: &SigningCall) -> CallAgent {
+        CallAgent {
+            inner: session
+                .for_call(call)
+                .unwrap_or_else(|| Arc::clone(session)),
+            cancel: Arc::clone(&call.cancel),
+        }
+    }
+
     fn check(&self) -> Result<(), RdyError> {
-        if (self.cancelled)() {
+        if self.cancel.is_cancelled() {
             return Err(rdy_engine::no_agent(rdy_engine::NoAgentCause::Cancelled));
         }
         Ok(())
@@ -197,7 +204,7 @@ impl RdyServer {
 
     /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
     /// under the state lock. Inside a tool call, `f` sees the call's own signer ([`CallAgent`]),
-    /// which stops asking once the call is cancelled. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean
+    /// whose ask in progress ends at the call's cancel. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean
     /// state (the invalidate runs on the writer, where `Rdy` is); if that fails, the error says
     /// so. With `notice` set, a pack notice rides on an object result; a resource read leaves
     /// the notice for the next tool reply.
@@ -211,12 +218,12 @@ impl RdyServer {
         F: FnOnce(&mut McpState) -> Result<serde_json::Value, RdyError> + Send + 'static,
     {
         let state = Arc::clone(&self.state);
-        let cancelled = CALL_CANCELLED.try_with(Arc::clone).ok();
+        let call = CALL.try_with(SigningCall::clone).ok();
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-            let session_agent = cancelled.map(|cancelled| {
-                let inner = Arc::clone(&st.agent);
-                std::mem::replace(&mut st.agent, Arc::new(CallAgent { inner, cancelled }))
+            let session_agent = call.map(|call| {
+                let agent = Arc::new(CallAgent::new(&st.agent, &call));
+                std::mem::replace(&mut st.agent, agent)
             });
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st)));
             if let Some(agent) = session_agent {
@@ -301,13 +308,26 @@ impl ServerHandler for RdyServer {
             )))
             .into());
         }
-        // the call's body signs through a signer that knows when the call is cancelled
+        // the call's body signs through a signer that names this request and stops at its
+        // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
+        // cancels every request's token then), reaches an ask of the agent in progress
         let ct = context.ct.clone();
-        let cancelled: CallCancelled = Arc::new(move || ct.is_cancelled());
+        let call = SigningCall {
+            request: serde_json::to_value(&context.id).unwrap_or(serde_json::Value::Null),
+            cancel: Arc::new(CallCancel::new()),
+        };
+        let cancel = Arc::clone(&call.cancel);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        CALL_CANCELLED
-            .scope(cancelled, self.tool_router.call(tcc))
-            .await
+        let run = CALL.scope(call, self.tool_router.call(tcc));
+        tokio::pin!(run);
+        tokio::select! {
+            biased;
+            out = &mut run => out,
+            () = ct.cancelled() => {
+                cancel.cancel();
+                run.await
+            }
+        }
     }
 
     async fn list_resources(
@@ -1021,18 +1041,20 @@ mod tests {
         assert_eq!(ok, serde_json::json!({"a": 1}));
     }
 
-    /// An agent that counts its calls, and can flip a call's cancel while it answers.
+    /// An agent that counts its calls, records the requests it serves, and can cancel a call
+    /// while it answers.
     #[derive(Default)]
     struct Counting {
         calls: std::sync::atomic::AtomicUsize,
-        flip: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+        flip: Mutex<Option<Arc<CallCancel>>>,
+        served: Mutex<Vec<serde_json::Value>>,
     }
 
     impl SigningAgent for Counting {
         fn identities(&self) -> Result<Vec<rdy_engine::signing_crypto::AgentIdentity>, RdyError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if let Some(flag) = &*self.flip.lock().unwrap() {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(cancel) = &*self.flip.lock().unwrap() {
+                cancel.cancel();
             }
             Ok(Vec::new())
         }
@@ -1041,20 +1063,24 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(vec![1])
         }
+
+        fn for_call(&self, call: &SigningCall) -> Option<Arc<dyn SigningAgent>> {
+            self.served.lock().unwrap().push(call.request.clone());
+            None
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn sig5_a_cancelled_tool_call_asks_its_agent_no_more() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::Ordering;
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
         let agent = Arc::new(Counting::default());
         let server = RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new())
             .with_agent(agent.clone());
-        let flag = Arc::new(AtomicBool::new(false));
-        let cancelled: CallCancelled = {
-            let flag = Arc::clone(&flag);
-            Arc::new(move || flag.load(Ordering::SeqCst))
+        let call = |id: u64| SigningCall {
+            request: serde_json::json!(id),
+            cancel: Arc::new(CallCancel::new()),
         };
         let keys = |st: &mut McpState| st.agent.identities().map(|k| serde_json::json!(k.len()));
         let sign = |st: &mut McpState| st.agent.sign(&[1], &[2]).map(|_| serde_json::Value::Null);
@@ -1064,34 +1090,33 @@ mod tests {
             e.message
         };
         let cancelled_text = "the SSH agent could not sign: request cancelled";
-        // a call its client has not cancelled asks the session's agent
-        let r = CALL_CANCELLED
-            .scope(Arc::clone(&cancelled), server.blocking("t", false, keys))
-            .await;
+        // a call its client has not cancelled asks the session's agent, for its own request
+        let r = CALL.scope(call(1), server.blocking("t", false, keys)).await;
         assert_eq!(r.unwrap(), serde_json::json!(0));
         assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
         // an answer that comes after the cancel is dropped
-        *agent.flip.lock().unwrap() = Some(Arc::clone(&flag));
-        let r = CALL_CANCELLED
-            .scope(Arc::clone(&cancelled), server.blocking("t", false, keys))
+        let two = call(2);
+        *agent.flip.lock().unwrap() = Some(Arc::clone(&two.cancel));
+        let r = CALL
+            .scope(two.clone(), server.blocking("t", false, keys))
             .await;
         assert_eq!(cause(r), cancelled_text);
         assert_eq!(agent.calls.load(Ordering::SeqCst), 2);
         // once cancelled, the call asks no more
-        let r = CALL_CANCELLED
-            .scope(Arc::clone(&cancelled), server.blocking("t", false, sign))
-            .await;
+        let r = CALL.scope(two, server.blocking("t", false, sign)).await;
         assert_eq!(cause(r), cancelled_text);
         assert_eq!(agent.calls.load(Ordering::SeqCst), 2);
         // the session's signer is unchanged for the next call, and outside a tool call
-        flag.store(false, Ordering::SeqCst);
         *agent.flip.lock().unwrap() = None;
-        let r = CALL_CANCELLED
-            .scope(cancelled, server.blocking("t", false, sign))
-            .await;
+        let r = CALL.scope(call(3), server.blocking("t", false, sign)).await;
         assert_eq!(r.unwrap(), serde_json::Value::Null);
         assert_eq!(server.agent().identities().unwrap().len(), 0);
         assert_eq!(agent.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            *agent.served.lock().unwrap(),
+            [1, 2, 2, 3].map(|n| serde_json::json!(n)),
+            "each call is served for its own request"
+        );
     }
 
     #[test]

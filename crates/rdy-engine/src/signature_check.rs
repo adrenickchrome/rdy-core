@@ -359,16 +359,57 @@ pub fn signature_checks(
     subject: &Hash,
     trust: Option<&AllowedSigners>,
 ) -> Result<Vec<SignatureCheck>, RdyError> {
-    let reader = state.reader();
-    let ids = state_signatures(state, subject)?;
-    if ids.is_empty() {
-        return Ok(vec![]);
+    Lineage::new(state).checks(subject, trust)
+}
+
+/// The repo ids a signature in one read state may name ([`repo_ids`]), read at most once, at
+/// the first check that needs them, and shared by every check of one report on that state. A
+/// report of many signed subjects so makes one pass over the stored ref updates, not one per
+/// subject, and every check sees the same state.
+pub(crate) struct Lineage<'s> {
+    state: &'s ReadState,
+    ids: std::cell::OnceCell<(RepoId, Vec<RepoId>)>,
+}
+
+impl<'s> Lineage<'s> {
+    pub(crate) fn new(state: &'s ReadState) -> Lineage<'s> {
+        Lineage {
+            state,
+            ids: std::cell::OnceCell::new(),
+        }
     }
-    let (current, sources) = repo_ids(state)?;
-    let context = subject_context(state, subject, current, sources)?;
-    ids.iter()
-        .map(|id| Ok(check_signature(&reader.signature(id)?, &context, trust)))
-        .collect()
+
+    /// The state the lineage is read from.
+    pub(crate) fn state(&self) -> &'s ReadState {
+        self.state
+    }
+
+    /// The current repo id and the fork sources, read on the first call.
+    fn ids(&self) -> Result<&(RepoId, Vec<RepoId>), RdyError> {
+        if let Some(ids) = self.ids.get() {
+            return Ok(ids);
+        }
+        let ids = repo_ids(self.state)?;
+        Ok(self.ids.get_or_init(|| ids))
+    }
+
+    /// [`signature_checks`] of `subject` on this lineage's state.
+    pub(crate) fn checks(
+        &self,
+        subject: &Hash,
+        trust: Option<&AllowedSigners>,
+    ) -> Result<Vec<SignatureCheck>, RdyError> {
+        let reader = self.state.reader();
+        let ids = state_signatures(self.state, subject)?;
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let (current, sources) = self.ids()?;
+        let context = subject_context(self.state, subject, *current, sources.clone())?;
+        ids.iter()
+            .map(|id| Ok(check_signature(&reader.signature(id)?, &context, trust)))
+            .collect()
+    }
 }
 
 /// The repo ids a signature in `state` may name (ruling task-6, D-17AA8, D-DAGNB): the
@@ -384,6 +425,8 @@ pub(crate) fn repo_ids(state: &ReadState) -> Result<(RepoId, Vec<RepoId>), RdyEr
     if state.origin()?.is_none() {
         return Ok((current, vec![]));
     }
+    #[cfg(test)]
+    LINEAGE_SCANS.with(|n| n.set(n.get() + 1));
     let reader = state.reader();
     let mut sources = BTreeSet::new();
     reader.for_each_object_of(kinds::REF_UPDATE, |hash| {
@@ -400,6 +443,13 @@ pub(crate) fn repo_ids(state: &ReadState) -> Result<(RepoId, Vec<RepoId>), RdyEr
         Ok(())
     })?;
     Ok((current, sources.into_iter().collect()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many passes over the stored ref updates [`repo_ids`] made on this thread: the
+    /// structural count of the lineage reads a report makes.
+    pub(crate) static LINEAGE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The context of a signature of `subject` in `state`, with the repo ids [`repo_ids`] read.

@@ -18,8 +18,8 @@
 
 use crate::sys::{self, AgentCancel, AgentStream};
 use rdy_engine::signing_crypto::{
-    AGENT_PACKET_MAX, AgentIdentity, COMMENT_MAX, IDENTITIES_MAX, PUBLIC_KEY_MAX, SSHSIG_MAX,
-    STATEMENT_MAX, SigningAgent,
+    AGENT_PACKET_MAX, AgentIdentity, COMMENT_MAX, CallCancel, IDENTITIES_MAX, PUBLIC_KEY_MAX,
+    SSHSIG_MAX, STATEMENT_MAX, SigningAgent, SigningCall,
 };
 use rdy_engine::{NoAgentCause, RdyError, no_agent, signing_limit};
 use std::io::{self, Read, Write};
@@ -51,7 +51,9 @@ const REFUSALS: [u8; 3] = [
 /// The environment variable that names the caller's agent socket.
 const AUTH_SOCK: &str = "SSH_AUTH_SOCK";
 
-/// The SSH agent of the calling process.
+/// The SSH agent of the calling process. A clone reaches the same socket and shares the calls in
+/// flight, so [`CallerAgent::cancel`] on either reaches both.
+#[derive(Clone)]
 pub struct CallerAgent {
     /// The agent socket; `None` when the caller has no agent.
     socket: Option<PathBuf>,
@@ -60,71 +62,6 @@ pub struct CallerAgent {
     /// The connections of the calls in flight, so [`CallerAgent::cancel`] and a call's
     /// [`CallCancel`] can close them.
     active: Arc<Mutex<Active>>,
-}
-
-/// The cancel of one call, latched: a cancel that comes before the call starts is kept, and the
-/// call then ends at once as `E_NO_AGENT` `request cancelled`, without reaching the agent.
-#[derive(Default)]
-pub struct CallCancel {
-    state: Mutex<CancelState>,
-}
-
-/// What runs at a cancel.
-type Hook = Box<dyn FnOnce() + Send>;
-
-#[derive(Default)]
-struct CancelState {
-    cancelled: bool,
-    next: u64,
-    hooks: Vec<(u64, Hook)>,
-}
-
-impl CallCancel {
-    pub fn new() -> CallCancel {
-        CallCancel::default()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, CancelState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Cancels the call, now or when it starts. A second cancel does nothing.
-    pub fn cancel(&self) {
-        let hooks = {
-            let mut st = self.lock();
-            if st.cancelled {
-                return;
-            }
-            st.cancelled = true;
-            std::mem::take(&mut st.hooks)
-        };
-        for (_, hook) in hooks {
-            hook();
-        }
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.lock().cancelled
-    }
-
-    /// Runs `hook` once at the cancel, unless [`CallCancel::forget`] comes first. `None`, and
-    /// the hook is dropped unrun, when the cancel has already come.
-    pub fn on_cancel(&self, hook: Hook) -> Option<u64> {
-        let mut st = self.lock();
-        if st.cancelled {
-            return None;
-        }
-        let id = st.next;
-        st.next = st.next.wrapping_add(1);
-        st.hooks.push((id, hook));
-        Some(id)
-    }
-
-    /// Drops the hook `id` unrun. A hook already taken by a cancel may still run: hooks are
-    /// harmless once their call has ended.
-    pub fn forget(&self, id: u64) {
-        self.lock().hooks.retain(|(h, _)| *h != id);
-    }
 }
 
 #[derive(Default)]
@@ -391,6 +328,32 @@ impl SigningAgent for CallerAgent {
 
     fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError> {
         self.sign_with(public_key, payload, None)
+    }
+
+    /// This agent bound to the call's cancel: a cancel, whenever it comes, closes the call's
+    /// connection to the agent (a security key's wait for a touch included).
+    fn for_call(&self, call: &SigningCall) -> Option<Arc<dyn SigningAgent>> {
+        Some(Arc::new(BoundCaller {
+            agent: self.clone(),
+            cancel: Arc::clone(&call.cancel),
+        }))
+    }
+}
+
+/// A [`CallerAgent`] serving one request: every call it makes is bound to the request's cancel.
+struct BoundCaller {
+    agent: CallerAgent,
+    cancel: Arc<CallCancel>,
+}
+
+impl SigningAgent for BoundCaller {
+    fn identities(&self) -> Result<Vec<AgentIdentity>, RdyError> {
+        self.agent.identities_with(Some(&self.cancel))
+    }
+
+    fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError> {
+        self.agent
+            .sign_with(public_key, payload, Some(&self.cancel))
     }
 }
 

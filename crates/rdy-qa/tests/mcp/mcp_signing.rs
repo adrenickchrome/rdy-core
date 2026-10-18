@@ -436,3 +436,161 @@ fn sig9_budgets_do_not_hide_a_partial_signature_report() {
         cap
     );
 }
+
+/// The test keys' signer, whose every sign reports on `started` and then waits for a release
+/// (a person who has not touched a security key yet); identities answer at once. Dropping the
+/// release sender ends a waiting sign.
+struct HoldingSigner {
+    keys: QaAgent,
+    started: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    signs: std::sync::atomic::AtomicUsize,
+}
+
+impl SigningAgent for HoldingSigner {
+    fn identities(
+        &self,
+    ) -> Result<Vec<rdy_engine::signing_crypto::AgentIdentity>, rdy_engine::RdyError> {
+        self.keys.identities()
+    }
+
+    fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, rdy_engine::RdyError> {
+        self.signs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.started.lock().unwrap().send(());
+        if self.release.lock().unwrap().recv().is_err() {
+            return Err(rdy_engine::no_agent(rdy_engine::NoAgentCause::Refused));
+        }
+        self.keys.sign(public_key, payload)
+    }
+}
+
+#[test]
+fn sig9_direct_mcp_cancel_ends_a_waiting_signer() {
+    use rdy_qa::mcp::{DEADLINE, McpClient};
+    let (d, mut r) = project();
+    let (_, section, _) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    drop(r);
+    config(d.path(), "never");
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let signer = Arc::new(HoldingSigner {
+        keys: QaAgent::new(),
+        started: std::sync::Mutex::new(started_tx),
+        release: std::sync::Mutex::new(release_rx),
+        signs: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let agent = SocketAgent::start(signer.clone()).unwrap();
+    // dropped before the agent, so a failed assertion never leaves its thread waiting
+    let release = release;
+    let sock = agent.socket_path().to_string_lossy().into_owned();
+    let mut c = McpClient::start_with_env(d.path(), &[("SSH_AUTH_SOCK", sock.as_str())]);
+
+    // the agent relays the person's approval, unsigned under `never`
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:relay", "run": "r1", "role": "writer"})
+        )
+        .is_ok()
+    );
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "claim", "parent": section, "body": "A held claim."}]}),
+    )
+    .ok();
+    c.call(
+        "rdy_propose",
+        json!({"title": "Held claim", "summary": "Adds one claim."}),
+    )
+    .ok();
+    let queue = c.call("rdy_pending", json!({})).ok();
+    let item = queue["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "approve")
+        .unwrap_or_else(|| panic!("an approval card: {queue}"))
+        .clone();
+    let answered = c
+        .call(
+            "rdy_answer",
+            json!({"ref": item["ref"], "option": "approve", "card_hash": item["card_hash"],
+                "evidence": "Yes, land it.", "question": "Shall I land it?"}),
+        )
+        .ok();
+    let landing = answered["landing"]["landing"].as_str().unwrap().to_string();
+
+    // the relay signature waits on the agent; the host cancels that request
+    let id = c.next_id();
+    c.send_raw(
+        &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "rdy_sign", "arguments": {"target": landing}}})
+        .to_string(),
+    );
+    started.recv_timeout(DEADLINE).expect("the signer is asked");
+    c.send_raw(
+        &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": id, "reason": "the person went away"}})
+        .to_string(),
+    );
+    // the next tool runs although the signer was never released
+    let log = c.call("rdy_log", json!({"limit": 1}));
+    assert!(log.is_ok(), "{log:?}");
+    assert_eq!(
+        signer.signs.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the cancelled request asked the signer once"
+    );
+    // the agent's first sign is let go (its caller has closed the connection)
+    release.send(()).unwrap();
+
+    // the session ends while a signer waits: the ask ends with it, and the process exits
+    let id = c.next_id();
+    c.send_raw(
+        &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "rdy_sign", "arguments": {"target": landing}}})
+        .to_string(),
+    );
+    started
+        .recv_timeout(DEADLINE)
+        .expect("the signer is asked again");
+    c.close_stdin();
+    let (code, _) = c.wait_exit(DEADLINE);
+    assert_eq!(
+        code,
+        Some(0),
+        "the session ended with its signer still waiting"
+    );
+    assert_eq!(signer.signs.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(release);
+}
+
+#[test]
+fn sig9_proxied_mcp_signs_for_the_request_it_serves() {
+    // through the daemon: the session's server names each tool call in its callbacks, and the
+    // proxy answers a callback for the call it names, with the proxy's own agent
+    use rdy_qa::mcp::McpClient;
+    let agent = SocketAgent::start(Arc::new(QaAgent::new())).unwrap();
+    let s = Served::new();
+    config(s.dir.path(), "never");
+    let mut env = s.env_pairs();
+    env.push((
+        "SSH_AUTH_SOCK".into(),
+        agent.socket_path().to_string_lossy().into_owned(),
+    ));
+    let mut c = McpClient::start_proxy_at(s.dir.path(), &env);
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:reader", "run": "r1", "role": "reader"})
+        )
+        .is_ok()
+    );
+    for _ in 0..2 {
+        let keys = c.call("rdy_key_show", json!({})).ok();
+        assert_eq!(keys["key"]["held"], true, "{keys}");
+        assert_eq!(keys["agent_key"]["held"], true, "{keys}");
+    }
+    assert_eq!(agent.requests(), 2, "one identities request per tool call");
+}

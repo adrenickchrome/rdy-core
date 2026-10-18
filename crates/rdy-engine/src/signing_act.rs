@@ -963,13 +963,14 @@ fn relays_tag(a: &Answer, tag: &Hash) -> bool {
     a.targets.as_slice() == [*tag] && a.relayed_by.is_some()
 }
 
-/// The configured selector of `setting` and its fingerprint, read by the pure parser.
+/// The configured selector of `setting` and its fingerprint, read by the pure parser. Unset
+/// (null) is `E_SIGNING_KEY_MISSING`; a set one that is malformed, an empty or blank one included,
+/// is the shared signing `E_BAD_INPUT`.
 fn selected(config: &SigningConfig, setting: &str) -> Result<(String, String), RdyError> {
     let selector = match setting {
         PERSON_KEY => config.key.clone(),
         _ => config.agent_key.clone(),
     }
-    .filter(|s| !s.trim().is_empty())
     .ok_or_else(|| signing_key_missing(setting))?;
     let fingerprint = key_fingerprint(&selector).map_err(|_| signing_selector(setting))?;
     Ok((selector, fingerprint))

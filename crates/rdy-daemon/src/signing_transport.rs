@@ -15,12 +15,19 @@
 //!
 //! The callback schemas, with unknown fields refused:
 //!
-//! - `{"id":N,"op":"identities"}` and `{"id":N,"op":"sign","key":"<hex>","payload":"<hex>"}`,
-//!   from the host;
-//! - `{"id":N,"ok":{"keys":["<hex>"]}}`, `{"id":N,"ok":{"signature":"<hex>"}}` and
-//!   `{"id":N,"error":{"code":"E_NO_AGENT","cause":"<closed cause>"}}`, from the caller.
+//! - `{"id":N,"request":R,"op":"identities"}` and
+//!   `{"id":N,"request":R,"op":"sign","key":"<hex>","payload":"<hex>"}`, from the host;
+//! - `{"id":N,"request":R,"ok":{"keys":["<hex>"]}}`,
+//!   `{"id":N,"request":R,"ok":{"signature":"<hex>"}}` and
+//!   `{"id":N,"request":R,"error":{"code":"E_NO_AGENT","cause":"<closed cause>"}}`, from the
+//!   caller.
 //!
-//! Hex is lowercase. `N` is a nonzero u64; it starts at 1 on each connection and increases
+//! `R` is the id of the request the host is serving, exactly as its client sent it: the MCP
+//! request id of a tool call, or the ctl request's id (`null` for an ask outside any request).
+//! The caller's reply echoes it, and the caller answers a callback for the request it names,
+//! never for whichever request happens to be oldest: the MCP proxy refuses the callback of a
+//! request it no longer awaits (cancelled, answered or unknown) as `request cancelled`, without
+//! asking its agent. Hex is lowercase. `N` is a nonzero u64; it starts at 1 on each connection and increases
 //! without wrapping. A callback line has at most [`MAX_CALLBACK_LINE_BYTES`] bytes, checked
 //! before any JSON is read; decoded content has the agent bounds of
 //! [`rdy_engine::signing_crypto`]. An invalid callback reply closes the connection's signing
@@ -32,10 +39,10 @@
 //! not a general signing service for the MCP client.
 
 use crate::handler::McpStream;
-use crate::signing_agent::{CallCancel, CallerAgent};
+use crate::signing_agent::CallerAgent;
 use rdy_engine::signing_crypto::{
-    AgentIdentity, IDENTITIES_MAX, KEY_TYPES, NAMESPACES, PUBLIC_KEY_MAX, SSHSIG_MAX,
-    STATEMENT_MAX, SigningAgent,
+    AgentIdentity, CallCancel, IDENTITIES_MAX, KEY_TYPES, NAMESPACES, PUBLIC_KEY_MAX, SSHSIG_MAX,
+    STATEMENT_MAX, SigningAgent, SigningCall,
 };
 use rdy_engine::{E_NO_AGENT, NoAgentCause, RdyError, no_agent};
 use rdy_mcp::server::LineScan;
@@ -155,12 +162,20 @@ enum Ask {
     Sign { key: Vec<u8>, payload: Vec<u8> },
 }
 
+/// The JSON of a request id, for a callback line.
+fn request_json(request: &Value) -> String {
+    serde_json::to_string(request).unwrap_or_else(|_| "null".into())
+}
+
 impl Ask {
-    fn line(&self, id: u64) -> Vec<u8> {
+    fn line(&self, id: u64, request: &Value) -> Vec<u8> {
+        let request = request_json(request);
         match self {
-            Ask::Identities => callback_line(&format!(r#"{{"id":{id},"op":"identities"}}"#)),
+            Ask::Identities => callback_line(&format!(
+                r#"{{"id":{id},"request":{request},"op":"identities"}}"#
+            )),
             Ask::Sign { key, payload } => callback_line(&format!(
-                r#"{{"id":{id},"op":"sign","key":"{}","payload":"{}"}}"#,
+                r#"{{"id":{id},"request":{request},"op":"sign","key":"{}","payload":"{}"}}"#,
                 hex(key),
                 hex(payload)
             )),
@@ -168,19 +183,36 @@ impl Ask {
     }
 }
 
-/// A host's callback request body: its id and what it asks. `Err` carries the id when one could
-/// be read (the caller then answers `invalid reply`).
-fn parse_ask(body: &[u8]) -> Result<(u64, Ask), Option<u64>> {
-    let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(body) else {
+/// A host's callback request: its id, the request it serves and what it asks.
+struct Parsed {
+    id: u64,
+    request: Value,
+    ask: Ask,
+}
+
+/// A host's callback request body. `Err` carries the id when one could be read (the caller then
+/// answers `invalid reply`).
+fn parse_ask(body: &[u8]) -> Result<Parsed, Option<u64>> {
+    let Ok(Value::Object(mut m)) = serde_json::from_slice::<Value>(body) else {
         return Err(None);
     };
     let id = callback_id(m.get("id")).ok_or(None)?;
     let bad = Err(Some(id));
+    let Some(request) = m.remove("request") else {
+        return bad;
+    };
     let Some(op) = m.get("op").and_then(Value::as_str) else {
         return bad;
     };
+    let parsed = |ask| {
+        Ok(Parsed {
+            id,
+            request: request.clone(),
+            ask,
+        })
+    };
     match op {
-        "identities" if m.len() == 2 => Ok((id, Ask::Identities)),
+        "identities" if m.len() == 2 => parsed(Ask::Identities),
         "sign" if m.len() == 4 => {
             let field =
                 |k: &str, max: usize| m.get(k).and_then(Value::as_str).and_then(|s| unhex(s, max));
@@ -188,7 +220,7 @@ fn parse_ask(body: &[u8]) -> Result<(u64, Ask), Option<u64>> {
                 field("key", PUBLIC_KEY_MAX),
                 field("payload", STATEMENT_MAX),
             ) {
-                (Some(key), Some(payload)) => Ok((id, Ask::Sign { key, payload })),
+                (Some(key), Some(payload)) => parsed(Ask::Sign { key, payload }),
                 _ => bad,
             }
         }
@@ -205,34 +237,38 @@ enum Answer {
 }
 
 impl Answer {
-    fn line(&self, id: u64) -> Vec<u8> {
+    fn line(&self, id: u64, request: &Value) -> Vec<u8> {
+        let request = request_json(request);
         match self {
             Answer::Keys(keys) => {
                 let keys: Vec<String> = keys.iter().map(|k| hex(k)).collect();
                 let keys = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".into());
-                callback_line(&format!(r#"{{"id":{id},"ok":{{"keys":{keys}}}}}"#))
+                callback_line(&format!(
+                    r#"{{"id":{id},"request":{request},"ok":{{"keys":{keys}}}}}"#
+                ))
             }
             Answer::Signature(sig) => callback_line(&format!(
-                r#"{{"id":{id},"ok":{{"signature":"{}"}}}}"#,
+                r#"{{"id":{id},"request":{request},"ok":{{"signature":"{}"}}}}"#,
                 hex(sig)
             )),
             Answer::Refused(cause) => {
                 let cause = Value::String(cause.as_str().into());
                 callback_line(&format!(
-                    r#"{{"id":{id},"error":{{"code":"{E_NO_AGENT}","cause":{cause}}}}}"#
+                    r#"{{"id":{id},"request":{request},"error":{{"code":"{E_NO_AGENT}","cause":{cause}}}}}"#
                 ))
             }
         }
     }
 }
 
-/// A caller's reply body to the ask `ask`: its id and answer. `None` for anything else: another
-/// shape, an unknown field, a request, bad hex or content over its bound.
-fn parse_answer(body: &[u8], ask: &Ask) -> Option<(u64, Answer)> {
+/// A caller's reply body to the ask `ask` for the request `request`: its id and answer. `None`
+/// for anything else: another shape, an unknown field, another request, a request line, bad hex
+/// or content over its bound.
+fn parse_answer(body: &[u8], ask: &Ask, request: &Value) -> Option<(u64, Answer)> {
     let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(body) else {
         return None;
     };
-    if m.len() != 2 {
+    if m.len() != 3 || m.get("request") != Some(request) {
         return None;
     }
     let id = callback_id(m.get("id"))?;
@@ -317,9 +353,21 @@ fn signing_key_blob(key: &[u8]) -> bool {
 
 // ---- the host ----
 
-/// The host's signer for one connection: each call asks the process at the other end.
+/// The host's signer for one connection: each call asks the process at the other end, naming
+/// the request it serves ([`RemoteAgent::for_request`]; `null` outside any request).
 pub struct RemoteAgent {
     link: Arc<Link>,
+    request: Value,
+}
+
+impl RemoteAgent {
+    /// This connection's signer serving the request `request` (its id, as the client sent it).
+    pub fn for_request(&self, request: Value) -> Arc<RemoteAgent> {
+        Arc::new(RemoteAgent {
+            link: Arc::clone(&self.link),
+            request,
+        })
+    }
 }
 
 struct Link {
@@ -342,6 +390,7 @@ struct LinkState {
 
 struct Waiting {
     id: u64,
+    request: Value,
     ask: Ask,
     reply: std::sync::mpsc::SyncSender<Result<Answer, NoAgentCause>>,
 }
@@ -368,7 +417,7 @@ impl Link {
             drop(st);
             return self.fail(NoAgentCause::InvalidReply);
         };
-        match parse_answer(body, &w.ask) {
+        match parse_answer(body, &w.ask, &w.request) {
             Some((id, answer)) if id == w.id => {
                 let _ = w.reply.send(Ok(answer));
                 self.outstanding.send_replace(false);
@@ -381,7 +430,7 @@ impl Link {
         }
     }
 
-    fn call(&self, ask: Ask) -> Result<Answer, RdyError> {
+    fn call(&self, ask: Ask, request: &Value) -> Result<Answer, RdyError> {
         let _turn = lock(&self.turn);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         {
@@ -395,10 +444,15 @@ impl Link {
                 return Err(no_agent(NoAgentCause::InvalidReply));
             };
             st.next = next;
-            let line = ask.line(id);
+            let line = ask.line(id, request);
             // outstanding before the line can be written: whoever writes it then reads for the
             // reply
-            st.waiting = Some(Waiting { id, ask, reply: tx });
+            st.waiting = Some(Waiting {
+                id,
+                request: request.clone(),
+                ask,
+                reply: tx,
+            });
             self.outstanding.send_replace(true);
             if self.out.send(line).is_err() {
                 st.waiting = None;
@@ -421,7 +475,7 @@ impl Link {
 
 impl SigningAgent for RemoteAgent {
     fn identities(&self) -> Result<Vec<AgentIdentity>, RdyError> {
-        match self.link.call(Ask::Identities)? {
+        match self.link.call(Ask::Identities, &self.request)? {
             Answer::Keys(keys) => Ok(keys
                 .into_iter()
                 .map(|public_key| AgentIdentity { public_key })
@@ -444,11 +498,17 @@ impl SigningAgent for RemoteAgent {
             key: public_key.to_vec(),
             payload: payload.to_vec(),
         };
-        match self.link.call(ask)? {
+        match self.link.call(ask, &self.request)? {
             Answer::Signature(sig) => Ok(sig),
             Answer::Refused(cause) => Err(no_agent(cause)),
             Answer::Keys(_) => Err(no_agent(NoAgentCause::InvalidReply)),
         }
+    }
+
+    /// This connection's signer naming the call's request. The caller stops its own ask at the
+    /// request's cancel and answers `request cancelled`, so the host waits for that reply.
+    fn for_call(&self, call: &SigningCall) -> Option<Arc<dyn SigningAgent>> {
+        Some(self.for_request(call.request.clone()))
     }
 }
 
@@ -533,6 +593,7 @@ pub fn host_link() -> (Arc<RemoteAgent>, HostInbound, HostOutbound) {
     (
         Arc::new(RemoteAgent {
             link: Arc::clone(&link),
+            request: Value::Null,
         }),
         HostInbound {
             link,
@@ -880,33 +941,39 @@ impl CallerLink {
     }
 
     /// The reply line (mark and newline included) to the callback line `line` (newline taken
-    /// off, mark kept or not), asking the caller's agent on the blocking pool with the call
-    /// bound to `cancel`. A cancel, before the ask or during it, and an interrupt during it, give
-    /// `request cancelled`; the worker is always waited for, so no signing worker outlives its
-    /// callback. When `stop` ends first the ask is cancelled too: [`Stop::Gone`] gives no reply,
-    /// [`Stop::Invalid`] closes the link and gives `invalid reply`. A line that is not a valid
-    /// callback request closes the link (see [`CallerLink::refuse`]).
+    /// off, mark kept or not), asking the caller's agent on the blocking pool. `cancel_of` gives
+    /// the cancel of the request the callback names (its `request`); `None` when that request is
+    /// no longer awaited (cancelled, answered or unknown): the reply is then `request
+    /// cancelled`, and the agent is not asked. A cancel, before the ask or during it, and an
+    /// interrupt during it, give `request cancelled` too; the worker is always waited for, so no
+    /// signing worker outlives its callback. When `stop` ends first the ask is cancelled too:
+    /// [`Stop::Gone`] gives no reply, [`Stop::Invalid`] closes the link and gives `invalid
+    /// reply`. A line that is not a valid callback request closes the link (see
+    /// [`CallerLink::refuse`]). Every reply echoes the callback's `request`.
     pub async fn answer(
         &mut self,
         line: &[u8],
-        cancel: Arc<CallCancel>,
+        cancel_of: impl FnOnce(&Value) -> Option<Arc<CallCancel>>,
         stop: impl Future<Output = Stop> + Send,
     ) -> Option<Vec<u8>> {
         let body = line.strip_prefix(&[CALLBACK_MARK]).unwrap_or(line);
-        let (id, ask) = match parse_ask(body) {
+        let Parsed { id, request, ask } = match parse_ask(body) {
             Ok(parsed) => parsed,
             Err(id) => return Some(self.refuse(id)),
         };
         if self.closed || id <= self.last {
-            return Some(self.refuse(Some(id)));
+            return Some(self.refuse_for(Some(id), &request));
         }
         self.last = id;
+        let Some(cancel) = cancel_of(&request) else {
+            return Some(Answer::Refused(NoAgentCause::Cancelled).line(id, &request));
+        };
         match self.ask(ask, cancel, stop).await {
-            Ok(answer) => Some(answer.line(id)),
+            Ok(answer) => Some(answer.line(id, &request)),
             Err(Stop::Gone) => None,
             Err(Stop::Invalid) => {
                 self.closed = true;
-                Some(Answer::Refused(NoAgentCause::InvalidReply).line(id))
+                Some(Answer::Refused(NoAgentCause::InvalidReply).line(id, &request))
             }
         }
     }
@@ -915,11 +982,17 @@ impl CallerLink {
     /// id, or anything after the link closed): the link closes, and the reply is `invalid
     /// reply` for `id`, the line's id when one could be read. With none, it is the next id, so
     /// the host's waiter still wakes: a reply to another id fails the host's channel closed too.
+    /// Its `request` is `null`: none could be read.
     pub fn refuse(&mut self, id: Option<u64>) -> Vec<u8> {
+        self.refuse_for(id, &Value::Null)
+    }
+
+    /// [`CallerLink::refuse`], echoing `request`.
+    fn refuse_for(&mut self, id: Option<u64>, request: &Value) -> Vec<u8> {
         self.closed = true;
         let id = id.unwrap_or_else(|| self.last.checked_add(1).unwrap_or(self.last));
         self.last = self.last.max(id);
-        Answer::Refused(NoAgentCause::InvalidReply).line(id)
+        Answer::Refused(NoAgentCause::InvalidReply).line(id, request)
     }
 
     /// The answer to `ask`; `Err` when `stop` ended first.
@@ -1062,8 +1135,9 @@ where
         }
         let reply = match read_capped(conn, MAX_CALLBACK_LINE_BYTES).await? {
             Capped::Line(line) => {
-                let cancel = Arc::new(CallCancel::new());
-                let Some(reply) = link.answer(&line, cancel, watch_conn(conn)).await else {
+                // a ctl client has one request in flight: every callback is that request's
+                let fresh = |_: &Value| Some(Arc::new(CallCancel::new()));
+                let Some(reply) = link.answer(&line, fresh, watch_conn(conn)).await else {
                     return Ok(None);
                 };
                 reply

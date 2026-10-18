@@ -42,9 +42,7 @@ use rdy_engine::signing_crypto::{
     AgentIdentity, CryptoCheck, KeyInfo, NAMESPACES, SigningAgent, UnavailableAgent,
     key_fingerprint, resolve_key, sign_sshsig, verify_sshsig,
 };
-use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_NO_AGENT, E_SIGNING_KEY_MISSING, E_SIGNING_KEY_TYPE, RdyError,
-};
+use rdy_engine::{E_BAD_INPUT, E_LIMIT, E_NO_AGENT, E_SIGNING_KEY_TYPE, RdyError};
 use ssh_encoding::base64::{Base64, Encoding};
 use ssh_encoding::{Decode, Encode};
 use ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
@@ -1005,14 +1003,17 @@ fn sig3_public_line_and_fingerprint_select_the_same_identity() {
             "set signing.agent_key to a public key line or its SHA256 fingerprint"
         );
     }
-    // an empty selector is a missing key
+    // an empty selector is set, and malformed: the shared input error (unset is the caller's)
     for empty in ["", "   "] {
         let e = err(resolve_key("signing.key", empty, &agent));
-        assert_eq!(e.code, E_SIGNING_KEY_MISSING);
-        assert_eq!(e.message, "signing.key is not set");
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(
+            e.message,
+            "signing.key is not a public key or SHA256 fingerprint"
+        );
         assert_eq!(
             e.fix,
-            "set signing.key in the user config or .rdy/local.yaml"
+            "set signing.key to a public key line or its SHA256 fingerprint"
         );
     }
     // no agent at all

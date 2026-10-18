@@ -13,14 +13,14 @@
 //!
 //! The proxy is the caller of its session's signing callbacks
 //! ([`crate::signing_transport`]): it answers them with its own SSH agent and never forwards
-//! them to stdout. A callback belongs to the active request: the oldest tool call not yet
-//! answered or cancelled (the daemon runs a session's tool calls one at a time, in arrival
-//! order). Each tool call has its own latched cancel: the host's `notifications/cancelled` for
-//! it cancels its ask of the agent, whether the ask is in flight, still waiting for a thread, or
-//! yet to come; one for another request cancels nothing of it. A callback read while no tool
-//! call is active belongs to a request no longer awaited, and is refused as `request
-//! cancelled` without asking the agent. (The daemon refuses the callbacks of a cancelled
-//! request on its side too: it knows which request is running.) Replies are followed as they
+//! them to stdout. A callback belongs to the request it names (its `request`, the MCP request
+//! id of the tool call the daemon serves), never to whichever request is oldest. Each tool call
+//! not yet answered or cancelled has its own latched cancel, kept by its id: the host's
+//! `notifications/cancelled` for it cancels its ask of the agent, whether the ask is in flight,
+//! still waiting for a thread, or yet to come; one for another request id cancels nothing of
+//! it. A callback whose request is cancelled, answered or unknown is refused at once as
+//! `request cancelled`, and the agent is not asked. (The daemon refuses the callbacks of a
+//! cancelled request on its side too.) Replies are followed as they
 //! stream, holding no more than their id, so a reply of any length settles its request, and so
 //! does a reply to a request with an id of any length the request line's bound allows.
 //!
@@ -33,13 +33,13 @@ use crate::client::{StartOptions, connect_or_start};
 use crate::ctl::MAX_CTL_LINE_BYTES;
 use crate::layout::RunDir;
 use crate::session::Proto;
-use crate::signing_agent::CallCancel;
 use crate::signing_agent::CallerAgent;
 use crate::signing_transport::{
     CALLBACK_MARK, CallerLink, CallerSigner, MAX_CALLBACK_LINE_BYTES, Stop, callback_id,
     copy_with_replies, never_interrupted, write_replies,
 };
 use crate::spawn::{serve_command, spawn_serve};
+use rdy_engine::signing_crypto::CallCancel;
 use rdy_mcp::server::LineScan;
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
@@ -161,8 +161,8 @@ fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Default)]
 struct Tracked {
     inflight: InFlight,
-    /// The tool calls not yet answered or cancelled, in send order, each with its cancel; the
-    /// first is the active one.
+    /// The tool calls not yet answered or cancelled, in send order, each with its cancel, found
+    /// by its request id.
     tools: VecDeque<(Value, Arc<CallCancel>)>,
     /// The socket's reading half reached its end.
     socket_closed: bool,
@@ -199,9 +199,13 @@ impl Tracked {
         }
     }
 
-    /// The cancel of the active request, the one a callback read now belongs to.
-    fn active(&self) -> Option<Arc<CallCancel>> {
-        self.tools.front().map(|(_, cancel)| Arc::clone(cancel))
+    /// The cancel of the tool call `request`, while it is awaited: `None` once it is answered
+    /// or cancelled, and for an id the proxy never sent as a tool call.
+    fn cancel_of(&self, request: &Value) -> Option<Arc<CallCancel>> {
+        self.tools
+            .iter()
+            .find(|(id, _)| id == request)
+            .map(|(_, cancel)| Arc::clone(cancel))
     }
 
     /// Whether no callback can come for a request already sent.
@@ -266,9 +270,8 @@ impl Shared {
 
 /// What the socket reader hands the callback answerer.
 enum Inbound {
-    /// A callback line, with the cancel of the request it belongs to; `None` when no tool call
-    /// is active, so the request that asked is no longer awaited.
-    Line(Vec<u8>, Option<Arc<CallCancel>>),
+    /// A callback line.
+    Line(Vec<u8>),
     /// A callback line over its bound, read off and dropped, with its id when one was read.
     Over(Option<u64>),
 }
@@ -367,8 +370,7 @@ async fn socket_to_stdout<R, O>(
                         let _ =
                             callbacks.send(Inbound::Over(callback_id(scan.finish().id.as_ref())));
                     } else {
-                        let cancel = locked(&shared.tracked).active();
-                        let _ = callbacks.send(Inbound::Line(bytes, cancel));
+                        let _ = callbacks.send(Inbound::Line(bytes));
                     }
                 }
                 None => {}
@@ -389,8 +391,9 @@ async fn socket_to_stdout<R, O>(
 }
 
 /// Answers the session's callbacks with `agent`, one at a time, in the order the daemon asked,
-/// until the proxy stops. A callback of a request no longer awaited is refused as `request
-/// cancelled` without asking the agent; an oversized one closes the link.
+/// until the proxy stops. Each is answered under the cancel of the tool call it names; one of a
+/// request no longer awaited (cancelled, answered or unknown) is refused as `request cancelled`
+/// without asking the agent; an oversized one closes the link.
 async fn answer_callbacks(
     agent: Arc<dyn CallerSigner>,
     shared: Arc<Shared>,
@@ -410,13 +413,9 @@ async fn answer_callbacks(
         };
         let reply = match inbound {
             Inbound::Over(id) => Some(link.refuse(id)),
-            Inbound::Line(line, cancel) => {
-                let cancel = cancel.unwrap_or_else(|| {
-                    let cancelled = Arc::new(CallCancel::new());
-                    cancelled.cancel();
-                    cancelled
-                });
-                link.answer(&line, cancel, shared.stopped()).await
+            Inbound::Line(line) => {
+                let cancel_of = |request: &Value| locked(&shared.tracked).cancel_of(request);
+                link.answer(&line, cancel_of, shared.stopped()).await
             }
         };
         if let Some(reply) = reply {

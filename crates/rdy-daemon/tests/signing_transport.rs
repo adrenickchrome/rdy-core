@@ -6,14 +6,13 @@
 mod common;
 
 use common::short_tempdir;
-use rdy_daemon::signing_agent::CallCancel;
 use rdy_daemon::signing_transport::{
     CALLBACK_MARK, CallerLink, CallerSigner, HostMcp, InterruptSource, MAX_CALLBACK_LINE_BYTES,
     RemoteAgent, Stop, host_mcp, never_interrupted, read_reply,
 };
 use rdy_daemon::*;
 use rdy_engine::engine::{Engine, write_typed};
-use rdy_engine::signing_crypto::{AgentIdentity, SigningAgent};
+use rdy_engine::signing_crypto::{AgentIdentity, CallCancel, SigningAgent};
 use rdy_engine::{E_NO_AGENT, NoAgentCause, Rdy, RdyError, Session, WriteRequest, no_agent};
 use rdy_model::Role;
 use serde_json::{Value, json};
@@ -204,9 +203,9 @@ impl SigningAgent for Fake {
     }
 }
 
-/// A fresh cancel, for one callback.
-fn fresh() -> Arc<CallCancel> {
-    Arc::new(CallCancel::new())
+/// A fresh cancel for whatever request a callback names, as a ctl caller has.
+fn fresh() -> impl FnOnce(&Value) -> Option<Arc<CallCancel>> {
+    |_| Some(Arc::new(CallCancel::new()))
 }
 
 /// Waits on a std receiver without blocking the runtime.
@@ -487,7 +486,8 @@ fn fake_service(
                 .await
                 .unwrap();
             w.flush().await.unwrap();
-            let a: Arc<RemoteAgent> = Arc::clone(&agent);
+            // the service's signer for this call names its request, as rdy's MCP server does
+            let a: Arc<RemoteAgent> = agent.for_request(id.clone());
             let out = tokio::task::spawn_blocking(move || a.sign(&key(1), &signed_data()))
                 .await
                 .unwrap();
@@ -727,7 +727,7 @@ async fn sig5_disconnect_and_cancel_release_the_signer() {
     let mut link = CallerLink::new(Some(fake.clone()), never_interrupted());
     let mut caller = BufReader::new(caller);
     let mut host = host;
-    host.write_all(&cb(r#"{"id":1,"op":"identities"}"#))
+    host.write_all(&cb(r#"{"id":1,"request":1,"op":"identities"}"#))
         .await
         .unwrap();
     let reading = tokio::spawn(async move { read_reply(&mut link, &mut caller).await });
@@ -835,32 +835,36 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
     let (mut c, _h) = served(Arc::new(Signer::default()));
     send(&mut c, ask).await;
     let l = line(&mut c).await;
-    assert_eq!(l, cb(r#"{"id":1,"op":"identities"}"#));
+    assert_eq!(l, cb(r#"{"id":1,"request":1,"op":"identities"}"#));
     send(
         &mut c,
         &cb(&format!(
-            r#"{{"id":1,"ok":{{"keys":["{}"]}}}}"#,
+            r#"{{"id":1,"request":1,"ok":{{"keys":["{}"]}}}}"#,
             hex(&key(4))
         )),
     )
     .await;
     assert_eq!(reply(&mut c).await["ok"], json!([hex(&key(4))]));
     // a repeated id closes the channel: the next ask fails without a callback
-    send(&mut c, &cb(r#"{"id":1,"ok":{"keys":[]}}"#)).await;
+    send(&mut c, &cb(r#"{"id":1,"request":1,"ok":{"keys":[]}}"#)).await;
     send(&mut c, ask2).await;
     assert_reply_cause(&reply(&mut c).await, NoAgentCause::InvalidReply);
 
     // each bad reply fails the waiting ask, and every later one, as `invalid reply`
     let bad: Vec<Vec<u8>> = vec![
-        cb(r#"{"id":1,"ok":{"keys":[]},"extra":1}"#),
-        cb(r#"{"id":1,"ok":{"keys":[],"extra":1}}"#),
-        cb(r#"{"id":1,"ok":{"keys":["0A"]}}"#),
-        cb(r#"{"id":1,"ok":{"keys":["abc"]}}"#),
-        cb(r#"{"id":1,"op":"identities"}"#),
-        cb(r#"{"id":1,"ok":{"signature":"00"}}"#),
-        cb(r#"{"id":1,"error":{"code":"E_NO_AGENT","cause":"the agent said no"}}"#),
-        cb(r#"{"id":0,"ok":{"keys":[]}}"#),
-        cb(r#"{"id":2,"ok":{"keys":[]}}"#),
+        cb(r#"{"id":1,"request":1,"ok":{"keys":[]},"extra":1}"#),
+        cb(r#"{"id":1,"request":1,"ok":{"keys":[],"extra":1}}"#),
+        cb(r#"{"id":1,"request":1,"ok":{"keys":["0A"]}}"#),
+        cb(r#"{"id":1,"request":1,"ok":{"keys":["abc"]}}"#),
+        cb(r#"{"id":1,"request":1,"op":"identities"}"#),
+        cb(r#"{"id":1,"request":1,"ok":{"signature":"00"}}"#),
+        cb(r#"{"id":1,"request":1,"error":{"code":"E_NO_AGENT","cause":"the agent said no"}}"#),
+        cb(r#"{"id":0,"request":1,"ok":{"keys":[]}}"#),
+        cb(r#"{"id":2,"request":1,"ok":{"keys":[]}}"#),
+        // the reply must name the request it answers
+        cb(r#"{"id":1,"ok":{"keys":[]}}"#),
+        cb(r#"{"id":1,"request":2,"ok":{"keys":[]}}"#),
+        cb(r#"{"id":1,"request":"1","ok":{"keys":[]}}"#),
         {
             let mut over = vec![CALLBACK_MARK];
             over.extend(std::iter::repeat_n(b'x', MAX_CALLBACK_LINE_BYTES));
@@ -889,7 +893,7 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
     callback(&mut c).await;
     send(
         &mut c,
-        &cb(r#"{"id":1,"error":{"code":"E_NO_AGENT","cause":"key is not held"}}"#),
+        &cb(r#"{"id":1,"request":1,"error":{"code":"E_NO_AGENT","cause":"key is not held"}}"#),
     )
     .await;
     assert_reply_cause(&reply(&mut c).await, NoAgentCause::NotHeld);
@@ -901,23 +905,23 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
     let (mut y, _hy) = served(Arc::new(Signer::default()));
     send(&mut x, ask).await;
     callback(&mut x).await;
-    send(&mut x, &cb(r#"{"id":1,"ok":{"keys":[]}}"#)).await;
+    send(&mut x, &cb(r#"{"id":1,"request":1,"ok":{"keys":[]}}"#)).await;
     reply(&mut x).await;
     send(&mut x, ask2).await;
     assert_eq!(callback(&mut x).await["id"], 2);
     send(&mut y, ask).await;
     assert_eq!(callback(&mut y).await["id"], 1);
     // y's id sent on x
-    send(&mut x, &cb(r#"{"id":1,"ok":{"keys":[]}}"#)).await;
+    send(&mut x, &cb(r#"{"id":1,"request":1,"ok":{"keys":[]}}"#)).await;
     assert_reply_cause(&reply(&mut x).await, NoAgentCause::InvalidReply);
-    send(&mut y, &cb(r#"{"id":1,"ok":{"keys":[]}}"#)).await;
+    send(&mut y, &cb(r#"{"id":1,"request":1,"ok":{"keys":[]}}"#)).await;
     assert_eq!(reply(&mut y).await["ok"], json!([]));
 
     // the caller's side fails closed too: a reply-shaped ask, a repeated id, a raw-sign ask
     let fake = Fake::open(vec![key(1)]);
     let mut link = CallerLink::new(Some(fake.clone()), never_interrupted());
     let never = || std::future::pending::<Stop>();
-    let identities = cb(r#"{"id":1,"op":"identities"}"#);
+    let identities = cb(r#"{"id":1,"request":7,"op":"identities"}"#);
     let line_of = |v: Option<Vec<u8>>| String::from_utf8(v.expect("a reply")).unwrap();
     assert_eq!(
         line_of(
@@ -925,55 +929,67 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
                 .await
         ),
         format!(
-            "\u{1e}{{\"id\":1,\"ok\":{{\"keys\":[\"{}\"]}}}}\n",
+            "\u{1e}{{\"id\":1,\"request\":7,\"ok\":{{\"keys\":[\"{}\"]}}}}\n",
             hex(&key(1))
         )
     );
     let raw_sign = format!(
-        r#"{{"id":2,"op":"sign","key":"{}","payload":"{}"}}"#,
+        r#"{{"id":2,"request":7,"op":"sign","key":"{}","payload":"{}"}}"#,
         hex(&key(1)),
         hex(b"raw bytes")
     );
     assert_eq!(
         line_of(link.answer(raw_sign.as_bytes(), fresh(), never()).await),
-        "\u{1e}{\"id\":2,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"request refused\"}}\n"
+        "\u{1e}{\"id\":2,\"request\":7,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"request refused\"}}\n"
     );
     let good_sign = format!(
-        r#"{{"id":3,"op":"sign","key":"{}","payload":"{}"}}"#,
+        r#"{{"id":3,"request":"seven","op":"sign","key":"{}","payload":"{}"}}"#,
         hex(&key(1)),
         hex(&signed_data())
     );
     assert_eq!(
         line_of(link.answer(good_sign.as_bytes(), fresh(), never()).await),
         format!(
-            "\u{1e}{{\"id\":3,\"ok\":{{\"signature\":\"{}\"}}}}\n",
+            "\u{1e}{{\"id\":3,\"request\":\"seven\",\"ok\":{{\"signature\":\"{}\"}}}}\n",
             hex(&fake_signature(&key(1)))
         )
     );
     assert_eq!(
         line_of(
-            link.answer(br#"{"id":3,"op":"identities"}"#, fresh(), never())
-                .await
+            link.answer(
+                br#"{"id":3,"request":7,"op":"identities"}"#,
+                fresh(),
+                never()
+            )
+            .await
         ),
-        "\u{1e}{\"id\":3,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
+        "\u{1e}{\"id\":3,\"request\":7,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
         "a repeated id"
     );
     assert_eq!(
         line_of(
-            link.answer(br#"{"id":9,"op":"identities"}"#, fresh(), never())
-                .await
+            link.answer(
+                br#"{"id":9,"request":7,"op":"identities"}"#,
+                fresh(),
+                never()
+            )
+            .await
         ),
-        "\u{1e}{\"id\":9,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
+        "\u{1e}{\"id\":9,\"request\":7,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
         "closed after a bad ask"
     );
     let mut other = CallerLink::new(Some(fake.clone()), never_interrupted());
     assert_eq!(
         line_of(
             other
-                .answer(br#"{"id":1,"ok":{"keys":[]}}"#, fresh(), never())
+                .answer(
+                    br#"{"id":1,"request":7,"ok":{"keys":[]}}"#,
+                    fresh(),
+                    never()
+                )
                 .await
         ),
-        "\u{1e}{\"id\":1,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
+        "\u{1e}{\"id\":1,\"request\":null,\"error\":{\"code\":\"E_NO_AGENT\",\"cause\":\"invalid reply\"}}\n",
         "a reply sent to the caller"
     );
     assert_eq!(
@@ -1186,16 +1202,25 @@ async fn host_callback(p: &mut Raw) -> Value {
     callback(&mut p.host).await
 }
 
-fn sign_ask(id: u64) -> Vec<u8> {
+/// A callback ask to sign, id `id`, for the MCP request `request`.
+fn sign_ask(id: u64, request: u64) -> Vec<u8> {
     cb(&format!(
-        r#"{{"id":{id},"op":"sign","key":"{}","payload":"{}"}}"#,
+        r#"{{"id":{id},"request":{request},"op":"sign","key":"{}","payload":"{}"}}"#,
         hex(&key(1)),
         hex(&signed_data())
     ))
 }
 
-fn refused(id: u64, cause: NoAgentCause) -> Value {
-    json!({"id": id, "error": {"code": E_NO_AGENT, "cause": cause.as_str()}})
+/// A callback ask for the identities, id `id`, for the MCP request `request`.
+fn identities_ask(id: u64, request: u64) -> Vec<u8> {
+    cb(&format!(
+        r#"{{"id":{id},"request":{request},"op":"identities"}}"#
+    ))
+}
+
+/// The caller's reply to callback `id` of the request `request`, refused with `cause`.
+fn refused(id: u64, request: Value, cause: NoAgentCause) -> Value {
+    json!({"id": id, "request": request, "error": {"code": E_NO_AGENT, "cause": cause.as_str()}})
 }
 
 /// A std receiver's signals, as an async receiver.
@@ -1233,10 +1258,10 @@ async fn sig5_cancel_before_the_first_callback_refuses_it() {
     // both reach the host before the body's first callback
     assert_eq!(host_json(&mut p).await["id"], 7);
     assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
-    send(&mut p.host, &sign_ask(1)).await;
+    send(&mut p.host, &sign_ask(1, 7)).await;
     assert_eq!(
         host_callback(&mut p).await,
-        refused(1, NoAgentCause::Cancelled)
+        refused(1, json!(7), NoAgentCause::Cancelled)
     );
     assert_eq!(
         fake.calls.load(Ordering::SeqCst),
@@ -1246,10 +1271,10 @@ async fn sig5_cancel_before_the_first_callback_refuses_it() {
     // an unrelated request after it still signs
     p.input.write_all(tool_call(8).as_bytes()).await.unwrap();
     assert_eq!(host_json(&mut p).await["id"], 8);
-    send(&mut p.host, &cb(r#"{"id":2,"op":"identities"}"#)).await;
+    send(&mut p.host, &identities_ask(2, 8)).await;
     assert_eq!(
         host_callback(&mut p).await,
-        json!({"id": 2, "ok": {"keys": [hex(&key(1))]}})
+        json!({"id": 2, "request": 8, "ok": {"keys": [hex(&key(1))]}})
     );
     send(
         &mut p.host,
@@ -1317,18 +1342,18 @@ fn sig5_cancel_reaches_a_queued_signing_worker() {
     };
     let (fake, ready) = Fake::gated(vec![key(1)]);
     let _unblock = Unblock(fake.clone());
-    let identities = br#"{"id":1,"op":"identities"}"#;
+    let identities = br#"{"id":1,"request":1,"op":"identities"}"#;
 
     // 1. the request's cancel comes while its worker waits for the blocking thread
     let free = occupy();
     let (fire, _) = tokio::sync::watch::channel(0u64);
     let (interrupt, armed) = armed_interrupt(&fire);
     let mut link = CallerLink::new(Some(fake.clone()), interrupt);
-    let cancel = fresh();
+    let cancel = Arc::new(CallCancel::new());
     let answering = {
         let cancel = Arc::clone(&cancel);
         rt.spawn(async move {
-            link.answer(identities, cancel, std::future::pending())
+            link.answer(identities, move |_| Some(cancel), std::future::pending())
                 .await
         })
     };
@@ -1338,7 +1363,7 @@ fn sig5_cancel_reaches_a_queued_signing_worker() {
     let reply = rt.block_on(answering).unwrap().expect("a reply");
     assert_eq!(
         serde_json::from_slice::<Value>(&reply[1..]).unwrap(),
-        refused(1, NoAgentCause::Cancelled)
+        refused(1, json!(1), NoAgentCause::Cancelled)
     );
     assert!(
         ready.try_recv().is_err(),
@@ -1360,7 +1385,7 @@ fn sig5_cancel_reaches_a_queued_signing_worker() {
     let reply = rt.block_on(answering).unwrap().expect("a reply");
     assert_eq!(
         serde_json::from_slice::<Value>(&reply[1..]).unwrap(),
-        refused(1, NoAgentCause::Cancelled)
+        refused(1, json!(1), NoAgentCause::Cancelled)
     );
     assert_eq!(
         fake.active.load(Ordering::SeqCst),
@@ -1389,7 +1414,7 @@ async fn sig5_proxy_exit_joins_its_signing_worker() {
     let call = tool_call(1);
     beside!(p.input.write_all(call.as_bytes())).unwrap();
     assert_eq!(beside!(host_json(&mut p))["id"], 1);
-    let ask = sign_ask(1);
+    let ask = sign_ask(1, 1);
     beside!(send(&mut p.host, &ask));
     beside!(ready.recv()).unwrap();
     // stdin and the daemon's socket close while the agent is asked
@@ -1449,15 +1474,15 @@ async fn sig5_stdin_eof_after_a_reply_over_the_tracked_bound() {
     let got = raw_out(&mut p.output).await;
     assert_eq!(got.len(), len, "the reply is forwarded whole");
     p.host = writing.await.unwrap();
-    // request 1 is answered: a cancel of request 2 is a cancel of the active request
+    // request 1 is answered: request 2 is cancelled, and its callback is refused
     p.input.write_all(tool_call(2).as_bytes()).await.unwrap();
     p.input.write_all(cancelled(2).as_bytes()).await.unwrap();
     assert_eq!(host_json(&mut p).await["id"], 2);
     assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
-    send(&mut p.host, &cb(r#"{"id":1,"op":"identities"}"#)).await;
+    send(&mut p.host, &identities_ask(1, 2)).await;
     assert_eq!(
         host_callback(&mut p).await,
-        refused(1, NoAgentCause::Cancelled)
+        refused(1, json!(2), NoAgentCause::Cancelled)
     );
     // at stdin's end nothing is awaited: the proxy's EOF reaches the daemon
     drop(p.input);
@@ -1485,15 +1510,15 @@ async fn sig5_stdin_eof_after_a_reply_with_a_long_id() {
     send(&mut p.host, reply.as_bytes()).await;
     let got: Value = serde_json::from_str(&raw_out(&mut p.output).await).unwrap();
     assert_eq!(got["id"], long);
-    // the long-id call is answered: a cancel of request 2 is a cancel of the active request
+    // the long-id call is answered: request 2 is cancelled, and its callback is refused
     p.input.write_all(tool_call(2).as_bytes()).await.unwrap();
     p.input.write_all(cancelled(2).as_bytes()).await.unwrap();
     assert_eq!(host_json(&mut p).await["id"], 2);
     assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
-    send(&mut p.host, &cb(r#"{"id":1,"op":"identities"}"#)).await;
+    send(&mut p.host, &identities_ask(1, 2)).await;
     assert_eq!(
         host_callback(&mut p).await,
-        refused(1, NoAgentCause::Cancelled)
+        refused(1, json!(2), NoAgentCause::Cancelled)
     );
     // at stdin's end nothing is awaited: the proxy's EOF reaches the daemon
     drop(p.input);
@@ -1519,18 +1544,18 @@ async fn sig5_proxy_fails_closed_on_an_oversized_callback() {
     p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
     assert_eq!(host_json(&mut p).await["id"], 1);
     // an oversized callback with a readable id, then a valid one: the first fails the channel
-    let mut over = br#"{"id":1,"op":"identities","pad":""#.to_vec();
+    let mut over = br#"{"id":1,"request":1,"op":"identities","pad":""#.to_vec();
     over.extend(std::iter::repeat_n(b'x', MAX_CALLBACK_LINE_BYTES));
     over.extend_from_slice(b"\"}");
     send(&mut p.host, &cb(std::str::from_utf8(&over).unwrap())).await;
-    send(&mut p.host, &cb(r#"{"id":2,"op":"identities"}"#)).await;
+    send(&mut p.host, &identities_ask(2, 1)).await;
     assert_eq!(
         host_callback(&mut p).await,
-        refused(1, NoAgentCause::InvalidReply)
+        refused(1, Value::Null, NoAgentCause::InvalidReply)
     );
     assert_eq!(
         host_callback(&mut p).await,
-        refused(2, NoAgentCause::InvalidReply),
+        refused(2, json!(1), NoAgentCause::InvalidReply),
         "the channel is closed"
     );
     // one with no readable id is answered at the next id, so the host's waiter wakes
@@ -1540,7 +1565,7 @@ async fn sig5_proxy_fails_closed_on_an_oversized_callback() {
     send(&mut p.host, &junk).await;
     assert_eq!(
         host_callback(&mut p).await,
-        refused(3, NoAgentCause::InvalidReply)
+        refused(3, Value::Null, NoAgentCause::InvalidReply)
     );
     assert_eq!(open.calls.load(Ordering::SeqCst), 0);
     drop(p.input);
@@ -1555,16 +1580,16 @@ async fn sig5_proxy_fails_closed_on_an_oversized_callback() {
     let proxy = tokio::spawn(proxy);
     p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
     assert_eq!(host_json(&mut p).await["id"], 1);
-    send(&mut p.host, &sign_ask(1)).await;
+    send(&mut p.host, &sign_ask(1, 1)).await;
     ready.recv().await.unwrap();
     send(&mut p.host, &junk).await;
     assert_eq!(
         host_callback(&mut p).await,
-        refused(1, NoAgentCause::InvalidReply)
+        refused(1, json!(1), NoAgentCause::InvalidReply)
     );
     assert_eq!(
         host_callback(&mut p).await,
-        refused(2, NoAgentCause::InvalidReply)
+        refused(2, Value::Null, NoAgentCause::InvalidReply)
     );
     assert_eq!(
         fake.active.load(Ordering::SeqCst),
@@ -1585,14 +1610,14 @@ async fn sig5_unexpected_bytes_while_the_agent_waits_fail_closed() {
     let mut link = CallerLink::new(Some(fake.clone()), never_interrupted());
     let mut caller = BufReader::new(caller);
     let mut host = BufReader::new(host);
-    send(&mut host, &cb(r#"{"id":1,"op":"identities"}"#)).await;
+    send(&mut host, &identities_ask(1, 1)).await;
     let reading = tokio::spawn(async move { read_reply(&mut link, &mut caller).await });
     recv(&mut ready).await;
     // one byte the host must not send while its callback is outstanding
     host.get_mut().write_all(b"x").await.unwrap();
     assert_eq!(
         callback(&mut host).await,
-        refused(1, NoAgentCause::InvalidReply)
+        refused(1, json!(1), NoAgentCause::InvalidReply)
     );
     assert_eq!(fake.cancels.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -1618,17 +1643,17 @@ async fn sig5_unexpected_bytes_while_the_agent_waits_fail_closed() {
     send(&mut host, &junk).await;
     assert_eq!(
         callback(&mut host).await,
-        refused(1, NoAgentCause::InvalidReply)
+        refused(1, Value::Null, NoAgentCause::InvalidReply)
     );
     send(&mut host, &cb("not json")).await;
     assert_eq!(
         callback(&mut host).await,
-        refused(2, NoAgentCause::InvalidReply)
+        refused(2, Value::Null, NoAgentCause::InvalidReply)
     );
-    send(&mut host, &cb(r#"{"id":3,"op":"identities"}"#)).await;
+    send(&mut host, &identities_ask(3, 1)).await;
     assert_eq!(
         callback(&mut host).await,
-        refused(3, NoAgentCause::InvalidReply)
+        refused(3, json!(1), NoAgentCause::InvalidReply)
     );
     send(&mut host, b"{\"id\":1,\"ok\":{}}\n").await;
     let out = reading.await.unwrap().unwrap().expect("the ctl reply");
@@ -1643,14 +1668,76 @@ async fn sig5_held_ctl_lines_are_bounded_by_count_and_bytes() {
     send(&mut c, b"{\"id\":1,\"op\":\"identities\"}\n").await;
     assert_eq!(callback(&mut c).await["id"], 1);
     send(&mut c, &vec![b'\n'; 100_000]).await;
-    send(&mut c, &cb(r#"{"id":1,"ok":{"keys":[]}}"#)).await;
+    send(&mut c, &cb(r#"{"id":1,"request":1,"ok":{"keys":[]}}"#)).await;
     assert_eq!(reply(&mut c).await["ok"], json!([]));
     // many small lines count by number as well as bytes
     send(&mut c, b"{\"id\":2,\"op\":\"identities\"}\n").await;
     assert_eq!(callback(&mut c).await["id"], 2);
     send(&mut c, &b"{}\n".repeat(5000)).await;
-    send(&mut c, &cb(r#"{"id":2,"ok":{"keys":[]}}"#)).await;
+    send(&mut c, &cb(r#"{"id":2,"request":2,"ok":{"keys":[]}}"#)).await;
     let v = reply(&mut c).await;
     assert_eq!(v["id"], 2);
     assert_reply_cause(&v, NoAgentCause::InvalidReply);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_a_callback_belongs_to_the_request_it_names() {
+    let fake = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    // 7 and 8 pipelined; 7 is cancelled before the daemon's callback for it arrives
+    p.input.write_all(tool_call(7).as_bytes()).await.unwrap();
+    p.input.write_all(tool_call(8).as_bytes()).await.unwrap();
+    p.input.write_all(cancelled(7).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 7);
+    assert_eq!(host_json(&mut p).await["id"], 8);
+    assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
+    send(&mut p.host, &sign_ask(1, 7)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(1, json!(7), NoAgentCause::Cancelled),
+        "the cancelled request's callback is not the next request's"
+    );
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        0,
+        "no signer is asked for a cancelled request"
+    );
+    // a cancel of an unrelated id changes nothing
+    p.input.write_all(cancelled(99).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["method"], "notifications/cancelled");
+    // a callback naming a request the proxy never sent is refused, unasked
+    send(&mut p.host, &identities_ask(2, 42)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(2, json!(42), NoAgentCause::Cancelled)
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+    // 8 signs normally
+    send(&mut p.host, &sign_ask(3, 8)).await;
+    let ok = host_callback(&mut p).await;
+    assert_eq!((&ok["id"], &ok["request"]), (&json!(3), &json!(8)), "{ok}");
+    assert_eq!(ok["ok"]["signature"], hex(&fake_signature(&key(1))), "{ok}");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    // once 8 is answered, its later callback is refused too
+    send(
+        &mut p.host,
+        (json!({"jsonrpc": "2.0", "id": 8, "result": {}}).to_string() + "\n").as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw_out(&mut p.output).await).unwrap()["id"],
+        8
+    );
+    send(&mut p.host, &sign_ask(4, 8)).await;
+    assert_eq!(
+        host_callback(&mut p).await,
+        refused(4, json!(8), NoAgentCause::Cancelled)
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    drop(p.input);
+    let mut rest = Vec::new();
+    p.host.read_to_end(&mut rest).await.unwrap();
+    drop(p.host);
+    assert_eq!(proxy.await.unwrap(), 0);
 }

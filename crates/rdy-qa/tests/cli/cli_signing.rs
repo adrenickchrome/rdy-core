@@ -716,17 +716,42 @@ fn sig9_key_show_reports_identity_type_and_agent_presence() {
         String::from_utf8_lossy(&o.stderr)
     );
 
-    // a malformed selector is the shared input error, before any agent request
-    config(d.path(), "auto", Some("not a key"), None, None);
-    let e = json_err(&cli(d.path(), rec, &["--json", "key", "show"]));
-    assert_eq!(
-        (&e["code"], &e["message"], &e["fix"]),
-        (
-            &json!("E_BAD_INPUT"),
-            &json!("signing.key is not a public key or SHA256 fingerprint"),
-            &json!("set signing.key to a public key line or its SHA256 fingerprint")
-        )
-    );
+    // a malformed selector, an empty or blank one included, is the shared input error, before
+    // any agent request, on key show and on rdy sign; only null is unset
+    let r = Rdy::open(d.path()).unwrap();
+    let landing = r.read().canon_head().unwrap().to_string();
+    drop(r);
+    for bad in ["not a key", "", "   "] {
+        for (setting, key, agent_key) in [
+            ("signing.key", Some(bad), None),
+            ("signing.agent_key", None, Some(bad)),
+        ] {
+            config(d.path(), "auto", key, agent_key, None);
+            let want = (
+                json!("E_BAD_INPUT"),
+                json!(format!(
+                    "{setting} is not a public key or SHA256 fingerprint"
+                )),
+                json!(format!(
+                    "set {setting} to a public key line or its SHA256 fingerprint"
+                )),
+            );
+            let e = json_err(&cli(d.path(), rec, &["--json", "key", "show"]));
+            assert_eq!(
+                (e["code"].clone(), e["message"].clone(), e["fix"].clone()),
+                want,
+                "key show {setting} {bad:?}"
+            );
+            if setting == "signing.key" {
+                let e = json_err(&cli(d.path(), rec, &["--json", "sign", &landing]));
+                assert_eq!(
+                    (e["code"].clone(), e["message"].clone(), e["fix"].clone()),
+                    want,
+                    "sign {bad:?}"
+                );
+            }
+        }
+    }
     assert_eq!(recorder.connections(), 0);
 }
 

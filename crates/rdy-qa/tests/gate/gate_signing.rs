@@ -1772,3 +1772,86 @@ fn sig8_signature_publication_preserves_redaction_epochs() {
     assert!(!on_disk(p.dir.path(), SECRET), "still erased");
     on(&p.e, |r| r.fsck().expect("fsck"));
 }
+
+/// `.rdy/local.yaml` with selectors written exactly as given (`None` is null, so unset).
+fn raw_config(dir: &Path, sign: &str, key: Option<&str>, agent_key: Option<&str>) {
+    let sel = |s: Option<&str>| s.map_or("null".to_string(), |s| format!("{s:?}"));
+    std::fs::write(
+        dir.join(".rdy/local.yaml"),
+        format!(
+            "signing:\n  key: {}\n  agent_key: {}\n  sign: {sign}\n  allowed_signers: null\n",
+            sel(key),
+            sel(agent_key)
+        ),
+    )
+    .expect("local config");
+}
+
+#[test]
+fn sig8_blank_selectors_are_the_shared_input_error() {
+    let p = project();
+    let keys = [person_ed(), agent_ed()];
+    let (pfp, afp) = (person_ed().fingerprint(), agent_ed().fingerprint());
+    let bad = |setting: &str| {
+        (
+            format!("{setting} is not a public key or SHA256 fingerprint"),
+            format!("set {setting} to a public key line or its SHA256 fingerprint"),
+        )
+    };
+    let assert_bad = |e: &RdyError, setting: &str| {
+        let (message, fix) = bad(setting);
+        assert_eq!(
+            (e.code, &e.message, &e.fix),
+            (E_BAD_INPUT, &message, &fix),
+            "{e}"
+        );
+    };
+    // unsigned subjects for the explicit signing below
+    let none = FakeAgent::new(&[]);
+    let local = subject(&p.approve_local(&none, &p.proposal().0).unwrap()).to_string();
+    let relayed = subject(&p.approve_relayed(&none, &p.proposal().0).unwrap()).to_string();
+    for blank in ["", "   "] {
+        // a blank person selector is set, and malformed: never "not set"
+        raw_config(p.dir.path(), "auto", Some(blank), Some(&afp));
+        let agent = FakeAgent::new(&keys);
+        let config = rdy_engine::signing_read::signing_config(p.dir.path()).unwrap();
+        assert_eq!(config.key.as_deref(), Some(blank));
+        let e = rdy_engine::signing_read::key_show(&config, &agent).unwrap_err();
+        assert_bad(&e, "signing.key");
+        let e = run_sign(&*p.e, &agent, &approver(), &local, None).unwrap_err();
+        assert_bad(&e, "signing.key");
+        let (message, _) = bad("signing.key");
+        for act in [Act::Approval, Act::Tag] {
+            assert_eq!(
+                outcome(&p, &agent, act, false),
+                Outcome::Warned(E_BAD_INPUT.into(), message.clone()),
+                "auto {act:?} {blank:?}"
+            );
+        }
+        raw_config(p.dir.path(), "always", Some(blank), Some(&afp));
+        assert_eq!(
+            outcome(&p, &agent, Act::Approval, false),
+            Outcome::Refused(E_BAD_INPUT, message.clone())
+        );
+        assert_eq!(agent.calls(), 0, "a malformed selector asks no agent");
+
+        // a blank machine selector, the same
+        raw_config(p.dir.path(), "auto", Some(&pfp), Some(blank));
+        let agent = FakeAgent::new(&keys);
+        let config = rdy_engine::signing_read::signing_config(p.dir.path()).unwrap();
+        assert_eq!(config.agent_key.as_deref(), Some(blank));
+        let e = rdy_engine::signing_read::key_show(&config, &agent).unwrap_err();
+        assert_bad(&e, "signing.agent_key");
+        let e = run_sign(&*p.e, &agent, &relayer(), &relayed, None).unwrap_err();
+        assert_bad(&e, "signing.agent_key");
+        let (message, _) = bad("signing.agent_key");
+        for act in [Act::Approval, Act::Tag] {
+            assert_eq!(
+                outcome(&p, &agent, act, true),
+                Outcome::Warned(E_BAD_INPUT.into(), message.clone()),
+                "auto relayed {act:?} {blank:?}"
+            );
+        }
+        assert_eq!(agent.calls(), 0, "a malformed selector asks no agent");
+    }
+}

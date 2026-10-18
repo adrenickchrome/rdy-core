@@ -13,13 +13,14 @@
 //! anything is allocated or handed to the SSH codec.
 
 use crate::{
-    E_BAD_INPUT, NoAgentCause, RdyError, no_agent, signing_key_missing, signing_key_type,
-    signing_limit, signing_selector,
+    E_BAD_INPUT, NoAgentCause, RdyError, no_agent, signing_key_type, signing_limit,
+    signing_selector,
 };
 use ssh_encoding::base64::{Base64, Base64Unpadded, Encoding};
 use ssh_encoding::{Decode, Encode};
 use ssh_key::public::KeyData;
 use ssh_key::{Algorithm, HashAlg, PublicKey, Signature, SshSig};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The SSHSIG namespace of a person's approval.
 pub const NS_APPROVAL: &str = "rdy-approval-v1";
@@ -84,6 +85,89 @@ pub trait SigningAgent: Send + Sync {
     /// The agent's SSH signature blob (algorithm and signature, as the agent's sign response
     /// carries it) of `payload` by the key `public_key`.
     fn sign(&self, public_key: &[u8], payload: &[u8]) -> Result<Vec<u8>, RdyError>;
+    /// This agent serving the one request `call` of a session: each ask names the call's
+    /// request, and the call's cancel ends an ask in progress. `None`: this agent can do
+    /// neither, and serves the call as it is (the default).
+    fn for_call(&self, call: &SigningCall) -> Option<Arc<dyn SigningAgent>> {
+        let _ = call;
+        None
+    }
+}
+
+/// One request of a session that asks the caller's agent: an MCP tool call, or a ctl request.
+#[derive(Clone)]
+pub struct SigningCall {
+    /// The request's id, exactly as its client sent it (a JSON number or string).
+    pub request: serde_json::Value,
+    /// Cancelled when the request is cancelled or its session ends.
+    pub cancel: Arc<CallCancel>,
+}
+
+/// The cancel of one call, latched: a cancel that comes before the call starts is kept, and the
+/// call then ends at once as `E_NO_AGENT` `request cancelled`, without reaching the agent. An
+/// agent that can stop an ask in progress registers a hook ([`CallCancel::on_cancel`]) that
+/// closes its connection.
+#[derive(Default)]
+pub struct CallCancel {
+    state: Mutex<CancelState>,
+}
+
+/// What runs at a cancel.
+type Hook = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: bool,
+    next: u64,
+    hooks: Vec<(u64, Hook)>,
+}
+
+impl CallCancel {
+    pub fn new() -> CallCancel {
+        CallCancel::default()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, CancelState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Cancels the call, now or when it starts. A second cancel does nothing.
+    pub fn cancel(&self) {
+        let hooks = {
+            let mut st = self.lock();
+            if st.cancelled {
+                return;
+            }
+            st.cancelled = true;
+            std::mem::take(&mut st.hooks)
+        };
+        for (_, hook) in hooks {
+            hook();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.lock().cancelled
+    }
+
+    /// Runs `hook` once at the cancel, unless [`CallCancel::forget`] comes first. `None`, and
+    /// the hook is dropped unrun, when the cancel has already come.
+    pub fn on_cancel(&self, hook: Hook) -> Option<u64> {
+        let mut st = self.lock();
+        if st.cancelled {
+            return None;
+        }
+        let id = st.next;
+        st.next = st.next.wrapping_add(1);
+        st.hooks.push((id, hook));
+        Some(id)
+    }
+
+    /// Drops the hook `id` unrun. A hook already taken by a cancel may still run: hooks are
+    /// harmless once their call has ended.
+    pub fn forget(&self, id: u64) {
+        self.lock().hooks.retain(|(h, _)| *h != id);
+    }
 }
 
 /// The agent of a caller that has none: every request is `E_NO_AGENT`
@@ -159,8 +243,9 @@ pub fn key_fingerprint(selector: &str) -> Result<String, ()> {
 
 /// The key the selector `selector` of setting `setting` names, as the caller's agent holds it.
 ///
-/// - An empty selector is `E_SIGNING_KEY_MISSING`; one that is neither a public-key line (see
-///   [`key_fingerprint`]) nor a canonical fingerprint is `E_BAD_INPUT`.
+/// - A selector that is neither a public-key line (see [`key_fingerprint`]) nor a canonical
+///   fingerprint, an empty or blank one included, is `E_BAD_INPUT`: an unset key is the
+///   caller's `E_SIGNING_KEY_MISSING`, before any selector exists.
 /// - A public-key line of an unsupported type is `E_SIGNING_KEY_TYPE`, held or not, and asks the
 ///   agent nothing.
 /// - A key the agent does not hold is `E_NO_AGENT` `key is not held`; a held key of an
@@ -171,9 +256,6 @@ pub fn resolve_key(
     agent: &dyn SigningAgent,
 ) -> Result<KeyInfo, RdyError> {
     let selector = selector.trim();
-    if selector.is_empty() {
-        return Err(signing_key_missing(setting));
-    }
     let wanted = match parse_selector(selector).ok_or_else(|| signing_selector(setting))? {
         Selector::Fingerprint(fp) => fp,
         Selector::Public { blob, key_type } => {

@@ -311,7 +311,6 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let mut st = LineState::default();
     let mut stop = info.stop.subscribe();
     let (agent, inbound, mut outbound) = host_link();
-    let agent: Arc<dyn SigningAgent> = agent;
     let mut held = Held::default();
     loop {
         if *stop.borrow() {
@@ -393,7 +392,9 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 info.stop.send_replace(true);
             }
             _ => {
-                let call = call_handler(&handler, &session, request, Arc::clone(&agent));
+                // the request's signer names it in each callback
+                let signer: Arc<dyn SigningAgent> = agent.for_request(id.clone());
+                let call = call_handler(&handler, &session, request, signer);
                 let reply = run_request(
                     call,
                     &mut r,

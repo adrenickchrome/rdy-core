@@ -3,14 +3,15 @@
 //!
 //! Nothing here writes, contacts a hub or reads a private key. The verified log and the fsck
 //! states never ask an SSH agent: each row's checks are the one offline check
-//! ([`signature_checks`]). Only [`key_show`] asks the caller's agent, and only for the
-//! identities it holds, when a key is configured.
+//! ([`crate::signature_check::signature_checks`]), with the fork lineage read once per report.
+//! Only [`key_show`] asks the caller's agent, and only for the identities it holds, when a key
+//! is configured.
 
 use crate::allowed_signers::{AllowedSigners, read_allowed_signers};
 use crate::config_levels::{SIGNING_AGENT_KEY, SIGNING_KEY, effective, user_file_from_env};
 use crate::read_state::ReadState;
 use crate::signature_check::{
-    PRESENCE_ABSENT, SIGNED_INVALID, STATEMENT_MISMATCH, SignatureCheck, signature_checks,
+    Lineage, PRESENCE_ABSENT, SIGNED_INVALID, STATEMENT_MISMATCH, SignatureCheck,
 };
 use crate::signing_config::{SignMode, SigningConfig};
 use crate::signing_crypto::{SigningAgent, blob_fingerprint, blob_type, key_fingerprint};
@@ -52,10 +53,10 @@ struct Selected {
     key_type: Option<String>,
 }
 
-/// The selector of `setting`: `None` when it is unset or blank; a malformed one is the shared
-/// signing `E_BAD_INPUT`.
+/// The selector of `setting`: `None` only when it is unset (null); a set one that is malformed,
+/// an empty or blank one included, is the shared signing `E_BAD_INPUT`.
 fn selected(setting: &str, selector: Option<&str>) -> Result<Option<Selected>, RdyError> {
-    let Some(text) = selector.map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(text) = selector.map(str::trim) else {
         return Ok(None);
     };
     let fingerprint = key_fingerprint(text).map_err(|_| signing_selector(setting))?;
@@ -154,23 +155,24 @@ fn checks_json(checks: Vec<SignatureCheck>) -> Result<Value, RdyError> {
 
 /// The signatures of the landing `landing` and of each of its tags `tags`, with `trust`:
 /// `(signatures, tag_signatures)`. Tag keys sort by name; each list is in signature-hash order;
-/// an empty list is an unsigned subject.
+/// an empty list is an unsigned subject. `lineage` is the report's, read once for all its rows.
 fn subject_reports(
-    state: &ReadState,
+    lineage: &Lineage,
     landing: &str,
     tags: &[String],
     trust: Option<&AllowedSigners>,
 ) -> Result<(Value, Value), RdyError> {
+    let state = lineage.state();
     let hash: Hash = landing.parse().map_err(|_| {
         RdyError::from(StoreError::Decode(format!(
             "log row landing {landing:?} is not a hash"
         )))
     })?;
-    let signatures = checks_json(signature_checks(state, &hash, trust)?)?;
+    let signatures = checks_json(lineage.checks(&hash, trust)?)?;
     let mut by_tag: BTreeMap<&str, Value> = BTreeMap::new();
     for name in tags {
         let checks = match tag_hash(state, name)? {
-            Some(h) => signature_checks(state, &h, trust)?,
+            Some(h) => lineage.checks(&h, trust)?,
             None => vec![],
         };
         by_tag.insert(name, checks_json(checks)?);
@@ -214,9 +216,11 @@ pub fn verified_log(
     let Value::Array(mut rows) = rows else {
         return Ok(rows);
     };
+    let lineage = Lineage::new(state);
     for row in &mut rows {
         let landing = row["landing"].as_str().unwrap_or_default().to_string();
-        let (signatures, tag_signatures) = subject_reports(state, &landing, &row_tags(row), trust)?;
+        let (signatures, tag_signatures) =
+            subject_reports(&lineage, &landing, &row_tags(row), trust)?;
         row["signatures"] = signatures;
         row["tag_signatures"] = tag_signatures;
     }
@@ -235,9 +239,11 @@ pub fn signature_states(state: &ReadState) -> Result<Value, RdyError> {
         )
     })?;
     let mut out = vec![];
+    let lineage = Lineage::new(state);
     for row in rows.as_array().into_iter().flatten() {
         let landing = row["landing"].as_str().unwrap_or_default().to_string();
-        let (signatures, tag_signatures) = subject_reports(state, &landing, &row_tags(row), None)?;
+        let (signatures, tag_signatures) =
+            subject_reports(&lineage, &landing, &row_tags(row), None)?;
         out.push(json!({
             "landing": landing,
             "signatures": signatures,
@@ -300,4 +306,116 @@ pub fn verified_lines(row: &Value) -> Vec<String> {
         out.extend(signature_lines(checks, 8));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clone::{CloneSource, clone};
+    use crate::signature_check::LINEAGE_SCANS;
+    use crate::{Rdy, Session, WriteRequest};
+    use rdy_model::signature::Signature;
+    use rdy_model::{Provenance, Role};
+
+    /// Writes one doc to view `work`, proposes and lands it; the landing.
+    fn land_one(r: &mut Rdy, title: &str) -> Hash {
+        let s = Session::human("human:t".into(), Role::Writer);
+        r.write(
+            &s,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+        let p = r.propose(&s, "work", title, None).unwrap();
+        let a = Session::human("human:t".into(), Role::Approver);
+        r.land(&a, &p.id).unwrap().parse().unwrap()
+    }
+
+    /// Stores a damaged signature of `subject` (a check reads the lineage for it all the same).
+    fn put_damaged(r: &mut Rdy, subject: Hash) {
+        let g = Signature {
+            subject,
+            namespace: "rdy-approval-v1".into(),
+            statement: b"rdy-statement: 1\n".to_vec(),
+            sig: b"damaged".to_vec(),
+            signed_by: Provenance {
+                actor: "human:t".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 1,
+            },
+        };
+        r.store_mut().put_signature(&g).unwrap();
+        r.seal_open().unwrap();
+    }
+
+    fn scans(f: impl FnOnce()) -> usize {
+        LINEAGE_SCANS.with(|n| n.set(0));
+        f();
+        LINEAGE_SCANS.with(|n| n.get())
+    }
+
+    #[test]
+    fn sig9_a_verified_report_reads_the_lineage_once() {
+        let d = tempfile::tempdir().unwrap();
+        let src_dir = d.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let mut src = Rdy::init(&src_dir, "rdy-standard").unwrap();
+        let landings: Vec<Hash> = ["One", "Two", "Three"]
+            .into_iter()
+            .map(|title| land_one(&mut src, title))
+            .collect();
+        // an ordinary clone has an origin, so its lineage is a pass over its ref updates
+        let st = src.read();
+        let plain = d.path().join("clone");
+        clone(CloneSource::State(&st), &plain, false).unwrap();
+        drop(st);
+        let mut cl = Rdy::open(&plain).unwrap();
+        for l in landings {
+            put_damaged(&mut cl, l);
+        }
+        let st = cl.read();
+        assert!(st.origin().unwrap().is_some());
+        let mut log = Value::Null;
+        assert_eq!(
+            scans(|| log = verified_log(&st, None, None, None).unwrap()),
+            1,
+            "one lineage pass for the whole verified log"
+        );
+        let signed = log
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["signatures"].as_array().is_some_and(|s| s.len() == 1))
+            .count();
+        assert_eq!(signed, 3, "{log:#}");
+        let mut states = Value::Null;
+        assert_eq!(
+            scans(|| states = signature_states(&st).unwrap()),
+            1,
+            "one lineage pass for the verbose fsck states"
+        );
+        assert_eq!(states.as_array().unwrap().len(), 3);
+        // an unsigned report reads no lineage at all
+        let empty = d.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let mut e = Rdy::init(&empty, "rdy-standard").unwrap();
+        land_one(&mut e, "Unsigned");
+        let est = e.read();
+        let unsigned_clone = d.path().join("empty-clone");
+        clone(CloneSource::State(&est), &unsigned_clone, false).unwrap();
+        let ec = Rdy::open(&unsigned_clone).unwrap();
+        let ecs = ec.read();
+        assert_eq!(
+            scans(|| drop(verified_log(&ecs, None, None, None).unwrap())),
+            0
+        );
+    }
 }
