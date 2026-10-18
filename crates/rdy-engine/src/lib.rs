@@ -38,6 +38,7 @@ mod pack_load;
 mod paths;
 pub mod pending;
 pub mod proposal_show;
+pub mod publication;
 mod publish;
 pub mod quarantine;
 mod query;
