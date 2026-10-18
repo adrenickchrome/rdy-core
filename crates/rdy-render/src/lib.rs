@@ -10,6 +10,7 @@ mod llms;
 pub mod menu;
 mod nav;
 mod page;
+mod prepare;
 pub mod print;
 pub mod review;
 mod search;
@@ -20,14 +21,12 @@ mod version;
 
 pub use html::{Link, escape, text_html};
 
-use rdy_engine::{E_IO, E_REDACTED, Materialized, RdyError, ReadState, Scope};
-use rdy_model::redaction::BlockResidue;
-use rdy_model::{Block, Hash, Op, tree};
+use rdy_engine::{E_IO, Materialized, RdyError, ReadState, Scope};
+use rdy_model::{Hash, tree};
 use serde::Serialize;
 use site::Site;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RenderSummary {
@@ -279,6 +278,16 @@ fn io_at(what: &str, path: &Path, e: std::io::Error) -> RdyError {
 /// writable, or it is a mount point), its contents are replaced in place instead.
 pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     rdy_engine::refuse_inflight_export(scope)?;
+    place_site(out, || build_site(rdy, scope, Mode::Static))
+}
+
+/// Places the site `build` builds at `out`, as [`render_site`] describes: the path guards, then
+/// staging, then `build` (only once the guards pass), the marker, and the swap into place.
+/// Staging is cleaned up when `build` or a later step fails.
+pub(crate) fn place_site(
+    out: &Path,
+    build: impl FnOnce() -> Result<SiteFiles, RdyError>,
+) -> Result<RenderSummary, RdyError> {
     let refuse = |what: String| {
         RdyError::new(
             rdy_engine::E_BAD_INPUT,
@@ -362,7 +371,7 @@ pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderS
         }
         Err(e) => return Err(io_at("cannot stage in", &beside, e)),
     };
-    let built = build_site(rdy, scope, Mode::Static).and_then(|site| {
+    let built = build().and_then(|site| {
         write_files(&staging, &site.files)?;
         Ok(site.summary)
     });
@@ -569,163 +578,6 @@ fn since_doc_kept(tag: &str) -> String {
     )
 }
 
-/// What a build reads of a scope before it builds a page: the site and the print read it the
-/// same way ([`read_scope`]).
-struct ScopeRead<'a> {
-    position: rdy_engine::VersionPosition,
-    versions: Vec<rdy_engine::VersionInfo>,
-    /// When each version's landing was approved, by landing hash (hex).
-    landed_ms: BTreeMap<String, i64>,
-    /// The scope's blocks, each figure whose blob lost content read as removed
-    /// ([`FigureBlobs::project`]).
-    m: &'a rdy_engine::Materialized,
-    /// The figure blobs the store holds, with their bytes, and those a redaction removed content
-    /// of.
-    blobs: FigureBlobs,
-    site_name: String,
-    description: Option<String>,
-    pack: rdy_schema::Pack,
-    g: std::sync::Arc<rdy_graph::Graph>,
-    /// The site's shape, with its disagreements.
-    site: Site<'a>,
-}
-
-/// Reads `scope` (its position, versions, landing times, materialized blocks, figure blobs,
-/// name, description, pack and graph, and the site's shape with its disagreements), then hands
-/// what it read to `f`.
-fn read_scope<R>(
-    rdy: &ReadState,
-    scope: &Scope,
-    f: impl FnOnce(ScopeRead<'_>) -> Result<R, RdyError>,
-) -> Result<R, RdyError> {
-    let position = rdy.version_position(scope)?;
-    let versions = rdy.versions()?;
-    // when each version's landing was approved (only the versions' landings are read)
-    let landed_ms: BTreeMap<String, i64> = versions
-        .iter()
-        .filter_map(|v| {
-            let h: Hash = v.landing.parse().ok()?;
-            let rec = rdy.reader().landing(&h).ok()?;
-            Some((v.landing.clone(), rec.approved_by.at_ms))
-        })
-        .collect();
-    // the figure blobs the store holds (read before `g` borrows `rdy`); a figure whose blob lost
-    // content reads as removed from here on, so no page, summary or print reads its file or words
-    let mut blobs = FigureBlobs::default();
-    let m = blobs.side(rdy, scope, true)?;
-    let site_name = rdy.project_name();
-    let description = rdy.project_description();
-    let pack = rdy.pack().clone();
-    let g = rdy.graph(scope)?;
-    let mut site = Site::new(&m, &pack, &site_name);
-    site.set_disagreements(disagree::list(rdy, scope)?);
-    f(ScopeRead {
-        position,
-        versions,
-        landed_ms,
-        m: &m,
-        blobs,
-        site_name,
-        description,
-        pack,
-        g,
-        site,
-    })
-}
-
-/// The figure blobs a build reads (D-3M81W): the bytes of each readable blob of the scope, and
-/// the blobs a redaction removed a chunk of, by the first request that removed one. A removed
-/// blob's bytes are never read, so they never reach an asset file or the print's image decoder.
-#[derive(Default)]
-pub(crate) struct FigureBlobs {
-    pub bytes: BTreeMap<Hash, Vec<u8>>,
-    pub removed: BTreeMap<Hash, Hash>,
-    /// The blobs of another side (a change summary's) that read whole; their bytes are not kept.
-    readable: BTreeSet<Hash>,
-}
-
-impl FigureBlobs {
-    /// The blocks of `scope`, each figure whose blob lost content read as removed. `keep` keeps
-    /// the bytes of each readable blob (the scope a build pages); a change summary's other side
-    /// only learns which blobs lost content.
-    fn side(
-        &mut self,
-        rdy: &ReadState,
-        scope: &Scope,
-        keep: bool,
-    ) -> Result<Arc<Materialized>, RdyError> {
-        let m = rdy.materialized(scope)?;
-        for b in m.iter() {
-            let Some(h) = figure_blob(b) else { continue };
-            if self.bytes.contains_key(&h)
-                || self.removed.contains_key(&h)
-                || self.readable.contains(&h)
-                || !rdy.reader().has_blob(&h).unwrap_or(false)
-            {
-                continue;
-            }
-            match rdy.reader().get_blob(&h).map_err(RdyError::from) {
-                Ok(bytes) if keep => {
-                    self.bytes.insert(h, bytes);
-                }
-                Ok(_) => {
-                    self.readable.insert(h);
-                }
-                Err(e) => match removed_by(&e) {
-                    Some(request) => {
-                        self.removed.insert(h, request);
-                    }
-                    None => return Err(e),
-                },
-            }
-        }
-        Ok(self.project(m))
-    }
-
-    /// `m` with each figure whose blob lost content read as a removed block: its id, type,
-    /// parent and order, the notice, no fields, and its own recorded version (Task 3's
-    /// projection). Its alt text, caption and file name are never read again.
-    fn project(&self, m: Arc<Materialized>) -> Arc<Materialized> {
-        let ops: Vec<Op> = m
-            .iter()
-            .filter_map(|b| {
-                let request = self.removed.get(&figure_blob(b)?)?;
-                Some(Op::Update {
-                    base: b.version_hash(),
-                    block: BlockResidue::of(b).stub(*request),
-                })
-            })
-            .collect();
-        if ops.is_empty() {
-            m
-        } else {
-            Arc::new(m.with(&ops))
-        }
-    }
-}
-
-/// The blob a figure shows; none for any other block, and for a removed figure (it has no
-/// fields).
-fn figure_blob(b: &Block) -> Option<Hash> {
-    if b.block_type != "figure" || b.is_redacted() {
-        return None;
-    }
-    b.field_str("blob")?.parse().ok()
-}
-
-/// The request an `E_REDACTED` refusal names (`Content removed by redaction {hash}.`); none for
-/// any other error.
-fn removed_by(e: &RdyError) -> Option<Hash> {
-    if e.code != E_REDACTED {
-        return None;
-    }
-    e.message
-        .strip_prefix("Content removed by redaction ")?
-        .strip_suffix('.')?
-        .parse()
-        .ok()
-}
-
 /// The render's warning about a top-level doc named `glossary`, when the site has one (D-Y4884).
 fn glossary_warning(site: &Site) -> Option<&'static str> {
     site.glossary_doc_dropped
@@ -734,29 +586,6 @@ fn glossary_warning(site: &Site) -> Option<&'static str> {
         } else {
             GLOSSARY_DOC_DROPPED
         })
-}
-
-/// The summary of the landings since the tag a scope counts from (sr6): the tag's name, how many
-/// landings, the tag's scope, and the state the position counts to (canon, a view's or
-/// proposal's base, or the as-of landing). None when the scope counts no landing since a tag.
-fn since_of(
-    rdy: &ReadState,
-    scope: &Scope,
-    position: &rdy_engine::VersionPosition,
-) -> Option<(String, u32, Scope, Scope)> {
-    match (&position.version, position.landings_since) {
-        (Some(v), n) if n > 0 => {
-            let to = match scope {
-                Scope::Canon => Some(Scope::Canon),
-                Scope::View(_) | Scope::Proposal(_) => review::base_of(rdy, scope),
-                Scope::At(h) => Some(Scope::At(*h)),
-                Scope::Inflight => None,
-            };
-            let tag = v.landing.parse::<Hash>().ok().map(Scope::At);
-            tag.zip(to).map(|(tag, to)| (v.name.clone(), n, tag, to))
-        }
-        _ => None,
-    }
 }
 
 /// The site build's warnings for a scope, in order: the change summary a top-level doc named
@@ -785,28 +614,28 @@ fn scope_warnings(
 
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
-    read_scope(rdy, scope, |read| build_site_from(rdy, scope, mode, read))
+    build_site_from(prepare::source(rdy, scope, prepare::Purpose::Site)?, mode)
 }
 
-/// [`build_site`] from what [`read_scope`] read.
-fn build_site_from(
-    rdy: &ReadState,
-    scope: &Scope,
-    mode: Mode,
-    read: ScopeRead,
-) -> Result<SiteFiles, RdyError> {
-    let ScopeRead {
-        position,
-        versions,
-        landed_ms,
+/// [`build_site`] from what [`prepare::source`] read: it reads no source.
+fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles, RdyError> {
+    let prepare::Prepared {
         m,
+        g,
+        pack,
         mut blobs,
         site_name,
         description,
-        pack,
-        g,
-        site,
-    } = read;
+        position,
+        versions,
+        landed_ms,
+        disagreements,
+        history,
+        ..
+    } = prepared;
+    let m: &Materialized = &m;
+    let mut site = Site::new(m, &pack, &site_name);
+    site.set_disagreements(disagreements);
     // a static site is written as files: two siblings that would be one file refuse before
     // anything is built, so the last rendered site stays as it was (a live site's pages are not
     // files)
@@ -814,98 +643,24 @@ fn build_site_from(
         return Err(e);
     }
     let env = env()?;
-    // what the scope changes: its chip, its change summary, the home page's list and the
-    // menu's count all read it (O12). A proposal version with no base here (made on the empty
-    // project, read once canon has landed) still names itself and counts against that empty base
-    let listed = review::listed(rdy, scope)?;
-    // the review marks on the pages read only a base a scope names: that proposal version's
-    // pages show none (the task-8 ruling)
-    let base = review::base_of(rdy, scope);
-    let review = listed.as_ref().filter(|_| base.is_some());
-    let blocks = listed.as_ref().map(|rv| rv.changed_blocks());
-    let reviewed = match blocks {
-        Some(blocks) => reviewed_of(rdy, scope, blocks)?,
-        None => None,
-    };
+    let prepare::History {
+        listed,
+        review_marks,
+        reviewed,
+        inline_diffs,
+        changes: changes_summary,
+        since: since_summary,
+        warnings,
+    } = history;
+    // the review marks on the pages read only a base a scope names (the task-8 ruling)
+    let review = listed.as_ref().filter(|_| review_marks);
     let header = version::header(&position, reviewed.as_ref());
-    let since_of = since_of(rdy, scope, &position);
     let mut summary = RenderSummary {
         pages: 0,
         assets: 0,
         redirects: 0,
-        warnings: scope_warnings(
-            m,
-            &site,
-            reviewed.is_some() && listed.is_some(),
-            since_of.as_ref().map(|(name, ..)| name.as_str()),
-        ),
+        warnings,
     };
-
-    // the change summary of a review render (sr6): against its base, or, for a proposal version
-    // made on the empty project that no scope names, against that empty project. A top-level
-    // doc that owns its path leaves out only the page (and its chip's link): the review pages
-    // keep each edited block's inline diff.
-    let mut changes_summary: Option<changes::Summary> = None;
-    let mut inline_diffs: BTreeMap<rdy_model::BlockId, String> = BTreeMap::new();
-    if let (Some(r), Some(rv)) = (&reviewed, listed.as_ref()) {
-        let (diff, from) = match &base {
-            Some(b) => (Some(rdy.diff(b, scope)?), blobs.side(rdy, b, false)?),
-            None => (None, Default::default()),
-        };
-        let sides = changes::Sides {
-            from: &from,
-            to: m,
-            text: &site,
-        };
-        let (s, inline) = changes::summary(
-            &site,
-            rdy_engine::site_scope::CHANGES_PAGE,
-            rv,
-            diff.as_ref(),
-            &sides,
-            &changes::Of::Review(r.kind),
-        );
-        // a top-level doc that owns the page keeps it (`scope_warnings` says so)
-        if !rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::CHANGES_PAGE) {
-            changes_summary = Some(s);
-        }
-        // only a page with review marks shows an edited block's diff
-        if review.is_some() {
-            inline_diffs = inline;
-        }
-    }
-    // the summary of the landings since the tag (sr6): from the tag to the state the position
-    // counts to; a top-level doc that owns the page keeps it (`scope_warnings` says so)
-    let mut since_summary: Option<changes::Summary> = None;
-    if let Some((name, landings, tag, to)) = since_of
-        && !rdy_engine::site_scope::summary_page_taken(m, rdy_engine::site_scope::SINCE_PAGE)
-    {
-        let rv = review::between(rdy, &tag, &to)?;
-        let diff = rdy.diff(&tag, &to)?;
-        let from = blobs.side(rdy, &tag, false)?;
-        // both sides read against the `to` side's site (O4)
-        let to_m = (to != *scope)
-            .then(|| blobs.side(rdy, &to, false))
-            .transpose()?;
-        let to_site = to_m.as_ref().map(|tm| Site::new(tm, &pack, &site_name));
-        let sides = changes::Sides {
-            from: &from,
-            to: to_m.as_deref().unwrap_or(m),
-            text: to_site.as_ref().unwrap_or(&site),
-        };
-        let (s, _) = changes::summary(
-            &site,
-            rdy_engine::site_scope::SINCE_PAGE,
-            &rv,
-            Some(&diff),
-            &sides,
-            &changes::Of::Since {
-                tag: name,
-                landings,
-            },
-        );
-        since_summary = Some(s);
-    }
 
     let sh = page::Shared {
         site: &site,
@@ -993,6 +748,10 @@ fn build_site_from(
     // permalink, as it always was
     let mut redirect: Option<RedirectTemplate> = None;
     for id in m.ids() {
+        // a publication profile is off the site: no permalink leads to it
+        if m.get(id).is_some_and(site::is_profile) {
+            continue;
+        }
         let Some(url) = site.url_of(id) else { continue };
         let t = match &mut redirect {
             Some(t) => t,
@@ -1065,36 +824,6 @@ fn build_site_from(
         header,
         label_at,
         summary,
-    })
-}
-
-/// What a review render shows (D-BMX8P): a view's name and owner, or a proposal version's title
-/// and author, with the `blocks` it changes (`Review::changed_blocks`). None for any other scope.
-fn reviewed_of(
-    rdy: &ReadState,
-    scope: &Scope,
-    blocks: u32,
-) -> Result<Option<version::Reviewed>, RdyError> {
-    Ok(match scope {
-        Scope::View(name) => Some(version::Reviewed {
-            kind: version::ReviewedKind::View,
-            name: name.clone(),
-            author: rdy
-                .view_head(name)
-                .and_then(|h| h.owner.as_ref())
-                .map(|o| o.actor.clone()),
-            blocks,
-        }),
-        Scope::Proposal(v) => {
-            let p = rdy.proposal_version(v)?;
-            Some(version::Reviewed {
-                kind: version::ReviewedKind::Proposal,
-                name: p.title,
-                author: Some(p.provenance.actor),
-                blocks,
-            })
-        }
-        Scope::Canon | Scope::At(_) | Scope::Inflight => None,
     })
 }
 

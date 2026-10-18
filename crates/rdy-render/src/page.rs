@@ -400,14 +400,23 @@ impl Shared<'_> {
     /// A link from `from` to the block `id`, if the store resolves it; with no href when the
     /// block has no place on the site (it then reads as its label, unlinked).
     fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
-        let b = self.m.get(id)?;
+        let target = self.m.get(id)?;
+        // a publication profile is off the site: a link to it leads to its doc and reads as it
+        // (a removed profile still reads as the notice)
+        let (id, b) = match crate::site::is_profile(target) {
+            true => {
+                let doc = self.site.doc_of(id)?;
+                (&doc.id, doc)
+            }
+            false => (id, target),
+        };
         let Some(url) = self.site.url_of(id) else {
             return Some(Link {
                 href: None,
                 label: self.site.label(b),
                 title: String::new(),
                 key: crate::site::typed_key(b).map(String::from),
-                removed: b.is_redacted(),
+                removed: target.is_redacted(),
             });
         };
         Some(Link {
@@ -417,7 +426,7 @@ impl Shared<'_> {
             // the hover describes where the link leads: for a decision, the block it governs
             title: self.hover(self.site.destination(id).unwrap_or(b), &url),
             key: crate::site::typed_key(b).map(String::from),
-            removed: b.is_redacted(),
+            removed: target.is_redacted(),
         })
     }
 
@@ -810,8 +819,9 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         if b.block_type == decision::DECISION || lede_block.is_some_and(|l| l.id == b.id) {
             continue;
         }
-        // a rationale is supporting text: off the site (FW-D10)
-        if b.block_type == crate::site::RATIONALE {
+        // a rationale is supporting text: off the site (FW-D10); a publication profile,
+        // removed or not, is administrative and off every output
+        if b.block_type == crate::site::RATIONALE || crate::site::is_profile(b) {
             continue;
         }
         if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {

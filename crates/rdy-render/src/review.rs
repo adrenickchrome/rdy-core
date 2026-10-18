@@ -305,9 +305,9 @@ pub(crate) fn unreviewed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review
     Ok(Some(review(&cmp, &dm, &empty)))
 }
 
-/// On the page: neither a decision nor its rationale.
+/// On the page: neither a decision, its rationale nor a publication profile.
 fn visible(b: &Block) -> bool {
-    b.block_type != decision::DECISION && b.block_type != RATIONALE
+    b.block_type != decision::DECISION && b.block_type != RATIONALE && !crate::site::is_profile(b)
 }
 
 fn ids(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {

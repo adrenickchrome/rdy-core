@@ -367,8 +367,8 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 body()
             )
         }
-        // supporting text: off the site (FW-D10)
-        "rationale" => String::new(),
+        // supporting text: off the site (FW-D10); a publication profile is administrative
+        "rationale" | crate::site::PUBLICATION_PROFILE => String::new(),
         "term" => format!(
             "<dl class=\"term\"><dt id=\"{}\">{}</dt><dd>{}{}</dd></dl>",
             escape(ctx.anchor),

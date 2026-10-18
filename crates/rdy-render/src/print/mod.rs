@@ -18,7 +18,9 @@ pub mod single;
 pub use md::Layout;
 
 use crate::page::{self, Kind};
-use crate::{Mode, ScopeRead, env, read_scope, review, tpl, version};
+use crate::prepare::{self, Prepared, Purpose};
+use crate::site::Site;
+use crate::{Mode, env, tpl, version};
 use rdy_engine::{E_BAD_INPUT, E_IO, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use serde::Serialize;
@@ -247,23 +249,6 @@ pub struct PrintSummary {
     pub warnings: Vec<String>,
 }
 
-/// The scope as rdy reads it back: a version by its tag.
-fn scope_text(rdy: &ReadState, scope: &Scope) -> Result<String, RdyError> {
-    Ok(match scope {
-        Scope::Canon => "canon".to_string(),
-        Scope::View(v) => format!("view:{v}"),
-        Scope::At(h) => {
-            let hex = h.to_string();
-            match rdy.versions()?.into_iter().find(|v| v.landing == hex) {
-                Some(v) => format!("tag:{}", v.name),
-                None => format!("landing:{hex}"),
-            }
-        }
-        Scope::Proposal(v) => format!("proposal:{v}"),
-        Scope::Inflight => rdy_engine::INFLIGHT_SCOPE.to_string(),
-    })
-}
-
 /// How deep a page sits: a folder's page is `<folder>/index.html`, one level below the folder.
 fn depth_of(page_url: &str, kind: PageKind) -> usize {
     page_url
@@ -277,22 +262,29 @@ fn depth_of(page_url: &str, kind: PageKind) -> usize {
 /// state and scope give an equal print.
 pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Print, RdyError> {
     rdy_engine::refuse_inflight_export(scope)?;
-    read_scope(rdy, scope, |read| build_from(rdy, scope, read))
+    build_from(prepare::source(rdy, scope, Purpose::Print)?)
 }
 
-fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, RdyError> {
-    let ScopeRead {
-        position,
-        versions,
-        landed_ms,
+/// [`build`] from what [`prepare::source`] read: it reads no source.
+fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
+    let Prepared {
         m,
+        g,
+        pack,
         blobs,
         site_name,
         description,
-        pack,
-        g,
-        site,
-    } = read;
+        position,
+        versions,
+        landed_ms,
+        disagreements,
+        scope_text,
+        rdy_dir,
+        history,
+    } = prepared;
+    let m: &rdy_engine::Materialized = &m;
+    let mut site = Site::new(m, &pack, &site_name);
+    site.set_disagreements(disagreements);
     // the Markdown tree writes a file per page: two siblings that would be one file refuse every
     // format alike, before anything is built or written
     if let Some(e) = site.path_clash("export") {
@@ -300,12 +292,7 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
     }
     // the label as the colophon writes it, which names the view or proposal version a print of
     // one shows; the pages show no review mark
-    let listed = review::listed(rdy, scope)?;
-    let reviewed = match listed.as_ref().map(|rv| rv.changed_blocks()) {
-        Some(blocks) => crate::reviewed_of(rdy, scope, blocks)?,
-        None => None,
-    };
-    let label = version::text_label(&position, reviewed.as_ref()).text;
+    let label = version::text_label(&position, history.reviewed.as_ref()).text;
     let sh = page::Shared {
         site: &site,
         m,
@@ -470,24 +457,16 @@ fn build_from(rdy: &ReadState, scope: &Scope, read: ScopeRead) -> Result<Print, 
             },
         );
     }
-    // the site build's warnings: a summary page a doc keeps, and the glossary's
-    let since = crate::since_of(rdy, scope, &position);
-    let warnings = crate::scope_warnings(
-        m,
-        &site,
-        reviewed.is_some() && listed.is_some(),
-        since.as_ref().map(|(name, ..)| name.as_str()),
-    );
-
     Ok(Print {
         title: site_name.clone(),
         description: description.clone(),
         label,
-        scope: scope_text(rdy, scope)?,
+        scope: scope_text,
         docs,
         blobs: print_blobs,
-        warnings,
-        rdy_dir: rdy.root().join(".rdy"),
+        // the site build's warnings: a summary page a doc keeps, and the glossary's
+        warnings: history.warnings,
+        rdy_dir,
     })
 }
 
