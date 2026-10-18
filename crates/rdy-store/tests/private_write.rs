@@ -274,9 +274,6 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
     let e = pio::create_private_dir_at(&dir, OsStr::new("sub")).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
     let sub = pio::open_dir_at(&dir, OsStr::new("sub")).unwrap();
-    fs::set_permissions(d.path().join("sub"), fs::Permissions::from_mode(0o500)).unwrap();
-    pio::make_private_open_dir(&sub).unwrap();
-    assert_eq!(mode(&d.path().join("sub")), 0o700);
     let f = pio::create_private_at(&sub, OsStr::new("a")).unwrap();
     pio::make_private_file(&f).unwrap();
     drop(f);
@@ -305,63 +302,47 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
     }
 }
 
-/// A new directory that a restrictive umask left without the owner's read bit still gets a
-/// handle, is set to 0o700 through it and reopened readable through it: no step names the
-/// directory by path after the open, so a directory put at the name later is never touched.
+/// The umask check a config edit runs before it makes a directory: a probe file made with mode
+/// 0o700 tells whether the umask keeps that mode whole, and is removed again. It never follows
+/// a link and never touches what already stands at its name.
 #[test]
-fn hsa2_pio_a_directory_handle_works_whatever_the_directory_mode() {
-    use rdy_store::fileid::FileId;
+fn hsa2_pio_the_umask_check_keeps_nothing_and_follows_no_link() {
     use std::ffi::OsStr;
+    use std::os::unix::fs::OpenOptionsExt;
     let d = tempfile::tempdir().unwrap();
     let dir = pio::open_dir(d.path()).unwrap();
-    // the modes mkdir(0o700) leaves under umasks 0o477, 0o177, 0o377, 0o277 and 0o077; on macOS a
-    // directory needs the owner's read or search bit for a handle, so 0o200 and 0o000 are Linux
-    // only there
-    let mut modes = vec![0o300, 0o600, 0o400, 0o500, 0o100, 0o700];
-    if cfg!(target_os = "linux") {
-        modes.extend([0o200, 0o000]);
-    }
-    for m in modes {
-        let name = format!("d{m:o}");
-        pio::create_private_dir_at(&dir, OsStr::new(&name)).unwrap();
-        let path = d.path().join(&name);
-        fs::set_permissions(&path, fs::Permissions::from_mode(m)).unwrap();
-        let handle = pio::open_dir_handle_at(&dir, OsStr::new(&name)).unwrap();
-        let meta = handle.metadata().unwrap();
-        assert!(meta.is_dir(), "{m:o}");
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            m,
-            "{m:o}: judged from the handle"
-        );
-        pio::make_private_open_dir(&handle).unwrap();
-        assert_eq!(mode(&path), 0o700, "{m:o}");
-        // the path moves away before the reopen: the reopen still names the same directory
-        let moved = d.path().join(format!("moved{m:o}"));
-        fs::rename(&path, &moved).unwrap();
-        fs::create_dir(&path).unwrap();
-        let readable = pio::reopen_dir(&handle).unwrap();
-        assert_eq!(
-            FileId::of_file(&readable).unwrap(),
-            FileId::of_file(&handle).unwrap(),
-            "{m:o}"
-        );
-        let f = pio::create_private_at(&readable, OsStr::new("a")).unwrap();
-        drop(f);
-        readable.sync_all().unwrap();
-        assert_eq!(names(&moved), ["a"], "{m:o}");
-        assert!(names(&path).is_empty(), "{m:o}: the new path is untouched");
-    }
-    // a link, or a file where a directory is opened, is a link refusal; a missing name is NotFound
+    // the answer agrees with the mode a file made 0o700 gets under this process's umask
+    let made = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(d.path().join("witness"))
+        .unwrap();
+    let whole = made.metadata().unwrap().permissions().mode() & 0o777 == 0o700;
+    drop(made);
+    fs::remove_file(d.path().join("witness")).unwrap();
+    assert_eq!(
+        pio::umask_keeps_0700_at(&dir, OsStr::new(".probe.tmp")).unwrap(),
+        whole
+    );
+    assert!(names(d.path()).is_empty(), "the probe file is removed");
+    // a link or a file at the name: AlreadyExists, the link not followed, nothing changed
     let elsewhere = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), d.path().join("ldir")).unwrap();
-    fs::write(d.path().join("plain"), b"plain").unwrap();
-    for name in ["ldir", "plain"] {
-        let e = pio::open_dir_handle_at(&dir, OsStr::new(name)).unwrap_err();
-        assert!(pio::is_link_refusal(&e), "{name}: {e}");
+    std::os::unix::fs::symlink(elsewhere.path().join("victim"), d.path().join("lnk")).unwrap();
+    fs::write(d.path().join("plain"), b"keep").unwrap();
+    for name in ["lnk", "plain"] {
+        let e = pio::umask_keeps_0700_at(&dir, OsStr::new(name)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{name}");
     }
-    let e = pio::open_dir_handle_at(&dir, OsStr::new("missing")).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    assert!(
+        names(elsewhere.path()).is_empty(),
+        "the link is not followed"
+    );
+    assert_eq!(fs::read(d.path().join("plain")).unwrap(), b"keep");
+    assert_eq!(names(d.path()), ["lnk", "plain"]);
+    // one entry name only
+    let e = pio::umask_keeps_0700_at(&dir, OsStr::new("a/b")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     // the new-directory probe stage reaches the test probe, and its error is returned
     let seen = with_private_write_probe_for_tests(
         |stage, path: &Path| {

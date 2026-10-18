@@ -13,9 +13,10 @@
 //! refused. The directory that holds the file must not be writable by group or others, so no
 //! other user can swap a temp file or the target. A secret file (`private`) must also be mode
 //! 0o600, and a lock must give group and others no access; a settings file keeps its mode
-//! through a replacement. Nothing here changes the mode of an existing file or directory; a
-//! directory this open makes is set to 0o700 through its handle, and a directory put in its place
-//! before it is opened is refused.
+//! through a replacement. Nothing here changes the mode of any directory, or of an existing
+//! file. mkdir returns no handle, so no call proves that the directory opened after it is the one
+//! it made: a directory is made only when the umask keeps 0o700 whole, and what then stands at
+//! its name is used only if it is a 0o700 directory of this user, as that mkdir makes it.
 //!
 //! The lock, the read and the replacement all go through the handle of the directory checked
 //! at open, so a path changed later cannot redirect them, and a replacement first checks that
@@ -28,6 +29,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A config file's bytes, read under its sibling lock, which is held until drop.
 pub struct LockedConfig {
@@ -53,7 +55,8 @@ impl LockedConfig {
     /// `rdy/credentials.yaml`.
     ///
     /// A missing file reads as empty bytes and is not created. Missing directories below
-    /// `home` are created 0o700, durably. `private` is true for a secret file, which must be
+    /// `home` are created 0o700, durably; a umask that takes one of the owner's bits from 0o700
+    /// is a failed save, with nothing made. `private` is true for a secret file, which must be
     /// mode 0o600. A file over `limit` bytes is `E_LIMIT`.
     pub fn open(
         home: &Path,
@@ -196,8 +199,8 @@ fn lock_name(name: &OsStr) -> OsString {
 /// Opens `home` (links followed: the caller trusts it), then each of `dirs` below it, one entry
 /// at a time and never through a link. Each must be a directory this user owns that group and
 /// others cannot write; so must the last one, which holds the file, even when it is the home.
-/// With `create`, a missing directory is made, set to 0o700 and synced with its parent; without
-/// it, a missing directory means the path changed. Returns the last directory and its path.
+/// With `create`, a missing directory is made 0o700 and synced with its parent; without it, a
+/// missing directory means the path changed. Returns the last directory and its path.
 fn walk(home: &Path, dirs: &[&OsStr], create: bool) -> Result<(File, PathBuf), RdyError> {
     let mut cur = pio::open_dir(home).map_err(|_| not_private())?;
     let mut cur_path = home.to_path_buf();
@@ -221,16 +224,24 @@ fn walk(home: &Path, dirs: &[&OsStr], create: bool) -> Result<(File, PathBuf), R
 }
 
 /// Makes the directory `part` in `parent` (at `parent_path`) and opens it. One that another
-/// process made first is opened and judged as an existing one; it is never chmodded.
+/// process made first is opened and judged as an existing one.
 ///
-/// mkdir returns no handle, so the directory at `part` when it is opened is taken as the one
-/// this call made only if that mkdir can have made it: a directory (not a link) that this user
-/// owns, with no group or other bit, since the umask only takes bits away from 0o700. Anything
-/// else is refused and keeps its mode. From that open on, every step goes through the handle:
-/// the handle works whatever bits the umask took (even the owner's read bit), the directory is
-/// set to 0o700 through it, and the readable handle the walk goes on with is reopened through
-/// it. Then the directory and its parent are synced.
+/// No directory is ever chmodded here: mkdir returns no handle, so nothing proves that the
+/// directory opened at `part` afterwards is the one it made. So the umask is checked first, with
+/// a probe file (see [`probe_name`]): a umask that takes an owner bit from 0o700 is a failed
+/// save, and nothing is made. After the
+/// mkdir, what stands at `part` is used only if it is what that mkdir made under this umask: a
+/// 0o700 directory (not a link) that this user owns. Anything else is refused and keeps its mode.
+/// Then the directory and its parent are synced.
 fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, RdyError> {
+    let probe = probe_name(part);
+    match pio::remove_file_at(parent, &probe) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(save_failed()),
+        _ => {}
+    }
+    if !pio::umask_keeps_0700_at(parent, &probe).map_err(|_| save_failed())? {
+        return Err(save_failed());
+    }
     match pio::create_private_dir_at(parent, part) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -243,21 +254,31 @@ fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, Rdy
         Err(_) => return Err(save_failed()),
     }
     fsutil::probe_dir_made(&parent_path.join(part)).map_err(|_| save_failed())?;
-    let handle = match pio::open_dir_handle_at(parent, part) {
+    let dir = match pio::open_dir_at(parent, part) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_private()),
         Err(e) => return Err(open_failed(&e)),
     };
-    let m = handle.metadata().map_err(|_| save_failed())?;
-    if !m.is_dir() || pio::owner(&m) != pio::own_uid() || !pio::is_owner_only(&m) {
+    let m = dir.metadata().map_err(|_| save_failed())?;
+    if !m.is_dir() || pio::owner(&m) != pio::own_uid() || !pio::is_private_dir(&m) {
         return Err(not_private());
     }
-    pio::make_private_open_dir(&handle).map_err(|_| save_failed())?;
-    let dir = pio::reopen_dir(&handle).map_err(|_| save_failed())?;
     dir.sync_all().map_err(|_| save_failed())?;
     parent.sync_all().map_err(|_| save_failed())?;
     fsutil::record(parent_path);
     Ok(dir)
+}
+
+/// `.<name>.<pid>-<n>.tmp`, the umask probe file's name beside a new directory `name`: one name
+/// per process and call, so two opens that make one directory at once never remove or block each
+/// other's probe. Whatever stands at it (left by a crash) is removed first, as at a temp name.
+fn probe_name(name: &OsStr) -> OsString {
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let n = CALLS.fetch_add(1, Ordering::Relaxed);
+    let mut tmp = OsString::from(".");
+    tmp.push(name);
+    tmp.push(format!(".{}-{n}.tmp", std::process::id()));
+    tmp
 }
 
 /// A directory of the config path: this user's, and not writable by group or others.

@@ -625,14 +625,29 @@ fn hsa2_a_lock_open_to_group_or_others_is_refused() {
 /// The home of the child half of the umask test; without it the child does nothing.
 const UMASK_CHILD: &str = "RDY_HSA2_UMASK_CHILD";
 
-/// Finding 5: directories this open makes are 0700 whatever the umask, so a restrictive umask
-/// cannot leave an unusable config directory, even one that takes the owner's read bit (477).
-/// Each umask runs in its own process, set by `sh`, twice against the same home: the second
-/// process finds the first one's directories usable.
+/// The child's expectation: `made` (the directories are made 0700) or `refused`.
+const UMASK_EXPECT: &str = "RDY_HSA2_UMASK_EXPECT";
+
+/// Round 1 finding 5, and round 3: a directory this open makes is never chmodded (no call proves
+/// that the directory opened after a mkdir is the one it made), so it is made only when the umask
+/// keeps 0o700 whole, and is then 0o700. A umask that takes an owner bit (277, 477, 177, 377,
+/// 700) is refused before anything is made, so it cannot leave an unusable config directory or a
+/// probe file. Each umask runs in its own process, set by `sh`, twice against the same home: the
+/// second process finds the first one's directories usable, or finds nothing made.
 #[test]
-fn hsa2_new_directories_are_0700_whatever_the_umask() {
+fn hsa2_new_directories_are_0700_or_not_made_at_all() {
     let exe = std::env::current_exe().unwrap();
-    for umask in ["277", "000", "077", "477", "177", "377"] {
+    let cases = [
+        ("000", "made"),
+        ("022", "made"),
+        ("077", "made"),
+        ("277", "refused"),
+        ("477", "refused"),
+        ("177", "refused"),
+        ("377", "refused"),
+        ("700", "refused"),
+    ];
+    for (umask, expect) in cases {
         let d = tempfile::tempdir().unwrap();
         chmod(d.path(), 0o700);
         for run in 1..=2 {
@@ -642,6 +657,7 @@ fn hsa2_new_directories_are_0700_whatever_the_umask() {
                 .args(["hsa2_new_directories_child", "--exact", "--test-threads=1"])
                 .arg("--nocapture")
                 .env(UMASK_CHILD, d.path())
+                .env(UMASK_EXPECT, expect)
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -654,6 +670,9 @@ fn hsa2_new_directories_are_0700_whatever_the_umask() {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+        if expect == "refused" {
+            assert!(names(d.path()).is_empty(), "umask {umask}: nothing is made");
+        }
     }
 }
 
@@ -664,6 +683,21 @@ fn hsa2_new_directories_child() {
         return;
     };
     let home = Path::new(&home);
+    if std::env::var(UMASK_EXPECT).as_deref() == Ok("refused") {
+        for rel in ["rdy/deeper/credentials.yaml", "rdy/config.yaml"] {
+            let e = open(home, rel, rel.ends_with("credentials.yaml"))
+                .err()
+                .expect("a umask that takes an owner bit is refused");
+            assert_eq!(
+                (e.code, e.message.as_str(), e.fix.as_str()),
+                (E_IO, SAVE, SAVE_FIX),
+                "{rel}"
+            );
+        }
+        assert!(names(home).is_empty(), "no directory and no probe file");
+        println!("HSA2 umask child done");
+        return;
+    }
     // twice: the second open must find the first one's directories usable
     for _ in 0..2 {
         let mut c = open(home, "rdy/deeper/credentials.yaml", true).unwrap();
@@ -677,25 +711,44 @@ fn hsa2_new_directories_child() {
     assert_eq!(mode(&home.join("rdy/deeper/credentials.yaml")), 0o600);
     assert_eq!(mode(&home.join("rdy/deeper/credentials.yaml.lock")), 0o600);
     assert_eq!(mode(&home.join("rdy/config.yaml")), 0o600);
+    assert_eq!(names(home), ["rdy"], "no probe file is left");
     let c = open(home, "rdy/deeper/credentials.yaml", true).unwrap();
     assert_eq!(c.bytes(), b"secret");
     println!("HSA2 umask child done");
 }
 
-/// Round 2, finding 2: mkdirat returns no handle, so what stands at the new name when it is
-/// opened is taken as the new directory only if that mkdir can have made it: a directory this
-/// user owns with no group or other bit. A directory put at the name between the mkdir and the
-/// open is refused, keeps its mode and gets nothing written into it, and so does a link there.
+/// Round 2, finding 2, and round 3: mkdirat returns no handle, so the directory at the new name
+/// when it is opened cannot be proved to be the one the mkdir made. It is never chmodded: it is
+/// used only if it is what that mkdir makes under a umask that keeps 0o700 whole (checked before
+/// the mkdir), a 0o700 directory this user owns. A directory put at the name between the mkdir
+/// and the open with any other mode, owner-only ones included, is refused, keeps its mode and
+/// gets nothing written into it, and so does a link there.
 #[test]
 fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
-    // (what is put at the new name, its mode, a file inside it)
+    // (what is put at the new name, its mode, a file inside it, the refusal); a mode without the
+    // owner's read bit cannot be opened for reading, which is a failed save
     let cases = [
-        ("a same-owner 0755 directory", 0o755, false),
-        ("a same-owner 0750 directory with a file", 0o750, true),
-        ("a same-owner 0711 directory", 0o711, false),
-        ("a link to a directory", 0o700, false),
+        ("a same-owner 0755 directory", 0o755, false, PRIVACY),
+        (
+            "a same-owner 0750 directory with a file",
+            0o750,
+            true,
+            PRIVACY,
+        ),
+        ("a same-owner 0711 directory", 0o711, false, PRIVACY),
+        ("a link to a directory", 0o700, false, PRIVACY),
+        ("a same-owner 0500 directory", 0o500, false, PRIVACY),
+        ("a same-owner 0600 directory", 0o600, false, PRIVACY),
+        (
+            "a same-owner 0500 directory with a file",
+            0o500,
+            true,
+            PRIVACY,
+        ),
+        ("a same-owner 0300 directory", 0o300, false, SAVE),
+        ("a same-owner 0100 directory", 0o100, false, SAVE),
     ];
-    for (what, pre_mode, with_file) in cases {
+    for (what, pre_mode, with_file, refusal) in cases {
         for private in [true, false] {
             let d = tempfile::tempdir().unwrap();
             let home = d.path().to_path_buf();
@@ -728,7 +781,14 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
                 },
                 || open(&home, "rdy/credentials.yaml", private),
             );
-            assert_privacy(r, what);
+            let e = r
+                .err()
+                .unwrap_or_else(|| panic!("{what}, private {private}: expected a refusal"));
+            assert_eq!(
+                (e.code, e.message.as_str()),
+                (E_IO, refusal),
+                "{what}, private {private}"
+            );
             assert_eq!(
                 calls.get(),
                 1,
@@ -745,6 +805,8 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
                 pre_ino,
                 "{what}"
             );
+            // the test lists it, and the temp dir removes it, only with the owner's bits back
+            chmod(&stands, 0o700);
             assert_eq!(
                 names(&stands),
                 want_names,
@@ -755,5 +817,50 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
                 "{what}: nothing is written into the directory moved aside"
             );
         }
+    }
+}
+
+/// Round 3, the limit of finding 2. No call proves which directory a mkdir made, so an empty
+/// 0o700 directory of this user, put at the new name between the mkdir and the open, is the one
+/// case that cannot be told from the new directory. It is used exactly as the same directory is
+/// when it stands there before the open (the ruling accepts an existing owner-held directory):
+/// its mode and inode stay, it is never chmodded, and the lock is made in it.
+#[test]
+fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchanged() {
+    for private in [true, false] {
+        // put in place between the mkdir and the open
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().to_path_buf();
+        chmod(&home, 0o700);
+        let pre = home.join("pre");
+        fs::create_dir(&pre).unwrap();
+        chmod(&pre, 0o700);
+        let pre_ino = fs::symlink_metadata(&pre).unwrap().ino();
+        let made = home.join("rdy");
+        let (h, m, p) = (home.clone(), made.clone(), pre.clone());
+        let c = with_private_write_probe_for_tests(
+            move |stage, _path: &Path| {
+                if stage == PrivateWriteStage::DirMade {
+                    fs::rename(&m, h.join("aside"))?;
+                    fs::rename(&p, &m)?;
+                }
+                Ok(())
+            },
+            || open(&home, "rdy/credentials.yaml", private),
+        )
+        .unwrap();
+        drop(c);
+        assert_eq!(mode(&made), 0o700, "never chmodded");
+        assert_eq!(fs::symlink_metadata(&made).unwrap().ino(), pre_ino);
+        assert_eq!(names(&made), ["credentials.yaml.lock"]);
+        assert!(names(&home.join("aside")).is_empty());
+        // the same directory standing there before the open: the same outcome
+        let d2 = tempfile::tempdir().unwrap();
+        chmod(d2.path(), 0o700);
+        fs::create_dir(d2.path().join("rdy")).unwrap();
+        chmod(&d2.path().join("rdy"), 0o700);
+        drop(open(d2.path(), "rdy/credentials.yaml", private).unwrap());
+        assert_eq!(mode(&d2.path().join("rdy")), 0o700);
+        assert_eq!(names(&d2.path().join("rdy")), ["credentials.yaml.lock"]);
     }
 }
