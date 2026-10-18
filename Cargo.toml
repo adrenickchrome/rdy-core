@@ -50,6 +50,22 @@ ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed
 ssh-encoding = { version = "=0.2.0", default-features = false, features = ["std", "base64"] }
 # Test-only: the in-memory software signer of the signing tests.
 ed25519-dalek = { version = "=2.2.0", default-features = false }
+# Hub client: canonical HTTPS origins and URLs (IDNA, host case, default ports).
+url = "=2.5.7"
+# Hub client: the blocking HTTPS transport (Rustls backend only).
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+# Hub client: the platform's trusted root certificates.
+rustls-native-certs = "=0.8.2"
+# Hub client: the CRC-32/ISO-HDLC checksum of a hub token's form.
+crc32fast = "=1.5.0"
+# Hub client: RFC3339 instants and challenge expiry.
+time = { version = "=0.3.55", features = ["parsing", "formatting"] }
+# Dependency logging facade; the engine caps it at compile time so no record is ever written.
+log = "=0.4.34"
+# Test-only: the local TLS fixture.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+# Test-only: the local TLS fixture's generated certificates.
+rcgen = "=0.14.5"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

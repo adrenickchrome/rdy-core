@@ -29,6 +29,9 @@ rdy-graph.workspace = true
 # the gate's signing tests sign with fixed in-memory test keys only
 ed25519-dalek.workspace = true
 ssh-key.workspace = true
+# the hub surface tests' local TLS fixture
+rustls.workspace = true
+rcgen.workspace = true
 
 [lints]
 workspace = true
