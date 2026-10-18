@@ -208,9 +208,13 @@ const PLAIN_KEY_LINE: &str =
 
 /// The frozen security-key vector: the same statement, for a simulated
 /// `sk-ssh-ed25519@openssh.com` key whose authenticator reported user presence (flags 0x01) and
-/// counter 7. OpenSSH cannot sign without a token, so the blob was made once by an in-memory
-/// simulation of the authenticator over the statement written out here, and frozen. No token is
-/// touched when the vector is used.
+/// counter 7. OpenSSH cannot sign without a token, so the blob was produced by the standalone
+/// script `fixtures/signing/sk_vector_sim.py` (Python standard library only, an RFC 8032
+/// Ed25519 reference, the statement written out by hand, the SSHSIG and U2F encodings built
+/// from OpenSSH's PROTOCOL.sshsig and PROTOCOL.u2f). It shares no code with rdy's statement
+/// builder or SSHSIG wrapper. Ed25519 is deterministic, so the script reproduces these bytes
+/// exactly, and `ssh-keygen -Y verify` accepts the blob ("Good ... ED25519-SK key"). The
+/// script's SHA-256 is pinned by a test below. No token is touched when the vector is used.
 const SK_STATEMENT: &str = "rdy-statement: 1\nkind: approval\nrepo: 14141414141414141414141414141414\nproposal_version: 0303030303030303030303030303030303030303030303030303030303030303\nbase: none\nactor: human:qa\nassurance: local\nkey: SHA256:2V6EF6XZaGa6R+yy2uTYpfxOTHPP4+nkupDfZcK0hx8\n";
 const SK_SIG: &str = "535348534947000000010000004a0000001a736b2d7373682d65643235353139406f70656e7373682e636f6d000000206b734a8eff246fe734b38d4046c148eee5f04fe87b3a0a423955a77956de066b000000047373683a0000000f7264792d617070726f76616c2d76310000000000000006736861353132000000670000001a736b2d7373682d65643235353139406f70656e7373682e636f6d000000404b49af80beaf8a68f32f81972926c44110ecd12739ef5e76268d3966b639e494d74d2ffa2c741d78ad07aa2674279c7b342b480db8b63fa7d25fa94f5527b80c0100000007";
 const SK_KEY_LINE: &str = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGtzSo7/JG/nNLONQEbBSO7l8E/oezoKQjlVp3lW3gZrAAAABHNzaDo=";
@@ -343,5 +347,51 @@ mod tests {
         let c = check_signature(&v.record, &v.context, Some(&v.trust));
         assert_ne!(c.key, Some(QaAgent::fingerprint(TestKey::Person)));
         assert_ne!(c.key, Some(QaAgent::fingerprint(TestKey::Agent)));
+    }
+
+    const SK_SCRIPT: &str = include_str!("../fixtures/signing/sk_vector_sim.py");
+
+    /// Task 10 fix round 2: the security-key vector comes from a standalone producer that does
+    /// not use rdy. The script is pinned by checksum, it imports nothing from rdy, and (when
+    /// python3 is present) running it reproduces the pinned statement, blob and trust line.
+    #[test]
+    fn sig10_the_sk_vector_comes_from_the_standalone_simulator() {
+        assert_eq!(
+            sha256_hex(SK_SCRIPT.as_bytes()),
+            "e739338e76be2dab55617e995d79a7eec423254b87fbec8054f1a7f64480bc12",
+            "the simulator script changed: the vector's provenance is pinned"
+        );
+        for line in SK_SCRIPT.lines() {
+            let t = line.trim_start();
+            if t.starts_with("import ") || t.starts_with("from ") {
+                assert!(
+                    matches!(t, "import base64" | "import hashlib" | "import struct"),
+                    "the simulator imports only the standard library: {t}"
+                );
+            }
+        }
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/signing/sk_vector_sim.py"
+        );
+        let Ok(out) = std::process::Command::new("python3").arg(path).output() else {
+            return; // no python3 on this host: the checksum above still pins the script
+        };
+        assert!(out.status.success(), "{out:?}");
+        let text = String::from_utf8(out.stdout).expect("utf8");
+        let field = |name: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(name))
+                .expect("field")
+                .trim()
+                .to_string()
+        };
+        assert_eq!(field("key_line:"), SK_KEY_LINE);
+        assert_eq!(field("sig_hex:"), SK_SIG);
+        assert_eq!(
+            field("statement:"),
+            SK_STATEMENT.replace('\n', "\\n"),
+            "statement"
+        );
     }
 }
