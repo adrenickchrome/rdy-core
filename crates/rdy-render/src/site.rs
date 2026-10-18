@@ -1048,6 +1048,14 @@ impl<'a> Site<'a> {
     }
 
     fn summary_words_uncached(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        // a publication profile, removed or not, has no words on the site: a trail's reference
+        // to one reads as its doc, where the reference leads (as its label does)
+        if is_profile(b) {
+            return self
+                .doc_of(&b.id)
+                .map(|d| self.summary_words(d, depth, keep_token))
+                .unwrap_or_default();
+        }
         if b.is_redacted() {
             return CONTENT_REMOVED.to_string();
         }

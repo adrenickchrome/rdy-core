@@ -3,7 +3,7 @@
 //! the source outputs keep their bytes. A `publication_profile` block is administrative: it is off
 //! every site and print output, like a rationale, and stays in the source state.
 use rdy_engine::{Rdy, Scope};
-use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op};
 use rdy_qa::golden::*;
 use rdy_render::print::{self, Layout, Print};
 use rdy_render::{Mode, SiteFiles, build_site};
@@ -384,7 +384,29 @@ fn profile_blocks(ids: &Ids) -> Vec<Block> {
         &[],
         &format!("Bare reference {{{{{PROFILE}}}}} here."),
     );
-    vec![profile, authored, bare]
+    // an accepted decision on the authored prose whose statement is a bare reference to the
+    // profile: the prose's decision trail quotes the statement
+    let mut ruling = raw(
+        "d-7QXZ6",
+        "decision",
+        Some(ids.overview_context_section.as_str()),
+        "z7",
+        &[
+            ("statement", &format!("Follow {{{{{PROFILE}}}}}.")),
+            ("status", "accepted"),
+            ("decided_at", "2021-02-08T10:00:00Z"),
+            ("recorded_at", "2021-02-08T10:00:00Z"),
+        ],
+        "",
+    );
+    ruling.links.insert(
+        "affects".into(),
+        vec![Link {
+            target: BlockId::parse("p-7QXZ4").unwrap(),
+            part: None,
+        }],
+    );
+    vec![profile, authored, bare, ruling]
 }
 
 /// What no output may hold: the profile's id and every text it owns.
@@ -466,6 +488,19 @@ fn pub3_profile_blocks_are_off_every_source_output() {
         let href = href_of(&overview, DISPLAY);
         assert!(!href.contains('#'), "{href}");
         assert!(href.ends_with(&doc_page), "{href} leads to {doc_page}");
+        // the prose's decision trail quotes the ruling: the bare reference in its statement reads
+        // as the doc, not the profile's title, and leads to the doc's page
+        let ruled = overview
+            .find("Ruled: Follow <a ")
+            .unwrap_or_else(|| panic!("{mode:?}: no trail quotes the ruling"));
+        let tag = &overview[ruled..ruled + overview[ruled..].find('>').unwrap()];
+        let h = tag.find("href=\"").expect("an href") + 6;
+        let trail_href = &tag[h..h + tag[h..].find('"').unwrap()];
+        assert!(!trail_href.contains('#'), "{trail_href}");
+        assert!(
+            trail_href.ends_with(&doc_page),
+            "{trail_href} leads to {doc_page}"
+        );
         // the tutorial doc's page shows nothing of the profile, and the page still renders
         let page = String::from_utf8(s.files[&doc_page].clone()).unwrap();
         assert!(!page.contains("publication_profile"), "{doc_page}");
