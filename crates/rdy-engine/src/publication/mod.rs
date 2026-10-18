@@ -14,7 +14,7 @@ pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
 pub use report::{REPORT_BYTES, REPORT_ROWS, check};
 pub use select::{
-    AttachmentEntry, DocEntry, Limits, PublicationWarning, Resolved, ResolvedProfile,
+    AttachmentEntry, DocEntry, IMPLICIT_ORG, Limits, PublicationWarning, Resolved, ResolvedProfile,
     SelectionEntry, blob_reads_for_tests, limits, load_assets, resolve,
 };
 #[cfg(feature = "test-support")]

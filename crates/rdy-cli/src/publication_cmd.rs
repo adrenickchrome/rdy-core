@@ -40,15 +40,23 @@ fn full_count(d: &Value, name: &str) -> u64 {
     d[name].as_array().map_or(0, |a| a.len() as u64) + num(&d["omitted"][name])
 }
 
-/// The text of a `publication_check` reply (the lines are in the order the docs list).
+/// The text of a `publication_check` reply (the lines are in the order the docs list). The
+/// implicit profile (an `id` that is null) is named by its audience; a profile block by its key.
 fn check_text(v: &Value, asked: &str) -> String {
-    let key = v["profile"]["key"].as_str().unwrap_or(asked);
+    let p = &v["profile"];
+    let status = text(&v["references"]["status"]);
+    let first = if p.get("id").is_some_and(Value::is_null) {
+        format!(
+            "Implicit publication profile ({}): {status}.",
+            text(&p["audience"])
+        )
+    } else {
+        let key = p["key"].as_str().unwrap_or(asked);
+        format!("Publication profile {key}: {status}.")
+    };
     let s = &v["selection"];
     let mut lines = vec![
-        format!(
-            "Publication profile {key}: {}.",
-            text(&v["references"]["status"])
-        ),
+        first,
         format!(
             "{} blocks in {} docs and {} folders.",
             num(&s["blocks"]),
@@ -125,6 +133,24 @@ mod tests {
                     "added_attachments": 0, "removed_attachments": 0, "changed_attachments": 0, "new_references": 0}
             })),
         })
+    }
+
+    #[test]
+    fn pub12_the_implicit_profile_is_named_by_its_audience() {
+        let mut v = report(true, 0);
+        v["profile"] = json!({"id": null, "version": null, "key": null, "audience": "org"});
+        let t = check_text(&v, "implicit:org");
+        assert!(
+            t.starts_with("Implicit publication profile (org): warning.\n7 blocks in 2 docs"),
+            "{t}"
+        );
+        assert_eq!(
+            t.lines().skip(1).collect::<Vec<_>>(),
+            check_text(&report(true, 0), "site")
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

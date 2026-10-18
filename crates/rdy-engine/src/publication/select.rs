@@ -200,6 +200,11 @@ impl Resolved {
 /// `profile` (a full profile id or an existing key) resolved in `scope`, which must be canon or
 /// a landing (a tag resolves to one). The profile is the version that scope holds: a tag selects
 /// what its own profile revision selected. A blocked check is returned, not refused.
+///
+/// The exact value [`IMPLICIT_ORG`] names the implicit profile instead (D-48NYM, RULING F5): no
+/// profile block, every block of the snapshot, a null id, version and key, the project's title
+/// and description, and audience org (FW-PB9a). No key or id holds a colon, so it never names a
+/// block; any other `implicit:` value is refused.
 pub fn resolve(read: &ReadState, scope: &Scope, profile: &str) -> Result<Resolved, RdyError> {
     match scope {
         Scope::Canon | Scope::At(_) => {}
@@ -213,7 +218,7 @@ pub fn resolve(read: &ReadState, scope: &Scope, profile: &str) -> Result<Resolve
     }
     check_name(profile, &limits())?;
     let m = read.materialized(scope)?;
-    resolve_in(read.pack(), read.reader(), &m, profile, &limits())
+    resolve_in(read, &m, profile, &limits())
 }
 
 /// Tests only: [`resolve`] over the state `m`, which may be built in memory (for trees and
@@ -225,7 +230,7 @@ pub fn resolve_in_for_tests(
     m: &Materialized,
     profile: &str,
 ) -> Result<Resolved, RdyError> {
-    resolve_in(read.pack(), read.reader(), m, profile, &limits())
+    resolve_in(read, m, profile, &limits())
 }
 
 fn check_name(profile: &str, l: &Limits) -> Result<(), RdyError> {
@@ -233,6 +238,34 @@ fn check_name(profile: &str, l: &Limits) -> Result<(), RdyError> {
         return Err(limit("profile name", l.profile_name, "bytes"));
     }
     Ok(())
+}
+
+/// The request value that names the implicit profile, compared byte for byte (O10, FW-PB9a).
+pub const IMPLICIT_ORG: &str = "implicit:org";
+
+/// What a profile request names: the implicit profile with its audience, or a profile block.
+enum Request {
+    Implicit(Audience),
+    Named,
+}
+
+/// The closed set of `implicit:` values: [`IMPLICIT_ORG`] alone; `implicit:public` and every
+/// other value with the prefix are refused. Any other text names a profile block.
+fn request(name: &str) -> Result<Request, RdyError> {
+    match name {
+        IMPLICIT_ORG => Ok(Request::Implicit(Audience::Org)),
+        "implicit:public" => Err(RdyError::new(
+            E_BAD_INPUT,
+            "the implicit profile is always org (FW-PB9a)",
+            "name an explicit publication profile whose audience is public",
+        )),
+        _ if name.starts_with("implicit:") => Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("Implicit profile \"{name}\" is not known."),
+            "Use implicit:org.",
+        )),
+        _ => Ok(Request::Named),
+    }
 }
 
 fn not_found(name: &str) -> RdyError {
@@ -466,30 +499,53 @@ fn subtree(sel: &Materialized, id: &BlockId) -> BTreeSet<BlockId> {
 }
 
 fn resolve_in(
-    pack: &Pack,
-    reader: &StoreReader,
+    read: &ReadState,
     m: &Materialized,
     name: &str,
     l: &Limits,
 ) -> Result<Resolved, RdyError> {
-    // 1. the profile, in this snapshot only
+    let (pack, reader) = (read.pack(), read.reader());
     check_name(name, l)?;
-    let (pid, fields) = find_profile(pack, m, name)?;
-    let profile = ResolvedProfile {
-        version: m.version_of(&pid),
-        id: Some(pid),
-        key: Some(fields.key),
-        title: fields.title,
-        description: fields.description,
-        audience: fields.audience,
-        trail: fields.trail,
+    let (profile, keep) = match request(name)? {
+        // the implicit profile reads no profile block and selects every block of the snapshot,
+        // profile blocks included (O12); every ancestor is already selected, so the selector
+        // and ancestor steps do not apply. The selection bound still does (O14).
+        Request::Implicit(audience) => {
+            let profile = ResolvedProfile {
+                id: None,
+                version: None,
+                key: None,
+                title: read.project_name(),
+                description: read.project_description(),
+                audience,
+                trail: audience == Audience::Org,
+            };
+            let mut keep = BTreeSet::new();
+            for b in m.iter() {
+                retain(&mut keep, &b.id, l)?;
+            }
+            (profile, keep)
+        }
+        Request::Named => {
+            // 1. the profile, in this snapshot only
+            let (pid, fields) = find_profile(pack, m, name)?;
+            let profile = ResolvedProfile {
+                version: m.version_of(&pid),
+                id: Some(pid),
+                key: Some(fields.key),
+                title: fields.title,
+                description: fields.description,
+                audience: fields.audience,
+                trail: fields.trail,
+            };
+            // 2, 3. whole docs and folders, then their ancestor folders' own records
+            let mut selectors = fields.select;
+            selectors.sort();
+            selectors.dedup();
+            let keep = select(m, &selectors, l)?;
+            (profile, keep)
+        }
     };
-
-    // 2, 3. whole docs and folders, then their ancestor folders' own records
-    let mut selectors = fields.select;
-    selectors.sort();
-    selectors.dedup();
-    let keep = select(m, &selectors, l)?;
 
     // 5. the selected state: cloned records, their source versions
     let versions = keep

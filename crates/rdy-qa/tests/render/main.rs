@@ -24,6 +24,7 @@ mod render_print_export;
 mod render_print_html;
 mod render_print_md;
 mod render_print_pdf;
+mod render_publication_implicit;
 mod render_publication_prepare;
 mod render_publication_print;
 mod render_publication_site;
