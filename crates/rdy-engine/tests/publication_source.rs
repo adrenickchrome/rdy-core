@@ -143,8 +143,12 @@ impl Settings {
 /// How a memory source holds one blob.
 #[derive(Clone)]
 enum Held {
-    /// The manifest, which an approved request removed.
-    Removed(Hash),
+    /// The manifest an approved request removed: the mark is logical, and the stored
+    /// manifest stays readable with its length and chunks.
+    Removed {
+        request: Hash,
+        manifest: BlobManifest,
+    },
     /// The manifest, intact.
     Intact(BlobManifest),
 }
@@ -214,12 +218,9 @@ impl Memory {
             if !reader.has_blob(&h).unwrap() {
                 continue;
             }
-            if let Some(request) = reader.redaction_of(kinds::BLOB_MANIFEST, &h).unwrap() {
-                out.held.borrow_mut().insert(h, Held::Removed(request));
-                continue;
-            }
             let manifest: BlobManifest = reader.get_typed(kinds::BLOB_MANIFEST, &h).unwrap();
-            let mut whole = true;
+            let mark = reader.redaction_of(kinds::BLOB_MANIFEST, &h).unwrap();
+            let mut whole = mark.is_none();
             for c in &manifest.chunks {
                 if let Some(request) = reader.redaction_of(kinds::BLOB_CHUNK, c).unwrap() {
                     out.chunk_removals.insert(*c, request);
@@ -231,7 +232,11 @@ impl Memory {
                     .borrow_mut()
                     .insert(h, reader.get_blob(&h).unwrap());
             }
-            out.held.borrow_mut().insert(h, Held::Intact(manifest));
+            let held = match mark {
+                Some(request) => Held::Removed { request, manifest },
+                None => Held::Intact(manifest),
+            };
+            out.held.borrow_mut().insert(h, held);
         }
         out
     }
@@ -249,15 +254,20 @@ impl Memory {
     }
 
     fn requests(&self, h: &Hash) -> Vec<Hash> {
-        match self.held.borrow().get(h) {
-            None => vec![],
-            Some(Held::Removed(r)) => vec![*r],
-            Some(Held::Intact(m)) => m
-                .chunks
-                .iter()
-                .filter_map(|c| self.chunk_removals.get(c).copied())
-                .collect(),
-        }
+        let (mark, manifest) = match self.held.borrow().get(h) {
+            None => return vec![],
+            Some(Held::Removed { request, manifest }) => (Some(*request), manifest.clone()),
+            Some(Held::Intact(m)) => (None, m.clone()),
+        };
+        // the manifest's mark, then each chunk's, in manifest order
+        mark.into_iter()
+            .chain(
+                manifest
+                    .chunks
+                    .iter()
+                    .filter_map(|c| self.chunk_removals.get(c).copied()),
+            )
+            .collect()
     }
 }
 
@@ -277,8 +287,8 @@ impl PublicationSource for Memory {
     fn manifest(&self, blob: &Hash) -> Result<Option<BlobManifest>, RdyError> {
         bump(&self.calls.manifest);
         Ok(match self.held.borrow().get(blob) {
-            Some(Held::Intact(m)) => Some(m.clone()),
-            _ => None,
+            Some(Held::Intact(m) | Held::Removed { manifest: m, .. }) => Some(m.clone()),
+            None => None,
         })
     }
 
@@ -848,6 +858,37 @@ fn hpb2_all_limits_apply_before_source_allocation() {
         assert_eq!(src.calls.total(), 0, "{what}: no source read");
     }
 
+    // the real field depth, beside an attachment: 65 levels are refused on the snapshot before
+    // the source answers any read; 64 levels pass, and only then is the figure's blob read
+    let nest = |depth: usize| {
+        let mut v = s("x");
+        for _ in 1..depth {
+            v = FieldValue::List(vec![v]);
+        }
+        v
+    };
+    for (depth, ok) in [(64usize, true), (65, false)] {
+        let src = fresh();
+        src.put(some_blob, 4, b"four".to_vec());
+        let mut deep = blk("tb-DEEP1", "table", Some("d-PAGE1"), "z");
+        deep.fields.insert("rows".into(), nest(depth));
+        let m = base(vec![deep, figure("fg-00000", "d-PAGE1", "c", &some_blob)]);
+        match (publication::resolve_source(&src, &m, "orgsite"), ok) {
+            (Ok(res), true) => {
+                assert!(res.attachments[0].available);
+                assert!(
+                    src.calls.manifest.get() > 0,
+                    "depth 64: the blob is checked"
+                );
+            }
+            (Err(e), false) => {
+                assert_limit(&e, "field depth", 64, "levels");
+                assert_eq!(src.calls.total(), 0, "depth 65: no source read");
+            }
+            (got, _) => panic!("depth {depth}: {:?}", got.map(|r| r.selection_hash)),
+        }
+    }
+
     // a hostile manifest length: refused on the manifests, with no availability or byte read
     let blobs: Vec<Hash> = (0..5u8).map(|i| Hash::of(&[i])).collect();
     let figures = |hs: &[Hash]| {
@@ -1028,9 +1069,15 @@ fn hpb2_blob_redaction_visitor_reports_requests_without_payload_reads() {
     assert!(store.blob_available(&seeded.kept).unwrap());
     assert!(!store.blob_available(&absent).unwrap());
     assert_eq!(store.manifest(&absent).unwrap(), None);
-    // the removed blob: its manifest's mark; the masked manifest has no chunks to walk
-    assert_eq!(visited(&store, &seeded.removed), vec![request]);
-    assert_eq!(store.manifest(&seeded.removed).unwrap(), None);
+    // the removed blob: its manifest's mark, then each chunk's. The mark is logical: the stored
+    // manifest stays readable, so the walk goes on through its chunks
+    let removed = store.manifest(&seeded.removed).unwrap().unwrap();
+    assert_eq!(
+        (removed.len, removed.chunks.len()),
+        (2 << 20, 2),
+        "a removed blob keeps its stored manifest"
+    );
+    assert_eq!(visited(&store, &seeded.removed), vec![request; 3]);
     assert!(!store.blob_available(&seeded.removed).unwrap());
     // the shared blob: its intact manifest, then one report per masked chunk, in manifest
     // order; the caller deduplicates
@@ -1060,6 +1107,50 @@ fn hpb2_blob_redaction_visitor_reports_requests_without_payload_reads() {
         st.reader().get_kind(kinds::BLOB_CHUNK, &manifest.chunks[0]),
         Err(StoreError::Redacted { .. })
     ));
+    // and the store's own frame counter shows it: each read takes the manifest frame alone,
+    // whether the blob is intact, removed or shares removed chunks; a blob the store lacks
+    // takes no frame, and the first-request reads of a removed blob stop at its manifest's
+    // mark, an index read
+    let frames = |f: &dyn Fn()| {
+        let before = st.reader().frames_read();
+        f();
+        st.reader().frames_read() - before
+    };
+    for (h, want, first) in [
+        (seeded.kept, 1, 1),
+        (seeded.removed, 1, 0),
+        (seeded.shared, 1, 1),
+        (absent, 0, 0),
+    ] {
+        assert_eq!(
+            frames(&|| {
+                visited(&store, &h);
+            }),
+            want,
+            "{h}: visit"
+        );
+        assert_eq!(
+            frames(&|| {
+                store.manifest(&h).unwrap();
+            }),
+            want,
+            "{h}: manifest"
+        );
+        assert_eq!(
+            frames(&|| {
+                store.removed_blob(&h).unwrap();
+            }),
+            first,
+            "{h}: removed_blob"
+        );
+        assert_eq!(
+            frames(&|| {
+                store.blob_available(&h).unwrap();
+            }),
+            first,
+            "{h}: blob_available"
+        );
+    }
 
     // the caller stops the walk at the first report: its error is returned as is
     let mut calls = 0;
@@ -1072,6 +1163,17 @@ fn hpb2_blob_redaction_visitor_reports_requests_without_payload_reads() {
         .unwrap_err();
     assert_eq!((e.code, e.message.as_str()), (E_LIMIT, "stop here"));
     assert_eq!(calls, 1);
+    // and on the removed blob, at its manifest's mark, before any chunk is walked
+    let mut calls = 0;
+    let e = store
+        .visit_blob_redactions(&seeded.removed, &mut |r| {
+            calls += 1;
+            assert_eq!(r, request);
+            Err(RdyError::new(E_LIMIT, "stop at the manifest", "caller"))
+        })
+        .unwrap_err();
+    assert_eq!(e.message, "stop at the manifest");
+    assert_eq!(calls, 1);
 
     // a memory copy of the same state reports the same requests in the same order
     let m = st.materialized(&Scope::Canon).unwrap();
@@ -1080,4 +1182,167 @@ fn hpb2_blob_redaction_visitor_reports_requests_without_payload_reads() {
         assert_eq!(visited(&memory, &h), visited(&store, &h));
     }
     assert_eq!(memory.calls.blob.get(), 0);
+}
+
+/// A landed doc `figs` with one figure on each of `blobs`.
+fn figures_doc(r: &mut Rdy, blobs: &[Hash]) {
+    let mut ops = vec![json!({"op": "create", "type": "doc", "id": "$d",
+        "fields": {"name": "figs", "title": "Figures", "doc_type": "page"}})];
+    for (i, b) in blobs.iter().enumerate() {
+        ops.push(json!({"op": "create", "type": "figure", "id": format!("$f{i}"), "parent": "$d",
+            "fields": {"blob": b.to_string(), "media_type": "application/octet-stream", "alt": format!("f{i}")}}));
+    }
+    write(r, "work", Value::Array(ops));
+    land(r, "work");
+}
+
+/// Approves one request removing `blob`, made at `at_ms`, in the closed store of `dir`.
+fn remove_blob(dir: &tempfile::TempDir, blob: Hash, at_ms: i64) -> Hash {
+    authorized_batch_fixture(
+        &dir.path().join(".rdy/store"),
+        &[RequestSpec::new("redact", vec![RedactTarget::Blob(blob)]).at(at_ms)],
+        &FixtureOptions::approved(Proof::local_human()),
+    )
+    .requests[0]
+        .request
+}
+
+#[test]
+fn hpb2_blob_redaction_visitor_reports_each_request_of_a_removed_blob() {
+    // blob x is chunks a and b; blob y is chunk b alone. R1 removes y, then R2 removes x: x's
+    // manifest and chunk a carry R2, chunk b keeps R1
+    let (dir, mut r) = project();
+    let (a, b) = (vec![1u8; 1 << 20], vec![2u8; 1 << 20]);
+    let x = r.store_mut().put_blob(&[a, b.clone()].concat()).unwrap();
+    let y = r.store_mut().put_blob(&b).unwrap();
+    figures_doc(&mut r, &[x, y]);
+    r.close().unwrap();
+    let r1 = remove_blob(&dir, y, 41);
+    let r2 = remove_blob(&dir, x, 42);
+    assert_ne!(r1, r2);
+    let r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    let settings = Settings::of(&st);
+    let store = settings.source(&st);
+    let manifest = store.manifest(&x).unwrap().unwrap();
+    assert_eq!(manifest.chunks.len(), 2);
+    let reader = st.reader();
+    assert_eq!(
+        (
+            reader.redaction_of(kinds::BLOB_MANIFEST, &x).unwrap(),
+            reader
+                .redaction_of(kinds::BLOB_CHUNK, &manifest.chunks[0])
+                .unwrap(),
+            reader
+                .redaction_of(kinds::BLOB_CHUNK, &manifest.chunks[1])
+                .unwrap(),
+        ),
+        (Some(r2), Some(r2), Some(r1))
+    );
+
+    // every approved request is reported: the manifest's, then each chunk's
+    assert_eq!(visited(&store, &x), vec![r2, r2, r1]);
+    assert_eq!(visited(&store, &y), vec![r1, r1]);
+    assert_eq!(store.removed_blob(&x).unwrap(), Some(r2));
+    assert_eq!(store.removed_blob(&y).unwrap(), Some(r1));
+    assert!(!store.blob_available(&x).unwrap() && !store.blob_available(&y).unwrap());
+    // the caller stops the walk after its second report
+    let mut seen = vec![];
+    let e = store
+        .visit_blob_redactions(&x, &mut |r| {
+            seen.push(r);
+            if seen.len() == 2 {
+                return Err(RdyError::new(E_LIMIT, "two are enough", "caller"));
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(e.message, "two are enough");
+    assert_eq!(seen, vec![r2, r2]);
+
+    // a memory copy of the same state reports the same requests
+    let m = st.materialized(&Scope::Canon).unwrap();
+    let memory = Memory::copy(&st, &m);
+    for h in [x, y] {
+        assert_eq!(visited(&memory, &h), visited(&store, &h), "{h}");
+        assert_eq!(memory.manifest(&h).unwrap(), store.manifest(&h).unwrap());
+    }
+}
+
+#[test]
+fn hpb2_removed_blobs_count_toward_snapshot_limits() {
+    // a kept 5-byte blob and a removed 10-byte one: the removed blob's stored manifest keeps
+    // its length, and the snapshot limits count it as HA1's take does
+    let (dir, mut r) = project();
+    let kept = r.store_mut().put_blob(b"kept!").unwrap();
+    let removed = r.store_mut().put_blob(b"ten bytes!").unwrap();
+    figures_doc(&mut r, &[kept, removed]);
+    r.close().unwrap();
+    let request = remove_blob(&dir, removed, 41);
+    let r = Rdy::open(dir.path()).unwrap();
+    let st = r.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    let settings = Settings::of(&st);
+    let store = settings.source(&st);
+    let memory = Memory::copy(&st, &m);
+    assert_eq!(store.removed_blob(&removed).unwrap(), Some(request));
+    assert!(!store.blob_available(&removed).unwrap());
+    assert_eq!(store.manifest(&removed).unwrap().map(|m| m.len), Some(10));
+
+    let stored = |h: &Hash| -> Result<Option<BlobManifest>, RdyError> {
+        Ok(Some(st.reader().get_typed(kinds::BLOB_MANIFEST, h)?))
+    };
+    let cases: Vec<(Limits, Option<Refusal>)> = vec![
+        (
+            Limits {
+                blob: 9,
+                ..Limits::default()
+            },
+            Some(("blob", 9, "bytes")),
+        ),
+        (
+            Limits {
+                blob: 10,
+                ..Limits::default()
+            },
+            None,
+        ),
+        (
+            Limits {
+                assets: 14,
+                ..Limits::default()
+            },
+            Some(("assets", 14, "bytes")),
+        ),
+        (
+            Limits {
+                assets: 15,
+                ..Limits::default()
+            },
+            None,
+        ),
+    ];
+    for (l, refusal) in cases {
+        let _g = publication::override_limits_for_tests(l);
+        for (what, got) in [
+            (
+                "HA1's check on the stored manifests",
+                publication::check_snapshot_limits_for_tests(m.iter(), stored),
+            ),
+            (
+                "store",
+                publication::resolve_source(&store, &m, IMPLICIT_ORG).map(|_| ()),
+            ),
+            (
+                "memory",
+                publication::resolve_source(&memory, &m, IMPLICIT_ORG).map(|_| ()),
+            ),
+        ] {
+            match (got, refusal) {
+                (Err(e), Some((part, n, unit))) => assert_limit(&e, part, n, unit),
+                (Ok(()), None) => {}
+                (got, _) => panic!("{what} at {l:?}: {got:?}"),
+            }
+        }
+    }
 }

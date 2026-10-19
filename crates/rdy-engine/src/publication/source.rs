@@ -7,6 +7,7 @@ use crate::ReadState;
 use crate::error::RdyError;
 use rdy_model::Hash;
 use rdy_schema::Pack;
+use rdy_store::StoreError;
 use rdy_store::kinds::{self, BlobManifest};
 use std::ops::ControlFlow;
 
@@ -20,8 +21,10 @@ pub trait PublicationSource {
     fn title(&self) -> &str;
     /// The source description the implicit profile shows, if any.
     fn description(&self) -> Option<&str>;
-    /// The manifest of blob `blob`, if the source holds it intact: None for a blob it lacks or
-    /// whose manifest a removal masked.
+    /// The stored manifest of blob `blob`, None for a blob the source lacks. A removal marks a
+    /// manifest logically and never erases it, so a removed blob's manifest is still returned,
+    /// with its length: the snapshot limits count it. [`PublicationSource::blob_available`]
+    /// says whether the bytes can be read.
     fn manifest(&self, blob: &Hash) -> Result<Option<BlobManifest>, RdyError>;
     /// Whether the source can read blob `blob`: it holds the blob and no approved removal masks
     /// its manifest or a chunk. No blob byte is read.
@@ -33,9 +36,10 @@ pub trait PublicationSource {
     /// one no removal masks.
     fn removed_blob(&self, blob: &Hash) -> Result<Option<Hash>, RdyError>;
     /// Reports to `visit` each approved removal request that masks blob `blob`: its manifest's,
-    /// then each chunk's in manifest order (a masked manifest has no chunks to walk). The same
-    /// request may be reported more than once; the caller bounds and deduplicates. An error
-    /// `visit` returns stops the walk and is returned. No blob payload is read.
+    /// then each chunk's in manifest order, the chunks of a removed manifest included (another
+    /// request may have removed one of them first). The same request may be reported more than
+    /// once; the caller bounds and deduplicates. An error `visit` returns stops the walk and is
+    /// returned. No blob payload is read.
     fn visit_blob_redactions(
         &self,
         blob: &Hash,
@@ -79,11 +83,16 @@ impl<'a> ReadPublicationSource<'a> {
         if !reader.has_blob(h)? {
             return Ok(());
         }
-        // a masked manifest is unreadable: nothing below it to walk
-        if let Some(request) = reader.redaction_of(kinds::BLOB_MANIFEST, h)? {
-            return step(request).map(|_| ());
+        // the manifest's mark is logical: its frame stays, and its chunks may name other
+        // requests, so the walk goes on below it
+        if let Some(request) = reader.redaction_of(kinds::BLOB_MANIFEST, h)?
+            && step(request)?.is_break()
+        {
+            return Ok(());
         }
-        let manifest: BlobManifest = reader.get_typed(kinds::BLOB_MANIFEST, h)?;
+        let Some(manifest) = self.stored_manifest(h)? else {
+            return Ok(());
+        };
         for c in &manifest.chunks {
             if let Some(request) = reader.redaction_of(kinds::BLOB_CHUNK, c)?
                 && step(request)?.is_break()
@@ -92,6 +101,17 @@ impl<'a> ReadPublicationSource<'a> {
             }
         }
         Ok(())
+    }
+
+    /// The stored manifest of blob `h`, which the store holds, whatever removal marks it. One
+    /// manifest frame; no chunk is read. A removal erases chunk frames only, so a manifest frame
+    /// it erased is no manifest to walk: None.
+    fn stored_manifest(&self, h: &Hash) -> Result<Option<BlobManifest>, RdyError> {
+        match self.read.reader().get_typed(kinds::BLOB_MANIFEST, h) {
+            Ok(m) => Ok(Some(m)),
+            Err(StoreError::Redacted { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -109,11 +129,10 @@ impl PublicationSource for ReadPublicationSource<'_> {
     }
 
     fn manifest(&self, blob: &Hash) -> Result<Option<BlobManifest>, RdyError> {
-        let reader = self.read.reader();
-        if !reader.has_blob(blob)? || reader.redaction_of(kinds::BLOB_MANIFEST, blob)?.is_some() {
+        if !self.read.reader().has_blob(blob)? {
             return Ok(None);
         }
-        Ok(Some(reader.get_typed(kinds::BLOB_MANIFEST, blob)?))
+        self.stored_manifest(blob)
     }
 
     fn blob_available(&self, blob: &Hash) -> Result<bool, RdyError> {
