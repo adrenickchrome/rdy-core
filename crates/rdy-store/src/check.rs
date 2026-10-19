@@ -176,7 +176,7 @@ impl StoreReader {
     /// record` otherwise), and the signature table holds exactly its rows. A decodable record's
     /// subject is not checked here: a missing or wrong-kind subject is the engine's
     /// E_SIG_OBJECT_MISMATCH, and its statement text the engine's E_SIG_INVALID.
-    fn check_signatures(&self) -> Result<(), StoreError> {
+    pub(crate) fn check_signatures(&self) -> Result<(), StoreError> {
         let matches = self
             .index()
             .signature_rows_match(&mut |h| Ok(self.signature(&h)?.subject))?;
@@ -547,76 +547,19 @@ impl StoreReader {
         Ok(())
     }
 
-    /// The relay and evidence rules of one landing, and its references to other objects.
-    fn check_landing_fields(&self, l: &Hash, rec: &LandingRecord) -> Result<(), StoreError> {
-        if rec.relayed_by.is_some() != rec.relay_evidence.is_some() {
-            return Err(bad(format!(
-                "landing {l}: relayed_by and relay_evidence must both be set or both unset"
-            )));
-        }
-        if (rec.assurance == Assurance::Relayed) != rec.relayed_by.is_some() {
-            return Err(bad(format!(
-                "landing {l}: assurance is {} but the relay fields are {}",
-                rec.assurance.as_str(),
-                if rec.relayed_by.is_some() {
-                    "set"
-                } else {
-                    "unset"
-                }
-            )));
-        }
-        match &rec.evidence {
-            Some(e) => {
-                let kind = e.kind.as_str();
-                match e.kind {
-                    EvidenceKind::Elicited if rec.assurance != Assurance::Local => {
-                        return Err(bad(format!(
-                            "landing {l}: evidence kind {kind} needs assurance local"
-                        )));
-                    }
-                    EvidenceKind::Card | EvidenceKind::Text
-                        if rec.assurance != Assurance::Relayed =>
-                    {
-                        return Err(bad(format!(
-                            "landing {l}: evidence kind {kind} needs assurance relayed"
-                        )));
-                    }
-                    _ => {}
-                }
-            }
-            None if rec.assurance == Assurance::Relayed => {
-                return Err(bad(format!(
-                    "landing {l}: a relayed landing names its evidence kind (card or text)"
-                )));
-            }
-            None => {}
-        }
-        if let Some(e) = &rec.evidence
-            && e.kind == EvidenceKind::Card
-            && e.card_hash.is_none()
-        {
-            return Err(bad(format!("landing {l}: card evidence needs card_hash")));
-        }
-        for h in &rec.rebased_from {
-            if !self.has_kind(kinds::LANDING, h)? {
-                return Err(bad(format!(
-                    "landing {l}: rebased_from names {h}, which is not a landing"
-                )));
-            }
-        }
-        if let Some(h) = &rec.approved_version
-            && !self.has_kind(kinds::PROPOSAL, h)?
-        {
-            return Err(bad(format!(
-                "landing {l}: approved_version {h} is not a proposal"
-            )));
-        }
-        Ok(())
+    /// The relay and evidence rules of one landing, and its references to other objects
+    /// ([`landing_field_rules`] over this store).
+    pub(crate) fn check_landing_fields(
+        &self,
+        l: &Hash,
+        rec: &LandingRecord,
+    ) -> Result<(), StoreError> {
+        landing_field_rules(l, rec, &mut |kind, h| self.has_kind(kind, h))
     }
 
     /// A change that the check follows, or None when it is not stored (its absence is reported
     /// where a change of the checked sets names it).
-    fn change_for_dag(
+    pub(crate) fn change_for_dag(
         &self,
         cache: &mut HashMap<Hash, Option<Arc<Change>>>,
         c: &Hash,
@@ -705,7 +648,7 @@ impl StoreReader {
     }
 
     /// An iterative depth-first search over the deps of `roots`, following into deps outside them.
-    fn check_acyclic(
+    pub(crate) fn check_acyclic(
         &self,
         roots: &BTreeSet<Hash>,
         cache: &mut HashMap<Hash, Option<Arc<Change>>>,
@@ -865,4 +808,79 @@ impl StoreReader {
         }
         Ok(newer)
     }
+}
+
+/// The relay and evidence rules of landing `l` (record `rec`), and its references to other
+/// objects: each `rebased_from` names a landing and `approved_version` a proposal, as
+/// `has_kind(kind, hash)` reads the objects. The one list of landing rules: the project's fsck,
+/// the holder's fsck and a holder's take (over the upload and the holder) apply it.
+/// `StoreError::Decode` names the broken rule.
+pub fn landing_field_rules<E: From<StoreError>>(
+    l: &Hash,
+    rec: &LandingRecord,
+    has_kind: &mut dyn FnMut(u8, &Hash) -> Result<bool, E>,
+) -> Result<(), E> {
+    if rec.relayed_by.is_some() != rec.relay_evidence.is_some() {
+        return Err(E::from(bad(format!(
+            "landing {l}: relayed_by and relay_evidence must both be set or both unset"
+        ))));
+    }
+    if (rec.assurance == Assurance::Relayed) != rec.relayed_by.is_some() {
+        return Err(E::from(bad(format!(
+            "landing {l}: assurance is {} but the relay fields are {}",
+            rec.assurance.as_str(),
+            if rec.relayed_by.is_some() {
+                "set"
+            } else {
+                "unset"
+            }
+        ))));
+    }
+    match &rec.evidence {
+        Some(e) => {
+            let kind = e.kind.as_str();
+            match e.kind {
+                EvidenceKind::Elicited if rec.assurance != Assurance::Local => {
+                    return Err(E::from(bad(format!(
+                        "landing {l}: evidence kind {kind} needs assurance local"
+                    ))));
+                }
+                EvidenceKind::Card | EvidenceKind::Text if rec.assurance != Assurance::Relayed => {
+                    return Err(E::from(bad(format!(
+                        "landing {l}: evidence kind {kind} needs assurance relayed"
+                    ))));
+                }
+                _ => {}
+            }
+        }
+        None if rec.assurance == Assurance::Relayed => {
+            return Err(E::from(bad(format!(
+                "landing {l}: a relayed landing names its evidence kind (card or text)"
+            ))));
+        }
+        None => {}
+    }
+    if let Some(e) = &rec.evidence
+        && e.kind == EvidenceKind::Card
+        && e.card_hash.is_none()
+    {
+        return Err(E::from(bad(format!(
+            "landing {l}: card evidence needs card_hash"
+        ))));
+    }
+    for h in &rec.rebased_from {
+        if !has_kind(kinds::LANDING, h)? {
+            return Err(E::from(bad(format!(
+                "landing {l}: rebased_from names {h}, which is not a landing"
+            ))));
+        }
+    }
+    if let Some(h) = &rec.approved_version
+        && !has_kind(kinds::PROPOSAL, h)?
+    {
+        return Err(E::from(bad(format!(
+            "landing {l}: approved_version {h} is not a proposal"
+        ))));
+    }
+    Ok(())
 }

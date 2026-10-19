@@ -46,8 +46,9 @@
 //! # Dump format 2
 //!
 //! Dump format 2 carries store format 13 (the pair (2, 13); its frame kinds are those of (1, 12)
-//! and 20 to 22) and store format 14 (the pair (2, 14); its frame kinds are those of (2, 13) and
-//! 11, the signature). It keeps the magic, the container framing and the `HEADER`, `FILE`,
+//! and 20 to 22), store format 14 (the pair (2, 14); its frame kinds are those of (2, 13) and
+//! 11, the signature) and store format 15 (the pair (2, 15); store format 15 adds refs only, so
+//! its frame kinds are those of (2, 14)). It keeps the magic, the container framing and the `HEADER`, `FILE`,
 //! `BATCH` and `TRAILER` layouts of format 1, and adds one container kind, `DROPPED = 0xF3`
 //! (D-3M81W: rdy "drops their bytes and keeps their hashes"). A `DROPPED` record stands only where
 //! a batch's data frame is expected, and only under dump format 2. It is one source frame whose
@@ -86,12 +87,12 @@ use std::io::{self, Read, Write};
 
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
-/// The dump format this rdy writes: 2, of store format 14 (the pair (2, 14)).
+/// The dump format this rdy writes: 2, of store format 15 (the pair (2, 15)).
 pub const DUMP_FORMAT: u32 = 2;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
-/// this list (D-69AY3). No (1, 13) pair exists: store formats 13 and 14 travel only in dump
+/// this list (D-69AY3). No (1, 13) pair exists: store formats 13 to 15 travel only in dump
 /// format 2.
-pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14)];
+pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -213,10 +214,14 @@ pub(crate) mod drop_text {
     }
 }
 
-/// The record rules of a dropped frame, shared by the writer and the reader: a removable kind,
-/// the residue its kind needs (BLOCK and CHANGE one, BLOB_CHUNK none), and an original length
-/// of at most `MAX_BLOB_BYTES`.
-fn check_dropped(kind: u8, residue: Option<&Hash>, len: u32) -> Result<(), Cow<'static, str>> {
+/// The record rules of a dropped frame, shared by the writer and the reader (and by the sync
+/// stream's `DROPPED` record, `crate::sync_stream`): a removable kind, the residue its kind needs
+/// (BLOCK and CHANGE one, BLOB_CHUNK none), and an original length of at most `MAX_BLOB_BYTES`.
+pub(crate) fn check_dropped(
+    kind: u8,
+    residue: Option<&Hash>,
+    len: u32,
+) -> Result<(), Cow<'static, str>> {
     let needs_residue = match kind {
         kinds::BLOCK | kinds::CHANGE => true,
         kinds::BLOB_CHUNK => false,
@@ -442,6 +447,33 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
             kinds::REDACTION_APPLY,
         ],
     ),
+    // store format 15 adds refs only (meta/store_mode, a holder's answer/tag-object:<hash>): the kinds
+    // of (2, 14)
+    (
+        (2, 15),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::SIGNATURE,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+            kinds::REDACTION,
+            kinds::REDACTION_RESIDUE,
+            kinds::REDACTION_APPLY,
+        ],
+    ),
 ];
 
 /// The store kinds a batch's frames may have in a dump of `dump_format` whose frames are of
@@ -478,12 +510,13 @@ pub(crate) fn try_batch_digest<'a>(
     Some(Hash::of(&b))
 }
 
-/// The bytes one record adds to the trailer chain.
-const LINK_LEN: usize = 1 + 8 + 32;
+/// The bytes one record adds to the trailer chain (a dump's, and a sync stream's,
+/// `crate::sync_stream`).
+pub(crate) const LINK_LEN: usize = 1 + 8 + 32;
 
 /// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its
 /// growth is fallible: None when it cannot be allocated.
-fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) -> Option<()> {
+pub(crate) fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) -> Option<()> {
     chain.try_reserve(LINK_LEN).ok()?;
     chain.push(kind);
     chain.extend_from_slice(&len.to_le_bytes());

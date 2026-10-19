@@ -39,7 +39,7 @@ pub use redaction::{
     RedactionWarning, ResidualOp,
 };
 pub use repo_id::RepoId;
-pub use value::FieldValue;
+pub use value::{FieldValue, MAX_FIELD_NESTING, field_nesting_fix, field_nesting_message};
 pub mod reference;
 pub mod review;
 pub use review::{Finding, Review, ReviewSubject, Verdict};

@@ -18,4 +18,12 @@ pub use select::{
     SelectionEntry, blob_reads_for_tests, limits, load_assets, resolve,
 };
 #[cfg(feature = "test-support")]
-pub use select::{LimitsGuard, override_limits_for_tests, resolve_in_for_tests};
+pub use select::{
+    LimitsGuard, check_snapshot_limits_for_tests, override_limits_for_tests, resolve_in_for_tests,
+};
+#[allow(
+    unused_imports,
+    reason = "the holder take calls it for every landing snapshot it takes"
+)]
+pub(crate) use select::{SnapshotBudget, check_snapshot_limits};
+pub(crate) use select::{check_block_limits, limit};

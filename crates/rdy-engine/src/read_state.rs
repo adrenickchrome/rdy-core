@@ -17,6 +17,7 @@ use rdy_model::{
     AltSet, AltStatus, Block, BlockId, Change, Hash, Intent, IntentStatus, Op, Proposal, Tag,
 };
 use rdy_schema::{AreaMatcher, Pack};
+use rdy_store::holder::StoreMode;
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -930,6 +931,16 @@ impl ReadState {
         }
     }
 
+    /// A holder's refusal of every read that needs canon (`holder reads need a tag or
+    /// landing`): a holder has no canon, so its scopes are tags and landings only. A state with a
+    /// canon head is never a holder's, so only a state without one reads the store's mode.
+    pub(crate) fn refuse_holder_canon(&self) -> Result<(), RdyError> {
+        if self.canon_head.is_none() && self.reader.mode()? == StoreMode::Holder {
+            return Err(crate::holder::needs_tag());
+        }
+        Ok(())
+    }
+
     /// The entry `scope` reads in this state, if there is one. Never builds, and never marks an
     /// as-of scope used. A floating view reads canon's entry, as `built` does; the in-flight
     /// scope reads its cell's entry when one was made without an error.
@@ -968,6 +979,9 @@ impl ReadState {
     pub(crate) fn built(&self, scope: &Scope) -> Result<Arc<Built>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
+        }
+        if !matches!(scope, Scope::At(_)) {
+            self.refuse_holder_canon()?;
         }
         match scope {
             Scope::Canon => self.build(&self.canon),

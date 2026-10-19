@@ -2,6 +2,25 @@ use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value as Yaml;
 use std::collections::BTreeMap;
 
+/// The most levels one block field value nests (final review ruling 1): the top-level value is
+/// level 1, and each element of a list or a map is one level below its container. A write refuses
+/// a deeper field before anything is persisted, so every written block stays exportable: the
+/// deepest record that embeds a block, a CHANGE whose op carries the full block, then stays
+/// within the stream decoder's 64 nesting levels (`rdy_store::bounded::MAX_DEPTH`). The value is
+/// the one the store's decoder test proves for that record (`ha1_field_nesting_bound_fits_the_
+/// deepest_embedding_record`), not counted by hand.
+pub const MAX_FIELD_NESTING: usize = 29;
+
+/// The refusal text of a field deeper than [`MAX_FIELD_NESTING`] levels.
+pub fn field_nesting_message() -> String {
+    format!("field nesting exceeds {MAX_FIELD_NESTING} levels")
+}
+
+/// The fix of a field deeper than [`MAX_FIELD_NESTING`] levels.
+pub fn field_nesting_fix() -> String {
+    format!("flatten the field to at most {MAX_FIELD_NESTING} levels")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldValue {
     Null,
@@ -13,6 +32,24 @@ pub enum FieldValue {
 }
 
 impl FieldValue {
+    /// Whether this value nests more than `max` levels (itself level 1, each list or map element
+    /// one level below its container). Walks without recursion and stops at the first value past
+    /// `max`.
+    pub fn nests_deeper_than(&self, max: usize) -> bool {
+        let mut open = vec![(self, 1usize)];
+        while let Some((v, level)) = open.pop() {
+            if level > max {
+                return true;
+            }
+            match v {
+                FieldValue::List(items) => open.extend(items.iter().map(|i| (i, level + 1))),
+                FieldValue::Map(m) => open.extend(m.values().map(|i| (i, level + 1))),
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             FieldValue::Str(s) => Some(s),

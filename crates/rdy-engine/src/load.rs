@@ -18,6 +18,9 @@
 //!    smallest form). Then check each dropped frame's authorization against the whole log (dump
 //!    format 2, `rdy_store::ingest`): a refusal is damage at the end of the stream, where the
 //!    check runs. Then write the store's `FORMAT`.
+//!    The first batch also sets the store's mode. A holder (D-BPYN8) holds no project file: a
+//!    holder dump that carries one is refused here, after the ingest has validated the mode and
+//!    before any file is written, and step 8 takes the store back.
 //! 5. Write each project file the target does not have.
 //! 6. Take the new store's lock, then rename `.rdy/store.loading` to `.rdy/store`. The load
 //!    holds the lock until it ends, so no other rdy process opens the project before step 7
@@ -39,10 +42,11 @@ use crate::config_levels::{LOCAL_FILE, PROJECT_FILE};
 use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_IO, E_LOCKED, RdyError};
 use crate::fsck::FsckReport;
 use crate::wc::ignore::IGNORE_FILE;
-use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal};
+use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal, Frame};
 use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
+use rdy_store::kinds;
 use rdy_store::layout::STORE_DIR;
 use rdy_store::segment::Location;
 use rdy_store::{StoreError, StoreLock};
@@ -58,6 +62,8 @@ const LOADING_DIR: &str = "store.loading";
 const PACKS_DIR: &str = ".rdy/packs";
 /// What the person does after a load: a dump carries no working copy (O9).
 const NEXT: &str = "run rdy checkout to bind a working copy; a dump carries none";
+/// What the person does after a holder load: a holder has no working copy.
+const HOLDER_NEXT: &str = "read the holder through the adapter at a tag";
 
 /// Finds a live daemon of the project at a path: its pid when the project's socket record ties a
 /// live process to the project's `.rdy`, else `None`. The engine cannot see daemons (they are a
@@ -118,7 +124,7 @@ pub(crate) fn open_dump(file: &Path) -> Result<File, RdyError> {
 /// item, the dump format and the header.
 pub(crate) struct Opened<R: Read> {
     reader: DumpReader<R>,
-    dump_format: u32,
+    pub(crate) dump_format: u32,
     pub(crate) header: DumpHeader,
 }
 
@@ -175,7 +181,7 @@ pub(crate) fn load_opened<R: Read>(
     let carried: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
     let mut made = Made::default();
     let out = (|| {
-        let (batches, frames) = ingest(
+        let (batches, frames, holder) = ingest(
             file,
             project,
             &mut reader,
@@ -184,6 +190,10 @@ pub(crate) fn load_opened<R: Read>(
             header.store_format,
             &mut made,
         )?;
+        // the ingest validated the mode: a holder carries no project file (D-BPYN8)
+        if holder && !files.is_empty() {
+            return Err(holder_files());
+        }
         let mut written = Vec::new();
         let mut kept = Vec::new();
         for (path, bytes) in &files {
@@ -220,7 +230,7 @@ pub(crate) fn load_opened<R: Read>(
             tags,
             views,
             fsck,
-            next: NEXT.to_string(),
+            next: if holder { HOLDER_NEXT } else { NEXT }.to_string(),
         })
     })();
     // step 8: a failure takes back everything this load wrote
@@ -390,7 +400,8 @@ fn holds_store(dir: &Path) -> bool {
 /// `.rdy/store.loading` and verifies the trailer. The batches must end at `log_end`, the end of
 /// the source log that the header names, and there must be at least one. Then a dump of a store
 /// format older than this rdy's (`store_format`) gets its one upgrade batch, and the store gets
-/// its `FORMAT`. Returns the dump's batches and frames written.
+/// its `FORMAT`. Returns the dump's batches and frames written, and whether the first batch set
+/// the holder mode (the ingest has refused any other mode value).
 fn ingest<R: Read>(
     file: &Path,
     project: &Path,
@@ -399,7 +410,8 @@ fn ingest<R: Read>(
     log_end: Location,
     store_format: u32,
     made: &mut Made,
-) -> Result<(u64, u64), RdyError> {
+) -> Result<(u64, u64, bool), RdyError> {
+    let holder = first.as_ref().is_some_and(|(_, b)| sets_holder_mode(b));
     let dot = project.join(".rdy");
     made.create_dirs(&dot)?;
     let loading = dot.join(LOADING_DIR);
@@ -454,7 +466,31 @@ fn ingest<R: Read>(
         StoreError::Dump { what, .. } => damaged(file, at, &what),
         e => target_error(&loading, e),
     })?;
-    Ok((report.batches, report.frames))
+    Ok((report.batches, report.frames, holder))
+}
+
+/// Whether batch `b`, the first of a log, sets the mode ref, decoded as the ingest decodes it
+/// (`names_store_mode`), so the load never disagrees with the store about the mode. `Ingest::batch`
+/// judges the value (only `holder`) and refuses the batch otherwise, so a load that goes on has a
+/// holder.
+fn sets_holder_mode(b: &DumpBatch) -> bool {
+    b.frames.iter().any(|f| match f {
+        Frame::Present {
+            kind: kinds::REF_UPDATE,
+            payload,
+            ..
+        } => rdy_store::holder::names_store_mode(payload),
+        _ => false,
+    })
+}
+
+/// A holder dump that carries a project file.
+fn holder_files() -> RdyError {
+    RdyError::new(
+        E_DUMP,
+        "a holder dump must not contain project files",
+        "write a new dump from the holder",
+    )
 }
 
 /// Step 5: writes one project file the target does not have, durably, never over a file.

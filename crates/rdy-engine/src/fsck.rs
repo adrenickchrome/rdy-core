@@ -1,7 +1,8 @@
 //! `rdy fsck`: the store's consistency report.
 
 use crate::signature_check::{
-    CheckContext, STATEMENT_MATCH, check_signature, repo_ids, subject_context,
+    CheckContext, STATEMENT_FOREIGN_REPO, STATEMENT_MATCH, check_signature, repo_ids,
+    subject_context,
 };
 use crate::{E_LIMIT, E_SIG_INVALID, Rdy, RdyError, sig_invalid, sig_object_mismatch};
 use rdy_schema::{Issue, Severity};
@@ -33,6 +34,11 @@ pub struct FsckReport {
     /// when not zero: an unsigned store's report has no such member.
     #[serde(skip_serializing_if = "is_zero")]
     pub signatures: usize,
+    /// In a holder: the stored signatures that are valid over their subject but name another
+    /// project's repo id (`foreign_repo`), counted as information, not damage. Present only
+    /// when not zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub foreign_signatures: usize,
     /// The redaction counts, present only when an active redaction exists: an ordinary store's
     /// report has none of these members.
     #[serde(flatten)]
@@ -54,6 +60,9 @@ pub struct FsckRedaction {
 
 impl Rdy {
     pub fn fsck(&self) -> Result<FsckReport, RdyError> {
+        if self.is_holder() {
+            return self.fsck_holder();
+        }
         let verified = self.store.verify_report()?;
         let frames = verified.frames;
         let landings = self.store.landings()?;
@@ -64,7 +73,7 @@ impl Rdy {
         let versions = self.check_tags(&chain)?;
         let objects = self.store.check_objects()?;
         let unlogged = crate::transitions::reconcile_moves(&self.read(), None, &[], None)?;
-        let signatures = self.check_signatures()?;
+        let (signatures, foreign_signatures) = self.check_signatures()?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),
@@ -77,6 +86,7 @@ impl Rdy {
             transitions: objects.transitions,
             unlogged_moves: crate::transitions::count(&unlogged),
             signatures,
+            foreign_signatures,
             redaction: verified.redaction.map(|c| FsckRedaction {
                 redacted_objects: c.objects,
                 redacted_frames: c.frames,
@@ -88,13 +98,64 @@ impl Rdy {
 }
 
 impl Rdy {
+    /// A holder's fsck (D-BPYN8): the log's frames and any active removal, the tags by the
+    /// rules every store keeps (no canon membership, no chronological order), then the store's
+    /// holder check of every tag's history (`StoreReader::check_holder`) and the signatures.
+    /// The report has the project report's members: `landings` and `landed_changes` count the
+    /// distinct landings and landed changes across the tags' chains; a holder has no views,
+    /// transitions or unlogged moves. No pack validates anything.
+    fn fsck_holder(&self) -> Result<FsckReport, RdyError> {
+        let verified = self.store.verify_report()?;
+        let versions = self.check_holder_tags()?;
+        let objects = self
+            .store
+            .check_holder()
+            .map_err(crate::holder::holder_error)?;
+        // the distinct landings of every tag's chain, read from the store's tags as checked;
+        // the chains are walked together, so each landing is read once
+        let heads: Vec<rdy_model::Hash> = self
+            .store
+            .tags()?
+            .into_iter()
+            .map(|(_, _, tag)| tag.landing)
+            .collect();
+        let landings = self
+            .store
+            .tag_histories(&heads)
+            .map_err(crate::holder::holder_error)?
+            .len();
+        let (signatures, foreign_signatures) = self.check_signatures()?;
+        Ok(FsckReport {
+            frames: verified.frames,
+            landings,
+            versions,
+            views: objects.views,
+            landed_changes: objects.landed_changes,
+            intents: objects.intents,
+            alt_sets: objects.alt_sets,
+            reviews: objects.reviews,
+            transitions: objects.transitions,
+            unlogged_moves: 0,
+            signatures,
+            foreign_signatures,
+            redaction: verified.redaction.map(|c| FsckRedaction {
+                redacted_objects: c.objects,
+                redacted_frames: c.frames,
+                redacted_bytes: c.bytes,
+                checked_payloads: c.checked_payloads,
+            }),
+        })
+    }
+
     /// Checks every stored signature, streamed in subject then hash order, with the same check
-    /// as every other surface and no trust file: an unknown key is no issue. Returns the count;
-    /// an invalid or mismatched signature fails with the first issue's code, message and fix and
-    /// at most [`MAX_SIGNATURE_ISSUES`] issues.
-    fn check_signatures(&self) -> Result<usize, RdyError> {
+    /// as every other surface and no trust file: an unknown key is no issue. Returns the count
+    /// and, of them, the signatures of another project a holder cannot verify (`foreign_repo`,
+    /// information, not damage); an invalid or mismatched signature fails with the first
+    /// issue's code, message and fix and at most [`MAX_SIGNATURE_ISSUES`] issues.
+    fn check_signatures(&self) -> Result<(usize, usize), RdyError> {
         let st = self.read();
         let mut count = 0usize;
+        let mut foreign = 0usize;
         let mut failed = 0usize;
         let mut issues: Vec<Issue> = Vec::new();
         let mut context: Option<CheckContext> = None;
@@ -129,6 +190,10 @@ impl Rdy {
             if check.statement == STATEMENT_MATCH {
                 return Ok(());
             }
+            if check.statement == STATEMENT_FOREIGN_REPO {
+                foreign += 1;
+                return Ok(());
+            }
             failed += 1;
             if issues.len() < MAX_SIGNATURE_ISSUES {
                 let hash = hash.to_string();
@@ -152,7 +217,7 @@ impl Rdy {
         }
         visited?;
         if failed == 0 {
-            return Ok(count);
+            return Ok((count, foreign));
         }
         if failed > MAX_SIGNATURE_ISSUES {
             issues.truncate(MAX_SIGNATURE_ISSUES - 1);
@@ -195,6 +260,7 @@ mod tests {
             transitions: 0,
             unlogged_moves: 0,
             signatures: 0,
+            foreign_signatures: 0,
             redaction,
         }
     }

@@ -285,6 +285,7 @@ pub fn vector(sk: bool) -> Vector {
             },
             current_repo: VECTOR_REPO,
             source_repos: vec![],
+            holder: false,
         },
         trust,
     }

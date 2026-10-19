@@ -8,7 +8,11 @@
 //!   signed it. Otherwise `invalid` (`E_SIG_INVALID`).
 //! - **statement**: the statement rebuilt from the subject, for the current repo id and then for
 //!   each fork source the caller gives, equals the signed bytes exactly. Otherwise `mismatch`
-//!   (`E_SIG_OBJECT_MISMATCH` for a valid signature).
+//!   (`E_SIG_OBJECT_MISMATCH` for a valid signature). In a holder only (ruling task-13), a valid
+//!   signature whose statement, rebuilt for the repo id it names, equals the signed bytes, but
+//!   names a repo id other than the holder's own, is `foreign_repo`, with that repo id: signed in
+//!   another project and not verified here. A holder holds no fork history and trusts none (H2
+//!   brings hub-recorded lineage); it is neither a mismatch nor an error code.
 //! - **trust**: a covered signature's key is trusted for its principal and namespace by the
 //!   caller's allowed-signers data. Otherwise `unknown`, with one `W_SIG_UNKNOWN_KEY` warning for
 //!   a covered signature only.
@@ -19,7 +23,8 @@
 //!
 //! [`read_check_context`] and [`signature_checks`] read the subject, the current repo id and the
 //! fork sources of the log's fork lineage from one immutable read state through the typed
-//! readers.
+//! readers. A holder finds a tag's relay answer by the tag object
+//! (`answer/tag-object:<hash>`), a project by the tag name (`answer/tag:<name>`).
 
 use crate::allowed_signers::AllowedSigners;
 use crate::read_state::ReadState;
@@ -30,6 +35,7 @@ use rdy_model::signature::{
     Signature, StatementKind, StatementSource, parse_statement, statement,
 };
 use rdy_model::{ActorRun, Answer, Hash, LandingRecord, RepoId, Tag};
+use rdy_store::holder::{StoreMode, answer_tag_object_ref};
 use rdy_store::kinds::RefUpdate;
 use rdy_store::meta::{REF_ORIGIN, decode_origin};
 use rdy_store::signature::MAX_PER_SUBJECT;
@@ -45,6 +51,9 @@ pub const SIGNED_INVALID: &str = "invalid";
 pub const STATEMENT_MATCH: &str = "match";
 /// `statement`: it does not, or the signature is invalid.
 pub const STATEMENT_MISMATCH: &str = "mismatch";
+/// `statement`: in a holder only, the signature is valid over its subject but its statement
+/// names another project's repo id, which the holder cannot verify (no fork history).
+pub const STATEMENT_FOREIGN_REPO: &str = "foreign_repo";
 /// `trust`: the caller's allowed-signers data trusts the key for the principal and namespace.
 pub const TRUST_TRUSTED: &str = "trusted";
 /// `trust`: it does not, or the signature is invalid or not covered.
@@ -60,7 +69,8 @@ pub enum SignatureSubject {
     /// A landing, for an approval or the relay of one.
     Landing { hash: Hash, record: LandingRecord },
     /// A tag, for a tag statement or its relay; `answer` is the answer the tag's answer ref
-    /// names (`answer/tag:<name>`), if any.
+    /// names (`answer/tag:<name>` in a project, `answer/tag-object:<hash>` in a holder), if
+    /// any.
     Tag {
         hash: Hash,
         record: Tag,
@@ -89,8 +99,11 @@ pub struct CheckContext {
     pub subject: SignatureSubject,
     pub current_repo: RepoId,
     /// The other repo ids a signature may name, tried in order after `current_repo`; locally
-    /// the fork sources, ascending, and empty for a project never forked.
+    /// the fork sources, ascending, and empty for a project never forked or a holder.
     pub source_repos: Vec<RepoId>,
+    /// The subject is read in a holder: a valid signature that names a repo id other than
+    /// `current_repo` and `source_repos` is [`STATEMENT_FOREIGN_REPO`], not a mismatch.
+    pub holder: bool,
 }
 
 /// An advisory result of a check, such as `W_SIG_UNKNOWN_KEY`.
@@ -121,7 +134,8 @@ pub struct SignatureCheck {
     pub key_type: Option<String>,
     /// [`SIGNED_VALID`] or [`SIGNED_INVALID`].
     pub signed: String,
-    /// [`STATEMENT_MATCH`] or [`STATEMENT_MISMATCH`].
+    /// [`STATEMENT_MATCH`], [`STATEMENT_MISMATCH`] or, in a holder only,
+    /// [`STATEMENT_FOREIGN_REPO`].
     pub statement: String,
     /// [`TRUST_TRUSTED`] or [`TRUST_UNKNOWN`].
     pub trust: String,
@@ -131,9 +145,14 @@ pub struct SignatureCheck {
     pub signed_by: ActorRun,
     /// When, as the record says: never a trusted time.
     pub at_ms: i64,
-    /// `E_SIG_INVALID`, `E_SIG_OBJECT_MISMATCH`, or `null` for a valid, covered signature.
+    /// `E_SIG_INVALID`, `E_SIG_OBJECT_MISMATCH`, or `null` for a valid, covered signature or
+    /// a valid one of another project in a holder.
     pub code: Option<String>,
     pub warnings: Vec<SigningWarning>,
+    /// In a holder only: the repo id a valid signature's statement names when it is not the
+    /// holder's own ([`STATEMENT_FOREIGN_REPO`]). Absent from the JSON otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub foreign_repo: Option<String>,
 }
 
 /// Checks `record` against `context`, with the caller's trust data (`None`: no allowed-signers
@@ -160,6 +179,7 @@ pub fn check_signature(
             at_ms: record.signed_by.at_ms,
             code: Some(E_SIG_INVALID.into()),
             warnings: vec![],
+            foreign_repo: None,
         };
     }
     let parsed = parse_statement(&record.statement).ok();
@@ -180,6 +200,7 @@ pub fn check_signature(
         at_ms: record.signed_by.at_ms,
         code: Some(E_SIG_INVALID.into()),
         warnings: vec![],
+        foreign_repo: None,
     };
     let (Some(parsed), Some(key)) = (parsed, crypto.key.as_deref()) else {
         return out;
@@ -191,9 +212,19 @@ pub fn check_signature(
     if crypto.presence {
         out.presence = PRESENCE_PRESENT.into();
     }
-    let Some(principal) = covered(record, &parsed, key, context) else {
-        out.code = Some(E_SIG_OBJECT_MISMATCH.into());
-        return out;
+    let principal = match covered(record, &parsed, key, context) {
+        Some(Coverage::Covered(principal)) => principal,
+        Some(Coverage::Foreign(repo)) => {
+            // signed in another project: not verified here, so no trust and no warning
+            out.statement = STATEMENT_FOREIGN_REPO.into();
+            out.code = None;
+            out.foreign_repo = Some(repo.to_string());
+            return out;
+        }
+        None => {
+            out.code = Some(E_SIG_OBJECT_MISMATCH.into());
+            return out;
+        }
     };
     out.statement = STATEMENT_MATCH.into();
     out.code = None;
@@ -248,16 +279,25 @@ fn varint_len(v: u64) -> usize {
     (64 - v.max(1).leading_zeros() as usize).div_ceil(7)
 }
 
-/// The principal trust is checked for, when the statement `parsed` of `record` (signed by `key`)
-/// covers the subject of `context`: the record names the subject, the statement's form fits it,
-/// and the statement rebuilt for the current repo id, or else for one of the fork sources,
-/// equals the signed bytes. `None` otherwise.
+/// What a valid signature's statement covers.
+enum Coverage<'c> {
+    /// The subject, in the current repo or a fork source: the principal trust is checked for.
+    Covered(&'c str),
+    /// In a holder, the subject as made in this other repo, which the holder cannot verify.
+    Foreign(RepoId),
+}
+
+/// What the statement `parsed` of `record` (signed by `key`) covers in `context`: the principal
+/// trust is checked for, when the record names the subject, the statement's form fits it, and
+/// the statement rebuilt for the current repo id, or else for one of the fork sources, equals
+/// the signed bytes. In a holder, a statement that equals the one rebuilt for the other repo id
+/// it names is `Foreign`. `None` otherwise.
 fn covered<'c>(
     record: &Signature,
     parsed: &ParsedStatement<'_>,
     key: &str,
     context: &'c CheckContext,
-) -> Option<&'c str> {
+) -> Option<Coverage<'c>> {
     if record.subject != context.subject.hash() {
         return None;
     }
@@ -314,13 +354,24 @@ fn covered<'c>(
         .filter(|source| *source != context.current_repo);
     for repo in std::iter::once(context.current_repo).chain(fallback) {
         match statement(source, Some(repo), key) {
-            Ok(bytes) if bytes == record.statement => return Some(principal),
+            Ok(bytes) if bytes == record.statement => return Some(Coverage::Covered(principal)),
             Ok(_) => {}
             // the record cannot be the source of this statement for any repo id
             Err(_) => return None,
         }
     }
-    None
+    if !context.holder {
+        return None;
+    }
+    // a holder: the repo id the statement names, when it is not one already tried
+    let named: RepoId = parsed.field("repo")?.parse().ok()?;
+    if named == context.current_repo || context.source_repos.contains(&named) {
+        return None;
+    }
+    match statement(source, Some(named), key) {
+        Ok(bytes) if bytes == record.statement => Some(Coverage::Foreign(named)),
+        _ => None,
+    }
 }
 
 /// The context of `signature` in `state`: its subject, read through the typed readers, the
@@ -422,7 +473,8 @@ impl<'s> Lineage<'s> {
 /// origin value and the pass is skipped.
 pub(crate) fn repo_ids(state: &ReadState) -> Result<(RepoId, Vec<RepoId>), RdyError> {
     let current = state.repo_id()?;
-    if state.origin()?.is_none() {
+    // a holder trusts no lineage: the upload carries none (ruling task-13)
+    if state.origin()?.is_none() || is_holder(state)? {
         return Ok((current, vec![]));
     }
     #[cfg(test)]
@@ -452,7 +504,17 @@ thread_local! {
     pub(crate) static LINEAGE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The context of a signature of `subject` in `state`, with the repo ids [`repo_ids`] read.
+/// Whether `state` is a holder's.
+fn is_holder(state: &ReadState) -> Result<bool, RdyError> {
+    Ok(state.reader().mode()? == StoreMode::Holder)
+}
+
+/// The context of a signature of `subject` in `state`, with the repo ids [`repo_ids`] read. A
+/// tag's relay answer is the one its answer ref names: in a project `answer/tag:<name>`, in a
+/// holder `answer/tag-object:<hash>` (ruling task-13), as a holder may keep two tag objects of
+/// one name. The context is the log's as `state` captured it: a subject or answer whose frame
+/// lies at or after the state's log end (a batch still open, or sealed after the state was
+/// published) is not held, so a held state never follows a later write.
 pub(crate) fn subject_context(
     state: &ReadState,
     subject: &Hash,
@@ -460,14 +522,25 @@ pub(crate) fn subject_context(
     source_repos: Vec<RepoId>,
 ) -> Result<CheckContext, RdyError> {
     let reader = state.reader();
-    let subject = if reader.has_kind(kinds::LANDING, subject)? {
+    let holder = is_holder(state)?;
+    let end = state.seq();
+    let subject = if reader.has_kind_before(kinds::LANDING, subject, end)? {
         SignatureSubject::Landing {
             hash: *subject,
             record: reader.landing(subject)?,
         }
-    } else if reader.has_kind(kinds::TAG, subject)? {
+    } else if reader.has_kind_before(kinds::TAG, subject, end)? {
         let record: Tag = reader.get_typed(kinds::TAG, subject)?;
-        let answer = reader.answer_of(&format!("tag:{}", record.name))?;
+        let answer = if holder {
+            relay_answer_by_object(state, subject)?
+        } else {
+            reader.answer_of(&format!("tag:{}", record.name))?
+        };
+        // the refs are live: an answer written after the state is not its answer
+        let answer = match answer {
+            Some((h, _)) if !reader.has_kind_before(kinds::ANSWER, &h, end)? => None,
+            answer => answer,
+        };
         SignatureSubject::Tag {
             hash: *subject,
             record,
@@ -479,8 +552,28 @@ pub(crate) fn subject_context(
     Ok(CheckContext {
         subject,
         current_repo,
-        source_repos,
+        source_repos: if holder { vec![] } else { source_repos },
+        holder,
     })
+}
+
+/// A holder's relay answer of the TAG object `tag`: the answer `answer/tag-object:<tag>` names.
+fn relay_answer_by_object(
+    state: &ReadState,
+    tag: &Hash,
+) -> Result<Option<(Hash, Answer)>, RdyError> {
+    let reader = state.reader();
+    let name = answer_tag_object_ref(tag);
+    let Some(value) = reader.get_ref(&name)? else {
+        return Ok(None);
+    };
+    let bytes = <[u8; 32]>::try_from(value.as_slice()).map_err(|_| {
+        RdyError::from(StoreError::Decode(format!(
+            "answer ref {name:?} is not a hash"
+        )))
+    })?;
+    let h = Hash(bytes);
+    Ok(Some((h, reader.get_typed(kinds::ANSWER, &h)?)))
 }
 
 #[cfg(test)]

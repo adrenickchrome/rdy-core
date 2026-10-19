@@ -27,6 +27,16 @@ pub const E_NOT_FOUND: &str = "E_NOT_FOUND";
 pub const E_IO: &str = "E_IO";
 pub const E_RESERVED_VIEW: &str = "E_RESERVED_VIEW";
 pub const E_TAG_EXISTS: &str = "E_TAG_EXISTS";
+/// A sync stream record is bad (D-D2NPN; `stream_error`).
+pub const E_BAD_RECORD: &str = "E_BAD_RECORD";
+/// A sync stream record needs an object the stream does not hold.
+pub const E_UNRESOLVED_REF: &str = "E_UNRESOLVED_REF";
+/// A sync stream's trailer is missing or does not match.
+pub const E_STREAM_TRUNCATED: &str = "E_STREAM_TRUNCATED";
+/// A sync stream's purpose is not the one asked for.
+pub const E_STREAM_PURPOSE: &str = "E_STREAM_PURPOSE";
+/// A sync stream or batch belongs to another repo.
+pub const E_REPO_MISMATCH: &str = "E_REPO_MISMATCH";
 pub const E_BAD_TAG_NAME: &str = "E_BAD_TAG_NAME";
 pub const E_VERSION_ORDER: &str = "E_VERSION_ORDER";
 pub const E_BAD_NAME: &str = "E_BAD_NAME";
@@ -324,6 +334,33 @@ pub fn no_agent(cause: NoAgentCause) -> RdyError {
         format!("the SSH agent could not sign: {cause}"),
         NO_AGENT_FIX,
     )
+}
+
+/// `E_LIMIT` for a field deeper than [`rdy_model::MAX_FIELD_NESTING`] levels (final review
+/// ruling 1): refused before anything is written.
+pub fn field_nesting_limit() -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        rdy_model::field_nesting_message(),
+        rdy_model::field_nesting_fix(),
+    )
+}
+
+/// The field nesting refusal among a write's schema `issues`, if any: it keeps its own code,
+/// message and fix (`E_LIMIT`), whatever else the validation found, and lists every issue.
+pub(crate) fn nesting_refusal(issues: &[rdy_schema::Issue]) -> Option<RdyError> {
+    issues
+        .iter()
+        .any(|i| {
+            i.severity == rdy_schema::Severity::Error
+                && i.code == E_LIMIT
+                && i.message == rdy_model::field_nesting_message()
+        })
+        .then(|| {
+            let mut e = field_nesting_limit();
+            e.issues = issues.to_vec();
+            e
+        })
 }
 
 /// `E_SIG_INVALID` for the signature record `hash`.

@@ -5,6 +5,7 @@ use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, LandingRecord, Op, Role, Tag};
 use rdy_schema::Pack;
 use rdy_store::StoreError;
+use rdy_store::holder::StoreMode;
 use rdy_store::kinds::{self, BlobManifest};
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -263,41 +264,77 @@ pub(crate) fn match_prefix(candidates: &[Hash], text: &str) -> Result<Hash, RdyE
     }
 }
 
+/// One `tag/*` ref checked by the rules every store keeps (fsck): its value is a 32-byte hash
+/// naming a stored tag of the ref's own name, and that name is a valid version. Returns the
+/// version and the tag, or the problem in fsck's words.
+fn check_tag_ref(
+    reader: &rdy_store::StoreReader,
+    refname: &str,
+    value: &[u8],
+) -> Result<(semver::Version, Tag), String> {
+    let Ok(bytes) = <[u8; 32]>::try_from(value) else {
+        return Err(format!("{refname}: the ref is not a 32-byte hash"));
+    };
+    let h = Hash(bytes);
+    let tag = match reader.read_tag(&h) {
+        Ok(t) => t,
+        Err(rdy_store::StoreError::NotFound(_)) => {
+            return Err(format!(
+                "{refname} names {}, which is not in the store",
+                h.short()
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "{refname} names {}, which is not a tag: {e}",
+                h.short()
+            ));
+        }
+    };
+    if refname["tag/".len()..] != tag.name {
+        return Err(format!("{refname} holds the tag {:?}", tag.name));
+    }
+    let Ok(v) = parse_version(&tag.name) else {
+        return Err(format!("{refname}: {:?} is not a valid version", tag.name));
+    };
+    Ok((v, tag))
+}
+
+/// Whether two adjacent versions of a precedence-sorted list denote the same version; if so,
+/// fsck's problem for them.
+fn same_version(lo: (&semver::Version, &str), hi: (&semver::Version, &str)) -> Option<String> {
+    (lo.0.cmp_precedence(hi.0) == Ordering::Equal)
+        .then(|| format!("{} and {} denote the same version", lo.1, hi.1))
+}
+
+/// fsck's result for the tag problems `problems` among `good` good tags.
+fn tag_check_result(problems: Vec<String>, good: usize) -> Result<usize, RdyError> {
+    if problems.is_empty() {
+        return Ok(good);
+    }
+    Err(RdyError::new(
+        E_IO,
+        format!(
+            "{} version problem(s): {}",
+            problems.len(),
+            problems.join("; ")
+        ),
+        "a tag ref is damaged or was written outside rdy tag: restore the store from a backup",
+    ))
+}
+
 impl Rdy {
     /// Checks every `tag/*` ref (see FsckReport); `chain` is canon's landings, head first.
     pub(crate) fn check_tags(&self, chain: &[Hash]) -> Result<usize, RdyError> {
         let mut problems = vec![];
         let mut good: Vec<(semver::Version, String, usize)> = vec![];
         for (refname, value) in self.store.refs_with_prefix("tag/")? {
-            let Ok(bytes) = <[u8; 32]>::try_from(value.as_slice()) else {
-                problems.push(format!("{refname}: the ref is not a 32-byte hash"));
-                continue;
-            };
-            let h = Hash(bytes);
-            let tag = match self.store.read_tag(&h) {
+            let (v, tag) = match check_tag_ref(&self.store, &refname, &value) {
                 Ok(t) => t,
-                Err(rdy_store::StoreError::NotFound(_)) => {
-                    problems.push(format!(
-                        "{refname} names {}, which is not in the store",
-                        h.short()
-                    ));
+                Err(p) => {
+                    problems.push(p);
                     continue;
                 }
-                Err(e) => {
-                    problems.push(format!(
-                        "{refname} names {}, which is not a tag: {e}",
-                        h.short()
-                    ));
-                    continue;
-                }
-            };
-            if refname["tag/".len()..] != tag.name {
-                problems.push(format!("{refname} holds the tag {:?}", tag.name));
-                continue;
-            }
-            let Ok(v) = parse_version(&tag.name) else {
-                problems.push(format!("{refname}: {:?} is not a valid version", tag.name));
-                continue;
             };
             let Some(pos) = chain.iter().position(|c| *c == tag.landing) else {
                 problems.push(format!(
@@ -311,24 +348,34 @@ impl Rdy {
         good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
         for pair in good.windows(2) {
             let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
-            if lo.cmp_precedence(hi) == Ordering::Equal {
-                problems.push(format!("{lo_ref} and {hi_ref} denote the same version"));
+            if let Some(p) = same_version((lo, lo_ref), (hi, hi_ref)) {
+                problems.push(p);
             } else if hi_pos > lo_pos {
                 problems.push(format!("{hi_ref} names an earlier landing than {lo_ref}"));
             }
         }
-        if problems.is_empty() {
-            return Ok(good.len());
+        tag_check_result(problems, good.len())
+    }
+
+    /// A holder's `check_tags`: the same rules for each ref and for versions that denote the
+    /// same version, with the same texts. A holder has no canon and its tags name divergent
+    /// histories, so a tag's landing is not looked up in a chain and versions keep no
+    /// chronological order. Each tag's history is checked by `StoreReader::check_holder`.
+    pub(crate) fn check_holder_tags(&self) -> Result<usize, RdyError> {
+        let mut problems = vec![];
+        let mut good: Vec<(semver::Version, String)> = vec![];
+        for (refname, value) in self.store.refs_with_prefix("tag/")? {
+            match check_tag_ref(&self.store, &refname, &value) {
+                Ok((v, _)) => good.push((v, refname)),
+                Err(p) => problems.push(p),
+            }
         }
-        Err(RdyError::new(
-            E_IO,
-            format!(
-                "{} version problem(s): {}",
-                problems.len(),
-                problems.join("; ")
-            ),
-            "a tag ref is damaged or was written outside rdy tag: restore the store from a backup",
-        ))
+        good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+        for pair in good.windows(2) {
+            let ((lo, lo_ref), (hi, hi_ref)) = (&pair[0], &pair[1]);
+            problems.extend(same_version((lo, lo_ref), (hi, hi_ref)));
+        }
+        tag_check_result(problems, good.len())
     }
 
     /// Every version as (parsed version, tag), in SemVer precedence order, read from the store's
@@ -763,9 +810,26 @@ impl ReadState {
     }
 
     /// A landing in canon's chain, by full hash or unique prefix of at least 6 hex characters.
+    /// In a holder, which has no canon, a landing in the chain of one of its tags.
     pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
+        if self.canon_head.is_none() && self.reader.mode()? == StoreMode::Holder {
+            return match_prefix(&self.tag_landings()?, text);
+        }
         let chain: Vec<Hash> = self.landings()?.into_iter().map(|(h, _)| h).collect();
         match_prefix(&chain, text)
+    }
+
+    /// The distinct landings of every tag's chain, in hash order: a holder's landings.
+    /// The chains are walked together, so each landing is read once.
+    pub(crate) fn tag_landings(&self) -> Result<Vec<Hash>, RdyError> {
+        let heads: Vec<Hash> = self
+            .version_tags()?
+            .into_iter()
+            .map(|(_, t)| t.landing)
+            .collect();
+        self.reader
+            .tag_histories(&heads)
+            .map_err(crate::holder::holder_error)
     }
 
     /// scope1: like `resolve_scope`, for reads. A view must have a record (it was written,
@@ -796,6 +860,10 @@ impl ReadState {
     /// `proposal:P-x`, the latest version, or `proposal:<version hash>`), `view:<name>`, or a
     /// view name.
     pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
+        // a holder has no canon: its scopes are tags and landings only
+        if !text.starts_with("tag:") && !text.starts_with("landing:") {
+            self.refuse_holder_canon()?;
+        }
         if text == "canon" {
             return Ok(Scope::Canon);
         }
@@ -843,6 +911,9 @@ impl ReadState {
     pub fn version_position(&self, scope: &Scope) -> Result<VersionPosition, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
+        }
+        if !matches!(scope, Scope::At(_)) {
+            self.refuse_holder_canon()?;
         }
         let (key, head) = match scope {
             // the in-flight state stands where canon stands

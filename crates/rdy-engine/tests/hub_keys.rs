@@ -1,11 +1,13 @@
-#![cfg(unix)]
-// Unix only: it writes 0600 credential fixtures in private config directories. FW-XP1 Phase 4 ports it.
 //! hsa7: key bind, retire and revoke through SIG and the hub's key API (D-XXA9D, D-17AA8,
 //! D-MRQB6). Bind proves possession of the configured key with SIG's keybind statement and the
 //! caller's agent, and returns the hub's confirmation link; retire and revoke look the hub id up
 //! by fingerprint, then change it once. A fake transport records every typed request; the
 //! loopback TLS fixture checks the raw requests where the wire bytes matter. Channels order the
 //! agent wait; nothing sleeps or measures time.
+//!
+//! Its 0600 credential fixtures in private config directories go through `rdy_store::pio` (FW-XP1
+//! D-1RXEA); the expected modes are Unix modes, which FW-XP1 Phase 4 ports with the Windows privacy
+//! rules.
 
 #[path = "support/hub_tls.rs"]
 mod hub_tls;
@@ -39,6 +41,7 @@ use rdy_engine::{
 use rdy_model::Role;
 use rdy_model::signature::{StatementSource, statement};
 use rdy_schema::Issue;
+use rdy_store::pio;
 use ssh_encoding::base64::{Base64, Encoding};
 use ssh_encoding::{Decode, Encode};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
@@ -47,7 +50,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::net::TcpListener;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
@@ -218,7 +220,7 @@ struct Env {
 
 fn private_dir() -> tempfile::TempDir {
     tempfile::Builder::new()
-        .permissions(fs::Permissions::from_mode(0o700))
+        .permissions(pio::permissions(0o700))
         .tempdir()
         .unwrap()
 }
@@ -243,10 +245,12 @@ fn env(config: &str) -> Env {
     let project_dir = private_dir();
     let home = home_dir.path().to_path_buf();
     let rdy = home.join("rdy");
-    fs::DirBuilder::new().mode(0o700).create(&rdy).unwrap();
+    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
+        .create(&rdy)
+        .unwrap();
     let user_file = rdy.join("config.yaml");
     fs::write(&user_file, config).unwrap();
-    fs::set_permissions(&user_file, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&user_file, pio::permissions(0o644)).unwrap();
     let project = project_dir.path().to_path_buf();
     drop(Rdy::init(&project, "rdy-standard").unwrap());
     Env {
@@ -301,15 +305,14 @@ fn seed_at(creds: &Path, records: &[(&str, Credential)]) {
     }
     let bytes = encode_credentials(&file).unwrap();
     let tmp = creds.with_extension("seed");
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)
-        .unwrap();
+    let mut f = pio::file_mode(
+        OpenOptions::new().write(true).create(true).truncate(true),
+        0o600,
+    )
+    .open(&tmp)
+    .unwrap();
     f.write_all(&bytes).unwrap();
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&tmp, pio::permissions(0o600)).unwrap();
     fs::rename(&tmp, creds).unwrap();
 }
 

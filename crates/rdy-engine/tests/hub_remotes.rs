@@ -1,9 +1,10 @@
-#![cfg(unix)]
-// Unix only: it reads and sets file modes. FW-XP1 Phase 4 ports it.
 //! hsa6: remote configuration with no network or credential access (D-B8N21, p-38V30, p-PCXT7).
 //! A remote mutation locks the user config first, then its destination's sibling lock, rereads
 //! every settings level under the locks and saves only the destination. A row's level is its
 //! effective source; removal and mode changes touch only the selected level's entry.
+//!
+//! Its file modes go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected modes are Unix modes,
+//! which FW-XP1 Phase 4 ports with the Windows privacy rules.
 
 use rdy_engine::config_levels::{Level, effective};
 use rdy_engine::hub_config::{HubConfig, RemoteMode};
@@ -14,13 +15,12 @@ use rdy_engine::{
     E_REMOTE_EXISTS, Rdy, RdyError,
 };
 use rdy_store::fsutil::{PrivateWriteStage, with_private_write_probe_for_tests};
+use rdy_store::pio;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier};
 
@@ -35,23 +35,25 @@ const USER_FIX: &str = "set XDG_CONFIG_HOME or HOME before changing remotes";
 const SAVE: &str = "the config file could not be saved durably";
 
 fn mode(path: &Path) -> u32 {
-    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+    pio::mode_of(&fs::symlink_metadata(path).unwrap())
 }
 
 fn chmod(path: &Path, mode: u32) {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    fs::set_permissions(path, pio::permissions(mode)).unwrap();
 }
 
 /// A directory that group and others cannot write, whatever the umask.
 fn private_dir() -> tempfile::TempDir {
     tempfile::Builder::new()
-        .permissions(fs::Permissions::from_mode(0o700))
+        .permissions(pio::permissions(0o700))
         .tempdir()
         .unwrap()
 }
 
 fn mkdir(path: &Path) {
-    fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
+        .create(path)
+        .unwrap();
 }
 
 /// A project (`.rdy.yaml` and an entry at `.rdy/store`) and a user config home whose `rdy`
@@ -885,9 +887,7 @@ const UMASK_RUN: &str = "RDY_HSA6_UMASK";
 #[test]
 fn hsa6_remote_tests_pass_under_umask_002_and_022() {
     for umask in ["002", "022"] {
-        let out = Command::new("/bin/sh")
-            .args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
-            .arg(std::env::current_exe().unwrap())
+        let out = pio::under_umask(umask, &std::env::current_exe().unwrap())
             .args([
                 "hsa6_",
                 "--skip",

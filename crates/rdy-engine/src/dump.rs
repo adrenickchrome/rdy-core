@@ -1,12 +1,16 @@
 //! `rdy dump` (plan Dump and load; D-69AY3, D-D2NPN, D-FR0C4): the whole project as one
 //! stream of the current dump format, 2 (`rdy_store::dump`). It holds the published log's
 //! sealed batches, byte for byte, and the closed set of project files (F5): `.rdy.yaml`,
-//! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A frame whose
+//! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A holder's dump
+//! (D-BPYN8) holds no project file: it reads neither `.rdy.yaml` nor `.rdy/packs`, and its
+//! header and batches are the same as a project's. A frame whose
 //! payload an applied redaction removed travels as its dropped record: its original header, its
 //! apply and its residue, never its bytes (plan Redaction, D-3M81W).
 //!
 //! A dump is atomic at the target: it writes `<out>.partial-<pid>`, syncs it, and hard-links it
-//! to `out`, so `out` is a complete dump or nothing. It never overwrites a file.
+//! to `out`, so `out` is a complete dump or nothing. It never overwrites a file. A dump is of one
+//! redaction epoch: a state read before a removal, or one whose removal lands during the dump, is
+//! `E_REDACTED_STATE`, and nothing is placed (TASK-293).
 use crate::config_levels::PROJECT_FILE;
 use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_IO, RdyError};
 use crate::handle::io;
@@ -19,6 +23,7 @@ use rdy_store::dump::{
 };
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::fsutil::sync_dir;
+use rdy_store::holder::StoreMode;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, ErrorKind, Write};
@@ -90,7 +95,7 @@ impl ReadState {
             ));
         }
         inside_rdy(self.root(), dir, out)?;
-        let files = project_files(self.root())?;
+        let files = self.dump_files()?;
         let totals = place(out, DUMP_CMD, |partial, file| {
             self.write_dump(BufWriter::new(file), &files)
                 .and_then(|(buf, t)| {
@@ -112,12 +117,29 @@ impl ReadState {
         })
     }
 
+    /// The project files this dump carries: a project's closed set, and none for a holder (it
+    /// has no config file and no pack directory, and neither is read).
+    fn dump_files(&self) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
+        match self.reader().mode()? {
+            StoreMode::Holder => Ok(Vec::new()),
+            StoreMode::Project => project_files(self.root()),
+        }
+    }
+
     /// Writes the whole dump into `w` and returns `w`, flushed (a dump, and a clone's stream).
+    ///
+    /// The dump belongs to this state's redaction epoch (TASK-293): a state read before a
+    /// removal, or one whose removal lands while the batches are written, is `E_REDACTED_STATE`.
+    /// The epoch is checked before anything is written and again after the last batch, before
+    /// the trailer (so before a dump file is placed): the batches read the live removal spans,
+    /// and a removal past this state's log end would leave a dropped frame that no record of the
+    /// dump authorizes. The caller removes its partial output on any error.
     pub(crate) fn write_dump<W: Write>(
         &self,
         w: W,
         files: &[(String, Vec<u8>)],
     ) -> Result<(W, DumpTotals), RdyError> {
+        self.ensure_current_epoch()?;
         let header = DumpHeader {
             store_format: STORE_FORMAT,
             log_end: self.seq(),
@@ -141,6 +163,8 @@ impl ReadState {
         if let Some(e) = failed {
             return Err(e);
         }
+        // a removal that landed during the batches: what they read is no one epoch's
+        self.ensure_current_epoch()?;
         read?;
         w.finish().map_err(dest)
     }
@@ -347,6 +371,10 @@ fn exists(out: &Path, cmd: &str) -> RdyError {
         "pick another path, or remove the file",
     )
 }
+
+#[cfg(test)]
+#[path = "dump_epoch_tests.rs"]
+mod epoch_tests;
 
 #[cfg(test)]
 mod tests {

@@ -11,7 +11,8 @@ use crate::allowed_signers::{AllowedSigners, read_allowed_signers};
 use crate::config_levels::{SIGNING_AGENT_KEY, SIGNING_KEY, effective, user_file_from_env};
 use crate::read_state::ReadState;
 use crate::signature_check::{
-    Lineage, PRESENCE_ABSENT, SIGNED_INVALID, STATEMENT_MISMATCH, SignatureCheck,
+    Lineage, PRESENCE_ABSENT, SIGNED_INVALID, STATEMENT_FOREIGN_REPO, STATEMENT_MISMATCH,
+    SignatureCheck,
 };
 use crate::signing_config::{SignMode, SigningConfig};
 use crate::signing_crypto::{SigningAgent, blob_fingerprint, blob_type, key_fingerprint};
@@ -256,12 +257,16 @@ pub fn signature_states(state: &ReadState) -> Result<Value, RdyError> {
 /// The text of one signature check: `signed <kind> <valid|invalid> by <key> (<key type>), key
 /// <trusted|unknown>, presence <present|absent>`. An invalid signature prints `E_SIG_INVALID`
 /// in place of its key trust; a valid one whose statement does not match ends with `, statement
-/// mismatch`. An unreadable kind, key or key type prints `unknown`.
+/// mismatch`. A holder's valid signature of another project (`foreign_repo`) prints `signed in
+/// another project (<repo id>): not verified here` in place of its key trust. An unreadable
+/// kind, key or key type prints `unknown`.
 pub fn signature_line(check: &Value) -> String {
     let word = |k: &str| check[k].as_str().unwrap_or("unknown");
     let signed = word("signed");
     let middle = if signed == SIGNED_INVALID {
         E_SIG_INVALID.to_string()
+    } else if check["statement"].as_str() == Some(STATEMENT_FOREIGN_REPO) {
+        foreign_repo_text(word("foreign_repo"))
     } else {
         format!("key {}", word("trust"))
     };
@@ -276,6 +281,21 @@ pub fn signature_line(check: &Value) -> String {
         line.push_str(", statement mismatch");
     }
     line
+}
+
+/// What a holder shows for a valid signature made in the project `repo` (a repo id): it cannot
+/// verify it, as it holds no fork history (ruling task-13).
+pub fn foreign_repo_text(repo: &str) -> String {
+    format!("signed in another project ({repo}): not verified here")
+}
+
+/// The fsck text line of a holder's signatures of another project, when there are any: `<n>
+/// signatures signed in another project: not verified here`.
+pub fn foreign_signatures_line(report: &Value) -> Option<String> {
+    let n = report["foreign_signatures"].as_u64().filter(|n| *n > 0)?;
+    Some(format!(
+        "{n} signatures signed in another project: not verified here"
+    ))
 }
 
 /// The lines of a list of checks, each indented `indent` spaces; `signed: no` for an empty list.

@@ -1147,7 +1147,8 @@ impl Store {
     /// acceptance change, if any. None when the landing lands no carrier.
     ///
     /// The carriers are found from the landing's changes and the derived carrier-to-request map.
-    /// Then, for every carrier:
+    /// The landing's `checks` must be exactly their requests, sorted and without repeats (empty
+    /// with no carrier), or `Refused`. Then, for every carrier:
     ///
     /// - the landing is a person's approval (the closed test of O19: an Approver, and either
     ///   Local with no relay fields or Relayed with both), or `RedactionHuman`;
@@ -1177,6 +1178,17 @@ impl Store {
             if let Some(r) = self.redaction_for_carrier(c)? {
                 found.push((*c, r));
             }
+        }
+        // the landing names exactly its requests, sorted (until M3d defines check-result
+        // objects, every entry of `checks` is a request)
+        let mut named: Vec<Hash> = found.iter().map(|(_, r)| *r).collect();
+        named.sort();
+        named.dedup();
+        if landing.checks != named {
+            return Err(refused(format!(
+                "a landing must name exactly the redaction requests it applies in checks, sorted: it names {:?} and applies {named:?}",
+                landing.checks
+            )));
         }
         if found.is_empty() {
             return Ok(None);

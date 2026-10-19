@@ -22,10 +22,13 @@ pub mod engine;
 mod error;
 pub mod events;
 pub mod factsheet;
+pub mod formats;
 mod fsck;
 mod gate;
 mod handle;
 mod history;
+pub mod history_facts;
+mod holder;
 pub mod hub_config;
 pub mod hub_credentials;
 pub mod hub_http;
@@ -64,6 +67,10 @@ pub mod signing_config;
 pub mod signing_crypto;
 pub mod signing_read;
 pub mod site_scope;
+pub mod stream_check;
+pub mod stream_error;
+pub mod stream_export;
+pub mod stream_take;
 pub mod suggest;
 pub mod tensions;
 pub mod testkit;
@@ -130,8 +137,8 @@ pub use view_query::{
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ResolveResult, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{
-    LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult, editorial_class,
-    json_to_field, parse_justification, parse_op, parse_ops,
+    JsonFieldError, LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult,
+    editorial_class, json_to_field, parse_justification, parse_op, parse_ops,
 };
 
 pub use config::{
@@ -140,8 +147,8 @@ pub use config::{
 pub use engine::{Engine, Local, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{
-    FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads, project_pack,
-    resolve_pack,
+    FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,
+    pack_source_reads_on_this_thread, project_pack, resolve_pack,
 };
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};

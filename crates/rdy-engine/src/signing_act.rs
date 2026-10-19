@@ -621,6 +621,8 @@ fn sign_act(
         subject: attempt.act.subject(),
         current_repo: attempt.repo,
         source_repos: vec![],
+        // a new signature is checked as made here: never as another project's
+        holder: false,
     };
     attempt
         .wants
@@ -914,6 +916,7 @@ pub fn run_sign(
         subject: context.subject.clone(),
         current_repo: current,
         source_repos: vec![],
+        holder: false,
     };
     let signed_by = session.provenance();
     let mut signed = vec![];

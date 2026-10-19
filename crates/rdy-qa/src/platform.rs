@@ -78,6 +78,13 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
+/// A command that runs the POSIX shell script `script` (`sh -c`), for a stub child process.
+pub fn shell_script(script: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", script]);
+    cmd
+}
+
 /// A command that does nothing and succeeds (`true`).
 pub fn no_op_command() -> Command {
     Command::new("true")
@@ -361,6 +368,22 @@ mod tests {
         symlink(&target, &link).expect("symlink");
         assert_eq!(std::fs::read_link(&link).expect("read_link"), target);
         assert!(no_op_command().status().expect("run true").success());
+    }
+
+    #[test]
+    fn ha1_a_shell_script_command_runs_its_script() {
+        let out = shell_script("read l; printf '%s|%s' \"$l\" done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.take().expect("stdin").write_all(b"line\n")?;
+                c.wait_with_output()
+            })
+            .expect("run the script");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "line|done");
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! The project's metadata refs (store format 12): `meta/store_format`, `meta/repo_id` and
-//! `meta/origin`. Only the store writes a `meta/` ref: a new store's first batch, a load's
-//! upgrade batch (`Ingest::upgrade`) and a clone's origin batch (`Store::put_origin`).
+//! `meta/origin`, and from store format 15 a holder's `meta/store_mode` (`crate::holder`). Only
+//! the store writes a `meta/` ref: a new store's first batch, a load's upgrade batch
+//! (`Ingest::upgrade`) and a clone's origin batch (`Store::put_origin`).
 use crate::Store;
 use crate::error::StoreError;
 use crate::format::REF_STORE_FORMAT;
+use crate::holder::REF_STORE_MODE;
 use crate::store::{StoreReader, batch_open};
 use rdy_model::{Hash, RepoId};
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,7 @@ pub const FIRST_REPO_ID_STORE_FORMAT: u32 = 12;
 const NO_REPO_ID: &str = "meta/repo_id is missing; load the project from a dump with this rdy";
 
 /// The meta refs this rdy knows (closed), in the order the fsck text names them.
-const KNOWN: [&str; 3] = [REF_STORE_FORMAT, REF_REPO_ID, REF_ORIGIN];
+const KNOWN: [&str; 4] = [REF_STORE_FORMAT, REF_REPO_ID, REF_ORIGIN, REF_STORE_MODE];
 
 /// Where a clone came from (D-C8C70): the source's repo id, its newest version and its canon
 /// head when the clone was made. `fork`: the clone took a new repo id (D-DAGNB `forked_from`).
@@ -80,38 +82,40 @@ impl StoreReader {
             .transpose()
     }
 
-    /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the three, in
+    /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the four, in
     /// name order; (2) `meta/repo_id`, when present, holds 16 bytes; (3) `meta/repo_id` is present
     /// (RULING F2: a load gives an older log one); (4) `meta/origin`, when present, decodes;
-    /// (5) it names this repo id when `fork` is false and another one when it is true. The first
-    /// failure is returned. Part of `check_objects`; a clone runs it alone before it writes its
-    /// origin (ruling task-5).
+    /// (5) it names this repo id when `fork` is false and another one when it is true; (6) every
+    /// ref of the indexed log meets the rules of the mode the log's first batch set, in log
+    /// order (`crate::holder`); (7) that mode is the index's (`meta/store_mode`), and a holder's
+    /// refs are all in its families. The first failure is returned. Part of
+    /// `check_objects`; a clone runs it alone before it writes its origin (ruling task-5).
     pub fn check_meta(&self) -> Result<(), StoreError> {
         for (name, _) in self.refs_with_prefix(META_REF)? {
             if !KNOWN.contains(&name.as_str()) {
                 return Err(bad(format!(
-                    "{name:?} is not a meta ref this rdy knows (meta/store_format, meta/repo_id, meta/origin)"
+                    "{name:?} is not a meta ref this rdy knows (meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
                 )));
             }
         }
         let Some(r) = self.repo_id()? else {
             return Err(bad(NO_REPO_ID));
         };
-        let Some(o) = self.origin()? else {
-            return Ok(());
-        };
-        if !o.fork && o.repo_id != r {
-            return Err(bad(format!(
-                "meta/origin names repo {} for a clone, but meta/repo_id is {r}",
-                o.repo_id
-            )));
+        if let Some(o) = self.origin()? {
+            if !o.fork && o.repo_id != r {
+                return Err(bad(format!(
+                    "meta/origin names repo {} for a clone, but meta/repo_id is {r}",
+                    o.repo_id
+                )));
+            }
+            if o.fork && o.repo_id == r {
+                return Err(bad(format!(
+                    "meta/origin names this repo {r} as the repo it was forked from"
+                )));
+            }
         }
-        if o.fork && o.repo_id == r {
-            return Err(bad(format!(
-                "meta/origin names this repo {r} as the repo it was forked from"
-            )));
-        }
-        Ok(())
+        let creation = self.check_ref_history()?;
+        self.check_mode_against(creation)
     }
 }
 

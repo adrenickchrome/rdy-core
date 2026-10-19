@@ -18,7 +18,8 @@
 //! Then, unless the options stop after preparation, one sealed landing batch:
 //!
 //! 1. the proposal of the view's included changes;
-//! 2. the snapshot and the landing, which carries the approval proof;
+//! 2. the snapshot and the landing, which carries the approval proof and names the requests of
+//!    the carriers it lands in `checks`, sorted (as `land_atomic` records them);
 //! 3. the proposing view's rebase op, then the refs (canon, the proposal, the view head);
 //! 4. one REDACTION_APPLY per request, in request-hash order, binding the landing hash, the
 //!    request hash and the report hash;
@@ -651,6 +652,13 @@ pub fn authorized_batch_fixture(
     let state_bytes = enc(&state);
     let sid = Hash::of(&state_bytes);
     let p = &opts.proof;
+    // a removal landing names its requests, sorted, as `land_atomic` records them
+    let mut checks: Vec<Hash> = included
+        .iter()
+        .filter_map(|c| store.redaction_for_carrier(c).unwrap())
+        .collect();
+    checks.sort();
+    checks.dedup();
     let mut landing = LandingRecord {
         proposal: pid,
         prev: canon,
@@ -658,7 +666,7 @@ pub fn authorized_batch_fixture(
         approved_by: p.approved_by.clone(),
         changes: included.clone(),
         chosen: None,
-        checks: vec![],
+        checks,
         assurance: p.assurance,
         relayed_by: p.relayed_by.clone(),
         relay_evidence: p.relay_evidence.clone(),

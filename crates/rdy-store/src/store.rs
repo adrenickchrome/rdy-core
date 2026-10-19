@@ -2,17 +2,18 @@ use crate::error::StoreError;
 use crate::fileid::FileId;
 use crate::format::{self, Format};
 use crate::fsutil;
+use crate::holder::{Creation, FirstBatch, RefRules, RefWrite, StoreMode, Walk};
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
 use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
-    CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
+    CrashPoint, HEADER, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
 use crate::transition::Transitions;
 use crate::view::ViewOp;
 use rdy_model::{
-    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot, Tracking,
+    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, RepoId, StateSnapshot, Tracking,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::cmp::Reverse;
@@ -155,6 +156,9 @@ pub struct Store {
     /// checkpoint may make it durable, and the close removes it. The next open rebuilds it from
     /// the log, and a reindex rebuilds it at once.
     stale_index: bool,
+    /// What the log's first sealed batch set (store format 15): the store's mode, which the ref
+    /// rules of every write and replay follow, and where that batch ends.
+    creation: Creation,
 }
 
 /// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
@@ -375,6 +379,9 @@ struct Faults {
     checkpoint: bool,
     /// The next replay fails before it indexes this frame (counting from 0).
     replay_after: Option<u64>,
+    /// Called by a take before it reads and appends each new record, with the records appended
+    /// so far (`on_take_append_for_tests`).
+    take_append: Option<Box<dyn FnMut(u64) + Send>>,
 }
 
 /// Frames for one `write`: `(kind, payload)` pairs, in write order.
@@ -382,6 +389,20 @@ pub(crate) type Frames = Vec<(u8, Vec<u8>)>;
 
 pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
+}
+
+/// Checks one chunk of blob `h` against the length `put_blob` cuts there, with `left` bytes of
+/// the blob still due: every chunk but the last is a full chunk. Returns the bytes due after it;
+/// any other length is `Decode` (`blob {h} has a chunk of {len} bytes where {want} are due`).
+/// The one rule a blob read, the fsck and a holder's take keep.
+pub fn check_chunk_len(h: &Hash, left: u64, len: u64) -> Result<u64, StoreError> {
+    let want = left.min(CHUNK as u64);
+    if len != want {
+        return Err(StoreError::Decode(format!(
+            "blob {h} has a chunk of {len} bytes where {want} are due"
+        )));
+    }
+    Ok(left - want)
 }
 
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
@@ -489,6 +510,34 @@ impl Drop for Store {
     }
 }
 
+/// What the opened log's first sealed batch set: its mode and where it ends, read from the
+/// origin to the first marker.
+fn read_creation(log: &SegmentLog) -> Result<Creation, StoreError> {
+    let mut first = FirstBatch::default();
+    let walked = log.for_each_view(ORIGIN, |_, v, next| {
+        match first.frame(v.kind, v.payload, next) {
+            Ok(true) => Err(Walk::Done),
+            Ok(false) => Ok(()),
+            Err(e) => Err(Walk::Failed(e)),
+        }
+    });
+    match walked {
+        Ok(()) | Err(Walk::Done) => Ok(first.creation(log.end())),
+        Err(Walk::Failed(e)) => Err(e),
+    }
+}
+
+/// The refusal of a holder's creation where a store, or anything else, already is.
+fn already_exists(dir: &Path) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "{} already holds something: a holder is created only in an empty directory",
+            dir.display()
+        ),
+    ))
+}
+
 /// Frames a catch-up applies to the index in one commit.
 pub const CATCH_UP_CHUNK: usize = 1000;
 
@@ -502,11 +551,16 @@ struct CatchUp {
 /// Replays the frames of `log` from `from` to its end into `index`, applying their entries every
 /// `CATCH_UP_CHUNK` frames, so it never holds more than one chunk. The commits are not durable.
 /// `fail_after` is a test fault: the replay fails before it indexes that frame (counting from 0).
+///
+/// Every ref replayed meets the holder rules (`crate::holder::RefRules`) of the mode the log's
+/// first batch set: `rules` are those of the log before `from` (`RefRules::of_log`), so a batch
+/// that `from` cuts is judged whole at its marker.
 fn replay_into(
     log: &SegmentLog,
     index: &Index,
     from: Location,
     fail_after: Option<u64>,
+    mut rules: RefRules,
 ) -> Result<CatchUp, StoreError> {
     let end = log.end();
     let mut done = CatchUp::default();
@@ -517,12 +571,22 @@ fn replay_into(
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
         }
+        rules.on_frame(loc, v.kind, v.payload)?;
         // the redaction rows come from the validated stream only: an apply the bootstrap did not
         // validate is never a row, and a removed payload's entries come from its residue
         if v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc) {
             return Err(StoreError::corrupt_at(loc));
         }
         entries.extend(match v.payload {
+            // a request's spans are the log's own: a holder's come from its approvals
+            Some(payload) if v.kind == kinds::REDACTION => vec![
+                IndexEntry::Object {
+                    kind: v.kind,
+                    hash: v.hash,
+                    loc,
+                },
+                auth.request_entry(v.hash, payload)?,
+            ],
             Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload)?,
             None => auth.entries_for_hole(v.kind, v.hash, loc)?,
         });
@@ -572,7 +636,28 @@ impl Store {
         };
         format::write_format_file(dir, Format::CURRENT)?;
         synced.push(dir.to_path_buf());
-        Store::open_current_format(dir, synced, None)
+        Store::open_current_format(dir, synced, None, None)
+    }
+
+    /// Creates a holder store (D-BPYN8) with repo id `repo_id`, in a directory that does not
+    /// exist or is wholly empty; a directory holding anything is `StoreError::Io` of kind
+    /// `AlreadyExists`, and nothing is written into it. The holder's first sealed batch holds its
+    /// format, its repo id and its mode (`meta/store_mode` = `holder`), then a checkpoint makes
+    /// the index durable. No origin is written. `FORMAT` is written last, so a crash before it
+    /// leaves a directory that no open accepts, never a project: retry in a new directory. The
+    /// store holds its lock as any open store does.
+    pub fn create_holder(dir: &Path, repo_id: RepoId) -> Result<Store, StoreError> {
+        let mut synced = match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_dir() && std::fs::read_dir(dir)?.next().is_none() => vec![],
+            Ok(_) => return Err(already_exists(dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fsutil::create_dir_durable(dir)?,
+            Err(e) => return Err(e.into()),
+        };
+        synced.push(dir.to_path_buf());
+        let mut store = Store::open_current_format(dir, synced, None, Some(repo_id))?;
+        format::write_format_file(dir, Format::CURRENT)?;
+        store.synced.push(dir.to_path_buf());
+        Ok(store)
     }
 
     /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
@@ -580,7 +665,7 @@ impl Store {
     /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         Store::check_existing(dir)?;
-        Store::open_current_format(dir, vec![], None)
+        Store::open_current_format(dir, vec![], None, None)
     }
 
     /// Opens an existing store as [`Store::open`] does, under `lock`, which the caller took on
@@ -592,7 +677,7 @@ impl Store {
         if !lock.guards(dir) {
             return Err(StoreError::Locked(dir.to_path_buf()));
         }
-        Store::open_current_format(dir, vec![], Some(lock.clone()))
+        Store::open_current_format(dir, vec![], Some(lock.clone()), None)
     }
 
     /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
@@ -612,11 +697,14 @@ impl Store {
         }
     }
 
-    /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).
+    /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`). With
+    /// `holder`, the log must be empty (`AlreadyExists` otherwise): its first batch makes the
+    /// store a holder with that repo id.
     fn open_current_format(
         dir: &Path,
         mut synced: Vec<PathBuf>,
         held: Option<StoreLock>,
+        holder: Option<RepoId>,
     ) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
         // dur1: each directory created here is fsynced into its parent before any write is acked.
@@ -682,6 +770,11 @@ impl Store {
         // two passes: the redaction bootstrap validates every apply from the log's own frames,
         // then the marker rule's scan hashes every payload but the authorized holes
         let (log, quarantined) = SegmentLog::open_authorized(&segments, SEGMENT_MAX, acked)?;
+        // the mode comes from the log's first batch, before any other ref is judged
+        let creation = read_creation(&log)?;
+        if holder.is_some() && log.end() != ORIGIN {
+            return Err(already_exists(dir));
+        }
         let report = OpenReport {
             quarantined,
             unclean_shutdown: unclean,
@@ -726,6 +819,7 @@ impl Store {
             held: false,
             open: None,
             stale_index: false,
+            creation,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -756,7 +850,9 @@ impl Store {
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
-        store.ensure_format()?;
+        store.ensure_format(holder)?;
+        // the index's mode and a holder's refs are the ones the log's first batch allows
+        store.check_mode_against(store.creation)?;
         // an authorized removal finishes before any reader escapes this open
         store.finish_redactions_at_open()?;
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
@@ -798,8 +894,11 @@ impl Store {
     /// rebuild), so the index is first rebuilt from the log and asked again. A new store (an
     /// empty log; `create` wrote `FORMAT` first) gets the ref and its repo id (`meta/repo_id`) as
     /// one marked batch, then a checkpoint. A crash before that leaves `FORMAT` and an empty log,
-    /// which the next open finishes.
-    fn ensure_format(&mut self) -> Result<(), StoreError> {
+    /// which the next open finishes. (`create_holder` writes `FORMAT` only after this.)
+    ///
+    /// With `holder`, the new store's batch is a holder's: the format, the repo id `holder`
+    /// names and `meta/store_mode`.
+    fn ensure_format(&mut self, holder: Option<RepoId>) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
                 segment: 0,
@@ -824,17 +923,33 @@ impl Store {
             }
             None => {
                 // one batch of the format and the repo id (D-DAGNB): set_refs refuses meta/ refs
-                let items = self.ref_items(vec![
+                let mut refs = vec![
                     (
                         format::REF_STORE_FORMAT.into(),
                         format::encode_u32(Format::CURRENT.store_format),
                     ),
                     (
                         crate::meta::REF_REPO_ID.into(),
-                        crate::meta::encode_repo_id(&rdy_model::RepoId::new()),
+                        crate::meta::encode_repo_id(&holder.unwrap_or_else(RepoId::new)),
                     ),
-                ]);
-                self.write(items)?;
+                ];
+                // a holder's mode is the creation's (D-BPYN8): this batch is the only place
+                if holder.is_some() {
+                    refs.push((
+                        crate::holder::REF_STORE_MODE.into(),
+                        crate::holder::HOLDER_MODE.to_vec(),
+                    ));
+                }
+                let items = self.ref_items(refs);
+                self.write_refs(items, RefWrite::Unchecked)?;
+                self.creation = Creation {
+                    mode: if holder.is_some() {
+                        StoreMode::Holder
+                    } else {
+                        StoreMode::Project
+                    },
+                    end: self.log.end(),
+                };
                 // a new store is durable from its first open
                 self.checkpoint()?;
             }
@@ -941,6 +1056,7 @@ impl Store {
         // the store's checked redaction writers write one) or an item that would bring back a
         // removed hash is refused with the batch still open, and nothing poisoned
         crate::redaction::refuse_redaction_kinds(&last)?;
+        self.check_refs(&last, RefWrite::Public)?;
         self.refuse_removed(&last)?;
         self.check_new_signatures(&last)?;
         // a held batch that holds a redaction apply seals through the apply hook, which never
@@ -1101,25 +1217,37 @@ impl Store {
     /// If `indexed_upto` is not a frame start in this log, the index is not trustworthy: it is set
     /// aside and the whole log is replayed into an empty one. Any other failure is returned with
     /// the index in place.
+    ///
+    /// The ref rules (`crate::holder`) judge the log, not the index: a holder's catch-up first
+    /// walks the log up to `indexed_upto`, even with nothing left to replay, then replays with
+    /// those rules. A project's rules hold no state across frames (a mode ref is refused outside
+    /// the first batch, which sets none), and any mode ref the index holds fails the open's
+    /// `check_mode_against`, so a project's catch-up skips that walk.
     fn catch_up(&mut self) -> Result<CatchUp, StoreError> {
         let from = self.index().indexed_upto()?;
         let end = self.log.end();
-        if from >= end {
-            return Ok(CatchUp::default());
-        }
-        if self.index_point_unusable(from, end)? {
+        if from < end && self.index_point_unusable(from, end)? {
             // close the file before it is renamed
             let shared = self.drop_index().expect("the store is open until close");
             let path = self.dir.join("index.redb");
             set_aside(&path)?;
             self.set_index(shared, Index::open(&path)?);
             self.report.index_rebuilt = true;
-            return self.replay_from(Location {
-                segment: 0,
-                offset: 0,
-            });
+            return self.replay_from(ORIGIN, RefRules::new(self.creation));
         }
-        self.replay_from(from)
+        let rules = match self.creation.mode {
+            StoreMode::Project => RefRules::new(self.creation),
+            StoreMode::Holder => RefRules::of_log(
+                self.segments(),
+                &self.log.authorization().holes,
+                self.creation,
+                from.min(end),
+            )?,
+        };
+        if from >= end {
+            return Ok(CatchUp::default());
+        }
+        self.replay_from(from, rules)
     }
 
     /// True if the frame at `from` (before the end of the log and of its segment) cannot be read:
@@ -1145,9 +1273,9 @@ impl Store {
         Ok(from.offset < len && !self.log.frame_readable(from)?)
     }
 
-    fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
+    fn replay_from(&mut self, from: Location, rules: RefRules) -> Result<CatchUp, StoreError> {
         let fail_after = self.faults.replay_after.take();
-        let done = replay_into(&self.log, self.index(), from, fail_after)?;
+        let done = replay_into(&self.log, self.index(), from, fail_after, rules)?;
         // the replayed frames are in the log, not yet in the durable index
         self.checkpoint()?;
         Ok(done)
@@ -1191,7 +1319,13 @@ impl Store {
         let fail_after = self.faults.replay_after.take();
         // an error at any step, the open of the temp included, removes the temp
         let built = Index::open(&tmp).and_then(|ix| {
-            replay_into(&self.log, &ix, ORIGIN, fail_after)?;
+            replay_into(
+                &self.log,
+                &ix,
+                ORIGIN,
+                fail_after,
+                RefRules::new(self.creation),
+            )?;
             // durable before it becomes the index
             ix.checkpoint()?;
             crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
@@ -1231,9 +1365,38 @@ impl Store {
     /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
     /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
     /// chunk, nor a change that embeds a removed block version. Nothing is written then.
+    ///
+    /// The mode ref is never written (`store mode cannot change`); in a holder, a ref outside its
+    /// families, or an `answer/tag-object:` ref, is refused (`crate::holder`).
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        self.write_refs(items, RefWrite::Public)
+    }
+
+    /// `write` with the ref rules `how` names.
+    fn write_refs(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        how: RefWrite,
+    ) -> Result<Vec<Hash>, StoreError> {
         crate::redaction::refuse_redaction_kinds(&items)?;
-        self.write_guarded(items)
+        self.write_checked(items, how)
+    }
+
+    /// The take's write (Task 11 is its caller): `write`, where a holder's
+    /// `answer/tag-object:<hash>` names a TAG object in `items` or in the store (O11).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn write_take(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.write_refs(items, RefWrite::Take)
+    }
+
+    /// The ref rules of a write or seal of `items`, before anything is appended.
+    fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
+        crate::holder::check_ref_writes(self.creation.mode, items, how, |h| {
+            self.has_kind(kinds::TAG, h)
+        })
     }
 
     /// `write` for the store's own checked writers: any kind, with the removed-hash refusal.
@@ -1241,9 +1404,19 @@ impl Store {
         &mut self,
         items: Vec<(u8, Vec<u8>)>,
     ) -> Result<Vec<Hash>, StoreError> {
+        self.write_checked(items, RefWrite::Public)
+    }
+
+    /// `write_guarded` with the ref rules `how` names.
+    fn write_checked(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        how: RefWrite,
+    ) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
             return Err(self.poisoned_err());
         }
+        self.check_refs(&items, how)?;
         // a held batch that holds a redaction apply takes only its seal: its TRANSITION is the
         // last data frame, and no copy of the content it removes can join it before the seal
         if self.held
@@ -1614,7 +1787,13 @@ impl Store {
     /// `answer/` or `pending/` ref is refused: only `put_answer` writes one, with its answer
     /// (plan Decision intake). A `meta/` ref is refused: only the store writes one (plan Export
     /// and clone, `crate::meta`).
+    ///
+    /// The mode and holder ref rules (`crate::holder`) come before those refusals, so their exact
+    /// errors are the same here as through `write` and the seals: `meta/store_mode` is `store
+    /// mode cannot change`, and a ref a holder never holds is `a holder store cannot write ref`.
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
+        let items = self.ref_items(refs.clone());
+        self.check_refs(&items, RefWrite::Public)?;
         if let Some((name, _)) = refs
             .iter()
             .find(|(name, _)| name.starts_with(crate::review::DISMISS_REF))
@@ -1671,7 +1850,6 @@ impl Store {
                 "ref {name:?} is project metadata: only the store writes meta/ refs"
             )));
         }
-        let items = self.ref_items(refs);
         self.write(items)?;
         Ok(())
     }
@@ -1683,7 +1861,7 @@ impl Store {
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<(), StoreError> {
         let items = self.ref_items(refs);
-        self.write(items)?;
+        self.write_refs(items, RefWrite::Unchecked)?;
         Ok(())
     }
 
@@ -1924,6 +2102,13 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some())
     }
 
+    /// Whether the log holds an object of `kind` with hash `h` before `end` (a published
+    /// state's log end): [`StoreReader::has_kind`] less a frame of a batch that is still open or
+    /// was sealed after that state. An index lookup that reads no frame.
+    pub fn has_kind_before(&self, kind: u8, h: &Hash, end: Location) -> Result<bool, StoreError> {
+        Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
+    }
+
     /// Object frames read so far by `get_raw` and `get_kind`.
     #[doc(hidden)]
     pub fn frames_read(&self) -> u64 {
@@ -2002,9 +2187,55 @@ impl StoreReader {
         Ok(out)
     }
 
+    /// Checks blob `h` by the rules a read keeps (`read_blob`), keeping no chunk: true when every
+    /// rule holds, false when an authorized removal masks the manifest or a chunk (the removal's
+    /// own checks cover it). Any other failure is the read's.
+    ///
+    /// `lens` holds the length of each chunk already read, across every blob one check reaches:
+    /// a chunk is read once, however many positions or manifests list it, and each position is
+    /// checked against its length.
+    pub(crate) fn check_blob(
+        &self,
+        h: &Hash,
+        lens: &mut HashMap<Hash, u64>,
+    ) -> Result<bool, StoreError> {
+        let m = match self.blob_manifest(h) {
+            Ok(m) => m,
+            Err(StoreError::Redacted { .. }) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let mut left = m.len;
+        for c in &m.chunks {
+            let len = match lens.get(c) {
+                Some(&len) => len,
+                None => {
+                    let len = self.blob_chunk(c)?.len() as u64;
+                    lens.insert(*c, len);
+                    len
+                }
+            };
+            left = check_chunk_len(h, left, len)?;
+        }
+        Ok(true)
+    }
+
     /// Validates the manifest-kind object at `h` against what `put_blob` writes, then hands each
     /// chunk to `sink` in order. Nothing is read before the manifest is known to be canonical.
     fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
+        let m = self.blob_manifest(h)?;
+        let mut left = m.len;
+        for c in &m.chunks {
+            let bytes = self.blob_chunk(c)?;
+            left = check_chunk_len(h, left, bytes.len() as u64)?;
+            sink(&bytes);
+        }
+        Ok(())
+    }
+
+    /// The manifest of blob `h`, checked as `put_blob` writes it: a manifest-kind object, its own
+    /// canonical encoding, with no masked manifest or chunk, and the chunk count its length
+    /// gives. No chunk is read.
+    fn blob_manifest(&self, h: &Hash) -> Result<BlobManifest, StoreError> {
         let payload = match self.get_kind(kinds::BLOB_MANIFEST, h) {
             Ok(p) => p,
             // kind1: an object of another kind with this hash is never the blob
@@ -2036,27 +2267,17 @@ impl StoreReader {
                 m.len
             )));
         }
-        let mut left = m.len;
-        for c in &m.chunks {
-            // the chunk-kind object, or failing that any object with the chunk's hash: a chunk
-            // written before kind1 may have deduped into a block or snapshot of the same bytes,
-            // and the hash proves the bytes
-            let bytes = match self.get_kind(kinds::BLOB_CHUNK, c) {
-                Err(StoreError::NotFound(_)) => self.get_raw(c)?.1,
-                r => r?,
-            };
-            // every chunk but the last is a full chunk, as `put_blob` cuts them
-            let want = left.min(CHUNK as u64);
-            if bytes.len() as u64 != want {
-                return Err(StoreError::Decode(format!(
-                    "blob {h} has a chunk of {} bytes where {want} are due",
-                    bytes.len()
-                )));
-            }
-            left -= want;
-            sink(&bytes);
+        Ok(m)
+    }
+
+    /// The bytes of chunk `c`: the chunk-kind object, or failing that any object with the
+    /// chunk's hash. A chunk written before kind1 may have deduped into a block or snapshot of
+    /// the same bytes, and the hash proves the bytes.
+    fn blob_chunk(&self, c: &Hash) -> Result<Vec<u8>, StoreError> {
+        match self.get_kind(kinds::BLOB_CHUNK, c) {
+            Err(StoreError::NotFound(_)) => Ok(self.get_raw(c)?.1),
+            r => r,
         }
-        Ok(())
     }
 
     /// The change that carried `version` into canon: of its producers, the one whose landing was
@@ -2627,6 +2848,11 @@ impl Store {
     /// after-apply-sync failpoint before its first zero write (the live writer reaches it right
     /// after its sync).
     fn finish(&mut self, at_open: bool) -> Result<RedactionCounts, StoreError> {
+        self.finish_erasing(at_open).map(|(c, _)| c)
+    }
+
+    /// `finish`, and whether it erased anything (and so rebuilt the index).
+    fn finish_erasing(&mut self, at_open: bool) -> Result<(RedactionCounts, bool), StoreError> {
         let auth = Arc::clone(self.log.authorization());
         let mut counts = auth.counts();
         let mut affected: BTreeSet<u32> = BTreeSet::new();
@@ -2644,12 +2870,12 @@ impl Store {
             affected.insert(loc.segment);
         }
         if affected.is_empty() {
-            return Ok(counts);
+            return Ok((counts, false));
         }
         self.log.sync_segments(&affected)?;
         crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
         self.reindex()?;
-        Ok(counts)
+        Ok((counts, true))
     }
 
     /// Reads and hash-checks every frame as `verify` does, reading the authorized holes as frames
@@ -2698,6 +2924,7 @@ impl Store {
             ));
         }
         crate::redaction_io::refuse_oversized_records(&items)?;
+        self.check_refs(&items, RefWrite::Public)?;
         self.refuse_removed(&items)?;
         self.check_new_signatures(&items)?;
         let (_, batch) = self.dedupe(items)?;
@@ -2866,6 +3093,238 @@ impl Store {
             Ok(c) => Ok(c),
             Err(_) => Err(self.pending_failure()),
         }
+    }
+
+    /// Takes every batch file of one upload into this holder as one sealed batch (hub p-97JVE,
+    /// f-NE0Z4; D-BPYN8: closure and tag in one batch). The checks before anything is written
+    /// are `crate::take_batch`'s: each file alone, the union over the holder, the root against
+    /// `target`, SIG's subject rule, the root's closure, every new removal's portable proof and
+    /// every local copy it removes, uncovered embeddings, then `check` (the caller's validation,
+    /// once, under this store's lock), then the receiver caps. A refusal writes nothing.
+    ///
+    /// The batch holds every record the holder lacks, in canonical order (each read again from
+    /// its file and checked against what was indexed: changed input is `input changed during
+    /// take` and its bytes are rolled back), each approved drop as its original header and zeros,
+    /// then the chosen tag's refs, then one marker and one sync. A batch that changes the
+    /// holder's removal authorization is checked once more by the holder's own bootstrap before
+    /// its sync; from the sync on, it is authorized: the epoch advances for a new apply, every
+    /// local copy is erased and the index is rebuilt, and a failure there is `RedactionPending`
+    /// (the next open finishes it) and never rolls the batch back. A take with nothing to write
+    /// returns the log's end with zero counts and writes no marker.
+    pub fn take_batches<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::UploadTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::UploadFacts,
+        ) -> Result<crate::take_batch::TagChoice, E>,
+    ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        crate::take_batch::check_input_bounds(files.len(), target).map_err(TakeError::Stream)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.held || self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a take")));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+            },
+            files,
+            target,
+            check,
+        )?;
+        drop(reader);
+        self.seal_take(files, plan)
+    }
+
+    /// Writes a prepared take (see [`Store::take_batches`]).
+    fn seal_take<E>(
+        &mut self,
+        files: &[File],
+        plan: crate::take_batch::Plan,
+    ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{BatchTaken, TakeError};
+        let taken = |end, frames| BatchTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: plan.redacted_objects,
+            end,
+            tag_hash: plan.tag_hash,
+            tag: plan.tag.clone(),
+        };
+        if plan.writes.is_empty() && plan.refs.is_empty() {
+            return Ok(BatchTaken {
+                redacted_objects: 0,
+                ..taken(self.log.end(), 0)
+            });
+        }
+        let refs = self.ref_items(plan.refs.clone());
+        // an answer ref may name a TAG object the plan writes in this batch (the root)
+        crate::holder::check_ref_writes(self.creation.mode, &refs, RefWrite::Take, |h| {
+            let key = crate::object_refs::ObjectKey {
+                kind: kinds::TAG,
+                hash: *h,
+            };
+            Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(kinds::TAG, h)?)
+        })?;
+        let epoch = if plan.new_applies {
+            Some(
+                self.shared
+                    .epoch
+                    .load(Ordering::Acquire)
+                    .checked_add(1)
+                    .ok_or(StoreError::RedactionPending)?,
+            )
+        } else {
+            None
+        };
+        let before = self.log.end();
+        let appended = self.append_take(files, &plan, &refs);
+        let (frames, entries) = match appended {
+            Ok(a) => a,
+            Err(e) => {
+                self.roll_back(before);
+                return Err(e);
+            }
+        };
+        // a batch that changes the removal authorization is judged by the holder's own
+        // bootstrap over the log it makes, before it is synced
+        let auth = if plan.redaction {
+            match crate::redaction_import::bootstrap_holder(self.log.readers()) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    self.roll_back(before);
+                    return Err(TakeError::Store(e));
+                }
+            }
+        } else {
+            None
+        };
+        self.log.crash_point(CrashPoint::BeforeSync);
+        if let Err(e) = self.log.sync() {
+            self.roll_back(before);
+            return Err(TakeError::Store(e.into()));
+        }
+        self.log.crash_point(CrashPoint::AfterSync);
+        let n = frames.len() as u64;
+        let Some(auth) = auth else {
+            let indexed = if self.take_index_fault() {
+                Err(StoreError::Db("injected index failure".into()))
+            } else {
+                self.index().apply(&entries, self.log.end())
+            };
+            if let Err(e) = indexed {
+                // as a failed write: nothing past `before` is acknowledged
+                self.roll_back(before);
+                return Err(TakeError::Store(e));
+            }
+            self.log.crash_point(CrashPoint::AfterIndex);
+            self.writes += 1;
+            self.acknowledge(frames);
+            return Ok(taken(self.log.end(), n));
+        };
+        // authorized: the batch is durable, and no error below rolls it back
+        self.log.set_authorization(Arc::new(auth));
+        if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+            return Err(TakeError::Store(self.pending_failure()));
+        }
+        if let Some(epoch) = epoch {
+            self.advance_epoch(epoch);
+        }
+        let rebuilt = match self.finish_erasing(false) {
+            Ok((_, true)) => Ok(()),
+            Ok((_, false)) => self.reindex(),
+            Err(e) => Err(e),
+        };
+        if rebuilt.is_err() {
+            return Err(TakeError::Store(self.pending_failure()));
+        }
+        self.writes += 1;
+        self.acknowledge(frames);
+        Ok(taken(self.log.end(), n))
+    }
+
+    /// Appends a prepared take's frames and marker, with no sync: each new record read again
+    /// from its file and checked, each drop as its header and zeros, then `refs`. Returns the
+    /// kind and hash of every data frame and, for a batch that leaves the authorization as it
+    /// is, their index entries. The caller rolls back on error.
+    #[allow(clippy::type_complexity)]
+    fn append_take<E>(
+        &mut self,
+        files: &[File],
+        plan: &crate::take_batch::Plan,
+        refs: &[(u8, Vec<u8>)],
+    ) -> Result<(Vec<(u8, Hash)>, Vec<IndexEntry>), crate::take_batch::TakeError<E>> {
+        use crate::take_batch::Write;
+        let size = plan
+            .writes
+            .iter()
+            .map(|w| HEADER + u64::from(w.len()))
+            .chain(refs.iter().map(|(_, p)| HEADER + p.len() as u64))
+            .sum::<u64>()
+            + HEADER
+            + crate::segment::MARKER_MAX;
+        self.log.roll_for_batch(size)?;
+        let start = self.log.end();
+        let mut frames: Vec<(u8, Hash)> = Vec::new();
+        frames
+            .try_reserve_exact(plan.writes.len() + refs.len())
+            .map_err(|_| crate::stream_error::StreamError::allocation(None, 0))?;
+        let mut entries = vec![];
+        let mut buf = Vec::new();
+        for (i, w) in plan.writes.iter().enumerate() {
+            if let Some(hook) = self.faults.take_append.as_mut() {
+                hook(i as u64);
+            }
+            match w {
+                Write::Present { key, at } => {
+                    crate::take_batch::reread(files, at, &mut buf)
+                        .map_err(|e| e.with_object(Some(*key)))?;
+                    let (loc, hash) = self.log.append_unrolled(key.kind, &buf)?;
+                    if !plan.redaction {
+                        entries.extend(entries_for_frame(key.kind, hash, loc, &buf)?);
+                    }
+                    frames.push((key.kind, hash));
+                }
+                Write::Dropped { key, len, verify } => {
+                    crate::take_batch::verify(files, verify, &mut buf)
+                        .map_err(|e| e.with_object(Some(*key)))?;
+                    self.log.append_dropped(key.kind, &key.hash, *len)?;
+                    frames.push((key.kind, key.hash));
+                }
+            }
+        }
+        for (kind, payload) in refs {
+            let (loc, hash) = self.log.append_unrolled(*kind, payload)?;
+            entries.extend(entries_for_frame(*kind, hash, loc, payload)?);
+            frames.push((*kind, hash));
+        }
+        self.log.crash_point(CrashPoint::BeforeMarker);
+        self.log
+            .append_marker(start, frames.iter().map(|(_, h)| h))?;
+        Ok((frames, entries))
+    }
+
+    /// Test hook: `hook` runs before a take reads and appends each new record, with the number
+    /// of records appended so far.
+    #[doc(hidden)]
+    pub fn on_take_append_for_tests(&mut self, hook: impl FnMut(u64) + Send + 'static) {
+        self.faults.take_append = Some(Box::new(hook));
     }
 
     /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the

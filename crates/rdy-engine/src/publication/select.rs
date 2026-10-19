@@ -7,7 +7,7 @@ use crate::error::*;
 use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
 use rdy_graph::Graph;
-use rdy_model::{BlockId, Hash, StateSnapshot, tree};
+use rdy_model::{Block, BlockId, Hash, StateSnapshot, tree};
 use rdy_schema::publication::{self as schema, Audience};
 use rdy_schema::{Issue, Pack, Severity};
 use rdy_store::StoreReader;
@@ -385,7 +385,7 @@ fn select(
             cur = p;
         }
     }
-    check_tree(m, &keep)?;
+    check_tree(&|id| m.get(id), &keep)?;
     Ok(keep)
 }
 
@@ -395,7 +395,13 @@ fn select(
 /// tree allows: a doc or folder at the top or in a folder, and any other block in a doc or in
 /// another such block. With every chain rooted, the first tree node above other content is its
 /// home doc. Iterative, and each chain is walked once.
-fn check_tree(m: &Materialized, keep: &BTreeSet<BlockId>) -> Result<(), RdyError> {
+///
+/// `get` reads a block of the state; a selection reads its source state, a snapshot check its
+/// own blocks.
+fn check_tree<'m>(
+    get: &dyn Fn(&BlockId) -> Option<&'m Block>,
+    keep: &BTreeSet<BlockId>,
+) -> Result<(), RdyError> {
     let mut rooted: BTreeSet<&BlockId> = BTreeSet::new();
     for id in keep {
         let mut chain: BTreeSet<&BlockId> = BTreeSet::new();
@@ -404,7 +410,7 @@ fn check_tree(m: &Materialized, keep: &BTreeSet<BlockId>) -> Result<(), RdyError
             if !chain.insert(cur) {
                 return Err(invalid_tree());
             }
-            match &m.get(cur).ok_or_else(invalid_tree)?.parent {
+            match &get(cur).ok_or_else(invalid_tree)?.parent {
                 Some(p) => cur = keep.get(p).ok_or_else(invalid_tree)?,
                 None => break,
             }
@@ -412,9 +418,9 @@ fn check_tree(m: &Materialized, keep: &BTreeSet<BlockId>) -> Result<(), RdyError
         rooted.extend(chain);
     }
     for id in keep {
-        let b = m.get(id).ok_or_else(invalid_tree)?;
+        let b = get(id).ok_or_else(invalid_tree)?;
         let parent = match &b.parent {
-            Some(p) => Some(m.get(p).ok_or_else(invalid_tree)?),
+            Some(p) => Some(get(p).ok_or_else(invalid_tree)?),
             None => None,
         };
         let placed = if tree::is_tree_type(&b.block_type) {
@@ -455,15 +461,10 @@ fn attachments(
 ) -> Result<Vec<AttachmentEntry>, RdyError> {
     let mut rows = vec![];
     for b in sel.iter() {
-        if b.block_type != "figure" || b.is_redacted() {
-            continue;
-        }
-        let Some(blob) = b.field_str("blob").and_then(|t| t.parse::<Hash>().ok()) else {
+        let Some(blob) = attachment_blob(b) else {
             continue;
         };
-        if rows.len() >= l.attachments {
-            return Err(limit("attachments", l.attachments, "rows"));
-        }
+        check_attachment_row(rows.len(), l)?;
         let home_doc = sel.doc_of(&b.id).ok_or_else(invalid_tree)?.id.clone();
         rows.push(AttachmentEntry {
             block: b.id.clone(),
@@ -485,6 +486,71 @@ fn attachments(
         };
     }
     Ok(rows)
+}
+
+/// The blob of `b`'s attachment row: a figure whose `blob` field is a hash. A removed figure's
+/// stub has no fields, so no row.
+fn attachment_blob(b: &Block) -> Option<Hash> {
+    if b.block_type != "figure" || b.is_redacted() {
+        return None;
+    }
+    b.field_str("blob").and_then(|t| t.parse::<Hash>().ok())
+}
+
+/// The bound on one more attachment row after `rows`.
+fn check_attachment_row(rows: usize, l: &Limits) -> Result<(), RdyError> {
+    if rows >= l.attachments {
+        return Err(limit("attachments", l.attachments, "rows"));
+    }
+    Ok(())
+}
+
+/// The graph bound of `blocks`: each block's edges and its parent edge, counted before
+/// induction.
+fn check_graph<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+    l: &Limits,
+) -> Result<(), RdyError> {
+    let mut edges = 0usize;
+    for b in blocks {
+        edges += rdy_graph::edges_of(b).len() + usize::from(b.parent.is_some());
+        if edges > l.graph {
+            return Err(limit("graph", l.graph, "edges"));
+        }
+    }
+    Ok(())
+}
+
+/// The bound on one selected doc's or folder's path.
+fn check_path(path: &str, l: &Limits) -> Result<(), RdyError> {
+    if path.len() > l.path {
+        return Err(limit("selected path", l.path, "bytes"));
+    }
+    Ok(())
+}
+
+/// The asset bounds of the distinct blobs `hashes`, in their order: each manifest's length, then
+/// the running total, before any blob byte is read. `manifest` reads a blob's manifest; None
+/// (a manifest that is missing) is skipped, and the caller owns completeness.
+fn check_assets<'h>(
+    hashes: impl IntoIterator<Item = &'h Hash>,
+    manifest: &mut dyn FnMut(&Hash) -> Result<Option<BlobManifest>, RdyError>,
+    l: &Limits,
+) -> Result<(), RdyError> {
+    let mut total = 0u64;
+    for h in hashes {
+        let Some(manifest) = manifest(h)? else {
+            continue;
+        };
+        if manifest.len > l.blob {
+            return Err(limit("blob", l.blob, "bytes"));
+        }
+        total = total.saturating_add(manifest.len);
+        if total > l.assets {
+            return Err(limit("assets", l.assets, "bytes"));
+        }
+    }
+    Ok(())
 }
 
 fn put(out: &mut Vec<u8>, part: &str) {
@@ -547,7 +613,7 @@ fn resolve_in(
             for b in m.iter() {
                 retain(&mut keep, &b.id, l)?;
             }
-            check_tree(m, &keep)?;
+            check_tree(&|id| m.get(id), &keep)?;
             (profile, keep)
         }
         Request::Named => {
@@ -583,13 +649,7 @@ fn resolve_in(
     let sel = Materialized::build(StateSnapshot { blocks: versions }, blocks);
     let chosen = profile.id.as_ref().and_then(|id| m.get(id));
     let references = references::scan(sel.iter(), chosen, m, &keep, profile.audience, l)?;
-    let mut edges = 0usize;
-    for b in sel.iter() {
-        edges += rdy_graph::edges_of(b).len() + usize::from(b.parent.is_some());
-        if edges > l.graph {
-            return Err(limit("graph", l.graph, "edges"));
-        }
-    }
+    check_graph(sel.iter(), l)?;
     let graph = Graph::build_with(sel.iter(), Arc::new(pack.tracking())).induced(&keep);
 
     // 6. attachments
@@ -607,9 +667,7 @@ fn resolve_in(
     let mut paths = BTreeMap::new();
     for b in sel.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
         let path = sel.path_of(&b.id).ok_or_else(invalid_tree)?;
-        if path.len() > l.path {
-            return Err(limit("selected path", l.path, "bytes"));
-        }
+        check_path(&path, l)?;
         paths.insert(b.id.clone(), path);
     }
     let by_id: BTreeMap<&BlockId, &SelectionEntry> = entries.iter().map(|e| (&e.id, e)).collect();
@@ -677,21 +735,140 @@ pub fn load_assets(
         .filter(|a| a.available)
         .map(|a| a.blob)
         .collect();
-    let mut total = 0u64;
-    for h in &hashes {
-        let manifest: BlobManifest = reader.get_typed(kinds::BLOB_MANIFEST, h)?;
-        if manifest.len > l.blob {
-            return Err(limit("blob", l.blob, "bytes"));
-        }
-        total = total.saturating_add(manifest.len);
-        if total > l.assets {
-            return Err(limit("assets", l.assets, "bytes"));
-        }
-    }
+    check_assets(
+        &hashes,
+        &mut |h| Ok(Some(reader.get_typed(kinds::BLOB_MANIFEST, h)?)),
+        &l,
+    )?;
     let mut out = BTreeMap::new();
     for h in hashes {
         BLOB_READS.with(|c| c.set(c.get().wrapping_add(1)));
         out.insert(h, reader.get_blob(&h)?);
     }
     Ok(out)
+}
+
+/// The resource limits of one complete snapshot, `blocks`, by the rules a publication of the
+/// whole snapshot keeps, in the same order and with the same errors: the selection bound, the
+/// document tree, the text and reference bounds, the graph, the attachment rows, the doc and
+/// folder paths, then each distinct attachment blob's length and their total. `manifest` reads a
+/// blob's manifest; None means the manifest is missing, and the caller owns completeness.
+///
+/// The references are checked as the implicit profile checks them, with the snapshot as both
+/// source and selection: every occurrence counts, and only one whose target lies outside the
+/// snapshot is a row, with its location and token bounded. So a snapshot Publications
+/// publishes whole passes, and one it refuses is refused with its error. It reads no store,
+/// pack or project path.
+#[allow(
+    dead_code,
+    reason = "the holder take calls it for every landing snapshot it takes"
+)]
+pub(crate) fn check_snapshot_limits<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+    mut manifest: impl FnMut(&Hash) -> Result<Option<BlobManifest>, RdyError>,
+) -> Result<(), RdyError> {
+    let l = limits();
+    let mut keep = BTreeSet::new();
+    let mut by_id: BTreeMap<&BlockId, &Block> = BTreeMap::new();
+    for b in blocks {
+        // two records of one block in one snapshot are no tree
+        if !retain(&mut keep, &b.id, &l)? {
+            return Err(invalid_tree());
+        }
+        by_id.insert(&b.id, b);
+    }
+    check_tree(&|id| by_id.get(id).copied(), &keep)?;
+    // the reference check of the implicit profile: the snapshot is the source and the selection
+    references::scan(
+        by_id.values().copied(),
+        None,
+        &by_id,
+        &keep,
+        Audience::Org,
+        &l,
+    )?;
+    check_graph(by_id.values().copied(), &l)?;
+    let mut rows = 0usize;
+    let mut blobs = BTreeSet::new();
+    for b in by_id.values() {
+        if let Some(blob) = attachment_blob(b) {
+            check_attachment_row(rows, &l)?;
+            rows += 1;
+            blobs.insert(blob);
+        }
+    }
+    // paths name docs and folders only, and with the tree checked a doc's or folder's ancestors
+    // are folders: the docs and folders alone give every path
+    let tree_blocks: BTreeMap<BlockId, Block> = by_id
+        .values()
+        .filter(|b| tree::is_tree_type(&b.block_type))
+        .map(|b| (b.id.clone(), (*b).clone()))
+        .collect();
+    let sel = Materialized::build(StateSnapshot::default(), tree_blocks);
+    for b in sel.iter() {
+        check_path(&sel.path_of(&b.id).ok_or_else(invalid_tree)?, &l)?;
+    }
+    check_assets(&blobs, &mut manifest, &l)
+}
+
+/// The resources of one snapshot counted block by block while its blocks are read, before each
+/// one is kept: the selection bound (one block per entry), the text and reference bounds, and
+/// the graph, each refused with the error [`check_snapshot_limits`] gives for it. A reader that
+/// charges every block before it keeps it never holds a snapshot past these bounds, whatever
+/// the snapshot's size. A snapshot over two bounds may be refused for another one first than
+/// the whole check would name; either way it is refused.
+pub(crate) struct SnapshotBudget {
+    l: Limits,
+    blocks: usize,
+    meter: references::ResourceMeter,
+    edges: usize,
+}
+
+impl SnapshotBudget {
+    pub(crate) fn new() -> SnapshotBudget {
+        let l = limits();
+        SnapshotBudget {
+            l,
+            blocks: 0,
+            meter: references::ResourceMeter::new(&l),
+            edges: 0,
+        }
+    }
+
+    /// Counts block `b`, one more entry of the snapshot.
+    pub(crate) fn charge(&mut self, b: &Block) -> Result<(), RdyError> {
+        if self.blocks >= self.l.selection {
+            return Err(limit("selection", self.l.selection, "blocks"));
+        }
+        self.blocks += 1;
+        self.meter.charge(b)?;
+        self.edges = self
+            .edges
+            .saturating_add(rdy_graph::edges_of(b).len() + usize::from(b.parent.is_some()));
+        if self.edges > self.l.graph {
+            return Err(limit("graph", self.l.graph, "edges"));
+        }
+        Ok(())
+    }
+}
+
+/// The limits block `b` keeps on its own, whatever snapshot holds it: its text bounds, its
+/// reference occurrences, its field depth and its graph edges. A block over one of them puts
+/// every snapshot that holds it over the same limit, so a receiver can refuse it at once. A
+/// reference row's location and token bounds depend on whether the snapshot holds the target,
+/// so [`check_snapshot_limits`] checks them.
+pub(crate) fn check_block_limits(b: &Block) -> Result<(), RdyError> {
+    let l = limits();
+    references::check_resources(std::iter::once(b), &l)?;
+    check_graph(std::iter::once(b), &l)
+}
+
+/// Tests only: [`check_snapshot_limits`].
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn check_snapshot_limits_for_tests<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+    manifest: impl FnMut(&Hash) -> Result<Option<BlobManifest>, RdyError>,
+) -> Result<(), RdyError> {
+    check_snapshot_limits(blocks, manifest)
 }

@@ -111,8 +111,9 @@ impl Store {
     /// proposing one is closed (when open, pinned or empty too) instead of rebased (altw1).
     ///
     /// When the landing lands redaction carriers (changes the carrier-to-request map names), the
-    /// store checks them before anything is written (`prepare_redaction_apply`): a person's
-    /// approval (`RedactionHuman` otherwise), each carrier in the proposing view's history
+    /// landing names their requests in `checks` (sorted), and the store checks them before
+    /// anything is written (`prepare_redaction_apply`): `checks` is exactly those requests, a
+    /// person's approval (`RedactionHuman` otherwise), each carrier in the proposing view's history
     /// (`Refused`), each request's targets against its frozen manifest (`Refused`), each span and
     /// residue (`RedactionCorrupt`), and every physical copy of the selected content covered: an
     /// unlisted copy before the request is `RedactionCorrupt`, one written after it
@@ -134,6 +135,25 @@ impl Store {
     /// current only while the log does not move: a caller that releases the writer between the
     /// two checks the log position itself.
     pub fn prepare_land(&self, req: LandRequest) -> Result<PreparedLanding, StoreError> {
+        self.prepare_land_with(req, &|_| {})
+    }
+
+    /// [`Store::prepare_land`] with `alter` run on the landing record before the redaction
+    /// applies are checked: the store's own refusals of a forged record are then testable.
+    #[doc(hidden)]
+    pub fn prepare_land_altered_for_tests(
+        &self,
+        req: LandRequest,
+        alter: &dyn Fn(&mut LandingRecord),
+    ) -> Result<PreparedLanding, StoreError> {
+        self.prepare_land_with(req, alter)
+    }
+
+    fn prepare_land_with(
+        &self,
+        req: LandRequest,
+        alter: &dyn Fn(&mut LandingRecord),
+    ) -> Result<PreparedLanding, StoreError> {
         // 1. the proposal, and the version check: the request names its stable's latest version
         let p = self.proposal(&req.proposal)?;
         let stable = p.stable.unwrap_or(req.proposal);
@@ -220,8 +240,19 @@ impl Store {
         let state = self.merge_checked(&prev_state, &changes)?.0.state;
         let sid = state.id();
         items.push((kinds::SNAPSHOT, encode(&state)));
-        // 6. the landing
-        let landing = LandingRecord {
+        // 6. the landing. A removal landing names the requests of the carriers it lands in
+        // `checks`, sorted and without repeats: its hash, and so a signed tag, commits to the
+        // exact removal set (D-CC90E), and no other request of the same carrier can reuse the
+        // approval. A landing with no carrier names nothing.
+        let mut checks = vec![];
+        for c in &final_changes {
+            if let Some(r) = self.redaction_for_carrier(c)? {
+                checks.push(r);
+            }
+        }
+        checks.sort();
+        checks.dedup();
+        let mut landing = LandingRecord {
             proposal: final_id,
             prev: self.canon_head()?,
             state: sid,
@@ -231,7 +262,7 @@ impl Store {
                 set: a.set,
                 member: a.member.clone(),
             }),
-            checks: vec![],
+            checks,
             assurance: if req.relay.is_some() {
                 Assurance::Relayed
             } else {
@@ -243,6 +274,7 @@ impl Store {
             rebased_from: vec![],
             evidence: req.evidence,
         };
+        alter(&mut landing);
         // 6a. the redaction applies of the carriers it lands, checked before anything is written
         let applies =
             self.prepare_redaction_apply(&p.view, &included, &landing, accept_change.as_ref())?;

@@ -286,20 +286,53 @@ pub struct WriteResult {
     pub warnings: Vec<Issue>,
 }
 
-pub fn json_to_field(v: &serde_json::Value) -> Result<FieldValue, String> {
+/// Why a JSON value is no field value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JsonFieldError {
+    /// A number that is not an integer; the text says so.
+    NotInteger(String),
+    /// The value nests deeper than [`rdy_model::MAX_FIELD_NESTING`] levels (final review
+    /// ruling 1).
+    TooDeep,
+}
+
+impl std::fmt::Display for JsonFieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JsonFieldError::NotInteger(m) => f.write_str(m),
+            JsonFieldError::TooDeep => f.write_str(&rdy_model::field_nesting_message()),
+        }
+    }
+}
+
+/// The field value of the JSON value `v`. A value deeper than [`rdy_model::MAX_FIELD_NESTING`]
+/// levels is refused when its first value past the bound is reached, before anything below it
+/// is built, so the recursion is bounded too.
+pub fn json_to_field(v: &serde_json::Value) -> Result<FieldValue, JsonFieldError> {
+    json_to_field_at(v, 1)
+}
+
+/// [`json_to_field`] of a value `level` levels down (the top-level value is level 1).
+fn json_to_field_at(v: &serde_json::Value, level: usize) -> Result<FieldValue, JsonFieldError> {
     use serde_json::Value as J;
+    if level > rdy_model::MAX_FIELD_NESTING {
+        return Err(JsonFieldError::TooDeep);
+    }
+    let down = |v| json_to_field_at(v, level + 1);
     Ok(match v {
         J::Null => FieldValue::Null,
         J::Bool(b) => FieldValue::Bool(*b),
         J::Number(n) => FieldValue::Int(n.as_i64().ok_or_else(|| {
-            format!("number {n} is not an integer: floats are not supported, write it as a string")
+            JsonFieldError::NotInteger(format!(
+                "number {n} is not an integer: floats are not supported, write it as a string"
+            ))
         })?),
         J::String(s) => FieldValue::Str(s.clone()),
-        J::Array(a) => FieldValue::List(a.iter().map(json_to_field).collect::<Result<_, _>>()?),
+        J::Array(a) => FieldValue::List(a.iter().map(down).collect::<Result<_, _>>()?),
         J::Object(o) => FieldValue::Map(
             o.iter()
-                .map(|(k, v)| Ok((k.clone(), json_to_field(v)?)))
-                .collect::<Result<_, String>>()?,
+                .map(|(k, v)| Ok((k.clone(), down(v)?)))
+                .collect::<Result<_, JsonFieldError>>()?,
         ),
     })
 }
@@ -633,8 +666,11 @@ impl Resolver<'_> {
             .map(|(k, v)| {
                 Ok((
                     k.clone(),
-                    self.value(json_to_field(&v).map_err(|e| {
-                        bad(format!("field {k}: {e}"), "write the value as a string")
+                    self.value(json_to_field(&v).map_err(|e| match e {
+                        JsonFieldError::TooDeep => crate::error::field_nesting_limit(),
+                        JsonFieldError::NotInteger(m) => {
+                            bad(format!("field {k}: {m}"), "write the value as a string")
+                        }
                     })?)?,
                 ))
             })
@@ -1225,6 +1261,9 @@ pub(crate) fn check_landed_block(pack: &Pack, m: &Materialized, b: &Block) -> Re
         }
     }
     let issues = validate_block(pack, b, b.parent.as_ref().and_then(|p| m.get(p)));
+    if let Some(e) = crate::error::nesting_refusal(&issues) {
+        return Err(e);
+    }
     if has_errors(&issues) {
         let first = issues
             .iter()
@@ -2403,6 +2442,9 @@ fn build_ops(
             }
             block.pins = pins;
         }
+    }
+    if let Some(e) = crate::error::nesting_refusal(&issues) {
+        return Err(e);
     }
     if has_errors(&issues) {
         let first = issues

@@ -1,7 +1,7 @@
 use rdy_engine::{Rdy, RdyError, Session, WriteRequest, WriteResult};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Op, Role};
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -302,12 +302,34 @@ pub fn rdy_bin() -> PathBuf {
 /// at `budget`: a hang guard, not a speed check. A command still running at `budget` is killed,
 /// reaped, and returned as an error.
 pub fn output_within(cmd: &mut Command, budget: Duration) -> Result<Output, String> {
+    output_within_stdin(cmd, None, budget)
+}
+
+/// `output_within` with `stdin` fed to the command on a thread of its own, so a command that
+/// stops reading cannot block the caller: the same `budget` bounds the feed and the run. A
+/// command that closes its stdin early is not an error, that is its answer.
+pub fn output_within_stdin(
+    cmd: &mut Command,
+    stdin: Option<&[u8]>,
+    budget: Duration,
+) -> Result<Output, String> {
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{cmd:?} did not start: {e}"))?;
+    if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        let bytes = bytes.to_vec();
+        // left behind on a kill like the drains: the dead child closes the pipe and ends it
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&bytes);
+        });
+    }
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
     let deadline = Instant::now() + budget;

@@ -1,0 +1,20 @@
+[package]
+name = "rdy-adapter"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+rdy-model.workspace = true
+rdy-store.workspace = true
+rdy-schema.workspace = true
+rdy-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -131,6 +131,10 @@ pub(crate) fn fsck(env: &Env, a: FsckArgs) -> Result<(Value, String), ErrorReply
         num(&v["landings"]),
         num(&v["versions"]),
     );
+    if let Some(line) = rdy_engine::signing_read::foreign_signatures_line(&v) {
+        t.push('\n');
+        t.push_str(&line);
+    }
     for state in v["signature_states"].as_array().into_iter().flatten() {
         t.push_str(&format!("\nlanding {}", text(&state["landing"])));
         for line in rdy_engine::signing_read::verified_lines(state) {

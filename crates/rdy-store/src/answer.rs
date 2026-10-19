@@ -76,8 +76,8 @@ fn ref_of(a: &Answer) -> String {
 }
 
 /// The rule of the record `a` breaks, if any (the targets rule aside): the one list that
-/// `put_answer` and fsck apply.
-fn invalid(a: &Answer) -> Option<String> {
+/// `put_answer`, fsck and the sync batch check apply.
+pub(crate) fn invalid(a: &Answer) -> Option<String> {
     if a.relayed_by.is_some() != a.relay_evidence.is_some() {
         return Some("relayed_by and relay_evidence must both be set or both unset".into());
     }
@@ -95,7 +95,8 @@ fn invalid(a: &Answer) -> Option<String> {
     }
 }
 
-fn damage(h: &Hash, rule: impl std::fmt::Display) -> String {
+/// The text of the rule `rule` that answer `h` breaks: `answer <h>: <rule>`.
+pub(crate) fn damage(h: &Hash, rule: impl std::fmt::Display) -> String {
     format!("answer {h}: {rule}")
 }
 
@@ -236,6 +237,14 @@ impl StoreReader {
             Ok(())
         })?;
         for (name, value) in self.refs_with_prefix(ANSWER_REF)? {
+            // a holder names its relay answers by tag object (O11), which the holder check
+            // checks: their name is not their item's. A mode that does not read is the meta
+            // check's to report.
+            if name.starts_with(crate::holder::ANSWER_TAG_OBJECT_REF)
+                && matches!(self.mode(), Ok(crate::holder::StoreMode::Holder))
+            {
+                continue;
+            }
             let (h, a) = self.answer_checked(&name, &value)?;
             if answer_ref(&a.item) != name {
                 return Err(bad_ref(&h, &name, "names an answer to another item"));

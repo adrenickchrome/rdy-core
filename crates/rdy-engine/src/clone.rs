@@ -28,6 +28,7 @@ use crate::error::{E_BAD_INPUT, E_DUMP, E_INTERNAL, E_IO, RdyError};
 use crate::load::{LoadSummary, Opened, inside_source_rdy, load_opened, open_dump, open_stream};
 use crate::read_state::ReadState;
 use rdy_model::RepoId;
+use rdy_store::holder::StoreMode;
 use rdy_store::layout::STORE_DIR;
 use rdy_store::meta::{FIRST_REPO_ID_STORE_FORMAT, Origin};
 use serde::Serialize;
@@ -140,6 +141,15 @@ pub fn clone(source: CloneSource, dir: &Path, fork: bool) -> Result<CloneSummary
     })
 }
 
+/// The refusal of a holder as a clone source: a clone is a project operation (D-BPYN8).
+fn holder_source() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "a holder dump cannot be cloned as a project",
+        "load the dump into a new holder directory",
+    )
+}
+
 /// What the origin step recorded: the origin and the clone's repo id.
 type Recorded = Option<(Origin, RepoId)>;
 
@@ -147,6 +157,10 @@ type Recorded = Option<(Origin, RepoId)>;
 /// after the store's meta check passed, which requires a repo id; a store with none would write
 /// nothing, and the load's `fsck` would refuse it.
 fn record_origin(r: &mut Rdy, fork: bool) -> Result<Recorded, RdyError> {
+    // a dump file of a holder: refused before any ref changes, and the load takes the target back
+    if r.store().mode()? == StoreMode::Holder {
+        return Err(holder_source());
+    }
     let Some(source_id) = r.store().reader().repo_id()? else {
         return Ok(None);
     };
@@ -222,6 +236,10 @@ fn from_state(
     dir: &Path,
     fork: bool,
 ) -> Result<(LoadSummary, Origin, RepoId), RdyError> {
+    // an open holder: refused before the target or the pipe is touched
+    if st.reader().mode()? == StoreMode::Holder {
+        return Err(holder_source());
+    }
     // the target must not be in the source's own .rdy, wherever a symlink puts it (C1)
     inside_source_rdy(&st.root().join(".rdy"), dir)?;
     let files = project_files(st.root())?;

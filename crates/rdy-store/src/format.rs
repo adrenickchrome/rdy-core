@@ -2,7 +2,8 @@
 //! the `FORMAT` file. A store opens only if its `FORMAT` says this binary's number (fmt3): a
 //! missing `FORMAT` (an M1 store, or any directory rdy did not create) is refused before the
 //! index or the log is opened, and so is a log that disagrees. There is no compatibility between
-//! formats, and opening never writes a `FORMAT`: only `Store::create` (rdy init) does.
+//! formats, and opening never writes a `FORMAT`: only `Store::create` (rdy init) and
+//! `Store::create_holder` do.
 use crate::error::StoreError;
 use crate::fsutil;
 use std::path::Path;
@@ -21,9 +22,12 @@ use std::path::Path;
 /// (Redaction); it moves in dump format 2, which carries removed payloads as dropped frames.
 /// 14 = kind SIGNATURE and the signature index (signing); it moves in dump format 2 as the pair
 /// (2, 14).
-pub const STORE_FORMAT: u32 = 14;
+/// 15 = ref `meta/store_mode` (a holder, D-BPYN8) and a holder's `answer/tag-object:<hash>`
+/// refs, one per relayed TAG object (O11 as amended by ruling task-13); no kind and no record
+/// encoding changes. It moves in dump format 2 as the pair (2, 15).
+pub const STORE_FORMAT: u32 = 15;
 /// The first store format that a dump carries (dl2, D-69AY3): dump format 1 carries 10 to 12,
-/// dump format 2 carries 13 and 14. A store of this format or a later one can move to a newer rdy
+/// dump format 2 carries 13 to 15. A store of this format or a later one can move to a newer rdy
 /// with dump and load; an earlier one cannot.
 pub const FIRST_DUMP_STORE_FORMAT: u32 = 10;
 /// The mirror file in the store directory.
