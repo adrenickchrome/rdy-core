@@ -35,7 +35,8 @@ impl RdyServer {
         &self,
         Parameters(p): Parameters<StreamCheckParams>,
     ) -> CallToolResult {
-        self.run("rdy_stream_check", p, tools::rdy_stream_check)
+        // a closed report: no pack notice rides on it (the notice stays for the next reply)
+        self.run_closed("rdy_stream_check", p, tools::rdy_stream_check)
             .await
     }
 }

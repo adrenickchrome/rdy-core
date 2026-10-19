@@ -5,7 +5,7 @@ use rdy_engine::Rdy;
 use rdy_engine::stream_check::check_batch;
 use rdy_model::RepoId;
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::rdy_bin;
+use rdy_qa::fixtures::{output_within_stdin, rdy_bin};
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
 use rdy_store::closure::{self, END_OF_LOG, StoreSource};
 use rdy_store::kinds;
@@ -13,9 +13,13 @@ use rdy_store::object_refs::{ObjectKey, refs_of};
 use rdy_store::sync_stream::StreamHeader;
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
+use std::time::Duration;
+
+/// A hang guard, not a speed check: a child still running at this budget is killed and reaped,
+/// and the test fails.
+const HANG_BUDGET: Duration = Duration::from_secs(120);
 
 /// A source project's batches: the whole closure of its tag, and the leaves alone.
 struct Batches {
@@ -106,31 +110,19 @@ impl Scratch {
         name.to_string()
     }
 
-    /// `rdy <args>` in the scratch directory, with `stdin` fed to it.
+    /// `rdy <args>` in the scratch directory, with `stdin` fed to it. The child is supervised:
+    /// stdin is fed and the output drained on threads, and a child still running at the budget
+    /// is killed and reaped.
     fn rdy(&self, args: &[&str], stdin: Option<&[u8]>) -> Output {
-        let mut child = Command::new(rdy_bin())
-            .args(args)
+        let mut cmd = Command::new(rdy_bin());
+        cmd.args(args)
             .current_dir(self.dir.path())
             .env_remove("RDY_ACTOR")
             .env_remove("RDY_RUN")
             .env_remove("RDY_NO_DAEMON")
             .env("HOME", self.home.path())
-            .env("XDG_CONFIG_HOME", self.home.path())
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        if let Some(bytes) = stdin {
-            let mut pipe = child.stdin.take().unwrap();
-            // a command that stops reading early closes the pipe; that is its answer
-            let _ = pipe.write_all(bytes);
-        }
-        child.wait_with_output().unwrap()
+            .env("XDG_CONFIG_HOME", self.home.path());
+        output_within_stdin(&mut cmd, stdin, HANG_BUDGET).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Every path under the scratch directory.
@@ -350,4 +342,20 @@ fn ha15_cli_check_does_not_create_rdy_or_an_index() {
         "no .rdy, store, index or run directory"
     );
     assert!(!s.dir.path().join(".rdy").exists());
+}
+
+#[test]
+fn ha15_a_child_that_stops_reading_is_killed_at_its_budget_not_waited_on() {
+    // more than a pipe holds, to a command that never reads: the feed would block a plain write
+    let mut cmd = Command::new("sleep");
+    cmd.arg("600");
+    let r = output_within_stdin(
+        &mut cmd,
+        Some(&vec![0u8; 4 << 20]),
+        Duration::from_millis(200),
+    );
+    assert!(
+        r.is_err(),
+        "a child past its budget is an error, not a wait: {r:?}"
+    );
 }

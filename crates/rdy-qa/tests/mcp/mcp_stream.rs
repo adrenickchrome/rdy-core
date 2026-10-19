@@ -8,7 +8,7 @@ use rdy_mcp::params::parse_params;
 use rdy_mcp::tools::StreamCheckParams;
 use rdy_model::{Hash, RepoId};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::rdy_bin;
+use rdy_qa::fixtures::{output_within_stdin, rdy_bin};
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_store::closure::{self, END_OF_LOG, StoreSource};
@@ -17,9 +17,13 @@ use rdy_store::object_refs::{ObjectKey, refs_of};
 use rdy_store::sync_stream::{StreamHeader, StreamWriter};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
+
+/// A hang guard, not a speed check: a child still running at this budget is killed and reaped,
+/// and the test fails.
+const HANG_BUDGET: Duration = Duration::from_secs(120);
 
 /// A served project holding the golden corpus, landed and tagged `v1.0.0`, with the batches of
 /// its tag history.
@@ -131,27 +135,21 @@ fn tree(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
 }
 
 /// `rdy --json stream check <args>` in a scratch directory with `stdin`: whether it succeeded,
-/// its stdout and its stderr. The child is supervised to its exit.
+/// its stdout and its stderr. The child is supervised: stdin is fed and the output drained on
+/// threads, and a child still running at the budget is killed and reaped.
 fn cli(args: &[&str], stdin: &[u8]) -> (bool, String, String) {
     let scratch = tempfile::tempdir().unwrap();
-    let mut child = Command::new(rdy_bin())
-        .args(["--json", "stream", "check"])
+    let mut cmd = Command::new(rdy_bin());
+    cmd.args(["--json", "stream", "check"])
         .args(args)
         .current_dir(scratch.path())
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
         .env_remove("RDY_NO_DAEMON")
         .env("HOME", scratch.path())
-        .env("XDG_CONFIG_HOME", scratch.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut pipe = child.stdin.take().unwrap();
-    let _ = pipe.write_all(stdin);
-    drop(pipe);
-    let o = child.wait_with_output().unwrap();
+        .env("XDG_CONFIG_HOME", scratch.path());
+    let o =
+        output_within_stdin(&mut cmd, Some(stdin), HANG_BUDGET).unwrap_or_else(|e| panic!("{e}"));
     (
         o.status.success(),
         String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -325,6 +323,65 @@ fn ha15_check_does_not_create_rdy_or_an_index() {
         before,
         "the check wrote no file, record, index or marker"
     );
+}
+
+#[test]
+fn ha15_a_pending_pack_notice_stays_outside_the_report() {
+    const PACK_A: &str = "name: proj\nversion: '1'\nextends: rdy-standard\n";
+    const PACK_BAD: &str = "name: proj\nversion: '1'\nextends: no-such-pack\n";
+    let src = source();
+    let dir = src.s.dir.path();
+    std::fs::write(dir.join("b.rdybatch"), &src.full).unwrap();
+    let core = serde_json::to_value(check_batch(src.full.as_slice(), None).unwrap()).unwrap();
+    let packs = dir.join(".rdy/packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let config = std::fs::read_to_string(dir.join(".rdy.yaml")).unwrap_or_default();
+    let config: String = config
+        .lines()
+        .filter(|l| !l.starts_with("pack:"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let mut c = McpClient::start_proxy(&src.s);
+    agent(&mut c, "reader");
+    let check = json!({"file": "b.rdybatch"});
+    assert_eq!(c.call("rdy_stream_check", check.clone()).ok(), core);
+
+    // a pack edit followed by a write: the pack reloads and this session has not heard of it
+    std::fs::write(packs.join("proj.yaml"), PACK_A).unwrap();
+    std::fs::write(dir.join(".rdy.yaml"), format!("pack: proj\n{config}")).unwrap();
+    let out = src.s.rdy(&["new", "doc", "fresh", "--title", "Fresh"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = c.call("rdy_stream_check", check.clone()).ok();
+    assert!(
+        v.get("notice").is_none(),
+        "the notice is not a report key: {v}"
+    );
+    assert_eq!(v, core, "exactly the core report");
+    // the notice is deferred, not lost: the next tool reply carries it
+    let next = c.call("rdy_overview", json!({})).ok();
+    assert!(
+        next["notice"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("pack_changed")),
+        "{next}"
+    );
+
+    // a standing pack error is repeated on every reply, and still stays out of the report
+    std::fs::write(packs.join("proj.yaml"), PACK_BAD).unwrap();
+    let out = src.s.rdy(&["new", "doc", "again", "--title", "Again"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for _ in 0..2 {
+        let v = c.call("rdy_stream_check", check.clone()).ok();
+        assert_eq!(v, core, "a standing pack error stays out of the report");
+    }
 }
 
 #[test]
