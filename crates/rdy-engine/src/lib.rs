@@ -63,6 +63,7 @@ pub mod site_scope;
 pub mod stream_check;
 pub mod stream_error;
 pub mod stream_export;
+pub mod stream_take;
 pub mod suggest;
 pub mod tensions;
 pub mod testkit;
