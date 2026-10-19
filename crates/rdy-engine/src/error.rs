@@ -667,3 +667,237 @@ pub const W_SITE_LAN: &str = "W_SITE_LAN";
 
 /// A file that is not a dump this rdy reads, a damaged dump, or a loaded project that fails fsck.
 pub const E_DUMP: &str = "E_DUMP";
+
+/// The session actor is not in the hub's `human:`, `agent:` or `ci:` form, an agent session
+/// claims a human actor, or a human claim is not bound to the install's account handle. Built by
+/// [`actor_unbound`].
+pub const E_ACTOR_UNBOUND: &str = "E_ACTOR_UNBOUND";
+/// A hub command names no remote, and none is the share remote or the only remote.
+pub const E_REMOTE_REQUIRED: &str = "E_REMOTE_REQUIRED";
+/// A second share remote would be added.
+pub const E_REMOTE_EXISTS: &str = "E_REMOTE_EXISTS";
+/// A hub request destination outside its install's origin fence. Built by [`upstream_origin`].
+pub const E_UPSTREAM_ORIGIN: &str = "E_UPSTREAM_ORIGIN";
+/// A hub token that fails the token form check.
+pub const E_UPSTREAM_TOKEN: &str = "E_UPSTREAM_TOKEN";
+/// The install has no usable sign-in. Built by [`upstream_auth`].
+pub const E_UPSTREAM_AUTH: &str = "E_UPSTREAM_AUTH";
+/// A hub reply outside the client contract.
+pub const E_UPSTREAM_PROTOCOL: &str = "E_UPSTREAM_PROTOCOL";
+/// A hub request that failed before the hub could act on it.
+pub const E_UPSTREAM_TRANSPORT: &str = "E_UPSTREAM_TRANSPORT";
+/// The hub refused the request.
+pub const E_UPSTREAM_REFUSED: &str = "E_UPSTREAM_REFUSED";
+/// A hub request whose reply was lost after it was sent: it may have completed.
+pub const E_UPSTREAM_UNCERTAIN: &str = "E_UPSTREAM_UNCERTAIN";
+/// A sign-in without a matching confirmation of its host card.
+pub const E_UPSTREAM_CONFIRM_HOST: &str = "E_UPSTREAM_CONFIRM_HOST";
+/// The configured CA file cannot be read or holds no usable certificate.
+pub const E_UPSTREAM_CA: &str = "E_UPSTREAM_CA";
+/// The SSH agent's proof for a key binding fails its check.
+pub const E_UPSTREAM_KEY_PROOF: &str = "E_UPSTREAM_KEY_PROOF";
+/// The hub refused the request's actor claim.
+pub const E_UPSTREAM_ACTOR_CLAIM: &str = "E_UPSTREAM_ACTOR_CLAIM";
+/// The account's hub handle changed. Built by [`upstream_handle_changed`].
+pub const W_UPSTREAM_HANDLE_CHANGED: &str = "W_UPSTREAM_HANDLE_CHANGED";
+/// The local credential was removed but the hub did not confirm the sign-out. Built by
+/// [`upstream_signout_local`].
+pub const W_UPSTREAM_SIGNOUT_LOCAL: &str = "W_UPSTREAM_SIGNOUT_LOCAL";
+
+/// The message of `E_ACTOR_UNBOUND`.
+pub const ACTOR_UNBOUND_MESSAGE: &str = "the session actor is not a hub actor";
+/// The fix of `E_ACTOR_UNBOUND`.
+pub const ACTOR_UNBOUND_FIX: &str =
+    "set an actor in the hub's human, agent or ci form, then try again";
+/// The message of `E_REMOTE_REQUIRED`.
+pub const REMOTE_REQUIRED_MESSAGE: &str = "no remote was selected";
+/// The fix of `E_REMOTE_REQUIRED`.
+pub const REMOTE_REQUIRED_FIX: &str = "pass --remote, or configure one share remote or one remote";
+/// The message of `E_REMOTE_EXISTS`.
+pub const REMOTE_EXISTS_MESSAGE: &str = "a share remote already exists";
+/// The fix of `E_REMOTE_EXISTS`.
+pub const REMOTE_EXISTS_FIX: &str = "change its mode before adding another share remote";
+/// The fix of `E_UPSTREAM_ORIGIN`.
+pub const UPSTREAM_ORIGIN_FIX: &str =
+    "use the install origin, or add its destination to hub.installs.pinned_origins";
+/// The message of `E_UPSTREAM_TOKEN`.
+pub const UPSTREAM_TOKEN_MESSAGE: &str = "the hub token has an invalid form";
+/// The fix of `E_UPSTREAM_TOKEN`.
+pub const UPSTREAM_TOKEN_FIX: &str = "sign in to this install again";
+/// The fix of `E_UPSTREAM_AUTH`.
+pub const UPSTREAM_AUTH_FIX: &str = "start a new sign-in for this install";
+/// The message of `E_UPSTREAM_PROTOCOL`.
+pub const UPSTREAM_PROTOCOL_MESSAGE: &str = "the hub reply does not match the client contract";
+/// The fix of `E_UPSTREAM_PROTOCOL`.
+pub const UPSTREAM_PROTOCOL_FIX: &str = "check that this rdy version supports the hub's API";
+/// The message of `E_UPSTREAM_TRANSPORT`.
+pub const UPSTREAM_TRANSPORT_MESSAGE: &str = "the hub request failed";
+/// The fix of `E_UPSTREAM_TRANSPORT`.
+pub const UPSTREAM_TRANSPORT_FIX: &str =
+    "check the install address, network and CA setting, then try again";
+/// The message of `E_UPSTREAM_REFUSED`.
+pub const UPSTREAM_REFUSED_MESSAGE: &str = "the hub refused the request";
+/// The fix of `E_UPSTREAM_REFUSED`.
+pub const UPSTREAM_REFUSED_FIX: &str = "check the account's access on the hub before trying again";
+/// The message of `E_UPSTREAM_UNCERTAIN`.
+pub const UPSTREAM_UNCERTAIN_MESSAGE: &str = "the hub request may have completed";
+/// The fix of `E_UPSTREAM_UNCERTAIN`.
+pub const UPSTREAM_UNCERTAIN_FIX: &str = "check its state on the hub before trying again";
+/// The message of `E_UPSTREAM_CONFIRM_HOST`.
+pub const UPSTREAM_CONFIRM_HOST_MESSAGE: &str = "the install host has not been confirmed";
+/// The fix of `E_UPSTREAM_CONFIRM_HOST`.
+pub const UPSTREAM_CONFIRM_HOST_FIX: &str =
+    "show the sign-in card, then relay the answer with its card_hash";
+/// The message of `E_UPSTREAM_CA`.
+pub const UPSTREAM_CA_MESSAGE: &str = "the configured CA file cannot be used";
+/// The fix of `E_UPSTREAM_CA`.
+pub const UPSTREAM_CA_FIX: &str =
+    "set ca_file to an absolute path to a valid PEM certificate bundle in user config";
+/// The message of `E_UPSTREAM_KEY_PROOF`.
+pub const UPSTREAM_KEY_PROOF_MESSAGE: &str = "the agent's key proof is invalid";
+/// The fix of `E_UPSTREAM_KEY_PROOF`.
+pub const UPSTREAM_KEY_PROOF_FIX: &str =
+    "check the configured public key and SSH agent, then bind again";
+/// The message of `E_UPSTREAM_ACTOR_CLAIM`.
+pub const UPSTREAM_ACTOR_CLAIM_MESSAGE: &str = "the hub refused the actor claim";
+/// The fix of `E_UPSTREAM_ACTOR_CLAIM`.
+pub const UPSTREAM_ACTOR_CLAIM_FIX: &str =
+    "check the current account handle and session actor, then try again";
+/// The message of `W_UPSTREAM_SIGNOUT_LOCAL`.
+pub const UPSTREAM_SIGNOUT_LOCAL_MESSAGE: &str =
+    "the local credential was removed; hub sign-out was not confirmed";
+/// The fix of `W_UPSTREAM_SIGNOUT_LOCAL`.
+pub const UPSTREAM_SIGNOUT_LOCAL_FIX: &str = "end the credential on the hub if it is still active";
+
+/// `E_ACTOR_UNBOUND`.
+pub fn actor_unbound() -> RdyError {
+    RdyError::new(E_ACTOR_UNBOUND, ACTOR_UNBOUND_MESSAGE, ACTOR_UNBOUND_FIX)
+}
+
+/// `E_REMOTE_REQUIRED`.
+pub fn remote_required() -> RdyError {
+    RdyError::new(
+        E_REMOTE_REQUIRED,
+        REMOTE_REQUIRED_MESSAGE,
+        REMOTE_REQUIRED_FIX,
+    )
+}
+
+/// `E_REMOTE_EXISTS`.
+pub fn remote_exists() -> RdyError {
+    RdyError::new(E_REMOTE_EXISTS, REMOTE_EXISTS_MESSAGE, REMOTE_EXISTS_FIX)
+}
+
+/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin.
+pub fn upstream_origin(install: &str) -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_ORIGIN,
+        format!("the request destination is not trusted for {install}"),
+        UPSTREAM_ORIGIN_FIX,
+    )
+}
+
+/// `E_UPSTREAM_TOKEN`. It never names the token.
+pub fn upstream_token() -> RdyError {
+    RdyError::new(E_UPSTREAM_TOKEN, UPSTREAM_TOKEN_MESSAGE, UPSTREAM_TOKEN_FIX)
+}
+
+/// `E_UPSTREAM_AUTH` for `install`, a canonical origin.
+pub fn upstream_auth(install: &str) -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_AUTH,
+        format!("sign-in is required for {install}"),
+        UPSTREAM_AUTH_FIX,
+    )
+}
+
+/// `E_UPSTREAM_PROTOCOL`. It never quotes the reply.
+pub fn upstream_protocol() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_PROTOCOL,
+        UPSTREAM_PROTOCOL_MESSAGE,
+        UPSTREAM_PROTOCOL_FIX,
+    )
+}
+
+/// `E_UPSTREAM_TRANSPORT`. It never quotes the library error.
+pub fn upstream_transport() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_TRANSPORT,
+        UPSTREAM_TRANSPORT_MESSAGE,
+        UPSTREAM_TRANSPORT_FIX,
+    )
+}
+
+/// `E_UPSTREAM_REFUSED`. It never quotes the hub's own message.
+pub fn upstream_refused() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_REFUSED,
+        UPSTREAM_REFUSED_MESSAGE,
+        UPSTREAM_REFUSED_FIX,
+    )
+}
+
+/// `E_UPSTREAM_UNCERTAIN`.
+pub fn upstream_uncertain() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_UNCERTAIN,
+        UPSTREAM_UNCERTAIN_MESSAGE,
+        UPSTREAM_UNCERTAIN_FIX,
+    )
+}
+
+/// `E_UPSTREAM_CONFIRM_HOST`.
+pub fn upstream_confirm_host() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_CONFIRM_HOST,
+        UPSTREAM_CONFIRM_HOST_MESSAGE,
+        UPSTREAM_CONFIRM_HOST_FIX,
+    )
+}
+
+/// `E_UPSTREAM_CA`. It never names the file or quotes its parser.
+pub fn upstream_ca() -> RdyError {
+    RdyError::new(E_UPSTREAM_CA, UPSTREAM_CA_MESSAGE, UPSTREAM_CA_FIX)
+}
+
+/// `E_UPSTREAM_KEY_PROOF`.
+pub fn upstream_key_proof() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_KEY_PROOF,
+        UPSTREAM_KEY_PROOF_MESSAGE,
+        UPSTREAM_KEY_PROOF_FIX,
+    )
+}
+
+/// `E_UPSTREAM_ACTOR_CLAIM`.
+pub fn upstream_actor_claim() -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_ACTOR_CLAIM,
+        UPSTREAM_ACTOR_CLAIM_MESSAGE,
+        UPSTREAM_ACTOR_CLAIM_FIX,
+    )
+}
+
+/// `W_UPSTREAM_HANDLE_CHANGED` from the validated handle `old` to the validated handle `new`, as
+/// a warning issue.
+pub fn upstream_handle_changed(old: &str, new: &str) -> Issue {
+    Issue {
+        severity: rdy_schema::Severity::Warning,
+        code: W_UPSTREAM_HANDLE_CHANGED,
+        block: None,
+        message: format!("the hub handle changed from {old} to {new}"),
+        fix: format!("use human:{new} for this install"),
+    }
+}
+
+/// `W_UPSTREAM_SIGNOUT_LOCAL`, as a warning issue.
+pub fn upstream_signout_local() -> Issue {
+    Issue {
+        severity: rdy_schema::Severity::Warning,
+        code: W_UPSTREAM_SIGNOUT_LOCAL,
+        block: None,
+        message: UPSTREAM_SIGNOUT_LOCAL_MESSAGE.to_string(),
+        fix: UPSTREAM_SIGNOUT_LOCAL_FIX.to_string(),
+    }
+}

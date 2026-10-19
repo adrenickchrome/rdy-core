@@ -1,5 +1,6 @@
 //! The MCP tools, one file per family; every item is re-exported here, at its old path.
 mod asset;
+mod auth;
 mod brief;
 mod budget;
 mod common;
@@ -12,6 +13,7 @@ mod intake;
 mod propose;
 mod read;
 mod redaction;
+mod remote;
 mod review;
 mod schema;
 mod schema_docs;
@@ -24,6 +26,7 @@ mod tension;
 mod write;
 
 pub use asset::*;
+pub use auth::*;
 pub use brief::*;
 pub use budget::*;
 pub use common::*;
@@ -36,6 +39,7 @@ pub use intake::*;
 pub use propose::*;
 pub use read::*;
 pub use redaction::*;
+pub use remote::*;
 pub use review::*;
 pub use schema::*;
 pub use schema_docs::*;

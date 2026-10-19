@@ -42,14 +42,66 @@ impl Reply {
     }
 }
 
+/// Everything a server wrote, from [`McpClient::finish`].
+#[derive(Debug, Clone)]
+pub struct Transcript {
+    /// Its exit code (`None` when killed by a signal).
+    pub code: Option<i32>,
+    /// Every stdout line, in arrival order, each ended by `\n`.
+    pub stdout: String,
+    /// Its stderr (empty when it was not piped).
+    pub stderr: String,
+}
+
+/// Each of `hidden` that one of `channels` (a name and its text) holds, as `{name}: {hidden}`,
+/// in channel order; empty when every channel is clean.
+pub fn exposed(hidden: &[&str], channels: &[(&str, &str)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, text) in channels {
+        for s in hidden {
+            if text.contains(s) {
+                out.push(format!("{name}: {s}"));
+            }
+        }
+    }
+    out
+}
+
+/// Each of `hidden` in what a server wrote (`t`: its raw stdout and its stderr) or in
+/// `project`'s daemon log (`.rdy/run/daemon.log`, which a detached daemon's stdout and stderr
+/// go to), as `{channel}: {hidden}`. Read it after the server and the daemon have exited and
+/// before the project is removed. A missing log reads as empty.
+pub fn exposed_outputs(hidden: &[&str], t: &Transcript, project: &Path) -> Vec<String> {
+    let log = rdy_daemon::RunDir::of_project(project).log_file();
+    let log = match std::fs::read(&log) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => panic!("{}: {e}", log.display()),
+    };
+    exposed(
+        hidden,
+        &[
+            ("mcp stdout", &t.stdout),
+            ("mcp stderr", &t.stderr),
+            ("daemon.log", &log),
+        ],
+    )
+}
+
 pub struct McpClient {
     child: Child,
     writer: Sender<String>,
     written: Receiver<bool>,
     lines: Receiver<String>,
-    /// The child's stderr, drained on a thread (a proxy child only; empty otherwise).
+    /// The child's stderr, drained on a thread (a child started with a piped stderr only;
+    /// empty otherwise).
     stderr: Arc<Mutex<String>>,
     stderr_drain: Option<std::thread::JoinHandle<()>>,
+    /// Every line the child wrote to stdout, as it came: replies, notifications, and lines
+    /// that are not JSON-RPC at all (which `recv` skips). `None` for a client that does not
+    /// keep its output (a long run would grow it without bound).
+    stdout: Option<Arc<Mutex<String>>>,
+    stdout_drain: Option<std::thread::JoinHandle<()>>,
     pending: Vec<Value>,
     /// The notifications (lines with a `method` and no `id`) received, in arrival order (ib10).
     notifications: Vec<Value>,
@@ -79,7 +131,23 @@ impl McpClient {
             .arg(project)
             .envs(env.iter().copied())
             .stderr(Stdio::null());
+        McpClient::launch_with(cmd, false)
+    }
+
+    /// `start_with_env` with the child's stderr kept, for a check of everything the server
+    /// writes ([`McpClient::finish`]).
+    pub fn start_capturing(project: &Path, env: &[(&str, &str)]) -> McpClient {
+        let mut cmd = Command::new(rdy_bin());
+        cmd.args(["mcp", "--no-daemon", "--project"])
+            .arg(project)
+            .envs(env.iter().copied())
+            .stderr(Stdio::piped());
         McpClient::launch(cmd)
+    }
+
+    /// `start_proxy_at` that keeps every line the proxy writes, for [`McpClient::finish`].
+    pub fn start_proxy_capturing(dir: &Path, env: &[(String, String)]) -> McpClient {
+        McpClient::launch(McpClient::proxy_command(dir, env))
     }
 
     /// `rdy mcp --project <s.dir>` as `s`'s human: the proxy to the project's daemon, which it
@@ -91,6 +159,10 @@ impl McpClient {
     /// `start_proxy` for a caller that cannot hold the `Served` (a worker thread that outlives
     /// its borrow): the project's directory and the human's environment (`Served::env_pairs`).
     pub fn start_proxy_at(dir: &Path, env: &[(String, String)]) -> McpClient {
+        McpClient::launch_with(McpClient::proxy_command(dir, env), false)
+    }
+
+    fn proxy_command(dir: &Path, env: &[(String, String)]) -> Command {
         let mut cmd = Command::new(rdy_bin());
         cmd.args(["mcp", "--project"])
             .arg(dir)
@@ -99,10 +171,17 @@ impl McpClient {
             .env_remove("RDY_NO_DAEMON")
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stderr(Stdio::piped());
-        McpClient::launch(cmd)
+        cmd
     }
 
-    fn launch(mut cmd: Command) -> McpClient {
+    /// Starts `cmd` as the server and initializes it, keeping every line it writes for
+    /// [`McpClient::finish`]. `cmd` sets its own stderr: piped to keep it, null to drop it. A
+    /// test may launch a stub server this way.
+    pub fn launch(cmd: Command) -> McpClient {
+        McpClient::launch_with(cmd, true)
+    }
+
+    fn launch_with(mut cmd: Command, keep: bool) -> McpClient {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -127,7 +206,9 @@ impl McpClient {
         });
         let out = child.stdout.take().expect("stdout");
         let (tx, rx) = channel();
-        std::thread::spawn(move || {
+        let stdout = keep.then(|| Arc::new(Mutex::new(String::new())));
+        let raw = stdout.clone();
+        let stdout_drain = std::thread::spawn(move || {
             let mut out = BufReader::new(out);
             let mut buf = Vec::new();
             loop {
@@ -140,6 +221,11 @@ impl McpClient {
                 let line = String::from_utf8_lossy(&buf)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
+                if let Some(raw) = &raw {
+                    let mut all = raw.lock().unwrap_or_else(|e| e.into_inner());
+                    all.push_str(&line);
+                    all.push('\n');
+                }
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -166,6 +252,8 @@ impl McpClient {
             lines: rx,
             stderr,
             stderr_drain,
+            stdout,
+            stdout_drain: Some(stdout_drain),
             pending: vec![],
             notifications: vec![],
             init: Value::Null,
@@ -213,6 +301,46 @@ impl McpClient {
                 Ok(None) => self.critical(&format!("the server did not exit within {budget:?}")),
                 Err(e) => self.critical(&format!("waiting for the server failed: {e}")),
             }
+        }
+    }
+
+    /// Closes the child's stdin, waits at most `budget` for it to exit, then for both of its
+    /// pipes to reach their end, and returns everything it wrote. A pipe still open after
+    /// `budget` (a grandchild holds it) is a Critical failure: its output cannot be checked, as
+    /// is a client that does not keep its output.
+    pub fn finish(mut self, budget: Duration) -> Transcript {
+        let Some(stdout) = self.stdout.clone() else {
+            self.critical(
+                "this client does not keep its output; start it with a capturing constructor",
+            );
+        };
+        self.close_stdin();
+        let end = Instant::now() + budget;
+        let code = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break status.code(),
+                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) => self.critical(&format!("the server did not exit within {budget:?}")),
+                Err(e) => self.critical(&format!("waiting for the server failed: {e}")),
+            }
+        };
+        for h in [self.stdout_drain.take(), self.stderr_drain.take()]
+            .into_iter()
+            .flatten()
+        {
+            while !h.is_finished() {
+                if Instant::now() >= end {
+                    self.critical(&format!("a pipe of the server stayed open past {budget:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = h.join();
+        }
+        let take = |m: &Arc<Mutex<String>>| m.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        Transcript {
+            code,
+            stdout: take(&stdout),
+            stderr: take(&self.stderr),
         }
     }
 
