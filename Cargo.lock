@@ -1936,6 +1936,7 @@ name = "rdy-engine"
 version = "0.10.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "crc32fast",
  "criterion",
  "ed25519-dalek",

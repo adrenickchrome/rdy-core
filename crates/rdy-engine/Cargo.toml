@@ -28,6 +28,9 @@ rustls-native-certs.workspace = true
 # same features; the transport tests' TLS fixture uses it too.
 rustls.workspace = true
 crc32fast.workspace = true
+# Publication artifacts: incremental BLAKE3 over streamed file bytes (`publication_manifest`),
+# the same digest as `Hash::of`, which needs the whole file in memory.
+blake3.workspace = true
 time.workspace = true
 # Every log record is compiled out: ureq-proto writes raw request bytes, Authorization included,
 # at trace level.

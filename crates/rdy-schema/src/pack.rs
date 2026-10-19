@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Trait {
     Normative,
@@ -18,7 +18,7 @@ pub enum Trait {
     Presentational,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldKind {
     Str,
@@ -29,7 +29,7 @@ pub enum FieldKind {
     Enum,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldDef {
     pub kind: FieldKind,
@@ -39,7 +39,7 @@ pub struct FieldDef {
     pub values: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BodyRule {
     #[default]
@@ -78,7 +78,7 @@ pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
 /// sets one is refused. Must equal `rdy_model::key::AUTO_FIELD` once AE2 merges.
 pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto"];
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockTypeDef {
     pub prefix: String,
@@ -99,7 +99,7 @@ pub struct BlockTypeDef {
     pub tracking: BTreeSet<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkeletonSection {
     pub title: String,
@@ -107,7 +107,7 @@ pub struct SkeletonSection {
     pub required: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DocTypeDef {
     #[serde(default)]
@@ -124,7 +124,7 @@ fn nav_default() -> bool {
 }
 
 /// A named part of the documentation tree, declared by path globs.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AreaDef {
     #[serde(default)]
@@ -133,7 +133,7 @@ pub struct AreaDef {
     pub paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pack {
     pub name: String,
@@ -199,7 +199,7 @@ impl CoverageDimension {
 }
 
 /// The pack's `coverage:` section. Every part is optional; a missing part takes its default.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageSettings {
     /// A whole-number weight per dimension. A missing dimension weighs 1; 0 leaves it out.
