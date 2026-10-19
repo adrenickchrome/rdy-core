@@ -222,6 +222,7 @@ fn ctx(subject: SignatureSubject) -> CheckContext {
         subject,
         current_repo: REPO,
         source_repos: vec![],
+        holder: false,
     }
 }
 
@@ -1669,4 +1670,89 @@ fn sig6_fsck_checks_all_signatures_without_agent_or_trust_file() {
         (e.code, e.message.as_str()),
         (first.code, first.message.as_str())
     );
+}
+
+/// ruling task-13: in a holder only, a signature that is valid over its subject but whose
+/// statement names a repo id other than the holder's own is `foreign_repo`, with that repo id:
+/// no error code, no trust and no warning. A signature that fails its own checks stays as it
+/// is, and a project keeps D-1ZTBP's rule.
+#[test]
+fn ha13_a_holder_shows_another_projects_signature_as_foreign() {
+    let rec = landing(Assurance::Local);
+    let subjects = [
+        (
+            ctx(tag_subject(Some((ANSWER_HASH, tag_answer(TAG_HASH))))),
+            vec![tag_sig(Key::Ed), relay_tag_sig(Key::Ed)],
+        ),
+        (
+            ctx(landing_subject(rec.clone())),
+            vec![approval_sig(&rec, Key::Ed)],
+        ),
+    ];
+    for (base, sigs) in subjects {
+        let holder = CheckContext {
+            current_repo: OTHER_REPO,
+            holder: true,
+            ..base.clone()
+        };
+        for g in &sigs {
+            // the holder of its own repo verifies it as the project does
+            let own = CheckContext {
+                holder: true,
+                ..base.clone()
+            };
+            assert_eq!(
+                statement_of(&check_signature(g, &own, None)),
+                ("match", None)
+            );
+            // a holder of another repo id: foreign, naming the signature's repo
+            let c = check_signature(g, &holder, None);
+            assert_eq!(
+                (
+                    c.signed.as_str(),
+                    c.statement.as_str(),
+                    c.trust.as_str(),
+                    c.code.as_deref(),
+                    c.foreign_repo.as_deref(),
+                ),
+                (
+                    "valid",
+                    "foreign_repo",
+                    "unknown",
+                    None,
+                    Some(REPO.to_string().as_str())
+                )
+            );
+            assert!(c.warnings.is_empty());
+            assert_eq!(json_of(&c)["foreign_repo"], REPO.to_string());
+            // a project of another repo id: a mismatch, as before
+            let project = CheckContext {
+                holder: false,
+                ..holder.clone()
+            };
+            let c = check_signature(g, &project, None);
+            assert_eq!(statement_of(&c), ("mismatch", Some(E_SIG_OBJECT_MISMATCH)));
+            assert!(json_of(&c).get("foreign_repo").is_none());
+            // another subject: a mismatch in a holder too
+            let mut other = g.clone();
+            other.subject = h(99);
+            assert_eq!(
+                statement_of(&check_signature(&other, &holder, None)),
+                ("mismatch", Some(E_SIG_OBJECT_MISMATCH))
+            );
+            // a signature that does not verify: invalid
+            let mut bad = g.clone();
+            let last = bad.sig.len() - 1;
+            bad.sig[last] ^= 1;
+            let c = check_signature(&bad, &holder, None);
+            assert_eq!(
+                (
+                    c.signed.as_str(),
+                    c.code.as_deref(),
+                    c.foreign_repo.as_deref()
+                ),
+                ("invalid", Some(E_SIG_INVALID), None)
+            );
+        }
+    }
 }

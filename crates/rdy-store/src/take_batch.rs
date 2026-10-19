@@ -33,8 +33,10 @@
 //! 7. An intact CHANGE that embeds an approved block version and that no approval covers, in the
 //!    holder or in the union, is `UncoveredChange`.
 //! 8. The caller's check (`check`) runs once, with the union and the holder as its source; its
-//!    choice selects which tag survives. With `Incoming`, the take writes `tag/<name>` and, when
-//!    the union holds exactly one relay answer of the root, `answer/tag:<name>` (O11).
+//!    choice selects which tag survives. With `Incoming`, the take writes `tag/<name>`. Either
+//!    way the root TAG is stored, and when the union holds a relay answer of the root, the take
+//!    writes `answer/tag-object:<root hash>` (O11, ruling task-13): at most one relay answer per
+//!    tag object, and never another one than the holder holds for it.
 //! 9. A holder with an approval keeps within its receiver caps (`crate::redaction_import`),
 //!    the frames, payload bytes and spans of the batch included; the marker counts only when
 //!    there is a frame to write (a complete retry writes none).
@@ -287,6 +289,13 @@ pub(crate) enum Write {
 }
 
 impl Write {
+    /// The object the frame writes.
+    pub(crate) fn key(&self) -> ObjectKey {
+        match self {
+            Write::Present { key, .. } | Write::Dropped { key, .. } => *key,
+        }
+    }
+
     /// The frame's payload bytes in the log.
     pub(crate) fn len(&self) -> u32 {
         match self {
@@ -300,7 +309,7 @@ impl Write {
 pub(crate) struct Plan {
     /// The new records, in canonical order.
     pub(crate) writes: Vec<Write>,
-    /// The refs to write (`tag/<name>`, `answer/tag:<name>`).
+    /// The refs to write (`tag/<name>`, `answer/tag-object:<hash>`).
     pub(crate) refs: Vec<(String, Vec<u8>)>,
     /// The batch changes the holder's authorization: it writes a redaction record or a drop.
     pub(crate) redaction: bool,
@@ -1136,30 +1145,6 @@ pub(crate) fn prepare<E>(
                 Some(_) => return Err(bad(Reason::InvalidHeader, root_key).into()),
                 None => refs.push((name, root_key.hash.0.to_vec())),
             }
-            // each answer read again: input changed since the checks refuses here, before any
-            // append, as an answer the holder holds is not read again by the append
-            let item = format!("tag:{}", root.name);
-            let mut relay: Vec<&ObjectKey> = Vec::new();
-            for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
-                if source
-                    .typed::<Answer>(*k)?
-                    .is_some_and(|a| a.act == AnswerAct::Tag && a.item == item)
-                {
-                    relay.push(k);
-                }
-            }
-            match relay[..] {
-                [] => {}
-                [a] => {
-                    let name = format!("{}{}", crate::holder::ANSWER_TAG_REF, root.name);
-                    if reader.get_ref(&name)?.as_deref() != Some(&a.hash.0[..]) {
-                        refs.push((name, a.hash.0.to_vec()));
-                    }
-                }
-                [_, second, ..] => {
-                    return Err(bad(Reason::OutsideTagClosure, *second).into());
-                }
-            }
             (root_key.hash, root.clone())
         }
         TagChoice::Existing { name, hash } => {
@@ -1181,6 +1166,35 @@ pub(crate) fn prepare<E>(
             }
         }
     };
+    // the root's relay answer (O11, ruling task-13): the root TAG is stored whichever tag stays
+    // the version, so its relay answer is named by the tag object, whichever choice was made.
+    // Each answer is read again: input changed since the checks refuses here, before any
+    // append, as an answer the holder holds is not read again by the append
+    let item = format!("tag:{}", root.name);
+    let mut relay: Vec<&ObjectKey> = Vec::new();
+    for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
+        if source
+            .typed::<Answer>(*k)?
+            .is_some_and(|a| a.act == AnswerAct::Tag && a.item == item)
+        {
+            relay.push(k);
+        }
+    }
+    match relay[..] {
+        [] => {}
+        [a] => {
+            let name = crate::holder::answer_tag_object_ref(&root_key.hash);
+            match reader.get_ref(&name)? {
+                Some(v) if v == a.hash.0 => {}
+                // the tag object holds another relay answer already: one per tag object
+                Some(_) => return Err(bad(Reason::OutsideTagClosure, *a).into()),
+                None => refs.push((name, a.hash.0.to_vec())),
+            }
+        }
+        [_, second, ..] => {
+            return Err(bad(Reason::OutsideTagClosure, *second).into());
+        }
+    }
     // 9. the receiver caps of a holder that holds an approval after this batch
     if redaction_after {
         // the ref frames exactly as the store salts them (`Store::ref_items`); the marker at its

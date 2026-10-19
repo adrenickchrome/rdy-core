@@ -392,8 +392,10 @@ pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
 }
 
 /// Checks one chunk of blob `h` against the length `put_blob` cuts there, with `left` bytes of
-/// the blob still due: every chunk but the last is a full chunk. Returns the bytes due after it.
-fn check_chunk_len(h: &Hash, left: u64, len: u64) -> Result<u64, StoreError> {
+/// the blob still due: every chunk but the last is a full chunk. Returns the bytes due after it;
+/// any other length is `Decode` (`blob {h} has a chunk of {len} bytes where {want} are due`).
+/// The one rule a blob read, the fsck and a holder's take keep.
+pub fn check_chunk_len(h: &Hash, left: u64, len: u64) -> Result<u64, StoreError> {
     let want = left.min(CHUNK as u64);
     if len != want {
         return Err(StoreError::Decode(format!(
@@ -1365,7 +1367,7 @@ impl Store {
     /// chunk, nor a change that embeds a removed block version. Nothing is written then.
     ///
     /// The mode ref is never written (`store mode cannot change`); in a holder, a ref outside its
-    /// families, or an `answer/tag:` ref, is refused (`crate::holder`).
+    /// families, or an `answer/tag-object:` ref, is refused (`crate::holder`).
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         self.write_refs(items, RefWrite::Public)
     }
@@ -1380,8 +1382,8 @@ impl Store {
         self.write_checked(items, how)
     }
 
-    /// The take's write (Task 11 is its caller): `write`, where a holder's `answer/tag:<name>`
-    /// stands beside `tag/<name>` in `items` or in the store (O11).
+    /// The take's write (Task 11 is its caller): `write`, where a holder's
+    /// `answer/tag-object:<hash>` names a TAG object in `items` or in the store (O11).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn write_take(
         &mut self,
@@ -1392,11 +1394,8 @@ impl Store {
 
     /// The ref rules of a write or seal of `items`, before anything is appended.
     fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
-        crate::holder::check_ref_writes(self.creation.mode, items, how, |t| {
-            Ok(self
-                .index()
-                .get_ref(&format!("{}{t}", crate::holder::TAG_REF))?
-                .is_some())
+        crate::holder::check_ref_writes(self.creation.mode, items, how, |h| {
+            self.has_kind(kinds::TAG, h)
         })
     }
 
@@ -3168,7 +3167,14 @@ impl Store {
             });
         }
         let refs = self.ref_items(plan.refs.clone());
-        self.check_refs(&refs, RefWrite::Take)?;
+        // an answer ref may name a TAG object the plan writes in this batch (the root)
+        crate::holder::check_ref_writes(self.creation.mode, &refs, RefWrite::Take, |h| {
+            let key = crate::object_refs::ObjectKey {
+                kind: kinds::TAG,
+                hash: *h,
+            };
+            Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(kinds::TAG, h)?)
+        })?;
         let epoch = if plan.new_applies {
             Some(
                 self.shared

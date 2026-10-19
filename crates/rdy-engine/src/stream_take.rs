@@ -12,12 +12,21 @@
 //!    version are damage: the take returns fsck's tag report instead of picking one.
 //! 2. Every block and blob manifest the holder lacks keeps the local limits the batch check
 //!    keeps for one record (`stream_check::check_batch`), so a take keeps no record that a batch
-//!    check refuses.
-//! 3. Every landing of the upload that the holder does not hold has its snapshot read from the
+//!    check refuses. Each such blob keeps the chunk lengths a blob read keeps, over the union
+//!    and the holder; a blob with a removed chunk, or a removed manifest, has none to judge.
+//! 3. Every landing of the upload that the holder does not hold keeps the landing rules the
+//!    holder's fsck keeps (`rdy_store::landing_field_rules`: relay, evidence and the objects it
+//!    names), and the root tag's chain keeps the chain rules (`check_holder::chain_rules`: each
+//!    change lands once, after its dependencies). These are structural rules, not the current
+//!    gate policy.
+//! 4. Every landing of the upload that the holder does not hold has its snapshot read from the
 //!    union and the holder: each entry must name a version of its own block, and the whole
 //!    snapshot must keep the Publications resource limits (`check_snapshot_limits`). A removed
 //!    block reads as its stub. No block is checked against a pack, and no approval is judged by
 //!    the current gate: a block of a type no pack knows is taken when these checks pass.
+//!
+//! A record that breaks a structural rule is `E_BAD_RECORD` with the holder fsck's own text, so
+//! no take acknowledges an upload that the holder's fsck would then refuse.
 //!
 //! The closure, the prerequisites, the removal proofs and the upload target are the store's
 //! checks (`rdy_store::take_batch`), not repeated here. After a take that wrote something, the
@@ -32,9 +41,10 @@ use crate::stream_error::{Reason, StreamError, to_rdy};
 use crate::version::parse_version;
 use crate::{Delta, Rdy};
 use rdy_model::redaction::{RedactionApply, RedactionResidue};
-use rdy_model::{Block, BlockId, Hash, LandingRecord, StateSnapshot, Tag};
+use rdy_model::{Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use rdy_schema::{Issue, Severity};
 use rdy_store::bounded;
+use rdy_store::check_holder;
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_proof::ObjectSource;
@@ -47,6 +57,7 @@ use serde::{Serialize, Serializer};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
+use std::sync::Arc;
 
 /// Where the holder's log ends after a take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -243,6 +254,7 @@ fn validate(
 ) -> Result<TagChoice, RdyError> {
     let choice = choose_tag(&facts.root, held, damage)?;
     check_records(reader, source, facts)?;
+    check_landing_rules(reader, source, facts)?;
     check_landings(reader, source, facts)?;
     Ok(choice)
 }
@@ -288,9 +300,151 @@ fn check_records(
         if !m.chunks_fit() {
             return Err(malformed());
         }
+        check_chunk_lengths(source, key.hash, &m)?;
     }
     Ok(())
 }
+
+/// The chunk lengths of blob `blob` (manifest `m`), as a blob read keeps them
+/// (`rdy_store::check_chunk_len`): each chunk is the bytes still due, at most one chunk's
+/// worth, read over the union and the holder. A blob with a removed chunk is unavailable to
+/// reads, as a removal leaves it, and has no lengths to judge.
+fn check_chunk_lengths(
+    source: &mut dyn ObjectSource,
+    blob: Hash,
+    m: &BlobManifest,
+) -> Result<(), RdyError> {
+    let mut lens = Vec::with_capacity(m.chunks.len());
+    for c in &m.chunks {
+        let key = ObjectKey {
+            kind: kinds::BLOB_CHUNK,
+            hash: *c,
+        };
+        match source.record(key).map_err(to_rdy)? {
+            Some(StreamRecord::Present { payload, .. }) => lens.push(payload.len() as u64),
+            Some(StreamRecord::Dropped { .. }) => return Ok(()),
+            None => return Err(to_rdy(StreamError::unresolved(0, 0, key))),
+        }
+    }
+    let mut left = m.len;
+    for len in lens {
+        left = rdy_store::check_chunk_len(&blob, left, len).map_err(|e| {
+            structural(
+                e,
+                ObjectKey {
+                    kind: kinds::BLOB_MANIFEST,
+                    hash: blob,
+                },
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The landing rules of every landing of the upload that the holder does not hold, and the
+/// chain rules of the root tag's chain over the union and the holder (module docs, step 3). A
+/// landing's fields are judged whether or not its snapshot is shared with another; a held
+/// landing was judged when it was taken, so its changes' dependencies are not read again.
+fn check_landing_rules(
+    reader: &StoreReader,
+    source: &mut dyn ObjectSource,
+    facts: &UploadFacts,
+) -> Result<(), RdyError> {
+    let in_union = |k: &ObjectKey| facts.objects.binary_search(k).is_ok();
+    for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
+        if reader.has_kind(kinds::LANDING, &key.hash)? {
+            continue;
+        }
+        let Some(landing) = typed::<LandingRecord>(source, *key)? else {
+            continue;
+        };
+        rdy_store::landing_field_rules(&key.hash, &landing, &mut |kind, h| {
+            let k = ObjectKey { kind, hash: *h };
+            Ok::<_, Rule>(in_union(&k) || reader.has_kind(kind, h)?)
+        })
+        .map_err(|e| e.into_rdy(*key))?;
+    }
+    let root = &facts.root;
+    let head = ObjectKey {
+        kind: kinds::LANDING,
+        hash: root.landing,
+    };
+    let chain = check_holder::tag_chain_with(&root.landing, &mut |h| {
+        let key = ObjectKey {
+            kind: kinds::LANDING,
+            hash: *h,
+        };
+        match typed::<LandingRecord>(source, key) {
+            Ok(Some(l)) => Ok(Arc::new(l)),
+            Ok(None) => Err(Rule::Other(to_rdy(StreamError::unresolved(0, 0, key)))),
+            Err(e) => Err(Rule::Other(e)),
+        }
+    })
+    .map_err(|e| e.into_rdy(head))?;
+    let refname = format!("{}{}", rdy_store::holder::TAG_REF, root.name);
+    check_holder::chain_rules(&refname, &chain, &mut |l, c| {
+        if reader.has_kind(kinds::LANDING, l)? {
+            return Ok(None);
+        }
+        let key = ObjectKey {
+            kind: kinds::CHANGE,
+            hash: *c,
+        };
+        // a removed change has no dependencies to read; its approval's checks cover it
+        typed::<Change>(source, key)
+            .map(|c| c.map(Arc::new))
+            .map_err(Rule::Other)
+    })
+    .map_err(|e| e.into_rdy(head))
+}
+
+/// A structural check's failure: a rule the record breaks (the store's `Decode` text), or any
+/// other error, which passes through.
+enum Rule {
+    Broken(StoreError),
+    Other(RdyError),
+}
+
+impl From<StoreError> for Rule {
+    fn from(e: StoreError) -> Rule {
+        match e {
+            StoreError::Decode(_) => Rule::Broken(e),
+            // a bound of the walk (`holder check exceeds ...`) is the holder's E_LIMIT
+            StoreError::Refused(_) => Rule::Other(crate::holder::holder_error(e)),
+            e => Rule::Other(e.into()),
+        }
+    }
+}
+
+impl Rule {
+    /// The engine error of this failure, a broken rule naming the object `key`.
+    fn into_rdy(self, key: ObjectKey) -> RdyError {
+        match self {
+            Rule::Broken(e) => structural(e, key),
+            Rule::Other(e) => e,
+        }
+    }
+}
+
+/// E_BAD_RECORD for the object `key`, which breaks the structural rule `e` names: the holder
+/// fsck's own text, refused before the take appends anything.
+fn structural(e: StoreError, key: ObjectKey) -> RdyError {
+    let message = match e {
+        StoreError::Decode(m) => m,
+        e => e.to_string(),
+    };
+    to_rdy(StreamError {
+        code: "E_BAD_RECORD",
+        message,
+        fix: STRUCTURE_FIX.into(),
+        record: None,
+        offset: 0,
+        object: Some(key),
+    })
+}
+
+/// The fix of a structural refusal.
+const STRUCTURE_FIX: &str = "upload the history as its source project exported it";
 
 /// `e`, an engine limit error of the record `key`, with the one issue the stream conversion
 /// gives: the same code, message and fix, naming the object.
@@ -399,19 +553,15 @@ fn check_landings(
 /// E_BAD_RECORD: snapshot `s` names `version`, a version of another block, for block `id` (the
 /// holder's fsck rule, refused before it is taken).
 fn foreign_version(s: &Hash, id: &BlockId, version: &Hash, other: &BlockId) -> RdyError {
-    to_rdy(StreamError {
-        code: "E_BAD_RECORD",
-        message: format!(
+    structural(
+        StoreError::Decode(format!(
             "snapshot {s}: block {id} names version {version}, which is a version of {other}"
-        ),
-        fix: "upload the history as its source project exported it".into(),
-        record: None,
-        offset: 0,
-        object: Some(ObjectKey {
+        )),
+        ObjectKey {
             kind: kinds::SNAPSHOT,
             hash: *s,
-        }),
-    })
+        },
+    )
 }
 
 /// Block version `version` as a read sees it: its record, or for a removed version the stub its

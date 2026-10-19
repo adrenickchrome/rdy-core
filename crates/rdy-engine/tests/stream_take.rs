@@ -1114,22 +1114,15 @@ fn sshsig(ns: &str, msg: &[u8]) -> Vec<u8> {
     out
 }
 
-#[test]
-fn ha13_holder_relay_tag_signature_checks_through_its_answer_ref() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut r, _, _) = project(&dir.path().join("src"));
-    let agent = Session::agent("agent:a".into(), Some("run-1".into()), Role::Writer).unwrap();
-    let relay = RelayInput {
-        evidence: Some("Yes, tag it.".into()),
-        ..RelayInput::default()
-    };
-    let info = r
-        .tag_as(&agent, "human:founder", &relay, true, "v1.0.0", None, None)
-        .unwrap();
-    assert!(info.relayed_by.is_some());
-    let t = tag_hash(&r, "v1.0.0");
+/// Signs the relay statement of tag `t` in `r` (its relay answer is the one `answer/tag:<name>`
+/// names in `r`) as made in repo `repo`, and stores the signature, made at `at_ms`.
+fn sign_relay(r: &mut Rdy, t: Hash, repo: RepoId, at_ms: i64) {
     let record = r.store().read_tag(&t).unwrap();
-    let (answer_hash, answer) = r.store().answer_of("tag:v1.0.0").unwrap().unwrap();
+    let (answer_hash, answer) = r
+        .store()
+        .answer_of(&format!("tag:{}", record.name))
+        .unwrap()
+        .unwrap();
     let mut blob = vec![];
     key_data().encode(&mut blob).unwrap();
     let stmt = statement(
@@ -1139,7 +1132,7 @@ fn ha13_holder_relay_tag_signature_checks_through_its_answer_ref() {
             answer_hash,
             answer: &answer,
         },
-        Some(repo(&r)),
+        Some(repo),
         &blob_fingerprint(&blob),
     )
     .unwrap();
@@ -1156,11 +1149,50 @@ fn ha13_holder_relay_tag_signature_checks_through_its_answer_ref() {
             actor: "agent:s".into(),
             run: Some("s/1".into()),
             role: Role::Writer,
-            at_ms: 1_000,
+            at_ms,
         },
     };
     r.store_mut().put_signature(&g).unwrap();
     r.seal_open().unwrap();
+}
+
+/// Tags canon's head `name` through a relay (an agent for the founder) and signs the relay
+/// statement in `r`'s own repo; returns the tag.
+fn relay_tag(r: &mut Rdy, name: &str) -> Hash {
+    let agent = Session::agent("agent:a".into(), Some("run-1".into()), Role::Writer).unwrap();
+    let relay = RelayInput {
+        evidence: Some("Yes, tag it.".into()),
+        ..RelayInput::default()
+    };
+    let info = r
+        .tag_as(&agent, "human:founder", &relay, true, name, None, None)
+        .unwrap();
+    assert!(info.relayed_by.is_some());
+    let t = tag_hash(r, name);
+    let id = repo(r);
+    sign_relay(r, t, id, 1_000);
+    t
+}
+
+/// The relay answer of tag `name` in project `r`.
+fn relay_answer(r: &Rdy, name: &str) -> Hash {
+    r.store()
+        .answer_of(&format!("tag:{name}"))
+        .unwrap()
+        .unwrap()
+        .0
+}
+
+fn checks_json(checks: &[rdy_engine::signature_check::SignatureCheck]) -> Value {
+    serde_json::to_value(checks).unwrap()
+}
+
+#[test]
+fn ha13_holder_relay_tag_signature_checks_through_its_answer_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    let t = relay_tag(&mut r, "v1.0.0");
+    let answer_hash = relay_answer(&r, "v1.0.0");
     let source = signature_checks(&r.read(), &t, None).unwrap();
     assert_eq!(source.len(), 1);
     assert_eq!(
@@ -1181,11 +1213,357 @@ fn ha13_holder_relay_tag_signature_checks_through_its_answer_ref() {
         target("v1.0.0", landing_of(&r, t)),
     )
     .unwrap();
-    assert!(refs(&h).contains(&("answer/tag:v1.0.0".to_string(), answer_hash.0.to_vec())));
-    let held = signature_checks(&h.read(), &t, None).unwrap();
+    // in a holder the relay answer is found by the tag object, not by the tag name
     assert_eq!(
-        serde_json::to_value(&held).unwrap(),
-        serde_json::to_value(&source).unwrap()
+        refs(&h),
+        vec![
+            ("tag/v1.0.0".to_string(), t.0.to_vec()),
+            (format!("answer/tag-object:{t}"), answer_hash.0.to_vec()),
+        ]
     );
+    let held = signature_checks(&h.read(), &t, None).unwrap();
+    assert_eq!(checks_json(&held), checks_json(&source));
+    h.fsck().unwrap();
+}
+
+#[test]
+fn ha13_twin_tags_of_one_version_keep_their_relay_signatures() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut a, mut b, _, _) = twins(dir.path());
+    // clones A and B of one repo, at one landing: A's plain 1.0.0, B's relayed and signed 1.0.0
+    let ta = tag(&mut a, "1.0.0");
+    let tb = relay_tag(&mut b, "1.0.0");
+    let l = landing_of(&a, ta);
+    assert_eq!(landing_of(&b, tb), l);
+    assert_ne!(ta, tb);
+    let source = signature_checks(&b.read(), &tb, None).unwrap();
+    assert_eq!(
+        (
+            source.len(),
+            source[0].signed.as_str(),
+            source[0].statement.as_str()
+        ),
+        (1, "valid", "match")
+    );
+    let (root, mut h) = holder(dir.path(), repo(&a));
+    take(
+        &mut h,
+        &files(dir.path(), "a", &[&export(&a, ta)]),
+        target("1.0.0", l),
+    )
+    .unwrap();
+    let got = take(
+        &mut h,
+        &files(dir.path(), "b", &[&export(&b, tb)]),
+        target("1.0.0", l),
+    )
+    .unwrap();
+    // the holder keeps A's tag as the version, and B's tag object with its relay answer
+    assert_eq!((got.tag.as_str(), got.tag_hash), ("1.0.0", ta));
+    let want = vec![
+        ("tag/1.0.0".to_string(), ta.0.to_vec()),
+        (
+            format!("answer/tag-object:{tb}"),
+            relay_answer(&b, "1.0.0").0.to_vec(),
+        ),
+    ];
+    assert_eq!(refs(&h), want);
+    // B's signature checks in the holder as it does in B
+    let held = signature_checks(&h.read(), &tb, None).unwrap();
+    assert_eq!(checks_json(&held), checks_json(&source));
+    h.fsck().unwrap();
+    // a repeat writes nothing
+    let again = take(
+        &mut h,
+        &files(dir.path(), "b2", &[&export(&b, tb)]),
+        target("1.0.0", l),
+    )
+    .unwrap();
+    assert!(again.unchanged, "{again:?}");
+    // durable: the reopened and reindexed holder reads the same
+    drop(h);
+    let mut h = Rdy::open_holder(&root).unwrap();
+    h.reindex().unwrap();
+    assert_eq!(refs(&h), want);
+    let held = signature_checks(&h.read(), &tb, None).unwrap();
+    assert_eq!(checks_json(&held), checks_json(&source));
+    h.fsck().unwrap();
+}
+
+#[test]
+fn ha13_holder_shows_signatures_of_another_repo_as_unverified() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    let t = relay_tag(&mut r, "v1.0.0");
+    let first = repo(&r);
+    // forked twice with the real clone API
+    let st = r.read();
+    rdy_engine::clone::clone(
+        rdy_engine::clone::CloneSource::State(&st),
+        &dir.path().join("f1"),
+        true,
+    )
+    .unwrap();
+    drop(st);
+    let f1 = Rdy::open(&dir.path().join("f1")).unwrap();
+    let st = f1.read();
+    rdy_engine::clone::clone(
+        rdy_engine::clone::CloneSource::State(&st),
+        &dir.path().join("f2"),
+        true,
+    )
+    .unwrap();
+    drop(st);
+    let mut f2 = Rdy::open(&dir.path().join("f2")).unwrap();
+    let last = repo(&f2);
+    assert_eq!(
+        BTreeSet::from([first, repo(&f1), last]).len(),
+        3,
+        "each fork has a new repo id"
+    );
+    // in the last fork the first signature verifies through the recorded fork lineage; a
+    // second signature of the same relay is made in the last fork
+    sign_relay(&mut f2, t, last, 2_000);
+    let source = signature_checks(&f2.read(), &t, None).unwrap();
+    assert_eq!(source.len(), 2);
+    assert!(
+        source
+            .iter()
+            .all(|c| (c.signed.as_str(), c.statement.as_str()) == ("valid", "match")),
+        "{source:?}"
+    );
+    f2.fsck().unwrap();
+
+    // a holder of the last fork's repo id: it holds no fork history and trusts none
+    let (_root, mut h) = holder(dir.path(), last);
+    take(
+        &mut h,
+        &files(dir.path(), "f", &[&export(&f2, t)]),
+        target("v1.0.0", landing_of(&f2, t)),
+    )
+    .unwrap();
+    let held = signature_checks(&h.read(), &t, None).unwrap();
+    assert_eq!(held.len(), 2);
+    let json = checks_json(&held);
+    for (i, check) in held.iter().enumerate() {
+        let names = check.foreign_repo.is_some();
+        if names {
+            // signed in the first project: valid over its subject, not verified here
+            assert_eq!(
+                (
+                    check.signed.as_str(),
+                    check.statement.as_str(),
+                    check.trust.as_str(),
+                    check.code.as_deref(),
+                    check.foreign_repo.as_deref(),
+                ),
+                (
+                    "valid",
+                    "foreign_repo",
+                    "unknown",
+                    None,
+                    Some(first.to_string().as_str())
+                ),
+                "{check:?}"
+            );
+            assert!(check.warnings.is_empty(), "{check:?}");
+            assert_eq!(json[i]["foreign_repo"], first.to_string());
+            let line = rdy_engine::signing_read::signature_line(&json[i]);
+            assert!(
+                line.contains(&format!(
+                    "signed in another project ({first}): not verified here"
+                )),
+                "{line}"
+            );
+        } else {
+            // made in the last fork: verifies as in its source
+            let same = source
+                .iter()
+                .find(|c| c.at_ms == check.at_ms)
+                .expect("the same signature in the source");
+            assert_eq!(check, same);
+            assert!(json[i].get("foreign_repo").is_none(), "{}", json[i]);
+        }
+    }
+    assert_eq!(held.iter().filter(|c| c.foreign_repo.is_some()).count(), 1);
+    // holder fsck passes, and counts the signature it cannot verify as information
+    let report = h.fsck().unwrap();
+    assert_eq!((report.signatures, report.foreign_signatures), (2, 1));
+    let v = serde_json::to_value(&report).unwrap();
+    assert_eq!(v["foreign_signatures"], 1);
+}
+
+// ---- the structural rules a holder's fsck keeps, checked before the append ----
+
+/// Tags `landing` in `r`'s store as `name` (no rule of `rdy tag`), seals it, and returns the
+/// whole closure as one batch that passes its own check.
+fn forged_upload(r: &mut Rdy, name: &str, landing: Hash, by: Provenance) -> (Hash, Vec<u8>) {
+    let t = r
+        .store_mut()
+        .put_tag(&Tag {
+            name: name.into(),
+            landing,
+            message: None,
+            tagged_by: by,
+        })
+        .unwrap();
+    r.seal_open().unwrap();
+    let batch = split(r, t, 1).remove(0);
+    check_batch(batch.as_slice(), Some(repo(r))).unwrap();
+    (t, batch)
+}
+
+const STRUCTURE_FIX: &str = "upload the history as its source project exported it";
+
+#[test]
+fn ha13_take_keeps_the_landing_and_chain_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    let v1 = tag(&mut r, "v1.0.0");
+    let l = landing_of(&r, v1);
+    let rec = r.store().landing(&l).unwrap();
+    let (root, mut h) = holder(dir.path(), repo(&r));
+    take(
+        &mut h,
+        &files(dir.path(), "v1", &[&export(&r, v1)]),
+        target("v1.0.0", l),
+    )
+    .unwrap();
+    // a landing whose assurance is relayed, with no relay fields or evidence
+    let relayed = r
+        .store_mut()
+        .put(
+            kinds::LANDING,
+            &LandingRecord {
+                assurance: Assurance::Relayed,
+                relayed_by: None,
+                relay_evidence: None,
+                evidence: None,
+                ..rec.clone()
+            },
+        )
+        .unwrap();
+    // a landing on top of `l` that lands `l`'s changes again
+    let again = r
+        .store_mut()
+        .put(
+            kinds::LANDING,
+            &LandingRecord {
+                prev: Some(l),
+                ..rec.clone()
+            },
+        )
+        .unwrap();
+    let c = rec.changes[0];
+    for (name, landing, message) in [
+        (
+            "v9.0.0",
+            relayed,
+            format!("landing {relayed}: assurance is relayed but the relay fields are unset"),
+        ),
+        (
+            "v9.1.0",
+            again,
+            format!("tag/v9.1.0: change {c} lands in landing {again} and in landing {l}"),
+        ),
+    ] {
+        let (_, batch) = forged_upload(&mut r, name, landing, rec.approved_by.clone());
+        let before = unchanged(&root, &h);
+        let e = take(
+            &mut h,
+            &files(dir.path(), name, &[&batch]),
+            target(name, landing),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal(&e),
+            ("E_BAD_RECORD", message.as_str(), STRUCTURE_FIX),
+            "{name}"
+        );
+        assert_eq!(unchanged(&root, &h), before, "{name}");
+    }
+    h.fsck().unwrap();
+}
+
+#[test]
+fn ha13_take_keeps_the_blob_chunk_lengths() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, doc, _) = project(&dir.path().join("src"));
+    let v1 = tag(&mut r, "v1.0.0");
+    let l = landing_of(&r, v1);
+    let rec = r.store().landing(&l).unwrap();
+    let (root, mut h) = holder(dir.path(), repo(&r));
+    // one correctly hashed chunk of three bytes
+    let chunk = r
+        .store_mut()
+        .write(vec![(kinds::BLOB_CHUNK, vec![1, 2, 3])])
+        .unwrap()[0];
+    r.seal_open().unwrap();
+    // a canonical manifest of one chunk that claims four bytes (short), then two (oversized),
+    // reached through a figure in the landing's snapshot
+    for (name, len) in [("v9.0.0", 4u64), ("v9.1.0", 2)] {
+        let manifest = r
+            .store_mut()
+            .put(
+                kinds::BLOB_MANIFEST,
+                &kinds::BlobManifest {
+                    len,
+                    chunks: vec![chunk],
+                },
+            )
+            .unwrap();
+        let figure = Block {
+            id: BlockId::parse("c-FGR01").unwrap(),
+            block_type: "figure".into(),
+            parent: Some(BlockId::parse(&doc).unwrap()),
+            order: "W".into(),
+            fields: BTreeMap::from([
+                ("blob".to_string(), FieldValue::Str(manifest.to_string())),
+                (
+                    "media_type".to_string(),
+                    FieldValue::Str("application/octet-stream".into()),
+                ),
+                ("alt".to_string(), FieldValue::Str("fig".into())),
+            ]),
+            body: String::new(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            read_identity: None,
+        };
+        let version = r.store_mut().put(kinds::BLOCK, &figure).unwrap();
+        let mut snap = r.store().state_of(Some(l)).unwrap();
+        snap.blocks.insert(figure.id.clone(), version);
+        let s = r.store_mut().put(kinds::SNAPSHOT, &snap).unwrap();
+        let landing = r
+            .store_mut()
+            .put(
+                kinds::LANDING,
+                &LandingRecord {
+                    state: s,
+                    ..rec.clone()
+                },
+            )
+            .unwrap();
+        let (_, batch) = forged_upload(&mut r, name, landing, rec.approved_by.clone());
+        let before = unchanged(&root, &h);
+        let e = take(
+            &mut h,
+            &files(dir.path(), name, &[&batch]),
+            target(name, landing),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal(&e),
+            (
+                "E_BAD_RECORD",
+                format!("blob {manifest} has a chunk of 3 bytes where {len} are due").as_str(),
+                STRUCTURE_FIX
+            ),
+            "{name}"
+        );
+        assert_eq!(unchanged(&root, &h), before, "{name}");
+    }
+    // the holder holds none of it, and its fsck passes
+    assert!(!h.store().has_kind(kinds::BLOB_CHUNK, &chunk).unwrap());
     h.fsck().unwrap();
 }

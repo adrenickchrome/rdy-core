@@ -12,8 +12,9 @@
 //! lengths). Then it checks each chain: each change landed once in the chain, and each landed
 //! change's dependencies landed at or before its landing in that chain. The dependency DAG has no
 //! cycle, the answers keep the answer rules, the signature table holds exactly its records, and
-//! (O11) each `answer/tag:<name>` names the stored answer that relays its tag. There is no pack
-//! validation: a holder has no pack.
+//! (O11, ruling task-13) each `answer/tag-object:<hash>` names a stored TAG and the stored answer
+//! that relays it. Each such TAG is read with the tags' objects too: a twin's tag kept beside the
+//! version that names the same landing. There is no pack validation: a holder has no pack.
 //!
 //! Every walk is iterative and bounded: [`MAX_LANDING_DEPTH`] landings in one chain,
 //! [`MAX_OBJECTS`] objects and [`MAX_EDGES`] object links. Past a bound the check refuses with
@@ -21,7 +22,7 @@
 use crate::StoreReader;
 use crate::check::StoreCheck;
 use crate::error::StoreError;
-use crate::holder::{ANSWER_TAG_REF, StoreMode, TAG_REF, not_allowed};
+use crate::holder::{ANSWER_TAG_OBJECT_REF, StoreMode, TAG_REF, answer_tag_object, not_allowed};
 use crate::index::hash_from;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, PORTABLE_KINDS, refs_of};
@@ -258,9 +259,88 @@ fn check_entry(snapshot: &Hash, id: &BlockId, v: &Hash, of: &BlockId) -> Result<
     Ok(())
 }
 
+/// The landings of the chain that starts at landing `head`, head first, as `landing` reads
+/// each: `head`, its `prev`, and so on to the first landing. More than `depth` landings is
+/// `holder check exceeds {depth} landing depth`; a landing met twice is `Decode`.
+fn walk_chain<E: From<StoreError>>(
+    head: &Hash,
+    depth: usize,
+    landing: &mut dyn FnMut(&Hash) -> Result<Arc<LandingRecord>, E>,
+) -> Result<Vec<(Hash, Arc<LandingRecord>)>, E> {
+    let mut out: Vec<(Hash, Arc<LandingRecord>)> = Vec::new();
+    let mut on: HashSet<Hash> = HashSet::new();
+    let mut cur = Some(*head);
+    while let Some(h) = cur {
+        if out.len() >= depth {
+            return Err(exceeds(format!("{depth} landing depth")).into());
+        }
+        if !on.insert(h) {
+            return Err(bad(format!("landing {h} is on its own chain twice")).into());
+        }
+        let rec = landing(&h)?;
+        cur = rec.prev;
+        out.push((h, rec));
+    }
+    Ok(out)
+}
+
+/// [`walk_chain`] with the holder check's depth bound ([`MAX_LANDING_DEPTH`]): the chain a tag
+/// at landing `head` names, read through `landing` (a holder's take reads it over the upload
+/// and the holder).
+pub fn tag_chain_with<E: From<StoreError>>(
+    head: &Hash,
+    landing: &mut dyn FnMut(&Hash) -> Result<Arc<LandingRecord>, E>,
+) -> Result<Vec<(Hash, Arc<LandingRecord>)>, E> {
+    walk_chain(head, MAX_LANDING_DEPTH, landing)
+}
+
+/// How [`chain_rules`] reads a landed change: from its landing and its hash.
+pub type ChangeOf<'a, E> = dyn FnMut(&Hash, &Hash) -> Result<Option<Arc<Change>>, E> + 'a;
+
+/// The rules of one tag's chain `chain` (head first), named `refname` in its refusals: each
+/// change lands once in the chain, and each landed change's dependencies landed at or before
+/// its landing in that chain. `change(landing, change)` reads a landed change; None skips its
+/// dependencies (a change that is not stored, or one whose landing the caller already
+/// checked). The one list of chain rules: the holder's fsck and a holder's take apply it.
+pub fn chain_rules<E: From<StoreError>>(
+    refname: &str,
+    chain: &[(Hash, Arc<LandingRecord>)],
+    change: &mut ChangeOf<'_, E>,
+) -> Result<(), E> {
+    // where each change of the chain landed: its position, newest first
+    let mut at: HashMap<Hash, usize> = HashMap::new();
+    for (i, (l, rec)) in chain.iter().enumerate() {
+        for c in &rec.changes {
+            if let Some(j) = at.insert(*c, i) {
+                let first = chain[j].0;
+                return Err(bad(format!(
+                    "{refname}: change {c} lands in landing {first} and in landing {l}"
+                ))
+                .into());
+            }
+        }
+    }
+    for (i, (l, rec)) in chain.iter().enumerate() {
+        for c in &rec.changes {
+            let Some(ch) = change(l, c)? else {
+                continue;
+            };
+            for dep in &ch.deps {
+                if !at.get(dep).is_some_and(|j| *j >= i) {
+                    return Err(bad(format!(
+                        "{refname}: change {c} of landing {l} depends on {dep}, which is not landed at or before it"
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl StoreReader {
     /// Checks a holder (see the module docs): its meta refs and ref history first, then its
-    /// `answer/tag:` refs, its tags and every object they reach, each tag's chain, the
+    /// `answer/tag-object:` refs, its tags and every object they reach, each tag's chain, the
     /// dependency DAG, the answers and the signature table. The first failure found is
     /// returned: `StoreError::Decode` for damage, `holder check exceeds {limit}` past a bound.
     /// The counts: `landed_changes` and `relayed` count distinct changes and landings across
@@ -361,28 +441,16 @@ impl StoreReader {
         depth: usize,
         cache: &mut HashMap<Hash, Arc<LandingRecord>>,
     ) -> Result<Vec<(Hash, Arc<LandingRecord>)>, StoreError> {
-        let mut out: Vec<(Hash, Arc<LandingRecord>)> = Vec::new();
-        let mut on: HashSet<Hash> = HashSet::new();
-        let mut cur = Some(*head);
-        while let Some(h) = cur {
-            if out.len() >= depth {
-                return Err(exceeds(format!("{depth} landing depth")));
-            }
-            if !on.insert(h) {
-                return Err(bad(format!("landing {h} is on its own chain twice")));
-            }
-            let rec = match cache.get(&h) {
+        walk_chain(head, depth, &mut |h| {
+            Ok(match cache.get(h) {
                 Some(r) => Arc::clone(r),
                 None => {
-                    let r = Arc::new(self.landing(&h)?);
-                    cache.insert(h, Arc::clone(&r));
+                    let r = Arc::new(self.landing(h)?);
+                    cache.insert(*h, Arc::clone(&r));
                     r
                 }
-            };
-            cur = rec.prev;
-            out.push((h, rec));
-        }
-        Ok(out)
+            })
+        })
     }
 
     fn check_holder_within(&self, limits: Limits) -> Result<StoreCheck, StoreError> {
@@ -391,13 +459,13 @@ impl StoreReader {
         }
         // the holder rule first: the mode's history and the closed ref families
         self.check_meta()?;
-        self.check_answer_tags()?;
+        let relayed_tags = self.check_answer_tags()?;
         let tags = self.holder_tags()?;
         let mut closure = Closure::new(self, limits);
-        for t in &tags {
+        for hash in tags.iter().map(|t| t.hash).chain(relayed_tags) {
             closure.add(ObjectKey {
                 kind: kinds::TAG,
-                hash: t.hash,
+                hash,
             })?;
         }
         closure.run()?;
@@ -409,38 +477,15 @@ impl StoreReader {
         let mut relayed: BTreeSet<Hash> = BTreeSet::new();
         for t in &tags {
             let chain = self.chain_within(&t.tag.landing, limits.landing_depth, &mut landings)?;
-            // where each change of the chain landed: its position, newest first
-            let mut at: HashMap<Hash, usize> = HashMap::new();
-            for (i, (l, rec)) in chain.iter().enumerate() {
+            for (l, rec) in &chain {
                 if rec.relayed_by.is_some() {
                     relayed.insert(*l);
                 }
-                for c in &rec.changes {
-                    if let Some(j) = at.insert(*c, i) {
-                        let first = chain[j].0;
-                        return Err(bad(format!(
-                            "{}: change {c} lands in landing {first} and in landing {l}",
-                            t.refname
-                        )));
-                    }
-                    landed.insert(*c);
-                }
+                landed.extend(rec.changes.iter().copied());
             }
-            for (i, (l, rec)) in chain.iter().enumerate() {
-                for c in &rec.changes {
-                    let Some(ch) = self.change_for_dag(&mut changes, c)? else {
-                        continue;
-                    };
-                    for dep in &ch.deps {
-                        if !at.get(dep).is_some_and(|j| *j >= i) {
-                            return Err(bad(format!(
-                                "{}: change {c} of landing {l} depends on {dep}, which is not landed at or before it",
-                                t.refname
-                            )));
-                        }
-                    }
-                }
-            }
+            chain_rules(&t.refname, &chain, &mut |_, c| {
+                self.change_for_dag(&mut changes, c)
+            })?;
         }
         let roots: BTreeSet<Hash> = closure
             .seen
@@ -467,15 +512,23 @@ impl StoreReader {
         })
     }
 
-    /// O11: each `answer/tag:<name>` ref stands beside `tag/<name>` and names a stored ANSWER
-    /// whose act is `tag` and whose item is `tag:<name>`; otherwise `holder ref {name} is not
-    /// allowed`.
-    fn check_answer_tags(&self) -> Result<(), StoreError> {
-        for (name, value) in self.refs_with_prefix(ANSWER_TAG_REF)? {
-            let tag = &name[ANSWER_TAG_REF.len()..];
-            if self.get_ref(&format!("{TAG_REF}{tag}"))?.is_none() {
+    /// O11 (ruling task-13): each `answer/tag-object:<hash>` ref names, by 64 lowercase hex
+    /// digits, a stored TAG, and its value names a stored ANSWER whose act is `tag` and whose
+    /// item is `tag:<that tag's name>`; otherwise `holder ref {name} is not allowed`. Returns
+    /// the TAG hashes the refs name.
+    fn check_answer_tags(&self) -> Result<Vec<Hash>, StoreError> {
+        let mut out = vec![];
+        for (name, value) in self.refs_with_prefix(ANSWER_TAG_OBJECT_REF)? {
+            let Some(t) = answer_tag_object(&name) else {
                 return Err(not_allowed(&name));
-            }
+            };
+            let tag = match self.read_tag(&t) {
+                Ok(tag) => tag,
+                Err(StoreError::NotFound(_) | StoreError::Decode(_)) => {
+                    return Err(not_allowed(&name));
+                }
+                Err(e) => return Err(e),
+            };
             let Ok(h) = hash_from(&value, &name) else {
                 return Err(not_allowed(&name));
             };
@@ -486,11 +539,12 @@ impl StoreReader {
                 }
                 Err(e) => return Err(e),
             };
-            if a.act != AnswerAct::Tag || a.item != format!("tag:{tag}") {
+            if a.act != AnswerAct::Tag || a.item != format!("tag:{}", tag.name) {
                 return Err(not_allowed(&name));
             }
+            out.push(t);
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Every `tag/` ref, in ref order, with the tag record it names: a ref that is not a 32-byte

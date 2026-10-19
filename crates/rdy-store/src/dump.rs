@@ -447,7 +447,7 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
             kinds::REDACTION_APPLY,
         ],
     ),
-    // store format 15 adds refs only (meta/store_mode, a holder's answer/tag:<name>): the kinds
+    // store format 15 adds refs only (meta/store_mode, a holder's answer/tag-object:<hash>): the kinds
     // of (2, 14)
     (
         (2, 15),

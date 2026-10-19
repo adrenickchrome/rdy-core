@@ -9,6 +9,7 @@ mod redaction_fixture;
 use rdy_model::signature::Signature;
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
+use rdy_store::holder::answer_tag_object_ref;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::redaction::StoredFrame;
@@ -93,7 +94,7 @@ fn sig(subject: Hash, namespace: &str, n: u8) -> Signature {
 }
 
 /// A source project: one change of two blocks, landed, tagged `v1` with its relay answer
-/// (`answer/tag:v1`, O11), with a signature of the landing and one of the tag.
+/// (`answer/tag:v1` in the source, O11), with a signature of the landing and one of the tag.
 struct Src {
     dir: tempfile::TempDir,
     path: PathBuf,
@@ -331,7 +332,8 @@ fn ha11_many_files_make_one_sealed_take() {
     for k in &records {
         assert!(h.has_kind(k.kind, &k.hash).unwrap(), "{k} is held");
     }
-    // the records in the closure's dependency order, then the tag ref and the relay answer ref
+    // the records in the closure's dependency order, then the tag ref and the relay answer ref,
+    // named by the tag object in a holder (ruling task-13)
     let written: Vec<ObjectKey> = data
         .iter()
         .filter(|(_, k, _, _)| *k != kinds::REF_UPDATE)
@@ -340,9 +342,10 @@ fn ha11_many_files_make_one_sealed_take() {
     assert_eq!(written, records);
     assert_eq!(h.get_ref("tag/v1").unwrap(), Some(src.tag.0.to_vec()));
     assert_eq!(
-        h.get_ref("answer/tag:v1").unwrap(),
+        h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(),
         Some(src.relay.0.to_vec())
     );
+    assert_eq!(h.get_ref("answer/tag:v1").unwrap(), None);
     h.check_meta().unwrap();
     // the sealed take reopens
     let path = h.dir().to_path_buf();
@@ -701,16 +704,17 @@ fn ha11_repeated_take_appends_nothing() {
 fn ha11_take_writes_the_relay_tag_answer_ref_once() {
     let src = source();
     let paths = src.split(src.tag, 1, "one");
-    // Incoming: the tag ref and the relay answer ref, once
+    // Incoming: the tag ref and the relay answer ref of the tag object, once
     let (_, mut h) = holder(&src, "h");
     take(&mut h, &open(&paths), &src.target()).unwrap();
     assert_eq!(
-        h.get_ref("answer/tag:v1").unwrap(),
+        h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(),
         Some(src.relay.0.to_vec())
     );
     let again = take(&mut h, &open(&paths), &src.target()).unwrap();
     assert_eq!(again.frames, 0);
-    // Existing: another tag of the same landing keeps the held one and writes no answer ref
+    // Existing: another tag of the same landing keeps the held one as the version; its own tag
+    // object is stored with the ref of its relay answer (ruling task-13)
     let mut s = Store::open(&src.path).unwrap();
     let (v10, relay10) = s
         .put_tag_answered(
@@ -742,11 +746,15 @@ fn ha11_take_writes_the_relay_tag_answer_ref_once() {
     assert!(h.has_kind(kinds::TAG, &v10).unwrap());
     assert!(h.has_kind(kinds::ANSWER, &relay10).unwrap());
     assert_eq!(h.get_ref("tag/v1.0").unwrap(), None);
-    assert_eq!(h.get_ref("answer/tag:v1.0").unwrap(), None);
     assert_eq!(
-        h.get_ref("answer/tag:v1").unwrap(),
+        h.get_ref(&answer_tag_object_ref(&v10)).unwrap(),
+        Some(relay10.0.to_vec())
+    );
+    assert_eq!(
+        h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(),
         Some(src.relay.0.to_vec())
     );
+    h.check_holder().unwrap();
     // an Existing choice must name a held tag of that landing by its stored name and hash
     for (name, hash) in [("v1", v10), ("v2", src.tag), ("v1.0", v10)] {
         let e = stream_err(
@@ -758,7 +766,8 @@ fn ha11_take_writes_the_relay_tag_answer_ref_once() {
             "{name}"
         );
     }
-    // two relay answers of the root: refused with Incoming, kept with Existing
+    // two relay answers of the root: refused, whichever tag stays the version, as one tag
+    // object has one relay answer
     let second = enc(&answer("tag:v1", vec![], Some("again")));
     let extra = src.dir.path().join("second.rdysync");
     write_extra(
@@ -777,13 +786,27 @@ fn ha11_take_writes_the_relay_tag_answer_ref_once() {
         "stream record 0 at byte 0: object is outside the tag closure"
     );
     assert_eq!(fresh.get_ref("tag/v1").unwrap(), None);
-    let got = h
-        .take_batches(&open(&both), &src.target(), choose("v1", src.tag))
-        .unwrap();
-    assert_eq!(got.new_objects, 1);
-    assert!(h.has_kind(kinds::ANSWER, &Hash::of(&second)).unwrap());
+    let end = h.log_end();
+    let e = stream_err(
+        h.take_batches(&open(&both), &src.target(), choose("v1", src.tag))
+            .unwrap_err(),
+    );
     assert_eq!(
-        h.get_ref("answer/tag:v1").unwrap(),
+        e.message,
+        "stream record 0 at byte 0: object is outside the tag closure"
+    );
+    assert_eq!(h.log_end(), end);
+    // one relay answer of the root, but not the one the holder holds for that tag object
+    let only = vec![src.dir.path().join("second.rdysync")];
+    let e = stream_err(take(&mut h, &open(&only), &src.target()).unwrap_err());
+    assert_eq!(
+        e.message,
+        "stream record 0 at byte 0: object is outside the tag closure"
+    );
+    assert_eq!(h.log_end(), end);
+    assert!(!h.has_kind(kinds::ANSWER, &Hash::of(&second)).unwrap());
+    assert_eq!(
+        h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(),
         Some(src.relay.0.to_vec())
     );
 }
@@ -895,7 +918,7 @@ fn ha11_changed_relay_answer_refuses_before_append() {
     );
     assert_eq!(h.log_end(), before.1);
     assert_eq!(h.get_ref("tag/v1").unwrap(), None);
-    assert_eq!(h.get_ref("answer/tag:v1").unwrap(), None);
+    assert_eq!(h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(), None);
     drop(h);
     assert_eq!(segment_bytes(&path), before.0);
 }

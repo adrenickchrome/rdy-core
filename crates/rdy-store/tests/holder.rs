@@ -8,7 +8,7 @@ use rdy_model::redaction::RedactTarget;
 use rdy_model::*;
 use rdy_store::dump::{DumpBatch, Frame};
 use rdy_store::format::{FORMAT_FILE, Format, REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
-use rdy_store::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode};
+use rdy_store::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode, answer_tag_object_ref};
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, RefUpdate, batch_digest};
 use rdy_store::meta::{REF_ORIGIN, REF_REPO_ID, encode_repo_id};
@@ -61,6 +61,14 @@ fn tag(name: &str) -> Tag {
         message: None,
         tagged_by: prov(),
     }
+}
+
+/// The TAG frame of `tag(name)` and the holder's answer ref that names that tag object (O11,
+/// ruling task-13).
+fn tag_object(name: &str) -> ((u8, Vec<u8>), String) {
+    let bytes = postcard::to_allocvec(&tag(name)).unwrap();
+    let r = answer_tag_object_ref(&Hash::of(&bytes));
+    ((kinds::TAG, bytes), r)
 }
 
 /// Ref frames salted as the store salts them: the i-th ref's `at` is `at` plus i.
@@ -434,6 +442,9 @@ fn ha4_holder_ref_families_are_closed() {
         "alt/a-1",
         "answer/q-1",
         "answer/tagged",
+        // a local project's relay answer ref, by tag name: a holder's is by tag object
+        "answer/tag:v1",
+        "answer/tag-object:v1",
         "dismiss/k",
         "mention/b/e",
         "pair/k",
@@ -444,21 +455,23 @@ fn ha4_holder_ref_families_are_closed() {
     // a public write of each is refused, and writes nothing
     let (_d, _path, mut s) = holder();
     let end = s.log_end();
-    for name in forbidden.iter().copied().chain(["answer/tag:v1"]) {
+    let (t2, n2) = tag_object("v2");
+    for name in forbidden.iter().copied().chain([n2.as_str()]) {
         assert_eq!(
             refused_text(write_ref(&mut s, name, &[1; 32])),
             format!("a holder store cannot write ref {name}"),
         );
     }
-    // the answer ref is refused even beside its tag in the same write
+    // the answer ref is refused even beside its tag object in the same write
     let t = s.put_tag(&tag("v1")).unwrap();
-    let items = ref_frames(
+    let mut items = vec![t2.clone()];
+    items.extend(ref_frames(
         s.log_end(),
-        &[("tag/v2", &t.0), ("answer/tag:v2", &[1; 32])],
-    );
+        &[("tag/v2", &t.0), (n2.as_str(), &[1; 32])],
+    ));
     assert_eq!(
         refused_text(s.write(items)),
-        "a holder store cannot write ref answer/tag:v2"
+        format!("a holder store cannot write ref {n2}")
     );
     assert_eq!(
         s.get_ref("tag/v2").unwrap(),
@@ -479,41 +492,39 @@ fn ha4_holder_ref_families_are_closed() {
             format!("holder ref {name} is not allowed"),
         );
     }
-    // the answer ref needs its tag, in the same batch or an earlier one
+    // the answer ref needs its TAG object, in the same batch or an earlier one
     let ans: &[u8] = &[4; 32];
-    let tagv: &[u8] = &[5; 32];
-    for (case, batches_of, ok) in [
-        (
-            "same batch",
-            vec![vec![("tag/v1", tagv), ("answer/tag:v1", ans)]],
-            true,
-        ),
-        (
-            "answer first",
-            vec![vec![("answer/tag:v1", ans), ("tag/v1", tagv)]],
-            true,
-        ),
+    let (t1, n1) = tag_object("v1");
+    let (other, _) = tag_object("v3");
+    let r = |at: Location| ref_frames(at, &[(n1.as_str(), ans)]);
+    type Case = (&'static str, Vec<Vec<Option<(u8, Vec<u8>)>>>, bool);
+    // each batch: frames, None standing for the answer ref
+    let cases: Vec<Case> = vec![
+        ("same batch", vec![vec![Some(t1.clone()), None]], true),
+        ("answer first", vec![vec![None, Some(t1.clone())]], true),
         (
             "earlier batch",
-            vec![vec![("tag/v1", tagv)], vec![("answer/tag:v1", ans)]],
+            vec![vec![Some(t1.clone())], vec![None]],
             true,
         ),
-        ("no tag", vec![vec![("answer/tag:v1", ans)]], false),
-        (
-            "another tag",
-            vec![vec![("tag/v2", tagv), ("answer/tag:v1", ans)]],
-            false,
-        ),
-        (
-            "later tag",
-            vec![vec![("answer/tag:v1", ans)], vec![("tag/v1", tagv)]],
-            false,
-        ),
-    ] {
+        ("no tag", vec![vec![None]], false),
+        ("another tag", vec![vec![Some(other.clone()), None]], false),
+        ("later tag", vec![vec![None], vec![Some(t1.clone())]], false),
+    ];
+    for (case, batches_of, ok) in cases {
         let (_d, path, s) = holder();
+        let mut at = s.log_end();
         drop(s);
         for b in &batches_of {
-            append_raw(&path, b);
+            let frames: Vec<(u8, Vec<u8>)> = b
+                .iter()
+                .flat_map(|f| match f {
+                    Some(f) => vec![f.clone()],
+                    None => r(at),
+                })
+                .collect();
+            append_raw_frames(&path, &frames);
+            at.offset += 1;
         }
         // with the index and without it
         for fresh in [false, true] {
@@ -523,24 +534,39 @@ fn ha4_holder_ref_families_are_closed() {
             let r = Store::open(&path);
             if ok {
                 let s = r.unwrap_or_else(|e| panic!("{case}: {e:?}"));
-                assert_eq!(s.get_ref("answer/tag:v1").unwrap(), Some(ans.to_vec()));
+                assert_eq!(s.get_ref(&n1).unwrap(), Some(ans.to_vec()));
                 s.check_meta().unwrap();
             } else {
                 assert_eq!(
                     decode_text(r),
-                    "holder ref answer/tag:v1 is not allowed",
+                    format!("holder ref {n1} is not allowed"),
                     "{case}"
                 );
             }
         }
     }
-    // fsck: an answer ref forged beside no tag
+    // a name that is not 64 lowercase hex digits, beside its tag object
+    let upper = format!(
+        "answer/tag-object:{}",
+        n1["answer/tag-object:".len()..].to_uppercase()
+    );
+    let (_d, path, s) = holder();
+    let at = s.log_end();
+    drop(s);
+    let mut frames = vec![t1.clone()];
+    frames.extend(ref_frames(at, &[(upper.as_str(), ans)]));
+    append_raw_frames(&path, &frames);
+    assert_eq!(
+        decode_text(Store::open(&path)),
+        format!("holder ref {upper} is not allowed")
+    );
+    // fsck: an answer ref forged beside no tag object
     let (_d, _path, mut s) = holder();
-    s.set_refs_unchecked_for_tests(vec![("answer/tag:v9".into(), ans.to_vec())])
+    s.set_refs_unchecked_for_tests(vec![(n1.clone(), ans.to_vec())])
         .unwrap();
     assert_eq!(
         decode_text(s.check_meta()),
-        "holder ref answer/tag:v9 is not allowed"
+        format!("holder ref {n1} is not allowed")
     );
     // ingest: a load of a holder dump with a forged canon is refused
     let (d, _path, s) = holder();
@@ -711,42 +737,40 @@ fn ha4_a_warm_index_open_and_fsck_read_the_log_history() {
         "a retry stays refused"
     );
 
-    // an answer ref in a batch before its tag's: the refs pair up, the log does not
+    // an answer ref in a batch before its tag object's: the index pairs them, the log does not
+    let (_, n1) = tag_object("v1");
+    let refused = format!("holder ref {n1} is not allowed");
     let (_d, path, mut s) = holder();
-    s.set_refs_unchecked_for_tests(vec![("answer/tag:v1".into(), ans.to_vec())])
+    s.set_refs_unchecked_for_tests(vec![(n1.clone(), ans.to_vec())])
         .unwrap();
     s.put_tag(&tag("v1")).unwrap();
     assert!(s.get_ref("tag/v1").unwrap().is_some());
-    assert_eq!(
-        decode_text(s.check_meta()),
-        "holder ref answer/tag:v1 is not allowed"
-    );
+    assert_eq!(decode_text(s.check_meta()), refused);
     s.checkpoint().unwrap();
     drop(s);
     for _ in 0..2 {
-        assert_eq!(
-            decode_text(Store::open(&path)),
-            "holder ref answer/tag:v1 is not allowed"
-        );
+        assert_eq!(decode_text(Store::open(&path)), refused);
     }
 
-    // the control: the tag first, then its answer, opens warm and passes fsck
+    // the control: the tag object first, then its answer, opens warm and passes fsck
     let (_d, path, mut s) = holder();
     s.put_tag(&tag("v1")).unwrap();
-    s.set_refs_unchecked_for_tests(vec![("answer/tag:v1".into(), ans.to_vec())])
+    s.set_refs_unchecked_for_tests(vec![(n1.clone(), ans.to_vec())])
         .unwrap();
     s.check_meta().unwrap();
     s.checkpoint().unwrap();
     drop(s);
     let s = Store::open(&path).unwrap();
     assert_eq!(s.open_report().caught_up_frames, 0, "the index was warm");
-    assert_eq!(s.get_ref("answer/tag:v1").unwrap(), Some(ans.to_vec()));
+    assert_eq!(s.get_ref(&n1).unwrap(), Some(ans.to_vec()));
     s.check_meta().unwrap();
 }
 
 #[test]
 fn ha4_a_failed_catch_up_keeps_its_batch_refused() {
     let ans: &[u8] = &[4; 32];
+    let (t1, n1) = tag_object("v1");
+    let refused = format!("holder ref {n1} is not allowed");
     let chunk = rdy_store::CATCH_UP_CHUNK;
     // the replay starts past the creation batch: the answer is its first frame, so a chunk
     // ends inside the batch for every count from `chunk` - 1 on
@@ -754,15 +778,15 @@ fn ha4_a_failed_catch_up_keeps_its_batch_refused() {
         let (_d, path, s) = holder();
         let start = s.log_end();
         drop(s);
-        let mut frames = ref_frames(start, &[("answer/tag:v1", ans)]);
+        let mut frames = ref_frames(start, &[(n1.as_str(), ans)]);
         frames.extend((0..chunks as u32).map(|i| (kinds::BLOB_CHUNK, i.to_le_bytes().to_vec())));
         append_raw_frames(&path, &frames);
-        append_raw(&path, &[("tag/v1", &[5; 32])]);
+        append_raw_frames(&path, std::slice::from_ref(&t1));
         // every open is refused: a failed catch-up never forgets the batch it stopped in
         for attempt in 0..3 {
             let r = Store::open(&path).map(|_| ());
             assert!(
-                matches!(&r, Err(StoreError::Decode(m)) if m == "holder ref answer/tag:v1 is not allowed"),
+                matches!(&r, Err(StoreError::Decode(m)) if *m == refused),
                 "{chunks} chunk frames, open {attempt}: {r:?}"
             );
         }
@@ -770,7 +794,7 @@ fn ha4_a_failed_catch_up_keeps_its_batch_refused() {
         let _ = std::fs::remove_file(path.join("index.redb"));
         assert_eq!(
             decode_text(Store::open(&path)),
-            "holder ref answer/tag:v1 is not allowed",
+            refused,
             "{chunks} chunk frames, fresh index"
         );
     }
@@ -804,7 +828,9 @@ fn ha4_set_refs_takes_the_mode_and_holder_refusals_first() {
             CHANGE_MODE
         );
     }
+    let (_, n1) = tag_object("v1");
     for name in [
+        n1.as_str(),
         "answer/tag:v1",
         "answer/q-1",
         "pending/human:a/q-1",
@@ -840,6 +866,7 @@ fn ha4_set_refs_takes_the_mode_and_holder_refusals_first() {
     s.put_tag(&tag("v1")).unwrap();
     for (name, want) in [
         (REF_STORE_MODE, CHANGE_MODE.to_string()),
+        (n1.as_str(), format!("a holder store cannot write ref {n1}")),
         (
             "answer/tag:v1",
             "a holder store cannot write ref answer/tag:v1".to_string(),

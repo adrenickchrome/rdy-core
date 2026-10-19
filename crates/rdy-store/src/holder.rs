@@ -4,8 +4,12 @@
 //! repo id (`Store::create_holder`), and never added, changed or removed later.
 //!
 //! A holder's refs are closed: `meta/store_format`, `meta/repo_id`, `meta/origin`, the creation's
-//! `meta/store_mode`, `tag/<name>` and (O11) `answer/tag:<name>`, which stands only when
-//! `tag/<name>` is in the same batch or an earlier one. Only the take writes an answer ref
+//! `meta/store_mode`, `tag/<name>` and (O11, ruling task-13) `answer/tag-object:<hash>`, which
+//! names the relay answer of the TAG object whose hash is `<hash>` (64 lowercase hex digits).
+//! It stands only when that TAG object is in the same batch or an earlier one. A holder may
+//! keep several tag objects of one version (the first stays the version; a twin's tag is kept
+//! beside it), so its relay answers are found by tag object, never by tag name: a local
+//! project's `answer/tag:<name>` never stands in a holder. Only the take writes an answer ref
 //! there, through the store's crate-private path; a public ref write of one is refused. Canon,
 //! views, proposals, pending and inbox refs, coordination heads and every other answer ref
 //! never stand in a holder.
@@ -26,6 +30,7 @@ use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_ORIGIN, REF_REPO_ID};
 use crate::segment::{Holes, Location, SegmentReader};
 use crate::store::StoreReader;
+use rdy_model::Hash;
 use std::collections::BTreeSet;
 
 /// The ref naming a holder: present only in a holder, with the value `HOLDER_MODE`.
@@ -34,8 +39,28 @@ pub const REF_STORE_MODE: &str = "meta/store_mode";
 pub const HOLDER_MODE: &[u8] = b"holder";
 /// The prefix of a tag ref.
 pub const TAG_REF: &str = "tag/";
-/// The prefix of the answer ref that relays a tag (O11): `answer/tag:<name>`.
-pub const ANSWER_TAG_REF: &str = "answer/tag:";
+/// The prefix of a holder's answer ref that relays a tag object (O11, ruling task-13):
+/// `answer/tag-object:<64 lowercase hex digits of the TAG's hash>`.
+pub const ANSWER_TAG_OBJECT_REF: &str = "answer/tag-object:";
+
+/// A holder's ref of the relay answer of the TAG object `tag`: `answer/tag-object:<hex>`.
+pub fn answer_tag_object_ref(tag: &Hash) -> String {
+    format!("{ANSWER_TAG_OBJECT_REF}{tag}")
+}
+
+/// The TAG hash an `answer/tag-object:` ref names: exactly 64 lowercase hex digits after the
+/// prefix; None for any other name.
+pub fn answer_tag_object(name: &str) -> Option<Hash> {
+    tag_object(name.strip_prefix(ANSWER_TAG_OBJECT_REF)?)
+}
+
+/// `hex` as a hash: exactly 64 lowercase hex digits.
+fn tag_object(hex: &str) -> Option<Hash> {
+    if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    hex.parse().ok()
+}
 
 /// What kind of store this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,9 +120,9 @@ enum Family<'a> {
     /// `meta/store_mode`: the creation's only.
     Mode,
     /// `tag/<name>`.
-    Tag(&'a str),
-    /// `answer/tag:<name>`.
-    AnswerTag(&'a str),
+    Tag,
+    /// `answer/tag-object:<hex>`, with the text after the prefix.
+    AnswerTagObject(&'a str),
     /// Anything else: never in a holder.
     Other,
 }
@@ -107,10 +132,10 @@ fn family(name: &str) -> Family<'_> {
         Family::Meta
     } else if name == REF_STORE_MODE {
         Family::Mode
-    } else if let Some(t) = name.strip_prefix(TAG_REF) {
-        Family::Tag(t)
-    } else if let Some(t) = name.strip_prefix(ANSWER_TAG_REF) {
-        Family::AnswerTag(t)
+    } else if name.starts_with(TAG_REF) {
+        Family::Tag
+    } else if let Some(t) = name.strip_prefix(ANSWER_TAG_OBJECT_REF) {
+        Family::AnswerTagObject(t)
     } else {
         Family::Other
     }
@@ -201,16 +226,17 @@ pub fn names_store_mode(payload: &[u8]) -> bool {
 
 /// The rules for refs the log holds, in log order: the replay of an open or a reindex, and an
 /// ingest. A mode ref outside the first batch is refused, and so is a mode value other than
-/// `holder` in it. In a holder, every ref must be in a holder family, and an `answer/tag:<name>`
-/// needs `tag/<name>` in its batch or an earlier one (checked at the batch's marker).
+/// `holder` in it. In a holder, every ref must be in a holder family, and an
+/// `answer/tag-object:<hash>` needs its TAG object in its batch or an earlier one (checked at
+/// the batch's marker).
 pub(crate) struct RefRules {
     creation: Creation,
-    /// A holder's tag names of the batches before this one.
-    tags: BTreeSet<String>,
-    /// A holder's tag names of this batch.
-    batch_tags: BTreeSet<String>,
-    /// A holder's answer refs of this batch.
-    batch_answers: Vec<String>,
+    /// A holder's TAG objects of the batches before this one.
+    tags: BTreeSet<Hash>,
+    /// A holder's TAG objects of this batch.
+    batch_tags: BTreeSet<Hash>,
+    /// A holder's answer refs of this batch, each with the TAG it names.
+    batch_answers: Vec<(String, Hash)>,
 }
 
 impl RefRules {
@@ -242,7 +268,7 @@ impl RefRules {
     }
 
     /// Takes the log frame `kind` at `loc` whose payload is `payload` (None for an authorized
-    /// hole): a ref, a batch's marker, or a frame no rule reads.
+    /// hole): a ref, a batch's marker, a TAG object, or a frame no rule reads.
     pub fn on_frame(
         &mut self,
         loc: Location,
@@ -252,7 +278,19 @@ impl RefRules {
         match (kind, payload) {
             (kinds::REF_UPDATE, Some(p)) => self.on_ref_frame(self.creation.in_first(loc), p),
             (kinds::BATCH_COMMIT, _) => self.on_marker(),
+            (kinds::TAG, Some(p)) => {
+                self.on_tag(p);
+                Ok(())
+            }
             _ => Ok(()),
+        }
+    }
+
+    /// Takes a TAG object of the batch being judged (its payload): an answer ref of the batch
+    /// or of a later one may name it. A project keeps none.
+    pub fn on_tag(&mut self, payload: &[u8]) {
+        if self.creation.mode == StoreMode::Holder {
+            self.batch_tags.insert(Hash::of(payload));
         }
     }
 
@@ -270,14 +308,14 @@ impl RefRules {
         }
         match family(name) {
             Family::Meta | Family::Mode => Ok(()),
-            Family::Tag(t) => {
-                self.batch_tags.insert(t.to_string());
-                Ok(())
-            }
-            Family::AnswerTag(_) => {
-                self.batch_answers.push(name.to_string());
-                Ok(())
-            }
+            Family::Tag => Ok(()),
+            Family::AnswerTagObject(t) => match tag_object(t) {
+                Some(h) => {
+                    self.batch_answers.push((name.to_string(), h));
+                    Ok(())
+                }
+                None => Err(not_allowed(name)),
+            },
             Family::Other => Err(not_allowed(name)),
         }
     }
@@ -304,11 +342,11 @@ impl RefRules {
         Ok(())
     }
 
-    /// Checks the end of a batch: each answer ref of it needs its tag in it or before it.
+    /// Checks the end of a batch: each answer ref of it needs its TAG object in it or before
+    /// it.
     pub fn check_marker(&self) -> Result<(), StoreError> {
-        for name in &self.batch_answers {
-            let t = name.strip_prefix(ANSWER_TAG_REF).unwrap_or(name);
-            if !self.batch_tags.contains(t) && !self.tags.contains(t) {
+        for (name, h) in &self.batch_answers {
+            if !self.batch_tags.contains(h) && !self.tags.contains(h) {
                 return Err(not_allowed(name));
             }
         }
@@ -327,7 +365,7 @@ impl RefRules {
 pub(crate) enum RefWrite {
     /// Every public write and seal.
     Public,
-    /// The take's crate-private write: a holder's `answer/tag:<name>` beside its tag.
+    /// The take's crate-private write: a holder's `answer/tag-object:<hash>` beside its TAG.
     Take,
     /// The creation batch, and the test hook that forges refs: no ref rule.
     Unchecked,
@@ -335,13 +373,14 @@ pub(crate) enum RefWrite {
 
 /// The ref rules of a write of `items` to a store of `mode`, before anything is appended. The
 /// mode ref is never written (`store mode cannot change`). In a holder, a ref outside the
-/// holder families is refused, and so is an answer ref outside the take; the take's answer ref
-/// needs `tag/<name>` in `items` or already in the store (`has_tag`).
+/// holder families is refused, and so is an answer ref outside the take; the take's
+/// `answer/tag-object:<hash>` needs its TAG object in `items` or already in the store
+/// (`has_tag`).
 pub(crate) fn check_ref_writes(
     mode: StoreMode,
     items: &[(u8, Vec<u8>)],
     how: RefWrite,
-    has_tag: impl Fn(&str) -> Result<bool, StoreError>,
+    has_tag: impl Fn(&Hash) -> Result<bool, StoreError>,
 ) -> Result<(), StoreError> {
     if how == RefWrite::Unchecked {
         return Ok(());
@@ -365,10 +404,15 @@ pub(crate) fn check_ref_writes(
             return Err(cannot_change());
         }
         match family(&u.name) {
-            Family::Meta | Family::Mode | Family::Tag(_) => {}
-            Family::AnswerTag(t) => {
-                let beside = refs.iter().any(|r| r.name.strip_prefix(TAG_REF) == Some(t));
-                if how != RefWrite::Take || !(beside || has_tag(t)?) {
+            Family::Meta | Family::Mode | Family::Tag => {}
+            Family::AnswerTagObject(t) => {
+                let Some(h) = tag_object(t) else {
+                    return Err(cannot_write(&u.name));
+                };
+                let beside = items
+                    .iter()
+                    .any(|(k, p)| *k == kinds::TAG && Hash::of(p) == h);
+                if how != RefWrite::Take || !(beside || has_tag(&h)?) {
                     return Err(cannot_write(&u.name));
                 }
             }
@@ -387,7 +431,7 @@ impl StoreReader {
 
     /// The index's refs against what the log's first batch set (`creation`): the mode ref is
     /// the creation's (`holder mode must be set in the first batch` otherwise), and a holder's
-    /// refs are all in its families, each `answer/tag:<name>` beside its `tag/<name>`.
+    /// refs are all in its families, each `answer/tag-object:<hash>` naming a stored TAG.
     pub(crate) fn check_mode_against(&self, creation: Creation) -> Result<(), StoreError> {
         let stored = self.get_ref(REF_STORE_MODE)?;
         let matches = match (creation.mode, stored.as_deref()) {
@@ -404,16 +448,11 @@ impl StoreReader {
         let refs = self.index().refs_with_prefix("")?;
         for (name, _) in &refs {
             match family(name) {
-                Family::Meta | Family::Mode | Family::Tag(_) => {}
-                Family::AnswerTag(t) => {
-                    let tag = format!("{TAG_REF}{t}");
-                    if refs
-                        .binary_search_by(|(n, _)| n.as_str().cmp(&tag))
-                        .is_err()
-                    {
-                        return Err(not_allowed(name));
-                    }
-                }
+                Family::Meta | Family::Mode | Family::Tag => {}
+                Family::AnswerTagObject(t) => match tag_object(t) {
+                    Some(h) if self.has_kind(kinds::TAG, &h)? => {}
+                    _ => return Err(not_allowed(name)),
+                },
                 Family::Other => return Err(not_allowed(name)),
             }
         }
@@ -487,39 +526,63 @@ mod tests {
             .collect()
     }
 
+    /// A TAG record's frame (its bytes need not decode for the ref rules).
+    fn tag_frame(n: u8) -> (u8, Vec<u8>) {
+        (kinds::TAG, vec![n; 40])
+    }
+
     #[test]
-    fn ha4_take_writes_an_answer_tag_beside_its_tag() {
+    fn ha4_take_writes_an_answer_tag_object_beside_its_tag() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h");
         let mut s = Store::create_holder(&path, RepoId([7; 16])).unwrap();
         let ans: &[u8] = &[4; 32];
-        // no tag yet: refused, and nothing is written
+        let (t1, t2) = (tag_frame(1), tag_frame(2));
+        let (n1, n2) = (
+            answer_tag_object_ref(&Hash::of(&t1.1)),
+            answer_tag_object_ref(&Hash::of(&t2.1)),
+        );
+        // no tag object yet: refused, and nothing is written
         let end = s.log_end();
-        let items = refs(end, &[("answer/tag:v1", ans)]);
+        let items = refs(end, &[(&n1, ans)]);
         assert!(matches!(
             s.write_take(items),
-            Err(StoreError::Refused(m)) if m == "a holder store cannot write ref answer/tag:v1"
+            Err(StoreError::Refused(m)) if m == format!("a holder store cannot write ref {n1}")
         ));
         assert_eq!(s.log_end(), end);
-        // beside its tag in the same write
-        let items = refs(s.log_end(), &[("answer/tag:v1", ans), ("tag/v1", &[5; 32])]);
+        // beside its tag object in the same write
+        let mut items = vec![t1.clone()];
+        items.extend(refs(s.log_end(), &[(&n1, ans), ("tag/v1", &[5; 32])]));
         s.write_take(items).unwrap();
-        // beside a tag of an earlier batch
-        let items = refs(s.log_end(), &[("tag/v2", &[6; 32])]);
-        s.write(items).unwrap();
-        let items = refs(s.log_end(), &[("answer/tag:v2", ans)]);
+        // beside a tag object of an earlier batch
+        s.write(vec![t2.clone()]).unwrap();
+        let items = refs(s.log_end(), &[(&n2, ans)]);
         s.write_take(items).unwrap();
-        // the take never writes another family, nor the mode
-        for name in ["canon", "answer/q-1", REF_STORE_MODE] {
+        // a name that is not 64 lowercase hex digits, a local project's answer ref, another
+        // family and the mode: never
+        let upper = n2
+            .to_uppercase()
+            .replace("ANSWER/TAG-OBJECT:", ANSWER_TAG_OBJECT_REF);
+        for name in [
+            upper.as_str(),
+            &n2[..n2.len() - 1],
+            "answer/tag:v1",
+            "canon",
+            "answer/q-1",
+            REF_STORE_MODE,
+        ] {
             let items = refs(s.log_end(), &[(name, ans)]);
-            assert!(matches!(s.write_take(items), Err(StoreError::Refused(_))));
+            assert!(
+                matches!(s.write_take(items), Err(StoreError::Refused(_))),
+                "{name}"
+            );
         }
         s.check_meta().unwrap();
         drop(s);
         // the log the take wrote reopens and reindexes
         let mut s = Store::open(&path).unwrap();
         s.reindex().unwrap();
-        assert_eq!(s.get_ref("answer/tag:v2").unwrap(), Some(ans.to_vec()));
+        assert_eq!(s.get_ref(&n2).unwrap(), Some(ans.to_vec()));
         assert_eq!(s.mode().unwrap(), StoreMode::Holder);
     }
 }

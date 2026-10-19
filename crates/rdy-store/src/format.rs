@@ -22,8 +22,9 @@ use std::path::Path;
 /// (Redaction); it moves in dump format 2, which carries removed payloads as dropped frames.
 /// 14 = kind SIGNATURE and the signature index (signing); it moves in dump format 2 as the pair
 /// (2, 14).
-/// 15 = ref `meta/store_mode` (a holder, D-BPYN8) and a holder's `answer/tag:<name>` refs (O11);
-/// no kind and no record encoding changes. It moves in dump format 2 as the pair (2, 15).
+/// 15 = ref `meta/store_mode` (a holder, D-BPYN8) and a holder's `answer/tag-object:<hash>`
+/// refs, one per relayed TAG object (O11 as amended by ruling task-13); no kind and no record
+/// encoding changes. It moves in dump format 2 as the pair (2, 15).
 pub const STORE_FORMAT: u32 = 15;
 /// The first store format that a dump carries (dl2, D-69AY3): dump format 1 carries 10 to 12,
 /// dump format 2 carries 13 to 15. A store of this format or a later one can move to a newer rdy

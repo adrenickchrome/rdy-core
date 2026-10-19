@@ -380,49 +380,123 @@ fn answer(item: &str, act: AnswerAct, target: Hash) -> Answer {
     }
 }
 
-#[test]
-fn ha7_check_holder_checks_answer_tag_refs() {
-    let (_d, mut s) = holder();
-    let d = divergent(&mut s, true);
-    let t1 = tag(&mut s, "v1.0.0", d.l_left);
+/// A holder with a tag `v1.0.0` and its relay answer, not yet named by any answer ref: the
+/// store, the tag and the answer.
+fn relayed_holder() -> (tempfile::TempDir, Store, Hash, Hash, Hash) {
+    let (d, mut s) = holder();
+    let div = divergent(&mut s, true);
+    let t1 = tag(&mut s, "v1.0.0", div.l_left);
     let good = s
         .put(kinds::ANSWER, &answer("tag:v1.0.0", AnswerAct::Tag, t1))
         .unwrap();
-    let forge = |s: &mut Store, name: &str, h: Hash| {
-        s.set_refs_unchecked_for_tests(vec![(name.into(), h.0.to_vec())])
-            .unwrap();
-    };
-    forge(&mut s, "answer/tag:v1.0.0", good);
+    (d, s, t1, good, div.l_left)
+}
+
+fn forge(s: &mut Store, name: &str, h: Hash) {
+    s.set_refs_unchecked_for_tests(vec![(name.into(), h.0.to_vec())])
+        .unwrap();
+}
+
+#[test]
+fn ha7_check_holder_checks_answer_tag_object_refs() {
+    let (_d, mut s, t1, good, l) = relayed_holder();
+    // the relay answer of a tag is found by the tag object (O11, ruling task-13)
+    let name = format!("answer/tag-object:{t1}");
+    forge(&mut s, &name, good);
     let c = s.check_holder().unwrap();
     assert_eq!(c.answers, 1);
-    let refused = "holder ref answer/tag:v1.0.0 is not allowed";
+    let refused = format!("holder ref {name} is not allowed");
     // an answer of another act
     let confirm = s
         .put(kinds::ANSWER, &answer("tag:v1.0.0", AnswerAct::Confirm, t1))
         .unwrap();
-    forge(&mut s, "answer/tag:v1.0.0", confirm);
+    forge(&mut s, &name, confirm);
     assert_eq!(decode_text(s.check_holder()), refused);
     // an answer to another item
     let other = s
         .put(kinds::ANSWER, &answer("tag:v2.0.0", AnswerAct::Tag, t1))
         .unwrap();
-    forge(&mut s, "answer/tag:v1.0.0", other);
+    forge(&mut s, &name, other);
     assert_eq!(decode_text(s.check_holder()), refused);
     // an object that is not an answer
-    forge(&mut s, "answer/tag:v1.0.0", t1);
+    forge(&mut s, &name, t1);
     assert_eq!(decode_text(s.check_holder()), refused);
     // a value that is not a hash
-    s.set_refs_unchecked_for_tests(vec![("answer/tag:v1.0.0".into(), vec![1, 2, 3])])
+    s.set_refs_unchecked_for_tests(vec![(name.clone(), vec![1, 2, 3])])
         .unwrap();
     assert_eq!(decode_text(s.check_holder()), refused);
     // the good answer again checks clean
-    forge(&mut s, "answer/tag:v1.0.0", good);
+    forge(&mut s, &name, good);
     s.check_holder().unwrap();
-    // an answer ref with no tag beside it
-    forge(&mut s, "answer/tag:v9.0.0", good);
+
+    // a twin's tag object of the same version kept beside it, with its own relay answer
+    let twin = s
+        .put(
+            kinds::TAG,
+            &Tag {
+                name: "1.0.0".into(),
+                landing: l,
+                message: Some("twin".into()),
+                tagged_by: prov(9),
+            },
+        )
+        .unwrap();
+    let twin_answer = s
+        .put(kinds::ANSWER, &answer("tag:1.0.0", AnswerAct::Tag, twin))
+        .unwrap();
+    let twin_ref = format!("answer/tag-object:{twin}");
+    forge(&mut s, &twin_ref, twin_answer);
+    s.check_holder().unwrap();
+    // its relay answer is one of its own name
+    forge(&mut s, &twin_ref, good);
     assert_eq!(
         decode_text(s.check_holder()),
-        "holder ref answer/tag:v9.0.0 is not allowed"
+        format!("holder ref {twin_ref} is not allowed")
+    );
+
+    // names that name no stored TAG: an object of another kind, nothing, a name that is not
+    // 64 lowercase hex digits, and a local project's ref by tag name
+    for bad in [
+        format!("answer/tag-object:{good}"),
+        format!("answer/tag-object:{}", Hash([9; 32])),
+        format!("answer/tag-object:{}", t1.to_string().to_uppercase()),
+        format!("answer/tag-object:{}", &t1.to_string()[..63]),
+        "answer/tag:v1.0.0".to_string(),
+    ] {
+        let (_d, mut s, _, good, _) = relayed_holder();
+        forge(&mut s, &bad, good);
+        assert_eq!(
+            decode_text(s.check_holder()),
+            format!("holder ref {bad} is not allowed")
+        );
+    }
+
+    // the TAG an answer ref names is read with the tags' objects: one whose landing is not
+    // stored is damage
+    let (_d, mut s, _, _, _) = relayed_holder();
+    let lost = Hash([8; 32]);
+    let stray = s
+        .put(
+            kinds::TAG,
+            &Tag {
+                name: "1.0.0".into(),
+                landing: lost,
+                message: None,
+                tagged_by: prov(9),
+            },
+        )
+        .unwrap();
+    let stray_answer = s
+        .put(kinds::ANSWER, &answer("tag:1.0.0", AnswerAct::Tag, stray))
+        .unwrap();
+    forge(&mut s, &format!("answer/tag-object:{stray}"), stray_answer);
+    assert_eq!(
+        decode_text(s.check_holder()),
+        format!(
+            "object {} names {}, which is not stored",
+            key(kinds::TAG, stray),
+            key(kinds::LANDING, lost)
+        )
     );
 }
 

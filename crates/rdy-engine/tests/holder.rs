@@ -819,7 +819,7 @@ fn ha7_old_read_state_fails_after_removal() {
 }
 
 #[test]
-fn ha7_holder_fsck_checks_answer_tag_refs() {
+fn ha7_holder_fsck_checks_answer_tag_object_refs() {
     let d = divergent();
     let mut h = d.holder();
     let tag_hash = Hash(
@@ -867,7 +867,9 @@ fn ha7_holder_fsck_checks_answer_tag_refs() {
             .unwrap();
         h.seal_open().unwrap();
     };
-    forge(&mut h, "answer/tag:v1.1.0", good);
+    // a holder finds a tag's relay answer by the tag object (O11, ruling task-13)
+    let name = format!("answer/tag-object:{tag_hash}");
+    forge(&mut h, &name, good);
     h.fsck().unwrap();
     let refused = |h: &Rdy, name: &str| {
         let e = h.fsck().unwrap_err();
@@ -879,14 +881,20 @@ fn ha7_holder_fsck_checks_answer_tag_refs() {
         );
     };
     for bad in [confirm, elsewhere, tag_hash] {
-        forge(&mut h, "answer/tag:v1.1.0", bad);
-        refused(&h, "answer/tag:v1.1.0");
+        forge(&mut h, &name, bad);
+        refused(&h, &name);
     }
-    forge(&mut h, "answer/tag:v1.1.0", good);
+    forge(&mut h, &name, good);
     h.fsck().unwrap();
-    // no tag beside it
-    forge(&mut h, "answer/tag:v9.0.0", good);
-    refused(&h, "answer/tag:v9.0.0");
+    // no stored tag object of that hash
+    let none = format!("answer/tag-object:{good}");
+    forge(&mut h, &none, good);
+    refused(&h, &none);
+    // a local project's ref, by tag name, never stands in a holder
+    let d = divergent();
+    let mut h = d.holder();
+    forge(&mut h, "answer/tag:v1.1.0", good);
+    refused(&h, "answer/tag:v1.1.0");
 }
 
 /// A holder at `dir` with one linear history of `n` empty landings, the i-th (from 0) tagged

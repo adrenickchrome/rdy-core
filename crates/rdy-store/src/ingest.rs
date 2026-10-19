@@ -247,8 +247,9 @@ impl Ingest {
 
     /// Judges batch `b`'s refs by the holder rules (`crate::holder::RefRules`) before it is
     /// written: the first batch's mode refs set the mode, then each present ref of `b` is judged,
-    /// then its end. A dropped frame is never a ref (only blocks, changes and chunks are
-    /// removable). `b`'s tags count for later batches only once `batch` takes it
+    /// then its end, which needs the TAG object of each of its answer refs in it or in an
+    /// earlier batch. A dropped frame is never a ref or a tag (only blocks, changes and chunks
+    /// are removable). `b`'s tags count for later batches only once `batch` takes it
     /// (`commit_batch`).
     fn check_refs(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
         let first = self.batches == 0;
@@ -279,6 +280,17 @@ impl Ingest {
         };
         // a batch refused earlier left its refs: they never count
         rules.abandon_batch();
+        // the batch's TAG objects, which its answer refs may name
+        for f in &b.frames {
+            if let Frame::Present {
+                kind: kinds::TAG,
+                payload,
+                ..
+            } = f
+            {
+                rules.on_tag(payload);
+            }
+        }
         let judged = refs()
             .try_for_each(|p| rules.on_ref_frame(first, p))
             .and_then(|()| rules.check_marker());

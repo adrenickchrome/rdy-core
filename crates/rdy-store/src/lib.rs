@@ -35,7 +35,7 @@ pub mod transition;
 pub mod view;
 
 pub use answer::{ANSWER_REF, PENDING_REF, answer_ref, snooze_ref};
-pub use check::StoreCheck;
+pub use check::{StoreCheck, landing_field_rules};
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
@@ -46,7 +46,7 @@ pub use merge::{
 pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
-    OpenReport, Store, StoreLock, StoreReader, lock_error,
+    OpenReport, Store, StoreLock, StoreReader, check_chunk_len, lock_error,
 };
 mod state;
 pub use state::{PreparedTag, ViewRecord, apply_op};
