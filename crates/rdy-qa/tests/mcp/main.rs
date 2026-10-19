@@ -14,6 +14,7 @@ mod mcp_export;
 mod mcp_golden;
 mod mcp_history;
 mod mcp_hub_auth;
+mod mcp_hub_keys;
 mod mcp_inbox;
 mod mcp_inbox_session;
 mod mcp_instructions;

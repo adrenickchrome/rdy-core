@@ -26,6 +26,7 @@ mod project_cmd;
 mod publication_cmd;
 mod read_cmd;
 mod redact_cmd;
+mod remote_cmd;
 mod search_cmd;
 mod serve_cmd;
 mod signing_cmd;
@@ -162,7 +163,7 @@ enum Cmd {
     },
     /// Sign an existing landing or tag through your SSH agent: a person signs their own act, an agent a relay or the person's relayed act. Works when signing.sign is never. The chat path is rdy_sign.
     Sign(signing_cmd::SignArgs),
-    /// Signing keys: show the configured person and agent keys (rdy key show). The chat path is rdy_key_show.
+    /// Signing keys: show the configured person and agent keys (rdy key show), or bind, retire or revoke a key on the selected remote's hub. The chat paths are rdy_key_show, rdy_key_bind, rdy_key_retire and rdy_key_revoke. Through the daemon, hub sign-ins come from the daemon's user config: after changing XDG_CONFIG_HOME, run rdy serve --stop.
     Key {
         #[command(subcommand)]
         cmd: signing_cmd::KeyCmd,
@@ -171,6 +172,11 @@ enum Cmd {
     Serve(serve_cmd::ServeArgs),
     /// Show the settings in effect, one row per key (no daemon is started).
     Config(config_cmd::ConfigArgs),
+    /// Remotes: list them, add or remove one at a config level, or change its mode. Offline: no hub is contacted. The chat path is rdy_remote. Through the daemon, a user-level remote is the daemon's user config: after changing XDG_CONFIG_HOME, run rdy serve --stop.
+    Remote {
+        #[command(subcommand)]
+        cmd: remote_cmd::RemoteCmd,
+    },
     /// Hub sign-in: start one (a confirmation card first), show its state, sign out, or list the saved sign-ins. No project or daemon is needed. The chat path is rdy_auth.
     Auth {
         #[command(subcommand)]
@@ -191,6 +197,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Keys { cmd } => project_cmd::keys(env, cmd),
         Cmd::Sign(a) => signing_cmd::sign(env, a),
         Cmd::Key { cmd } => signing_cmd::key(env, cmd),
+        Cmd::Remote { cmd } => remote_cmd::remote(env, cmd),
         Cmd::Status => read_cmd::status(env),
         Cmd::Show(a) => read_cmd::show(env, a),
         Cmd::New { what } => edit_cmd::new(env, what),
@@ -292,8 +299,11 @@ fn main() -> ExitCode {
     let own_warnings = match &cli.cmd {
         Cmd::Status | Cmd::Mcp => true,
         Cmd::Config(a) => a.show_origin && !as_json,
-        // key show prints them after its three lines
-        Cmd::Key { .. } => !as_json,
+        // key show prints them after its three lines; bind, retire and revoke print them as
+        // every other command does
+        Cmd::Key {
+            cmd: signing_cmd::KeyCmd::Show,
+        } => !as_json,
         _ => false,
     };
     match run(cli, &env) {

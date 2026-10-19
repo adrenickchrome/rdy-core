@@ -268,7 +268,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 48 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 52 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
     // `RelayParams`, `RecommendedParams`).
     check!(
@@ -292,6 +292,9 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         IdParams,
         InboxParams,
         IntentParams,
+        KeyBindParams,
+        KeyRetireParams,
+        KeyRevokeParams,
         KeyShowParams,
         LoadParams,
         LogParams,
@@ -303,6 +306,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         RecommendedParams,
         RedactParams,
         RelayParams,
+        RemoteParams,
         RenderParams,
         ResolveParams,
         ReviewNextParams,
@@ -1013,5 +1017,358 @@ fn hsa8_auth_tool_schema_is_strict_and_complete() {
         check(json!({"op": "installs", "machine_name": "m", "install": o})).unwrap_err(),
         unused("installs", "install"),
         "install first"
+    );
+}
+
+#[test]
+fn hsa9_remote_and_key_schemas_are_strict() {
+    let props_of = |schema: std::sync::Arc<serde_json::Map<String, Value>>| {
+        let schema = Value::Object((*schema).clone());
+        let mut props: Vec<String> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        props.sort();
+        (schema, props)
+    };
+    let schema_for =
+        |s: Result<std::sync::Arc<serde_json::Map<String, Value>>, _>| props_of(s.unwrap());
+    // the four schemas: exact fields, closed, only the named fields required
+    let cases: [(Value, Vec<String>, Value); 4] = {
+        let (r, rp) = schema_for(rmcp::handler::server::common::schema_for_input::<
+            RemoteParams,
+        >());
+        let (b, bp) = schema_for(rmcp::handler::server::common::schema_for_input::<
+            KeyBindParams,
+        >());
+        let (t, tp) = schema_for(rmcp::handler::server::common::schema_for_input::<
+            KeyRetireParams,
+        >());
+        let (v, vp) = schema_for(rmcp::handler::server::common::schema_for_input::<
+            KeyRevokeParams,
+        >());
+        [
+            (r, rp, json!(["op"])),
+            (b, bp, json!(["kind"])),
+            (t, tp, json!(["key"])),
+            (v, vp, json!(["key"])),
+        ]
+    };
+    let want: [&[&str]; 4] = [
+        &["level", "mode", "name", "op", "url"],
+        &["kind", "label", "remote"],
+        &["key", "remote"],
+        &["compromised_since", "key", "remote"],
+    ];
+    for ((schema, props, required), want) in cases.iter().zip(want) {
+        assert_eq!(props, want, "{schema}");
+        assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
+        assert_eq!(schema["required"], *required, "{schema}");
+        let text = schema.to_string();
+        for banned in [
+            "expires",
+            "key_expiry",
+            "private_key",
+            "token",
+            "confirm\"",
+            "\"proof",
+        ] {
+            assert!(!text.contains(banned), "{banned}: {text}");
+        }
+    }
+    let remote_text = cases[0].0.to_string();
+    for word in [
+        "\"list\"",
+        "\"add\"",
+        "\"rm\"",
+        "\"set_mode\"",
+        "\"share\"",
+        "\"publish\"",
+        "\"project\"",
+        "\"local\"",
+        "\"user\"",
+    ] {
+        assert!(remote_text.contains(word), "{word}: {remote_text}");
+    }
+    let bind_text = cases[1].0.to_string();
+    assert!(
+        bind_text.contains("\"person\"") && bind_text.contains("\"agent\""),
+        "{bind_text}"
+    );
+
+    // every published key parses; the enums are closed
+    let parse = |tool: &str, args: Value| -> Result<(), (String, String, String)> {
+        let map = args.as_object().unwrap().clone();
+        let r = match tool {
+            "rdy_remote" => parse_params::<RemoteParams>(tool, map).map(|_| ()),
+            "rdy_key_bind" => parse_params::<KeyBindParams>(tool, map).map(|_| ()),
+            "rdy_key_retire" => parse_params::<KeyRetireParams>(tool, map).map(|_| ()),
+            _ => parse_params::<KeyRevokeParams>(tool, map).map(|_| ()),
+        };
+        r.map_err(|e| (e.code.to_string(), e.message, e.fix))
+    };
+    assert!(
+        parse(
+            "rdy_remote",
+            json!({"op": "add", "name": "origin", "url": "https://127.0.0.1:1/p",
+                "mode": "share", "level": "user"})
+        )
+        .is_ok()
+    );
+    assert!(
+        parse(
+            "rdy_key_bind",
+            json!({"kind": "agent", "label": "l", "remote": "origin"})
+        )
+        .is_ok()
+    );
+    assert!(parse("rdy_key_retire", json!({"key": "k", "remote": "origin"})).is_ok());
+    assert!(
+        parse(
+            "rdy_key_revoke",
+            json!({"key": "k", "compromised_since": "2026-10-17T11:00:00Z", "remote": "o"})
+        )
+        .is_ok()
+    );
+    for (tool, args, message) in [
+        (
+            "rdy_remote",
+            json!({"op": "remove"}),
+            "rdy_remote: parameter \"op\" must be one of",
+        ),
+        (
+            "rdy_remote",
+            json!({"op": "add", "mode": "mirror"}),
+            "rdy_remote: parameter \"mode\" must be one of",
+        ),
+        (
+            "rdy_remote",
+            json!({"op": "add", "level": "default"}),
+            "rdy_remote: parameter \"level\" must be one of",
+        ),
+        (
+            "rdy_key_bind",
+            json!({"kind": "machine"}),
+            "rdy_key_bind: parameter \"kind\" must be one of",
+        ),
+        (
+            "rdy_key_bind",
+            json!({}),
+            "rdy_key_bind: parameter \"kind\" is required",
+        ),
+        (
+            "rdy_key_retire",
+            json!({}),
+            "rdy_key_retire: parameter \"key\" is required",
+        ),
+        (
+            "rdy_key_revoke",
+            json!({"compromised_since": "x"}),
+            "rdy_key_revoke: parameter \"key\" is required",
+        ),
+    ] {
+        let (code, m, _) = parse(tool, args.clone()).unwrap_err();
+        assert_eq!(code, "E_BAD_INPUT", "{args}");
+        assert!(m.starts_with(message), "{args}: {m}");
+    }
+
+    // unknown keys: the shared nearest-key refusal, near and far, and no secret or expiry
+    // argument exists on any of them
+    let near = [
+        (
+            "rdy_remote",
+            json!({"op": "add", "nmae": "x"}),
+            "nmae",
+            "name",
+            "level, mode, name, op, url",
+        ),
+        (
+            "rdy_key_bind",
+            json!({"kind": "person", "lable": "x"}),
+            "lable",
+            "label",
+            "kind, label, remote",
+        ),
+        (
+            "rdy_key_retire",
+            json!({"key": "k", "remot": "x"}),
+            "remot",
+            "remote",
+            "key, remote",
+        ),
+        (
+            "rdy_key_revoke",
+            json!({"key": "k", "compromised_snce": "x"}),
+            "compromised_snce",
+            "compromised_since",
+            "compromised_since, key, remote",
+        ),
+    ];
+    for (tool, args, wrong, right, all) in near {
+        assert_eq!(
+            parse(tool, args.clone()).unwrap_err(),
+            bad(
+                &format!("{tool}: unknown parameter \"{wrong}\""),
+                &format!("did you mean \"{right}\"? the parameters here are {all}")
+            ),
+            "{args}"
+        );
+    }
+    for (tool, base, all) in [
+        (
+            "rdy_remote",
+            json!({"op": "list"}),
+            "level, mode, name, op, url",
+        ),
+        (
+            "rdy_key_bind",
+            json!({"kind": "person"}),
+            "kind, label, remote",
+        ),
+        ("rdy_key_retire", json!({"key": "k"}), "key, remote"),
+        (
+            "rdy_key_revoke",
+            json!({"key": "k"}),
+            "compromised_since, key, remote",
+        ),
+    ] {
+        for key in [
+            "expires",
+            "key_expiry",
+            "private_key",
+            "token",
+            "access_token",
+            "confirm",
+            "proof",
+            "statement",
+            "user_file",
+        ] {
+            let mut args = base.clone();
+            args[key] = json!("x");
+            let (code, m, fix) = parse(tool, args).unwrap_err();
+            assert_eq!(code, "E_BAD_INPUT", "{tool} {key}");
+            assert_eq!(m, format!("{tool}: unknown parameter \"{key}\""));
+            assert!(
+                fix.ends_with(&format!("the parameters here are {all}")),
+                "{tool} {key}: {fix}"
+            );
+        }
+    }
+
+    // which fields each remote op takes, checked in the order name, url, mode, level
+    let check = |args: Value| -> Result<RemoteRequest, (String, String, String)> {
+        let p = parse_params::<RemoteParams>("rdy_remote", args.as_object().unwrap().clone())
+            .expect("parses");
+        remote_request(p).map_err(|e| (e.code.to_string(), e.message, e.fix))
+    };
+    let needs = |op: &str, f: &str| bad(&format!("remote {op} needs {f}"), &format!("pass {f}"));
+    let unused = |op: &str, f: &str| {
+        bad(
+            &format!("{f} is not used by remote {op}"),
+            &format!("remove {f}"),
+        )
+    };
+    let u = "https://127.0.0.1:1/p";
+    // list: nothing
+    assert_eq!(check(json!({"op": "list"})).unwrap(), RemoteRequest::List);
+    for (f, v) in [
+        ("name", json!("o")),
+        ("url", json!(u)),
+        ("mode", json!("share")),
+        ("level", json!("project")),
+    ] {
+        assert_eq!(
+            check(json!({"op": "list", f: v})).unwrap_err(),
+            unused("list", f),
+            "{f}"
+        );
+    }
+    assert_eq!(
+        check(json!({"op": "list", "level": "user", "name": "o"})).unwrap_err(),
+        unused("list", "name"),
+        "name first"
+    );
+    // add: name, url and mode; level is optional and defaults to project
+    assert_eq!(
+        check(json!({"op": "add", "url": u, "mode": "share"})).unwrap_err(),
+        needs("add", "name")
+    );
+    assert_eq!(
+        check(json!({"op": "add", "mode": "share", "level": "user"})).unwrap_err(),
+        needs("add", "name"),
+        "name first"
+    );
+    assert_eq!(
+        check(json!({"op": "add", "name": "o", "mode": "share"})).unwrap_err(),
+        needs("add", "url")
+    );
+    assert_eq!(
+        check(json!({"op": "add", "name": "o", "url": u})).unwrap_err(),
+        needs("add", "mode")
+    );
+    assert_eq!(
+        check(json!({"op": "add", "name": "o", "url": u, "mode": "publish"})).unwrap(),
+        RemoteRequest::Add {
+            name: "o".into(),
+            url: u.into(),
+            mode: rdy_engine::hub_config::RemoteMode::Publish,
+            level: rdy_engine::hub_remotes::RemoteLevel::Project,
+        }
+    );
+    assert_eq!(
+        check(json!({"op": "add", "name": "o", "url": u, "mode": "share", "level": "local"}))
+            .unwrap(),
+        RemoteRequest::Add {
+            name: "o".into(),
+            url: u.into(),
+            mode: rdy_engine::hub_config::RemoteMode::Share,
+            level: rdy_engine::hub_remotes::RemoteLevel::Local,
+        }
+    );
+    // rm: name; url and mode are not used
+    assert_eq!(check(json!({"op": "rm"})).unwrap_err(), needs("rm", "name"));
+    assert_eq!(
+        check(json!({"op": "rm", "url": u})).unwrap_err(),
+        needs("rm", "name"),
+        "name first"
+    );
+    assert_eq!(
+        check(json!({"op": "rm", "name": "o", "url": u})).unwrap_err(),
+        unused("rm", "url")
+    );
+    assert_eq!(
+        check(json!({"op": "rm", "name": "o", "mode": "share"})).unwrap_err(),
+        unused("rm", "mode")
+    );
+    assert_eq!(
+        check(json!({"op": "rm", "name": "o", "level": "user"})).unwrap(),
+        RemoteRequest::Rm {
+            name: "o".into(),
+            level: rdy_engine::hub_remotes::RemoteLevel::User,
+        }
+    );
+    // set_mode: name and mode; url is not used
+    assert_eq!(
+        check(json!({"op": "set_mode", "mode": "share"})).unwrap_err(),
+        needs("set_mode", "name")
+    );
+    assert_eq!(
+        check(json!({"op": "set_mode", "name": "o", "url": u, "mode": "share"})).unwrap_err(),
+        unused("set_mode", "url"),
+        "url before mode"
+    );
+    assert_eq!(
+        check(json!({"op": "set_mode", "name": "o"})).unwrap_err(),
+        needs("set_mode", "mode")
+    );
+    assert_eq!(
+        check(json!({"op": "set_mode", "name": "o", "mode": "share"})).unwrap(),
+        RemoteRequest::SetMode {
+            name: "o".into(),
+            mode: rdy_engine::hub_config::RemoteMode::Share,
+            level: rdy_engine::hub_remotes::RemoteLevel::Project,
+        }
     );
 }

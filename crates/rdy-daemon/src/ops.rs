@@ -28,6 +28,7 @@ mod project;
 mod publication;
 mod read;
 mod redaction;
+mod remote;
 mod search;
 mod signing;
 mod site;
@@ -45,8 +46,9 @@ use project::{check, fsck, reindex};
 use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use redaction::redact;
+use remote::remote;
 use search::search;
-use signing::{key_show, sign};
+use signing::{key_bind, key_retire, key_revoke, key_show, sign};
 use site::{EXPORT_SHAPE, export, import, render};
 pub(crate) use site::{export_print, render_static};
 use site_url::site_url;
@@ -134,6 +136,10 @@ pub const OPS: &[&str] = &[
     "answer",
     "sign",
     "key_show",
+    "remote",
+    "key_bind",
+    "key_retire",
+    "key_revoke",
 ];
 
 #[derive(Deserialize)]
@@ -527,6 +533,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         ),
         "sign" => sign(cx, parse(op, args, "{target, kind?}")?),
         "key_show" => key_show(cx, parse(op, args, "{}")?),
+        "remote" => remote(cx, parse(op, args, "{op, name?, url?, mode?, level?}")?),
+        "key_bind" => key_bind(cx, parse(op, args, "{kind, label?, remote?}")?),
+        "key_retire" => key_retire(cx, parse(op, args, "{key, remote?}")?),
+        "key_revoke" => key_revoke(cx, parse(op, args, "{key, compromised_since?, remote?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

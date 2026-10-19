@@ -14,6 +14,7 @@ mod cli_entities;
 mod cli_export;
 mod cli_hub_auth;
 mod cli_hub_config;
+mod cli_hub_keys;
 mod cli_inbox;
 mod cli_intake;
 mod cli_intents;
