@@ -187,6 +187,10 @@ pub(crate) struct Authorization {
     pub(crate) applies: Vec<Applied>,
     /// Every sealed request frame inside the acknowledged log, in log order.
     pub(crate) requests: Vec<(Location, Hash)>,
+    /// A holder's logical authorization (`crate::redaction_import`): what each validated apply
+    /// approves and the receiver spans each request's approved objects have. None in a project,
+    /// whose spans are its requests' own places.
+    pub(crate) imported: Option<crate::redaction_import::Imported>,
 }
 
 impl Authorization {
@@ -259,7 +263,7 @@ impl Authorization {
         for (loc, hash) in self.requests.iter().filter(|(l, _)| *l < upto) {
             let payload = read_record(readers, &BTreeMap::new(), *loc, kinds::REDACTION, hash)?
                 .ok_or_else(|| StoreError::corrupt_at(*loc))?;
-            at.push((*loc, crate::redaction::request_entry(*hash, &payload)?));
+            at.push((*loc, self.request_entry(*hash, &payload)?));
         }
         for a in self.applies.iter().filter(|a| a.loc < upto) {
             at.push((
@@ -273,6 +277,36 @@ impl Authorization {
         }
         at.sort_by_key(|(l, _)| *l);
         Ok(at.into_iter().map(|(_, e)| e).collect())
+    }
+
+    /// The index entry of the `REDACTION` frame `hash` with `payload`, as this log reads it: in a
+    /// project, the request's own entry (its spans are its manifest's places in this log); in a
+    /// holder, the same objects with the receiver spans its approval derived
+    /// (`crate::redaction_import`), never the source places its manifest names. A holder request
+    /// that no validated apply approves has no span.
+    pub(crate) fn request_entry(
+        &self,
+        hash: Hash,
+        payload: &[u8],
+    ) -> Result<IndexEntry, StoreError> {
+        let entry = crate::redaction::request_entry(hash, payload)?;
+        match (&self.imported, entry) {
+            (
+                Some(imported),
+                IndexEntry::RedactionRequest {
+                    request,
+                    carrier,
+                    objects,
+                    ..
+                },
+            ) => Ok(IndexEntry::RedactionRequest {
+                request,
+                carrier,
+                objects,
+                spans: imported.spans_of(&request),
+            }),
+            (_, e) => Ok(e),
+        }
     }
 }
 
@@ -342,11 +376,11 @@ pub(crate) fn residue_fits(
 }
 
 /// One apply frame the header pass met in a sealed batch.
-struct ApplyFrame {
-    loc: Location,
-    hash: Hash,
+pub(crate) struct ApplyFrame {
+    pub(crate) loc: Location,
+    pub(crate) hash: Hash,
     /// None: its payload matched its hash but is no apply record.
-    record: Option<RedactionApply>,
+    pub(crate) record: Option<RedactionApply>,
     /// The batch it belongs to (a counter in log order).
     batch: u64,
     /// The LANDING frames of its batch before it: (location, hash).
@@ -369,16 +403,16 @@ struct Pending {
 /// finding 8): the spans' frame boundaries and the blob manifests are looked up by the log pass
 /// ([`check_log`]) only when an apply exists.
 #[derive(Default)]
-struct Collected {
-    requests: Vec<(Location, Hash)>,
+pub(crate) struct Collected {
+    pub(crate) requests: Vec<(Location, Hash)>,
     request_at: HashMap<Hash, Location>,
     residue_at: HashMap<Hash, Location>,
-    applies: Vec<ApplyFrame>,
+    pub(crate) applies: Vec<ApplyFrame>,
     /// Frames of a batch not yet written (the live writer's): kind and payload, by location.
     memory: BTreeMap<Location, (u8, Vec<u8>)>,
     batches: u64,
     /// The end of the last batch whose marker matched it.
-    sealed_end: Option<Location>,
+    pub(crate) sealed_end: Option<Location>,
 }
 
 impl Collected {
@@ -478,7 +512,7 @@ pub(crate) fn refuse_oversized_records(items: &[(u8, Vec<u8>)]) -> Result<(), St
 }
 
 /// Reads `len` payload bytes at `at` into a fallibly allocated buffer.
-fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
+pub(crate) fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
     let mut buf = Vec::new();
     buf.try_reserve_exact(len as usize).map_err(|_| {
         StoreError::Io(io::Error::new(
@@ -503,7 +537,7 @@ fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
 /// - a torn header or a marker that does not match ends the walk of the last segment, where the
 ///   scan stops too. In a sealed segment (one a later segment follows) it is damage and refuses
 ///   the open (`segment::sealed_damage`): the frames behind it could not be validated.
-fn collect(readers: &[File]) -> Result<Collected, StoreError> {
+pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
     let mut c = Collected::default();
     let last = readers.len().saturating_sub(1);
     for (i, f) in readers.iter().enumerate() {
@@ -566,7 +600,7 @@ fn collect(readers: &[File]) -> Result<Collected, StoreError> {
 /// The record of `kind` with hash `hash` at `loc`, read and hash-checked: from `memory` (a batch
 /// not yet written) or the log. None when the frame there is not that record or does not match
 /// its hash.
-fn read_record(
+pub(crate) fn read_record(
     readers: &[File],
     memory: &BTreeMap<Location, (u8, Vec<u8>)>,
     loc: Location,
@@ -807,11 +841,11 @@ fn validate(
 }
 
 /// One frame the log pass reads: its place, kind, hash and length, and how to read its payload.
-struct Seen<'a> {
-    loc: Location,
-    kind: u8,
-    hash: Hash,
-    len: u32,
+pub(crate) struct Seen<'a> {
+    pub(crate) loc: Location,
+    pub(crate) kind: u8,
+    pub(crate) hash: Hash,
+    pub(crate) len: u32,
     source: Source<'a>,
 }
 
@@ -832,7 +866,7 @@ impl Seen<'_> {
 
     /// The payload when it is intact (it matches the frame's hash); None for an erased, partly
     /// erased or damaged one.
-    fn intact(&self) -> Result<Option<Vec<u8>>, StoreError> {
+    pub(crate) fn intact(&self) -> Result<Option<Vec<u8>>, StoreError> {
         let p = self.payload()?;
         Ok((Hash::of(&p) == self.hash).then_some(p))
     }
@@ -841,7 +875,7 @@ impl Seen<'_> {
 /// Calls `f` with every frame header of the log before `upto` (checked lengths; a torn frame
 /// ends a segment's walk), then with every frame of `memory`, in log order. Payloads are read
 /// only when `f` asks for them.
-fn for_each_seen(
+pub(crate) fn for_each_seen(
     readers: &[File],
     upto: Location,
     memory: &BTreeMap<Location, (u8, Vec<u8>)>,

@@ -21,6 +21,7 @@ pub mod meta;
 pub mod object_refs;
 pub mod pio;
 pub mod redaction;
+pub mod redaction_import;
 pub mod redaction_io;
 pub mod review;
 pub mod segment;
@@ -29,6 +30,7 @@ mod store;
 pub mod stream_error;
 pub mod sync_proof;
 pub mod sync_stream;
+pub mod take_batch;
 pub mod transition;
 pub mod view;
 

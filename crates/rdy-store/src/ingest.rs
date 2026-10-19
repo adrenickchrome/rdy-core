@@ -24,6 +24,11 @@
 //! own authorization bootstrap must authorize the frame's exact span, by the apply and with the
 //! residue the record names. A dangling or forged drop refuses the load, and no store is made.
 //!
+//! A holder's dump (its first batch sets `meta/store_mode`) is checked by the holder's own
+//! bootstrap (`crate::redaction_import`): its applies by their logical tuples, its dropped frames
+//! as the spans those tuples derive. The mode is the one the first batch sets, read before any
+//! dropped frame is judged, so a load never reads a holder's applies as a project's.
+//!
 //! Every batch's refs meet the holder rules (`crate::holder`) before the batch writes a byte:
 //! the first batch sets the mode, a mode ref in a later batch is refused, and a holder's refs
 //! stay in its families. The refusal is the store's own (`StoreError::Decode`).
@@ -44,7 +49,7 @@ use crate::dump::{
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
-use crate::holder::{FirstBatch, RefRules};
+use crate::holder::{FirstBatch, RefRules, StoreMode};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_REPO_ID, encode_repo_id};
 use crate::redaction_io;
@@ -90,6 +95,8 @@ pub struct Ingest {
     unauthorized: u64,
     /// The ref rules of the log so far: None until the first batch set the mode.
     rules: Option<RefRules>,
+    /// The mode the first batch set (a project until then).
+    mode: StoreMode,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -135,6 +142,7 @@ impl Ingest {
             pending: Vec::new(),
             unauthorized: 0,
             rules: None,
+            mode: StoreMode::Project,
         })
     }
 
@@ -264,7 +272,9 @@ impl Ingest {
                 for p in refs() {
                     scan.frame(kinds::REF_UPDATE, Some(p), b.start)?;
                 }
-                self.rules.insert(RefRules::new(scan.creation(b.start)))
+                let creation = scan.creation(b.start);
+                self.mode = creation.mode;
+                self.rules.insert(RefRules::new(creation))
             }
         };
         // a batch refused earlier left its refs: they never count
@@ -285,7 +295,7 @@ impl Ingest {
     /// the sealed batches fails its validation, nothing is released (`finish` refuses such a log
     /// anyway). An I/O error stays one.
     fn release_authorized(&mut self) -> Result<(), StoreError> {
-        let auth = match redaction_io::bootstrap_sealed(self.log.readers()) {
+        let auth = match self.bootstrap(true) {
             Ok(auth) => auth,
             Err(StoreError::Io(e)) => return Err(StoreError::Io(e)),
             Err(_) => return Ok(()),
@@ -335,7 +345,7 @@ impl Ingest {
             return Ok(());
         }
         let refuse = |what: &str| Err(dump_error(what.into()));
-        let auth = match redaction_io::bootstrap(self.log.readers()) {
+        let auth = match self.bootstrap(false) {
             Ok(auth) => auth,
             Err(StoreError::Io(e)) => return Err(StoreError::Io(e)),
             Err(StoreError::RedactionCorrupt { segment, offset }) => {
@@ -373,6 +383,17 @@ impl Ingest {
             }
         }
         Ok(())
+    }
+
+    /// The log's authorization by the bootstrap of its mode: a holder's derives its spans from
+    /// its approvals (`redaction_import::bootstrap_holder`, which reads the sealed batches only);
+    /// a project's is `redaction_io::bootstrap`, or `bootstrap_sealed` when `sealed`.
+    fn bootstrap(&self, sealed: bool) -> Result<redaction_io::Authorization, StoreError> {
+        match (self.mode, sealed) {
+            (StoreMode::Holder, _) => crate::redaction_import::bootstrap_holder(self.log.readers()),
+            (StoreMode::Project, true) => redaction_io::bootstrap_sealed(self.log.readers()),
+            (StoreMode::Project, false) => redaction_io::bootstrap(self.log.readers()),
+        }
     }
 
     /// The end of the log so far.

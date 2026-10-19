@@ -8,7 +8,7 @@ use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
 use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
-    CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
+    CrashPoint, HEADER, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
 use crate::transition::Transitions;
 use crate::view::ViewOp;
@@ -379,6 +379,9 @@ struct Faults {
     checkpoint: bool,
     /// The next replay fails before it indexes this frame (counting from 0).
     replay_after: Option<u64>,
+    /// Called by a take before it reads and appends each new record, with the records appended
+    /// so far (`on_take_append_for_tests`).
+    take_append: Option<Box<dyn FnMut(u64) + Send>>,
 }
 
 /// Frames for one `write`: `(kind, payload)` pairs, in write order.
@@ -573,6 +576,15 @@ fn replay_into(
             return Err(StoreError::corrupt_at(loc));
         }
         entries.extend(match v.payload {
+            // a request's spans are the log's own: a holder's come from its approvals
+            Some(payload) if v.kind == kinds::REDACTION => vec![
+                IndexEntry::Object {
+                    kind: v.kind,
+                    hash: v.hash,
+                    loc,
+                },
+                auth.request_entry(v.hash, payload)?,
+            ],
             Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload)?,
             None => auth.entries_for_hole(v.kind, v.hash, loc)?,
         });
@@ -2830,6 +2842,11 @@ impl Store {
     /// after-apply-sync failpoint before its first zero write (the live writer reaches it right
     /// after its sync).
     fn finish(&mut self, at_open: bool) -> Result<RedactionCounts, StoreError> {
+        self.finish_erasing(at_open).map(|(c, _)| c)
+    }
+
+    /// `finish`, and whether it erased anything (and so rebuilt the index).
+    fn finish_erasing(&mut self, at_open: bool) -> Result<(RedactionCounts, bool), StoreError> {
         let auth = Arc::clone(self.log.authorization());
         let mut counts = auth.counts();
         let mut affected: BTreeSet<u32> = BTreeSet::new();
@@ -2847,12 +2864,12 @@ impl Store {
             affected.insert(loc.segment);
         }
         if affected.is_empty() {
-            return Ok(counts);
+            return Ok((counts, false));
         }
         self.log.sync_segments(&affected)?;
         crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
         self.reindex()?;
-        Ok(counts)
+        Ok((counts, true))
     }
 
     /// Reads and hash-checks every frame as `verify` does, reading the authorized holes as frames
@@ -3070,6 +3087,231 @@ impl Store {
             Ok(c) => Ok(c),
             Err(_) => Err(self.pending_failure()),
         }
+    }
+
+    /// Takes every batch file of one upload into this holder as one sealed batch (hub p-97JVE,
+    /// f-NE0Z4; D-BPYN8: closure and tag in one batch). The checks before anything is written
+    /// are `crate::take_batch`'s: each file alone, the union over the holder, the root against
+    /// `target`, SIG's subject rule, the root's closure, every new removal's portable proof and
+    /// every local copy it removes, uncovered embeddings, then `check` (the caller's validation,
+    /// once, under this store's lock), then the receiver caps. A refusal writes nothing.
+    ///
+    /// The batch holds every record the holder lacks, in canonical order (each read again from
+    /// its file and checked against what was indexed: changed input is `input changed during
+    /// take` and its bytes are rolled back), each approved drop as its original header and zeros,
+    /// then the chosen tag's refs, then one marker and one sync. A batch that changes the
+    /// holder's removal authorization is checked once more by the holder's own bootstrap before
+    /// its sync; from the sync on, it is authorized: the epoch advances for a new apply, every
+    /// local copy is erased and the index is rebuilt, and a failure there is `RedactionPending`
+    /// (the next open finishes it) and never rolls the batch back. A take with nothing to write
+    /// returns the log's end with zero counts and writes no marker.
+    pub fn take_batches<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::UploadTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::UploadFacts,
+        ) -> Result<crate::take_batch::TagChoice, E>,
+    ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        crate::take_batch::check_input_bounds(files.len(), target).map_err(TakeError::Stream)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.held || self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a take")));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+            },
+            files,
+            target,
+            check,
+        )?;
+        drop(reader);
+        self.seal_take(files, plan)
+    }
+
+    /// Writes a prepared take (see [`Store::take_batches`]).
+    fn seal_take<E>(
+        &mut self,
+        files: &[File],
+        plan: crate::take_batch::Plan,
+    ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{BatchTaken, TakeError};
+        let taken = |end, frames| BatchTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: plan.redacted_objects,
+            end,
+            tag_hash: plan.tag_hash,
+            tag: plan.tag.clone(),
+        };
+        if plan.writes.is_empty() && plan.refs.is_empty() {
+            return Ok(BatchTaken {
+                redacted_objects: 0,
+                ..taken(self.log.end(), 0)
+            });
+        }
+        let refs = self.ref_items(plan.refs.clone());
+        self.check_refs(&refs, RefWrite::Take)?;
+        let epoch = if plan.new_applies {
+            Some(
+                self.shared
+                    .epoch
+                    .load(Ordering::Acquire)
+                    .checked_add(1)
+                    .ok_or(StoreError::RedactionPending)?,
+            )
+        } else {
+            None
+        };
+        let before = self.log.end();
+        let appended = self.append_take(files, &plan, &refs);
+        let (frames, entries) = match appended {
+            Ok(a) => a,
+            Err(e) => {
+                self.roll_back(before);
+                return Err(e);
+            }
+        };
+        // a batch that changes the removal authorization is judged by the holder's own
+        // bootstrap over the log it makes, before it is synced
+        let auth = if plan.redaction {
+            match crate::redaction_import::bootstrap_holder(self.log.readers()) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    self.roll_back(before);
+                    return Err(TakeError::Store(e));
+                }
+            }
+        } else {
+            None
+        };
+        self.log.crash_point(CrashPoint::BeforeSync);
+        if let Err(e) = self.log.sync() {
+            self.roll_back(before);
+            return Err(TakeError::Store(e.into()));
+        }
+        self.log.crash_point(CrashPoint::AfterSync);
+        let n = frames.len() as u64;
+        let Some(auth) = auth else {
+            let indexed = if self.take_index_fault() {
+                Err(StoreError::Db("injected index failure".into()))
+            } else {
+                self.index().apply(&entries, self.log.end())
+            };
+            if let Err(e) = indexed {
+                // as a failed write: nothing past `before` is acknowledged
+                self.roll_back(before);
+                return Err(TakeError::Store(e));
+            }
+            self.log.crash_point(CrashPoint::AfterIndex);
+            self.writes += 1;
+            self.acknowledge(frames);
+            return Ok(taken(self.log.end(), n));
+        };
+        // authorized: the batch is durable, and no error below rolls it back
+        self.log.set_authorization(Arc::new(auth));
+        if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+            return Err(TakeError::Store(self.pending_failure()));
+        }
+        if let Some(epoch) = epoch {
+            self.advance_epoch(epoch);
+        }
+        let rebuilt = match self.finish_erasing(false) {
+            Ok((_, true)) => Ok(()),
+            Ok((_, false)) => self.reindex(),
+            Err(e) => Err(e),
+        };
+        if rebuilt.is_err() {
+            return Err(TakeError::Store(self.pending_failure()));
+        }
+        self.writes += 1;
+        self.acknowledge(frames);
+        Ok(taken(self.log.end(), n))
+    }
+
+    /// Appends a prepared take's frames and marker, with no sync: each new record read again
+    /// from its file and checked, each drop as its header and zeros, then `refs`. Returns the
+    /// kind and hash of every data frame and, for a batch that leaves the authorization as it
+    /// is, their index entries. The caller rolls back on error.
+    #[allow(clippy::type_complexity)]
+    fn append_take<E>(
+        &mut self,
+        files: &[File],
+        plan: &crate::take_batch::Plan,
+        refs: &[(u8, Vec<u8>)],
+    ) -> Result<(Vec<(u8, Hash)>, Vec<IndexEntry>), crate::take_batch::TakeError<E>> {
+        use crate::take_batch::Write;
+        let size = plan
+            .writes
+            .iter()
+            .map(|w| HEADER + u64::from(w.len()))
+            .chain(refs.iter().map(|(_, p)| HEADER + p.len() as u64))
+            .sum::<u64>()
+            + HEADER
+            + crate::segment::MARKER_MAX;
+        self.log.roll_for_batch(size)?;
+        let start = self.log.end();
+        let mut frames: Vec<(u8, Hash)> = Vec::new();
+        frames
+            .try_reserve_exact(plan.writes.len() + refs.len())
+            .map_err(|_| crate::stream_error::StreamError::allocation(None, 0))?;
+        let mut entries = vec![];
+        let mut buf = Vec::new();
+        for (i, w) in plan.writes.iter().enumerate() {
+            if let Some(hook) = self.faults.take_append.as_mut() {
+                hook(i as u64);
+            }
+            match w {
+                Write::Present { key, at } => {
+                    crate::take_batch::reread(files, at, &mut buf)
+                        .map_err(|e| e.with_object(Some(*key)))?;
+                    let (loc, hash) = self.log.append_unrolled(key.kind, &buf)?;
+                    if !plan.redaction {
+                        entries.extend(entries_for_frame(key.kind, hash, loc, &buf)?);
+                    }
+                    frames.push((key.kind, hash));
+                }
+                Write::Dropped { key, len, verify } => {
+                    crate::take_batch::verify(files, verify, &mut buf)
+                        .map_err(|e| e.with_object(Some(*key)))?;
+                    self.log.append_dropped(key.kind, &key.hash, *len)?;
+                    frames.push((key.kind, key.hash));
+                }
+            }
+        }
+        for (kind, payload) in refs {
+            let (loc, hash) = self.log.append_unrolled(*kind, payload)?;
+            entries.extend(entries_for_frame(*kind, hash, loc, payload)?);
+            frames.push((*kind, hash));
+        }
+        self.log.crash_point(CrashPoint::BeforeMarker);
+        self.log
+            .append_marker(start, frames.iter().map(|(_, h)| h))?;
+        Ok((frames, entries))
+    }
+
+    /// Test hook: `hook` runs before a take reads and appends each new record, with the number
+    /// of records appended so far.
+    #[doc(hidden)]
+    pub fn on_take_append_for_tests(&mut self, hook: impl FnMut(u64) + Send + 'static) {
+        self.faults.take_append = Some(Box::new(hook));
     }
 
     /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the

@@ -1037,7 +1037,14 @@ impl SegmentLog {
         floor: Option<Location>,
     ) -> Result<(SegmentLog, Vec<PathBuf>), StoreError> {
         let mut readers = open_readers(dir)?;
-        let auth = Arc::new(redaction_io::bootstrap(&readers)?);
+        // the mode the first batch sets decides the bootstrap: a holder's applies are checked by
+        // their logical tuples (`redaction_import`), a project's by their own spans' places
+        let auth = Arc::new(match crate::redaction_import::log_mode(&readers)? {
+            crate::holder::StoreMode::Holder => {
+                crate::redaction_import::bootstrap_holder(&readers)?
+            }
+            crate::holder::StoreMode::Project => redaction_io::bootstrap(&readers)?,
+        });
         let holes = &auth.holes;
         let mut last = (readers.len() - 1) as u32;
         let mut writer = OpenOptions::new()
@@ -1250,6 +1257,16 @@ impl SegmentLog {
         });
         self.append_marker(start, placed.iter().map(|(_, h)| h))?;
         Ok(placed)
+    }
+
+    /// Rolls the segment first when a batch of `size` bytes (its frames and its marker) would not
+    /// fit in the current one, as `append_frames` does for the first frames of a batch. A batch
+    /// that `append_unrolled` writes frame by frame calls it once before its first frame.
+    pub(crate) fn roll_for_batch(&mut self, size: u64) -> io::Result<()> {
+        if self.len > 0 && self.len.saturating_add(size) > self.max_len {
+            self.roll()?;
+        }
+        Ok(())
     }
 
     /// Appends `frames` with no batch marker and does not sync; returns where each went and its
