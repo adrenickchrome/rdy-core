@@ -15,7 +15,7 @@ pub(super) struct OutArgs {
 }
 
 /// The print arguments of the `export` op (O1): `format` is `pdf`, `html` or `md`; `layout` is
-/// `mkdocs`, with `md` only.
+/// `mkdocs` or `techdocs`, with `md` only.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExportArgs {
@@ -41,6 +41,7 @@ enum FormatArg {
 #[serde(rename_all = "lowercase")]
 enum LayoutArg {
     Mkdocs,
+    Techdocs,
 }
 
 /// `text` as one of the closed set `T` names; anything else is the op's argument error.
@@ -112,7 +113,7 @@ pub(crate) fn render_static(
     Ok(to_json(&summary))
 }
 
-/// Prints `scope_text` at `out` as `format` (`pdf`, `html` or `md`) and `layout` (`mkdocs`), and
+/// Prints `scope_text` at `out` as `format` (`pdf`, `html` or `md`) and `layout` (`mkdocs` or `techdocs`), and
 /// replies with the print's summary. The scope and the profile read as [`render_static`] reads
 /// them: with a profile, its selected view and its reference check; without, the full source.
 /// The `export` op and the daemon's `Engine::export` (`rdy_export`) both print through it.
@@ -139,7 +140,10 @@ pub(crate) fn export_print(
     let layout = layout
         .map(closed::<LayoutArg>)
         .transpose()?
-        .map(|LayoutArg::Mkdocs| Layout::Mkdocs);
+        .map(|l| match l {
+            LayoutArg::Mkdocs => Layout::Mkdocs,
+            LayoutArg::Techdocs => Layout::Techdocs,
+        });
     let summary = match (profile, scope) {
         (Some(p), _) => rdy_render::print::export_profile(st, scope_text, p, out, format, layout)?,
         (None, Some(scope)) => rdy_render::print::export(st, &scope, out, format, layout)?,

@@ -82,10 +82,10 @@ pub fn export_profile(
 
 /// A layout applies to the Markdown tree only.
 fn check_layout(format: Format, layout: Option<Layout>) -> Result<(), RdyError> {
-    if layout.is_some() && !matches!(format, Format::Md) {
+    if let Some(layout) = layout.filter(|_| !matches!(format, Format::Md)) {
         return Err(RdyError::new(
             E_BAD_INPUT,
-            "--layout mkdocs applies to the md format only",
+            format!("--layout {} applies to the md format only", layout.name()),
             "drop --layout, or export with --format md",
         ));
     }

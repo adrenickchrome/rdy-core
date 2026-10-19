@@ -83,7 +83,7 @@ pub struct ExportRequest {
     pub out: PathBuf,
     /// `pdf`, `html` or `md`.
     pub format: String,
-    /// `mkdocs`, with `md` only.
+    /// `mkdocs` or `techdocs`, with `md` only.
     pub layout: Option<String>,
     /// The scope's text; canon when none.
     pub scope: Option<String>,

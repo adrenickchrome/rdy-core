@@ -37,6 +37,7 @@ mod render_review_page;
 mod render_review_toggle;
 mod render_search;
 mod render_site;
+mod render_techdocs;
 mod render_theme;
 mod render_toolbar;
 mod render_trail;

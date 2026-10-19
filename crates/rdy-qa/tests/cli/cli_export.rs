@@ -179,11 +179,25 @@ fn ec11_no_cli_path_writes_a_format_3_tree() {
     );
     assert!(!dir.join("z.pdf").exists());
 
+    let out = s.rdy(&[
+        "export", "--out", "z.pdf", "--format", "pdf", "--layout", "techdocs",
+    ]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--layout techdocs applies to the md format only"),
+        "{err}"
+    );
+    assert!(!dir.join("z.pdf").exists());
+
     for (o, f) in [("t.pdf", "pdf"), ("t.html", "html"), ("t-md", "md")] {
         stdout(&s.rdy(&["export", "--out", o, "--format", f]));
     }
     stdout(&s.rdy(&[
         "export", "--out", "t-mk", "--format", "md", "--layout", "mkdocs",
+    ]));
+    stdout(&s.rdy(&[
+        "export", "--out", "t-td", "--format", "md", "--layout", "techdocs",
     ]));
     let f3: Vec<String> = names(dir)
         .into_iter()

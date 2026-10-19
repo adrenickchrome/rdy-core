@@ -32,7 +32,7 @@ pub struct ExportParams {
     pub out: String,
     /// pdf, html or md.
     pub format: ExportFormat,
-    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. Only with md.
+    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. Only with md.
     pub layout: Option<ExportLayout>,
     /// canon (the default), a view, tag:<version>, landing:<id> or proposal:P-<id>@<n>. With a profile: canon, tag:<version> or landing:<id>.
     pub scope: Option<String>,
@@ -64,12 +64,14 @@ impl ExportFormat {
 #[serde(rename_all = "lowercase")]
 pub enum ExportLayout {
     Mkdocs,
+    Techdocs,
 }
 
 impl ExportLayout {
     fn as_str(self) -> &'static str {
         match self {
             ExportLayout::Mkdocs => "mkdocs",
+            ExportLayout::Techdocs => "techdocs",
         }
     }
 }
