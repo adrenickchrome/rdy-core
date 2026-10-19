@@ -7,6 +7,7 @@
 //! No product behaviour is promised stable across pins.
 
 pub mod history;
+pub mod maintenance;
 pub mod publication;
 mod store;
 mod value;

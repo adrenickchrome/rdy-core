@@ -1,6 +1,9 @@
 //! The store handle and its captured read snapshot.
 
-use rdy_engine::{E_INTERNAL, E_NOT_FOUND, Local, RdyError, ReadState, parse_version};
+use rdy_engine::{
+    DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy, RdyError, ReadState,
+    parse_version,
+};
 use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::meta::Origin;
 use std::cmp::Ordering;
@@ -28,6 +31,38 @@ impl StoreHandle {
         Ok(StoreHandle {
             local: Local::open(project)?,
         })
+    }
+
+    /// Creates the holder at `root` for `repo_id` (D-BPYN8) and holds it open: one durable batch
+    /// with the store format, the repo id and the holder mode, and nothing else on disk (no
+    /// config, pack directory or settings). A directory that already holds a store is refused
+    /// and left as it was.
+    pub fn create_holder(root: &Path, repo_id: RepoId) -> Result<Self, RdyError> {
+        Ok(StoreHandle {
+            local: Local::new(Rdy::create_holder(root, repo_id)?),
+        })
+    }
+
+    /// Opens the holder at `root` through the existing exclusive lock. A project store there is
+    /// refused (`this store is a project`); no config, pack or settings file is read.
+    pub fn open_holder(root: &Path) -> Result<Self, RdyError> {
+        Ok(StoreHandle {
+            local: Local::new(Rdy::open_holder(root)?),
+        })
+    }
+
+    /// Writes the store's current published state as a dump to `out`, through the lock this
+    /// handle already holds: the store is not opened a second time. A project's dump carries
+    /// its project files; a holder's carries none. `out` must not exist.
+    pub fn dump(&self, out: &Path) -> Result<DumpSummary, RdyError> {
+        // one captured state: the dump ends where that state ends, whatever is written meanwhile
+        self.local.read().dump(out)
+    }
+
+    /// Checks the store with the engine's own `fsck`, by mode (a holder checks each tag's own
+    /// history). It reads under the lock and emits no batch.
+    pub fn fsck(&self) -> Result<FsckReport, RdyError> {
+        self.local.inspect(|rdy| rdy.fsck())
     }
 
     /// A read snapshot: the published state, the identity, the canon head and every `tag/*` ref,

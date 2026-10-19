@@ -1,7 +1,9 @@
 //! `rdy dump` (plan Dump and load; D-69AY3, D-D2NPN, D-FR0C4): the whole project as one
 //! stream of the current dump format, 2 (`rdy_store::dump`). It holds the published log's
 //! sealed batches, byte for byte, and the closed set of project files (F5): `.rdy.yaml`,
-//! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A frame whose
+//! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A holder's dump
+//! (D-BPYN8) holds no project file: it reads neither `.rdy.yaml` nor `.rdy/packs`, and its
+//! header and batches are the same as a project's. A frame whose
 //! payload an applied redaction removed travels as its dropped record: its original header, its
 //! apply and its residue, never its bytes (plan Redaction, D-3M81W).
 //!
@@ -19,6 +21,7 @@ use rdy_store::dump::{
 };
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::fsutil::sync_dir;
+use rdy_store::holder::StoreMode;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, ErrorKind, Write};
@@ -90,7 +93,7 @@ impl ReadState {
             ));
         }
         inside_rdy(self.root(), dir, out)?;
-        let files = project_files(self.root())?;
+        let files = self.dump_files()?;
         let totals = place(out, DUMP_CMD, |partial, file| {
             self.write_dump(BufWriter::new(file), &files)
                 .and_then(|(buf, t)| {
@@ -110,6 +113,15 @@ impl ReadState {
             files: files.into_iter().map(|(path, _)| path).collect(),
             bytes: totals.bytes,
         })
+    }
+
+    /// The project files this dump carries: a project's closed set, and none for a holder (it
+    /// has no config file and no pack directory, and neither is read).
+    fn dump_files(&self) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
+        match self.reader().mode()? {
+            StoreMode::Holder => Ok(Vec::new()),
+            StoreMode::Project => project_files(self.root()),
+        }
     }
 
     /// Writes the whole dump into `w` and returns `w`, flushed (a dump, and a clone's stream).
