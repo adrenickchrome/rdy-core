@@ -29,6 +29,7 @@ mod search_cmd;
 mod serve_cmd;
 mod signing_cmd;
 mod site_cmd;
+mod stream_cmd;
 mod tension_cmd;
 mod view_cmd;
 mod wc;
@@ -166,6 +167,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: signing_cmd::KeyCmd,
     },
+    /// Check upload batches without a store.
+    Stream {
+        #[command(subcommand)]
+        cmd: stream_cmd::StreamCmd,
+    },
     /// Run the project's daemon in the foreground (every other command starts one as needed).
     Serve(serve_cmd::ServeArgs),
     /// Show the settings in effect, one row per key (no daemon is started).
@@ -178,6 +184,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
     let as_json = cli.json;
     match cli.cmd {
         Cmd::Config(a) => config_cmd::run(&env.project, a.show_origin),
+        Cmd::Stream { .. } => unreachable!("handled before the project is found"),
         Cmd::Wc(c) => wc::run(c, env),
         Cmd::Init(a) => project_cmd::init(env, a, cli.project),
         Cmd::Mcp => serve_cmd::mcp(env),
@@ -234,6 +241,10 @@ fn main() -> ExitCode {
     rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
     let cli = Cli::parse();
     let as_json = cli.json;
+    // ha15: a batch check opens no project, store, config or daemon, so it runs first
+    if let Cmd::Stream { cmd } = cli.cmd {
+        return stream_cmd::run(cmd, as_json);
+    }
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {

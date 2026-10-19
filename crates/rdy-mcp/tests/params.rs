@@ -313,6 +313,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         SessionParams,
         SignParams,
         SiteParams,
+        StreamCheckParams,
         SupersedeParams,
         TagParams,
         TagsParams,

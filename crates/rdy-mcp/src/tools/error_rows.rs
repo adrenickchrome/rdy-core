@@ -267,6 +267,31 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         SIGNING_FAILED_FIX,
     ),
     (
+        E_BAD_RECORD,
+        "a sync batch has an invalid object, frame, dependency cycle or repeated object",
+        "request this stream again; run rdy fsck at its source",
+    ),
+    (
+        E_UNRESOLVED_REF,
+        "an upload needs an object that was not supplied",
+        "send the missing object with its dependencies",
+    ),
+    (
+        E_STREAM_TRUNCATED,
+        "a sync batch's trailer is missing or does not match",
+        "request the complete stream again",
+    ),
+    (
+        E_STREAM_PURPOSE,
+        "a sync batch has a purpose this call did not request",
+        "request a tag_history stream",
+    ),
+    (
+        E_REPO_MISMATCH,
+        "a sync batch names a different repo from its holder",
+        "use the holder for the stream's repo",
+    ),
+    (
         E_PUBLICATION_REFERENCE,
         "a public profile refers to blocks outside its selection",
         "Include the target docs or remove these references. Run the publication check again.",

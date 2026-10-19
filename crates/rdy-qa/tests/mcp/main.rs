@@ -42,6 +42,7 @@ mod mcp_search_brief;
 mod mcp_signing;
 mod mcp_site;
 mod mcp_state;
+mod mcp_stream;
 mod mcp_tag_relay;
 mod mcp_tensions;
 mod mcp_view_brief;

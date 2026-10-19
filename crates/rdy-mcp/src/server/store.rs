@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, CloneParams, DumpParams, LoadParams};
+use crate::tools::{self, CloneParams, DumpParams, LoadParams, StreamCheckParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = store_router, vis = "pub(crate)")]
@@ -26,5 +26,16 @@ impl RdyServer {
     )]
     async fn rdy_clone(&self, Parameters(p): Parameters<CloneParams>) -> CallToolResult {
         self.run("rdy_clone", p, tools::rdy_clone).await
+    }
+
+    #[tool(
+        description = "Check one upload batch without opening a store. Return its record keys in order. Complete upload checks run when all batches are taken."
+    )]
+    async fn rdy_stream_check(
+        &self,
+        Parameters(p): Parameters<StreamCheckParams>,
+    ) -> CallToolResult {
+        self.run("rdy_stream_check", p, tools::rdy_stream_check)
+            .await
     }
 }

@@ -2,7 +2,9 @@
 //! O6). Any session may call them. Relative paths resolve against the project directory.
 use super::*;
 use rdy_engine::clone::{CloneSource, SourceKind, clone, source_kind};
-use rdy_engine::{E_BAD_INPUT, RdyError};
+use rdy_engine::stream_check::check_batch;
+use rdy_engine::{E_BAD_INPUT, E_IO, RdyError};
+use rdy_model::RepoId;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,6 +35,15 @@ pub struct CloneParams {
     pub file: Option<String>,
     /// true: the clone gets a new repo id and records forked_from.
     pub fork: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamCheckParams {
+    /// The batch file: absolute, or relative to the project directory. A name of - is an ordinary file name.
+    pub file: String,
+    /// Refuse a batch of another repo: 32 hex digits.
+    pub repo_id: Option<String>,
 }
 
 /// `p` as given when absolute, else under the project directory `root` (`join` replaces the
@@ -100,4 +111,34 @@ fn not_a_dump(path: &Path) -> RdyError {
         format!("{} is not a dump file", path.display()),
         "to clone another project, call rdy_dump on its own server, then pass the file here",
     )
+}
+
+/// `rdy_stream_check` (ha15; D-D2NPN, D-KQ4CA): checks one upload batch file without opening a
+/// store, through the same pure check as `rdy stream check`. A session is required, as for
+/// `rdy_dump`. The report comes only after the whole batch passes.
+pub fn rdy_stream_check(st: &mut McpState, p: StreamCheckParams) -> Result<Value, RdyError> {
+    session(st)?;
+    let repo = p
+        .repo_id
+        .as_deref()
+        .map(|text| {
+            text.parse::<RepoId>().map_err(|e| {
+                RdyError::new(
+                    E_BAD_INPUT,
+                    e.to_string(),
+                    "pass a repo id with 32 hex digits",
+                )
+            })
+        })
+        .transpose()?;
+    let path = under(&st.engine.root(), &p.file);
+    let file = std::fs::File::open(&path).map_err(|e| {
+        RdyError::new(
+            E_IO,
+            format!("{}: {e}", path.display()),
+            "check the path and its permissions",
+        )
+    })?;
+    let report = check_batch(std::io::BufReader::new(file), repo)?;
+    Ok(serde_json::to_value(report).expect("a report serializes"))
 }
