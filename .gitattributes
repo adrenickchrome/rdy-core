@@ -2,3 +2,5 @@
 crates/rdy-qa/tests/*/main.rs merge=union
 # The released dump fixtures are pinned by the hash of their bytes: never convert line endings.
 crates/rdy-qa/fixtures/dump/* -text
+# The sync batch vectors are pinned the same way.
+crates/rdy-qa/fixtures/sync/* -text
