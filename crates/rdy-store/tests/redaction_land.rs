@@ -1221,3 +1221,87 @@ fn rdx7_held_apply_seal_takes_only_its_transition() {
         }
     }
 }
+
+/// HA1 Task 5, fix round 1 (ruling: "a removal landing names its requests in `checks`"): the
+/// landing's hash commits to the exact removal set, so a signed tag covers it and no other
+/// request with the same carrier can reuse the approval.
+#[test]
+fn ha5_a_removal_landing_names_exactly_its_requests() {
+    // two carriers: the landing names both requests, sorted
+    let (w, mut s) = World::new();
+    let d1 = record(&mut s, &w.secret("work"));
+    let d2 = record(&mut s, &w.blob_spec("work"));
+    let p = s.propose("work", "Remove content", writer()).unwrap();
+    let mut want = vec![d1.request_id(), d2.request_id()];
+    want.sort();
+    let prepared = s
+        .prepare_land(request(p, person(Role::Approver), false))
+        .unwrap();
+    assert_eq!(prepared.landing().checks, want, "prepared");
+    let out = s
+        .land_atomic(request(p, person(Role::Approver), false))
+        .unwrap();
+    assert_eq!(s.landing(&out.landing).unwrap().checks, want, "stored");
+
+    // a landing with no carrier names nothing
+    let (_w, mut s) = World::new();
+    let p = s.propose("work", "Ordinary", writer()).unwrap();
+    let out = s
+        .land_atomic(request(p, person(Role::Approver), false))
+        .unwrap();
+    assert!(s.landing(&out.landing).unwrap().checks.is_empty());
+
+    // the apply path refuses a landing whose checks are not exactly its requests
+    let (w, mut s) = World::new();
+    let d1 = record(&mut s, &w.secret("work"));
+    let d2 = record(&mut s, &w.blob_spec("work"));
+    let p = s.propose("work", "Remove content", writer()).unwrap();
+    let (r1, r2) = (d1.request_id(), d2.request_id());
+    type Alter = Box<dyn Fn(&mut LandingRecord)>;
+    let cases: Vec<(&str, Alter)> = vec![
+        ("empty", Box::new(|l: &mut LandingRecord| l.checks.clear())),
+        (
+            "one omitted",
+            Box::new(move |l: &mut LandingRecord| l.checks.retain(|h| *h != r1)),
+        ),
+        (
+            "another request",
+            Box::new(|l: &mut LandingRecord| l.checks[0] = Hash([7; 32])),
+        ),
+        (
+            "one more",
+            Box::new(|l: &mut LandingRecord| {
+                l.checks.push(Hash([0xff; 32]));
+            }),
+        ),
+        (
+            "a repeat",
+            Box::new(move |l: &mut LandingRecord| {
+                l.checks.push(r2.max(r1));
+            }),
+        ),
+        (
+            "unsorted",
+            Box::new(|l: &mut LandingRecord| l.checks.reverse()),
+        ),
+    ];
+    let (end, writes) = (s.log_end(), s.write_count());
+    for (case, hook) in cases {
+        let e = s
+            .prepare_land_altered_for_tests(request(p, person(Role::Approver), false), &*hook)
+            .unwrap_err();
+        let StoreError::Refused(m) = &e else {
+            panic!("{case}: {e:?}")
+        };
+        assert!(
+            m.contains("must name exactly the redaction requests it applies"),
+            "{case}: {m}"
+        );
+        assert_untouched(&s, &w.path, end, writes);
+    }
+    // unaltered, the same landing lands
+    assert!(
+        s.prepare_land_altered_for_tests(request(p, person(Role::Approver), false), &|_| {})
+            .is_ok()
+    );
+}

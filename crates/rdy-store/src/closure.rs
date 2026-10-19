@@ -23,17 +23,30 @@
 //! that landing's history), and attachments are taken again until no new key appears: a key is
 //! taken once, so the walk ends. No other ref is followed.
 //!
-//! A key the receiver claims to hold (`known`) is not walked: it leaves the batch and, when a
-//! record of the batch needs it, becomes a prerequisite. The take verifies it again; a claim is
-//! no authorization.
+//! The answers have no index by target: one pass over the stored answers finds those that
+//! target the closure's landings and tags not asked yet, after the other links and attachments
+//! reach their fixed point; a pass runs again only when new landings or tags joined. A pass
+//! keeps only the answers it attaches, so unrelated answers cost a read and nothing of the
+//! closure's bounds. (An index of answers by target would make each pass a lookup, but it is a
+//! new derived table of the index; the closure needs none for its bounds.)
+//!
+//! A key the receiver claims to hold (`known`) leaves the batch, but the walk goes on through
+//! it: a held object does not mean its history or its later attachments are held (a quarantined
+//! root's landing, a later removal proof of a held landing). A known key that a record of the
+//! batch needs, or that is a removal proof a placeholder of the batch names, is a prerequisite;
+//! one no record of the batch needs is not. The take verifies every prerequisite again; a claim
+//! is no authorization. A known key the source does not hold is not walked.
+//!
+//! The upload's bounds are charged to the walk: at most [`MAX_RECORDS`] records and
+//! [`MAX_EDGES`] distinct references of each record, summed, known records included.
 //!
 //! # The order
 //!
-//! Depth-first postorder with each record's needed keys in `ObjectKey` order: from the root
-//! first, then from each record not yet placed, in key order. Every record follows what it
-//! needs; a removed object follows its residue; an apply may follow what it removes (the later
-//! proof). The order depends on the set of records only, never on the order they were found or
-//! stored.
+//! Depth-first postorder over the batch's records, with each record's needed keys in `ObjectKey`
+//! order: from the root first, then from each record not yet placed, in key order. Every record
+//! follows what it needs of the batch; a removed object follows its residue; an apply may follow
+//! what it removes (the later proof: a placeholder's apply is a reference, never an order). The
+//! order depends on the set of records only, never on the order they were found or stored.
 use crate::error::StoreError;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef};
@@ -50,7 +63,7 @@ use crate::sync_stream::{
     TRAILER_LEN, depth_of,
 };
 use rdy_model::{Answer, AnswerAct, Hash, Tag};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write;
 
 /// The end of every log: a closure read with it sees everything the reader's index holds.
@@ -91,47 +104,73 @@ pub fn closure_before(
     };
     let mut w = Walk {
         source: StoreSource { reader, end },
-        known,
         root,
         nodes: BTreeMap::new(),
         seen: HashSet::new(),
         queue: Vec::new(),
         edges: 0,
-        answers: None,
+        asked: HashSet::new(),
     };
-    w.reach(root);
+    w.reach(root)?;
     loop {
-        while let Some(k) = w.queue.pop() {
-            w.expand(k)?;
+        // forward links and the indexed attachments, to their fixed point
+        loop {
+            while let Some(k) = w.queue.pop() {
+                w.expand(k, known)?;
+            }
+            let fresh: Vec<ObjectKey> = w
+                .nodes
+                .iter()
+                .filter(|(_, n)| !n.attached)
+                .map(|(k, _)| *k)
+                .collect();
+            if fresh.is_empty() {
+                break;
+            }
+            for k in fresh {
+                for a in w.attachments(k)? {
+                    w.reach(a)?;
+                }
+                w.nodes.get_mut(&k).expect("an expanded key").attached = true;
+            }
         }
-        let fresh: Vec<ObjectKey> = w
+        // the answers of the landings and tags not asked yet: one pass over the answers
+        let ask: HashSet<Hash> = w
             .nodes
-            .iter()
-            .filter(|(_, n)| !n.attached)
-            .map(|(k, _)| *k)
+            .keys()
+            .filter(|k| matches!(k.kind, kinds::LANDING | kinds::TAG))
+            .map(|k| k.hash)
+            .filter(|h| !w.asked.contains(h))
             .collect();
-        if fresh.is_empty() {
+        if ask.is_empty() {
             break;
         }
-        for k in fresh {
-            for a in w.attachments(k)? {
-                w.reach(a);
-            }
-            w.nodes.get_mut(&k).expect("an expanded key").attached = true;
-        }
+        w.attach_answers(&ask)?;
+        w.asked.extend(ask);
     }
+    // the batch: every record found that the receiver does not hold
     let children: BTreeMap<ObjectKey, Vec<ObjectKey>> = w
         .nodes
         .iter()
+        .filter(|(k, _)| !known.contains(k))
         .map(|(k, n)| (*k, n.children.clone()))
         .collect();
     let records = dependency_order(root, &children)?;
-    let mut prerequisites: BTreeSet<ObjectKey> = children
-        .values()
-        .flatten()
-        .filter(|k| !children.contains_key(k))
-        .copied()
-        .collect();
+    // the prerequisites: what the batch's records need or name as a proof, and do not hold
+    let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
+    let mut body = 0u64;
+    for k in children.keys() {
+        let n = &w.nodes[k];
+        body += FRAME_HEADER + n.len;
+        for c in n.children.iter().chain(&n.proof) {
+            if !children.contains_key(c) {
+                prerequisites.insert(*c);
+                if prerequisites.len() > MAX_PREREQUISITES {
+                    return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
+                }
+            }
+        }
+    }
     if !children.contains_key(&root) {
         prerequisites.insert(root);
     }
@@ -139,7 +178,6 @@ pub fn closure_before(
         return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
     }
     let header = (HEADER_FIXED + prerequisites.len() * KEY_LEN) as u64;
-    let body: u64 = w.nodes.values().map(|n| FRAME_HEADER + n.len).sum();
     let bytes =
         MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
     if bytes > MAX_STREAM_BYTES {
@@ -299,65 +337,88 @@ pub(crate) fn store_error(e: StoreError, object: Option<ObjectKey>) -> StreamErr
 /// The walk of one closure.
 struct Walk<'a> {
     source: StoreSource<'a>,
-    known: &'a BTreeSet<ObjectKey>,
     root: ObjectKey,
-    /// The records found so far, each with the keys it needs.
+    /// The records found so far, each with the keys it needs; known records included.
     nodes: BTreeMap<ObjectKey, Node>,
-    /// Every key met: a record found or queued, or a known key.
+    /// Every key met: a record found or queued, or a known key the source does not hold.
     seen: HashSet<ObjectKey>,
     queue: Vec<ObjectKey>,
+    /// The distinct references of the records found, summed.
     edges: u64,
-    /// The answers of the log by target, read once when the first landing or tag asks.
-    answers: Option<HashMap<Hash, Vec<Hash>>>,
+    /// The landings and tags whose answers a pass looked for.
+    asked: HashSet<Hash>,
 }
 
 /// One record of the closure.
 struct Node {
-    /// The keys it needs, in `ObjectKey` order, no repeats.
+    /// The keys it needs before it, in `ObjectKey` order, no repeats.
     children: Vec<ObjectKey>,
+    /// The removal proof a placeholder names: its apply, a reference that keeps no order.
+    proof: Option<ObjectKey>,
     /// Its frame's payload bytes in a batch.
     len: u64,
     /// Whether its attachments were taken.
     attached: bool,
 }
 
+/// The most keys a walk meets: its records and the known keys the source does not hold.
+const MAX_SEEN: usize = MAX_RECORDS as usize + MAX_PREREQUISITES;
+
 impl Walk<'_> {
-    /// Notes `k`: a key met for the first time is queued, unless the receiver holds it.
-    fn reach(&mut self, k: ObjectKey) {
-        if self.seen.insert(k) && !self.known.contains(&k) {
-            self.queue.push(k);
+    /// Notes `k`: a key met for the first time is queued. The bound is checked before the sets
+    /// grow.
+    fn reach(&mut self, k: ObjectKey) -> Result<(), StreamError> {
+        if self.seen.contains(&k) {
+            return Ok(());
         }
+        if self.seen.len() >= MAX_SEEN {
+            return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
+        }
+        let grow = |_| StreamError::allocation(None, 0);
+        self.seen.try_reserve(1).map_err(grow)?;
+        self.queue.try_reserve(1).map_err(grow)?;
+        self.seen.insert(k);
+        self.queue.push(k);
+        Ok(())
     }
 
-    /// Reads record `k` and notes the keys it needs.
-    fn expand(&mut self, k: ObjectKey) -> Result<(), StreamError> {
+    /// Reads record `k` and notes the keys it needs and the proof it names. A known key the
+    /// source does not hold is left as it is.
+    fn expand(&mut self, k: ObjectKey, known: &BTreeSet<ObjectKey>) -> Result<(), StreamError> {
         if self.nodes.len() as u64 >= MAX_RECORDS {
             return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
         }
-        let record = self
-            .source
-            .record(k)?
-            .ok_or_else(|| StreamError::unresolved(0, 0, k))?;
+        let Some(record) = self.source.record(k)? else {
+            if known.contains(&k) {
+                return Ok(());
+            }
+            return Err(StreamError::unresolved(0, 0, k));
+        };
         let refs = record
             .refs()
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
-        let mut children = Vec::with_capacity(refs.len());
+        let mut children = Vec::new();
+        children
+            .try_reserve_exact(refs.len())
+            .map_err(|_| StreamError::allocation(None, 0))?;
         for r in refs {
             children.push(self.resolve(k, r)?);
         }
         children.sort_unstable();
         children.dedup();
-        self.edges += children.len() as u64;
+        let proof = record.proof();
+        self.edges += children.len() as u64 + u64::from(proof.is_some());
         if self.edges > MAX_EDGES {
             return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES).with_object(Some(k)));
         }
-        for c in &children {
-            self.reach(*c);
+        for c in children.iter().chain(&proof) {
+            self.reach(*c)?;
         }
         self.nodes.insert(
             k,
             Node {
                 children,
+                proof,
                 len: record.frame_len(),
                 attached: false,
             },
@@ -388,7 +449,8 @@ impl Walk<'_> {
         }))
     }
 
-    /// The reverse attachments of record `k` (see the module docs).
+    /// The indexed reverse attachments of record `k` (see the module docs); the answers that
+    /// target it come from [`Walk::attach_answers`].
     fn attachments(&mut self, k: ObjectKey) -> Result<Vec<ObjectKey>, StreamError> {
         let mut out = Vec::new();
         let err = |e| store_error(e, Some(k));
@@ -396,12 +458,6 @@ impl Walk<'_> {
         let end = self.source.end;
         match k.kind {
             kinds::LANDING | kinds::TAG => {
-                for a in self.answers_targeting(&k.hash)? {
-                    out.push(ObjectKey {
-                        kind: kinds::ANSWER,
-                        hash: a,
-                    });
-                }
                 if k.kind == kinds::LANDING || k == self.root {
                     for g in reader.signatures_before(&k.hash, end).map_err(err)? {
                         out.push(ObjectKey {
@@ -448,48 +504,44 @@ impl Walk<'_> {
         Ok(out)
     }
 
-    /// The answers that target `target`, from every ANSWER before the end, read once.
-    fn answers_targeting(&mut self, target: &Hash) -> Result<Vec<Hash>, StreamError> {
-        if self.answers.is_none() {
-            let mut hashes = Vec::new();
-            self.source
-                .reader
-                .for_each_object_of(kinds::ANSWER, |h| {
-                    hashes.push(h);
-                    Ok(())
-                })
-                .map_err(|e| store_error(e, None))?;
-            if hashes.len() as u64 > MAX_RECORDS {
-                return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
+    /// One pass over the answers before the end: each answer not met yet that targets a hash of
+    /// `ask` joins the walk. Nothing else of an answer is kept, so an unrelated answer charges
+    /// nothing to the closure's bounds.
+    fn attach_answers(&mut self, ask: &HashSet<Hash>) -> Result<(), StreamError> {
+        let reader = self.source.reader;
+        let mut source = StoreSource {
+            reader,
+            end: self.source.end,
+        };
+        let mut failed: Option<StreamError> = None;
+        let mut visit = |h: Hash, w: &mut Self| -> Result<(), StreamError> {
+            let key = ObjectKey {
+                kind: kinds::ANSWER,
+                hash: h,
+            };
+            if w.seen.contains(&key) {
+                return Ok(());
             }
-            let mut by_target: HashMap<Hash, Vec<Hash>> = HashMap::new();
-            let mut edges = 0u64;
-            for h in hashes {
-                let key = ObjectKey {
-                    kind: kinds::ANSWER,
-                    hash: h,
-                };
-                let Some(StreamRecord::Present { payload, .. }) = self.source.record(key)? else {
-                    continue;
-                };
-                let a: Answer = crate::bounded::decode(&payload)
-                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
-                edges += a.targets.len() as u64;
-                if edges > MAX_EDGES {
-                    return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES));
-                }
-                for t in a.targets {
-                    by_target.entry(t).or_default().push(h);
-                }
+            let Some(StreamRecord::Present { payload, .. }) = source.record(key)? else {
+                return Ok(());
+            };
+            let a: Answer = crate::bounded::decode(&payload)
+                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
+            if a.targets.iter().any(|t| ask.contains(t)) {
+                w.reach(key)?;
             }
-            self.answers = Some(by_target);
+            Ok(())
+        };
+        let walked = reader.for_each_object_of(kinds::ANSWER, |h| {
+            visit(h, self).map_err(|e| {
+                failed = Some(e);
+                StoreError::Refused("the closure's answer pass stopped".into())
+            })
+        });
+        if let Some(e) = failed {
+            return Err(e);
         }
-        Ok(self
-            .answers
-            .as_ref()
-            .and_then(|m| m.get(target))
-            .cloned()
-            .unwrap_or_default())
+        walked.map_err(|e| store_error(e, None))
     }
 
     /// The ANSWER that the ref `answer/tag:<root name>` names, when it has act Tag and that item

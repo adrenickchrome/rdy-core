@@ -11,7 +11,9 @@
 #[path = "support/redaction.rs"]
 mod redaction_fixture;
 
-use rdy_model::redaction::{RedactTarget, Redaction, RedactionApply};
+use rdy_model::redaction::{
+    BlockResidue, DropSpan, FramePlace, RedactTarget, Redaction, RedactionApply, RedactionResidue,
+};
 use rdy_model::signature::Signature;
 use rdy_model::*;
 use rdy_store::closure::{
@@ -24,7 +26,7 @@ use rdy_store::sync_proof::{ObjectSource, PortableRemoval, RemovalObject, check}
 use rdy_store::sync_stream::{SYNC_KINDS, StreamHeader, StreamReader, StreamRecord, check_batch};
 use rdy_store::{Store, StoreReader};
 use redaction_fixture::{
-    Fixture, FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, enc, hash_of,
+    Fixture, FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, enc, frames, hash_of,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -497,36 +499,29 @@ fn ha5_known_keys_become_prerequisites() {
     let s = Store::open(&src.path).unwrap();
     let reader = s.reader();
     let root = key(kinds::TAG, src.tag);
-    // the receiver holds the landing: the tag and what attaches to it stay
-    let held = BTreeSet::from([key(kinds::LANDING, src.landing)]);
+    let full = closure(&reader, src.tag, &BTreeSet::new()).unwrap();
+    let all: BTreeSet<ObjectKey> = full.records.iter().copied().collect();
+    // the receiver holds the landing: that record alone leaves the batch and becomes its
+    // prerequisite; the walk goes on through it (fix round 1: a held key is no frontier)
+    let landing = key(kinds::LANDING, src.landing);
+    let held = BTreeSet::from([landing]);
     let c = closure(&reader, src.tag, &held).unwrap();
-    assert_eq!(
-        c.records,
-        vec![
-            root,
-            key(kinds::ANSWER, src.relay),
-            key(kinds::SIGNATURE, src.tag_sig),
-        ]
-    );
-    assert_eq!(c.prerequisites, vec![key(kinds::LANDING, src.landing)]);
+    let mut want = all.clone();
+    want.remove(&landing);
+    assert_eq!(c.records.iter().copied().collect::<BTreeSet<_>>(), want);
+    assert_eq!(c.records.len(), want.len());
+    assert_eq!(c.prerequisites, vec![landing]);
     let bytes = write(&reader, src.tag, &held);
     let report = check_batch(&bytes[..]).unwrap();
     assert_eq!(report.keys, c.records);
     assert_eq!(report.header.prerequisites, c.prerequisites);
     // a key is its kind and its hash: the landing's hash under another kind is not the landing
     let other_kind = BTreeSet::from([key(kinds::SNAPSHOT, src.landing)]);
-    assert_eq!(
-        closure(&reader, src.tag, &other_kind).unwrap(),
-        closure(&reader, src.tag, &BTreeSet::new()).unwrap()
-    );
+    assert_eq!(closure(&reader, src.tag, &other_kind).unwrap(), full);
     // a key the walk never meets changes nothing
     let unmet = BTreeSet::from([key(kinds::BLOCK, src.side_block)]);
-    assert_eq!(
-        closure(&reader, src.tag, &unmet).unwrap(),
-        closure(&reader, src.tag, &BTreeSet::new()).unwrap()
-    );
-    // the receiver holds the root: a zero-object batch that names it
-    let all = BTreeSet::from([root]);
+    assert_eq!(closure(&reader, src.tag, &unmet).unwrap(), full);
+    // the receiver holds the whole closure: a zero-object batch that names the root
     let c = closure(&reader, src.tag, &all).unwrap();
     assert!(c.records.is_empty());
     assert_eq!(c.prerequisites, vec![root]);
@@ -539,6 +534,86 @@ fn ha5_known_keys_become_prerequisites() {
         e.message,
         format!("stream record 0 needs 9:{}", Hash([9; 32]))
     );
+}
+
+#[test]
+fn ha5_known_keys_do_not_stop_the_walk() {
+    let src = source();
+    let s = Store::open(&src.path).unwrap();
+    let reader = s.reader();
+    let root = key(kinds::TAG, src.tag);
+    let landing = key(kinds::LANDING, src.landing);
+    let full: BTreeSet<ObjectKey> = closure(&reader, src.tag, &BTreeSet::new())
+        .unwrap()
+        .records
+        .into_iter()
+        .collect();
+
+    // a partial quarantine: a checked batch holds only the root TAG, its landing listed as a
+    // prerequisite. The retry names that batch's keys as known: the landing and its history
+    // still come, and the root becomes the retry's prerequisite.
+    let mut store_source = StoreSource {
+        reader: &reader,
+        end: END_OF_LOG,
+    };
+    let tag_bytes = match store_source.record(root).unwrap() {
+        Some(StreamRecord::Present { payload, .. }) => payload,
+        other => panic!("the tag is present: {other:?}"),
+    };
+    let header =
+        StreamHeader::tag_history(reader.repo_id().unwrap().unwrap(), src.tag, vec![landing]);
+    let mut w = rdy_store::sync_stream::StreamWriter::new(Vec::new(), &header).unwrap();
+    w.record(&StreamRecord::Present {
+        key: root,
+        payload: tag_bytes,
+    })
+    .unwrap();
+    let first = check_batch(&w.finish().unwrap().0[..]).unwrap();
+    assert_eq!(first.keys, vec![root]);
+    let quarantined: BTreeSet<ObjectKey> = first.keys.iter().copied().collect();
+    let retry = closure(&reader, src.tag, &quarantined).unwrap();
+    let got: BTreeSet<ObjectKey> = retry.records.iter().copied().collect();
+    let mut want = full.clone();
+    want.remove(&root);
+    assert_eq!(got, want, "everything but the quarantined root");
+    assert!(got.contains(&landing), "the missing landing is found again");
+    assert_eq!(retry.prerequisites, vec![root]);
+    let second = check_batch(&write(&reader, src.tag, &quarantined)[..]).unwrap();
+    let union: BTreeSet<ObjectKey> = first.keys.iter().chain(&second.keys).copied().collect();
+    assert_eq!(union, full, "the two batches hold the whole closure");
+
+    // a held landing does not hold what attached to it later: its signature and the later
+    // removal proof (the apply, its request and its human landing) still come
+    let held = BTreeSet::from([landing]);
+    let c = closure(&reader, src.tag, &held).unwrap();
+    let got: BTreeSet<ObjectKey> = c.records.iter().copied().collect();
+    for k in [
+        key(kinds::SIGNATURE, src.landing_sig),
+        key(kinds::REDACTION_APPLY, src.apply()),
+        key(kinds::REDACTION, src.request()),
+        key(kinds::LANDING, src.later_landing()),
+        key(kinds::BLOCK, src.secret.version_hash()),
+        key(kinds::CHANGE, src.change),
+    ] {
+        assert!(got.contains(&k), "{k}");
+    }
+    assert_eq!(c.prerequisites, vec![landing]);
+
+    // a held apply: the placeholders it proves still travel, and the batch names the apply
+    let apply = key(kinds::REDACTION_APPLY, src.apply());
+    let held = BTreeSet::from([apply]);
+    let c = closure(&reader, src.tag, &held).unwrap();
+    let got: BTreeSet<ObjectKey> = c.records.iter().copied().collect();
+    let mut want = full.clone();
+    want.remove(&apply);
+    assert_eq!(got, want);
+    assert_eq!(
+        c.prerequisites,
+        vec![apply],
+        "the absent proof is a prerequisite"
+    );
+    let report = check_batch(&write(&reader, src.tag, &held)[..]).unwrap();
+    assert_eq!(report.header.prerequisites, vec![apply]);
 }
 
 #[test]
@@ -675,17 +750,28 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
         invalid_at(check(&mut forged, a)),
         Some(key(kinds::REDACTION, src.request()))
     );
-    // a request that names its spans twice (two physical copies): equal tuples collapse
+    // a request that names its spans twice (two physical copies): equal tuples collapse. Each
+    // reforged request comes with a human landing that names it (fix round 1: the approval names
+    // its requests in `checks`).
+    let later = src.fixture.landing_record.clone().unwrap();
     let reforge = |records: &mut BTreeMap<ObjectKey, StreamRecord>, r: &Redaction| {
         let mut buf = vec![0u8; rdy_model::redaction::MAX_RECORD_BYTES];
         let report_hash = r.manifest.report_hash(&mut buf).unwrap();
         let rh = forge(records, kinds::REDACTION, enc(r));
+        let landing = forge(
+            records,
+            kinds::LANDING,
+            enc(&LandingRecord {
+                checks: vec![rh],
+                ..later.clone()
+            }),
+        );
         forge(
             records,
             kinds::REDACTION_APPLY,
             enc(&RedactionApply {
                 request: rh,
-                landing: real.landing,
+                landing,
                 report_hash,
             }),
         )
@@ -698,6 +784,10 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
     let mut collapsed = want.clone();
     collapsed.apply = a;
     collapsed.request = Hash::of(&enc(&twice));
+    collapsed.landing = Hash::of(&enc(&LandingRecord {
+        checks: vec![collapsed.request],
+        ..later.clone()
+    }));
     assert_eq!(check(&mut forged, a).unwrap(), collapsed);
     // unequal tuples of one key refuse
     let mut unequal = twice.clone();
@@ -720,6 +810,169 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
     missing.remove(&key(kinds::REDACTION, src.request()));
     let e = check(&mut missing, src.apply()).unwrap_err();
     assert_eq!(e.code, "E_UNRESOLVED_REF");
+}
+
+#[test]
+fn ha5_a_new_request_cannot_reuse_an_approval() {
+    let src = source();
+    let s = Store::open(&src.path).unwrap();
+    let reader = s.reader();
+    let records = records_of(&write(&reader, src.tag, &BTreeSet::new()));
+    let later = src.fixture.landing_record.clone().unwrap();
+    assert_eq!(
+        later.checks,
+        vec![src.request()],
+        "the approval names the request it approved"
+    );
+    let real: RedactionApply = src.fixture.applies[0].1.clone();
+    let forge = |records: &mut BTreeMap<ObjectKey, StreamRecord>, kind: u8, bytes: Vec<u8>| {
+        let k = key(kind, Hash::of(&bytes));
+        records.insert(
+            k,
+            StreamRecord::Present {
+                key: k,
+                payload: bytes,
+            },
+        );
+        k.hash
+    };
+    let report_of = |r: &Redaction| {
+        let mut buf = vec![0u8; rdy_model::redaction::MAX_RECORD_BYTES];
+        r.manifest.report_hash(&mut buf).unwrap()
+    };
+
+    // the reviewer's forgery: a wider request with the same carrier, proposal and landing. It
+    // also selects the figure block, with that block's span and true residue, and every hash
+    // is recomputed.
+    let mut wider: Redaction = reader.redaction_request(&src.request()).unwrap();
+    let figure = src.figure.version_hash();
+    wider.targets.push(RedactTarget::Version {
+        id: src.figure.id.clone(),
+        version: figure,
+    });
+    wider
+        .manifest
+        .versions
+        .push((src.figure.id.clone(), figure));
+    wider.manifest.versions.sort();
+    let residue = RedactionResidue::Block(BlockResidue::of(&src.figure));
+    let frame = frames(&reader, s.log_end())
+        .into_iter()
+        .find(|f| f.kind == kinds::BLOCK && f.hash == figure)
+        .expect("the figure block's frame");
+    wider.manifest.spans.push(DropSpan {
+        place: FramePlace {
+            segment: frame.loc.segment,
+            offset: frame.loc.offset,
+        },
+        kind: kinds::BLOCK,
+        hash: figure,
+        len: frame.len,
+        residue: Some(hash_of(&residue)),
+    });
+    wider
+        .manifest
+        .spans
+        .sort_by_key(|s| (s.place.segment, s.place.offset));
+    let mut forged = records.clone();
+    forge(&mut forged, kinds::REDACTION_RESIDUE, enc(&residue));
+    let wide = forge(&mut forged, kinds::REDACTION, enc(&wider));
+    let a = forge(
+        &mut forged,
+        kinds::REDACTION_APPLY,
+        enc(&RedactionApply {
+            request: wide,
+            landing: real.landing,
+            report_hash: report_of(&wider),
+        }),
+    );
+    assert_eq!(
+        invalid_at(check(&mut forged, a)),
+        Some(key(kinds::LANDING, real.landing)),
+        "the approval names another request"
+    );
+
+    // a human landing whose checks omit the request, or name another one, is no approval of it
+    let with_checks =
+        |records: &mut BTreeMap<ObjectKey, StreamRecord>, checks: Vec<Hash>| -> (Hash, Hash) {
+            let l = forge(
+                records,
+                kinds::LANDING,
+                enc(&LandingRecord {
+                    checks,
+                    ..later.clone()
+                }),
+            );
+            let a = forge(
+                records,
+                kinds::REDACTION_APPLY,
+                enc(&RedactionApply {
+                    landing: l,
+                    ..real.clone()
+                }),
+            );
+            (l, a)
+        };
+    let sorted = |mut v: Vec<Hash>| {
+        v.sort();
+        v
+    };
+    for (case, checks) in [
+        ("empty", vec![]),
+        ("another request", vec![wide]),
+        ("an unheld record", vec![Hash([5; 32])]),
+        (
+            "the request and an unheld record",
+            sorted(vec![src.request(), Hash([5; 32])]),
+        ),
+        (
+            "the request and a record of another kind",
+            sorted(vec![src.request(), real.landing]),
+        ),
+    ] {
+        let mut f = forged.clone();
+        let (l, a) = with_checks(&mut f, checks);
+        assert_eq!(
+            invalid_at(check(&mut f, a)),
+            Some(key(kinds::LANDING, l)),
+            "{case}"
+        );
+    }
+    // the request and another held request: each entry is a REDACTION record the source holds
+    let mut f = forged.clone();
+    let (l, a) = with_checks(&mut f, sorted(vec![src.request(), wide]));
+    let got = check(&mut f, a).unwrap();
+    assert_eq!((got.request, got.landing), (src.request(), l));
+    // the real proof still passes, from the batch's records
+    let mut f = records.clone();
+    assert_eq!(check(&mut f, src.apply()).unwrap().landing, real.landing);
+}
+
+#[test]
+fn ha5_unrelated_answers_charge_nothing_to_the_closure() {
+    let src = source();
+    let s = Store::open(&src.path).unwrap();
+    let before = closure(&s.reader(), src.tag, &BTreeSet::new()).unwrap();
+    drop(s);
+    // eleven bounded answers, each naming an unrelated block 100000 times: 1100000 raw targets,
+    // none of them in the tag's closure
+    {
+        let mut s = Store::open(&src.path).unwrap();
+        for i in 0..11 {
+            s.put_answer(&answer(
+                &format!("P-u{i}@1"),
+                AnswerAct::Confirm,
+                vec![src.side_block; 100_000],
+            ))
+            .unwrap();
+        }
+    }
+    let s = Store::open(&src.path).unwrap();
+    let after = closure(&s.reader(), src.tag, &BTreeSet::new()).unwrap();
+    assert_eq!(
+        after, before,
+        "the closure is unchanged and within its bounds"
+    );
 }
 
 fn block_version(id: &str, body: &str) -> Block {

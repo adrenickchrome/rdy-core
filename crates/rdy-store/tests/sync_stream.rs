@@ -174,7 +174,14 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
         present(kinds::TAG, &t),
     ];
     let root = t.id();
-    let h = header(root, vec![key(kinds::LANDING, landing)]);
+    // the tag needs its landing; the absent apply of the dropped chunk is a prerequisite too
+    let h = header(
+        root,
+        vec![
+            key(kinds::LANDING, landing),
+            key(kinds::REDACTION_APPLY, apply),
+        ],
+    );
     let bytes = batch(&h, &records);
 
     // the bytes, field by field
@@ -182,10 +189,12 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
     hp.extend_from_slice(&REPO.0);
     hp.push(0);
     hp.extend_from_slice(&root.0);
-    hp.extend_from_slice(&1u32.to_le_bytes());
+    hp.extend_from_slice(&2u32.to_le_bytes());
     hp.push(kinds::LANDING);
     hp.extend_from_slice(&landing.0);
-    assert_eq!(hp.len(), 57 + 33);
+    hp.push(kinds::REDACTION_APPLY);
+    hp.extend_from_slice(&apply.0);
+    assert_eq!(hp.len(), 57 + 2 * 33);
     let mut dropped = vec![kinds::BLOB_CHUNK];
     dropped.extend_from_slice(&chunk.0);
     dropped.extend_from_slice(&5u32.to_le_bytes());
@@ -287,7 +296,10 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
             "repo_id": "07070707070707070707070707070707",
             "purpose": "tag_history",
             "tag": root.to_string(),
-            "prerequisites": [{"kind": 4, "hash": landing.to_string()}],
+            "prerequisites": [
+                {"kind": 4, "hash": landing.to_string()},
+                {"kind": 22, "hash": apply.to_string()},
+            ],
         })
     );
     assert_eq!(
@@ -502,7 +514,8 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         "no batch check returns E_UNRESOLVED_REF"
     );
 
-    // a dropped object needs its residue; its apply is a later proof, no dependency
+    // a dropped object needs its residue, and names its apply: an absent apply is a
+    // prerequisite (fix round 1); an apply of the batch is a later proof, so it may follow
     let residue = Hash([21; 32]);
     let dropped = StreamRecord::Dropped {
         key: a_key,
@@ -511,14 +524,75 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         residue: Some(residue),
     };
     let res_key = key(kinds::REDACTION_RESIDUE, residue);
-    let mut needs = vec![root_key, res_key];
+    let apply_key = key(kinds::REDACTION_APPLY, Hash([22; 32]));
+    let mut needs = vec![root_key, res_key, apply_key];
     needs.sort();
     let d = batch(&header(root, needs), std::slice::from_ref(&dropped));
-    assert!(check(&d).is_ok());
-    let no_residue = batch(&header(root, vec![root_key]), &[dropped]);
+    assert_eq!(
+        check(&d).unwrap().header.prerequisites,
+        vec![root_key, res_key, apply_key]
+    );
+    let mut no_apply = vec![root_key, res_key];
+    no_apply.sort();
+    let unlisted = batch(&header(root, no_apply), std::slice::from_ref(&dropped));
+    assert_eq!(
+        refusal(check(&unlisted).unwrap_err()),
+        bad(0, PRELUDE, "invalid header"),
+        "an absent apply that is no prerequisite"
+    );
+    let no_residue = batch(
+        &header(root, vec![root_key, apply_key]),
+        std::slice::from_ref(&dropped),
+    );
     assert_eq!(
         refusal(check(&no_residue).unwrap_err()),
         bad(0, PRELUDE, "invalid header")
+    );
+    // the apply in the batch, after the placeholder: no prerequisite, no cycle
+    let real_apply = present(
+        kinds::REDACTION_APPLY,
+        &rdy_model::redaction::RedactionApply {
+            request: Hash([30; 32]),
+            landing: Hash([31; 32]),
+            report_hash: Hash([32; 32]),
+        },
+    );
+    let StreamRecord::Dropped {
+        key: k,
+        original_len,
+        residue: r,
+        ..
+    } = dropped.clone()
+    else {
+        unreachable!()
+    };
+    let proved = StreamRecord::Dropped {
+        key: k,
+        original_len,
+        apply: real_apply.key().hash,
+        residue: r,
+    };
+    // the apply itself needs its request and its landing
+    let mut needs = vec![
+        root_key,
+        res_key,
+        key(kinds::REDACTION, Hash([30; 32])),
+        key(kinds::LANDING, Hash([31; 32])),
+    ];
+    needs.sort();
+    let later_proof = batch(
+        &header(root, needs.clone()),
+        &[proved.clone(), real_apply.clone()],
+    );
+    assert_eq!(check(&later_proof).unwrap().keys.len(), 2);
+    let mut listed = needs.clone();
+    listed.push(real_apply.key());
+    listed.sort();
+    let held_apply = batch(&header(root, listed), &[proved, real_apply]);
+    assert_eq!(
+        refusal(check(&held_apply).unwrap_err()),
+        bad(0, PRELUDE, "invalid header"),
+        "an apply the batch holds is no prerequisite"
     );
 
     // a repeated logical key, present or dropped
@@ -958,9 +1032,14 @@ fn ha5_lengths_counts_edges_and_depth_are_bounded() {
             })
             .collect()
     };
-    let sixteen = batch(&only_root, &drops(16));
+    // the drops name one absent apply, a prerequisite (fix round 1)
+    let with_apply = header(
+        root,
+        vec![root_key, key(kinds::REDACTION_APPLY, Hash([200; 32]))],
+    );
+    let sixteen = batch(&with_apply, &drops(16));
     assert_eq!(check(&sixteen).unwrap().records, 16);
-    let mut w = StreamWriter::new(Vec::new(), &only_root).unwrap();
+    let mut w = StreamWriter::new(Vec::new(), &with_apply).unwrap();
     let seventeen = drops(17);
     for r in &seventeen[..16] {
         w.record(r).unwrap();

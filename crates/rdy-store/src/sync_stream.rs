@@ -39,8 +39,9 @@
 //! dropped object's residue) is an earlier record of the batch or a prerequisite; the
 //! prerequisites are exactly the keys the records need that the batch does not hold, plus the
 //! root TAG when the batch does not hold it. A kind-None link resolves to exactly one key of the
-//! batch or of its prerequisites. A dropped object's apply is no dependency: it may come later,
-//! in this batch or another one (a removal proof follows what it removes).
+//! batch or of its prerequisites. A dropped object's apply is a reference but no forward
+//! dependency: in the batch it may come before or after the dropped object (a removal proof
+//! follows what it removes); absent from it, it is a prerequisite like any other reference.
 //!
 //! A batch check says only that: its framing and objects are valid. It never says that an upload
 //! is complete or that a removal is authorized; the take checks those over every file.
@@ -236,8 +237,9 @@ impl StreamRecord {
         }
     }
 
-    /// The objects the record needs, as `refs_of` gives them: a present record's references, a
-    /// dropped record's residue (its apply is a later proof, no dependency). Sorted, no repeats.
+    /// The objects the record needs before it, as `refs_of` gives them: a present record's
+    /// references, a dropped record's residue (its apply is a later proof, see
+    /// [`StreamRecord::proof`]). Sorted, no repeats.
     pub fn refs(&self) -> Result<Vec<ObjectRef>, RecordError> {
         match self {
             StreamRecord::Present { key, payload } => refs_of(key.kind, payload),
@@ -248,6 +250,21 @@ impl StreamRecord {
                     hash: *r,
                 })
                 .collect()),
+        }
+    }
+}
+
+impl StreamRecord {
+    /// The removal proof a dropped record names: its apply. It is a reference, but no forward
+    /// dependency: an apply of the same batch may come before or after the record (a removal
+    /// proof follows what it removes), and an absent one is a prerequisite.
+    pub fn proof(&self) -> Option<ObjectKey> {
+        match self {
+            StreamRecord::Present { .. } => None,
+            StreamRecord::Dropped { apply, .. } => Some(ObjectKey {
+                kind: kinds::REDACTION_APPLY,
+                hash: *apply,
+            }),
         }
     }
 }
@@ -850,11 +867,13 @@ pub(crate) fn depth_of(
 /// [`MAX_EDGES`] edges, and the batch's dependency rules. Only when every check passes are its
 /// keys returned.
 ///
-/// Every edge must resolve to an earlier record of the batch or to a prerequisite; a kind-None
-/// edge resolves to exactly one of them by hash (two or more: `ambiguous object kind`). An edge
-/// to the record itself or to a later record is `dependency cycle` at the record that needs it;
-/// an edge to neither, an absent root TAG that is no prerequisite and a prerequisite that no
-/// record needs are each `invalid header` at the header. No order between batch files is
+/// Every edge must resolve to an earlier record of the batch or to a prerequisite, and every
+/// removal proof a dropped record names to a record of the batch (before or after it) or to a
+/// prerequisite. A kind-None edge resolves to exactly one of them by hash (two or more:
+/// `ambiguous object kind`). An edge to the record itself or to a later record is `dependency
+/// cycle` at the record that needs it; an edge or proof to neither, an absent root TAG that is
+/// no prerequisite and a prerequisite that no record needs are each `invalid header` at the
+/// header. No order between batch files is
 /// required, and E_UNRESOLVED_REF is never returned here: that needs the whole upload.
 pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
     let (mut reader, header) = StreamReader::open(input)?;
@@ -863,6 +882,8 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
     let mut index: HashMap<ObjectKey, u32> = HashMap::new();
     let mut edges: Vec<ObjectRef> = Vec::new();
     let mut ends: Vec<u32> = Vec::new();
+    // the removal proofs the dropped records name, which keep no order
+    let mut proofs: Vec<ObjectKey> = Vec::new();
     while let Some(r) = reader.next()? {
         let (n, offset) = reader.position();
         let key = r.key();
@@ -875,13 +896,20 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
         let refs = r
             .refs()
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
-        if (edges.len() + refs.len()) as u64 > MAX_EDGES {
+        let proof = r.proof();
+        if (edges.len() + proofs.len() + refs.len() + usize::from(proof.is_some())) as u64
+            > MAX_EDGES
+        {
             return Err(
                 StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES).with_object(Some(key))
             );
         }
         edges.try_reserve(refs.len()).map_err(|_| grow())?;
         edges.extend(refs);
+        if let Some(p) = proof {
+            proofs.try_reserve(1).map_err(|_| grow())?;
+            proofs.push(p);
+        }
         keys.try_reserve(1).map_err(|_| grow())?;
         at.try_reserve(1).map_err(|_| grow())?;
         ends.try_reserve(1).map_err(|_| grow())?;
@@ -930,6 +958,15 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
         }
         depth.push(depth_of(n, at[i], deps).map_err(|e| e.with_object(Some(keys[i])))?);
         start = *end as usize;
+    }
+    // a removal proof: anywhere in the batch, or a prerequisite
+    for p in &proofs {
+        if !index.contains_key(p) {
+            if !is_prerequisite(p) {
+                return Err(bad_header());
+            }
+            needed.insert(*p);
+        }
     }
     let root = header.root();
     if !index.contains_key(&root) {

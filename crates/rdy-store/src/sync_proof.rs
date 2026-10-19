@@ -5,7 +5,10 @@
 //! are, by following object links only:
 //!
 //! - the apply decodes and is canonically encoded;
-//! - its landing was approved by a person (`human_approval`, policy never passes);
+//! - its landing was approved by a person (`human_approval`, policy never passes) and names the
+//!   request in `checks`, each entry of which is a REDACTION record the source holds: the
+//!   approval commits to the exact removal set, so no other request of the same carrier can
+//!   reuse it;
 //! - the request's carrier is a zero-op carrier change, the landing lands it and the proposal
 //!   version the approver approved lists it;
 //! - the request keeps its bounds, canonical manifest order and selector expansion, and the
@@ -115,6 +118,28 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
     let landing: LandingRecord = typed(source, landing_key)?;
     if !human_approval(&landing) {
         return Err(invalid(landing_key));
+    }
+    // the approval names the request: the landing's `checks` holds it, and each other entry is
+    // a REDACTION record the source holds (a removal landing names its requests, D-CC90E; the
+    // request itself is checked below). A removal landing that names none, made before this
+    // rule, is refused.
+    if !landing.checks.contains(&record.request) {
+        return Err(invalid(landing_key));
+    }
+    // each distinct entry is read once, so a repeated entry costs nothing more
+    let others: BTreeSet<Hash> = landing
+        .checks
+        .iter()
+        .filter(|c| **c != record.request)
+        .copied()
+        .collect();
+    for c in others {
+        let named = key(kinds::REDACTION, c);
+        match typed::<Redaction>(source, named) {
+            Ok(_) => {}
+            Err(e) if e.code == "E_LIMIT" || e.code == "E_IO" => return Err(e),
+            Err(_) => return Err(invalid(landing_key)),
+        }
     }
     // the request, its carrier and the approved proposal
     let request_key = key(kinds::REDACTION, record.request);
