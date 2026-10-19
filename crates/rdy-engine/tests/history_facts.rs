@@ -560,6 +560,61 @@ fn ha10_history_depth_is_bounded() {
     assert_eq!(hashes(&c), [ids[2], ids[1], ids[0]]);
 }
 
+/// One request-wide budget: the distinct landings met across all heads, and a matched target,
+/// count against [`MAX_LANDINGS`] together.
+#[test]
+fn ha10_history_budget_is_one_for_all_heads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Rdy::create_holder(dir.path(), RepoId([1; 16])).unwrap();
+    let half = MAX_LANDINGS / 2 + 1; // 50001
+    // two disjoint histories of 50001 landings each, oldest first
+    let mut chain = |base: u32| {
+        let mut ids = Vec::with_capacity(half);
+        let mut prev = None;
+        for n in 0..half as u32 {
+            let id = h
+                .store_mut()
+                .put(kinds::LANDING, &link(base + n, prev))
+                .unwrap();
+            ids.push(id);
+            prev = Some(id);
+        }
+        ids
+    };
+    let a = chain(0);
+    let b = chain(1_000_000);
+    h.seal_open().unwrap();
+    h.close().unwrap();
+    let h = Rdy::open_holder(dir.path()).unwrap();
+    let read = h.read();
+    let unknown = hs(9);
+    let (a_head, a_second) = (a[half - 1], a[half - 2]);
+    let (b_head, b_second) = (b[half - 1], b[half - 2]);
+    let over = |r: Result<bool, RdyError>| {
+        let e = r.unwrap_err();
+        (e.code, e.message)
+    };
+    let limit = (E_LIMIT, "history exceeds 100000 landings".to_string());
+    // 50001 + 50001 distinct landings are over the one budget, though each head alone is not
+    assert!(!history_facts::reachable(&read, &[a_head], unknown).unwrap());
+    assert!(!history_facts::reachable(&read, &[b_head], unknown).unwrap());
+    assert_eq!(
+        over(history_facts::reachable(&read, &[b_head, a_head], unknown)),
+        limit
+    );
+    // 50000 + 50000 is exactly the budget: walked to the end, and the oldest is reached
+    assert!(!history_facts::reachable(&read, &[b_second, a_second], unknown).unwrap());
+    assert!(history_facts::reachable(&read, &[b_second, a_second], a[0]).unwrap());
+    // a target that is the 100001st landing met is over the budget, not a match
+    assert_eq!(
+        over(history_facts::reachable(&read, &[b_second, a_head], a[0])),
+        limit
+    );
+    // landings both heads share are met once
+    assert!(!history_facts::reachable(&read, &[a_head, a_second], unknown).unwrap());
+    assert!(!history_facts::reachable(&read, &[a_second, a_head, a_second], unknown).unwrap());
+}
+
 // ---------------------------------------------------------------------------------------------
 // signatures
 

@@ -231,10 +231,12 @@ pub fn chain(read: &ReadState, start: Hash) -> Result<Vec<LandingFacts>, RdyErro
 
 /// Whether landing `hash` lies in the history of one of `heads`. Each head's history is walked
 /// once: a landing an earlier walk passed is not walked again, so divergent histories that share
-/// a past cost it once.
+/// a past cost it once. One budget of [`MAX_LANDINGS`] covers the distinct landings met across
+/// all heads, a matched `hash` included; the landing that would pass it is `E_LIMIT`.
 pub fn reachable(read: &ReadState, heads: &[Hash], hash: Hash) -> Result<bool, RdyError> {
     read.ensure_current_epoch()?;
     let reader = read.reader();
+    // landings met by the walks that ended; the walk in progress is `path`
     let mut done: HashSet<Hash> = HashSet::new();
     for head in heads {
         let mut path: HashSet<Hash> = HashSet::new();
@@ -243,18 +245,19 @@ pub fn reachable(read: &ReadState, heads: &[Hash], hash: Hash) -> Result<bool, R
             if done.contains(&h) {
                 break;
             }
-            if h == hash {
-                return Ok(true);
-            }
-            if !path.insert(h) {
+            if path.contains(&h) {
                 return Err(to_rdy(
                     StreamError::bad_record(0, 0, Reason::DependencyCycle)
                         .with_object(Some(landing_key(h))),
                 ));
             }
-            if path.len() > MAX_LANDINGS {
+            if done.len() + path.len() == MAX_LANDINGS {
                 return Err(history_limit());
             }
+            if h == hash {
+                return Ok(true);
+            }
+            path.insert(h);
             at = reader.landing(&h)?.prev;
         }
         done.extend(path);
