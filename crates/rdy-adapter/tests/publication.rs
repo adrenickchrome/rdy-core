@@ -5,8 +5,10 @@
 use rdy_adapter::publication::{Audience, DisclosureDiff, PreviousPublication, ProfileSummary};
 use rdy_adapter::{BlockId, Hash, RdyError, StoreHandle};
 use rdy_engine::publication::{self, IMPLICIT_ORG};
+use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, Session, SessionKind, WriteRequest};
-use rdy_model::Role;
+use rdy_model::{Provenance, Role};
+use rdy_store::LandRequest;
 use serde_json::{Value, json};
 
 fn session(role: Role) -> Session {
@@ -479,5 +481,91 @@ fn ha6_audience_mismatch_passes_through_the_diff_text() {
         "Disclosure comparison requires the same audience.",
         "Choose a baseline with the same audience as the candidate profile.",
     );
+    handle.close().unwrap();
+}
+
+/// TASK-305: a redaction after a publication moves the selection hash of the tag (the mark of an
+/// entry is hashed), so the holder refuses every later disclosure review against that publication.
+#[test]
+#[ignore = "FW-PB3b: selection identity, TASK-305 (fixed in HA2b)"]
+fn ha6_a_redaction_after_a_publication_keeps_later_disclosure_reviews() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$ap", "parent": "$a", "body": "Text of a."},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let (a, ap, admin) = (bid(&w, "$a"), bid(&w, "$ap"), bid(&w, "$admin"));
+    write(
+        &mut r,
+        json!([{"op": "create", "type": "publication_profile", "id": "$p", "parent": admin.to_string(),
+            "fields": {"key": "site", "title": "Site", "audience": "org", "select": [a.to_string()]}}]),
+    );
+    land(&mut r);
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    write(
+        &mut r,
+        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "D", "doc_type": "page"}}]),
+    );
+    land(&mut r);
+    r.tag(&session(Role::Approver), "v2.0.0", None, None)
+        .unwrap();
+    // the publication facts, read before the redaction
+    let (old, prev) = {
+        let st = r.read();
+        let scope = st.resolve_scope("tag:v1.0.0").unwrap();
+        let old = publication::resolve(&st, &scope, "site").unwrap();
+        (old.profile.version, old.selection_hash)
+    };
+
+    // the real redaction path, with a human approval
+    let s = session(Role::Writer);
+    r.redact(
+        &s,
+        RedactInput {
+            targets: vec![ap.to_string()],
+            reason_class: "secret".into(),
+            reason: "a leaked code".into(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+    let p = r.propose(&s, "work", "Remove", None).unwrap();
+    let version: Hash = p.id.parse().unwrap();
+    r.seal_open().unwrap();
+    r.store_mut().set_held(false).unwrap();
+    r.store_mut()
+        .land_atomic(LandRequest {
+            proposal: version,
+            accept: None,
+            approver: Provenance {
+                actor: "human:t".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 1_000_000,
+            },
+            alt: None,
+            relay: None,
+            evidence: None,
+        })
+        .unwrap();
+    r.store_mut().set_held(true).unwrap();
+    r.invalidate();
+    r.close().unwrap();
+
+    let handle = StoreHandle::open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let previous = PreviousPublication {
+        tag: "v1.0.0".into(),
+        profile_version: old,
+        selection_hash: prev,
+    };
+    let check = snap.disclosure("v2.0.0", "site", Some(&previous));
+    assert!(check.is_ok(), "{}", check.unwrap_err());
     handle.close().unwrap();
 }
