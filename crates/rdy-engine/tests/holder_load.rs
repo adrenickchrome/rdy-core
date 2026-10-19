@@ -411,3 +411,97 @@ fn ha12_holder_files_are_refused_and_target_is_restored() {
         3
     );
 }
+
+/// An empty holder's dump with one byte appended to its `meta/store_mode` ref payload. The
+/// ingest's decoder accepts the ref (it names the mode `holder`); the strict record decoder does
+/// not. Hashes, digest and log end are recomputed, so the dump is whole. `file` adds a project
+/// file ahead of the batch.
+fn trailing_mode_dump(root: &Path, file: bool) -> std::path::PathBuf {
+    let dir = root.join("empty-holder");
+    if !dir.exists() {
+        Rdy::create_holder(&dir, RepoId([9; 16]))
+            .unwrap()
+            .close()
+            .unwrap();
+    }
+    let plain = root.join(if file {
+        "empty-a.rdydump"
+    } else {
+        "empty-b.rdydump"
+    });
+    Rdy::open_holder(&dir).unwrap().read().dump(&plain).unwrap();
+    let (mut header, _, items) = dump_items(&plain);
+    assert_eq!(items.len(), 1, "an empty holder is one batch");
+    let DumpItem::Batch(mut b) = items.into_iter().next().unwrap() else {
+        unreachable!()
+    };
+    let mut changed = 0;
+    for f in &mut b.frames {
+        if let rdy_store::dump::Frame::Present {
+            kind: kinds::REF_UPDATE,
+            hash,
+            payload,
+        } = f
+            && rdy_store::bounded::decode::<kinds::RefUpdate>(payload)
+                .is_ok_and(|u| u.name == rdy_store::holder::REF_STORE_MODE)
+        {
+            payload.push(0);
+            *hash = Hash::of(payload);
+            changed += 1;
+        }
+    }
+    assert_eq!(changed, 1);
+    b.digest = kinds::batch_digest(b.frames.iter().map(|f| f.hash()));
+    header.log_end = Location {
+        segment: header.log_end.segment,
+        offset: header.log_end.offset + 1,
+    };
+    let out = root.join(if file {
+        "trailing-file.rdydump"
+    } else {
+        "trailing.rdydump"
+    });
+    let f = std::fs::File::create(&out).unwrap();
+    let mut w = DumpWriter::new(std::io::BufWriter::new(f), &header).unwrap();
+    if file {
+        w.file(".rdy.yaml", b"pack: rdy-standard\n").unwrap();
+    }
+    w.batch(&b).unwrap();
+    let (buf, _) = w.finish().unwrap();
+    buf.into_inner().unwrap().sync_all().unwrap();
+    out
+}
+
+#[test]
+fn ha12_holder_mode_is_the_ingests_even_when_the_ref_has_trailing_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    // the honest form of the dump loads as a holder, so the probe below is a fair baseline
+    let carrying = trailing_mode_dump(root.path(), true);
+    let target = root.path().join("loaded");
+    let e = load::load(&carrying, &target).unwrap_err();
+    assert_err(
+        &e,
+        E_DUMP,
+        "a holder dump must not contain project files",
+        "write a new dump from the holder",
+    );
+    assert!(!target.exists(), "{:?}", tree(&target));
+    // an existing target keeps what it had
+    let occupied = root.path().join("occupied");
+    std::fs::create_dir_all(occupied.join("notes")).unwrap();
+    std::fs::write(occupied.join("notes/a.txt"), b"mine").unwrap();
+    let before = tree(&occupied);
+    let e = load::load(&carrying, &occupied).unwrap_err();
+    assert_eq!(e.code, E_DUMP, "{e}");
+    assert_eq!(tree(&occupied), before);
+    assert!(!occupied.join(".rdy.yaml").exists());
+    // the same dump without the file is a holder, as the ingest judged it
+    let plain = trailing_mode_dump(root.path(), false);
+    let loaded = load::load(&plain, &occupied).unwrap();
+    assert!(loaded.files_written.is_empty());
+    assert_eq!(loaded.next, "read the holder through the adapter at a tag");
+    assert_eq!(
+        Rdy::open_holder(&occupied).unwrap().store().mode().unwrap(),
+        StoreMode::Holder
+    );
+}

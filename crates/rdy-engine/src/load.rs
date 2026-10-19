@@ -45,9 +45,8 @@ use crate::wc::ignore::IGNORE_FILE;
 use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal, Frame};
 use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
-use rdy_store::holder::REF_STORE_MODE;
 use rdy_store::ingest::Ingest;
-use rdy_store::kinds::{self, RefUpdate};
+use rdy_store::kinds;
 use rdy_store::layout::STORE_DIR;
 use rdy_store::segment::Location;
 use rdy_store::{StoreError, StoreLock};
@@ -470,17 +469,17 @@ fn ingest<R: Read>(
     Ok((report.batches, report.frames, holder))
 }
 
-/// Whether batch `b`, the first of a log, sets the mode ref. `Ingest::batch` judges the value
-/// (only `holder`) and refuses the batch otherwise, so a load that goes on has a holder.
+/// Whether batch `b`, the first of a log, sets the mode ref, decoded as the ingest decodes it
+/// (`names_store_mode`), so the load never disagrees with the store about the mode. `Ingest::batch`
+/// judges the value (only `holder`) and refuses the batch otherwise, so a load that goes on has a
+/// holder.
 fn sets_holder_mode(b: &DumpBatch) -> bool {
     b.frames.iter().any(|f| match f {
         Frame::Present {
             kind: kinds::REF_UPDATE,
             payload,
             ..
-        } => {
-            rdy_store::bounded::decode::<RefUpdate>(payload).is_ok_and(|u| u.name == REF_STORE_MODE)
-        }
+        } => rdy_store::holder::names_store_mode(payload),
         _ => false,
     })
 }

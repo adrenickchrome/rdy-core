@@ -192,6 +192,13 @@ pub(crate) fn decode_ref(payload: &[u8]) -> Option<RefUpdate> {
     postcard::from_bytes(payload).ok()
 }
 
+/// Whether the `REF_UPDATE` payload `payload` names the mode ref, read as the ingest and the
+/// open read it ([`decode_ref`]). A caller that must agree with the store's own judgement of a
+/// log's mode (a load that branches on it) asks here, not through a stricter decoder.
+pub fn names_store_mode(payload: &[u8]) -> bool {
+    decode_ref(payload).is_some_and(|u| u.name == REF_STORE_MODE)
+}
+
 /// The rules for refs the log holds, in log order: the replay of an open or a reindex, and an
 /// ingest. A mode ref outside the first batch is refused, and so is a mode value other than
 /// `holder` in it. In a holder, every ref must be in a holder family, and an `answer/tag:<name>`
