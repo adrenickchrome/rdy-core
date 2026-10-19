@@ -199,7 +199,7 @@ fn write_json(inputs: &RenderInputs, sink: &mut Bounded) -> Result<(), RdyError>
 }
 
 /// The row and reference bounds, then each row's form: a sentence of the table, one or more
-/// distinct blocks, a lead among them or none, and no row twice.
+/// distinct valid blocks, a lead among them or none, and no row twice.
 fn check_disagreements(rows: &[DisagreementInput]) -> Result<(), RdyError> {
     if rows.len() > MAX_DISAGREEMENT_ROWS {
         return Err(over("100000 disagreement rows"));
@@ -216,8 +216,11 @@ fn check_disagreements(rows: &[DisagreementInput]) -> Result<(), RdyError> {
         let known = DISAGREEMENT_SENTENCES.iter().any(|(_, s)| *s == r.sentence);
         let mut blocks: BTreeSet<&BlockId> = BTreeSet::new();
         let distinct = r.blocks.iter().all(|b| blocks.insert(b));
+        // a typed id may still be the empty `BlockId::MIN` sentinel, which no reader parses;
+        // the lead is one of the blocks, so checking the blocks covers it too
+        let valid = r.blocks.iter().all(|b| BlockId::parse(b.as_str()).is_ok());
         let lead_ok = r.lead.as_ref().is_none_or(|l| blocks.contains(l));
-        if !known || r.blocks.is_empty() || !distinct || !lead_ok || !seen.insert(r) {
+        if !known || r.blocks.is_empty() || !distinct || !valid || !lead_ok || !seen.insert(r) {
             return Err(bad_disagreements());
         }
     }

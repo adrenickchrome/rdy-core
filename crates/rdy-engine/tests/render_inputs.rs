@@ -411,3 +411,32 @@ fn area_def(len: usize) -> rdy_schema::AreaDef {
         paths: vec![],
     }
 }
+
+/// Fix round 1: `BlockId::MIN` is the empty range-bound sentinel, not a valid id, so a row that
+/// names it is refused by both the validator and the serializer, as a block or as the lead.
+#[test]
+fn hpb1_render_inputs_refuse_the_min_block_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, r) = project(dir.path(), "p", "name: P\n");
+    let base = capture(&r.read()).unwrap();
+    let cases: Vec<Vec<DisagreementInput>> = vec![
+        vec![row("fork", vec![BlockId::MIN], Some(BlockId::MIN))],
+        vec![row("fork", vec![BlockId::MIN], None)],
+        vec![row("semantic", vec![bid(1), BlockId::MIN], Some(bid(1)))],
+        vec![
+            row("fork", vec![bid(1), bid(2)], None),
+            row("fork", vec![BlockId::MIN, bid(2)], Some(BlockId::MIN)),
+        ],
+    ];
+    for rows in cases {
+        let mut i = base.clone();
+        i.disagreements = rows;
+        malformed(&i);
+        assert_err(
+            &to_bounded_json(&i).unwrap_err(),
+            "E_BAD_INPUT",
+            "render disagreement inputs are invalid",
+            "capture the render inputs from the source again",
+        );
+    }
+}
