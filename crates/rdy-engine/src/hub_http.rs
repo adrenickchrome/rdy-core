@@ -29,7 +29,7 @@ use crate::hub_types::{
     MAX_JSON_BYTES, MAX_MEMBERS, MAX_SCALAR_BYTES, MAX_SIG_KEY_BYTES, MAX_SIG_PROOF_BYTES,
     MAX_TIMESTAMP_BYTES, MAX_URL_BYTES, MeReply, Origin, OriginFence, REFRESH_GRANT, RefreshReply,
     RequestClaim, Secret, TokenPair, check_count, check_label, check_machine_name, hub_limit,
-    parse_compromised_since, token_form,
+    is_device_page, parse_compromised_since, token_form,
 };
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -1176,10 +1176,7 @@ fn decode(call: &HubCall, status: u16, body: &[u8]) -> Result<HubReply, HubFailu
             // The link is exactly the install's device page, byte for byte: a URL parser would
             // also accept a path that only normalizes to it (`/app/<code>/../device`, encoded
             // dots), and the reply returns the raw text.
-            let device_page = install
-                .join(&["app", "device"])
-                .map_err(|_| HubFailure::Protocol)?;
-            protocol_if(dto.verification_uri != device_page)?;
+            protocol_if(!is_device_page(install, &dto.verification_uri))?;
             let reply = DeviceStartReply {
                 device_code: Secret::new(dto.device_code),
                 user_code: dto.user_code,

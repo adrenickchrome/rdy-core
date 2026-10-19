@@ -1156,3 +1156,48 @@ fn hsa1_key_replies_hold_every_member() {
 fn key_from(json: &str) -> HubKey {
     serde_json::from_str(json).unwrap()
 }
+
+/// The device page is one exact text, `<install>/app/device`: a same-origin link that only
+/// normalizes to it (plain or encoded dot segments, which can carry the device code), or any
+/// other path, is refused by the typed check and by the shared comparison alike.
+#[test]
+fn hsa1_the_device_page_is_compared_byte_for_byte() {
+    let install = Origin::parse("https://hub.test").unwrap();
+    assert_eq!(
+        device_page(&install).unwrap(),
+        "https://hub.test/app/device"
+    );
+    let start = |uri: &str| DeviceStartReply {
+        device_code: Secret::new("dc-secret"),
+        user_code: "BCDFGHJK".to_string(),
+        verification_uri: uri.to_string(),
+        expires_in: 600,
+        interval: 5,
+    };
+    start("https://hub.test/app/device")
+        .validate(&install)
+        .unwrap();
+    assert!(is_device_page(&install, "https://hub.test/app/device"));
+    for uri in [
+        "https://hub.test/app/dc-secret/../device",
+        "https://hub.test/app/dc-secret/%2e%2e/device",
+        "https://hub.test/app/dc-secret/%2E%2E/device",
+        "https://hub.test/app/dc-secret/.%2e/device",
+        "https://hub.test/app/./device",
+        "https://hub.test/app/%2e/device",
+        "https://hub.test/app/device/",
+        "https://hub.test/app//device",
+        "https://hub.test//app/device",
+        "https://HUB.test/app/device",
+        "https://hub.test:443/app/device",
+        "https://hub.test/app/devic%65",
+        "https://hub.test/App/device",
+        "https://hub.test/app/other",
+        "https://hub.test/app",
+        "https://hub.test/",
+        "https://hub.test",
+    ] {
+        protocol(start(uri).validate(&install));
+        assert!(!is_device_page(&install, uri), "{uri}");
+    }
+}

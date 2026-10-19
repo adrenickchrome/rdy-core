@@ -13,7 +13,11 @@
 //! - **Nothing secret leaves.** Replies carry no token, device code or complete verification
 //!   link. Access leaves only through the command line's machine-token reply.
 //! - **Warnings are not lost.** The config's warnings are read first; a failure after that
-//!   carries them as its issues ([`with_warnings`]).
+//!   carries them as its issues ([`with_warnings`]), and a state reply as its warnings
+//!   ([`AuthReply::with_warnings`]).
+//! - **Sign-out is local first.** [`sign_out`] needs no settings to remove the saved sign-in:
+//!   they are read only for the hub sign-out that follows, so settings that do not load leave
+//!   `signed_out` with `W_UPSTREAM_SIGNOUT_LOCAL`, never the credential in place.
 
 use super::*;
 use rdy_engine::answer::relay::RelayInput;
@@ -241,36 +245,83 @@ pub fn with_warnings(mut e: RdyError, warnings: &[Issue]) -> RdyError {
 }
 
 /// The bounded configured human actor: `actor` in `.rdy/local.yaml`, else in the user config,
-/// as `settings` read them, else `human:$USER`, else `human:unknown`.
-pub fn auth_person(settings: &HubConfig) -> String {
+/// as `settings` read them, else `human:$USER`, else `human:unknown`. With no settings (they do
+/// not load, and the caller only signs out), the configured actor is not known: `human:$USER`.
+pub fn auth_person(settings: Option<&HubConfig>) -> String {
     let user = std::env::var("USER").ok();
-    settings.human_actor(user.as_deref())
+    match settings {
+        Some(s) => s.human_actor(user.as_deref()),
+        None => format!("human:{}", user.as_deref().unwrap_or("unknown")),
+    }
+}
+
+/// Where a call's origin fence comes from.
+enum FenceOf<'a> {
+    /// No install (`installs`): every request is refused.
+    None,
+    /// Already read from the call's settings.
+    Ready(OriginFence),
+    /// Read from the settings on the first request (sign-out): settings that do not load fail
+    /// that request, never the removal before it.
+    Settings {
+        project: Option<&'a Path>,
+        user_file: &'a Path,
+        install: Origin,
+    },
 }
 
 /// The HTTPS transport of one call, fenced to its install and built on its first request; it
-/// is dropped with the call. With no install (`installs`), every request is refused.
-struct CallTransport {
-    fence: Option<OriginFence>,
+/// is dropped with the call.
+struct CallTransport<'a> {
+    fence: FenceOf<'a>,
     built: OnceLock<Result<HttpHubTransport, RdyError>>,
 }
 
-impl HubTransport for CallTransport {
-    fn exchange(&self, call: HubCall) -> Result<HubReply, HubFailure> {
-        let Some(fence) = &self.fence else {
-            return Err(HubFailure::Local(RdyError::new(
-                E_INTERNAL,
-                "a hub request was made without an install",
-                "report this as a bug in rdy",
-            )));
+impl CallTransport<'_> {
+    fn build(&self) -> Result<HttpHubTransport, RdyError> {
+        let fence = match &self.fence {
+            FenceOf::None => {
+                return Err(RdyError::new(
+                    E_INTERNAL,
+                    "a hub request was made without an install",
+                    "report this as a bug in rdy",
+                ));
+            }
+            FenceOf::Ready(f) => f.clone(),
+            FenceOf::Settings {
+                project,
+                user_file,
+                install,
+            } => HubConfig::load(*project, Some(*user_file))?.fence(install)?,
         };
-        let built = self
-            .built
-            .get_or_init(|| HttpHubTransport::new(fence.clone()));
-        match built {
+        HttpHubTransport::new(fence)
+    }
+}
+
+impl HubTransport for CallTransport<'_> {
+    fn exchange(&self, call: HubCall) -> Result<HubReply, HubFailure> {
+        match self.built.get_or_init(|| self.build()) {
             Ok(t) => t.exchange(call),
             Err(e) => Err(HubFailure::Local(e.clone())),
         }
     }
+}
+
+/// Runs `f` with the credential service of `project` and `user_file`, whose requests go
+/// through `fence` only. The transport lives for this call alone.
+fn with_service<R>(
+    project: Option<&Path>,
+    user_file: &Path,
+    fence: FenceOf<'_>,
+    f: impl FnOnce(&HubCredentials<'_>) -> Result<R, RdyError>,
+) -> Result<R, RdyError> {
+    let transport = CallTransport {
+        fence,
+        built: OnceLock::new(),
+    };
+    let clock = SystemHubClock;
+    let service = HubCredentials::new(project, user_file, &transport, &clock);
+    f(&service)
 }
 
 /// Runs `f` with the credential service of `surface`, whose requests go to `install` only.
@@ -280,14 +331,31 @@ pub fn with_credentials<R>(
     install: Option<&Origin>,
     f: impl FnOnce(&HubCredentials<'_>) -> Result<R, RdyError>,
 ) -> Result<R, RdyError> {
-    let fence = install.map(|i| surface.settings.fence(i)).transpose()?;
-    let transport = CallTransport {
-        fence,
-        built: OnceLock::new(),
+    let fence = match install {
+        Some(i) => FenceOf::Ready(surface.settings.fence(i)?),
+        None => FenceOf::None,
     };
-    let clock = SystemHubClock;
-    let service = HubCredentials::new(surface.project, surface.user_file, &transport, &clock);
-    f(&service)
+    with_service(surface.project, surface.user_file, fence, f)
+}
+
+/// Signs `session` out of `install` with the credential file of `user_file`: the caller's claim
+/// is checked, then the service removes the saved sign-in under its lock. No settings are read
+/// first: the hub sign-out after the removal reads them (the CA file and the origin fence of
+/// `project` and `user_file`), so settings that do not load give `signed_out` with
+/// `W_UPSTREAM_SIGNOUT_LOCAL`.
+pub fn sign_out(
+    session: &Session,
+    project: Option<&Path>,
+    user_file: &Path,
+    install: &Origin,
+) -> Result<AuthState, RdyError> {
+    let claim = RequestClaim::from_session(session)?;
+    let fence = FenceOf::Settings {
+        project,
+        user_file,
+        install: install.clone(),
+    };
+    with_service(project, user_file, fence, |c| c.sign_out(install, &claim))
 }
 
 /// A reply of `rdy_auth` and `rdy auth`.
@@ -298,8 +366,31 @@ pub enum AuthReply {
 }
 
 impl AuthReply {
-    fn state(s: AuthState) -> AuthReply {
+    /// The reply of one state.
+    pub fn state(s: AuthState) -> AuthReply {
         AuthReply::State(Box::new(s))
+    }
+
+    /// The reply with the config's `warnings`, as they were read for this call: a state carries
+    /// them first, then each of its own that is not one of them (the order [`with_warnings`]
+    /// gives a failure's issues). The installs list keeps its `warnings: []`.
+    pub fn with_warnings(self, warnings: &[Issue]) -> AuthReply {
+        match self {
+            AuthReply::State(mut s) => {
+                let own = std::mem::take(&mut s.warnings);
+                s.warnings = warnings.to_vec();
+                s.warnings
+                    .extend(own.into_iter().filter(|i| !warnings.contains(i)));
+                AuthReply::State(s)
+            }
+            other => other,
+        }
+    }
+
+    /// Whether the reply carries the config's warnings ([`AuthReply::with_warnings`]): a state
+    /// does, the installs list does not.
+    pub fn carries_warnings(&self) -> bool {
+        matches!(self, AuthReply::State(_))
     }
 
     /// The reply's JSON: the state, or `{installs, warnings: []}`.
@@ -345,11 +436,13 @@ pub fn run_auth(surface: &AuthSurface<'_>, req: AuthRequest) -> Result<AuthReply
             with_credentials(surface, Some(&install), |c| c.state(&install, &claim))
                 .map(AuthReply::state)
         }
-        AuthRequest::SignOut { install } => {
-            let claim = RequestClaim::from_session(surface.session)?;
-            with_credentials(surface, Some(&install), |c| c.sign_out(&install, &claim))
-                .map(AuthReply::state)
-        }
+        AuthRequest::SignOut { install } => sign_out(
+            surface.session,
+            surface.project,
+            surface.user_file,
+            &install,
+        )
+        .map(AuthReply::state),
         AuthRequest::Installs => {
             with_credentials(surface, None, |c| c.installs()).map(AuthReply::Installs)
         }
@@ -360,7 +453,8 @@ pub fn run_auth(surface: &AuthSurface<'_>, req: AuthRequest) -> Result<AuthReply
 /// decides who may answer the card.
 ///
 /// The config's warnings, as the project and user config are now, are read first: a failure
-/// after that carries them as its issues, so a mistake made during the session is not lost.
+/// after that carries them as its issues and a state reply as its warnings, so a mistake made
+/// during the session is not lost. Sign-out reads no settings before the removal ([`sign_out`]).
 pub fn rdy_auth(st: &mut McpState, p: AuthParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     let root = st.engine.root();
@@ -369,17 +463,72 @@ pub fn rdy_auth(st: &mut McpState, p: AuthParams) -> Result<Value, RdyError> {
     let run = || -> Result<Value, RdyError> {
         let req = auth_request(p, None)?;
         let user_file = require_user_file(found)?;
-        let settings = HubConfig::load(Some(&root), Some(&user_file))?;
-        let person = auth_person(&settings);
-        let surface = AuthSurface {
-            session: &s,
-            person: &person,
-            implicit: true,
-            project: Some(&root),
-            user_file: &user_file,
-            settings: &settings,
+        let reply = if let AuthRequest::SignOut { install } = &req {
+            AuthReply::state(sign_out(&s, Some(&root), &user_file, install)?)
+        } else {
+            let settings = HubConfig::load(Some(&root), Some(&user_file))?;
+            let person = auth_person(Some(&settings));
+            let surface = AuthSurface {
+                session: &s,
+                person: &person,
+                implicit: true,
+                project: Some(&root),
+                user_file: &user_file,
+                settings: &settings,
+            };
+            run_auth(&surface, req)?
         };
-        run_auth(&surface, req)?.to_json()
+        reply.with_warnings(&warnings).to_json()
     };
     run().map_err(|e| with_warnings(e, &warnings))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_engine::hub_credentials::AuthPhase;
+
+    fn config_warning(key: &str) -> Issue {
+        Issue {
+            severity: rdy_schema::Severity::Warning,
+            code: "W_CONFIG_UNKNOWN",
+            block: None,
+            message: format!("unknown key {key}"),
+            fix: format!("remove {key}"),
+        }
+    }
+
+    /// A state reply carries the config's warnings first, then each of its own that is not one
+    /// of them; the installs list keeps `warnings: []`.
+    #[test]
+    fn hsa8_reply_warnings_merge_config_first_without_repeats() {
+        let install = Origin::parse("https://hub.test").unwrap();
+        let (a, b) = (config_warning("a"), config_warning("b"));
+        let own = upstream_signout_local();
+        let state = AuthState {
+            install,
+            state: AuthPhase::SignedOut,
+            card: None,
+            card_hash: None,
+            user_code: None,
+            verification_uri: None,
+            expires_at_ms: None,
+            next_poll_at_ms: None,
+            account: None,
+            human_actor: None,
+            warnings: vec![own.clone(), b.clone()],
+        };
+        let reply = AuthReply::state(state).with_warnings(&[a.clone(), b.clone()]);
+        assert!(reply.carries_warnings());
+        let AuthReply::State(s) = &reply else {
+            unreachable!()
+        };
+        assert_eq!(s.warnings, [a.clone(), b.clone(), own]);
+        let rows = AuthReply::Installs(Vec::new()).with_warnings(&[a, b]);
+        assert!(!rows.carries_warnings());
+        assert_eq!(
+            rows.to_json().unwrap(),
+            json!({"installs": [], "warnings": []})
+        );
+    }
 }

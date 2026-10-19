@@ -1135,3 +1135,108 @@ fn hsa3_nested_dotted_hub_keys_name_only_safe_paths() {
         assert!(!all.contains(secret), "{secret}: {all}");
     }
 }
+
+/// A saved pending sign-in's link must be exactly the install's device page. A same-origin link
+/// that only normalizes to it can carry the device code, so it is the one `E_CONFIG` text on
+/// read and on write, and no error shows the link or the code.
+#[test]
+fn hsa3_a_saved_link_must_be_the_exact_device_page() {
+    let o = Origin::parse(O).unwrap();
+    let text = |uri: &str| {
+        format!(
+            "installs:\n  \"{O}\":\n    state: pending\n    machine_name: laptop\n    device_code: dc-{SENTINEL}\n    user_code: BCDFGHJK\n    verification_uri: \"{uri}\"\n    expires_at_ms: 1000\n    next_poll_at_ms: 500\n    interval_seconds: 5\n"
+        )
+    };
+    let page = format!("{O}/app/device");
+    let f = parse_credentials(text(&page).as_bytes()).unwrap();
+    assert_eq!(f.get(&o), Some(&pending()));
+    for uri in [
+        format!("{O}/app/dc-{SENTINEL}/../device"),
+        format!("{O}/app/dc-{SENTINEL}/%2e%2e/device"),
+        format!("{O}/app/dc-{SENTINEL}/%2E%2E/device"),
+        format!("{O}/app/./device"),
+        format!("{O}/app/%2e/device"),
+        format!("{O}/app/device/"),
+        format!("{O}/app//device"),
+        format!("{O}/app/devic%65"),
+        format!("{O}/app/other"),
+        format!("{O}/"),
+        O.to_string(),
+        "https://HUB.example.com/app/device".to_string(),
+        "https://hub.example.com:443/app/device".to_string(),
+    ] {
+        let e = cred_err(text(&uri).as_bytes());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (E_CONFIG, CRED_MESSAGE, CRED_FIX),
+            "{uri}"
+        );
+        assert!(!format!("{e} {e:?}").contains(SENTINEL), "{uri}: {e:?}");
+        let Credential::Pending(mut p) = pending() else {
+            unreachable!()
+        };
+        p.verification_uri = uri.clone();
+        let mut file = CredentialFile::default();
+        file.set(o.clone(), Some(Credential::Pending(p)));
+        let e = encode_credentials(&file).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_CONFIG, CRED_MESSAGE),
+            "{uri}"
+        );
+    }
+}
+
+/// The 4096-entry bound counts every mapping entry and sequence element of the whole document,
+/// not each collection on its own: siblings and nested collections share it, on read and on
+/// write. Depth and scalar bounds stay as they are.
+#[test]
+fn hsa3_the_entry_bound_counts_the_whole_document() {
+    let seq = |n: usize| format!("[{}]", vec!["0"; n].join(", "));
+    let limit = (E_LIMIT, "config input exceeds 4096 entries");
+    let siblings = |last: usize| {
+        let mut t: String = (0..1023).map(|i| format!("k{i}: [0, 0, 0]\n")).collect();
+        t.push_str(&format!("k1023: {}\n", seq(last)));
+        t
+    };
+    // (text at the bound, text one over): two arrays, two nested arrays, 1024 small arrays
+    let cases = [
+        (
+            format!("a: {}\nb: {}\n", seq(2047), seq(2047)),
+            format!("a: {}\nb: {}\n", seq(2047), seq(2048)),
+        ),
+        (
+            format!("a: {{b: {}, c: {}}}\n", seq(2046), seq(2047)),
+            format!("a: {{b: {}, c: {}}}\n", seq(2047), seq(2047)),
+        ),
+        (siblings(3), siblings(4)),
+    ];
+    for (at, over) in &cases {
+        assert!(parse_settings(at.as_bytes()).is_ok(), "at the bound");
+        let e = settings_err(over.as_bytes());
+        assert_eq!((e.code, e.message.as_str()), limit);
+        // a user config, read by both readers
+        let fx = Fx::new("", None, Some(at));
+        assert!(fx.load().is_ok());
+        let fx = Fx::new("", None, Some(over));
+        assert_eq!(fx.load().unwrap_err().code, E_LIMIT);
+        let e = effective(fx.project(), Some(&fx.user_file())).unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), limit);
+        // encoding the same values
+        let m = parse_settings(at.as_bytes()).unwrap();
+        assert!(encode_settings(&m).is_ok());
+        let mut big = m.clone();
+        big.insert(Value::from("one-more"), Value::from(1));
+        let e = encode_settings(&big).unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), limit);
+    }
+    // the credential file shares the same bound, before its semantic parse
+    let creds = |n: usize| format!("installs: {{a: {}, b: {}}}\n", seq(2047), seq(n));
+    assert_eq!(
+        cred_err(creds(2046).as_bytes()).code,
+        E_CONFIG,
+        "at the bound"
+    );
+    let e = cred_err(creds(2047).as_bytes());
+    assert_eq!((e.code, e.message.as_str()), limit);
+}

@@ -9,8 +9,11 @@
 //! - **The token door.** `rdy --json auth token` gives a consumer one line with current access,
 //!   only to a pipe: never to a terminal, never as text, and never the refresh token.
 //! - **The user config's warnings.** With no project, the shared config-warning print does not
-//!   run, so this command reads the user config's warnings itself: they follow a reply on
-//!   stderr, and a failure after they are read carries them as its issues.
+//!   run, so this command reads the user config's warnings itself. A state reply carries them in
+//!   its warnings, as `rdy_auth` does; they follow the installs list and the token door's line on
+//!   stderr; a failure after they are read carries them as its issues.
+//! - **Sign-out is local first.** Settings that do not load do not stop the removal of the saved
+//!   sign-in: only the hub sign-out after it needs them.
 use crate::config_warning_line;
 use crate::output::print_error;
 use clap::Subcommand;
@@ -22,7 +25,7 @@ use rdy_engine::hub_types::{Origin, RequestClaim};
 use rdy_engine::{E_BAD_INPUT, RdyError, Session, classify};
 use rdy_mcp::tools::{
     AuthAnswerParam, AuthOp, AuthParams, AuthReply, AuthRequest, AuthSurface, auth_person,
-    auth_request, auth_user_file, run_auth, with_credentials, with_warnings,
+    auth_request, auth_user_file, run_auth, sign_out, with_credentials, with_warnings,
 };
 use rdy_model::Role;
 use rdy_schema::Issue;
@@ -128,9 +131,9 @@ fn token_line(g: &AccessGrant) -> String {
     .to_string()
 }
 
-/// The standalone caller: the bounded configured person, classified with `RDY_ACTOR` and
-/// `RDY_RUN` as a writer.
-fn caller(settings: &HubConfig) -> Result<(Session, String), RdyError> {
+/// The standalone caller: the bounded configured person (`human:$USER` when the settings do not
+/// load, for sign-out), classified with `RDY_ACTOR` and `RDY_RUN` as a writer.
+fn caller(settings: Option<&HubConfig>) -> Result<(Session, String), RdyError> {
     let person = auth_person(settings);
     let actor = std::env::var("RDY_ACTOR").ok();
     let run = std::env::var("RDY_RUN").ok();
@@ -222,20 +225,45 @@ fn reply_text(r: &AuthReply) -> Result<String, RdyError> {
     Ok(out)
 }
 
-/// One person command: its JSON (the `rdy_auth` reply) and its text.
-fn person(cmd: AuthCmd, settings: &HubConfig, user_file: &std::path::Path) -> CmdResult {
+/// One person command: its JSON (the `rdy_auth` reply, with the config's `warnings`) and its
+/// text. `settings` is `None` only for sign-out, whose removal needs none.
+fn person(
+    cmd: AuthCmd,
+    settings: Option<&HubConfig>,
+    user_file: &std::path::Path,
+    warnings: &[Issue],
+) -> CmdResult {
     let req = request(cmd)?;
     let (session, person) = caller(settings)?;
-    let surface = AuthSurface {
-        session: &session,
-        person: &person,
-        implicit: false,
-        project: None,
-        user_file,
-        settings,
+    let reply = match (req, settings) {
+        (AuthRequest::SignOut { install }, _) => {
+            AuthReply::state(sign_out(&session, None, user_file, &install)?)
+        }
+        (req, Some(settings)) => {
+            let surface = AuthSurface {
+                session: &session,
+                person: &person,
+                implicit: false,
+                project: None,
+                user_file,
+                settings,
+            };
+            run_auth(&surface, req)?
+        }
+        (_, None) => {
+            return Err(RdyError::new(
+                rdy_engine::E_INTERNAL,
+                "a sign-in command ran without its settings",
+                "report this as a bug in rdy",
+            ));
+        }
     };
-    let reply = run_auth(&surface, req)?;
-    Ok((reply.to_json()?, reply_text(&reply)?))
+    let reply = reply.with_warnings(warnings);
+    Ok((
+        reply.to_json()?,
+        reply_text(&reply)?,
+        reply.carries_warnings(),
+    ))
 }
 
 /// The machine-token door: current access for `install`, renewed by this process under the
@@ -246,7 +274,7 @@ fn token(
     user_file: &std::path::Path,
 ) -> Result<String, RdyError> {
     let install = Origin::parse(install)?;
-    let (session, person) = caller(settings)?;
+    let (session, person) = caller(Some(settings))?;
     let claim = RequestClaim::from_session(&session)?;
     let surface = AuthSurface {
         session: &session,
@@ -260,7 +288,8 @@ fn token(
     Ok(token_line(&grant))
 }
 
-type CmdResult = Result<(Value, String), RdyError>;
+/// A person command's JSON, its text, and whether the reply carries the config's warnings.
+type CmdResult = Result<(Value, String, bool), RdyError>;
 
 fn fail(e: RdyError, as_json: bool) -> ExitCode {
     print_error(&ErrorReply::from(e), as_json);
@@ -275,9 +304,10 @@ fn print_warnings(warnings: &[Issue]) {
 }
 
 /// `rdy auth <cmd>`: no project, store or daemon. The user config's warnings are read once,
-/// right after its location: a person command prints its reply, then the warnings on stderr;
-/// the token door prints exactly one line on stdout, then the warnings on stderr; a failure
-/// after the read carries them as its issues.
+/// right after its location: a state reply carries them in its warnings (its JSON, or after its
+/// text); the installs list and the token door's one line are followed by them on stderr; a
+/// failure after the read carries them as its issues. Settings that do not load refuse every
+/// command but sign-out, which removes the saved sign-in without them.
 pub(crate) fn run(cmd: AuthCmd, as_json: bool) -> ExitCode {
     if let AuthCmd::Token(_) = &cmd
         && let Err(e) = token_door(as_json, OutputKind::of_stdout())
@@ -291,11 +321,12 @@ pub(crate) fn run(cmd: AuthCmd, as_json: bool) -> ExitCode {
     let warnings = user_config_warnings(&user_file);
     let refuse = |e: RdyError| fail(with_warnings(e, &warnings), as_json);
     let settings = match HubConfig::load(None, Some(&user_file)) {
-        Ok(s) => s,
+        Ok(s) => Some(s),
+        Err(_) if matches!(cmd, AuthCmd::SignOut(_)) => None,
         Err(e) => return refuse(e),
     };
-    if let AuthCmd::Token(a) = &cmd {
-        return match token(&a.install, &settings, &user_file) {
+    if let (AuthCmd::Token(a), Some(settings)) = (&cmd, &settings) {
+        return match token(&a.install, settings, &user_file) {
             Ok(line) => {
                 let mut out = std::io::stdout().lock();
                 if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
@@ -307,14 +338,16 @@ pub(crate) fn run(cmd: AuthCmd, as_json: bool) -> ExitCode {
             Err(e) => refuse(e),
         };
     }
-    match person(cmd, &settings, &user_file) {
-        Ok((v, text)) => {
+    match person(cmd, settings.as_ref(), &user_file, &warnings) {
+        Ok((v, text, carried)) => {
             if as_json {
                 println!("{v}");
             } else {
                 println!("{text}");
             }
-            print_warnings(&warnings);
+            if !carried {
+                print_warnings(&warnings);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => refuse(e),

@@ -965,6 +965,19 @@ impl HubMetadata {
     }
 }
 
+/// The device page of `install`: `<install>/app/device`, as [`Origin::join`] writes it.
+pub fn device_page(install: &Origin) -> Result<String, RdyError> {
+    install.join(&["app", "device"])
+}
+
+/// Whether `uri` is the device page of `install`, byte for byte. A URL parser would also accept
+/// a path that only normalizes to it (`/app/<code>/../device`, encoded dots, a trailing slash),
+/// and the link is shown as it is, so the reply decoder, this type's check and the credential
+/// codec all compare the text itself.
+pub fn is_device_page(install: &Origin, uri: &str) -> bool {
+    device_page(install).is_ok_and(|page| page == uri)
+}
+
 /// A device sign-in start (HTTP 200). There is no complete verification URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceStartReply {
@@ -977,8 +990,9 @@ pub struct DeviceStartReply {
 
 impl DeviceStartReply {
     /// Checks the reply against the settled profile: a 1-4096 byte device code with no control
-    /// character, an eight-letter user code, `<install>/app/device` with no query or fragment,
-    /// a 1-600 second life and a 5 second interval. Else `E_UPSTREAM_PROTOCOL`.
+    /// character, an eight-letter user code, exactly the install's device page
+    /// ([`is_device_page`]), a 1-600 second life and a 5 second interval. Else
+    /// `E_UPSTREAM_PROTOCOL`.
     pub fn validate(&self, install: &Origin) -> Result<(), RdyError> {
         let code = self.device_code.expose();
         if code.is_empty()
@@ -988,7 +1002,9 @@ impl DeviceStartReply {
             return Err(upstream_protocol());
         }
         check_user_code(&self.user_code)?;
-        check_endpoint(install, &self.verification_uri, |p| p == "/app/device")?;
+        if !is_device_page(install, &self.verification_uri) {
+            return Err(upstream_protocol());
+        }
         check_device_expires_in(self.expires_in)?;
         check_initial_interval(self.interval)
     }

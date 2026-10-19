@@ -1149,8 +1149,9 @@ fn hsa8_token_consumer_gets_access_only_after_durable_refresh() {
     assert_eq!(hub.finish(), 0);
 
     // the final save fails: the hub rotated the pair, but this machine could not keep it, so
-    // no access reaches the pipe. The user config directory is made read-only while the
-    // refresh is held, after the old pair has left the file
+    // no access reaches the pipe. While the refresh is held, after the old pair has left the
+    // file, a directory is put at the replacement's temp name: the save cannot remove or create
+    // it, whatever the user id (a read-only directory would not stop root)
     let mut hub = Server::start();
     let gate = Gate::start(hub.origin(), 2, 1);
     let o = gate.origin.clone();
@@ -1162,11 +1163,11 @@ fn hsa8_token_consumer_gets_access_only_after_durable_refresh() {
     let token = ["--json", "auth", "token", "--install", &o];
     let consumer = Consumer::start(home.command(c, &[], &token));
     gate.held(&home, &o, &consumer);
-    let rdy_dir = home.config().parent().unwrap().to_path_buf();
-    set_mode(&rdy_dir, 0o500).unwrap();
+    let blocker = home.creds().with_file_name(".credentials.yaml.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("keep"), "").unwrap();
     gate.release.send(()).unwrap();
     let rest = consumer.next();
-    set_mode(&rdy_dir, 0o700).unwrap();
     assert_eq!(
         rest.map(|b| String::from_utf8_lossy(&b).into_owned()),
         None,
@@ -1176,6 +1177,8 @@ fn hsa8_token_consumer_gets_access_only_after_durable_refresh() {
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
     assert_eq!(parsed(&out).1["code"], "E_UPSTREAM_AUTH");
+    assert!(blocker.is_dir(), "the save failed at its temp name");
+    std::fs::remove_dir_all(&blocker).unwrap();
     assert_eq!(
         home.read_creds().get(&Origin::parse(&o).unwrap()),
         Some(&Credential::ReauthRequired),
@@ -1328,8 +1331,10 @@ fn warning_lines(warnings: &[rdy_schema::Issue]) -> String {
 }
 
 /// `rdy auth` has no project, so it reports the user config's warnings itself: every one of
-/// them, an ordinary unknown key as well as a hub key. After a reply they follow on stderr;
-/// after a failure they are the error's issues. The token door's stdout stays its one line.
+/// them, an ordinary unknown key as well as a hub key. A state reply carries them in its
+/// warnings, as `rdy_auth` does: in its JSON, and after its text on stdout. The installs list and
+/// the token door, which carry none, are followed by them on stderr. After a failure they are the
+/// error's issues. The token door's stdout stays its one line.
 #[test]
 fn hsa8_auth_relays_user_config_warnings() {
     let home = Home::new();
@@ -1350,11 +1355,12 @@ fn hsa8_auth_relays_user_config_warnings() {
         MACHINE,
     ];
 
-    // a card, as text and as JSON: the reply on stdout, the warnings on stderr
+    // a card, as text and as JSON: the reply and its warnings on stdout, once
     let (ok, out, err) = home.text(c, &[], &start);
     assert!(ok, "{err}");
     assert!(out.starts_with(&card(&o, MACHINE)), "{out}");
-    assert_eq!(err, lines);
+    assert!(out.ends_with(&format!("--card-hash\n{lines}")), "{out}");
+    assert_eq!(err, "");
     let mut json_start = vec!["--json"];
     json_start.extend_from_slice(&start);
     let o_ = home.run(c, &[], &json_start);
@@ -1363,8 +1369,11 @@ fn hsa8_auth_relays_user_config_warnings() {
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     let v: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(v["state"], "confirmation_required");
-    assert_eq!(v["warnings"], json!([]), "the reply's own warnings only");
-    assert_eq!(String::from_utf8(o_.stderr).unwrap(), lines);
+    assert_eq!(
+        v["warnings"], issues,
+        "the reply carries the config's warnings"
+    );
+    assert_eq!(String::from_utf8(o_.stderr).unwrap(), "");
 
     // failures after the config is read carry the warnings as their issues: a wrong answer,
     // a wrong card and a missing sign-in at the token door
@@ -1438,15 +1447,66 @@ fn hsa8_auth_relays_user_config_warnings() {
             "human_actor": "human:test-person"})
     );
     assert_eq!(String::from_utf8(out.stderr).unwrap(), lines);
-    // installs and state, as replies, add the same lines
-    for args in [
-        vec!["auth", "installs"],
-        vec!["auth", "state", "--install", &o],
-    ] {
-        let (ok, _, err) = home.text(c, &[], &args);
-        assert!(ok, "{args:?}");
-        assert_eq!(err, lines, "{args:?}");
-    }
+    // installs adds the same lines on stderr; state carries them after its text, and in JSON
+    let (ok, _, err) = home.text(c, &[], &["auth", "installs"]);
+    assert!(ok);
+    assert_eq!(err, lines);
+    let (ok, out, err) = home.text(c, &[], &["auth", "state", "--install", &o]);
+    assert!(ok);
+    assert_eq!(
+        out,
+        format!("signed in to {o} as human:test-person\n{lines}")
+    );
+    assert_eq!(err, "");
+    let (ok, v) = home.json(c, &["auth", "state", "--install", &o]);
+    assert!(ok);
+    assert_eq!(v["warnings"], issues);
     assert!(hub.requests().is_empty(), "no request was needed");
     assert_eq!(hub.finish(), 0);
+}
+
+/// The codes of a reply's warnings, in order.
+fn warning_codes(v: &Value) -> Vec<String> {
+    v["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings in {v}"))
+        .iter()
+        .map(|w| w["code"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+/// Sign-out removes this machine's saved sign-in even when the settings do not load: a user
+/// config that does not parse, or one with two share remotes. The record is removed durably
+/// first; the hub sign-out, which needs the settings, then cannot be confirmed, so the reply is
+/// signed_out with `W_UPSTREAM_SIGNOUT_LOCAL`, and no request is sent.
+#[test]
+fn hsa8_cli_sign_out_is_local_first_whatever_the_settings() {
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    for broken in [
+        format!("actor: [{PERSON}\n"),
+        "remotes:\n  a: {url: \"https://a.example.com\", mode: share}\n  b: {url: \"https://b.example.com\", mode: share}\n".to_string(),
+    ] {
+        let home = Home::new();
+        let hub = Server::start();
+        home.trust(&hub);
+        let o = hub.origin().to_string();
+        let text = std::fs::read_to_string(home.config()).unwrap();
+        std::fs::write(home.config(), format!("{text}{broken}")).unwrap();
+        // the settings are refused by a command that needs them
+        let (ok, e) = home.json(c, &["auth", "state", "--install", &o]);
+        assert!(!ok, "{broken}: {e}");
+        home.seed(vec![(&o, ready(ACCESS, REFRESH, now() + 3_000_000))]);
+        let (ok, v) = home.json(c, &["auth", "sign-out", "--install", &o]);
+        assert!(ok, "{broken}: {v}");
+        assert_eq!((v["install"].as_str(), v["state"].as_str()), (Some(o.as_str()), Some("signed_out")));
+        assert_eq!(warning_codes(&v), ["W_UPSTREAM_SIGNOUT_LOCAL"], "{v}");
+        assert!(home.read_creds().is_empty(), "{broken}: the record is removed");
+        // as text, again with nothing saved: a no-op reply
+        let (ok, out, err) = home.text(c, &[], &["auth", "sign-out", "--install", &o]);
+        assert!(ok, "{err}");
+        assert_eq!(out, format!("signed out of {o}\n"));
+        assert!(hub.requests().is_empty(), "no request without the settings");
+        assert_eq!(hub.finish(), 0);
+    }
 }

@@ -582,9 +582,9 @@ fn refusal(r: McpReply) -> Value {
     }
 }
 
-/// A config mistake made while a session is open is reported by the next failing `rdy_auth`
-/// call: the warnings of the project and the user config as they are now, an ordinary
-/// unknown key as well as a hub key, are the error's issues.
+/// A config mistake made while a session is open is reported by the next `rdy_auth` call: the
+/// warnings of the project and the user config as they are now, an ordinary unknown key as
+/// well as a hub key, are a failure's issues and a successful reply's warnings.
 #[test]
 fn hsa8_chat_auth_failures_carry_config_warnings() {
     let home = tempfile::tempdir().unwrap();
@@ -624,15 +624,75 @@ fn hsa8_chat_auth_failures_carry_config_warnings() {
         assert_eq!(e["code"], code, "{args}: {e}");
         assert_eq!(e["issues"], issues, "{args}: {e}");
     }
-    // a reply is unchanged: the card still carries only its own warnings
+    // a successful reply carries them too, as the config is now: the card and an offline state
     let v = ok(auth(
         &mut c,
         json!({"op": "start", "install": o, "machine_name": MACHINE}),
     ));
     assert_eq!(
         (v["state"].clone(), v["warnings"].clone()),
-        (json!("confirmation_required"), json!([]))
+        (json!("confirmation_required"), issues.clone())
+    );
+    let v = ok(auth(&mut c, json!({"op": "state", "install": o})));
+    assert_eq!(
+        (v["state"].clone(), v["warnings"].clone()),
+        (json!("signed_out"), issues)
     );
     assert!(hub.requests().is_empty());
     assert_eq!(hub.finish(), 0);
+}
+
+/// Sign-out from chat removes the saved sign-in even when the settings stop loading during the
+/// session: a user config that no longer parses, or one with two share remotes. The record is
+/// removed durably first; the hub sign-out, which needs the settings, cannot be confirmed, so
+/// the reply is signed_out with `W_UPSTREAM_SIGNOUT_LOCAL`, and no request is sent.
+#[test]
+fn hsa8_chat_sign_out_is_local_first_whatever_the_settings() {
+    for broken in [
+        "actor: [human:qa\n",
+        "remotes:\n  a: {url: \"https://a.example.com\", mode: share}\n  b: {url: \"https://b.example.com\", mode: share}\n",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let hub = Server::start();
+        let o = hub.origin().to_string();
+        configure(home.path(), &[(&o, hub.ca_pem())]);
+        let (_p, mut c) = chat(home.path());
+        session(&mut c, "agent:claude", Some("r7"));
+        let mut file = CredentialFile::default();
+        file.set(
+            Origin::parse(&o).unwrap(),
+            Some(Credential::Ready(ReadyCredential {
+                access_token: Secret::new(ACCESS),
+                refresh_token: Secret::new(REFRESH),
+                expires_at_ms: rdy_engine::now_ms() + 3_000_000,
+                account: "acc_00000000000000000000000001".into(),
+                handle: "test-person".into(),
+            })),
+        );
+        write_creds(home.path(), &file);
+        let cfg = home.path().join("rdy/config.yaml");
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(&cfg, format!("{text}{broken}")).unwrap();
+        // the settings are refused by a call that needs them
+        let (code, _) = refused(auth(&mut c, json!({"op": "state", "install": o})));
+        assert!(
+            code == "E_CONFIG" || code == "E_REMOTE_EXISTS",
+            "{broken}: {code}"
+        );
+        let v = ok(auth(&mut c, json!({"op": "sign_out", "install": o})));
+        assert_eq!(v["state"], "signed_out", "{broken}: {v}");
+        let codes: Vec<&str> = v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["code"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(codes.last(), Some(&"W_UPSTREAM_SIGNOUT_LOCAL"), "{v}");
+        assert!(
+            read_creds(home.path()).is_empty(),
+            "{broken}: the record is removed"
+        );
+        assert!(hub.requests().is_empty(), "no request without the settings");
+        assert_eq!(hub.finish(), 0);
+    }
 }

@@ -12,7 +12,7 @@
 //! Tokens and device codes live only in the user config's sibling `credentials.yaml`, which only
 //! [`parse_credentials`] and [`encode_credentials`] read and write. Every helper here is pure: it
 //! never reads a path or logs its input, and the caller reads the bytes under its file lock. Both
-//! codecs bound their input (1 MiB, depth 32, 4096 entries a collection, 16384-byte scalars, no
+//! codecs bound their input (1 MiB, depth 32, 4096 entries a document, 16384-byte scalars, no
 //! alias, no tagged key) before the semantic parse, and rely on serde_yaml_ng's own duplicate-key
 //! refusal. Encoding checks the same bounds on the borrowed value and writes through a buffer
 //! that stops at 1 MiB.
@@ -27,7 +27,7 @@ use crate::hub_types::{
     INITIAL_POLL_SECONDS, LimitUnit, MAX_ACTOR_BYTES, MAX_CONFIG_BYTES, MAX_DEPTH,
     MAX_DEVICE_CODE_BYTES, MAX_ID_BYTES, MAX_INSTALLS, MAX_MEMBERS, MAX_ORIGINS, MAX_POLL_SECONDS,
     MAX_REMOTES, MAX_SCALAR_BYTES, Origin, OriginFence, RemoteUrl, Secret, check_machine_name,
-    check_user_code, token_form,
+    check_user_code, is_device_page, token_form,
 };
 use rdy_schema::{Issue, Severity};
 use saphyr_parser::{Event, Parser, ScalarStyle};
@@ -154,30 +154,36 @@ impl Refusal {
 }
 
 /// The resource checks the event scan makes before serde_yaml_ng builds a value: the text size,
-/// no alias, no tagged mapping key, at most 32 nested collections, at most 4096 entries in one
-/// collection and at most 16384 bytes in one scalar. A syntax error the scan meets is
-/// [`Refusal::Syntax`]. `Ok(true)` when the text holds a node other than an empty plain
-/// scalar: an explicit `null` document, not an empty or comment-only one.
+/// no alias, no tagged mapping key, at most 32 nested collections, at most 4096 mapping entries
+/// and sequence elements in the whole document, and at most 16384 bytes in one scalar. A syntax
+/// error the scan meets is [`Refusal::Syntax`]. `Ok(true)` when the text holds a node other than
+/// an empty plain scalar: an explicit `null` document, not an empty or comment-only one.
 fn scan(text: &str) -> Result<bool, Refusal> {
     if text.len() > MAX_CONFIG_BYTES {
         return Err(Refusal::Limit(MAX_CONFIG_BYTES, LimitUnit::Bytes));
     }
     // per open collection: whether it is a mapping, and the child nodes seen
     let mut open: Vec<(bool, usize)> = Vec::new();
+    // the mapping entries and sequence elements of the whole document so far
+    let mut entries = 0usize;
     let mut explicit = false;
     for ev in Parser::new_from_str(text) {
         let (ev, _) = ev.map_err(|_| Refusal::Syntax)?;
-        // counts one node in its collection; whether it is a mapping key
-        let child = |open: &mut Vec<(bool, usize)>| -> Result<bool, Refusal> {
+        // counts one node in its collection, and a new entry (a key or an element) in the
+        // document; whether it is a mapping key
+        let mut child = |open: &mut Vec<(bool, usize)>| -> Result<bool, Refusal> {
             let Some((map, n)) = open.last_mut() else {
                 return Ok(false);
             };
             *n += 1;
-            let entries = if *map { n.div_ceil(2) } else { *n };
-            if entries > MAX_MEMBERS {
-                return Err(Refusal::Limit(MAX_MEMBERS, LimitUnit::Entries));
+            let key = *map && *n % 2 == 1;
+            if key || !*map {
+                entries += 1;
+                if entries > MAX_MEMBERS {
+                    return Err(Refusal::Limit(MAX_MEMBERS, LimitUnit::Entries));
+                }
             }
-            Ok(*map && *n % 2 == 1)
+            Ok(key)
         };
         // a tagged key is not a string key: a key-based removal would miss it
         let tagged_key = |key: bool, tag: bool| -> Result<(), Refusal> {
@@ -226,40 +232,49 @@ fn parse_explicit(text: &str) -> Result<(Value, bool), Refusal> {
     Ok((value, explicit))
 }
 
+/// The bounds of [`scan`] over a whole document about to be encoded, a borrowed mapping, so it
+/// need not be copied into a value first.
+fn document_bounds(m: &Mapping) -> Result<(), RdyError> {
+    mapping_bounds(m, 0, &mut 0)
+}
+
 /// The bounds of [`scan`] over a value about to be encoded; `depth` counts the collections
-/// around `v`.
-fn value_bounds(v: &Value, depth: usize) -> Result<(), RdyError> {
+/// around `v`, and `entries` the document's mapping entries and sequence elements so far.
+fn value_bounds(v: &Value, depth: usize, entries: &mut usize) -> Result<(), RdyError> {
     match v {
         Value::Sequence(items) => {
-            nested_bounds(items.len(), depth)?;
-            items.iter().try_for_each(|i| value_bounds(i, depth + 1))
+            nested_bounds(items.len(), depth, entries)?;
+            items
+                .iter()
+                .try_for_each(|i| value_bounds(i, depth + 1, entries))
         }
-        Value::Mapping(m) => mapping_bounds(m, depth),
+        Value::Mapping(m) => mapping_bounds(m, depth, entries),
         Value::String(s) if s.len() > MAX_SCALAR_BYTES => {
             Err(config_limit(MAX_SCALAR_BYTES, LimitUnit::Bytes))
         }
-        Value::Tagged(t) => value_bounds(&t.value, depth),
+        Value::Tagged(t) => value_bounds(&t.value, depth, entries),
         _ => Ok(()),
     }
 }
 
-/// [`value_bounds`] of a borrowed mapping, so it need not be copied into a value first.
-fn mapping_bounds(m: &Mapping, depth: usize) -> Result<(), RdyError> {
-    nested_bounds(m.len(), depth)?;
+/// [`value_bounds`] of a borrowed mapping.
+fn mapping_bounds(m: &Mapping, depth: usize, entries: &mut usize) -> Result<(), RdyError> {
+    nested_bounds(m.len(), depth, entries)?;
     m.iter().try_for_each(|(k, v)| {
-        value_bounds(k, depth + 1)?;
-        value_bounds(v, depth + 1)
+        value_bounds(k, depth + 1, entries)?;
+        value_bounds(v, depth + 1, entries)
     })
 }
 
-/// A collection of `len` entries inside `depth` others.
-fn nested_bounds(len: usize, depth: usize) -> Result<(), RdyError> {
+/// A collection of `len` entries inside `depth` others, added to the document's `entries`.
+fn nested_bounds(len: usize, depth: usize, entries: &mut usize) -> Result<(), RdyError> {
     if depth + 1 > MAX_DEPTH {
         return Err(config_limit(MAX_DEPTH, LimitUnit::Levels));
     }
-    if len > MAX_MEMBERS {
-        return Err(config_limit(MAX_MEMBERS, LimitUnit::Entries));
-    }
+    *entries = entries
+        .checked_add(len)
+        .filter(|n| *n <= MAX_MEMBERS)
+        .ok_or_else(|| config_limit(MAX_MEMBERS, LimitUnit::Entries))?;
     Ok(())
 }
 
@@ -358,7 +373,7 @@ pub fn parse_settings(bytes: &[u8]) -> Result<Mapping, RdyError> {
 /// A settings mapping as YAML bytes, within the bounds. Comments are not kept. The borrowed
 /// mapping is checked, then written through a buffer that stops at 1 MiB; it is never copied.
 pub fn encode_settings(map: &Mapping) -> Result<Vec<u8>, RdyError> {
-    mapping_bounds(map, 0)?;
+    document_bounds(map)?;
     encode_bounded(map, || settings_invalid(None))
 }
 
@@ -1277,7 +1292,7 @@ impl Credential {
                 check_machine_name(&p.machine_name).is_ok()
                     && text(p.device_code.expose(), MAX_DEVICE_CODE_BYTES)
                     && check_user_code(&p.user_code).is_ok()
-                    && RemoteUrl::parse(&p.verification_uri).is_ok_and(|u| u.origin() == install)
+                    && is_device_page(install, &p.verification_uri)
                     && p.expires_at_ms >= 0
                     && p.next_poll_at_ms >= 0
                     && (INITIAL_POLL_SECONDS..=MAX_POLL_SECONDS).contains(&p.interval_seconds)
@@ -1493,7 +1508,7 @@ pub fn encode_credentials(file: &CredentialFile) -> Result<Vec<u8>, RdyError> {
     }
     let mut top = Mapping::new();
     top.insert(Value::from("installs"), Value::Mapping(installs));
-    mapping_bounds(&top, 0)?;
+    document_bounds(&top)?;
     encode_bounded(&top, credentials_invalid)
 }
 
