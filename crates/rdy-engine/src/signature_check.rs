@@ -512,7 +512,9 @@ fn is_holder(state: &ReadState) -> Result<bool, RdyError> {
 /// The context of a signature of `subject` in `state`, with the repo ids [`repo_ids`] read. A
 /// tag's relay answer is the one its answer ref names: in a project `answer/tag:<name>`, in a
 /// holder `answer/tag-object:<hash>` (ruling task-13), as a holder may keep two tag objects of
-/// one name.
+/// one name. The context is the log's as `state` captured it: a subject or answer whose frame
+/// lies at or after the state's log end (a batch still open, or sealed after the state was
+/// published) is not held, so a held state never follows a later write.
 pub(crate) fn subject_context(
     state: &ReadState,
     subject: &Hash,
@@ -521,17 +523,23 @@ pub(crate) fn subject_context(
 ) -> Result<CheckContext, RdyError> {
     let reader = state.reader();
     let holder = is_holder(state)?;
-    let subject = if reader.has_kind(kinds::LANDING, subject)? {
+    let end = state.seq();
+    let subject = if reader.has_kind_before(kinds::LANDING, subject, end)? {
         SignatureSubject::Landing {
             hash: *subject,
             record: reader.landing(subject)?,
         }
-    } else if reader.has_kind(kinds::TAG, subject)? {
+    } else if reader.has_kind_before(kinds::TAG, subject, end)? {
         let record: Tag = reader.get_typed(kinds::TAG, subject)?;
         let answer = if holder {
             relay_answer_by_object(state, subject)?
         } else {
             reader.answer_of(&format!("tag:{}", record.name))?
+        };
+        // the refs are live: an answer written after the state is not its answer
+        let answer = match answer {
+            Some((h, _)) if !reader.has_kind_before(kinds::ANSWER, &h, end)? => None,
+            answer => answer,
         };
         SignatureSubject::Tag {
             hash: *subject,

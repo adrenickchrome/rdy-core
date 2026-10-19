@@ -474,3 +474,84 @@ fn ha16_check_context_refuses_a_stale_snapshot() {
     drop(before);
     handle.close().unwrap();
 }
+
+/// Fix round 1: a snapshot's `check_context` reads the subject and its relay answer as the log
+/// stood when the snapshot was taken. A later take adds a tag and its answer without a removal,
+/// so the epoch guard alone does not hide them: the older snapshot still finds the subject
+/// missing, and a new snapshot finds the tag and its answer.
+#[test]
+fn ha16_check_context_keeps_the_snapshot_log_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let (repo, landing, t, answer) = relayed_project(&src);
+    let r = Rdy::open(&src).unwrap();
+    let mut batch = Vec::new();
+    stream_export::write(&r.read(), t, &BTreeSet::new(), &mut batch).unwrap();
+    r.close().unwrap();
+    let path = dir.path().join("up.rdysync");
+    std::fs::write(&path, &batch).unwrap();
+
+    let mut handle = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
+    let before = handle.snapshot().unwrap();
+    let (g, _) = vector(false);
+    let tag_sig = Signature { subject: t, ..g };
+    let landing_sig = Signature {
+        subject: landing,
+        ..tag_sig.clone()
+    };
+    let missing = |c: &CheckContext, want: Hash| {
+        assert!(
+            matches!(c.subject, SignatureSubject::Missing { hash } if hash == want),
+            "{:?}",
+            c.subject
+        );
+    };
+    missing(&before.check_context(&tag_sig).unwrap(), t);
+    missing(&before.check_context(&landing_sig).unwrap(), landing);
+
+    handle
+        .take(
+            &[std::fs::File::open(&path).unwrap()],
+            rdy_adapter::take::UploadTarget {
+                tag: "v1.0.0".into(),
+                landing,
+            },
+        )
+        .unwrap();
+
+    // the older snapshot: no tag, no landing, as its other reads say
+    assert!(before.tags().unwrap().is_empty());
+    let old = before.check_context(&tag_sig).unwrap();
+    missing(&old, t);
+    missing(&before.check_context(&landing_sig).unwrap(), landing);
+    let old_report = check_signature(&tag_sig, &old, None);
+
+    // a new snapshot: the tag with its relay answer, and the landing
+    let after = handle.snapshot().unwrap();
+    match after.check_context(&tag_sig).unwrap().subject {
+        SignatureSubject::Tag {
+            hash,
+            answer: Some((a, rec)),
+            ..
+        } => {
+            assert_eq!((hash, a), (t, answer));
+            assert_eq!(rec.targets, vec![t]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        after.check_context(&landing_sig).unwrap().subject,
+        SignatureSubject::Landing { hash, .. } if hash == landing
+    ));
+    // the older snapshot's report is unchanged by the take
+    assert_eq!(
+        json_bytes(&check_signature(
+            &tag_sig,
+            &before.check_context(&tag_sig).unwrap(),
+            None
+        )),
+        json_bytes(&old_report)
+    );
+    drop((before, after));
+    handle.close().unwrap();
+}

@@ -2102,6 +2102,13 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some())
     }
 
+    /// Whether the log holds an object of `kind` with hash `h` before `end` (a published
+    /// state's log end): [`StoreReader::has_kind`] less a frame of a batch that is still open or
+    /// was sealed after that state. An index lookup that reads no frame.
+    pub fn has_kind_before(&self, kind: u8, h: &Hash, end: Location) -> Result<bool, StoreError> {
+        Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
+    }
+
     /// Object frames read so far by `get_raw` and `get_kind`.
     #[doc(hidden)]
     pub fn frames_read(&self) -> u64 {
