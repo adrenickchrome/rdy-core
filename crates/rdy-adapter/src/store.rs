@@ -99,6 +99,19 @@ impl StoreHandle {
         })
     }
 
+    /// Takes the batch files `batches` of one upload for the publication `target` into this
+    /// holder: the closure, its approved removals and the tag in one sealed batch, or nothing
+    /// (`crate::take`). The files may come in any order and repeat each other. The handles are
+    /// cloned for the call and the files stay the caller's. A project is refused (`this store is
+    /// a project`). The `&mut` borrow orders the writes of this handle.
+    pub fn take(
+        &mut self,
+        batches: &[std::fs::File],
+        target: crate::take::UploadTarget,
+    ) -> Result<crate::take::TakeOutcome, RdyError> {
+        crate::take::take(&self.local, batches, target)
+    }
+
     /// The engine handle, so a sibling module's tests can write through it.
     #[cfg(test)]
     pub(crate) fn local(&self) -> &Local {

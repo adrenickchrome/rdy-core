@@ -9,12 +9,15 @@
 pub mod history;
 pub mod maintenance;
 pub mod publication;
+pub mod signatures;
 mod store;
 pub mod stream;
+pub mod take;
 mod value;
 
 pub use rdy_engine::RdyError;
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::meta::Origin;
 pub use store::{Identity, Snapshot, StoreHandle};
+pub use take::{StorePosition, TakeOutcome, UploadTarget};
 pub use value::{encode_block, hash_bytes};
