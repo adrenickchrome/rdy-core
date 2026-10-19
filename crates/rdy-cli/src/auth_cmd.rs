@@ -131,10 +131,14 @@ fn token_line(g: &AccessGrant) -> String {
     .to_string()
 }
 
-/// The standalone caller: the bounded configured person (`human:$USER` when the settings do not
-/// load, for sign-out), classified with `RDY_ACTOR` and `RDY_RUN` as a writer.
-fn caller(settings: Option<&HubConfig>) -> Result<(Session, String), RdyError> {
-    let person = auth_person(settings);
+/// The standalone caller: the bounded configured person (for a sign-out whose settings do not
+/// load, the user config's actor read on its own, else `human:$USER`), classified with
+/// `RDY_ACTOR` and `RDY_RUN` as a writer.
+fn caller(
+    settings: Option<&HubConfig>,
+    user_file: &std::path::Path,
+) -> Result<(Session, String), RdyError> {
+    let person = auth_person(settings, user_file);
     let actor = std::env::var("RDY_ACTOR").ok();
     let run = std::env::var("RDY_RUN").ok();
     let session = classify(&person, actor.as_deref(), run.as_deref(), Role::Writer)?;
@@ -234,7 +238,7 @@ fn person(
     warnings: &[Issue],
 ) -> CmdResult {
     let req = request(cmd)?;
-    let (session, person) = caller(settings)?;
+    let (session, person) = caller(settings, user_file)?;
     let reply = match (req, settings) {
         (AuthRequest::SignOut { install }, _) => {
             AuthReply::state(sign_out(&session, None, user_file, &install)?)
@@ -274,7 +278,7 @@ fn token(
     user_file: &std::path::Path,
 ) -> Result<String, RdyError> {
     let install = Origin::parse(install)?;
-    let (session, person) = caller(Some(settings))?;
+    let (session, person) = caller(Some(settings), user_file)?;
     let claim = RequestClaim::from_session(&session)?;
     let surface = AuthSurface {
         session: &session,

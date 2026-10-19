@@ -1510,3 +1510,51 @@ fn hsa8_cli_sign_out_is_local_first_whatever_the_settings() {
         assert_eq!(hub.finish(), 0);
     }
 }
+
+/// An explicit human actor signs out when the settings fail only their remote checks: the
+/// user config still reads within its bounds, so its `actor` is the person, and `RDY_ACTOR`
+/// naming it is that person, not `human:$USER`. The record is removed durably, then the reply
+/// is signed_out with `W_UPSTREAM_SIGNOUT_LOCAL`. A config that does not parse names no actor,
+/// so the same caller stays refused there and the record is unchanged.
+#[test]
+fn hsa8_cli_sign_out_keeps_the_configured_actor_when_remotes_fail() {
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let human: &[(&str, &str)] = &[("RDY_ACTOR", "human:test-person")];
+    let shares = "remotes:\n  a: {url: \"https://a.example.com\", mode: share}\n  b: {url: \"https://b.example.com\", mode: share}\n";
+    let home = Home::new();
+    let hub = Server::start();
+    std::fs::write(home.config(), "actor: human:test-person\n").unwrap();
+    home.trust(&hub);
+    let o = hub.origin().to_string();
+    let text = std::fs::read_to_string(home.config()).unwrap();
+    std::fs::write(home.config(), format!("{text}{shares}")).unwrap();
+    let (ok, e) = home.json_as(c, human, &["auth", "state", "--install", &o]);
+    assert!(!ok, "{e}");
+    assert_eq!(err_code(&e), "E_REMOTE_EXISTS", "{e}");
+    home.seed(vec![(&o, ready(ACCESS, REFRESH, now() + 3_000_000))]);
+    let (ok, v) = home.json_as(c, human, &["auth", "sign-out", "--install", &o]);
+    assert!(ok, "{v}");
+    assert_eq!(
+        (v["install"].as_str(), v["state"].as_str()),
+        (Some(o.as_str()), Some("signed_out"))
+    );
+    assert_eq!(warning_codes(&v), ["W_UPSTREAM_SIGNOUT_LOCAL"], "{v}");
+    assert!(
+        home.read_creds().is_empty(),
+        "the record is removed durably"
+    );
+    assert!(hub.requests().is_empty(), "no request without the settings");
+    assert_eq!(hub.finish(), 0);
+
+    // a config that does not parse: the actor is not known, so the explicit human is refused
+    let home = Home::new();
+    std::fs::write(home.config(), "actor: [human:test-person\n").unwrap();
+    let o = "https://hub.example.com";
+    home.seed(vec![(o, ready(ACCESS, REFRESH, now() + 3_000_000))]);
+    let before = std::fs::read(home.creds()).unwrap();
+    let (ok, e) = home.json_as(c, human, &["auth", "sign-out", "--install", o]);
+    assert!(!ok, "{e}");
+    assert_eq!(err_code(&e), "E_ACTOR_UNBOUND", "{e}");
+    assert_eq!(std::fs::read(home.creds()).unwrap(), before, "unchanged");
+}

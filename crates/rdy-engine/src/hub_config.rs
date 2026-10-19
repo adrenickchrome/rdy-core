@@ -1051,6 +1051,58 @@ pub(crate) fn merge(
     }
 }
 
+/// The config files `HubConfig::load` reads, each once and within the settings bounds: the
+/// user config at `user_file`, then `.rdy.yaml` and `.rdy/local.yaml` of `project`. A missing
+/// file is left out.
+fn read_levels(
+    project: Option<&Path>,
+    user_file: Option<&Path>,
+) -> Result<Vec<(Level, Mapping)>, RdyError> {
+    let mut files: Vec<(Level, Mapping)> = Vec::new();
+    if let Some(uf) = user_file {
+        let shown = config_levels::file_name(Level::User, Some(uf));
+        if let Some(m) = config_levels::read_file(uf, &shown)? {
+            files.push((Level::User, m));
+        }
+    }
+    if let Some(p) = project {
+        for (level, rel) in [(Level::Project, PROJECT_FILE), (Level::Local, LOCAL_FILE)] {
+            let shown = config_levels::file_name(level, user_file);
+            if let Some(m) = config_levels::read_file(&p.join(rel), &shown)? {
+                files.push((level, m));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// The non-empty `actor` string of the file at `level`, if it was read.
+fn actor_of(files: &[(Level, Mapping)], level: Level) -> Option<String> {
+    files
+        .iter()
+        .find(|(l, _)| *l == level)
+        .and_then(|(_, m)| m.get("actor"))
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+}
+
+/// The human actor the settings name, read as `HubConfig::load` reads the files and by the
+/// same precedence as [`HubConfig::human_actor`], but without the remote and install checks:
+/// settings that fail only those (two share remotes, a limit) still name their person. A file
+/// that does not read within the settings bounds is the error `load` gives, and the caller
+/// does not know the actor.
+pub fn configured_human_actor(
+    project: Option<&Path>,
+    user_file: Option<&Path>,
+    user: Option<&str>,
+) -> Result<String, RdyError> {
+    let files = read_levels(project, user_file)?;
+    Ok(actor_of(&files, Level::Local)
+        .or_else(|| actor_of(&files, Level::User))
+        .unwrap_or_else(|| format!("human:{}", user.unwrap_or("unknown"))))
+}
+
 /// The hub settings in effect: remotes, installs, their display rows and warnings. It never
 /// holds or opens a credential.
 #[derive(Clone, Debug)]
@@ -1073,32 +1125,9 @@ impl HubConfig {
     /// origins is `E_LIMIT`, a second share remote `E_REMOTE_EXISTS`; the error carries the
     /// warnings as its issues. The credential file is never opened.
     pub fn load(project: Option<&Path>, user_file: Option<&Path>) -> Result<HubConfig, RdyError> {
-        let mut files: Vec<(Level, Mapping)> = Vec::new();
-        if let Some(uf) = user_file {
-            let shown = config_levels::file_name(Level::User, Some(uf));
-            if let Some(m) = config_levels::read_file(uf, &shown)? {
-                files.push((Level::User, m));
-            }
-        }
-        if let Some(p) = project {
-            for (level, rel) in [(Level::Project, PROJECT_FILE), (Level::Local, LOCAL_FILE)] {
-                let shown = config_levels::file_name(level, user_file);
-                if let Some(m) = config_levels::read_file(&p.join(rel), &shown)? {
-                    files.push((level, m));
-                }
-            }
-        }
-        let actor_of = |level: Level| {
-            files
-                .iter()
-                .find(|(l, _)| *l == level)
-                .and_then(|(_, m)| m.get("actor"))
-                .and_then(Value::as_str)
-                .filter(|a| !a.is_empty())
-                .map(str::to_string)
-        };
-        let local_actor = actor_of(Level::Local);
-        let user_actor = actor_of(Level::User);
+        let files = read_levels(project, user_file)?;
+        let local_actor = actor_of(&files, Level::Local);
+        let user_actor = actor_of(&files, Level::User);
         let mut parts = Vec::new();
         let mut notes = Vec::new();
         for (level, mut map) in files {

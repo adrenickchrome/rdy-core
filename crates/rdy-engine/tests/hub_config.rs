@@ -1240,3 +1240,59 @@ fn hsa3_the_entry_bound_counts_the_whole_document() {
     let e = cred_err(creds(2047).as_bytes());
     assert_eq!((e.code, e.message.as_str()), limit);
 }
+
+/// The configured human actor is read as `load` reads the files, by its precedence, but without
+/// its remote checks: two share remotes still name their person. A file that does not parse,
+/// or is over the byte bound, is the error `load` gives.
+#[test]
+fn hsa3_the_configured_actor_survives_remote_refusals() {
+    let shares = format!("remotes:\n  b: {}\n", remote(O, "share"));
+    let user_shares = format!("actor: human:u\nremotes:\n  a: {}\n", remote(O, "share"));
+    // local over user, the remote refusal notwithstanding
+    let fx = Fx::new(&shares, Some("actor: human:l\n"), Some(&user_shares));
+    assert_eq!(fx.load().unwrap_err().code, E_REMOTE_EXISTS);
+    let actor = |fx: &Fx, project: bool| {
+        let p = if project { Some(fx.project()) } else { None };
+        configured_human_actor(p, Some(&fx.user_file()), Some("qa"))
+    };
+    assert_eq!(actor(&fx, true).unwrap(), "human:l");
+    // the user config alone, as the command line reads it
+    assert_eq!(actor(&fx, false).unwrap(), "human:u");
+    let fx = Fx::new(
+        "",
+        None,
+        Some(&format!(
+            "actor: human:u\nremotes:\n  a: {}\n  b: {}\n",
+            remote(O, "share"),
+            remote(O, "share")
+        )),
+    );
+    assert_eq!(
+        HubConfig::load(None, Some(&fx.user_file()))
+            .unwrap_err()
+            .code,
+        E_REMOTE_EXISTS
+    );
+    assert_eq!(actor(&fx, false).unwrap(), "human:u");
+    // no actor, or an empty one: human:<user>, else human:unknown
+    let fx = Fx::new("", None, Some("actor: \"\"\n"));
+    assert_eq!(actor(&fx, false).unwrap(), "human:qa");
+    assert_eq!(
+        configured_human_actor(None, Some(&fx.user_file()), None).unwrap(),
+        "human:unknown"
+    );
+    let fx = Fx::new("", None, None);
+    assert_eq!(actor(&fx, false).unwrap(), "human:qa");
+    // the same answer as a config that loads
+    let fx = Fx::new("", Some("actor: human:l\n"), Some("actor: human:u\n"));
+    assert_eq!(
+        actor(&fx, true).unwrap(),
+        fx.load().unwrap().human_actor(Some("qa"))
+    );
+    // a file that does not read within the bounds names no actor
+    let fx = Fx::new("", None, Some("actor: [human:u\n"));
+    assert_eq!(actor(&fx, false).unwrap_err().code, E_CONFIG);
+    let big = format!("actor: human:u\npad: \"{}\"\n", "x".repeat(1 << 20));
+    let fx = Fx::new("", None, Some(&big));
+    assert_eq!(actor(&fx, false).unwrap_err().code, E_LIMIT);
+}
