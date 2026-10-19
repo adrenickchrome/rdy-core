@@ -38,6 +38,7 @@ use rdy_engine::{
 };
 use rdy_model::Role;
 use rdy_model::signature::{StatementSource, statement};
+use rdy_schema::Issue;
 use ssh_encoding::base64::{Base64, Encoding};
 use ssh_encoding::{Decode, Encode};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
@@ -45,18 +46,16 @@ use ssh_key::{Algorithm, HashAlg, Signature, SshSig};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
+use std::net::TcpListener;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Mutex, OnceLock, mpsc};
 
 // ---------------------------------------------------------------------------------------------
 // The settled fixtures (TASK-237: cd-540FX, cd-VMRX2, cd-8EQJ5, cd-HXGW6, cd-V4D9H, cd-BA018)
 // ---------------------------------------------------------------------------------------------
 
-const INSTALL: &str = "https://hub.test";
-const SECOND: &str = "https://second.test";
-const THIRD: &str = "https://third.test";
 const ACCOUNT: &str = "acc_00000000000000000000000001";
 const OTHER_ACCOUNT: &str = "acc_00000000000000000000000009";
 const HANDLE: &str = "test-person";
@@ -121,6 +120,38 @@ impl<T: Encode> EncodeVec for T {
 
 fn origin(s: &str) -> Origin {
     Origin::parse(s).unwrap()
+}
+
+/// The fake hub installs: three loopback origins on ports generated at run time (each held
+/// free while the three are chosen), so no host name enters this file. The fake transport
+/// never connects to them; the TLS tests use their own server's generated origin.
+fn fixture_origins() -> &'static [String; 3] {
+    static ORIGINS: OnceLock<[String; 3]> = OnceLock::new();
+    ORIGINS.get_or_init(|| {
+        let held: Vec<TcpListener> = (0..3)
+            .map(|_| TcpListener::bind((hub_tls::LOOPBACK, 0)).unwrap())
+            .collect();
+        let made = |i: usize| {
+            let port = held[i].local_addr().unwrap().port();
+            format!("https://{}:{port}", hub_tls::LOOPBACK)
+        };
+        [made(0), made(1), made(2)]
+    })
+}
+
+/// The install of the standard remote `origin`.
+fn hub_origin() -> &'static str {
+    &fixture_origins()[0]
+}
+
+/// A second install, for remote selection.
+fn second_origin() -> &'static str {
+    &fixture_origins()[1]
+}
+
+/// A third install, for remote selection.
+fn third_origin() -> &'static str {
+    &fixture_origins()[2]
 }
 
 fn dalek(seed: &[u8; 32]) -> ed25519_dalek::SigningKey {
@@ -229,7 +260,7 @@ fn env(config: &str) -> Env {
 }
 
 /// The default environment: the fixture key as `signing.key`, a software key as
-/// `signing.agent_key`, one share remote `origin` on [`INSTALL`] and a fresh sign-in there.
+/// `signing.agent_key`, one share remote `origin` on [`hub_origin`] and a fresh sign-in there.
 fn standard() -> Env {
     let e = env(&signing_yaml(
         Some(PUBLIC_KEY),
@@ -237,8 +268,8 @@ fn standard() -> Env {
         "auto",
         "",
     ));
-    add_remote(&e, "origin", INSTALL, RemoteMode::Share);
-    seed(&e, &[(INSTALL, ready(ACCOUNT, HANDLE))]);
+    add_remote(&e, "origin", hub_origin(), RemoteMode::Share);
+    seed(&e, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
     e
 }
 
@@ -673,7 +704,9 @@ fn hsa7_bind_uses_the_exact_keybind_bytes_and_selected_key() {
         "BindChallenge",
         challenged(challenge_of(KeyKind::Person, LABEL)),
     )
-    .on("Bind", |call| bound_reply(INSTALL, call, KeyKind::Person));
+    .on("Bind", |call| {
+        bound_reply(hub_origin(), call, KeyKind::Person)
+    });
     let reply = svc(&e, &t, &clock, &agent)
         .bind(KeyKind::Person, Some(LABEL), None, &human())
         .unwrap();
@@ -708,7 +741,7 @@ fn hsa7_bind_uses_the_exact_keybind_bytes_and_selected_key() {
             key: FINGERPRINT.to_string(),
             kind: KeyKind::Person,
             state: KeyState::Pending,
-            confirm_url: confirm_url(INSTALL, KEY_ID),
+            confirm_url: confirm_url(hub_origin(), KEY_ID),
             remote: "origin".to_string(),
             warnings: vec![],
         }
@@ -739,7 +772,7 @@ fn hsa7_bind_uses_the_exact_keybind_bytes_and_selected_key() {
         let check = verify_sshsig(NS_KEYBIND, &checked, &blob);
         assert!(check.valid);
         assert_eq!(check.key, key_fingerprint(public_key).ok());
-        bound_reply(INSTALL, call, KeyKind::Agent)
+        bound_reply(hub_origin(), call, KeyKind::Agent)
     });
     let agent = TestAgent::standard();
     let reply = svc(&e, &t, &clock, &agent)
@@ -762,8 +795,8 @@ fn hsa7_bind_uses_the_exact_keybind_bytes_and_selected_key() {
 
     // Each kind selects only its own setting.
     let only_agent = env(&signing_yaml(None, Some(&agent_fp), "auto", ""));
-    add_remote(&only_agent, "origin", INSTALL, RemoteMode::Share);
-    seed(&only_agent, &[(INSTALL, ready(ACCOUNT, HANDLE))]);
+    add_remote(&only_agent, "origin", hub_origin(), RemoteMode::Share);
+    seed(&only_agent, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
     let t = Fake::default();
     let agent = TestAgent::standard();
     let e1 = err(svc(&only_agent, &t, &clock, &agent).bind(KeyKind::Person, None, None, &human()));
@@ -776,8 +809,8 @@ fn hsa7_bind_uses_the_exact_keybind_bytes_and_selected_key() {
         )
     );
     let only_person = env(&signing_yaml(Some(PUBLIC_KEY), None, "auto", ""));
-    add_remote(&only_person, "origin", INSTALL, RemoteMode::Share);
-    seed(&only_person, &[(INSTALL, ready(ACCOUNT, HANDLE))]);
+    add_remote(&only_person, "origin", hub_origin(), RemoteMode::Share);
+    seed(&only_person, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
     let e2 = err(svc(&only_person, &t, &clock, &agent).bind(
         KeyKind::Agent,
         None,
@@ -796,11 +829,90 @@ fn hsa7_bind_uses_the_exact_keybind_bytes_and_selected_key() {
     assert!(agent.signs().is_empty());
 }
 
+/// Each warning of `want` appears exactly once in `got`, and `got` holds nothing else.
+fn same_warnings(got: &[Issue], want: &[Issue], what: &str) {
+    for w in want {
+        let n = got.iter().filter(|g| *g == w).count();
+        assert_eq!(n, 1, "{what}: {} appears {n} times in {got:?}", w.message);
+    }
+    assert_eq!(got.len(), want.len(), "{what}: {got:?}");
+}
+
+#[test]
+fn hsa7_bind_carries_signing_config_warnings() {
+    // signing.agent_key names signing.key's key (SIG ignores it with a warning), signing has an
+    // unknown setting, and the hub settings have an unknown key that HubConfig and the effective
+    // settings both report.
+    let e = env(&signing_yaml(
+        Some(PUBLIC_KEY),
+        Some(FINGERPRINT),
+        "auto",
+        "  colour: blue\nhub:\n  bogus: 1\n",
+    ));
+    add_remote(&e, "origin", hub_origin(), RemoteMode::Share);
+    seed(&e, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
+    let want = effective(&e.project, Some(&e.user_file)).unwrap().warnings;
+    let hub_warnings = HubConfig::load(Some(&e.project), Some(&e.user_file))
+        .unwrap()
+        .warnings;
+    assert!(!hub_warnings.is_empty(), "HubConfig reports hub.bogus");
+    for w in &hub_warnings {
+        assert!(
+            want.contains(w),
+            "the effective settings repeat {}",
+            w.message
+        );
+    }
+    let equal = "signing.agent_key equals signing.key; rdy ignores signing.agent_key";
+    assert!(want.iter().any(|w| w.message == equal), "{want:?}");
+    assert!(
+        want.iter().any(|w| w.message.contains("signing.colour")),
+        "{want:?}"
+    );
+    assert!(want.iter().all(|w| w.code == "W_CONFIG_UNKNOWN"));
+    let clock = Clock::at(T_ISSUE);
+
+    // The ignored agent key: the missing-key error says why, once each.
+    let agent = TestAgent::standard();
+    let t = Fake::default();
+    let e1 = err(svc(&e, &t, &clock, &agent).bind(KeyKind::Agent, None, None, &agent_session()));
+    assert_eq!(
+        (e1.code, e1.message.as_str()),
+        (E_SIGNING_KEY_MISSING, "signing.agent_key is not set")
+    );
+    same_warnings(&e1.issues, &want, "the missing agent key");
+    assert!(t.ops().is_empty());
+
+    // A person bind succeeds and carries every warning once.
+    let t = Fake::default();
+    t.reply(
+        "BindChallenge",
+        challenged(challenge_of(KeyKind::Person, LABEL)),
+    )
+    .on("Bind", |call| {
+        bound_reply(hub_origin(), call, KeyKind::Person)
+    });
+    let reply = svc(&e, &t, &clock, &agent)
+        .bind(KeyKind::Person, Some(LABEL), None, &human())
+        .unwrap();
+    t.done();
+    same_warnings(&reply.warnings, &want, "a successful bind");
+
+    // A later failure carries them too.
+    let t = Fake::default();
+    let mut c = challenge_of(KeyKind::Person, LABEL);
+    c.namespace = "rdy-approval-v1".into();
+    t.reply("BindChallenge", challenged(c));
+    let e2 = err(svc(&e, &t, &clock, &agent).bind(KeyKind::Person, Some(LABEL), None, &human()));
+    assert_eq!(e2.code, E_UPSTREAM_PROTOCOL);
+    same_warnings(&e2.issues, &want, "a refused challenge");
+}
+
 #[test]
 fn hsa7_explicit_bind_works_when_automatic_signing_is_never() {
     let e = env(&signing_yaml(Some(PUBLIC_KEY), None, "never", ""));
-    add_remote(&e, "origin", INSTALL, RemoteMode::Share);
-    seed(&e, &[(INSTALL, ready(ACCOUNT, HANDLE))]);
+    add_remote(&e, "origin", hub_origin(), RemoteMode::Share);
+    seed(&e, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
     let before = fs::read(&e.user_file).unwrap();
     assert_eq!(signing_config(&e).sign, SignMode::Never);
     let clock = Clock::at(T_ISSUE);
@@ -810,7 +922,9 @@ fn hsa7_explicit_bind_works_when_automatic_signing_is_never() {
         "BindChallenge",
         challenged(challenge_of(KeyKind::Person, LABEL)),
     )
-    .on("Bind", |call| bound_reply(INSTALL, call, KeyKind::Person));
+    .on("Bind", |call| {
+        bound_reply(hub_origin(), call, KeyKind::Person)
+    });
     let reply = svc(&e, &t, &clock, &agent)
         .bind(KeyKind::Person, Some(LABEL), None, &human())
         .unwrap();
@@ -830,8 +944,8 @@ fn hsa7_account_key_namespace_and_proof_substitution_are_refused() {
     let e = standard();
     let person = soft_blob(&PERSON_SEED);
     let soft = env(&signing_yaml(Some(&line_of(&person)), None, "auto", ""));
-    add_remote(&soft, "origin", INSTALL, RemoteMode::Share);
-    seed(&soft, &[(INSTALL, ready(ACCOUNT, HANDLE))]);
+    add_remote(&soft, "origin", hub_origin(), RemoteMode::Share);
+    seed(&soft, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
 
     // Challenge substitution: refused before the agent is asked to sign.
     let base = || challenge_of(KeyKind::Person, LABEL);
@@ -957,14 +1071,14 @@ fn hsa7_account_key_namespace_and_proof_substitution_are_refused() {
     let clock = Clock::at(T_ISSUE);
     let creds = e.creds.clone();
     let agent = TestAgent::standard().with_hook(move || {
-        seed_at(&creds, &[(INSTALL, ready(OTHER_ACCOUNT, HANDLE))]);
+        seed_at(&creds, &[(hub_origin(), ready(OTHER_ACCOUNT, HANDLE))]);
     });
     let t = Fake::default();
     t.reply("BindChallenge", challenged(base()));
     let e1 = err(svc(&e, &t, &clock, &agent).bind(KeyKind::Person, Some(LABEL), None, &human()));
     assert_eq!(e1.code, E_UPSTREAM_AUTH);
     assert_eq!(t.ops(), ["BindChallenge"], "zero Bind requests");
-    seed(&e, &[(INSTALL, ready(ACCOUNT, HANDLE))]);
+    seed(&e, &[(hub_origin(), ready(ACCOUNT, HANDLE))]);
 
     // The challenge expires while the agent waits.
     let clock = std::sync::Arc::new(Clock::at(T_ISSUE));
@@ -992,49 +1106,82 @@ fn hsa7_account_key_namespace_and_proof_substitution_are_refused() {
     }
 }
 
+/// Runs its closure when dropped, also while a panic unwinds.
+struct OnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+/// Every `*.lock` file below `dir`.
+fn lock_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if fs::symlink_metadata(&path).unwrap().is_dir() {
+            out.extend(lock_files(&path));
+        } else if path.extension().is_some_and(|x| x == "lock") {
+            out.push(path);
+        }
+    }
+    out
+}
+
 #[test]
 fn hsa7_agent_wait_holds_no_config_or_writer_lock() {
     let e = standard();
     let clock = Clock::at(T_ISSUE);
-    // `true`: the agent is waiting inside its sign request; `false`: bind returned.
+    // `true`: the agent is waiting inside its sign request; `false`: bind returned or panicked.
     let (event_tx, event_rx) = mpsc::channel::<bool>();
     let (go_tx, go_rx) = mpsc::channel::<()>();
     let go_rx = Mutex::new(go_rx);
     let in_sign_tx = Mutex::new(event_tx.clone());
     let agent = TestAgent::standard().with_hook(move || {
-        in_sign_tx.lock().unwrap().send(true).unwrap();
-        go_rx.lock().unwrap().recv().unwrap();
+        let _ = in_sign_tx.lock().unwrap().send(true);
+        // A go signal or a dropped sender releases the agent.
+        let _ = go_rx.lock().unwrap().recv();
     });
     let t = Fake::default();
     t.reply(
         "BindChallenge",
         challenged(challenge_of(KeyKind::Person, LABEL)),
     )
-    .on("Bind", |call| bound_reply(INSTALL, call, KeyKind::Person));
+    .on("Bind", |call| {
+        bound_reply(hub_origin(), call, KeyKind::Person)
+    });
     let other = Fake::default();
     let reply = std::thread::scope(|scope| {
+        // Releases the agent when this closure ends, also when an assertion below fails: the
+        // scope then joins a bind thread that can finish, and the failure is reported.
+        let release = OnDrop(move || {
+            let _ = go_tx.send(());
+        });
         let (e2, t2, clock2, agent2) = (&e, &t, &clock, &agent);
         let bind = scope.spawn(move || {
-            let r = svc(e2, t2, clock2, agent2).bind(KeyKind::Person, Some(LABEL), None, &human());
-            event_tx.send(false).unwrap();
-            r
+            let _returned = OnDrop(move || {
+                let _ = event_tx.send(false);
+            });
+            svc(e2, t2, clock2, agent2).bind(KeyKind::Person, Some(LABEL), None, &human())
         });
         assert!(
             event_rx.recv().unwrap(),
             "bind returned before it asked the agent: {:?}",
-            bind.join().unwrap()
+            bind.join()
         );
-        // The agent is waiting: every lock is free and independent work completes.
-        for lock in [
-            e.home.join("rdy/credentials.yaml.lock"),
-            e.home.join("rdy/config.yaml.lock"),
-        ] {
-            if let Ok(f) = File::open(&lock) {
-                match f.try_lock() {
-                    Ok(()) => f.unlock().unwrap(),
-                    Err(TryLockError::WouldBlock) => panic!("{} is held", lock.display()),
-                    Err(TryLockError::Error(err)) => panic!("{err}"),
-                }
+        // The agent is waiting: every lock is free (checked without blocking, before anything
+        // that could wait for a lock) and independent work completes.
+        let locks: Vec<PathBuf> = [e.home.as_path(), e.project.as_path()]
+            .into_iter()
+            .flat_map(lock_files)
+            .collect();
+        for lock in &locks {
+            let f = File::open(lock).unwrap();
+            match f.try_lock() {
+                Ok(()) => f.unlock().unwrap(),
+                Err(TryLockError::WouldBlock) => panic!("{} is held", lock.display()),
+                Err(TryLockError::Error(err)) => panic!("{err}"),
             }
         }
         let installs = HubCredentials::new(Some(&e.project), &e.user_file, &other, &clock)
@@ -1045,7 +1192,7 @@ fn hsa7_agent_wait_holds_no_config_or_writer_lock() {
         drop(LockedConfig::open(&e.project, Path::new(".rdy/local.yaml"), false, 1 << 20).unwrap());
         RemoteService::new(&e.project, &e.user_file).list().unwrap();
         drop(Rdy::open(&e.project).unwrap());
-        go_tx.send(()).unwrap();
+        drop(release);
         bind.join().unwrap()
     })
     .unwrap();
@@ -1064,7 +1211,9 @@ fn hsa7_bind_returns_a_confirmation_link_without_confirming() {
         "BindChallenge",
         challenged(challenge_of(KeyKind::Person, LABEL)),
     )
-    .on("Bind", |call| bound_reply(INSTALL, call, KeyKind::Person));
+    .on("Bind", |call| {
+        bound_reply(hub_origin(), call, KeyKind::Person)
+    });
     let reply = svc(&e, &t, &clock, &agent)
         .bind(KeyKind::Person, Some(LABEL), None, &human())
         .unwrap();
@@ -1083,7 +1232,7 @@ fn hsa7_bind_returns_a_confirmation_link_without_confirming() {
         assert!(!call.destination.contains("/app/"), "{}", call.destination);
     }
     assert_eq!(reply.state, KeyState::Pending);
-    assert_eq!(reply.confirm_url, confirm_url(INSTALL, KEY_ID));
+    assert_eq!(reply.confirm_url, confirm_url(hub_origin(), KEY_ID));
     let json = serde_json::to_value(&reply).unwrap();
     let keys: Vec<&str> = json
         .as_object()
@@ -1104,10 +1253,10 @@ fn hsa7_bind_returns_a_confirmation_link_without_confirming() {
     type Tamper = fn(&mut BindResult);
     let tampers: Vec<(&str, Tamper)> = vec![
         ("a link on another origin", |b| {
-            b.confirm_url = confirm_url(SECOND, KEY_ID);
+            b.confirm_url = confirm_url(second_origin(), KEY_ID);
         }),
         ("a link for another key", |b| {
-            b.confirm_url = confirm_url(INSTALL, FOUND_ID);
+            b.confirm_url = confirm_url(hub_origin(), FOUND_ID);
         }),
         ("an active key", |b| b.key.state = KeyState::Active),
         ("another fingerprint", |b| {
@@ -1124,7 +1273,7 @@ fn hsa7_bind_returns_a_confirmation_link_without_confirming() {
             challenged(challenge_of(KeyKind::Person, LABEL)),
         )
         .on("Bind", move |call| {
-            let Ok(HubReply::Bind(mut b)) = bound_reply(INSTALL, call, KeyKind::Person) else {
+            let Ok(HubReply::Bind(mut b)) = bound_reply(hub_origin(), call, KeyKind::Person) else {
                 unreachable!()
             };
             tamper(&mut b);
@@ -1153,17 +1302,17 @@ fn hsa7_bind_returns_a_confirmation_link_without_confirming() {
 #[test]
 fn hsa7_key_commands_select_explicit_share_or_only_remote() {
     let e = standard();
-    // Only `origin` (share, INSTALL) so far; replace it with one publish remote.
+    // Only `origin` (share, hub_origin()) so far; replace it with one publish remote.
     RemoteService::new(&e.project, &e.user_file)
         .remove("origin", RemoteLevel::Project)
         .unwrap();
-    add_remote(&e, "a", SECOND, RemoteMode::Publish);
+    add_remote(&e, "a", second_origin(), RemoteMode::Publish);
     seed(
         &e,
         &[
-            (INSTALL, ready(ACCOUNT, HANDLE)),
-            (SECOND, ready(ACCOUNT, HANDLE)),
-            (THIRD, ready(ACCOUNT, HANDLE)),
+            (hub_origin(), ready(ACCOUNT, HANDLE)),
+            (second_origin(), ready(ACCOUNT, HANDLE)),
+            (third_origin(), ready(ACCOUNT, HANDLE)),
         ],
     );
     let clock = Clock::at(T_ISSUE);
@@ -1181,25 +1330,30 @@ fn hsa7_key_commands_select_explicit_share_or_only_remote() {
     };
 
     // The only remote.
-    assert_eq!(retire(None, SECOND).unwrap().remote, "a");
+    assert_eq!(retire(None, second_origin()).unwrap().remote, "a");
     // A share remote wins over the others, whatever their names.
-    add_remote(&e, "b", THIRD, RemoteMode::Share);
-    assert_eq!(retire(None, THIRD).unwrap().remote, "b");
+    add_remote(&e, "b", third_origin(), RemoteMode::Share);
+    assert_eq!(retire(None, third_origin()).unwrap().remote, "b");
     // An explicit name wins over the share remote.
-    assert_eq!(retire(Some("a"), SECOND).unwrap().remote, "a");
+    assert_eq!(retire(Some("a"), second_origin()).unwrap().remote, "a");
     // Bind and revoke select the same way.
     let tagent = TestAgent::standard();
     let t = Fake::default();
     let mut c = challenge_of(KeyKind::Person, LABEL);
     c.label = "person key".into();
-    t.reply("BindChallenge", challenged(c))
-        .on("Bind", |call| bound_reply(THIRD, call, KeyKind::Person));
+    t.reply("BindChallenge", challenged(c)).on("Bind", |call| {
+        bound_reply(third_origin(), call, KeyKind::Person)
+    });
     let b = svc(&e, &t, &clock, &tagent)
         .bind(KeyKind::Person, None, None, &human())
         .unwrap();
     assert_eq!(b.remote, "b");
-    assert_eq!(b.confirm_url, confirm_url(THIRD, KEY_ID));
-    assert!(t.calls().iter().all(|c| c.install == origin(THIRD)));
+    assert_eq!(b.confirm_url, confirm_url(third_origin(), KEY_ID));
+    assert!(
+        t.calls()
+            .iter()
+            .all(|c| c.install == origin(third_origin()))
+    );
     let t = Fake::default();
     t.reply("FindKey", found(FINGERPRINT, KEY_ID))
         .reply("Revoke", revoked(KEY_ID, COMPROMISED));
@@ -1207,7 +1361,11 @@ fn hsa7_key_commands_select_explicit_share_or_only_remote() {
         .revoke(FINGERPRINT, None, Some("a"), &human())
         .unwrap();
     assert_eq!(r.remote, "a");
-    assert!(t.calls().iter().all(|c| c.install == origin(SECOND)));
+    assert!(
+        t.calls()
+            .iter()
+            .all(|c| c.install == origin(second_origin()))
+    );
 
     // No share remote and two remotes: one must be named; nothing is sent.
     RemoteService::new(&e.project, &e.user_file)
@@ -1418,11 +1576,11 @@ fn hsa7_retire_and_revoke_find_the_hub_id_first() {
             HubOperation::FindKey { fingerprint } => assert_eq!(fingerprint, FINGERPRINT),
             op => panic!("first request {op:?}"),
         }
-        assert_eq!(calls[0].destination, find_destination(INSTALL));
+        assert_eq!(calls[0].destination, find_destination(hub_origin()));
         let act = if revoke { "revoke" } else { "retire" };
         assert_eq!(
             calls[1].destination,
-            format!("{INSTALL}/api/v1/me/keys/{FOUND_ID}/{act}")
+            format!("{}/api/v1/me/keys/{FOUND_ID}/{act}", hub_origin())
         );
     }
 
@@ -1589,7 +1747,7 @@ fn hsa7_actor_claim_refresh_does_not_replay_the_mutation() {
         assert_eq!(claim.run.as_deref(), Some("cli"));
     }
     assert!(calls[2].claim.is_none(), "/me carries no claim");
-    assert_eq!(handle_on_disk(&e, INSTALL).as_deref(), Some("renamed"));
+    assert_eq!(handle_on_disk(&e, hub_origin()).as_deref(), Some("renamed"));
 
     // Bind refused for its claim: no second Bind and no new challenge.
     let agent = TestAgent::standard();
@@ -1676,7 +1834,9 @@ fn hsa7_key_commands_leave_log_and_signing_config_unchanged() {
         "BindChallenge",
         challenged(challenge_of(KeyKind::Person, LABEL)),
     )
-    .on("Bind", |call| bound_reply(INSTALL, call, KeyKind::Person));
+    .on("Bind", |call| {
+        bound_reply(hub_origin(), call, KeyKind::Person)
+    });
     svc(&e, &t, &clock, &agent)
         .bind(KeyKind::Person, Some(LABEL), None, &human())
         .unwrap();

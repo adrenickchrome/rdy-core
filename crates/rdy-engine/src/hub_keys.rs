@@ -19,7 +19,7 @@
 //!   completed (`E_UPSTREAM_UNCERTAIN`). A refused actor claim reads `/me` once through
 //!   [`HubCredentials::refresh_handle`] and reports `E_UPSTREAM_ACTOR_CLAIM` with any handle
 //!   change; the refused request is not sent again.
-use crate::config_levels::{SIGNING_AGENT_KEY, SIGNING_KEY, effective};
+use crate::config_levels::{Effective, SIGNING_AGENT_KEY, SIGNING_KEY, effective};
 use crate::error::{
     E_BAD_INPUT, RdyError, signing_key_missing, upstream_actor_claim, upstream_auth,
     upstream_key_proof, upstream_protocol, upstream_refused, upstream_transport,
@@ -227,11 +227,22 @@ struct Target {
     install: Origin,
     fence: OriginFence,
     ca_file: Option<PathBuf>,
-    /// The hub settings' warnings: a success carries them, a failure carries them as issues.
+    /// The hub settings' warnings, and for bind also the effective settings' ones (each once):
+    /// a success carries them, a failure carries them as issues.
     warnings: Vec<Issue>,
 }
 
 impl Target {
+    /// Adds the warnings of `more` that this target does not already carry: the effective
+    /// settings repeat the hub settings' warnings, and each is reported once.
+    fn add_warnings(&mut self, more: &[Issue]) {
+        for w in more {
+            if !self.warnings.contains(w) {
+                self.warnings.push(w.clone());
+            }
+        }
+    }
+
     /// `e` with this target's settings warnings added to its issues.
     fn fail(&self, mut e: RdyError) -> RdyError {
         e.issues.extend(self.warnings.iter().cloned());
@@ -375,9 +386,14 @@ impl<'a> KeyService<'a> {
             check_label(label)?;
         }
         let claim = RequestClaim::from_session(session)?;
-        let t = self.target(remote)?;
+        let mut t = self.target(remote)?;
         let grant = self.access(&t, &claim)?;
-        let key = self.selected_key(kind).map_err(|e| t.fail(e))?;
+        // The effective settings' warnings (an ignored `signing.agent_key`, an unknown signing
+        // setting) say why a key is or is not selected: every later success and failure
+        // carries them.
+        let eff = effective(&self.project, Some(&self.user_file)).map_err(|e| t.fail(e))?;
+        t.add_warnings(&eff.warnings);
+        let key = self.selected_key(&eff, kind).map_err(|e| t.fail(e))?;
 
         let asked = HubOperation::BindChallenge {
             kind,
@@ -448,9 +464,8 @@ impl<'a> KeyService<'a> {
     /// The configured key of `kind`, as the caller's agent holds it: `signing.key` for a person,
     /// `signing.agent_key` for an agent, and only that one. Unset is `E_SIGNING_KEY_MISSING`.
     /// `signing.sign` does not apply: it governs automatic signing, not an explicit bind.
-    fn selected_key(&self, kind: KeyKind) -> Result<KeyInfo, RdyError> {
-        let eff = effective(&self.project, Some(&self.user_file))?;
-        let config = SigningConfig::from_effective(&self.project, &eff)?;
+    fn selected_key(&self, eff: &Effective, kind: KeyKind) -> Result<KeyInfo, RdyError> {
+        let config = SigningConfig::from_effective(&self.project, eff)?;
         let (setting, selector) = match kind {
             KeyKind::Person => (SIGNING_KEY, config.key),
             KeyKind::Agent => (SIGNING_AGENT_KEY, config.agent_key),
