@@ -8,7 +8,9 @@
 //! apply and its residue, never its bytes (plan Redaction, D-3M81W).
 //!
 //! A dump is atomic at the target: it writes `<out>.partial-<pid>`, syncs it, and hard-links it
-//! to `out`, so `out` is a complete dump or nothing. It never overwrites a file.
+//! to `out`, so `out` is a complete dump or nothing. It never overwrites a file. A dump is of one
+//! redaction epoch: a state read before a removal, or one whose removal lands during the dump, is
+//! `E_REDACTED_STATE`, and nothing is placed (TASK-293).
 use crate::config_levels::PROJECT_FILE;
 use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_IO, RdyError};
 use crate::handle::io;
@@ -125,11 +127,19 @@ impl ReadState {
     }
 
     /// Writes the whole dump into `w` and returns `w`, flushed (a dump, and a clone's stream).
+    ///
+    /// The dump belongs to this state's redaction epoch (TASK-293): a state read before a
+    /// removal, or one whose removal lands while the batches are written, is `E_REDACTED_STATE`.
+    /// The epoch is checked before anything is written and again after the last batch, before
+    /// the trailer (so before a dump file is placed): the batches read the live removal spans,
+    /// and a removal past this state's log end would leave a dropped frame that no record of the
+    /// dump authorizes. The caller removes its partial output on any error.
     pub(crate) fn write_dump<W: Write>(
         &self,
         w: W,
         files: &[(String, Vec<u8>)],
     ) -> Result<(W, DumpTotals), RdyError> {
+        self.ensure_current_epoch()?;
         let header = DumpHeader {
             store_format: STORE_FORMAT,
             log_end: self.seq(),
@@ -153,6 +163,8 @@ impl ReadState {
         if let Some(e) = failed {
             return Err(e);
         }
+        // a removal that landed during the batches: what they read is no one epoch's
+        self.ensure_current_epoch()?;
         read?;
         w.finish().map_err(dest)
     }
@@ -359,6 +371,10 @@ fn exists(out: &Path, cmd: &str) -> RdyError {
         "pick another path, or remove the file",
     )
 }
+
+#[cfg(test)]
+#[path = "dump_epoch_tests.rs"]
+mod epoch_tests;
 
 #[cfg(test)]
 mod tests {

@@ -811,6 +811,47 @@ pub(crate) fn check_snapshot_limits<'a>(
     check_assets(&blobs, &mut manifest, &l)
 }
 
+/// The resources of one snapshot counted block by block while its blocks are read, before each
+/// one is kept: the selection bound (one block per entry), the text and reference bounds, and
+/// the graph, each refused with the error [`check_snapshot_limits`] gives for it. A reader that
+/// charges every block before it keeps it never holds a snapshot past these bounds, whatever
+/// the snapshot's size. A snapshot over two bounds may be refused for another one first than
+/// the whole check would name; either way it is refused.
+pub(crate) struct SnapshotBudget {
+    l: Limits,
+    blocks: usize,
+    meter: references::ResourceMeter,
+    edges: usize,
+}
+
+impl SnapshotBudget {
+    pub(crate) fn new() -> SnapshotBudget {
+        let l = limits();
+        SnapshotBudget {
+            l,
+            blocks: 0,
+            meter: references::ResourceMeter::new(&l),
+            edges: 0,
+        }
+    }
+
+    /// Counts block `b`, one more entry of the snapshot.
+    pub(crate) fn charge(&mut self, b: &Block) -> Result<(), RdyError> {
+        if self.blocks >= self.l.selection {
+            return Err(limit("selection", self.l.selection, "blocks"));
+        }
+        self.blocks += 1;
+        self.meter.charge(b)?;
+        self.edges = self
+            .edges
+            .saturating_add(rdy_graph::edges_of(b).len() + usize::from(b.parent.is_some()));
+        if self.edges > self.l.graph {
+            return Err(limit("graph", self.l.graph, "edges"));
+        }
+        Ok(())
+    }
+}
+
 /// The limits block `b` keeps on its own, whatever snapshot holds it: its text bounds, its
 /// reference occurrences, its field depth and its graph edges. A block over one of them puts
 /// every snapshot that holds it over the same limit, so a receiver can refuse it at once. A

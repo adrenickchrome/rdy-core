@@ -6,11 +6,11 @@
 //!
 //! # What the take checks before anything is written
 //!
-//! 1. Each file alone (`sync_stream::check_batch`): framing, hashes, bounded typed records,
-//!    trailer and end of file, the order inside the batch and its exact prerequisites. Every
-//!    header names the same format, repo, purpose and root; the repo is the holder's. The
-//!    upload-wide bytes, records, edges and pending drops are counted over every file, repeats
-//!    included.
+//! 1. Each file alone (`sync_stream::check_batch`): framing, hashes, bounded typed records and
+//!    their kinds' record rules (an ANSWER's relay and evidence rules), trailer and end of file,
+//!    the order inside the batch and its exact prerequisites. Every header names the same
+//!    format, repo, purpose and root; the repo is the holder's. The upload-wide bytes, records,
+//!    edges and pending drops are counted over every file, repeats included.
 //! 2. The union of the files' records over the holder: every prerequisite of every file is a
 //!    record of the union or of the holder (the smallest missing key is E_UNRESOLVED_REF).
 //!    Equal records of several files are one; a key's dropped representations must agree.
@@ -35,10 +35,13 @@
 //!    holder or in the union, is `UncoveredChange`.
 //! 8. The caller's check (`check`) runs once, with the union and the holder as its source; its
 //!    choice selects which tag survives. With `Incoming`, the take writes `tag/<name>`. Either
-//!    way the root TAG is stored, and when the union holds a relay answer of the root (one that
-//!    targets exactly the root TAG; `crate::holder::is_relay_answer_of`), the take writes
-//!    `answer/tag-object:<root hash>` (O11, ruling task-13): at most one relay answer per tag
-//!    object, and never another one than the holder holds for it.
+//!    way the root TAG is stored, and for every TAG object of the union whose relay answer the
+//!    union holds (one that targets exactly that TAG; `crate::holder::is_relay_answer_of`), the
+//!    root or any other tag the closure reaches, the take writes `answer/tag-object:<tag hash>`
+//!    (O11, ruling task-13): at most one relay answer per tag object, and never another one than
+//!    the holder holds for it. The check gets these answers before it runs
+//!    (`UploadFacts::relay_answers`), so it judges each signature of a relayed tag against the
+//!    answer the holder will name.
 //! 9. A holder with an approval keeps within its receiver caps (`crate::redaction_import`),
 //!    the frames, payload bytes and spans of the batch included; the marker counts only when
 //!    there is a frame to write (a complete retry writes none).
@@ -100,13 +103,17 @@ fn parse_hash<'de, D: Deserializer<'de>>(d: D) -> Result<Hash, D::Error> {
 }
 
 /// What the take validated before it asks the caller: the stream's repo, the root TAG's hash
-/// and record, and every key of the union, sorted. Temporary metadata, never stored.
+/// and record, every key of the union, sorted, and the relay answer of each TAG object (of the
+/// union or the holder) that has one in the union (tag hash to answer hash): the answer the take
+/// names by `answer/tag-object:<tag>` (O11, ruling task-13). A tag with no relay answer in the
+/// union keeps the one the holder names for it, if any. Temporary metadata, never stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadFacts {
     pub repo_id: RepoId,
     pub root_hash: Hash,
     pub root: Tag,
     pub objects: Vec<ObjectKey>,
+    pub relay_answers: BTreeMap<Hash, Hash>,
 }
 
 /// Which immutable tag ref survives the take: the upload's root (`tag/<root.name>`), or a tag
@@ -833,6 +840,45 @@ fn check_closure(
     }
 }
 
+/// The relay answer of each TAG object, of the union or the holder, that has one in the union
+/// (tag hash to answer hash): an answer of the union of act `tag`, item `tag:<name>` and targets
+/// exactly that TAG object, whose name is `<name>` (`crate::holder::is_relay_answer_of`). An
+/// answer to a tag of the same name that targets another tag object is not that tag's. Two
+/// relay answers of one tag object refuse the upload at the second.
+fn relay_answers(
+    source: &mut UploadSource,
+    union: &BTreeMap<ObjectKey, Entry>,
+) -> Result<BTreeMap<Hash, Hash>, StreamError> {
+    let mut out: BTreeMap<Hash, Hash> = BTreeMap::new();
+    for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
+        let Some(a) = source.typed::<Answer>(*k)? else {
+            continue;
+        };
+        let [tag] = a.targets[..] else {
+            continue;
+        };
+        if a.act != rdy_model::AnswerAct::Tag {
+            continue;
+        }
+        // the tag object of the union, or one the holder holds already (a retry's root)
+        let tag_key = ObjectKey {
+            kind: kinds::TAG,
+            hash: tag,
+        };
+        let Some(t) = source.typed::<Tag>(tag_key)? else {
+            continue;
+        };
+        if !crate::holder::is_relay_answer_of(&a, &tag, &t.name) {
+            continue;
+        }
+        if out.contains_key(&tag) {
+            return Err(bad(Reason::OutsideTagClosure, *k));
+        }
+        out.insert(tag, k.hash);
+    }
+    Ok(out)
+}
+
 /// The residue `r`, decoded, from the union or the holder.
 fn residue(source: &mut UploadSource, r: Hash) -> Result<RedactionResidue, StreamError> {
     let key = ObjectKey {
@@ -1136,13 +1182,41 @@ pub(crate) fn prepare<E>(
             source.masked.insert(*k, (*apply, *t));
         }
     }
+    // the relay answer of every tag object of the union (O11, ruling task-13), each named by
+    // its tag object whichever tag stays the version: at most one per tag object, and never
+    // another one than the holder holds for it. The caller's check judges signatures against
+    // them, so they are found before it runs
+    let relayed = relay_answers(&mut source, &union)?;
+    let mut answer_refs: Vec<(String, Vec<u8>)> = Vec::new();
+    for (tag, answer) in &relayed {
+        let name = crate::holder::answer_tag_object_ref(tag);
+        match reader.get_ref(&name)? {
+            Some(v) if v == answer.0 => {}
+            // the tag object holds another relay answer already: one per tag object
+            Some(_) => {
+                let key = ObjectKey {
+                    kind: kinds::ANSWER,
+                    hash: *answer,
+                };
+                return Err(bad(Reason::OutsideTagClosure, key).into());
+            }
+            None => answer_refs.push((name, answer.0.to_vec())),
+        }
+    }
     let facts = UploadFacts {
         repo_id: header.repo_id,
         root_hash: root_key.hash,
         root: root.clone(),
         objects: union.keys().copied().collect(),
+        relay_answers: relayed,
     };
     let choice = check(&mut source, &facts).map_err(TakeError::Validation)?;
+    // each answer is read again after the check (a reread checks its frame and hash): input
+    // changed since then refuses here, before any append, as an answer the holder holds is not
+    // read again by the append
+    if relay_answers(&mut source, &union)? != facts.relay_answers {
+        return Err(StreamError::bad_record(0, 0, Reason::InputChangedDuringTake).into());
+    }
     let mut refs: Vec<(String, Vec<u8>)> = Vec::new();
     let (tag_hash, tag) = match choice {
         TagChoice::Incoming => {
@@ -1173,36 +1247,7 @@ pub(crate) fn prepare<E>(
             }
         }
     };
-    // the root's relay answer (O11, ruling task-13): the root TAG is stored whichever tag stays
-    // the version, so its relay answer is named by the tag object, whichever choice was made.
-    // Each answer is read again: input changed since the checks refuses here, before any
-    // append, as an answer the holder holds is not read again by the append
-    // A relay answer targets exactly the root TAG (`is_relay_answer_of`): an answer to a tag of
-    // the same name that targets another tag object never gets the root's ref
-    let mut relay: Vec<&ObjectKey> = Vec::new();
-    for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
-        if source
-            .typed::<Answer>(*k)?
-            .is_some_and(|a| crate::holder::is_relay_answer_of(&a, &root_key.hash, &root.name))
-        {
-            relay.push(k);
-        }
-    }
-    match relay[..] {
-        [] => {}
-        [a] => {
-            let name = crate::holder::answer_tag_object_ref(&root_key.hash);
-            match reader.get_ref(&name)? {
-                Some(v) if v == a.hash.0 => {}
-                // the tag object holds another relay answer already: one per tag object
-                Some(_) => return Err(bad(Reason::OutsideTagClosure, *a).into()),
-                None => refs.push((name, a.hash.0.to_vec())),
-            }
-        }
-        [_, second, ..] => {
-            return Err(bad(Reason::OutsideTagClosure, *second).into());
-        }
-    }
+    refs.extend(answer_refs);
     // 9. the receiver caps of a holder that holds an approval after this batch
     if redaction_after {
         // the ref frames exactly as the store salts them (`Store::ref_items`); the marker at its

@@ -1567,3 +1567,423 @@ fn ha13_take_keeps_the_blob_chunk_lengths() {
     assert!(!h.store().has_kind(kinds::BLOB_CHUNK, &chunk).unwrap());
     h.fsck().unwrap();
 }
+
+// ---- final review: every record a take keeps passes the holder's fsck ----
+
+/// Tags `landing` in `r`'s store as `name` (no rule of `rdy tag`), seals it, and returns the tag
+/// and its whole closure as one batch, unchecked.
+fn raw_upload(r: &mut Rdy, name: &str, landing: Hash, by: Provenance) -> (Hash, Vec<u8>) {
+    let t = r
+        .store_mut()
+        .put_tag(&Tag {
+            name: name.into(),
+            landing,
+            message: None,
+            tagged_by: by,
+        })
+        .unwrap();
+    r.seal_open().unwrap();
+    (t, split(r, t, 1).remove(0))
+}
+
+/// A local answer of act `act` by the founder that writes `targets`.
+fn local_answer(item: &str, act: AnswerAct, targets: Vec<Hash>) -> Answer {
+    Answer {
+        item: item.into(),
+        act,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: None,
+        targets,
+        person: Provenance {
+            actor: "human:founder".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 7,
+        },
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    }
+}
+
+/// The holder at `root` reopened, checked, dumped and loaded again: the dump of a holder whose
+/// takes were refused loads, and the loaded holder's fsck passes.
+fn reopen_dump_load(root: &Path, dir: &Path, name: &str) {
+    let h = Rdy::open_holder(root).unwrap();
+    h.fsck().unwrap();
+    let dump = dir.join(format!("{name}.rdydump"));
+    h.read().dump(&dump).unwrap();
+    let target = dir.join(format!("{name}-loaded"));
+    rdy_engine::load::load(&dump, &target).unwrap();
+    Rdy::open_holder(&target).unwrap().fsck().unwrap();
+}
+
+#[test]
+fn ha13_take_refuses_an_answer_that_breaks_the_answer_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    let v1 = tag(&mut r, "v1.0.0");
+    let l = landing_of(&r, v1);
+    let rec = r.store().landing(&l).unwrap();
+    let (root, mut h) = holder(dir.path(), repo(&r));
+    take(
+        &mut h,
+        &files(dir.path(), "v1", &[&export(&r, v1)]),
+        target("v1.0.0", l),
+    )
+    .unwrap();
+    // a confirm of the landing that names a relay and holds no relay evidence: a hash-valid,
+    // in-closure record that breaks the answer rules
+    let bad = Answer {
+        relayed_by: Some(ActorRun {
+            actor: "agent:a".into(),
+            run: None,
+        }),
+        ..local_answer("D-x@1", AnswerAct::Confirm, vec![l])
+    };
+    let a = r.store_mut().put(kinds::ANSWER, &bad).unwrap();
+    r.seal_open().unwrap();
+    let (_, batch) = raw_upload(&mut r, "v9.0.0", l, rec.approved_by.clone());
+    assert!(
+        closure_keys(&r, tag_hash(&r, "v9.0.0")).contains(&ObjectKey {
+            kind: kinds::ANSWER,
+            hash: a,
+        })
+    );
+    let rule = format!("answer {a}: relayed_by and relay_evidence must both be set or both unset");
+    // the batch check refuses it with the answer rule's own text
+    let e = check_batch(batch.as_slice(), Some(repo(&r))).unwrap_err();
+    assert_eq!(e.code, "E_BAD_RECORD", "{e:?}");
+    assert!(e.message.ends_with(&rule), "{}", e.message);
+    // and so does the take, before anything is written
+    let before = unchanged(&root, &h);
+    let e = take(
+        &mut h,
+        &files(dir.path(), "v9", &[&batch]),
+        target("v9.0.0", l),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_RECORD", "{e:?}");
+    assert!(e.message.ends_with(&rule), "{}", e.message);
+    assert_eq!(unchanged(&root, &h), before);
+    assert!(!h.store().has_kind(kinds::ANSWER, &a).unwrap());
+    drop(h);
+    reopen_dump_load(&root, dir.path(), "answer");
+}
+
+/// A signature of statement `stmt` over `subject`, signed with the test key.
+fn signature_of(subject: Hash, stmt: Vec<u8>) -> Signature {
+    let ns = rdy_model::signature::parse_statement(&stmt)
+        .unwrap()
+        .namespace()
+        .to_string();
+    Signature {
+        subject,
+        namespace: ns.clone(),
+        sig: sshsig(&ns, &stmt),
+        statement: stmt,
+        signed_by: Provenance {
+            actor: "agent:s".into(),
+            run: Some("s/1".into()),
+            role: Role::Writer,
+            at_ms: 3_000,
+        },
+    }
+}
+
+/// The tag statement of tag `t` of `r`, for `r`'s repo and the test key.
+fn tag_statement(r: &Rdy, t: Hash) -> Vec<u8> {
+    let record = r.store().read_tag(&t).unwrap();
+    let mut blob = vec![];
+    key_data().encode(&mut blob).unwrap();
+    statement(
+        StatementSource::Tag {
+            hash: t,
+            tag: &record,
+        },
+        Some(repo(r)),
+        &blob_fingerprint(&blob),
+    )
+    .unwrap()
+}
+
+#[test]
+fn ha13_take_checks_every_new_signature_before_it_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    let v1 = tag(&mut r, "v1.0.0");
+    let l = landing_of(&r, v1);
+    let rec = r.store().landing(&l).unwrap();
+    let (root, mut h) = holder(dir.path(), repo(&r));
+    take(
+        &mut h,
+        &files(dir.path(), "v1", &[&export(&r, v1)]),
+        target("v1.0.0", l),
+    )
+    .unwrap();
+    // (tag name, the signature of that tag, the refusal)
+    type MakeSignature = fn(&Rdy, Hash, Hash) -> Signature;
+    let cases: [(&str, MakeSignature, &str); 2] = [
+        // a tag namespace and subject, but a statement and a signature that are no SSHSIG
+        (
+            "v9.0.0",
+            |_, t, _| Signature {
+                subject: t,
+                namespace: "rdy-tag-v1".into(),
+                statement: b"x".to_vec(),
+                sig: vec![0],
+                signed_by: Provenance {
+                    actor: "agent:s".into(),
+                    run: None,
+                    role: Role::Writer,
+                    at_ms: 1,
+                },
+            },
+            "E_SIG_INVALID",
+        ),
+        // a valid signature of v1.0.0's statement, stored as a signature of another tag
+        (
+            "v9.1.0",
+            |r, t, v1| signature_of(t, tag_statement(r, v1)),
+            "E_SIG_OBJECT_MISMATCH",
+        ),
+    ];
+    for (name, make, code) in cases {
+        let t = r
+            .store_mut()
+            .put_tag(&Tag {
+                name: name.into(),
+                landing: l,
+                message: None,
+                tagged_by: rec.approved_by.clone(),
+            })
+            .unwrap();
+        r.seal_open().unwrap();
+        let g = make(&r, t, v1);
+        let gh = r.store_mut().put_signature(&g).unwrap();
+        r.seal_open().unwrap();
+        let batch = split(&r, t, 1).remove(0);
+        assert!(closure_keys(&r, t).contains(&ObjectKey {
+            kind: kinds::SIGNATURE,
+            hash: gh,
+        }));
+        let before = unchanged(&root, &h);
+        let e = take(&mut h, &files(dir.path(), name, &[&batch]), target(name, l)).unwrap_err();
+        assert_eq!(e.code, code, "{name}: {e:?}");
+        assert!(e.message.contains(&gh.to_string()), "{name}: {}", e.message);
+        assert_eq!(unchanged(&root, &h), before, "{name}");
+        assert!(
+            !h.store().has_kind(kinds::SIGNATURE, &gh).unwrap(),
+            "{name}"
+        );
+    }
+    // the control: a valid tag signature by a key no trust file names is taken and checks as in
+    // its source
+    let t = r
+        .store_mut()
+        .put_tag(&Tag {
+            name: "v9.2.0".into(),
+            landing: l,
+            message: None,
+            tagged_by: rec.approved_by.clone(),
+        })
+        .unwrap();
+    r.seal_open().unwrap();
+    let stmt = tag_statement(&r, t);
+    r.store_mut().put_signature(&signature_of(t, stmt)).unwrap();
+    r.seal_open().unwrap();
+    let source = signature_checks(&r.read(), &t, None).unwrap();
+    assert_eq!(
+        (
+            source.len(),
+            source[0].signed.as_str(),
+            source[0].statement.as_str(),
+            source[0].trust.as_str()
+        ),
+        (1, "valid", "match", "unknown")
+    );
+    take(
+        &mut h,
+        &files(dir.path(), "v92", &[&split(&r, t, 1).remove(0)]),
+        target("v9.2.0", l),
+    )
+    .unwrap();
+    let held = signature_checks(&h.read(), &t, None).unwrap();
+    assert_eq!(checks_json(&held), checks_json(&source));
+    assert_eq!(h.fsck().unwrap().signatures, 1);
+    drop(h);
+    reopen_dump_load(&root, dir.path(), "signatures");
+}
+
+#[test]
+fn ha13_every_relay_tag_the_take_stores_keeps_its_answer_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    // a relayed, signed v1.0.0, and a plain v2.0.0 of the same landing
+    let t1 = relay_tag(&mut r, "v1.0.0");
+    let a1 = relay_answer(&r, "v1.0.0");
+    let sig1 = r.store().reader().signatures_of(&t1).unwrap();
+    assert_eq!(sig1.len(), 1);
+    let l = landing_of(&r, t1);
+    let t2 = tag(&mut r, "v2.0.0");
+    assert_eq!(landing_of(&r, t2), l);
+    // a valid answer of the landing that also wrote v1.0.0's tag and signature: v2.0.0's
+    // closure reaches the relayed tag, its relay answer and its signature through its targets
+    let a = r
+        .store_mut()
+        .put(
+            kinds::ANSWER,
+            &local_answer("D-x@1", AnswerAct::Confirm, vec![l, t1, sig1[0]]),
+        )
+        .unwrap();
+    r.seal_open().unwrap();
+    r.fsck().unwrap();
+    let keys = closure_keys(&r, t2);
+    for (kind, hash) in [
+        (kinds::ANSWER, a),
+        (kinds::TAG, t1),
+        (kinds::ANSWER, a1),
+        (kinds::SIGNATURE, sig1[0]),
+    ] {
+        assert!(keys.contains(&ObjectKey { kind, hash }), "{kind}:{hash}");
+    }
+    let source = signature_checks(&r.read(), &t1, None).unwrap();
+    assert_eq!(
+        (source[0].signed.as_str(), source[0].statement.as_str()),
+        ("valid", "match")
+    );
+
+    let (root, mut h) = holder(dir.path(), repo(&r));
+    take(
+        &mut h,
+        &files(dir.path(), "v2", &[&export(&r, t2)]),
+        target("v2.0.0", l),
+    )
+    .unwrap();
+    // the non-root relayed tag keeps its relay answer by its tag object
+    let want = vec![
+        ("tag/v2.0.0".to_string(), t2.0.to_vec()),
+        (format!("answer/tag-object:{t1}"), a1.0.to_vec()),
+    ];
+    assert_eq!(refs(&h), want);
+    let held = signature_checks(&h.read(), &t1, None).unwrap();
+    assert_eq!(checks_json(&held), checks_json(&source));
+    h.fsck().unwrap();
+    // the later upload of v1.0.0 itself keeps the same ref and writes no other
+    take(
+        &mut h,
+        &files(dir.path(), "v1", &[&export(&r, t1)]),
+        target("v1.0.0", l),
+    )
+    .unwrap();
+    let mut want = want;
+    want.insert(1, ("tag/v1.0.0".to_string(), t1.0.to_vec()));
+    let mut got = refs(&h);
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+    h.fsck().unwrap();
+    drop(h);
+    reopen_dump_load(&root, dir.path(), "relay");
+}
+
+// ---- final review ruling 1: what can be written can be exported ----
+
+/// A table rows value of `levels` levels: lists in lists, the innermost one empty (the deepest
+/// encoding a value of that many levels has).
+fn rows_of_levels(levels: usize) -> Value {
+    let mut v = json!([]);
+    for _ in 1..levels {
+        v = json!([v]);
+    }
+    v
+}
+
+fn table(doc: &str, rows: Value) -> Value {
+    json!([{"op": "create", "type": "table", "parent": doc, "fields": {"columns": ["a"], "rows": rows}}])
+}
+
+#[test]
+fn ha1_a_field_deeper_than_the_bound_is_refused_before_it_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, doc, _) = project(&dir.path().join("src"));
+    r.seal_open().unwrap();
+    let end = r.store().log_end();
+    let text = (
+        "E_LIMIT",
+        format!("field nesting exceeds {MAX_FIELD_NESTING} levels"),
+        format!("flatten the field to at most {MAX_FIELD_NESTING} levels"),
+    );
+    // the reviewer's case: a standard table with 30 nested lists in its rows
+    assert_eq!(MAX_FIELD_NESTING, 29);
+    for rows in [rows_of_levels(30), rows_of_levels(1_000)] {
+        let e = r
+            .write(
+                &writer(),
+                WriteRequest {
+                    view: "work".into(),
+                    ops: serde_json::from_value(table(&doc, rows)).unwrap(),
+                    justification: None,
+                    message: "deep".into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.clone(), e.fix.clone()),
+            (text.0, text.1.clone(), text.2.clone())
+        );
+    }
+    // nothing was persisted
+    r.seal_open().unwrap();
+    assert_eq!(r.store().log_end(), end);
+    // a block read from files (import, the working copy) meets the same write schema
+    let mut deep = FieldValue::List(vec![]);
+    for _ in 0..MAX_FIELD_NESTING {
+        deep = FieldValue::List(vec![deep]);
+    }
+    let block = Block {
+        id: BlockId::parse("tb-00001").unwrap(),
+        block_type: "table".into(),
+        parent: Some(BlockId::parse(&doc).unwrap()),
+        order: "W".into(),
+        fields: BTreeMap::from([
+            ("columns".to_string(), FieldValue::List(vec![])),
+            ("rows".to_string(), deep),
+        ]),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        read_identity: None,
+    };
+    let issues = rdy_schema::validate_block(r.pack(), &block, None);
+    assert_eq!(
+        issues
+            .iter()
+            .map(|i| (i.code, i.message.clone(), i.fix.clone()))
+            .collect::<Vec<_>>(),
+        vec![text]
+    );
+}
+
+#[test]
+fn ha1_a_field_at_the_bound_writes_lands_tags_exports_and_is_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, doc, _) = project(&dir.path().join("src"));
+    write(&mut r, table(&doc, rows_of_levels(MAX_FIELD_NESTING)));
+    land(&mut r);
+    let t = tag(&mut r, "v2.0.0");
+    r.fsck().unwrap();
+    let batch = export(&r, t);
+    check_batch(batch.as_slice(), Some(repo(&r))).unwrap();
+    let (_root, mut h) = holder(dir.path(), repo(&r));
+    take(
+        &mut h,
+        &files(dir.path(), "deep", &[&batch]),
+        target("v2.0.0", landing_of(&r, t)),
+    )
+    .unwrap();
+    h.fsck().unwrap();
+}

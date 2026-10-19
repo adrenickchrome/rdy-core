@@ -58,7 +58,7 @@ pub fn is_portable(kind: u8) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct ObjectKey {
     pub kind: u8,
-    #[serde(with = "hex")]
+    #[serde(with = "crate::transition::hex::one")]
     pub hash: Hash,
 }
 
@@ -354,30 +354,5 @@ impl Edges {
         }
         self.all(CHANGE, &c.deps);
         self.links(&c.links);
-    }
-}
-
-/// A hash as full lowercase hex in a human-readable format, and as the hash's own serde
-/// otherwise; `Hash`'s own serializer is unchanged.
-mod hex {
-    use rdy_model::Hash;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
-        if s.is_human_readable() {
-            s.collect_str(h)
-        } else {
-            h.serialize(s)
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Hash, D::Error> {
-        if d.is_human_readable() {
-            let text = String::deserialize(d)?;
-            text.parse()
-                .map_err(|_| serde::de::Error::custom(format!("bad hash {text:?}")))
-        } else {
-            Hash::deserialize(d)
-        }
     }
 }

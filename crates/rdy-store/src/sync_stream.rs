@@ -862,8 +862,35 @@ pub(crate) fn depth_of(
     Ok(d)
 }
 
+/// The rules the store keeps for every record of a kind, whatever the log around it, that a
+/// batch check applies to each present record before it is counted: an ANSWER keeps the answer
+/// record rules (`crate::answer`: relay and evidence together, an evidence kind only with a
+/// relay, card evidence with its card hash), with fsck's own text. Its targets rule is the
+/// batch's edge rule. A take checks every file of an upload this way, so no take keeps an answer
+/// that the holder's fsck would refuse.
+fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError> {
+    let StreamRecord::Present { key, payload } = r else {
+        return Ok(());
+    };
+    if key.kind != crate::kinds::ANSWER {
+        return Ok(());
+    }
+    let a: rdy_model::Answer = crate::bounded::decode(payload)
+        .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+    match crate::answer::invalid(&a) {
+        Some(rule) => {
+            Err(
+                StreamError::broken_rule(n, offset, &crate::answer::damage(&key.hash, rule))
+                    .with_object(Some(*key)),
+            )
+        }
+        None => Ok(()),
+    }
+}
+
 /// Checks one complete batch and returns its report: the framing ([`StreamReader`]), each
-/// object record's bounded typed decode (`refs_of`), no repeated logical key, at most
+/// object record's bounded typed decode (`refs_of`) and its kind's record rules (an ANSWER's
+/// relay and evidence rules), no repeated logical key, at most
 /// [`MAX_EDGES`] edges, and the batch's dependency rules. Only when every check passes are its
 /// keys returned.
 ///
@@ -910,6 +937,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
         let refs = r
             .refs()
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
+        record_rules(n, offset, &r)?;
         on_record(n, offset, &r)?;
         let proof = r.proof();
         if (edges.len() + proofs.len() + refs.len() + usize::from(proof.is_some())) as u64

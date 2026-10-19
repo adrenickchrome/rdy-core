@@ -137,8 +137,8 @@ pub use view_query::{
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ResolveResult, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{
-    LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult, editorial_class,
-    json_to_field, parse_justification, parse_op, parse_ops,
+    JsonFieldError, LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult,
+    editorial_class, json_to_field, parse_justification, parse_op, parse_ops,
 };
 
 pub use config::{
@@ -147,8 +147,8 @@ pub use config::{
 pub use engine::{Engine, Local, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{
-    FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads, project_pack,
-    resolve_pack,
+    FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,
+    pack_source_reads_on_this_thread, project_pack, resolve_pack,
 };
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};

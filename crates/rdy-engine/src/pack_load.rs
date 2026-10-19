@@ -53,11 +53,22 @@ pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
 
 static SOURCE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+thread_local! {
+    static THREAD_SOURCE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Test hook: how many times this process has read the pack-defining files (open, reload and
 /// the daemon's watch each read them through one function), whatever the project.
 #[doc(hidden)]
 pub fn pack_source_reads() -> usize {
     SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test hook: [`pack_source_reads`] counted on the calling thread only, so a test that calls the
+/// engine on its own thread sees no read another test makes at the same time.
+#[doc(hidden)]
+pub fn pack_source_reads_on_this_thread() -> usize {
+    THREAD_SOURCE_READS.with(std::cell::Cell::get)
 }
 
 /// The pack-defining files read once: their fingerprint and the very bytes it hashed, so what is
@@ -75,6 +86,7 @@ pub(crate) struct Sources {
 /// No config file is `E_NO_PROJECT`; any other failure is an I/O error.
 pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    THREAD_SOURCE_READS.with(|n| n.set(n.get().wrapping_add(1)));
     let at = std::time::SystemTime::now();
     let cfg_path = project.join(config_levels::PROJECT_FILE);
     if !cfg_path.exists() {

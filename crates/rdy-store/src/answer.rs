@@ -76,8 +76,8 @@ fn ref_of(a: &Answer) -> String {
 }
 
 /// The rule of the record `a` breaks, if any (the targets rule aside): the one list that
-/// `put_answer` and fsck apply.
-fn invalid(a: &Answer) -> Option<String> {
+/// `put_answer`, fsck and the sync batch check apply.
+pub(crate) fn invalid(a: &Answer) -> Option<String> {
     if a.relayed_by.is_some() != a.relay_evidence.is_some() {
         return Some("relayed_by and relay_evidence must both be set or both unset".into());
     }
@@ -95,7 +95,8 @@ fn invalid(a: &Answer) -> Option<String> {
     }
 }
 
-fn damage(h: &Hash, rule: impl std::fmt::Display) -> String {
+/// The text of the rule `rule` that answer `h` breaks: `answer <h>: <rule>`.
+pub(crate) fn damage(h: &Hash, rule: impl std::fmt::Display) -> String {
     format!("answer {h}: {rule}")
 }
 

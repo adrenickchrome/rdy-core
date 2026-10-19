@@ -2227,9 +2227,16 @@ fn rdx5_long_strings_and_deep_fields_elsewhere_never_block_a_report() {
             .unwrap_err();
     assert_eq!(e.code, E_REDACTION_LIMIT, "{e}");
     assert_eq!(e.message, "The redaction exceeds 1048576 bytes per string.");
-    // a field nested 65 levels deep elsewhere: searched down to level 64, with one warning
+    // a field nested past the level bound elsewhere: searched down to the bound, with one
+    // warning. A write keeps fields within MAX_FIELD_NESTING (29) levels (final review ruling
+    // 1), so the report's bound is lowered to 20 for this thread and the field nests 21 lists
+    // deep: one past it, as 65 lists were past the default 64.
+    let _levels = override_limits_for_tests(Limits {
+        levels: 20,
+        ..Limits::default()
+    });
     let mut rows = json!([SECRET]);
-    for _ in 0..64 {
+    for _ in 0..20 {
         rows = json!([rows]);
     }
     let w = write(
@@ -2245,7 +2252,7 @@ fn rdx5_long_strings_and_deep_fields_elsewhere_never_block_a_report() {
         p.r.redact(&writer(), input(&[p.prose.to_string()], false))
             .unwrap();
     assert!(rec.redaction.is_some());
-    let line = "W_REDACTION_QUOTES: 1 records nest deeper than 64 levels; rdy did not search below \
+    let line = "W_REDACTION_QUOTES: 1 records nest deeper than 20 levels; rdy did not search below \
                 that depth";
     let lines: Vec<String> = rec
         .warnings

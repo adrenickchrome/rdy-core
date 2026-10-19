@@ -336,6 +336,33 @@ pub fn no_agent(cause: NoAgentCause) -> RdyError {
     )
 }
 
+/// `E_LIMIT` for a field deeper than [`rdy_model::MAX_FIELD_NESTING`] levels (final review
+/// ruling 1): refused before anything is written.
+pub fn field_nesting_limit() -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        rdy_model::field_nesting_message(),
+        rdy_model::field_nesting_fix(),
+    )
+}
+
+/// The field nesting refusal among a write's schema `issues`, if any: it keeps its own code,
+/// message and fix (`E_LIMIT`), whatever else the validation found, and lists every issue.
+pub(crate) fn nesting_refusal(issues: &[rdy_schema::Issue]) -> Option<RdyError> {
+    issues
+        .iter()
+        .any(|i| {
+            i.severity == rdy_schema::Severity::Error
+                && i.code == E_LIMIT
+                && i.message == rdy_model::field_nesting_message()
+        })
+        .then(|| {
+            let mut e = field_nesting_limit();
+            e.issues = issues.to_vec();
+            e
+        })
+}
+
 /// `E_SIG_INVALID` for the signature record `hash`.
 pub fn sig_invalid(hash: &str) -> RdyError {
     RdyError::new(

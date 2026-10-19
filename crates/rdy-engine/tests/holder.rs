@@ -995,7 +995,7 @@ fn ha7_holder_never_reloads_its_pack() {
     let mut h = d.holder();
     let name = h.read().project_name().to_string();
     let fingerprint = h.pack_fingerprint().clone();
-    let reads = pack_source_reads();
+    let reads = pack_source_reads_on_this_thread();
     std::fs::create_dir_all(dir.join(".rdy/packs")).unwrap();
     // valid files, then malformed ones: none is read, and the holder keeps its fixed context
     for (file, text) in [
@@ -1024,7 +1024,12 @@ fn ha7_holder_never_reloads_its_pack() {
         assert_eq!(h.read().pack().name, "rdy-standard", "{file}");
         assert_eq!(h.pack_fingerprint(), &fingerprint, "{file}");
     }
-    assert_eq!(pack_source_reads(), reads, "no pack-defining file was read");
+    // counted on this thread: a project another test opens meanwhile reads on its own thread
+    assert_eq!(
+        pack_source_reads_on_this_thread(),
+        reads,
+        "no pack-defining file was read"
+    );
     assert_reads(&h, &d, ["base", "left", "right"]);
     h.fsck().unwrap();
 }

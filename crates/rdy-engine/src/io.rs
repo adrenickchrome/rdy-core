@@ -1128,6 +1128,9 @@ impl Rdy {
             issues.extend(validate_prefix(&self.pack, b));
             issues.extend(validate_block(&self.pack, b, parent));
         }
+        if let Some(e) = crate::error::nesting_refusal(&issues) {
+            return Err(e);
+        }
         if has_errors(&issues) {
             let mut e = RdyError::new(
                 E_VALIDATION,

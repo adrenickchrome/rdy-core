@@ -1013,6 +1013,198 @@ fn ha1_identity_hashes_are_not_dependencies() {
     assert!(!refs.unwrap().iter().any(|r| r.hash == h(92)));
 }
 
+/// Every variant of `$ty`, listed through an exhaustive match: a new variant does not compile
+/// until it is listed here and so sampled below.
+macro_rules! every {
+    ($ty:ident: $($v:ident),+ $(,)?) => {{
+        let all = vec![$($ty::$v),+];
+        for v in &all {
+            match v {
+                $($ty::$v)|+ => {}
+            }
+        }
+        all
+    }};
+}
+
+#[test]
+fn ha1_refs_cover_every_edge_free_enum_arm() {
+    // An arm that holds no hash adds no edge: each record below has the edges of its base, for
+    // every variant of every closed enum it holds.
+    let answer = |act: AnswerAct, role: Role, evidence: Option<EvidenceKind>| Answer {
+        item: t("answer.item"),
+        act,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: Some(h(35)),
+        targets: vec![h(36), h(37)],
+        person: Provenance {
+            role,
+            ..prov("answer.person")
+        },
+        relayed_by: Some(actor_run("answer.relayed_by")),
+        relay_evidence: Some(relay("answer.relay")),
+        evidence_kind: evidence,
+        note: None,
+    };
+    let answer_edges = vec![any(36), any(37)];
+    let acts = every!(AnswerAct: RejectProposal, Later, Confirm, RejectDecision, AnswerQuestion,
+        Dismiss, Tag, ViewOwn, CloseStale, Propose);
+    let roles = every!(Role: Reader, Writer, Reviewer, Approver);
+    let evidence = every!(EvidenceKind: Elicited, Card, Text);
+    assert_eq!((acts.len(), roles.len(), evidence.len()), (10, 4, 3));
+    for act in &acts {
+        let a = answer(*act, Role::Approver, Some(EvidenceKind::Text));
+        assert_eq!(
+            refs_of(ANSWER, &enc(&a)),
+            Ok(answer_edges.clone()),
+            "{act:?}"
+        );
+    }
+    for role in &roles {
+        let a = answer(AnswerAct::Confirm, *role, None);
+        assert_eq!(
+            refs_of(ANSWER, &enc(&a)),
+            Ok(answer_edges.clone()),
+            "{role:?}"
+        );
+    }
+    for kind in evidence.iter().copied().map(Some).chain([None]) {
+        let a = answer(AnswerAct::Confirm, Role::Approver, kind);
+        assert_eq!(
+            refs_of(ANSWER, &enc(&a)),
+            Ok(answer_edges.clone()),
+            "{kind:?}"
+        );
+    }
+
+    // a landing's assurance and evidence kind
+    let landing = |assurance: Assurance, kind: EvidenceKind| LandingRecord {
+        proposal: h(20),
+        prev: None,
+        state: h(22),
+        approved_by: prov("landing.approved_by"),
+        changes: vec![h(23)],
+        chosen: None,
+        checks: vec![],
+        assurance,
+        relayed_by: None,
+        relay_evidence: None,
+        approved_version: None,
+        rebased_from: vec![],
+        evidence: Some(ApprovalEvidence {
+            kind,
+            options: vec![],
+            choice: None,
+            card_hash: Some(h(28)),
+        }),
+    };
+    let landing_edges = vec![some(PROPOSAL, 20), some(SNAPSHOT, 22), some(CHANGE, 23)];
+    let assurances = every!(Assurance: Policy, Relayed, Local);
+    assert_eq!(assurances.len(), 3);
+    for assurance in &assurances {
+        for kind in &evidence {
+            let l = landing(*assurance, *kind);
+            assert_eq!(
+                refs_of(LANDING, &enc(&l)),
+                Ok(sorted(landing_edges.clone())),
+                "{assurance:?} {kind:?}"
+            );
+        }
+    }
+
+    // a change's editorial class, and a change residue's
+    let classes = every!(EditorialClass: Typo, Restructure, Clarify);
+    assert_eq!(classes.len(), 3);
+    for class in &classes {
+        let editorial = Justification::Editorial {
+            class: *class,
+            reason: t("change.reason"),
+        };
+        let c = change("change", vec![], ChangeLinks::default(), editorial.clone());
+        assert_eq!(
+            refs_of(CHANGE, &enc(&c)),
+            Ok(vec![some(CHANGE, 5)]),
+            "{class:?}"
+        );
+        let mut residue = change_residue();
+        residue.ops.clear();
+        residue.links = ChangeLinks::default();
+        residue.justification = Some(editorial);
+        assert_eq!(
+            refs_of(REDACTION_RESIDUE, &enc(&RedactionResidue::Change(residue))),
+            Ok(vec![some(CHANGE, 97)]),
+            "residue {class:?}"
+        );
+    }
+
+    // a request's reason class and its report rows
+    let reasons = every!(ReasonClass: Secret, Personal, Legal, Retraction);
+    let impacts = every!(ImpactKind: BlockVersion, Change, Landing, Tag, View, Proposal,
+        StateSnapshot, AuditText, Review, Tension, Answer);
+    let relations = every!(ImpactRelation: Removed, Embeds, References, Quotes);
+    let copies = every!(CopyKind: Render, Export, Dump, Clone, Published, WorkingCopy);
+    let statuses = every!(CopyStatus: Unknown);
+    let support = every!(AssessmentSupport: NotImplemented);
+    assert_eq!(
+        (
+            reasons.len(),
+            impacts.len(),
+            relations.len(),
+            copies.len(),
+            statuses.len(),
+            support.len()
+        ),
+        (4, 11, 4, 6, 1, 1)
+    );
+    let request = |reason_class: ReasonClass, inside: Vec<ImpactRow>, outside: Vec<CopyRow>| {
+        let mut r = redaction();
+        r.targets = vec![RedactTarget::AllVersions(id("c-00001"))];
+        r.reason_class = reason_class;
+        r.manifest.versions = vec![];
+        r.manifest.blobs = vec![];
+        r.manifest.shared_blobs = vec![];
+        r.manifest.spans = vec![];
+        r.manifest.inside = inside;
+        r.manifest.outside = outside;
+        r.manifest.assessment = support[0];
+        r
+    };
+    let request_edges = vec![some(CHANGE, 80)];
+    for reason in &reasons {
+        let r = request(*reason, vec![], vec![]);
+        assert_eq!(
+            refs_of(REDACTION, &enc(&r)),
+            Ok(request_edges.clone()),
+            "{reason:?}"
+        );
+    }
+    let mut inside = vec![];
+    for kind in &impacts {
+        for relation in &relations {
+            inside.push(ImpactRow {
+                kind: *kind,
+                // report text, even when it spells a hash
+                record: h(89).to_string(),
+                relation: *relation,
+                erasable: true,
+            });
+        }
+    }
+    let outside: Vec<CopyRow> = copies
+        .iter()
+        .flat_map(|kind| {
+            statuses.iter().map(|status| CopyRow {
+                kind: *kind,
+                status: *status,
+            })
+        })
+        .collect();
+    let r = request(ReasonClass::Secret, inside, outside);
+    assert_eq!(refs_of(REDACTION, &enc(&r)), Ok(request_edges));
+}
+
 #[test]
 fn ha1_refs_are_sorted_and_unique() {
     let landing = LandingRecord {

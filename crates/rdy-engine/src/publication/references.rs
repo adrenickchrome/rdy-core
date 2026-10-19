@@ -407,6 +407,24 @@ impl Visit for Resources {
     }
 }
 
+/// The resource walk of [`check_resources`] kept open across blocks: a caller that reads a
+/// state's blocks one by one counts each before it keeps it, so it holds no more than the
+/// bounds allow.
+pub(crate) struct ResourceMeter(Resources);
+
+impl ResourceMeter {
+    pub(crate) fn new(l: &Limits) -> ResourceMeter {
+        ResourceMeter(Resources {
+            budget: Budget::new(l),
+        })
+    }
+
+    /// Counts block `b` with every block counted before it, as [`check_resources`] counts them.
+    pub(crate) fn charge(&mut self, b: &Block) -> Result<(), RdyError> {
+        walk_block(&mut self.0, b)
+    }
+}
+
 /// The text and reference bounds of `blocks` together that need no other block, in the order a
 /// scan checks them: each text value, all text, the reference occurrences and the field depth.
 /// A scan counts every occurrence whatever its target, so blocks over these bounds are over

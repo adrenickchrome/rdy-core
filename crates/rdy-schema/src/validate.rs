@@ -132,7 +132,24 @@ pub fn validate_prefix(pack: &Pack, block: &Block) -> Option<Issue> {
 
 /// The write schema: every check, whatever the block's read marker says, so a write can never
 /// pass a removed block's stub off as content (D-3M81W).
+///
+/// First, the one field nesting bound every writer keeps (final review ruling 1): a field
+/// deeper than [`rdy_model::MAX_FIELD_NESTING`] levels is the only issue, `E_LIMIT` `field
+/// nesting exceeds 29 levels`, so no written block is one that its export could not carry. A
+/// stored state's reads ([`validate_read_block`]) and fsck do not apply it.
 pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
+    if block
+        .fields
+        .values()
+        .any(|v| v.nests_deeper_than(rdy_model::MAX_FIELD_NESTING))
+    {
+        return vec![err(
+            block,
+            "E_LIMIT",
+            rdy_model::field_nesting_message(),
+            rdy_model::field_nesting_fix(),
+        )];
+    }
     check_block(pack, block, parent, false)
 }
 

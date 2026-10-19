@@ -538,3 +538,89 @@ fn ha1_stream_errors_use_the_exact_texts() {
         assert_eq!(r.as_str(), s);
     }
 }
+
+/// A field value of `levels` levels whose deepest value is the costliest leaf for the decoder:
+/// an empty list (its enum and its sequence) or an empty map.
+fn field_of_levels(levels: usize, map: bool) -> rdy_model::FieldValue {
+    use rdy_model::FieldValue;
+    let mut v = if map {
+        FieldValue::Map(BTreeMap::new())
+    } else {
+        FieldValue::List(vec![])
+    };
+    for _ in 1..levels {
+        v = if map {
+            FieldValue::Map(BTreeMap::from([("k".to_string(), v)]))
+        } else {
+            FieldValue::List(vec![v])
+        };
+    }
+    v
+}
+
+/// The deepest record that embeds a block: a CHANGE whose op carries the full block, with one
+/// field of `levels` levels; an update when `update`, else a create.
+fn embedding_change(levels: usize, map: bool, update: bool) -> Vec<u8> {
+    use rdy_model::{Block, BlockId, Change, Op};
+    let block = Block {
+        id: BlockId::parse("c-00001").unwrap(),
+        block_type: "table".into(),
+        parent: None,
+        order: "V".into(),
+        fields: BTreeMap::from([("rows".to_string(), field_of_levels(levels, map))]),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        read_identity: None,
+    };
+    assert!(!field_of_levels(levels, map).nests_deeper_than(levels));
+    assert!(field_of_levels(levels, map).nests_deeper_than(levels - 1));
+    let op = if update {
+        Op::Update {
+            base: Hash([1; 32]),
+            block,
+        }
+    } else {
+        Op::Create { block }
+    };
+    let change = Change {
+        view: "work".into(),
+        ops: vec![op],
+        deps: vec![],
+        provenance: Provenance {
+            actor: "human:a".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 1,
+        },
+        justification: None,
+        message: String::new(),
+        links: Default::default(),
+        read_identity: None,
+    };
+    postcard::to_allocvec(&change).unwrap()
+}
+
+#[test]
+fn ha1_field_nesting_bound_fits_the_deepest_embedding_record() {
+    use rdy_model::MAX_FIELD_NESTING;
+    use rdy_store::kinds::CHANGE;
+    // the write-side bound is what the stream decoder's own counting allows in the deepest
+    // record that embeds a block: at MAX_FIELD_NESTING levels it decodes, one more is refused
+    for map in [false, true] {
+        for update in [true, false] {
+            let at = embedding_change(MAX_FIELD_NESTING, map, update);
+            assert!(
+                refs_of(CHANGE, &at).is_ok(),
+                "map {map} update {update}: {:?}",
+                refs_of(CHANGE, &at)
+            );
+        }
+        let over = embedding_change(MAX_FIELD_NESTING + 1, map, true);
+        assert_eq!(
+            unit(refs_of(CHANGE, &over)),
+            limit(NESTING, 64),
+            "map {map}"
+        );
+    }
+}

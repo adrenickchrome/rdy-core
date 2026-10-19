@@ -19,14 +19,21 @@
 //!    names), and the root tag's chain keeps the chain rules (`check_holder::chain_rules`: each
 //!    change lands once, after its dependencies). These are structural rules, not the current
 //!    gate policy.
-//! 4. Every landing of the upload that the holder does not hold has its snapshot read from the
+//! 4. Every signature of the upload that the holder does not hold passes SIG's check
+//!    (`signature_check::check_signature`) against its subject in the union and the holder, a
+//!    relayed tag's relay answer as the take names it: the check the holder's fsck runs once the
+//!    take is sealed. An unknown key is no refusal, nor is a signature of another project
+//!    (`foreign_repo`); an invalid one is E_SIG_INVALID, an uncovered one E_SIG_OBJECT_MISMATCH.
+//! 5. Every landing of the upload that the holder does not hold has its snapshot read from the
 //!    union and the holder: each entry must name a version of its own block, and the whole
 //!    snapshot must keep the Publications resource limits (`check_snapshot_limits`). A removed
 //!    block reads as its stub. No block is checked against a pack, and no approval is judged by
 //!    the current gate: a block of a type no pack knows is taken when these checks pass.
 //!
-//! A record that breaks a structural rule is `E_BAD_RECORD` with the holder fsck's own text, so
-//! no take acknowledges an upload that the holder's fsck would then refuse.
+//! A record that breaks a structural rule is `E_BAD_RECORD` with the holder fsck's own text (a
+//! signature its fsck code), so no take acknowledges an upload that the holder's fsck would then
+//! refuse. An ANSWER's record rules are the batch check's (`sync_stream::check_batch`), which the
+//! store's take runs on every file first.
 //!
 //! The closure, the prerequisites, the removal proofs and the upload target are the store's
 //! checks (`rdy_store::take_batch`), not repeated here. After a take that wrote something, the
@@ -36,12 +43,16 @@
 //! A caller whose reply was lost repairs from the holder's tags and object-key presence: the
 //! take keeps no receipt, transaction id or timer.
 use crate::error::{E_BAD_INPUT, E_REDACTION_STALE, E_REPO_MISMATCH, E_TAG_EXISTS, RdyError};
-use crate::publication::{self, check_snapshot_limits};
+use crate::publication::{self, SnapshotBudget, check_snapshot_limits};
+use crate::signature_check::{
+    CheckContext, STATEMENT_FOREIGN_REPO, STATEMENT_MATCH, SignatureSubject, check_signature,
+};
 use crate::stream_error::{Reason, StreamError, to_rdy};
 use crate::version::parse_version;
 use crate::{Delta, Rdy};
 use rdy_model::redaction::{RedactionApply, RedactionResidue};
-use rdy_model::{Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
+use rdy_model::signature::Signature;
+use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use rdy_schema::{Issue, Severity};
 use rdy_store::bounded;
 use rdy_store::check_holder;
@@ -255,8 +266,106 @@ fn validate(
     let choice = choose_tag(&facts.root, held, damage)?;
     check_records(reader, source, facts)?;
     check_landing_rules(reader, source, facts)?;
+    check_signatures(reader, source, facts)?;
     check_landings(reader, source, facts)?;
     Ok(choice)
+}
+
+/// SIG's check of every signature of the upload that the holder does not hold (module docs,
+/// step 4), as the holder's fsck checks it once the take is sealed: against its subject read
+/// from the union and the holder, and a relayed tag's relay answer as the take names it
+/// (`UploadFacts::relay_answers`, else the one the holder names), with no fork lineage and no
+/// trust file. A valid signature by a key no trust file names is taken (trust is not judged
+/// here), and so is one that names another project (`foreign_repo`, ruling task-13). An invalid
+/// one is E_SIG_INVALID, and a valid one that does not cover its subject E_SIG_OBJECT_MISMATCH,
+/// before anything is appended.
+fn check_signatures(
+    reader: &StoreReader,
+    source: &mut dyn ObjectSource,
+    facts: &UploadFacts,
+) -> Result<(), RdyError> {
+    let in_union = |k: &ObjectKey| facts.objects.binary_search(k).is_ok();
+    let has = |k: &ObjectKey| -> Result<bool, RdyError> {
+        Ok(in_union(k) || reader.has_kind(k.kind, &k.hash)?)
+    };
+    for key in facts.objects.iter().filter(|k| k.kind == kinds::SIGNATURE) {
+        if reader.has_kind(key.kind, &key.hash)? {
+            continue;
+        }
+        let Some(g) = typed::<Signature>(source, *key)? else {
+            continue;
+        };
+        let landing = ObjectKey {
+            kind: kinds::LANDING,
+            hash: g.subject,
+        };
+        let tag = ObjectKey {
+            kind: kinds::TAG,
+            hash: g.subject,
+        };
+        let subject = match () {
+            _ if has(&landing)? => match typed::<LandingRecord>(source, landing)? {
+                Some(record) => SignatureSubject::Landing {
+                    hash: g.subject,
+                    record,
+                },
+                None => SignatureSubject::Missing { hash: g.subject },
+            },
+            _ if has(&tag)? => match typed::<Tag>(source, tag)? {
+                Some(record) => SignatureSubject::Tag {
+                    hash: g.subject,
+                    record,
+                    answer: relay_answer(reader, source, facts, &g.subject)?,
+                },
+                None => SignatureSubject::Missing { hash: g.subject },
+            },
+            _ => SignatureSubject::Missing { hash: g.subject },
+        };
+        let context = CheckContext {
+            subject,
+            current_repo: facts.repo_id,
+            source_repos: vec![],
+            holder: true,
+        };
+        let check = check_signature(&g, &context, None);
+        if check.statement == STATEMENT_MATCH || check.statement == STATEMENT_FOREIGN_REPO {
+            continue;
+        }
+        let hash = key.hash.to_string();
+        let e = if check.code.as_deref() == Some(crate::E_SIG_INVALID) {
+            crate::sig_invalid(&hash)
+        } else {
+            crate::sig_object_mismatch(&hash)
+        };
+        return Err(at_object(e, *key));
+    }
+    Ok(())
+}
+
+/// The relay answer of TAG object `tag` once the take is sealed: the one the upload names for
+/// it, else the one the holder's `answer/tag-object:<tag>` names, if any.
+fn relay_answer(
+    reader: &StoreReader,
+    source: &mut dyn ObjectSource,
+    facts: &UploadFacts,
+    tag: &Hash,
+) -> Result<Option<(Hash, Answer)>, RdyError> {
+    let hash = match facts.relay_answers.get(tag) {
+        Some(h) => *h,
+        None => match reader.get_ref(&rdy_store::holder::answer_tag_object_ref(tag))? {
+            Some(v) => match <[u8; 32]>::try_from(v.as_slice()) {
+                Ok(b) => Hash(b),
+                // a ref that is no hash is the holder fsck's to report: it names no answer
+                Err(_) => return Ok(None),
+            },
+            None => return Ok(None),
+        },
+    };
+    let key = ObjectKey {
+        kind: kinds::ANSWER,
+        hash,
+    };
+    Ok(typed::<Answer>(source, key)?.map(|a| (hash, a)))
 }
 
 /// The local limits of every block and blob manifest of the upload that the holder does not
@@ -503,9 +612,15 @@ fn tag_exists(name: &str, existing: &Hash) -> RdyError {
 }
 
 /// Checks the snapshot of every landing of the upload that the holder does not hold yet (module
-/// docs, step 2). A snapshot several landings share is checked once. The blocks of the last
-/// snapshot are kept for the next one, so a history whose landings share most blocks reads each
-/// shared version about once; nothing older is kept.
+/// docs, step 5). A snapshot several landings share is checked once. The blocks of the last
+/// snapshot that the next one names are kept for it, so a history whose landings share most
+/// blocks reads each shared version about once; nothing older is kept.
+///
+/// Every block is charged to the snapshot's resource budget (`SnapshotBudget`: selection, text,
+/// references, graph) before it is kept, the kept ones from the last snapshot first, so the
+/// blocks held at any time are within the Publications limits of one snapshot, plus the one
+/// block being read: a snapshot past the limits is refused before it is materialized, and the
+/// memory a take holds follows the limits, not the upload.
 fn check_landings(
     reader: &StoreReader,
     source: &mut dyn ObjectSource,
@@ -529,18 +644,29 @@ fn check_landings(
         };
         let snapshot = typed::<StateSnapshot>(source, snapshot_key)?
             .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, snapshot_key)))?;
+        // the kept blocks are this snapshot's only, charged before any other is read
+        let named: HashSet<&Hash> = snapshot.blocks.values().collect();
+        last.retain(|v, _| named.contains(v));
+        drop(named);
+        let mut budget = SnapshotBudget::new();
+        for b in last.values() {
+            budget.charge(b)?;
+        }
         let mut blocks: BTreeMap<Hash, Block> = BTreeMap::new();
         for (id, version) in &snapshot.blocks {
-            let block = match last.remove(version) {
-                Some(b) => b,
+            let (block, charged) = match last.remove(version) {
+                Some(b) => (b, true),
                 None => match read_block(source, *version)? {
-                    Some(b) => b,
+                    Some(b) => (b, false),
                     // a removed version no residue describes reads as nothing
                     None => continue,
                 },
             };
             if block.id != *id {
                 return Err(foreign_version(&landing.state, id, version, &block.id));
+            }
+            if !charged {
+                budget.charge(&block)?;
             }
             blocks.insert(*version, block);
         }

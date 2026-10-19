@@ -127,6 +127,19 @@ impl StreamError {
         )
     }
 
+    /// E_BAD_RECORD: record `record`, whose frame starts at byte `offset`, decodes but breaks the
+    /// record rule `rule` that the store keeps for every record of its kind (the rule's own text,
+    /// as fsck gives it).
+    pub fn broken_rule(record: u64, offset: u64, rule: &str) -> Self {
+        Self::new(
+            E_BAD_RECORD,
+            format!("stream record {record} at byte {offset}: {rule}"),
+            "request this stream again; run rdy fsck at its source",
+            Some(record),
+            offset,
+        )
+    }
+
     /// E_UNRESOLVED_REF: record `record` needs object `missing`, which the stream does not hold.
     pub fn unresolved(record: u64, offset: u64, missing: ObjectKey) -> Self {
         Self::new(
