@@ -1066,6 +1066,14 @@ fn hsa4_redirects_and_cross_install_destinations_never_receive_a_token() {
         };
         assert_eq!(e.code, E_UPSTREAM_ORIGIN, "{op:?}");
         assert!(e.message.contains(a.install.as_str()), "{}", e.message);
+        // TASK-291: sign-in and key requests say only "use the install origin", even though
+        // this fence has a pin.
+        assert_eq!(
+            e.message,
+            format!("the request destination is not trusted for {}", a.install),
+            "{op:?}"
+        );
+        assert_eq!(e.fix, "use the install origin", "{op:?}");
     }
     // A call for another install than the transport's fence is refused.
     let mut call = b.call(HubOperation::Me);

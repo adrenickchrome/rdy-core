@@ -5,6 +5,7 @@ use rdy_engine::{
     E_ACTOR_UNBOUND, E_BAD_INPUT, E_LIMIT, E_UPSTREAM_ACTOR_CLAIM, E_UPSTREAM_AUTH,
     E_UPSTREAM_ORIGIN, E_UPSTREAM_PROTOCOL, E_UPSTREAM_REFUSED, E_UPSTREAM_TOKEN,
     E_UPSTREAM_TRANSPORT, E_UPSTREAM_UNCERTAIN, RdyError, Session, SessionKind,
+    upstream_publish_origin,
 };
 use rdy_model::Role;
 use std::marker::PhantomData;
@@ -339,7 +340,14 @@ fn hsa1_an_origin_pin_belongs_to_one_install() {
             fence.check(destination),
             E_UPSTREAM_ORIGIN,
             &format!("the request destination is not trusted for {install}"),
-            "use the install origin, or add its destination to hub.installs.pinned_origins",
+            "use the install origin, or add its destination to the pinned origins of this install (hub.installs.<install>.pinned_origins)",
+        );
+        // The fence's refusal is exactly the pin-aware helper's (TASK-291).
+        let e = fence.check(destination).unwrap_err();
+        let helper = upstream_publish_origin(install);
+        assert_eq!(
+            (e.code, &e.message, &e.fix),
+            (helper.code, &helper.message, &helper.fix)
         );
     };
     // another install, and another install's pinned origin

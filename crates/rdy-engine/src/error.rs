@@ -703,7 +703,8 @@ pub const E_ACTOR_UNBOUND: &str = "E_ACTOR_UNBOUND";
 pub const E_REMOTE_REQUIRED: &str = "E_REMOTE_REQUIRED";
 /// A second share remote would be added.
 pub const E_REMOTE_EXISTS: &str = "E_REMOTE_EXISTS";
-/// A hub request destination outside its install's origin fence. Built by [`upstream_origin`].
+/// A hub request destination outside its install's origin fence. Built by [`upstream_origin`]
+/// and [`upstream_publish_origin`].
 pub const E_UPSTREAM_ORIGIN: &str = "E_UPSTREAM_ORIGIN";
 /// A hub token that fails the token form check.
 pub const E_UPSTREAM_TOKEN: &str = "E_UPSTREAM_TOKEN";
@@ -744,9 +745,15 @@ pub const REMOTE_REQUIRED_FIX: &str = "pass --remote, or configure one share rem
 pub const REMOTE_EXISTS_MESSAGE: &str = "a share remote already exists";
 /// The fix of `E_REMOTE_EXISTS`.
 pub const REMOTE_EXISTS_FIX: &str = "change its mode before adding another share remote";
-/// The fix of `E_UPSTREAM_ORIGIN`.
-pub const UPSTREAM_ORIGIN_FIX: &str =
-    "use the install origin, or add its destination to hub.installs.pinned_origins";
+/// The fix of `E_UPSTREAM_ORIGIN` for sign-in and key requests, which stay on the install even
+/// when it has pinned origins.
+pub const UPSTREAM_ORIGIN_FIX: &str = "use the install origin";
+/// The fix of `E_UPSTREAM_ORIGIN` where a pinned origin is trusted: the origin fence and uploads.
+pub const UPSTREAM_PUBLISH_ORIGIN_FIX: &str = "use the install origin, or add its destination to the pinned origins of this install (hub.installs.<install>.pinned_origins)";
+/// The message of the `E_IO` refusal of an upload body. Built by [`upload_body`].
+pub const UPLOAD_BODY_MESSAGE: &str = "the upload body does not match its declared length";
+/// The fix of the `E_IO` refusal of an upload body.
+pub const UPLOAD_BODY_FIX: &str = "check that the upload source is unchanged, then try again";
 /// The message of `E_UPSTREAM_TOKEN`.
 pub const UPSTREAM_TOKEN_MESSAGE: &str = "the hub token has an invalid form";
 /// The fix of `E_UPSTREAM_TOKEN`.
@@ -815,13 +822,30 @@ pub fn remote_exists() -> RdyError {
     RdyError::new(E_REMOTE_EXISTS, REMOTE_EXISTS_MESSAGE, REMOTE_EXISTS_FIX)
 }
 
-/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin.
+/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin: a sign-in or key request, which only
+/// the install itself may receive. It never names the destination.
 pub fn upstream_origin(install: &str) -> RdyError {
     RdyError::new(
         E_UPSTREAM_ORIGIN,
         format!("the request destination is not trusted for {install}"),
         UPSTREAM_ORIGIN_FIX,
     )
+}
+
+/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin, where the install's pinned origins are
+/// trusted too: the origin fence's own refusal and an upload's. It never names the destination.
+pub fn upstream_publish_origin(install: &str) -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_ORIGIN,
+        format!("the request destination is not trusted for {install}"),
+        UPSTREAM_PUBLISH_ORIGIN_FIX,
+    )
+}
+
+/// `E_IO`: an upload body that ended before its declared length, ran past it or could not be
+/// read. The request it began is never completed; no reader text is kept.
+pub fn upload_body() -> RdyError {
+    RdyError::new(E_IO, UPLOAD_BODY_MESSAGE, UPLOAD_BODY_FIX)
 }
 
 /// `E_UPSTREAM_TOKEN`. It never names the token.

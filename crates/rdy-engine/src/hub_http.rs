@@ -17,9 +17,16 @@
 //! - **Nothing raw escapes.** No URL, request, reply, library error or hub message is logged or
 //!   returned: failures are the closed [`HubFailure`] values. The engine's `log` features
 //!   compile every dependency record out.
+//! - **Uploads share the sender.** [`HttpHubTransport::upload`] is the typed upload client's
+//!   seam, not an arbitrary-URL tool: its destination may be the install or one of the install's
+//!   pinned origins, checked before any authorization is prepared. It shares the CA loading,
+//!   hostname check, token and claim checks, closed headers, agent settings, connection marking
+//!   and failure suppression above; its body streams with its exact length and its reply cap is
+//!   the caller's, never over 16 MiB. Sign-in and key requests stay on the install alone.
 use crate::error::{
-    RdyError, actor_unbound, signing_selector, upstream_auth, upstream_ca, upstream_key_proof,
-    upstream_origin, upstream_protocol, upstream_token,
+    E_BAD_INPUT, E_UPSTREAM_ORIGIN, RdyError, actor_unbound, signing_selector, upload_body,
+    upstream_auth, upstream_ca, upstream_key_proof, upstream_origin, upstream_protocol,
+    upstream_token,
 };
 use crate::hub_types::{
     BindResult, CLIENT_ID, DEVICE_CODE_GRANT, DEVICE_SCOPE, DevicePollReply, DeviceStartReply,
@@ -42,6 +49,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use ureq::SendBody;
 use ureq::http::{self, HeaderName, HeaderValue, Method};
 use ureq::tls::{Certificate, PemItem, RootCerts, TlsConfig, TlsProvider};
 use ureq::unversioned::resolver::DefaultResolver;
@@ -51,8 +59,24 @@ use ureq::unversioned::transport::{ConnectionDetails, Connector, DefaultConnecto
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest whole exchange.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The bytes a reply body is read to: one past the limit, so an over-long body is seen.
-const BODY_READ_LIMIT: u64 = MAX_JSON_BYTES as u64 + 1;
+/// The longest upload body, in bytes.
+pub const MAX_UPLOAD_BODY_BYTES: u64 = 2_147_483_648;
+/// The highest reply cap an upload caller may choose, in bytes.
+pub const MAX_UPLOAD_REPLY_BYTES: usize = 16_777_216;
+/// The copying buffer an upload body streams through, in bytes.
+pub const UPLOAD_BUFFER_BYTES: usize = 65_536;
+/// The slowest average rate an upload must keep, in bytes per second: an upload's whole exchange
+/// may take [`REQUEST_TIMEOUT`] plus one second for each this many body and reply bytes.
+pub const UPLOAD_MIN_RATE: u64 = 131_072;
+/// The longest upload media type, in bytes.
+const MAX_MEDIA_TYPE_BYTES: usize = 256;
+/// The JSON bounds of every typed exchange reply: HA2a's settled constants.
+const EXCHANGE_JSON: JsonLimits = JsonLimits {
+    bytes: MAX_JSON_BYTES,
+    depth: MAX_DEPTH,
+    values: MAX_MEMBERS,
+    scalar_bytes: MAX_SCALAR_BYTES,
+};
 /// The metadata route (RFC 8414, issuer `<install>/auth`).
 const METADATA_ROUTE: [&str; 3] = [".well-known", "oauth-authorization-server", "auth"];
 /// The OAuth endpoints' path prefix.
@@ -70,6 +94,53 @@ const CHALLENGE_PREFIX: &str = "kch_";
 
 const FORM: &str = "application/x-www-form-urlencoded";
 const JSON: &str = "application/json";
+
+/// The method of an upload request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadMethod {
+    Get,
+    Post,
+}
+
+/// One upload request for [`HttpHubTransport::upload`].
+///
+/// - `destination`: an HTTPS URL on the install or one of its pinned origins.
+/// - `content_type`: the media type of a POST body; for a GET, which has no body, the media type
+///   it accepts. A POST always accepts `application/json`.
+/// - `body` and `body_len`: a POST's body and its exact length, at most
+///   [`MAX_UPLOAD_BODY_BYTES`]; no body is a length of 0. A GET has neither.
+/// - `reply_limit`: the caller's reply cap, at most [`MAX_UPLOAD_REPLY_BYTES`].
+pub struct UploadHttpRequest<'a> {
+    pub method: UploadMethod,
+    pub destination: &'a str,
+    pub content_type: &'a str,
+    pub body: Option<&'a mut dyn Read>,
+    pub body_len: u64,
+    pub reply_limit: usize,
+}
+
+impl fmt::Debug for UploadHttpRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The destination may carry an upload id: it is not printed.
+        f.debug_struct("UploadHttpRequest")
+            .field("method", &self.method)
+            .field("content_type", &self.content_type)
+            .field("body", &self.body.is_some())
+            .field("body_len", &self.body_len)
+            .field("reply_limit", &self.reply_limit)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The bounds of one JSON document: its bytes, nesting depth, members and elements in total,
+/// and the length of each string and key. The caller owns them; nothing in a body changes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JsonLimits {
+    pub bytes: usize,
+    pub depth: usize,
+    pub values: usize,
+    pub scalar_bytes: usize,
+}
 
 /// The hub transport over HTTPS (Rustls), fenced to one install.
 pub struct HttpHubTransport {
@@ -167,11 +238,25 @@ fn class(op: &HubOperation) -> Class {
 }
 
 /// A request ready to send: everything checked and encoded.
-struct Prepared {
+struct Prepared<'a> {
     method: Method,
     url: String,
     headers: Vec<(HeaderName, HeaderValue)>,
-    body: Option<Vec<u8>>,
+    body: Payload<'a>,
+    /// The longest reply body read.
+    reply_limit: usize,
+    /// The longest whole exchange.
+    timeout: Duration,
+}
+
+/// A request body.
+enum Payload<'a> {
+    /// None: a GET.
+    Empty,
+    /// Encoded bytes; ureq sends their length (`content-length: 0` when empty).
+    Bytes(Vec<u8>),
+    /// A body streamed with its exact length, which the request's headers already hold.
+    Stream(Exact<'a>),
 }
 
 impl HubTransport for HttpHubTransport {
@@ -184,8 +269,138 @@ impl HubTransport for HttpHubTransport {
 }
 
 impl HttpHubTransport {
+    /// Sends one upload request and returns its status and its bounded reply body, which the
+    /// typed caller decodes. In order, before any connection: the install must be the fence's,
+    /// the destination must pass the fence (the install or one of its pinned origins), then the
+    /// request's bounds, the claim, the bearer's form and the closed header set, then the CA
+    /// bundle. A failure there is [`HubFailure::Local`] and nothing is sent.
+    ///
+    /// A body that ends before `body_len`, runs past it or fails to read is `E_IO`: the request
+    /// it began is never completed, because the last bytes are held until the body's end is
+    /// seen. A redirect is never followed. Nothing is retried.
+    pub fn upload(
+        &self,
+        install: &Origin,
+        ca_file: Option<&Path>,
+        claim: &RequestClaim,
+        bearer: &Secret,
+        request: UploadHttpRequest<'_>,
+    ) -> Result<(u16, Vec<u8>), HubFailure> {
+        let prepared = self.prepare_upload(install, claim, bearer, request)?;
+        let roots = self.roots(ca_file)?;
+        send(prepared, roots)
+    }
+
+    /// Every check of an upload before a connection, in the contract's order.
+    fn prepare_upload<'a>(
+        &self,
+        install: &Origin,
+        claim: &RequestClaim,
+        bearer: &Secret,
+        request: UploadHttpRequest<'a>,
+    ) -> Result<Prepared<'a>, RdyError> {
+        let fenced = self.fence.install();
+        // 1. The install, then the destination: the install or its own pin. The fence's
+        // refusal keeps its pin-aware fix and names neither the destination nor a token.
+        if install != fenced {
+            return Err(upstream_origin(fenced.as_str()));
+        }
+        self.fence.check(request.destination)?;
+        // 2. The request's bounds, before anything is read or allocated.
+        let UploadHttpRequest {
+            method,
+            destination,
+            content_type,
+            body,
+            body_len,
+            reply_limit,
+        } = request;
+        if body_len > MAX_UPLOAD_BODY_BYTES {
+            let cap = usize::try_from(MAX_UPLOAD_BODY_BYTES).unwrap_or(usize::MAX);
+            return Err(hub_limit(cap, LimitUnit::Bytes));
+        }
+        check_count(reply_limit, MAX_UPLOAD_REPLY_BYTES, LimitUnit::Bytes)?;
+        let media = media_type(content_type)?;
+        let (stream, empty) = match (method, body) {
+            (UploadMethod::Get, None) if body_len == 0 => (None, None),
+            (UploadMethod::Post, None) if body_len == 0 => (None, None),
+            (UploadMethod::Post, Some(reader)) if body_len == 0 => (None, Some(reader)),
+            (UploadMethod::Post, Some(reader)) => (Some(reader), None),
+            _ => return Err(upload_body()),
+        };
+        // 3. The claim and the bearer's form.
+        claim.validate_for_send()?;
+        token_form(bearer.expose())?;
+        // 4. The closed header set.
+        let json = HeaderValue::from_static(JSON);
+        let mut headers = Vec::new();
+        let method = match method {
+            UploadMethod::Get => {
+                headers.push((http::header::ACCEPT, media));
+                Method::GET
+            }
+            UploadMethod::Post => {
+                headers.push((http::header::ACCEPT, json));
+                headers.push((http::header::CONTENT_TYPE, media));
+                Method::POST
+            }
+        };
+        if stream.is_some() {
+            headers.push((http::header::CONTENT_LENGTH, HeaderValue::from(body_len)));
+        }
+        push_bearer(&mut headers, bearer)?;
+        push_claim(&mut headers, claim)?;
+        check_headers(&headers)?;
+        // 5. The body. An empty one must end at once: that is seen before connecting.
+        if let Some(reader) = empty
+            && !at_end(reader)
+        {
+            return Err(upload_body());
+        }
+        let payload = match (method == Method::GET, stream) {
+            (true, _) => Payload::Empty,
+            (false, None) => Payload::Bytes(Vec::new()),
+            (false, Some(reader)) => Payload::Stream(Exact::new(reader, body_len)),
+        };
+        // A slow link gets time in proportion to the bytes it must carry.
+        let reply_bytes = u64::try_from(reply_limit).unwrap_or(u64::MAX);
+        let carried = body_len.saturating_add(reply_bytes);
+        let timeout =
+            REQUEST_TIMEOUT.saturating_add(Duration::from_secs(carried.div_ceil(UPLOAD_MIN_RATE)));
+        Ok(Prepared {
+            method,
+            url: destination.to_string(),
+            headers,
+            body: payload,
+            reply_limit,
+            timeout,
+        })
+    }
+}
+
+/// An upload media type as one header value: 1-256 bytes, no control character and no space at
+/// either end. Else `E_BAD_INPUT`.
+fn media_type(text: &str) -> Result<HeaderValue, RdyError> {
+    let ok = !text.is_empty()
+        && text.len() <= MAX_MEDIA_TYPE_BYTES
+        && !text.chars().any(char::is_control)
+        && !text.starts_with(' ')
+        && !text.ends_with(' ');
+    ok.then(|| HeaderValue::from_str(text).ok())
+        .flatten()
+        .filter(|v| v.as_bytes() == text.as_bytes())
+        .ok_or_else(|| {
+            RdyError::new(
+                E_BAD_INPUT,
+                "the upload media type is not one header value",
+                "use a media type such as application/octet-stream",
+            )
+        })
+}
+
+impl HttpHubTransport {
     /// Every check and encoding before a connection, in the contract's order.
-    fn prepare(&self, call: &HubCall) -> Result<Prepared, RdyError> {
+    fn prepare(&self, call: &HubCall) -> Result<Prepared<'static>, RdyError> {
         let install = self.fence.install();
         if call.install != *install {
             return Err(upstream_origin(install.as_str()));
@@ -203,7 +418,15 @@ impl HttpHubTransport {
             Class::Metadata | Class::OAuth | Class::Me => None,
         };
         // 2. The destination: fenced, on the install itself, and the operation's own route.
-        let origin = self.fence.check(&call.destination)?;
+        // Sign-in and key requests never use a pin, so every origin refusal has the
+        // install-only fix.
+        let origin = self.fence.check(&call.destination).map_err(|e| {
+            if e.code == E_UPSTREAM_ORIGIN {
+                upstream_origin(install.as_str())
+            } else {
+                e
+            }
+        })?;
         if origin != *install {
             return Err(upstream_origin(install.as_str()));
         }
@@ -237,27 +460,23 @@ impl HttpHubTransport {
             headers.push((http::header::CONTENT_TYPE, HeaderValue::from_static(ctype)));
         }
         if let Some(bearer) = bearer {
-            let mut value = HeaderValue::try_from(format!("Bearer {}", bearer.expose()))
-                .map_err(|_| upstream_token())?;
-            value.set_sensitive(true);
-            headers.push((http::header::AUTHORIZATION, value));
+            push_bearer(&mut headers, bearer)?;
         }
         if let Some(claim) = claim {
             push_claim(&mut headers, claim)?;
         }
-        check_count(headers.len(), MAX_HEADERS, LimitUnit::Headers)?;
-        let mut size = 0usize;
-        for (n, v) in &headers {
-            size = size
-                .checked_add(n.as_str().len() + v.len() + 4)
-                .filter(|&s| s <= MAX_HEADER_BYTES)
-                .ok_or_else(|| hub_limit(MAX_HEADER_BYTES, LimitUnit::Bytes))?;
-        }
+        check_headers(&headers)?;
+        let body = match (method == Method::GET, body) {
+            (true, _) => Payload::Empty,
+            (false, body) => Payload::Bytes(body.map(|(_, b)| b).unwrap_or_default()),
+        };
         Ok(Prepared {
             method,
             url: call.destination.clone(),
             headers,
-            body: body.map(|(_, b)| b),
+            body,
+            reply_limit: MAX_JSON_BYTES,
+            timeout: REQUEST_TIMEOUT,
         })
     }
 
@@ -269,6 +488,31 @@ impl HttpHubTransport {
         }
         Ok(roots)
     }
+}
+
+/// Adds the bearer's `Authorization`, marked sensitive.
+fn push_bearer(
+    headers: &mut Vec<(HeaderName, HeaderValue)>,
+    bearer: &Secret,
+) -> Result<(), RdyError> {
+    let mut value = HeaderValue::try_from(format!("Bearer {}", bearer.expose()))
+        .map_err(|_| upstream_token())?;
+    value.set_sensitive(true);
+    headers.push((http::header::AUTHORIZATION, value));
+    Ok(())
+}
+
+/// At most 64 header fields in at most 32768 bytes.
+fn check_headers(headers: &[(HeaderName, HeaderValue)]) -> Result<(), RdyError> {
+    check_count(headers.len(), MAX_HEADERS, LimitUnit::Headers)?;
+    let mut size = 0usize;
+    for (n, v) in headers {
+        size = size
+            .checked_add(n.as_str().len() + v.len() + 4)
+            .filter(|&s| s <= MAX_HEADER_BYTES)
+            .ok_or_else(|| hub_limit(MAX_HEADER_BYTES, LimitUnit::Bytes))?;
+    }
+    Ok(())
 }
 
 /// Adds `Rdy-Actor` and, only with it, `Rdy-Run`: the claim's bytes exactly.
@@ -620,8 +864,88 @@ impl Connector<()> for Marked {
     }
 }
 
+/// A request body read to exactly `remaining` more bytes through one copying buffer. Each fill
+/// that reaches the end first checks that the source has ended, so the bytes that would
+/// complete the request are held back from a body that runs long. A short, long or failed
+/// source sets `refused` and fails every later read; the reader's own error text is dropped.
+struct Exact<'a> {
+    inner: &'a mut dyn Read,
+    remaining: u64,
+    buf: Vec<u8>,
+    start: usize,
+    end: usize,
+    refused: bool,
+}
+
+impl<'a> Exact<'a> {
+    fn new(inner: &'a mut dyn Read, len: u64) -> Exact<'a> {
+        let size = usize::try_from(len).map_or(UPLOAD_BUFFER_BYTES, |n| n.min(UPLOAD_BUFFER_BYTES));
+        Exact {
+            inner,
+            remaining: len,
+            buf: vec![0; size],
+            start: 0,
+            end: 0,
+            refused: false,
+        }
+    }
+
+    fn refuse(&mut self) -> std::io::Result<usize> {
+        self.refused = true;
+        Err(std::io::Error::other("upload body refused"))
+    }
+}
+
+impl Read for Exact<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.refused {
+            return self.refuse();
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.start == self.end {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            let want =
+                usize::try_from(self.remaining).map_or(self.buf.len(), |r| r.min(self.buf.len()));
+            let n = match read_some(self.inner, &mut self.buf[..want]) {
+                Ok(n) if n > 0 && n <= want => n,
+                _ => return self.refuse(),
+            };
+            self.remaining -= n as u64;
+            if self.remaining == 0 && !at_end(self.inner) {
+                return self.refuse();
+            }
+            self.start = 0;
+            self.end = n;
+        }
+        let n = out.len().min(self.end - self.start);
+        out[..n].copy_from_slice(&self.buf[self.start..self.start + n]);
+        self.start += n;
+        Ok(n)
+    }
+}
+
+/// One read of `r`, repeated while it is interrupted.
+fn read_some(r: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match r.read(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
+
+/// Whether `r` has ended: a one-byte read gives nothing. A failed read is not an end.
+fn at_end(r: &mut dyn Read) -> bool {
+    let mut probe = [0u8; 1];
+    matches!(read_some(r, &mut probe), Ok(0))
+}
+
 /// Sends one request on a fresh agent and reads the bounded reply: its status and body.
-fn send(p: Prepared, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u8>), HubFailure> {
+fn send(p: Prepared<'_>, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u8>), HubFailure> {
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .https_only(true)
@@ -632,7 +956,7 @@ fn send(p: Prepared, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u8>),
         .max_idle_connections(0)
         .max_idle_connections_per_host(0)
         .timeout_connect(Some(CONNECT_TIMEOUT))
-        .timeout_global(Some(REQUEST_TIMEOUT))
+        .timeout_global(Some(p.timeout))
         .tls_config(
             TlsConfig::builder()
                 .provider(TlsProvider::Rustls)
@@ -656,10 +980,20 @@ fn send(p: Prepared, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u8>),
         builder = builder.header(name, value);
     }
     // A GET has no body. A POST without one sends `content-length: 0`; an empty `()` body
-    // would be sent chunked.
-    let result = match (p.method == Method::GET, p.body) {
-        (true, _) => builder.body(()).map(|r| agent.run(r)),
-        (false, body) => builder.body(body.unwrap_or_default()).map(|r| agent.run(r)),
+    // would be sent chunked. A streamed body's length is already in the headers.
+    let result = match p.body {
+        Payload::Empty => builder.body(()).map(|r| agent.run(r)),
+        Payload::Bytes(body) => builder.body(body).map(|r| agent.run(r)),
+        Payload::Stream(mut exact) => {
+            let result = builder
+                .body(SendBody::from_reader(&mut exact))
+                .map(|r| agent.run(r));
+            // The request was never completed: nothing reached the hub as a request.
+            if exact.refused {
+                return Err(HubFailure::Local(upload_body()));
+            }
+            result
+        }
     };
     let mut response = match result {
         Err(_) => {
@@ -678,13 +1012,17 @@ fn send(p: Prepared, roots: Vec<Certificate<'static>>) -> Result<(u16, Vec<u8>),
     if status.is_redirection() {
         return Err(HubFailure::Protocol);
     }
+    // Read one byte past the limit, so an over-long body is seen.
+    let read_limit = u64::try_from(p.reply_limit)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
     let body = response
         .body_mut()
         .with_config()
-        .limit(BODY_READ_LIMIT)
+        .limit(read_limit)
         .read_to_vec()
         .map_err(|e| failure(&e, true))?;
-    if body.len() > MAX_JSON_BYTES {
+    if body.len() > p.reply_limit {
         return Err(HubFailure::Protocol);
     }
     Ok((status.as_u16(), body))
@@ -714,21 +1052,23 @@ fn failure(e: &ureq::Error, sent: bool) -> HubFailure {
 // ---------------------------------------------------------------------------------------------
 
 /// Walks one JSON value with serde's visitors, checking its depth, its total members and
-/// elements, its scalar lengths and its keys for duplicates.
+/// elements, its scalar lengths and its keys for duplicates against the caller's limits.
 struct Guard<'a> {
     depth: usize,
     members: &'a Cell<usize>,
+    limits: JsonLimits,
 }
 
 impl Guard<'_> {
     fn inner(&self) -> Result<Guard<'_>, &'static str> {
-        let depth = self.depth + 1;
-        if depth > MAX_DEPTH {
+        let depth = self.depth.checked_add(1).ok_or("too deep")?;
+        if depth > self.limits.depth {
             return Err("too deep");
         }
         Ok(Guard {
             depth,
             members: self.members,
+            limits: self.limits,
         })
     }
 
@@ -736,12 +1076,17 @@ impl Guard<'_> {
         Guard {
             depth: self.depth,
             members: self.members,
+            limits: self.limits,
         }
     }
 
     fn count(&self) -> Result<(), &'static str> {
-        let n = self.members.get() + 1;
-        if n > MAX_MEMBERS {
+        let n = self
+            .members
+            .get()
+            .checked_add(1)
+            .ok_or("too many members")?;
+        if n > self.limits.values {
             return Err("too many members");
         }
         self.members.set(n);
@@ -785,7 +1130,7 @@ impl<'de> Visitor<'de> for Guard<'_> {
     }
 
     fn visit_str<E: de::Error>(self, v: &str) -> Result<(), E> {
-        if v.len() > MAX_SCALAR_BYTES {
+        if v.len() > self.limits.scalar_bytes {
             return Err(E::custom("scalar too long"));
         }
         Ok(())
@@ -804,7 +1149,7 @@ impl<'de> Visitor<'de> for Guard<'_> {
         let mut keys = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
             inner.count().map_err(de::Error::custom)?;
-            if key.len() > MAX_SCALAR_BYTES || !keys.insert(key) {
+            if key.len() > inner.limits.scalar_bytes || !keys.insert(key) {
                 return Err(de::Error::custom("duplicate or long key"));
             }
             map.next_value_seed(inner.at_depth())?;
@@ -813,10 +1158,12 @@ impl<'de> Visitor<'de> for Guard<'_> {
     }
 }
 
-/// Checks `body` against the JSON bounds, then reads it as `T`. Any failure is a contract
-/// mismatch; no parser text is kept.
-fn json<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, HubFailure> {
-    if body.len() > MAX_JSON_BYTES || std::str::from_utf8(body).is_err() {
+/// Checks that `body` is one JSON value within `limits`: at most `bytes` bytes of UTF-8, no
+/// duplicate key at any depth, no trailing data, and its depth, total members and elements, and
+/// string and key lengths within bounds. Any failure is [`HubFailure::Protocol`]; no parser text
+/// is kept.
+pub fn check_json(body: &[u8], limits: JsonLimits) -> Result<(), HubFailure> {
+    if body.len() > limits.bytes || std::str::from_utf8(body).is_err() {
         return Err(HubFailure::Protocol);
     }
     let members = Cell::new(0);
@@ -824,11 +1171,26 @@ fn json<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, HubFailure> {
     Guard {
         depth: 0,
         members: &members,
+        limits,
     }
     .deserialize(&mut de)
     .and_then(|()| de.end())
-    .map_err(|_| HubFailure::Protocol)?;
+    .map_err(|_| HubFailure::Protocol)
+}
+
+/// [`check_json`], then reads `body` as `T`. A value of the wrong shape is
+/// [`HubFailure::Protocol`] too, without serde's text.
+pub fn decode_bounded_json<'a, T: Deserialize<'a>>(
+    body: &'a [u8],
+    limits: JsonLimits,
+) -> Result<T, HubFailure> {
+    check_json(body, limits)?;
     serde_json::from_slice(body).map_err(|_| HubFailure::Protocol)
+}
+
+/// A typed exchange reply under HA2a's settled JSON bounds.
+fn json<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, HubFailure> {
+    decode_bounded_json(body, EXCHANGE_JSON)
 }
 
 // ---------------------------------------------------------------------------------------------
