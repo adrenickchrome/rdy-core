@@ -124,7 +124,8 @@ fn print_digests(p: &Print) -> [String; 5] {
 }
 
 /// The PDF with its `/Producer (rdy <version>)` text masked to the same length, so a version
-/// bump keeps the digest.
+/// bump keeps the digest while the version keeps its length. A bump that changes the version's
+/// length (0.9.0 to 0.10.0) moves the PDF's later byte offsets: re-take the PDF digests then.
 fn versionless(pdf: &[u8]) -> Vec<u8> {
     let producer = format!("rdy {}", env!("CARGO_PKG_VERSION")).into_bytes();
     let mask = [b"rdy ".as_slice(), &vec![b'#'; producer.len() - 4]].concat();
@@ -218,7 +219,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "canon",
         [
             "84fbbf923af3bea784c101f69f0c8bde48b5de7f587d02ce62132eba628728b9",
-            "b143bcd40d82b3e6bf4ef8ad6c7d37dc3b66194539b88159f27ca64280b1ded1",
+            "1f11b48f2af3af7ab8d9e6a8ad98596e3181b8dd63b4bc85e4e0e1c756a809ba",
             "1254c1001737892e1f0ea20ec3ab4993f9ce684c97b193f5ada6bb09d8445142",
             "a943098d24ccf984658403df96a3f311b142c90e7b764eef247562699e2cd8d7",
             "6984953d91796ef67f268dc7bdc3bfbf076253aa1356c77eb46c9d4bacb3c24d",
@@ -228,7 +229,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "tag",
         [
             "855eab380b64b94361c87f775b60a406e78a7d0e8fea00b5da8ffec1f0f384c8",
-            "1f71c6bd5b3ee470e6373166aed0fc7bfacb0cbca90e7fe7ec4e943de1e1ce1b",
+            "27e70ec170c51d8c9689312ccc6fd5c39605838d4a7ad8e595d84836c8052148",
             "53ce7675b9e938c31ce92b8160230b6af99d10d6ca48af11e72d16c92667a015",
             "9cffc2a308540e6ad7610e2af7c3973fc8655d15f34668682f5219cc490ce4be",
             "b561e223280d7fabc9c6d01dc1f629e59181ea4bea1360aa9f443ef09f3205be",
@@ -238,7 +239,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "view",
         [
             "fcbe79bc01b641aee08d7ad7794cff02a96208e7b503ce21c7b9128c18bae49b",
-            "5af427d8a0591d192d477033b81e4c4bf402385823c02d98a2f4386b67592e71",
+            "c197b6e9dc4e2f617f2bc7151364040f878b781e0342d1594dc4760bea1eacd7",
             "21001f066775b54d02924d382c65a73ea776a315612b3e0e930cb9bacb5e2d77",
             "6dbce21b6ae082807d92313182695e098d5737ca9de9e63af530d24f10f02689",
             "6d41c3661756568ca0957040786ecab66dd94cdb9f1b664804eedd5460376704",
@@ -248,7 +249,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
         "proposal",
         [
             "4de53923b9900182e01c67ccd1643c993e6c326baf4f5c5778270ca5a8ed680a",
-            "6d7d178cd4dfa7b931f72b9ba1a747a4c7bcc01e159bb49fdf3501cf6e928432",
+            "ee6e483ca4215c2853dec0a863cf43cf561ecd6a6a320dd9bf9ba608d4b2c87a",
             "4b10693e6304e921edaf44bac4315b3331b0be5fa9f17ec517ea5cd3c0e5139e",
             "eed98db235160352f5118b7c057ea1d69914af9a4acb0f15b798db983187d8d9",
             "f22bf84190f83a8e13dcbe3f893e71b79143d545ab734e4990af9003a7974957",
