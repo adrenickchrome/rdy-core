@@ -20,8 +20,9 @@
 //! 5. Every record of the union is in the root's closure: reached from the root by forward links
 //!    (through the holder's records too), or attached as the closure attaches it
 //!    (`crate::closure`): answers of reached landings and tags, signatures of reached landings
-//!    and of the root, the root's relay answer (O11), requests of reached carriers, and applies
-//!    whose request names a reached object.
+//!    and of the root, the root's relay answer (O11: act `tag`, item `tag:<root name>`, and
+//!    targets exactly the root TAG), requests of reached carriers, and applies whose request
+//!    names a reached object.
 //! 6. Each new apply passes its portable proof (`sync_proof::check`, over the union and the
 //!    holder). Each dropped record names a validated apply that approves its exact tuple, and
 //!    each key the upload approves or drops has one tuple over every approval of the holder and
@@ -34,9 +35,10 @@
 //!    holder or in the union, is `UncoveredChange`.
 //! 8. The caller's check (`check`) runs once, with the union and the holder as its source; its
 //!    choice selects which tag survives. With `Incoming`, the take writes `tag/<name>`. Either
-//!    way the root TAG is stored, and when the union holds a relay answer of the root, the take
-//!    writes `answer/tag-object:<root hash>` (O11, ruling task-13): at most one relay answer per
-//!    tag object, and never another one than the holder holds for it.
+//!    way the root TAG is stored, and when the union holds a relay answer of the root (one that
+//!    targets exactly the root TAG; `crate::holder::is_relay_answer_of`), the take writes
+//!    `answer/tag-object:<root hash>` (O11, ruling task-13): at most one relay answer per tag
+//!    object, and never another one than the holder holds for it.
 //! 9. A holder with an approval keeps within its receiver caps (`crate::redaction_import`),
 //!    the frames, payload bytes and spans of the batch included; the marker counts only when
 //!    there is a frame to write (a complete retry writes none).
@@ -68,7 +70,7 @@ use crate::sync_stream::{
 };
 use rdy_model::redaction::{Redaction, RedactionApply, RedactionResidue};
 use rdy_model::signature::Signature;
-use rdy_model::{Answer, AnswerAct, Change, Hash, RepoId, Tag};
+use rdy_model::{Answer, Change, Hash, RepoId, Tag};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -658,10 +660,15 @@ struct Attachments {
     relay: Vec<ObjectKey>,
 }
 
-/// Collects the union's attachments: every answer, signature, request and apply it holds.
-fn attachments(source: &mut UploadSource, root: &Tag) -> Result<Attachments, StreamError> {
+/// Collects the union's attachments: every answer, signature, request and apply it holds. The
+/// root's relay answer is one that targets exactly the root TAG (`is_relay_answer_of`): an
+/// answer to a tag of the same name that targets another tag object is not attached by name.
+fn attachments(
+    source: &mut UploadSource,
+    root_key: ObjectKey,
+    root: &Tag,
+) -> Result<Attachments, StreamError> {
     let mut a = Attachments::default();
-    let item = format!("tag:{}", root.name);
     let keys: Vec<ObjectKey> = source
         .union
         .keys()
@@ -682,7 +689,7 @@ fn attachments(source: &mut UploadSource, root: &Tag) -> Result<Attachments, Str
                 for t in &answer.targets {
                     a.answers.entry(*t).or_default().push(k);
                 }
-                if answer.act == AnswerAct::Tag && answer.item == item {
+                if crate::holder::is_relay_answer_of(&answer, &root_key.hash, &root.name) {
                     a.relay.push(k);
                 }
             }
@@ -744,7 +751,7 @@ fn check_closure(
     root_key: ObjectKey,
     root: &Tag,
 ) -> Result<(), StreamError> {
-    let att = attachments(source, root)?;
+    let att = attachments(source, root_key, root)?;
     let mut reached: HashSet<ObjectKey> = HashSet::new();
     let mut queue: Vec<ObjectKey> = Vec::new();
     let mut edges = 0u64;
@@ -1170,12 +1177,13 @@ pub(crate) fn prepare<E>(
     // the version, so its relay answer is named by the tag object, whichever choice was made.
     // Each answer is read again: input changed since the checks refuses here, before any
     // append, as an answer the holder holds is not read again by the append
-    let item = format!("tag:{}", root.name);
+    // A relay answer targets exactly the root TAG (`is_relay_answer_of`): an answer to a tag of
+    // the same name that targets another tag object never gets the root's ref
     let mut relay: Vec<&ObjectKey> = Vec::new();
     for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
         if source
             .typed::<Answer>(*k)?
-            .is_some_and(|a| a.act == AnswerAct::Tag && a.item == item)
+            .is_some_and(|a| crate::holder::is_relay_answer_of(&a, &root_key.hash, &root.name))
         {
             relay.push(k);
         }

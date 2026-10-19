@@ -5,7 +5,9 @@
 //!
 //! A holder's refs are closed: `meta/store_format`, `meta/repo_id`, `meta/origin`, the creation's
 //! `meta/store_mode`, `tag/<name>` and (O11, ruling task-13) `answer/tag-object:<hash>`, which
-//! names the relay answer of the TAG object whose hash is `<hash>` (64 lowercase hex digits).
+//! names the relay answer of the TAG object whose hash is `<hash>` (64 lowercase hex digits):
+//! an ANSWER of act `tag` and item `tag:<that tag's name>` whose targets are exactly that TAG
+//! (`is_relay_answer_of`).
 //! It stands only when that TAG object is in the same batch or an earlier one. A holder may
 //! keep several tag objects of one version (the first stays the version; a twin's tag is kept
 //! beside it), so its relay answers are found by tag object, never by tag name: a local
@@ -30,7 +32,7 @@ use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_ORIGIN, REF_REPO_ID};
 use crate::segment::{Holes, Location, SegmentReader};
 use crate::store::StoreReader;
-use rdy_model::Hash;
+use rdy_model::{Answer, AnswerAct, Hash};
 use std::collections::BTreeSet;
 
 /// The ref naming a holder: present only in a holder, with the value `HOLDER_MODE`.
@@ -52,6 +54,15 @@ pub fn answer_tag_object_ref(tag: &Hash) -> String {
 /// prefix; None for any other name.
 pub fn answer_tag_object(name: &str) -> Option<Hash> {
     tag_object(name.strip_prefix(ANSWER_TAG_OBJECT_REF)?)
+}
+
+/// Whether `a` is the relay answer of the TAG object `tag` named `name` (O11, ruling task-13):
+/// act `tag`, item `tag:<name>`, and targets exactly that TAG, as `Store::prepare_tag` writes it.
+/// Two tag objects of one name never share a relay answer.
+pub fn is_relay_answer_of(a: &Answer, tag: &Hash, name: &str) -> bool {
+    a.act == AnswerAct::Tag
+        && a.item.strip_prefix("tag:") == Some(name)
+        && a.targets.as_slice() == [*tag]
 }
 
 /// `hex` as a hash: exactly 64 lowercase hex digits.

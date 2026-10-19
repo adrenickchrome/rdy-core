@@ -500,6 +500,77 @@ fn ha7_check_holder_checks_answer_tag_object_refs() {
     );
 }
 
+/// Fix round 2: an answer ref names the relay answer of exactly its TAG object, so two tag
+/// objects of one name never share an answer, and an answer that targets anything else (no
+/// object, the tag and more) is not a tag object's relay answer.
+#[test]
+fn ha13_answer_tag_object_refs_name_the_answer_of_their_own_tag() {
+    let (_d, mut s, _t1, _good, l) = relayed_holder();
+    let twin = |s: &mut Store, message: &str| {
+        s.put(
+            kinds::TAG,
+            &Tag {
+                name: "1.0.0".into(),
+                landing: l,
+                message: Some(message.into()),
+                tagged_by: prov(9),
+            },
+        )
+        .unwrap()
+    };
+    let a = twin(&mut s, "A");
+    let b = twin(&mut s, "B");
+    assert_ne!(a, b);
+    let of_a = s
+        .put(kinds::ANSWER, &answer("tag:1.0.0", AnswerAct::Tag, a))
+        .unwrap();
+    let of_b = s
+        .put(kinds::ANSWER, &answer("tag:1.0.0", AnswerAct::Tag, b))
+        .unwrap();
+    let (ref_a, ref_b) = (
+        format!("answer/tag-object:{a}"),
+        format!("answer/tag-object:{b}"),
+    );
+    // each tag object names its own relay answer
+    forge(&mut s, &ref_a, of_a);
+    forge(&mut s, &ref_b, of_b);
+    s.check_holder().unwrap();
+    // crossed: B's ref names A's answer, then A's ref names B's answer
+    forge(&mut s, &ref_b, of_a);
+    assert_eq!(
+        decode_text(s.check_holder()),
+        format!("holder ref {ref_b} is not allowed")
+    );
+    forge(&mut s, &ref_b, of_b);
+    forge(&mut s, &ref_a, of_b);
+    assert_eq!(
+        decode_text(s.check_holder()),
+        format!("holder ref {ref_a} is not allowed")
+    );
+    forge(&mut s, &ref_a, of_a);
+    s.check_holder().unwrap();
+    // an answer of the right act and name that targets no object, or the tag and another
+    for targets in [vec![], vec![b, a], vec![b, b]] {
+        let loose = s
+            .put(
+                kinds::ANSWER,
+                &Answer {
+                    targets: targets.clone(),
+                    ..answer("tag:1.0.0", AnswerAct::Tag, b)
+                },
+            )
+            .unwrap();
+        forge(&mut s, &ref_b, loose);
+        assert_eq!(
+            decode_text(s.check_holder()),
+            format!("holder ref {ref_b} is not allowed"),
+            "{targets:?}"
+        );
+    }
+    forge(&mut s, &ref_b, of_b);
+    s.check_holder().unwrap();
+}
+
 #[test]
 fn ha7_check_holder_bounds_every_walk() {
     assert_eq!(

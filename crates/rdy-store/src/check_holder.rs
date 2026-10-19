@@ -13,8 +13,9 @@
 //! change's dependencies landed at or before its landing in that chain. The dependency DAG has no
 //! cycle, the answers keep the answer rules, the signature table holds exactly its records, and
 //! (O11, ruling task-13) each `answer/tag-object:<hash>` names a stored TAG and the stored answer
-//! that relays it. Each such TAG is read with the tags' objects too: a twin's tag kept beside the
-//! version that names the same landing. There is no pack validation: a holder has no pack.
+//! that relays it: act `tag`, item `tag:<its name>`, targets exactly that TAG. Each such TAG is
+//! read with the tags' objects too: a twin's tag kept beside the version that names the same
+//! landing. There is no pack validation: a holder has no pack.
 //!
 //! Every walk is iterative and bounded: [`MAX_LANDING_DEPTH`] landings in one chain,
 //! [`MAX_OBJECTS`] objects and [`MAX_EDGES`] object links. Past a bound the check refuses with
@@ -22,14 +23,14 @@
 use crate::StoreReader;
 use crate::check::StoreCheck;
 use crate::error::StoreError;
-use crate::holder::{ANSWER_TAG_OBJECT_REF, StoreMode, TAG_REF, answer_tag_object, not_allowed};
+use crate::holder::{
+    ANSWER_TAG_OBJECT_REF, StoreMode, TAG_REF, answer_tag_object, is_relay_answer_of, not_allowed,
+};
 use crate::index::hash_from;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, PORTABLE_KINDS, refs_of};
 use crate::store::decode;
-use rdy_model::{
-    Answer, AnswerAct, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag,
-};
+use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -513,9 +514,9 @@ impl StoreReader {
     }
 
     /// O11 (ruling task-13): each `answer/tag-object:<hash>` ref names, by 64 lowercase hex
-    /// digits, a stored TAG, and its value names a stored ANSWER whose act is `tag` and whose
-    /// item is `tag:<that tag's name>`; otherwise `holder ref {name} is not allowed`. Returns
-    /// the TAG hashes the refs name.
+    /// digits, a stored TAG, and its value names a stored ANSWER whose act is `tag`, whose item
+    /// is `tag:<that tag's name>` and whose targets are exactly that TAG (`is_relay_answer_of`);
+    /// otherwise `holder ref {name} is not allowed`. Returns the TAG hashes the refs name.
     fn check_answer_tags(&self) -> Result<Vec<Hash>, StoreError> {
         let mut out = vec![];
         for (name, value) in self.refs_with_prefix(ANSWER_TAG_OBJECT_REF)? {
@@ -539,7 +540,7 @@ impl StoreReader {
                 }
                 Err(e) => return Err(e),
             };
-            if a.act != AnswerAct::Tag || a.item != format!("tag:{}", tag.name) {
+            if !is_relay_answer_of(&a, &t, &tag.name) {
                 return Err(not_allowed(&name));
             }
             out.push(t);

@@ -766,9 +766,9 @@ fn ha11_take_writes_the_relay_tag_answer_ref_once() {
             "{name}"
         );
     }
-    // two relay answers of the root: refused, whichever tag stays the version, as one tag
-    // object has one relay answer
-    let second = enc(&answer("tag:v1", vec![], Some("again")));
+    // two relay answers of the root (each targets the root TAG, as a relay answer does):
+    // refused, whichever tag stays the version, as one tag object has one relay answer
+    let second = enc(&answer("tag:v1", vec![src.tag], Some("again")));
     let extra = src.dir.path().join("second.rdysync");
     write_extra(
         &src.repo,
@@ -921,4 +921,92 @@ fn ha11_changed_relay_answer_refuses_before_append() {
     assert_eq!(h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(), None);
     drop(h);
     assert_eq!(segment_bytes(&path), before.0);
+}
+
+/// Fix round 2: the take installs `answer/tag-object:<root>` only for an answer that targets
+/// exactly the root TAG. Two tag objects of one name at one landing (A held, B uploaded): an
+/// answer to `tag:v1` that targets A, or no object, is not B's relay answer, so an upload of B
+/// that carries it is refused before any append; one that targets B and A is an answer of B,
+/// taken with no ref; and B's own relay answer gets B's ref.
+#[test]
+fn ha13_take_names_only_the_relay_answer_of_its_own_tag_object() {
+    let src = source();
+    let paths = src.split(src.tag, 1, "one");
+    let (path, mut h) = holder(&src, "h");
+    take(&mut h, &open(&paths), &src.target()).unwrap();
+    // B: a second tag object named v1 at the same landing, as a clone tags it
+    let b = Tag {
+        name: "v1".into(),
+        landing: src.landing,
+        message: Some("B".into()),
+        tagged_by: prov("human:alice", Role::Approver),
+    };
+    let b_bytes = enc(&b);
+    let b_hash = Hash::of(&b_bytes);
+    assert_ne!(b_hash, src.tag);
+    let existing = |_: &mut dyn ObjectSource, _: &UploadFacts| {
+        Ok::<_, StreamError>(TagChoice::Existing {
+            name: "v1".into(),
+            hash: src.tag,
+        })
+    };
+    // an upload of B and an answer to tag:v1 with `targets`: the answer's hash and the file
+    let upload = |name: &str, targets: Vec<Hash>| {
+        let a = enc(&answer("tag:v1", targets.clone(), Some(name)));
+        let file = src.dir.path().join(format!("{name}.rdysync"));
+        write_extra(
+            &src.repo,
+            b_hash,
+            &[(kinds::TAG, b_bytes.clone()), (kinds::ANSWER, a.clone())],
+            // the exact prerequisites: the landing, and A when the answer targets it
+            std::iter::once(key(kinds::LANDING, src.landing))
+                .chain(targets.contains(&src.tag).then(|| key(kinds::TAG, src.tag)))
+                .collect(),
+            &file,
+        );
+        (Hash::of(&a), file)
+    };
+    // crossed: an answer that targets A (the held tag of the same name), and one with no target
+    for (name, targets) in [("crossed", vec![src.tag]), ("none", vec![])] {
+        let (a, file) = upload(name, targets);
+        let before = (segment_bytes(&path), h.log_end());
+        let e = stream_err(
+            h.take_batches(&open(&[file]), &src.target(), existing)
+                .unwrap_err(),
+        );
+        assert_eq!(
+            e.message, "stream record 0 at byte 0: object is outside the tag closure",
+            "{name}"
+        );
+        assert_eq!(h.log_end(), before.1);
+        assert_eq!(segment_bytes(&path), before.0);
+        assert!(!h.has_kind(kinds::TAG, &b_hash).unwrap());
+        assert!(!h.has_kind(kinds::ANSWER, &a).unwrap());
+        assert_eq!(h.get_ref(&answer_tag_object_ref(&b_hash)).unwrap(), None);
+        h.check_holder().unwrap();
+    }
+    // an answer that targets B and A: attached to B by its target, taken, but not B's relay
+    // answer
+    let (loose, file) = upload("loose", vec![b_hash, src.tag]);
+    h.take_batches(&open(&[file]), &src.target(), existing)
+        .unwrap();
+    assert!(h.has_kind(kinds::TAG, &b_hash).unwrap());
+    assert!(h.has_kind(kinds::ANSWER, &loose).unwrap());
+    assert_eq!(h.get_ref(&answer_tag_object_ref(&b_hash)).unwrap(), None);
+    h.check_holder().unwrap();
+    // B with its own relay answer: taken, and named by B's tag object
+    let (own, file) = upload("own", vec![b_hash]);
+    let got = h
+        .take_batches(&open(&[file]), &src.target(), existing)
+        .unwrap();
+    assert_eq!(got.tag_hash, src.tag);
+    assert_eq!(
+        h.get_ref(&answer_tag_object_ref(&b_hash)).unwrap(),
+        Some(own.0.to_vec())
+    );
+    assert_eq!(
+        h.get_ref(&answer_tag_object_ref(&src.tag)).unwrap(),
+        Some(src.relay.0.to_vec())
+    );
+    h.check_holder().unwrap();
 }
