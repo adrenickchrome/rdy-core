@@ -17,8 +17,12 @@ use rdy_qa::fixtures::{project, rdy_bin};
 use rdy_qa::mcp::{McpClient, Reply as McpReply};
 use rdy_qa::platform::set_mode;
 use serde_json::{Value, json};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 const REFRESH: &str = "rdyh_r_efghijklmnopqrstuvwxyz0123456789ABCDEFGH3qAvLC";
@@ -94,15 +98,20 @@ impl Home {
 
     /// Trusts `hub`'s CA for its install in the user config.
     fn trust(&self, hub: &Server) {
-        let pem = self.dir.path().join(format!("ca-{}.pem", hub_port(hub)));
+        self.trust_at(hub.origin(), hub);
+    }
+
+    /// Trusts `hub`'s CA for the install `origin` (the hub itself, or a gate in front of it).
+    fn trust_at(&self, origin: &str, hub: &Server) {
+        let port = origin.rsplit(':').next().unwrap();
+        let pem = self.dir.path().join(format!("ca-{port}.pem"));
         std::fs::write(&pem, hub.ca_pem()).unwrap();
         let mut text = std::fs::read_to_string(self.config()).unwrap();
         if !text.contains("hub:") {
             text.push_str("hub:\n  installs:\n");
         }
         text.push_str(&format!(
-            "    \"{}\":\n      ca_file: {}\n",
-            hub.origin(),
+            "    \"{origin}\":\n      ca_file: {}\n",
             pem.display()
         ));
         std::fs::write(self.config(), text).unwrap();
@@ -193,10 +202,6 @@ impl Home {
 /// The arguments of `v` as `&str`.
 fn args(v: &[String]) -> Vec<&str> {
     v.iter().map(String::as_str).collect()
-}
-
-fn hub_port(hub: &Server) -> String {
-    hub.origin().rsplit(':').next().unwrap().to_string()
 }
 
 /// Checks that no output of `rdy <args>` holds a secret, a device code or a complete link.
@@ -921,12 +926,137 @@ fn hsa8_cli_and_mcp_auth_replies_match() {
     assert_eq!(mcp_hub.finish(), 0);
 }
 
+/// A loopback TCP gate in front of `upstream`: it accepts `n` connections in order and pipes
+/// each to `upstream`; it reports connection `hold` on `arrived` and holds it, unconnected,
+/// until `release` gets a message.
+struct Gate {
+    origin: String,
+    arrived: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Gate {
+    fn start(upstream: &str, n: usize, hold: usize) -> Gate {
+        let up_port: u16 = upstream.rsplit(':').next().unwrap().parse().unwrap();
+        let listener = TcpListener::bind((hub_tls::LOOPBACK, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (arrived_tx, arrived) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            for i in 0..n {
+                let (client, _) = listener.accept().expect("accept");
+                if i == hold {
+                    arrived_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                let server = TcpStream::connect((hub_tls::LOOPBACK, up_port)).unwrap();
+                std::thread::spawn(move || pipe(client, server));
+            }
+        });
+        Gate {
+            origin: format!("https://{}:{port}", hub_tls::LOOPBACK),
+            arrived,
+            release,
+            thread,
+        }
+    }
+
+    /// Waits until the consumer's refresh request is held, then checks that nothing is on its
+    /// pipe and that the old pair has already left the file of `install`.
+    fn held(&self, home: &Home, install: &str, consumer: &Consumer) {
+        self.arrived
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the refresh request arrives");
+        assert!(
+            matches!(consumer.chunks.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "nothing reaches the pipe while the refresh is held"
+        );
+        assert_eq!(
+            home.read_creds().get(&Origin::parse(install).unwrap()),
+            Some(&Credential::ReauthRequired),
+            "the refresh token is sent only from a record that no longer holds it"
+        );
+    }
+}
+
+/// Copies both ways until each side ends.
+fn pipe(client: TcpStream, server: TcpStream) {
+    let (mut c_in, mut s_out) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+    let up = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut c_in, &mut s_out);
+        let _ = s_out.shutdown(Shutdown::Write);
+    });
+    let (mut s_in, mut c_out) = (server, client);
+    let _ = std::io::copy(&mut s_in, &mut c_out);
+    let _ = c_out.flush();
+    let _ = c_out.shutdown(Shutdown::Write);
+    up.join().unwrap();
+}
+
+/// A credential consumer: `rdy --json auth token` running with its stdout on a pipe that this
+/// test reads as the bytes arrive, while the child still runs.
+struct Consumer {
+    child: std::process::Child,
+    chunks: mpsc::Receiver<Vec<u8>>,
+}
+
+impl Consumer {
+    fn start(mut cmd: Command) -> Consumer {
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rdy");
+        let mut stdout = child.stdout.take().unwrap();
+        let (tx, chunks) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n @ 1..) = stdout.read(&mut buf) {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Consumer { child, chunks }
+    }
+
+    /// The next bytes on the pipe, or `None` once it has closed with nothing more.
+    fn next(&self) -> Option<Vec<u8>> {
+        self.chunks.recv_timeout(Duration::from_secs(60)).ok()
+    }
+
+    /// Waits for the child: its output, with `first` and the rest of the pipe as stdout,
+    /// checked by `clean`.
+    fn finish(mut self, first: Vec<u8>, args: &[&str]) -> Output {
+        let mut stdout = first;
+        while let Some(more) = self.next() {
+            stdout.extend(more);
+        }
+        let mut stderr = Vec::new();
+        self.child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_end(&mut stderr)
+            .unwrap();
+        let status = self.child.wait().unwrap();
+        let o = Output {
+            status,
+            stdout,
+            stderr,
+        };
+        clean(&o, args);
+        o
+    }
+}
+
 #[test]
 fn hsa8_token_consumer_gets_access_only_after_durable_refresh() {
     let home = Home::new();
     let cwd = tempfile::tempdir().unwrap();
     let c = cwd.path();
-    let mut hub = Server::start();
+    let hub = Server::start();
     home.trust(&hub);
     let o = hub.origin().to_string();
     let token = ["--json", "auth", "token", "--install", &o];
@@ -954,19 +1084,39 @@ fn hsa8_token_consumer_gets_access_only_after_durable_refresh() {
             "human_actor": "human:test-person"})
     );
     assert!(hub.requests().is_empty());
+    assert_eq!(hub.finish(), 0);
 
     // expiring access: the refresh is sent once, the rotated pair is saved, and only then is
-    // the new access printed; the refresh token never leaves
+    // the new access printed; the refresh token never leaves. A gate holds the refresh request
+    // while the consumer's pipe is watched: nothing is on it, and the old pair has already left
+    // the file; when access appears on the pipe, the rotated pair is already saved
+    let mut hub = Server::start();
+    let gate = Gate::start(hub.origin(), 2, 1);
+    let o = gate.origin.clone();
+    home.trust_at(&o, &hub);
     home.seed(vec![(&o, ready(ACCESS, REFRESH, now() + 1_000))]);
     hub.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
     hub.reply(Reply::json(200, ROTATED_REPLY));
     hub.accept_n(2);
-    let out = home.run(c, &[("RDY_ACTOR", "agent:sync"), ("RDY_RUN", "s1")], &token);
+    let token = ["--json", "auth", "token", "--install", &o];
+    let consumer =
+        Consumer::start(home.command(c, &[("RDY_ACTOR", "agent:sync"), ("RDY_RUN", "s1")], &token));
+    gate.held(&home, &o, &consumer);
+    gate.release.send(()).unwrap();
+    let first = consumer.next().expect("access reaches the pipe");
+    let saved = home.read_creds();
+    let Some(Credential::Ready(r)) = saved.get(&Origin::parse(&o).unwrap()) else {
+        panic!("the rotated pair is saved before access reaches the pipe");
+    };
+    assert_eq!(r.access_token.expose(), ACCESS_2);
+    let out = consumer.finish(first, &token);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+    assert_eq!(stdout.matches('\n').count(), 1, "one line: {stdout}");
     let printed: Value = serde_json::from_slice(&out.stdout).unwrap();
     let saved = home.read_creds();
     let Some(Credential::Ready(r)) = saved.get(&Origin::parse(&o).unwrap()) else {
@@ -995,6 +1145,47 @@ fn hsa8_token_consumer_gets_access_only_after_durable_refresh() {
         reqs.iter().all(|r| r.header("rdy-actor").is_none()),
         "no claim on OAuth routes"
     );
+    gate.thread.join().unwrap();
+    assert_eq!(hub.finish(), 0);
+
+    // the final save fails: the hub rotated the pair, but this machine could not keep it, so
+    // no access reaches the pipe. The user config directory is made read-only while the
+    // refresh is held, after the old pair has left the file
+    let mut hub = Server::start();
+    let gate = Gate::start(hub.origin(), 2, 1);
+    let o = gate.origin.clone();
+    home.trust_at(&o, &hub);
+    home.seed(vec![(&o, ready(ACCESS, REFRESH, now() + 1_000))]);
+    hub.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
+    hub.reply(Reply::json(200, ROTATED_REPLY));
+    hub.accept_n(2);
+    let token = ["--json", "auth", "token", "--install", &o];
+    let consumer = Consumer::start(home.command(c, &[], &token));
+    gate.held(&home, &o, &consumer);
+    let rdy_dir = home.config().parent().unwrap().to_path_buf();
+    set_mode(&rdy_dir, 0o500).unwrap();
+    gate.release.send(()).unwrap();
+    let rest = consumer.next();
+    set_mode(&rdy_dir, 0o700).unwrap();
+    assert_eq!(
+        rest.map(|b| String::from_utf8_lossy(&b).into_owned()),
+        None,
+        "no access reaches the pipe"
+    );
+    let out = consumer.finish(Vec::new(), &token);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert_eq!(parsed(&out).1["code"], "E_UPSTREAM_AUTH");
+    assert_eq!(
+        home.read_creds().get(&Origin::parse(&o).unwrap()),
+        Some(&Credential::ReauthRequired),
+        "the rotated pair was not kept, and the old one is gone"
+    );
+    assert_eq!(
+        routes(&hub.requests()),
+        [route("GET", META), route("POST", "/auth/token")]
+    );
+    gate.thread.join().unwrap();
     assert_eq!(hub.finish(), 0);
 
     // a refused refresh: no access is printed, and the old refresh token is not kept
@@ -1107,4 +1298,155 @@ fn hsa8_installs_lists_credentials_without_exporting_them() {
             "listing changes no record"
         );
     }
+}
+
+/// Adds an ordinary key rdy does not know (`actro`) and an unknown hub key (`hub.instalss`) to
+/// the user config, and returns the warnings rdy finds in that file alone.
+fn mistype(home: &Home) -> Vec<rdy_schema::Issue> {
+    let text = std::fs::read_to_string(home.config()).unwrap();
+    let text = if text.contains("hub:\n") {
+        text.replacen("hub:\n", "hub:\n  instalss: {}\n", 1)
+    } else {
+        format!("{text}hub:\n  instalss: {{}}\n")
+    };
+    std::fs::write(home.config(), format!("{text}actro: human:wrong\n")).unwrap();
+    let warnings = rdy_engine::config_levels::user_config_warnings(&home.config());
+    let found: Vec<bool> = ["actro", "hub.instalss"]
+        .iter()
+        .map(|k| warnings.iter().any(|w| w.message.contains(k)))
+        .collect();
+    assert_eq!(found, [true, true], "{warnings:?}");
+    warnings
+}
+
+/// The warnings as the CLI prints them on stderr, one line each.
+fn warning_lines(warnings: &[rdy_schema::Issue]) -> String {
+    warnings
+        .iter()
+        .map(|w| format!("warning {}: {}; {}\n", w.code, w.message, w.fix))
+        .collect()
+}
+
+/// `rdy auth` has no project, so it reports the user config's warnings itself: every one of
+/// them, an ordinary unknown key as well as a hub key. After a reply they follow on stderr;
+/// after a failure they are the error's issues. The token door's stdout stays its one line.
+#[test]
+fn hsa8_auth_relays_user_config_warnings() {
+    let home = Home::new();
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let hub = Server::start();
+    home.trust(&hub);
+    let o = hub.origin().to_string();
+    let warnings = mistype(&home);
+    let lines = warning_lines(&warnings);
+    let issues = serde_json::to_value(&warnings).unwrap();
+    let start = [
+        "auth",
+        "sign-in",
+        "--install",
+        &o,
+        "--machine-name",
+        MACHINE,
+    ];
+
+    // a card, as text and as JSON: the reply on stdout, the warnings on stderr
+    let (ok, out, err) = home.text(c, &[], &start);
+    assert!(ok, "{err}");
+    assert!(out.starts_with(&card(&o, MACHINE)), "{out}");
+    assert_eq!(err, lines);
+    let mut json_start = vec!["--json"];
+    json_start.extend_from_slice(&start);
+    let o_ = home.run(c, &[], &json_start);
+    assert!(o_.status.success());
+    let stdout = String::from_utf8(o_.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let v: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["state"], "confirmation_required");
+    assert_eq!(v["warnings"], json!([]), "the reply's own warnings only");
+    assert_eq!(String::from_utf8(o_.stderr).unwrap(), lines);
+
+    // failures after the config is read carry the warnings as their issues: a wrong answer,
+    // a wrong card and a missing sign-in at the token door
+    let wrong = "0".repeat(64);
+    let failures: Vec<(Vec<&str>, &str)> = vec![
+        (
+            vec![
+                "auth",
+                "sign-in",
+                "--install",
+                &o,
+                "--machine-name",
+                MACHINE,
+                "--answer",
+                "confirm",
+            ],
+            "E_BAD_INPUT",
+        ),
+        (
+            vec![
+                "auth",
+                "sign-in",
+                "--install",
+                &o,
+                "--machine-name",
+                MACHINE,
+                "--card-hash",
+                &wrong,
+                "--answer",
+                "confirm",
+            ],
+            "E_UPSTREAM_CONFIRM_HOST",
+        ),
+        (vec!["auth", "token", "--install", &o], "E_UPSTREAM_AUTH"),
+    ];
+    for (args, code) in &failures {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        let out = home.run(c, &[], &all);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let (_, e) = parsed(&out);
+        assert_eq!(e["code"], *code, "{e}");
+        assert_eq!(e["issues"], issues, "{args:?}: {e}");
+    }
+    // as text, each issue follows the error
+    let (ok, out, err) = home.text(c, &[], &failures[1].0);
+    assert!(!ok && out.is_empty());
+    assert!(err.starts_with("error E_UPSTREAM_CONFIRM_HOST: "), "{err}");
+    for w in &warnings {
+        assert!(
+            err.contains(&format!(
+                "  {} None: {} (fix: {})",
+                w.code, w.message, w.fix
+            )),
+            "{err}"
+        );
+    }
+
+    // the token door: exactly its line on stdout, the warnings on stderr
+    let later = now() + 3_000_000;
+    home.seed(vec![(&o, ready(ACCESS, REFRESH, later))]);
+    let out = home.run(c, &[], &["--json", "auth", "token", "--install", &o]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.matches('\n').count(), 1, "one line: {stdout}");
+    assert!(stdout.ends_with('\n'), "{stdout}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout).unwrap(),
+        json!({"install": o, "access_token": ACCESS, "expires_at_ms": later,
+            "human_actor": "human:test-person"})
+    );
+    assert_eq!(String::from_utf8(out.stderr).unwrap(), lines);
+    // installs and state, as replies, add the same lines
+    for args in [
+        vec!["auth", "installs"],
+        vec!["auth", "state", "--install", &o],
+    ] {
+        let (ok, _, err) = home.text(c, &[], &args);
+        assert!(ok, "{args:?}");
+        assert_eq!(err, lines, "{args:?}");
+    }
+    assert!(hub.requests().is_empty(), "no request was needed");
+    assert_eq!(hub.finish(), 0);
 }

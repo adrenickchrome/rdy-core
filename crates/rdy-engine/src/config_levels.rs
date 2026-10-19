@@ -517,10 +517,10 @@ pub(crate) fn file_name(level: Level, user_file: Option<&Path>) -> String {
     }
 }
 
-fn path_of(project: &Path, level: Level, user_file: Option<&Path>) -> Option<PathBuf> {
+fn path_of(project: Option<&Path>, level: Level, user_file: Option<&Path>) -> Option<PathBuf> {
     match level {
-        Level::Local => Some(project.join(LOCAL_FILE)),
-        Level::Project => Some(project.join(PROJECT_FILE)),
+        Level::Local => project.map(|p| p.join(LOCAL_FILE)),
+        Level::Project => project.map(|p| p.join(PROJECT_FILE)),
         Level::User => user_file.map(Path::to_path_buf),
         Level::Default => None,
     }
@@ -604,7 +604,7 @@ fn parse_file(text: &str, shown: &str) -> Result<Mapping, RdyError> {
 /// value type, a file that is not a mapping and a project that has no config. A key in a file of a
 /// level that does not allow it is a warning, and rdy ignores it.
 pub fn effective(project: &Path, user_file: Option<&Path>) -> Result<Effective, RdyError> {
-    build(project, user_file, false, None)
+    build(Some(project), user_file, false, None)
 }
 
 /// The bytes of the project config and of `.rdy/local.yaml` (`None` when it does not exist),
@@ -622,13 +622,13 @@ pub fn effective_from(
     user_file: Option<&Path>,
     given: GivenFiles<'_>,
 ) -> Result<Effective, RdyError> {
-    build(project, user_file, false, Some(given))
+    build(Some(project), user_file, false, Some(given))
 }
 
 /// `effective` that never fails: a wrong value type, or a file that does not read, is left out,
 /// so a client can still start a daemon that then reports the error.
 pub fn effective_lenient(project: &Path, user_file: Option<&Path>) -> Effective {
-    build(project, user_file, true, None).unwrap_or_else(|_| Effective {
+    build(Some(project), user_file, true, None).unwrap_or_else(|_| Effective {
         origins: Vec::new(),
         merged: Mapping::new(),
         warnings: Vec::new(),
@@ -644,6 +644,16 @@ pub fn config_warnings(project: &Path, user_file: Option<&Path>) -> Vec<Issue> {
 /// `config_warnings` over the environment's user config.
 pub fn config_warnings_for_env(project: &Path) -> Vec<Issue> {
     config_warnings(project, user_file_from_env().as_deref())
+}
+
+/// The warnings of the user config at `user_file` alone, for a command that runs with no
+/// project (hub sign-in): every check `config_warnings` makes on that file, the same bounded
+/// read and passes, and none that needs a project (its files and its code repos). Never fails:
+/// a file that does not read adds none.
+pub fn user_config_warnings(user_file: &Path) -> Vec<Issue> {
+    build(None, Some(user_file), true, None)
+        .map(|e| e.warnings)
+        .unwrap_or_default()
 }
 
 fn level_name(level: Level) -> &'static str {
@@ -1096,14 +1106,19 @@ fn wrong_type(map: &Mapping, rule: &KeyRule) -> Option<String> {
     None
 }
 
+/// The settings of the levels: with no `project`, the user config alone (lenient only).
 fn build(
-    project: &Path,
+    project: Option<&Path>,
     user_file: Option<&Path>,
     lenient: bool,
     given: Option<GivenFiles<'_>>,
 ) -> Result<Effective, RdyError> {
-    if !lenient && given.is_none() && !project.join(PROJECT_FILE).exists() {
-        return Err(missing_project(project));
+    if let Some(p) = project
+        && !lenient
+        && given.is_none()
+        && !p.join(PROJECT_FILE).exists()
+    {
+        return Err(missing_project(p));
     }
     // each file's mapping, in precedence order
     let mut files: Vec<(Level, Mapping)> = Vec::new();
@@ -1137,7 +1152,7 @@ fn build(
         hub_parts.push((*level, part));
         hub_notes.extend(notes);
     }
-    let hub = crate::hub_config::merge(hub_parts, hub_notes, Some(project), user_file);
+    let hub = crate::hub_config::merge(hub_parts, hub_notes, project, user_file);
     for (level, map) in &mut files {
         warnings.extend(unknown_warnings(*level, map, user_file));
         warnings.extend(wrong_file_warnings(*level, map, user_file));
@@ -1178,13 +1193,17 @@ fn build(
     // O15: from the mappings parsed above, never a second read; a wrong type adds no warning
     // and no `code_paths` row here (the code briefing reports it)
     let map_of = |level: Level| files.iter().find(|(l, _)| *l == level).map(|(_, m)| m);
-    let code = linked_core(
-        project,
-        map_of(Level::Project),
-        map_of(Level::Local),
-        map_of(Level::User),
-        user_file,
-    );
+    // code repos are a project's: with no project there are none, and no warning of theirs
+    let code = match project {
+        Some(p) => linked_core(
+            p,
+            map_of(Level::Project),
+            map_of(Level::Local),
+            map_of(Level::User),
+            user_file,
+        ),
+        None => Ok((Vec::new(), Vec::new())),
+    };
     let mut origins = Vec::new();
     for rule in KEY_LEVELS {
         if rule.key == crate::hub_config::REMOTES_KEY {
@@ -1202,7 +1221,7 @@ fn build(
             continue;
         }
         if rule.key == CODE_PATHS_KEY {
-            if let Ok((linked, _)) = &code {
+            if let (Ok((linked, _)), Some(project)) = (&code, project) {
                 let rows = code_path_origins(project, linked, map_of, user_file);
                 if !rows.is_empty() {
                     let entries: Mapping = rows
@@ -1281,7 +1300,7 @@ fn code_path_origins<'a>(
                 key: format!("{CODE_PATHS_KEY}.{}", l.name),
                 value,
                 level: l.level,
-                file: path_of(project, l.level, user_file),
+                file: path_of(Some(project), l.level, user_file),
             })
         })
         .collect();
@@ -1327,7 +1346,7 @@ pub fn linked_repos(
     project: &Path,
     user_file: Option<&Path>,
 ) -> Result<(Vec<LinkedRepo>, Vec<Issue>), RdyError> {
-    let read = |level: Level| match path_of(project, level, user_file) {
+    let read = |level: Level| match path_of(Some(project), level, user_file) {
         Some(path) => read_file(&path, &file_name(level, user_file)),
         None => Ok(None),
     };
@@ -2170,5 +2189,37 @@ mod tests {
             let err = effective(d.path(), None).unwrap_err();
             assert_eq!(err.code, E_CONFIG, "{bad}: {}", err.message);
         }
+    }
+
+    /// Hub sign-in runs with no project: the user config alone gets every check a project's
+    /// warnings run on it (an ordinary unknown key and a hub key alike), the same warnings as
+    /// next to a project that adds none, and a file that is missing or does not parse adds none.
+    #[test]
+    fn hsa8_user_config_warnings_cover_the_user_file_alone() {
+        let u = tempfile::tempdir().unwrap();
+        let uf = u.path().join("config.yaml");
+        assert!(user_config_warnings(&uf).is_empty(), "a missing file");
+        std::fs::write(
+            &uf,
+            "actor: human:qa\nactro: human:wrong\nhub:\n  instalss: {}\n",
+        )
+        .unwrap();
+        let alone = user_config_warnings(&uf);
+        let paths: Vec<bool> = ["actro", "hub.instalss"]
+            .iter()
+            .map(|k| alone.iter().any(|w| w.message.contains(k)))
+            .collect();
+        assert_eq!(paths, [true, true], "{alone:?}");
+        assert!(
+            alone.iter().all(|w| w.code == "W_CONFIG_UNKNOWN"),
+            "{alone:?}"
+        );
+        let quiet = project("pack: p\n", None);
+        assert_eq!(alone, config_warnings(quiet.path(), Some(&uf)));
+        std::fs::write(&uf, "actro: [unclosed\n").unwrap();
+        assert!(
+            user_config_warnings(&uf).is_empty(),
+            "a file that does not parse"
+        );
     }
 }

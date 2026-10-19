@@ -522,9 +522,12 @@ fn hsa8_a_paused_hub_call_does_not_block_other_sessions() {
         })),
     );
     write_creds(&home, &file);
-    // both sessions are connections to one daemon
-    let mut a = McpClient::start_proxy(&s);
-    let mut b = McpClient::start_proxy(&s);
+    // both sessions are connections to one daemon, which runs exactly one async worker: a hub
+    // call that ran on that worker instead of the blocking pool would hold B's call too
+    let mut env = s.env_pairs();
+    env.push(("TOKIO_WORKER_THREADS".into(), "1".into()));
+    let mut a = McpClient::start_proxy_at(s.dir.path(), &env);
+    let mut b = McpClient::start_proxy_at(s.dir.path(), &env);
     session(&mut a, "agent:a", Some("ra"));
     session(&mut b, "agent:b", Some("rb"));
     hub.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
@@ -540,9 +543,11 @@ fn hsa8_a_paused_hub_call_does_not_block_other_sessions() {
     gate.arrived
         .recv_timeout(Duration::from_secs(60))
         .expect("A's hub request arrives");
-    // while it is held, B's ordinary read completes
+    // while it is held, B's ordinary read completes, and A has no reply yet: had A's call
+    // taken the one worker, B would have waited for A's request to give up
     let r = b.call("rdy_overview", json!({}));
     assert!(r.is_ok(), "{r:?}");
+    assert_eq!(a.drain(Duration::ZERO), 0, "A is still held at the gate");
     assert!(hub.requests().is_empty(), "A is still held at the gate");
     // released, A completes: discovery, then its one revoke
     gate.release.send(()).unwrap();
@@ -558,4 +563,76 @@ fn hsa8_a_paused_hub_call_does_not_block_other_sessions() {
     gate.thread.join().unwrap();
     assert_eq!(hub.finish(), 0);
     assert!(read_creds(&home).is_empty());
+}
+
+/// Adds an ordinary key rdy does not know (`actro`) and an unknown hub key (`hub.instalss`) to
+/// the user config under `home`.
+fn mistype(home: &Path) {
+    let file = home.join("rdy/config.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let text = text.replacen("hub:\n", "hub:\n  instalss: {}\n", 1);
+    std::fs::write(&file, format!("{text}actro: human:wrong\n")).unwrap();
+}
+
+/// The whole tool error of a refusal.
+fn refusal(r: McpReply) -> Value {
+    match r {
+        McpReply::ToolError(v) => v,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A config mistake made while a session is open is reported by the next failing `rdy_auth`
+/// call: the warnings of the project and the user config as they are now, an ordinary
+/// unknown key as well as a hub key, are the error's issues.
+#[test]
+fn hsa8_chat_auth_failures_carry_config_warnings() {
+    let home = tempfile::tempdir().unwrap();
+    let hub = Server::start();
+    let o = hub.origin().to_string();
+    configure(home.path(), &[(&o, hub.ca_pem())]);
+    let (p, mut c) = chat(home.path());
+    session(&mut c, "agent:claude", Some("r7"));
+    let wrong = json!({"op": "start", "install": o, "machine_name": MACHINE,
+        "card_hash": "0".repeat(64), "answer": "confirm", "evidence": "yes"});
+    let e = refusal(auth(&mut c, wrong.clone()));
+    assert_eq!(
+        (e["code"].clone(), e["issues"].clone()),
+        (json!("E_UPSTREAM_CONFIRM_HOST"), json!([]))
+    );
+    mistype(home.path());
+    let cfg = home.path().join("rdy/config.yaml");
+    let warnings = rdy_engine::config_levels::config_warnings(p.path(), Some(&cfg));
+    let found: Vec<bool> = ["actro", "hub.instalss"]
+        .iter()
+        .map(|k| warnings.iter().any(|w| w.message.contains(k)))
+        .collect();
+    assert_eq!(found, [true, true], "{warnings:?}");
+    let issues = serde_json::to_value(&warnings).unwrap();
+    for (args, code) in [
+        (wrong, "E_UPSTREAM_CONFIRM_HOST"),
+        (
+            json!({"op": "start", "install": o, "machine_name": MACHINE, "answer": "confirm"}),
+            "E_BAD_INPUT",
+        ),
+        (
+            json!({"op": "sign_out", "install": o, "machine_name": MACHINE}),
+            "E_BAD_INPUT",
+        ),
+    ] {
+        let e = refusal(auth(&mut c, args.clone()));
+        assert_eq!(e["code"], code, "{args}: {e}");
+        assert_eq!(e["issues"], issues, "{args}: {e}");
+    }
+    // a reply is unchanged: the card still carries only its own warnings
+    let v = ok(auth(
+        &mut c,
+        json!({"op": "start", "install": o, "machine_name": MACHINE}),
+    ));
+    assert_eq!(
+        (v["state"].clone(), v["warnings"].clone()),
+        (json!("confirmation_required"), json!([]))
+    );
+    assert!(hub.requests().is_empty());
+    assert_eq!(hub.finish(), 0);
 }

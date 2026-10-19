@@ -8,17 +8,21 @@
 //!   service's relay check decides, and nothing here skips it.
 //! - **The token door.** `rdy --json auth token` gives a consumer one line with current access,
 //!   only to a pipe: never to a terminal, never as text, and never the refresh token.
+//! - **The user config's warnings.** With no project, the shared config-warning print does not
+//!   run, so this command reads the user config's warnings itself: they follow a reply on
+//!   stderr, and a failure after they are read carries them as its issues.
 use crate::config_warning_line;
 use crate::output::print_error;
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
+use rdy_engine::config_levels::user_config_warnings;
 use rdy_engine::hub_config::HubConfig;
 use rdy_engine::hub_credentials::{AccessGrant, AuthPhase, AuthState};
 use rdy_engine::hub_types::{Origin, RequestClaim};
 use rdy_engine::{E_BAD_INPUT, RdyError, Session, classify};
 use rdy_mcp::tools::{
     AuthAnswerParam, AuthOp, AuthParams, AuthReply, AuthRequest, AuthSurface, auth_person,
-    auth_request, auth_user_file, run_auth, with_credentials,
+    auth_request, auth_user_file, run_auth, with_credentials, with_warnings,
 };
 use rdy_model::Role;
 use rdy_schema::Issue;
@@ -263,8 +267,17 @@ fn fail(e: RdyError, as_json: bool) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// `rdy auth <cmd>`: no project, store or daemon. Person commands print their reply, then the
-/// user config's hub warnings on stderr; the token door prints exactly one line on stdout.
+/// Each warning on stderr, in the shared form.
+fn print_warnings(warnings: &[Issue]) {
+    for w in warnings {
+        eprintln!("{}", config_warning_line(w));
+    }
+}
+
+/// `rdy auth <cmd>`: no project, store or daemon. The user config's warnings are read once,
+/// right after its location: a person command prints its reply, then the warnings on stderr;
+/// the token door prints exactly one line on stdout, then the warnings on stderr; a failure
+/// after the read carries them as its issues.
 pub(crate) fn run(cmd: AuthCmd, as_json: bool) -> ExitCode {
     if let AuthCmd::Token(_) = &cmd
         && let Err(e) = token_door(as_json, OutputKind::of_stdout())
@@ -275,20 +288,23 @@ pub(crate) fn run(cmd: AuthCmd, as_json: bool) -> ExitCode {
         Ok(f) => f,
         Err(e) => return fail(e, as_json),
     };
+    let warnings = user_config_warnings(&user_file);
+    let refuse = |e: RdyError| fail(with_warnings(e, &warnings), as_json);
     let settings = match HubConfig::load(None, Some(&user_file)) {
         Ok(s) => s,
-        Err(e) => return fail(e, as_json),
+        Err(e) => return refuse(e),
     };
     if let AuthCmd::Token(a) = &cmd {
         return match token(&a.install, &settings, &user_file) {
             Ok(line) => {
                 let mut out = std::io::stdout().lock();
-                match writeln!(out, "{line}").and_then(|_| out.flush()) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(_) => ExitCode::FAILURE,
+                if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+                    return ExitCode::FAILURE;
                 }
+                print_warnings(&warnings);
+                ExitCode::SUCCESS
             }
-            Err(e) => fail(e, as_json),
+            Err(e) => refuse(e),
         };
     }
     match person(cmd, &settings, &user_file) {
@@ -298,12 +314,10 @@ pub(crate) fn run(cmd: AuthCmd, as_json: bool) -> ExitCode {
             } else {
                 println!("{text}");
             }
-            for w in &settings.warnings {
-                eprintln!("{}", config_warning_line(w));
-            }
+            print_warnings(&warnings);
             ExitCode::SUCCESS
         }
-        Err(e) => fail(e, as_json),
+        Err(e) => refuse(e),
     }
 }
 

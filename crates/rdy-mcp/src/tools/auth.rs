@@ -12,10 +12,12 @@
 //!   fenced to its install, and dropped when the call returns, inside the tool's blocking run.
 //! - **Nothing secret leaves.** Replies carry no token, device code or complete verification
 //!   link. Access leaves only through the command line's machine-token reply.
+//! - **Warnings are not lost.** The config's warnings are read first; a failure after that
+//!   carries them as its issues ([`with_warnings`]).
 
 use super::*;
 use rdy_engine::answer::relay::RelayInput;
-use rdy_engine::config_levels::user_file_from_env;
+use rdy_engine::config_levels::{config_warnings, user_file_from_env};
 use rdy_engine::hub_config::HubConfig;
 use rdy_engine::hub_credentials::{
     AuthAnswer, AuthCaller, AuthConfirmation, AuthState, HubCredentials, InstallState,
@@ -26,6 +28,7 @@ use rdy_engine::hub_types::{
     HubCall, HubFailure, HubReply, HubTransport, Origin, OriginFence, RequestClaim, SystemHubClock,
 };
 use rdy_engine::*;
+use rdy_schema::Issue;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -227,6 +230,16 @@ pub fn auth_user_file() -> Result<std::path::PathBuf, RdyError> {
     require_user_file(user_file_from_env())
 }
 
+/// `e` with the config's `warnings` as its issues: those first, then each issue `e` had that is
+/// not one of them (a hub settings refusal already carries its own share).
+pub fn with_warnings(mut e: RdyError, warnings: &[Issue]) -> RdyError {
+    let own = std::mem::take(&mut e.issues);
+    e.issues = warnings.to_vec();
+    e.issues
+        .extend(own.into_iter().filter(|i| !warnings.contains(i)));
+    e
+}
+
 /// The bounded configured human actor: `actor` in `.rdy/local.yaml`, else in the user config,
 /// as `settings` read them, else `human:$USER`, else `human:unknown`.
 pub fn auth_person(settings: &HubConfig) -> String {
@@ -345,20 +358,28 @@ pub fn run_auth(surface: &AuthSurface<'_>, req: AuthRequest) -> Result<AuthReply
 
 /// `rdy_auth`: the session's sign-in act. Any session may call it; the service's relay check
 /// decides who may answer the card.
+///
+/// The config's warnings, as the project and user config are now, are read first: a failure
+/// after that carries them as its issues, so a mistake made during the session is not lost.
 pub fn rdy_auth(st: &mut McpState, p: AuthParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    let req = auth_request(p, None)?;
-    let user_file = auth_user_file()?;
     let root = st.engine.root();
-    let settings = HubConfig::load(Some(&root), Some(&user_file))?;
-    let person = auth_person(&settings);
-    let surface = AuthSurface {
-        session: &s,
-        person: &person,
-        implicit: true,
-        project: Some(&root),
-        user_file: &user_file,
-        settings: &settings,
+    let found = user_file_from_env();
+    let warnings = config_warnings(&root, found.as_deref());
+    let run = || -> Result<Value, RdyError> {
+        let req = auth_request(p, None)?;
+        let user_file = require_user_file(found)?;
+        let settings = HubConfig::load(Some(&root), Some(&user_file))?;
+        let person = auth_person(&settings);
+        let surface = AuthSurface {
+            session: &s,
+            person: &person,
+            implicit: true,
+            project: Some(&root),
+            user_file: &user_file,
+            settings: &settings,
+        };
+        run_auth(&surface, req)?.to_json()
     };
-    run_auth(&surface, req)?.to_json()
+    run().map_err(|e| with_warnings(e, &warnings))
 }
