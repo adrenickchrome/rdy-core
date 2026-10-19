@@ -57,6 +57,22 @@ pub struct BlobManifest {
     pub chunks: Vec<Hash>,
 }
 
+impl BlobManifest {
+    /// Whether `payload`, the bytes this manifest was decoded from, is its own canonical
+    /// encoding, as `put_blob` writes it. Postcard also decodes a varint that is not minimal, so
+    /// other bytes (under another hash) can give the same manifest; they are no blob a store
+    /// reads or writes.
+    pub fn is_encoding_of(&self, payload: &[u8]) -> bool {
+        crate::store::encode(self) == payload
+    }
+
+    /// Whether the chunk count is the one `put_blob` writes for the length: one chunk for each
+    /// started [`MAX_CHUNK_BYTES`](crate::bounded::MAX_CHUNK_BYTES) of it.
+    pub fn chunks_fit(&self) -> bool {
+        self.chunks.len() as u64 == self.len.div_ceil(crate::bounded::MAX_CHUNK_BYTES as u64)
+    }
+}
+
 /// The marker that ends a batch (kind `BATCH_COMMIT`): `start` is the location of the batch's
 /// first data frame, `frames` how many data frames the batch holds, and `digest` is
 /// `batch_digest` of their hashes.

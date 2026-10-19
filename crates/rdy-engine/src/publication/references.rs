@@ -285,9 +285,36 @@ fn walk_block<V: Visit>(v: &mut V, b: &Block) -> Result<(), RdyError> {
     Ok(())
 }
 
+/// The state a scan classifies reference targets against: its blocks by id, and all of them.
+/// A publication's source state, or a snapshot's own blocks.
+pub(crate) trait Source {
+    fn block(&self, id: &BlockId) -> Option<&Block>;
+    fn blocks(&self) -> Box<dyn Iterator<Item = &Block> + '_>;
+}
+
+impl Source for Materialized {
+    fn block(&self, id: &BlockId) -> Option<&Block> {
+        self.get(id)
+    }
+
+    fn blocks(&self) -> Box<dyn Iterator<Item = &Block> + '_> {
+        Box::new(self.iter())
+    }
+}
+
+impl Source for BTreeMap<&BlockId, &Block> {
+    fn block(&self, id: &BlockId) -> Option<&Block> {
+        self.get(id).copied()
+    }
+
+    fn blocks(&self) -> Box<dyn Iterator<Item = &Block> + '_> {
+        Box::new(self.values().copied())
+    }
+}
+
 /// The scan of the selected blocks: its running counts and rows.
 struct Scan<'a> {
-    source: &'a Materialized,
+    source: &'a dyn Source,
     keep: &'a BTreeSet<BlockId>,
     budget: Budget,
     /// The source's keys, built on the first key-shaped token.
@@ -305,7 +332,7 @@ impl Scan<'_> {
             return Some(Classification::Missing);
         }
         let source = self.source;
-        let keys = self.keys.get_or_insert_with(|| Keys::of(source.iter()));
+        let keys = self.keys.get_or_insert_with(|| Keys::of(source.blocks()));
         let holders = keys.holders(token);
         if holders.is_empty() {
             Some(Classification::Missing)
@@ -319,7 +346,7 @@ impl Scan<'_> {
     fn by_id(&self, id: &BlockId) -> Option<Classification> {
         if self.keep.contains(id) {
             None
-        } else if self.source.get(id).is_some() {
+        } else if self.source.block(id).is_some() {
             Some(Classification::Excluded)
         } else {
             Some(Classification::Missing)
@@ -373,18 +400,18 @@ impl Visit for Resources {
         &mut self.budget
     }
 
-    /// Counts one occurrence and bounds it as a row: any occurrence becomes a row of a
-    /// selection that leaves its target out.
-    fn occur(&mut self, _: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError> {
-        self.budget.occurrence()?;
-        self.budget.row(&at(), token)
+    /// Counts one occurrence. Whether it is a row, and so has its location and token bounded,
+    /// depends on the state that holds its target, which these blocks alone do not give.
+    fn occur(&mut self, _: &Block, _: &str, _: &dyn Fn() -> String) -> Result<(), RdyError> {
+        self.budget.occurrence()
     }
 }
 
-/// The text and reference bounds of `blocks` together, in the order a scan checks them, with
-/// no reference policy: every occurrence counts and has its location and token bounded, since
-/// any selection that leaves its target out makes it a row. So blocks within these bounds keep
-/// them in every selection of theirs.
+/// The text and reference bounds of `blocks` together that need no other block, in the order a
+/// scan checks them: each text value, all text, the reference occurrences and the field depth.
+/// A scan counts every occurrence whatever its target, so blocks over these bounds are over
+/// them in every state that holds them. A row's location and token bounds are not checked:
+/// a scan applies them only to a reference whose target lies outside its selection.
 pub(super) fn check_resources<'a>(
     blocks: impl IntoIterator<Item = &'a Block>,
     l: &Limits,
@@ -404,11 +431,12 @@ const METADATA_FIELDS: [&str; 2] = ["description", "title"];
 /// The reference check of `selected` (the selected blocks, in id order) against `source`, the
 /// whole snapshot, which classifies each target and supplies nothing else. `profile` is the
 /// chosen profile's block: its title and description reach the output whether or not its home
-/// doc is selected, so they count once either way (None for the implicit profile).
+/// doc is selected, so they count once either way (None for the implicit profile). A snapshot
+/// check passes the snapshot as `selected`, `source` and `keep` alike: the implicit profile.
 pub(crate) fn scan<'a>(
     selected: impl IntoIterator<Item = &'a Block>,
     profile: Option<&Block>,
-    source: &Materialized,
+    source: &dyn Source,
     keep: &BTreeSet<BlockId>,
     audience: Audience,
     l: &Limits,

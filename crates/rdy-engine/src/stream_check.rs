@@ -16,7 +16,7 @@ use crate::error::{E_REPO_MISMATCH, RdyError};
 use crate::publication;
 use crate::stream_error::{Reason, StreamError, to_rdy};
 use rdy_model::{Block, RepoId};
-use rdy_store::bounded::{self, MAX_CHUNK_BYTES};
+use rdy_store::bounded;
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_stream::{self, StreamHeader, StreamRecord};
@@ -45,10 +45,13 @@ impl From<StreamError> for Stop {
 /// as the header is read). A new holder passes None, and is then created with the report's repo
 /// id.
 ///
-/// Each record's local limits are checked at once: a block's text, reference and graph limits
-/// (the per-block part of [`publication::check_snapshot_limits`]), and a blob manifest's claimed
-/// length (the publication blob limit) and the chunk count that length gives. A record over
-/// one of them is refused with the publication limit's own text, positioned at the record.
+/// Each record's local limits are checked at once: a block's text, reference occurrence, field
+/// depth and graph limits (the part of [`publication::check_snapshot_limits`] that needs no
+/// other block), and a blob manifest's claimed length (the publication blob limit). A record
+/// over one of them is refused with the publication limit's own text, positioned at the record.
+/// A reference row's location and token bounds apply only when the snapshot lacks the target,
+/// so the take checks them with each snapshot. A blob manifest must also be its own canonical
+/// encoding with the chunk count its length gives, as a blob read requires (E_BAD_RECORD).
 pub fn check_batch<R: Read>(
     input: R,
     expected_repo: Option<RepoId>,
@@ -88,13 +91,18 @@ fn check_record(n: u64, at: u64, r: &StreamRecord) -> Result<(), Stop> {
         }
         kinds::BLOB_MANIFEST => {
             let m: BlobManifest = bounded::decode(payload).map_err(decoded)?;
+            // the bytes `put_blob` writes, which a blob read requires: no other encoding of
+            // the same manifest (such as a varint that is not minimal) is a blob
+            if !m.is_encoding_of(payload) {
+                return Err(bad(Reason::RecordDoesNotDecode));
+            }
             let l = publication::limits();
             if m.len > l.blob {
                 let e = publication::limit("blob", l.blob, "bytes");
                 return Err(positioned(n, at, *key, e));
             }
             // the chunks `put_blob` writes: one per started chunk of the claimed length
-            if m.chunks.len() as u64 != m.len.div_ceil(MAX_CHUNK_BYTES as u64) {
+            if !m.chunks_fit() {
                 return Err(bad(Reason::RecordDoesNotDecode));
             }
             Ok(())

@@ -271,6 +271,9 @@ fn limit_text(part: &str, limit: u64, unit: &str) -> (&'static str, String, Stri
 
 #[test]
 fn ha9_check_opens_no_store_and_reads_no_config() {
+    if child_check() {
+        return;
+    }
     let (_src, r, tag) = source();
     let (bytes, c) = batch_of(&r, tag, &BTreeSet::new());
 
@@ -297,6 +300,24 @@ fn ha9_check_opens_no_store_and_reads_no_config() {
         std::fs::read(&file).unwrap(),
         bytes,
         "the batch file is the hub's"
+    );
+
+    // and in a new process whose working directory is that directory, so a check that read a
+    // config or store from its working directory would meet the broken ones; the report goes to
+    // a file outside it
+    let out = tempfile::tempdir().unwrap();
+    let there = in_new_process(
+        "ha9_check_opens_no_store_and_reads_no_config",
+        Path::new("upload-1.rdysync"),
+        Some(repo(&r)),
+        &out.path().join("report"),
+        Some(dir.path()),
+    );
+    assert_eq!(there, serde_json::to_string(&report).unwrap());
+    assert_eq!(
+        listing(dir.path()),
+        before,
+        "nothing is created, changed or removed"
     );
 
     // the source project is open (its writer holds the store lock) while its batch is checked
@@ -482,8 +503,9 @@ fn ha9_batch_can_precede_root_and_dependencies() {
     assert_eq!(e.message, "stream record 0 at byte 12: invalid header");
 }
 
-/// The child half of [`ha9_check_has_no_process_state`]: in a new process, checks the batch
-/// file the parent names and writes the report's JSON, or the error's code and message.
+/// The child half of [`ha9_check_has_no_process_state`] and
+/// [`ha9_check_opens_no_store_and_reads_no_config`]: in a new process, checks the batch file the
+/// parent names and writes the report's JSON, or the error's code and message.
 fn child_check() -> bool {
     let Ok(file) = std::env::var("RDY_HA9_BATCH") else {
         return false;
@@ -503,23 +525,32 @@ fn child_check() -> bool {
     true
 }
 
-/// Runs this test binary's [`ha9_check_has_no_process_state`] in a new process on `file`.
-fn in_new_process(file: &Path, repo: Option<RepoId>, out: &Path) -> String {
+/// Runs this test binary's test `test` in a new process on `file`, in working directory `cwd`
+/// when given. The working directory is the child's own, so tests that run in parallel keep
+/// theirs.
+fn in_new_process(
+    test: &str,
+    file: &Path,
+    repo: Option<RepoId>,
+    out: &Path,
+    cwd: Option<&Path>,
+) -> String {
     let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-    cmd.args([
-        "--exact",
-        "ha9_check_has_no_process_state",
-        "--test-threads=1",
-    ])
-    .env("RDY_HA9_BATCH", file)
-    .env("RDY_HA9_OUT", out);
+    cmd.args(["--exact", test, "--test-threads=1"])
+        .env("RDY_HA9_BATCH", file)
+        .env("RDY_HA9_OUT", out);
     if let Some(r) = repo {
         cmd.env("RDY_HA9_REPO", r.to_string());
+    }
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
     }
     let status = cmd.status().unwrap();
     assert!(status.success());
     std::fs::read_to_string(out).unwrap()
 }
+
+const NO_STATE: &str = "ha9_check_has_no_process_state";
 
 #[test]
 fn ha9_check_has_no_process_state() {
@@ -540,13 +571,31 @@ fn ha9_check_has_no_process_state() {
 
     // a failed check in one process, then the good batch in each of two new processes: each
     // call stands alone, and a restart between calls loses nothing
-    let failed = in_new_process(&bad, Some(repo(&r)), &dir.path().join("out-1"));
+    let failed = in_new_process(
+        NO_STATE,
+        &bad,
+        Some(repo(&r)),
+        &dir.path().join("out-1"),
+        None,
+    );
     assert_eq!(
         failed,
         "E_STREAM_TRUNCATED: stream trailer is missing or does not match"
     );
-    let first = in_new_process(&good, Some(repo(&r)), &dir.path().join("out-2"));
-    let second = in_new_process(&good, Some(repo(&r)), &dir.path().join("out-3"));
+    let first = in_new_process(
+        NO_STATE,
+        &good,
+        Some(repo(&r)),
+        &dir.path().join("out-2"),
+        None,
+    );
+    let second = in_new_process(
+        NO_STATE,
+        &good,
+        Some(repo(&r)),
+        &dir.path().join("out-3"),
+        None,
+    );
     assert_eq!(first, here);
     assert_eq!(second, here);
     // and in this process, after its own failure
@@ -743,6 +792,32 @@ fn ha9_huge_lengths_and_deep_values_refuse_without_panics() {
     };
     let rec = enc.record(kinds::BLOB_MANIFEST, &empty);
     check_batch(crafted(&[rec], &[]).as_slice(), None).unwrap();
+    // the empty manifest with a length varint that is not minimal: it decodes to the same
+    // value, but it is not its own canonical encoding, so it is not what `put_blob` writes and a
+    // blob read refuses it. A blob object that is invalid on its own is refused at once
+    let payload = vec![0x80, 0x00, 0x00];
+    let key = ObjectKey {
+        kind: kinds::BLOB_MANIFEST,
+        hash: Hash::of(&payload),
+    };
+    let b = crafted(&[StreamRecord::Present { key, payload }], &[]);
+    sync_stream::check_batch(b.as_slice()).unwrap();
+    let e = check_batch(b.as_slice(), None).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            E_BAD_RECORD,
+            format!(
+                "stream record 1 at byte {}: record does not decode",
+                head.len()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        position(&e),
+        format!("record 1 at byte {}; object {key}", head.len())
+    );
 
     // a block's own publication limits, each at N (passes) and N - 1 (refused at the record)
     let mut table = blk("tb-TAB01", "table", None, "a");
@@ -768,20 +843,19 @@ fn ha9_huge_lengths_and_deep_values_refuse_without_panics() {
         ("field depth", "levels", 3, |l, n| {
             l.field_depth = n as usize
         }),
-        (
-            "reference location",
-            "bytes",
-            "/fields/rows/0/deep~0key".len() as u64,
-            |l, n| l.location = n as usize,
-        ),
-        (
-            "reference token",
-            "bytes",
-            "in-snapshot-key".len() as u64,
-            |l, n| l.token = n as usize,
-        ),
         ("graph", "edges", edges, |l, n| l.graph = n as usize),
     ];
+    // a reference row's location and token are bounded only when its target lies outside the
+    // snapshot, which one record cannot tell: the take checks them with the snapshot
+    let deferred = Limits {
+        location: "/fields/rows/0/deep~0key".len() - 1,
+        token: "in-snapshot-key".len() - 1,
+        ..Limits::default()
+    };
+    {
+        let _g = publication::override_limits_for_tests(deferred);
+        check_batch(b.as_slice(), None).unwrap();
+    }
     for (part, unit, n, set) in cases {
         let mut l = Limits::default();
         set(&mut l, n);
@@ -995,21 +1069,105 @@ fn ha9_shared_snapshot_limits_match_publications() {
     );
     drop(_g);
 
-    // the one deliberate difference: the shared check has no reference policy, so it bounds a
-    // reference whose target is in the snapshot too. A selection that leaves that target out
-    // makes it a row, so a snapshot within the shared limits keeps them in every selection.
+    // a reference row's location and token are bounded under Publications' own condition: only
+    // a reference whose target lies outside the snapshot is a row. One whose target is in the
+    // snapshot passes both, by id and by key; one whose target is not refuses both alike
     let inner = vec![
-        named(blk("d-H0ST1", "doc", None, "a"), "doc"),
-        with_body(blk("p-H0ST4", "prose", Some("d-H0ST1"), "a"), "{{d-H0ST1}}"),
+        with_field(
+            named(blk("d-H0ST1", "doc", None, "a"), "doc"),
+            "key",
+            s("doc"),
+        ),
+        with_body(
+            blk("p-H0ST4", "prose", Some("d-H0ST1"), "a"),
+            "{{d-H0ST1}} {{doc}}",
+        ),
+    ];
+    let outer = vec![
+        inner[0].clone(),
+        with_body(
+            blk("p-H0ST4", "prose", Some("d-H0ST1"), "a"),
+            "{{d-ELSE1}} {{doc}}",
+        ),
     ];
     let l = Limits {
-        token: "d-H0ST1".len() - 1,
+        token: "doc".len() - 1,
         ..Limits::default()
     };
     let _g = publication::override_limits_for_tests(l);
     publication::resolve_in_for_tests(&st, &synth(&inner), IMPLICIT_ORG).unwrap();
+    publication::check_snapshot_limits_for_tests(&inner, manifest).unwrap();
+    let p = publication::resolve_in_for_tests(&st, &synth(&outer), IMPLICIT_ORG).unwrap_err();
+    let s = publication::check_snapshot_limits_for_tests(&outer, manifest).unwrap_err();
     assert_eq!(
-        refusal(&publication::check_snapshot_limits_for_tests(&inner, manifest).unwrap_err()),
-        limit_text("reference token", "d-H0ST1".len() as u64 - 1, "bytes")
+        refusal(&p),
+        limit_text("reference token", "doc".len() as u64 - 1, "bytes")
     );
+    assert_eq!(refusal(&s), refusal(&p));
+}
+
+/// A table whose one row holds a map with a 1024-byte key whose value is a reference to `to`.
+fn long_key_rows(to: &str) -> Value {
+    let mut row = serde_json::Map::new();
+    row.insert("k".repeat(1024), json!(format!("{{{{{to}}}}}")));
+    json!([[Value::Object(row)]])
+}
+
+#[test]
+fn ha9_reference_rows_keep_publications_conditions() {
+    // a normally written, landed and tagged source: a table under a doc whose row is a map with
+    // a 1024-byte key, holding a reference to that doc. Its location is over the 1024-byte
+    // limit, but its target is in every selection that holds the table, so it is no row
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rows"}}
+        ]),
+    );
+    let d = res.created["$d"].clone();
+    write(
+        &mut r,
+        json!([{"op": "create", "type": "table", "parent": res.created["$s"].clone(),
+                "fields": {"columns": ["a"], "rows": long_key_rows(&d)}}]),
+    );
+    land(&mut r);
+    r.tag(&founder(), "v1.0.0", None, None).unwrap();
+    let tag = tag_hash(&r, "v1.0.0");
+    let st = r.read();
+    let scope = st.resolve_scope("tag:v1.0.0").unwrap();
+    let location = format!("/fields/rows/0/0/{}", "k".repeat(1024));
+    assert!(location.len() > publication::limits().location);
+
+    // the production limits: Publications publishes it, the shared snapshot check and the batch
+    // check pass it
+    let res = publication::resolve(&st, &scope, IMPLICIT_ORG).unwrap();
+    publication::load_assets(&st, &res).unwrap();
+    let m = st.materialized(&scope).unwrap();
+    let reader = st.reader();
+    let manifest = |h: &Hash| -> Result<Option<BlobManifest>, RdyError> {
+        Ok(Some(reader.get_typed(kinds::BLOB_MANIFEST, h)?))
+    };
+    publication::check_snapshot_limits_for_tests(m.iter(), manifest).unwrap();
+    let (bytes, c) = batch_of(&r, tag, &BTreeSet::new());
+    assert_eq!(
+        check_batch(bytes.as_slice(), Some(repo(&r))).unwrap().keys,
+        c.records
+    );
+
+    // the same row whose target is outside the snapshot is a row, and both refuse it alike
+    let mut blocks: Vec<Block> = m.iter().cloned().collect();
+    let table = blocks.iter_mut().find(|b| b.block_type == "table").unwrap();
+    let mut row = BTreeMap::new();
+    row.insert("k".repeat(1024), s("{{d-ELSE1}}"));
+    table.fields.insert(
+        "rows".into(),
+        FieldValue::List(vec![FieldValue::List(vec![FieldValue::Map(row)])]),
+    );
+    let p = publication::resolve_in_for_tests(&st, &synth(&blocks), IMPLICIT_ORG).unwrap_err();
+    let e = publication::check_snapshot_limits_for_tests(&blocks, manifest).unwrap_err();
+    assert_eq!(refusal(&p), limit_text("reference location", 1024, "bytes"));
+    assert_eq!(refusal(&e), refusal(&p));
 }

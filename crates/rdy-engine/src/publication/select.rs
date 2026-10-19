@@ -754,10 +754,11 @@ pub fn load_assets(
 /// folder paths, then each distinct attachment blob's length and their total. `manifest` reads a
 /// blob's manifest; None means the manifest is missing, and the caller owns completeness.
 ///
-/// Reference occurrences have no policy here: each one counts and has its location and token
-/// bounded, whatever its target. Each limit only grows with the selection, so a snapshot within
-/// these limits keeps them in every publication selection of it. It reads no store, pack or
-/// project path.
+/// The references are checked as the implicit profile checks them, with the snapshot as both
+/// source and selection: every occurrence counts, and only one whose target lies outside the
+/// snapshot is a row, with its location and token bounded. So a snapshot Publications
+/// publishes whole passes, and one it refuses is refused with its error. It reads no store,
+/// pack or project path.
 #[allow(
     dead_code,
     reason = "the holder take calls it for every landing snapshot it takes"
@@ -777,7 +778,15 @@ pub(crate) fn check_snapshot_limits<'a>(
         by_id.insert(&b.id, b);
     }
     check_tree(&|id| by_id.get(id).copied(), &keep)?;
-    references::check_resources(by_id.values().copied(), &l)?;
+    // the reference check of the implicit profile: the snapshot is the source and the selection
+    references::scan(
+        by_id.values().copied(),
+        None,
+        &by_id,
+        &keep,
+        Audience::Org,
+        &l,
+    )?;
     check_graph(by_id.values().copied(), &l)?;
     let mut rows = 0usize;
     let mut blobs = BTreeSet::new();
@@ -802,9 +811,11 @@ pub(crate) fn check_snapshot_limits<'a>(
     check_assets(&blobs, &mut manifest, &l)
 }
 
-/// The limits block `b` keeps on its own, whatever snapshot holds it: its text and reference
-/// bounds and its graph edges. A block over one of them puts every snapshot that holds it over
-/// the same limit, so a receiver can refuse it at once.
+/// The limits block `b` keeps on its own, whatever snapshot holds it: its text bounds, its
+/// reference occurrences, its field depth and its graph edges. A block over one of them puts
+/// every snapshot that holds it over the same limit, so a receiver can refuse it at once. A
+/// reference row's location and token bounds depend on whether the snapshot holds the target,
+/// so [`check_snapshot_limits`] checks them.
 pub(crate) fn check_block_limits(b: &Block) -> Result<(), RdyError> {
     let l = limits();
     references::check_resources(std::iter::once(b), &l)?;
