@@ -300,6 +300,23 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
         assert_eq!(pio::is_shared_writable(&meta), shared, "{m:o}");
         assert_eq!(pio::is_owner_only(&meta), owner_only, "{m:o}");
     }
+    // all users may write the directory, and its sticky bit is unset (ruling gate-g3)
+    let dir = d.path().join("modes");
+    fs::create_dir(&dir).unwrap();
+    for (m, unsticky) in [
+        (0o755, false),
+        (0o775, false),
+        (0o777, true),
+        (0o757, true),
+        (0o1777, false),
+        (0o1757, false),
+        (0o700, false),
+    ] {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(m)).unwrap();
+        let meta = fs::symlink_metadata(&dir).unwrap();
+        assert_eq!(pio::is_world_writable_unsticky(&meta), unsticky, "{m:o}");
+    }
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 /// The umask check a config edit runs before it makes a directory: a probe file made with mode

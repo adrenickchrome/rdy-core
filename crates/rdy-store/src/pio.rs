@@ -6,7 +6,8 @@
 //! - privacy: this process's uid (`own_uid`), a file's owner (`owner`), private files of mode
 //!   0o600 (`private_file`, `make_private_file`, `is_private_file`), private directories of
 //!   mode 0o700 (`create_private_dir`, `make_private_dir`, `is_private_dir`), the mode
-//!   tests `is_shared_writable` and `is_owner_only`, and the umask check `umask_keeps_0700_at`;
+//!   tests `is_shared_writable`, `is_world_writable_unsticky` and `is_owner_only`, and the umask
+//!   check `umask_keeps_0700_at`;
 //! - calls in an open directory (`open_dir`, `open_dir_at`, `open_read_at`,
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
 //!   `rename_at`, `is_link_refusal`): each names one entry of a directory handle, so a path that
@@ -116,6 +117,15 @@ pub fn owner(meta: &Metadata) -> u32 {
 #[cfg(unix)]
 pub fn is_shared_writable(meta: &Metadata) -> bool {
     meta.permissions().mode() & 0o022 != 0
+}
+
+/// Whether others (all users, not only the group) may write the directory `meta` describes and
+/// its sticky bit is unset (mode bit 0o002 without 0o1000). In such a directory any user can
+/// remove or replace an entry; the sticky bit limits that to the entry's owner.
+#[cfg(unix)]
+pub fn is_world_writable_unsticky(meta: &Metadata) -> bool {
+    let mode = meta.permissions().mode();
+    mode & 0o002 != 0 && mode & 0o1000 == 0
 }
 
 /// Whether group and others have no permission bit on `meta` (mode & 0o077 is 0).

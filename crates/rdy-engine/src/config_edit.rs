@@ -10,9 +10,13 @@
 //! The caller's config home is trusted as given, links included. Below it, every directory,
 //! the file and its lock are opened one entry at a time without following links, and must be
 //! this user's: a symbolic link, a foreign owner and a target that is not a regular file are
-//! refused. The directory that holds the file must not be writable by group or others, so no
-//! other user can swap a temp file or the target. A secret file (`private`) must also be mode
-//! 0o600, and a lock must give group and others no access; a settings file keeps its mode
+//! refused. These directories, and the home when it holds the file itself, also have a write
+//! rule. For a secret file (`private`), group and others must not be able to write them, so no
+//! other user can swap a temp file or the target. For a settings file, the group may write them:
+//! under a umask of 002, `rdy init` makes `.rdy/` group-writable, and a group that can write it
+//! can already change the store. All users may write such a directory only when its sticky bit
+//! is set, so no other user can remove or replace this user's entries. A secret file must also
+//! be mode 0o600, and a lock must give group and others no access; a settings file keeps its mode
 //! through a replacement. Nothing here changes the mode of any directory, or of an existing
 //! file. mkdir returns no handle, so no call proves that the directory opened after it is the one
 //! it made: a directory is made only when the umask keeps 0o700 whole, and what then stands at
@@ -65,7 +69,7 @@ impl LockedConfig {
         limit: usize,
     ) -> Result<LockedConfig, RdyError> {
         let (dirs, name) = split_rel(rel)?;
-        let (dir, dir_path) = walk(home, &dirs, true)?;
+        let (dir, dir_path) = walk(home, &dirs, true, private)?;
         let dir_id = FileId::of_file(&dir).map_err(|_| save_failed())?;
         let lock = open_lock(&dir, &lock_name(name))?;
         lock.lock().map_err(|_| save_failed())?;
@@ -129,7 +133,7 @@ impl LockedConfig {
     /// check of [`walk`] passing again; nothing is created.
     fn check_bound(&self) -> Result<(), RdyError> {
         let (dirs, _) = split_rel(&self.rel)?;
-        let (dir, _) = walk(&self.home, &dirs, false)?;
+        let (dir, _) = walk(&self.home, &dirs, false, self.private)?;
         match FileId::of_file(&dir) {
             Ok(id) if id == self.dir_id => Ok(()),
             Ok(_) => Err(not_private()),
@@ -197,11 +201,17 @@ fn lock_name(name: &OsStr) -> OsString {
 }
 
 /// Opens `home` (links followed: the caller trusts it), then each of `dirs` below it, one entry
-/// at a time and never through a link. Each must be a directory this user owns that group and
-/// others cannot write; so must the last one, which holds the file, even when it is the home.
-/// With `create`, a missing directory is made 0o700 and synced with its parent; without it, a
-/// missing directory means the path changed. Returns the last directory and its path.
-fn walk(home: &Path, dirs: &[&OsStr], create: bool) -> Result<(File, PathBuf), RdyError> {
+/// at a time and never through a link. Each must be a directory this user owns that passes the
+/// write rule of [`check_dir`] for `private`; so must the last one, which holds the file, even
+/// when it is the home. With `create`, a missing directory is made 0o700 and synced with its
+/// parent; without it, a missing directory means the path changed. Returns the last directory
+/// and its path.
+fn walk(
+    home: &Path,
+    dirs: &[&OsStr],
+    create: bool,
+    private: bool,
+) -> Result<(File, PathBuf), RdyError> {
     let mut cur = pio::open_dir(home).map_err(|_| not_private())?;
     let mut cur_path = home.to_path_buf();
     for &part in dirs {
@@ -213,12 +223,12 @@ fn walk(home: &Path, dirs: &[&OsStr], create: bool) -> Result<(File, PathBuf), R
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_private()),
             Err(e) => return Err(open_failed(&e)),
         };
-        check_dir(&next)?;
+        check_dir(&next, private)?;
         cur = next;
         cur_path.push(part);
     }
     if dirs.is_empty() {
-        check_dir(&cur)?;
+        check_dir(&cur, private)?;
     }
     Ok((cur, cur_path))
 }
@@ -281,10 +291,17 @@ fn probe_name(name: &OsStr) -> OsString {
     tmp
 }
 
-/// A directory of the config path: this user's, and not writable by group or others.
-fn check_dir(dir: &File) -> Result<(), RdyError> {
+/// A directory of the config path: this user's, and safe to write the file in. For a secret
+/// file (`private`), group and others cannot write it. For a settings file, the group may write
+/// it, and all users may write it only when the sticky bit is set.
+fn check_dir(dir: &File, private: bool) -> Result<(), RdyError> {
     let m = dir.metadata().map_err(|_| save_failed())?;
-    if m.is_dir() && pio::owner(&m) == pio::own_uid() && !pio::is_shared_writable(&m) {
+    let shared = if private {
+        pio::is_shared_writable(&m)
+    } else {
+        pio::is_world_writable_unsticky(&m)
+    };
+    if m.is_dir() && pio::owner(&m) == pio::own_uid() && !shared {
         Ok(())
     } else {
         Err(not_private())

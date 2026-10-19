@@ -20,6 +20,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier};
 
@@ -667,6 +668,11 @@ fn hsa6_only_the_destination_settings_file_is_saved() {
 fn hsa6_remote_changes_never_touch_the_project_log() {
     let project = private_dir();
     drop(Rdy::init(project.path(), "rdy-standard").unwrap());
+    if std::env::var(UMASK_RUN).as_deref() == Ok("002") {
+        // gate G3: under this umask `rdy init` makes `.rdy/` group-writable, and settings
+        // writes through it must still work
+        assert_eq!(mode(&project.path().join(".rdy")) & 0o020, 0o020);
+    }
     let fx = Fx::with_project(project);
     let store = fx.project().join(".rdy/store");
     let log = tree(&store);
@@ -868,4 +874,42 @@ fn hsa6_share_uniqueness_is_checked_on_the_effective_config() {
     assert_eq!(changed.remote.mode, RemoteMode::Share);
     assert_eq!(changed.remote.level, RemoteLevel::User);
     assert_eq!(effective_shares(&fx), ["b"]);
+}
+
+/// The umask a rerun of the hsa6_ tests runs under, in octal; unset in a plain run.
+const UMASK_RUN: &str = "RDY_HSA6_UMASK";
+
+/// Ruling gate-g3: every hsa6_ test also passes under a umask of 002 (the Ubuntu default for
+/// user private groups, under which `rdy init` makes `.rdy/` 0775) and of 022. The umask is
+/// process-wide, so each runs in its own process, set by `sh`.
+#[test]
+fn hsa6_remote_tests_pass_under_umask_002_and_022() {
+    for umask in ["002", "022"] {
+        let out = Command::new("/bin/sh")
+            .args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "hsa6_",
+                "--skip",
+                "hsa6_remote_tests_pass_under_umask_002_and_022",
+            ])
+            .args(["--test-threads=1"])
+            .env(UMASK_RUN, umask)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let passed = stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("test result: ok. "))
+            .filter_map(|l| l.split(' ').next()?.parse::<usize>().ok())
+            .sum::<usize>();
+        assert!(
+            out.status.success()
+                && passed >= 5
+                && stdout.contains("hsa6_remote_changes_never_touch_the_project_log ... ok"),
+            "umask {umask}: {} ({passed} passed)\n{stdout}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

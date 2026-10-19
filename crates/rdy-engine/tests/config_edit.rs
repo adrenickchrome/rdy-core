@@ -372,8 +372,10 @@ fn hsa2_config_reads_and_writes_are_bounded() {
 // Fix round 1.
 
 /// Finding 1: in a directory that group or others may write, another user can swap the synced
-/// temp file for their own before the rename. Such a directory is refused, at open and again at
-/// replace, before any temp file is made. An owner-held 0755 directory still works.
+/// temp file for their own before the rename. Such a directory is refused for a secret file, at
+/// open and again at replace, before any temp file is made. A settings file is refused in a
+/// directory that all users may write without the sticky bit (ruling gate-g3: the group may
+/// write a settings file's directory). An owner-held 0755 directory still works.
 #[test]
 fn hsa2_a_directory_others_may_write_is_refused_before_a_temp_is_made() {
     let d = home_dir();
@@ -386,10 +388,12 @@ fn hsa2_a_directory_others_may_write_is_refused_before_a_temp_is_made() {
             open(home, "rdy/credentials.yaml", true),
             &format!("a {wide:o} directory"),
         );
-        assert_privacy(
-            open(home, "rdy/config.yaml", false),
-            &format!("a {wide:o} directory, settings"),
-        );
+        if wide & 0o1002 == 0o002 {
+            assert_privacy(
+                open(home, "rdy/config.yaml", false),
+                &format!("a {wide:o} directory, settings"),
+            );
+        }
         assert_eq!(mode(&rdy), wide, "no silent chmod");
         assert!(names(&rdy).is_empty(), "{wide:o}: no lock is made there");
     }
@@ -878,5 +882,164 @@ fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchange
         drop(open(d2.path(), "rdy/credentials.yaml", private).unwrap());
         assert_eq!(mode(&d2.path().join("rdy")), 0o700);
         assert_eq!(names(&d2.path().join("rdy")), ["credentials.yaml.lock"]);
+    }
+}
+
+// Gate G3 (ruling gate-g3): under a umask of 002, the Ubuntu default for user private groups,
+// `rdy init` makes `.rdy/` 0775. A settings file may be written through a directory the group
+// may write; a secret file may not. A directory all users may write is refused for both, unless
+// its sticky bit is set, which a settings file accepts. The umask is process-wide, so each case
+// runs in its own process, set by `sh`.
+
+/// The home of the child half of the group-write test; without it the child does nothing.
+const GROUP_CHILD: &str = "RDY_HSA2_GROUP_CHILD";
+
+/// The umask the child of the group-write test runs under, in octal.
+const GROUP_UMASK: &str = "RDY_HSA2_GROUP_UMASK";
+
+/// Runs this test binary under `umask` with the libtest `args`; panics unless it passes with at
+/// least `min` tests run, and returns its output.
+fn run_under_umask(umask: &str, args: &[&str], envs: &[(&str, &Path)], min: usize) -> String {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
+        .arg(std::env::current_exe().unwrap())
+        .args(args)
+        .args(["--test-threads=1", "--nocapture"])
+        .env(GROUP_UMASK, umask);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let passed = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("test result: ok. "))
+        .filter_map(|l| l.split(' ').next()?.parse::<usize>().ok())
+        .sum::<usize>();
+    assert!(
+        out.status.success() && passed >= min,
+        "umask {umask}, {args:?}: {} ({passed} passed)\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+#[test]
+fn hsa2_a_group_writable_folder_takes_settings_not_secrets_under_umask_002_and_022() {
+    for umask in ["002", "022"] {
+        let d = home_dir();
+        let stdout = run_under_umask(
+            umask,
+            &["hsa2_group_writable_folder_child", "--exact"],
+            &[(GROUP_CHILD, d.path())],
+            1,
+        );
+        assert!(
+            stdout.contains("HSA2 group child done"),
+            "umask {umask}: the child ran\n{stdout}"
+        );
+    }
+}
+
+/// The child half of the test above: it runs only in the process that test starts.
+#[test]
+fn hsa2_group_writable_folder_child() {
+    let Some(home) = std::env::var_os(GROUP_CHILD) else {
+        return;
+    };
+    let home = Path::new(&home);
+    let umask = u32::from_str_radix(&std::env::var(GROUP_UMASK).unwrap(), 8).unwrap();
+    // a project's `.rdy/` as `rdy init` makes it: 0o777 less the umask (0o775 under 002)
+    let dot = home.join(".rdy");
+    fs::create_dir(&dot).unwrap();
+    assert_eq!(mode(&dot), 0o777 & !umask, "the umask is in force");
+    let mut c = open(home, ".rdy/local.yaml", false).unwrap();
+    c.replace(b"a: 1\n").unwrap();
+    drop(c);
+    assert_eq!(
+        open(home, ".rdy/local.yaml", false).unwrap().bytes(),
+        b"a: 1\n"
+    );
+    assert_eq!(
+        mode(&dot.join("local.yaml")),
+        0o600,
+        "a new settings file is 0600"
+    );
+    assert_eq!(mode(&dot), 0o777 & !umask, "no silent chmod");
+    // a 0775 directory below the home: settings yes, secrets no
+    let group = home.join("group");
+    mkdir(&group).unwrap();
+    chmod(&group, 0o775);
+    let mut s = open(home, "group/config.yaml", false).unwrap();
+    s.replace(b"b: 2\n").unwrap();
+    drop(s);
+    assert_eq!(fs::read(group.join("config.yaml")).unwrap(), b"b: 2\n");
+    assert_privacy(
+        open(home, "group/credentials.yaml", true),
+        "a secret file in a 0775 directory",
+    );
+    assert_eq!(
+        names(&group),
+        ["config.yaml", "config.yaml.lock"],
+        "no secret lock"
+    );
+    assert_eq!(mode(&group), 0o775, "no silent chmod");
+    // a 0775 home that holds the file itself is judged the same way
+    let mut h = open(&group, "own.yaml", false).unwrap();
+    h.replace(b"c: 3\n").unwrap();
+    drop(h);
+    assert_privacy(
+        open(&group, "credentials.yaml", true),
+        "a secret file in a 0775 home",
+    );
+    // a directory that all users may write, without the sticky bit: refused for both
+    for wide in [0o777, 0o757] {
+        let world = home.join(format!("world{wide:o}"));
+        mkdir(&world).unwrap();
+        chmod(&world, wide);
+        for (rel, private) in [("config.yaml", false), ("credentials.yaml", true)] {
+            assert_privacy(
+                open(home, &format!("world{wide:o}/{rel}"), private),
+                &format!("a {wide:o} directory, private={private}"),
+            );
+        }
+        assert!(names(&world).is_empty(), "{wide:o}: nothing is made there");
+        assert_eq!(mode(&world), wide, "no silent chmod");
+    }
+    // with the sticky bit, all users may write it, but only this user may remove or replace
+    // this user's entries: a settings file is accepted, a secret file is not
+    let sticky = home.join("sticky");
+    mkdir(&sticky).unwrap();
+    chmod(&sticky, 0o1777);
+    let mut t = open(home, "sticky/config.yaml", false).unwrap();
+    t.replace(b"d: 4\n").unwrap();
+    drop(t);
+    assert_eq!(fs::read(sticky.join("config.yaml")).unwrap(), b"d: 4\n");
+    assert_privacy(
+        open(home, "sticky/credentials.yaml", true),
+        "a secret file in a 1777 directory",
+    );
+    assert_eq!(mode(&sticky), 0o1777, "no silent chmod");
+    println!("HSA2 group child done");
+}
+
+/// Ruling gate-g3: every hsa2_ config test also passes under a umask of 002 and of 022, each in
+/// its own process.
+#[test]
+fn hsa2_config_tests_pass_under_umask_002_and_022() {
+    for umask in ["002", "022"] {
+        run_under_umask(
+            umask,
+            &[
+                "hsa2_",
+                "--skip",
+                "hsa2_config_tests_pass_under_umask_002_and_022",
+                "--skip",
+                "hsa2_a_group_writable_folder_takes_settings_not_secrets_under_umask_002_and_022",
+            ],
+            &[],
+            10,
+        );
     }
 }
