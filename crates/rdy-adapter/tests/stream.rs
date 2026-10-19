@@ -1,0 +1,379 @@
+//! ha14 (D-D2NPN, D-DAGNB, D-WDKWQ): the stateless batch check and the library stream export
+//! through the adapter. Core owns the bytes, the errors and the limits; the adapter delegates, so
+//! every result here is compared with the core call it stands for. The project is built with core
+//! calls in a closed store first, then read through the adapter.
+
+use rdy_adapter::stream::{
+    BatchReport, ObjectKey, ObjectPresence, StreamError, StreamHeader, StreamPurpose, StreamReader,
+    StreamRecord, StreamTotals, StreamWriter, check_batch,
+};
+use rdy_adapter::{Hash, RdyError, RepoId, Snapshot, StoreHandle};
+use rdy_engine::{Rdy, Session, SessionKind, WriteRequest, stream_check, stream_export};
+use rdy_model::Role;
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+
+fn session(role: Role) -> Session {
+    Session {
+        actor: if role == Role::Approver {
+            "human:founder".into()
+        } else {
+            "agent:a".into()
+        },
+        run: None,
+        role,
+        kind: SessionKind::Human,
+    }
+}
+
+fn write(r: &mut Rdy, ops: Value) -> rdy_engine::WriteResult {
+    r.write(
+        &session(Role::Writer),
+        WriteRequest {
+            view: "work".into(),
+            ops: serde_json::from_value(ops).unwrap(),
+            justification: None,
+            message: "ha14".into(),
+        },
+    )
+    .unwrap()
+}
+
+fn land(r: &mut Rdy, title: &str) {
+    let p = r
+        .propose(&session(Role::Writer), "work", title, None)
+        .unwrap();
+    r.land(&session(Role::Approver), &p.id).unwrap();
+}
+
+struct Fixture {
+    dir: tempfile::TempDir,
+    repo: RepoId,
+    tag: Hash,
+    /// What core itself exports for `tag`, with nothing known.
+    bytes: Vec<u8>,
+    report: BatchReport,
+    /// Core's export with the first two keys of `report` known.
+    known: BTreeSet<ObjectKey>,
+    partial: Vec<u8>,
+    partial_report: BatchReport,
+}
+
+/// A closed project with two landings, tagged v1.0.0 after the second, and core's own export of
+/// that tag taken before any adapter handle opens the store.
+fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "First."}
+        ]),
+    );
+    land(&mut r, "first");
+    write(
+        &mut r,
+        json!([{"op": "create", "type": "prose", "id": "$q", "parent": w.created["$d"], "body": "Second."}]),
+    );
+    land(&mut r, "second");
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    let tag = r.store().tags().unwrap()[0].1;
+    let repo = r.store().repo_id().unwrap().unwrap();
+    let mut bytes = Vec::new();
+    let report = stream_export::write(&r.read(), tag, &BTreeSet::new(), &mut bytes).unwrap();
+    let known: BTreeSet<ObjectKey> = report.keys.iter().take(2).copied().collect();
+    let mut partial = Vec::new();
+    let partial_report = stream_export::write(&r.read(), tag, &known, &mut partial).unwrap();
+    r.close().unwrap();
+    Fixture {
+        dir,
+        repo,
+        tag,
+        bytes,
+        report,
+        known,
+        partial,
+        partial_report,
+    }
+}
+
+fn export(snap: &Snapshot, tag: &str, known: &BTreeSet<ObjectKey>) -> (Vec<u8>, BatchReport) {
+    let mut out = Vec::new();
+    let report = snap.write_stream(tag, known, &mut out).unwrap();
+    (out, report)
+}
+
+fn same_error(a: &RdyError, b: &RdyError) {
+    assert_eq!((&a.code, &a.message, &a.fix), (&b.code, &b.message, &b.fix));
+}
+
+#[test]
+fn ha14_adapter_batch_matches_core_bytes_and_reports() {
+    let f = fixture();
+    let handle = StoreHandle::open(f.dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+
+    // the export is core's bytes and core's report, by stored name or by version
+    let (bytes, report) = export(&snap, "v1.0.0", &BTreeSet::new());
+    assert_eq!(bytes, f.bytes);
+    assert_eq!(report, f.report);
+    assert_eq!(export(&snap, "1.0.0", &BTreeSet::new()).0, f.bytes);
+    assert_eq!(report.header.tag, f.tag);
+    assert_eq!(report.header.repo_id, f.repo);
+    assert_eq!(report.header.purpose, StreamPurpose::TagHistory);
+    assert_eq!(report.bytes + 85, bytes.len() as u64);
+
+    // the check is core's check: same report, with or without the repo to match
+    assert_eq!(check_batch(bytes.as_slice(), None).unwrap(), report);
+    assert_eq!(
+        check_batch(bytes.as_slice(), Some(f.repo)).unwrap(),
+        stream_check::check_batch(bytes.as_slice(), Some(f.repo)).unwrap()
+    );
+
+    // known keys leave their objects out and become the header's prerequisites, as in core
+    let (partial, partial_report) = export(&snap, "v1.0.0", &f.known);
+    assert_eq!(partial, f.partial);
+    assert_eq!(partial_report, f.partial_report);
+    assert_eq!(partial_report.keys.len() + 2, report.keys.len());
+    assert!(!partial_report.header.prerequisites.is_empty());
+
+    // errors, messages and fixes are core's
+    let wrong = RepoId([9; 16]);
+    same_error(
+        &check_batch(bytes.as_slice(), Some(wrong)).unwrap_err(),
+        &stream_check::check_batch(bytes.as_slice(), Some(wrong)).unwrap_err(),
+    );
+    assert_eq!(
+        check_batch(bytes.as_slice(), Some(wrong)).unwrap_err().code,
+        "E_REPO_MISMATCH"
+    );
+    let cut = &bytes[..bytes.len() - 1];
+    same_error(
+        &check_batch(cut, None).unwrap_err(),
+        &stream_check::check_batch(cut, None).unwrap_err(),
+    );
+    assert_eq!(
+        check_batch(cut, None).unwrap_err().code,
+        "E_STREAM_TRUNCATED"
+    );
+    let mut flipped = bytes.clone();
+    let mid = flipped.len() / 2;
+    flipped[mid] ^= 0xff;
+    same_error(
+        &check_batch(flipped.as_slice(), None).unwrap_err(),
+        &stream_check::check_batch(flipped.as_slice(), None).unwrap_err(),
+    );
+    let mut out = Vec::new();
+    let e = snap
+        .write_stream("2.0.0", &BTreeSet::new(), &mut out)
+        .unwrap_err();
+    assert_eq!(e.code, "E_NOT_FOUND");
+    assert!(out.is_empty());
+    handle.close().unwrap();
+}
+
+#[test]
+fn ha14_early_batch_returns_keys_without_root() {
+    let f = fixture();
+    let root = ObjectKey {
+        kind: rdy_store::kinds::TAG,
+        hash: f.tag,
+    };
+    assert_eq!(f.report.header.root(), root);
+
+    // the records that need nothing, split off by the re-exported reader and writer; the root
+    // is not among them and is the batch's one prerequisite
+    let (mut reader, _) = StreamReader::open(f.bytes.as_slice()).unwrap();
+    let mut leaves: Vec<StreamRecord> = Vec::new();
+    while let Some(rec) = reader.next().unwrap() {
+        if rec.refs().unwrap().is_empty() {
+            leaves.push(rec);
+        }
+    }
+    let totals: StreamTotals = reader.finish().unwrap();
+    assert_eq!(totals.records, f.report.records);
+    assert!(!leaves.is_empty() && leaves.len() < f.report.keys.len());
+    let header = StreamHeader::tag_history(f.repo, f.tag, vec![root]);
+    let mut writer = StreamWriter::new(Vec::new(), &header).unwrap();
+    for rec in &leaves {
+        writer.record(rec).unwrap();
+    }
+    let (early, _) = writer.finish().unwrap();
+
+    // the check passes without the root, and its keys keep the wire order
+    let report = check_batch(early.as_slice(), Some(f.repo)).unwrap();
+    let wire: Vec<ObjectKey> = leaves.iter().map(StreamRecord::key).collect();
+    assert_eq!(report.keys, wire);
+    assert!(!report.keys.contains(&root));
+    assert_eq!(report.header.prerequisites, vec![root]);
+
+    // the full batch holds the root, last, and the early keys in its order
+    assert_eq!(f.report.keys.last(), Some(&root));
+    let in_full: Vec<ObjectKey> = f
+        .report
+        .keys
+        .iter()
+        .copied()
+        .filter(|k| wire.contains(k))
+        .collect();
+    assert_eq!(in_full, wire);
+}
+
+type WriteFn = fn(&Snapshot, &str, &BTreeSet<ObjectKey>, Vec<u8>) -> Result<BatchReport, RdyError>;
+type HasFn = fn(&Snapshot, &[ObjectKey]) -> Result<Vec<ObjectPresence>, RdyError>;
+type CheckFn = fn(std::io::Cursor<Vec<u8>>, Option<RepoId>) -> Result<BatchReport, RdyError>;
+
+#[test]
+fn ha14_known_uses_exact_object_keys() {
+    // the public signatures, by type: object keys in, a report out
+    let _write: WriteFn = Snapshot::write_stream::<Vec<u8>>;
+    let _has: HasFn = Snapshot::has_objects;
+    let _check: CheckFn = check_batch::<std::io::Cursor<Vec<u8>>>;
+
+    let f = fixture();
+    let handle = StoreHandle::open(f.dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+
+    // what the store answers it holds is what an export may leave out
+    let asked: Vec<ObjectKey> = f.report.keys.iter().copied().take(3).collect();
+    let rows = snap.has_objects(&asked).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r.present && !r.redacted));
+    let known: BTreeSet<ObjectKey> = rows.iter().filter(|r| r.present).map(|r| r.key).collect();
+    let (_, report) = export(&snap, "v1.0.0", &known);
+    assert!(report.keys.iter().all(|k| !known.contains(k)));
+    assert_eq!(report.keys.len() + 3, f.report.keys.len());
+
+    // a known key must match by kind as well as hash
+    let other_kind = ObjectKey {
+        kind: if asked[0].kind == rdy_store::kinds::TAG {
+            rdy_store::kinds::BLOCK
+        } else {
+            rdy_store::kinds::TAG
+        },
+        hash: asked[0].hash,
+    };
+    assert!(!snap.has_objects(&[other_kind]).unwrap()[0].present);
+    let wrong_kind: BTreeSet<ObjectKey> = [other_kind].into();
+    let (_, unchanged) = export(&snap, "v1.0.0", &wrong_kind);
+    assert_eq!(unchanged.keys, f.report.keys);
+
+    // keys of a successful batch report are the next call's known set
+    let first: BTreeSet<ObjectKey> = f.report.keys.iter().copied().take(4).collect();
+    let (_, second) = export(&snap, "v1.0.0", &first);
+    let mut both: BTreeSet<ObjectKey> = first.clone();
+    both.extend(second.keys.iter().copied());
+    let (_, third) = export(&snap, "v1.0.0", &both);
+    assert!(third.keys.is_empty());
+    handle.close().unwrap();
+}
+
+#[test]
+fn ha14_adapter_keeps_no_quarantine_state() {
+    let f = fixture();
+    let holder_dir = tempfile::tempdir().unwrap();
+    let holder_root = holder_dir.path().join("holder");
+    let handle = StoreHandle::create_holder(&holder_root, f.repo).unwrap();
+    let keys = f.report.keys.clone();
+
+    // a passing check holds nothing: the holder still lacks every key
+    let report = check_batch(f.bytes.as_slice(), Some(f.repo)).unwrap();
+    assert_eq!(report.keys, keys);
+    let absent = |h: &StoreHandle| {
+        h.snapshot()
+            .unwrap()
+            .has_objects(&keys)
+            .unwrap()
+            .iter()
+            .all(|p| !p.present && !p.redacted)
+    };
+    assert!(absent(&handle));
+    handle.close().unwrap();
+
+    // after a reopen the same calls give the same answers, with no state carried between them
+    let handle = StoreHandle::open_holder(&holder_root).unwrap();
+    assert!(absent(&handle));
+    assert_eq!(check_batch(f.bytes.as_slice(), None).unwrap(), report);
+    assert_eq!(
+        check_batch(f.bytes.as_slice(), Some(f.repo)).unwrap(),
+        report
+    );
+    assert!(absent(&handle));
+    handle.close().unwrap();
+
+    // a failed check leaves nothing either: the intact batch passes at once
+    let cut = &f.bytes[..f.bytes.len() - 1];
+    assert!(check_batch(cut, None).is_err());
+    assert_eq!(check_batch(f.bytes.as_slice(), None).unwrap(), report);
+}
+
+/// A consumer that names every type and call from `rdy_adapter` and `std` alone.
+mod consumer {
+    use rdy_adapter::stream::{
+        BatchReport, ObjectKey, StreamError, StreamHeader, StreamPurpose, StreamReader,
+        StreamRecord, StreamTotals, StreamWriter, check_batch,
+    };
+    use rdy_adapter::{Hash, RdyError, RepoId, Snapshot, StoreHandle};
+    use std::collections::BTreeSet;
+    use std::io::Cursor;
+    use std::path::Path;
+
+    /// Exports `tag` from the project at `project`, checks the batch and splits it again.
+    pub fn round_trip(project: &Path, tag: &str, known: &[ObjectKey]) -> Result<(), RdyError> {
+        let handle = StoreHandle::open(project)?;
+        let snap: Snapshot = handle.snapshot()?;
+        let known: BTreeSet<ObjectKey> = known.iter().copied().collect();
+        let mut out: Vec<u8> = Vec::new();
+        let written: BatchReport = snap.write_stream(tag, &known, &mut out)?;
+        let checked: BatchReport = check_batch(Cursor::new(&out), Some(written.header.repo_id))?;
+        assert_eq!(written, checked);
+        let repo: RepoId = checked.header.repo_id;
+        let root: Hash = checked.header.tag;
+        let purpose: StreamPurpose = checked.header.purpose;
+        assert_eq!(purpose, StreamPurpose::TagHistory);
+        let (mut reader, header) = reads(&out).map_err(|e| to_rdy(&e))?;
+        let header: StreamHeader = header;
+        assert_eq!((header.repo_id, header.tag), (repo, root));
+        let mut seen: Vec<ObjectKey> = Vec::new();
+        let mut writer = StreamWriter::new(Vec::new(), &header).map_err(|e| to_rdy(&e))?;
+        while let Some(rec) = reader.next().map_err(|e| to_rdy(&e))? {
+            let rec: StreamRecord = rec;
+            seen.push(rec.key());
+            writer.record(&rec).map_err(|e| to_rdy(&e))?;
+        }
+        let totals: StreamTotals = reader.finish().map_err(|e| to_rdy(&e))?;
+        let (copy, again) = writer.finish().map_err(|e| to_rdy(&e))?;
+        assert_eq!((copy, again), (out, totals));
+        assert_eq!(seen, checked.keys);
+        handle.close()
+    }
+
+    fn reads(bytes: &[u8]) -> Result<(StreamReader<&[u8]>, StreamHeader), StreamError> {
+        StreamReader::open(bytes)
+    }
+
+    fn to_rdy(e: &StreamError) -> RdyError {
+        RdyError::new(e.code, e.message.clone(), e.fix.clone())
+    }
+}
+
+#[test]
+fn ha14_public_signatures_need_no_transitive_crate_import() {
+    let f = fixture();
+    consumer::round_trip(f.dir.path(), "v1.0.0", &[]).unwrap();
+    let known: Vec<ObjectKey> = f.report.keys.iter().copied().take(2).collect();
+    consumer::round_trip(f.dir.path(), "1.0.0", &known).unwrap();
+    assert_eq!(
+        consumer::round_trip(f.dir.path(), "9.9.9", &[])
+            .unwrap_err()
+            .code,
+        "E_NOT_FOUND"
+    );
+}
+
+#[allow(dead_code)]
+fn _error_type_is_named(e: StreamError) -> StreamError {
+    e
+}

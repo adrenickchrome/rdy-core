@@ -10,6 +10,7 @@ pub mod history;
 pub mod maintenance;
 pub mod publication;
 mod store;
+pub mod stream;
 mod value;
 
 pub use rdy_engine::RdyError;
