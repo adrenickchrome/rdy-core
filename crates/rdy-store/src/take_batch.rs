@@ -23,17 +23,21 @@
 //!    and of the root, the root's relay answer (O11), requests of reached carriers, and applies
 //!    whose request names a reached object.
 //! 6. Each new apply passes its portable proof (`sync_proof::check`, over the union and the
-//!    holder). Each dropped record names a validated apply that approves its exact tuple. A
-//!    present record that an approval covers is written as a drop (its bytes checked against
-//!    the tuple first); a covered key the holder holds intact is a local copy to erase, each of
-//!    its frames found by the holder's own log headers, never by a source place.
+//!    holder). Each dropped record names a validated apply that approves its exact tuple, and
+//!    each key the upload approves or drops has one tuple over every approval of the holder and
+//!    of the upload, whether the holder holds it or not (an object it removed already keeps
+//!    its identity). A present record that an approval covers is written as a drop (its bytes
+//!    checked against the tuple first); a covered key the holder holds intact is a local copy
+//!    to erase, each of its frames found by the holder's own log headers, never by a source
+//!    place.
 //! 7. An intact CHANGE that embeds an approved block version and that no approval covers, in the
 //!    holder or in the union, is `UncoveredChange`.
 //! 8. The caller's check (`check`) runs once, with the union and the holder as its source; its
 //!    choice selects which tag survives. With `Incoming`, the take writes `tag/<name>` and, when
 //!    the union holds exactly one relay answer of the root, `answer/tag:<name>` (O11).
 //! 9. A holder with an approval keeps within its receiver caps (`crate::redaction_import`),
-//!    the frames, payload bytes and spans of the batch included.
+//!    the frames, payload bytes and spans of the batch included; the marker counts only when
+//!    there is a frame to write (a complete retry writes none).
 //!
 //! The take keeps one record payload buffer at a time: it indexes each record's file, number,
 //! offset and frame, and reads a record again when a check or the append needs it. Each re-read
@@ -946,6 +950,17 @@ pub(crate) fn prepare<E>(
             _ => Err(bad(Reason::InvalidRemovalProof, *key)),
         }
     };
+    // every key the upload approves or drops has one tuple across the holder's approvals, the
+    // upload's and its dropped records, held or not: a key the holder removed already keeps the
+    // identity its approval gave it
+    for key in incoming_keys.iter().chain(
+        union
+            .iter()
+            .filter(|(_, e)| !e.dropped.is_empty())
+            .map(|(k, _)| k),
+    ) {
+        one_tuple(key, union.get(key))?;
+    }
     let block_versions: HashSet<Hash> = approved
         .keys()
         .filter(|k| k.kind == kinds::BLOCK)
@@ -1121,15 +1136,18 @@ pub(crate) fn prepare<E>(
                 Some(_) => return Err(bad(Reason::InvalidHeader, root_key).into()),
                 None => refs.push((name, root_key.hash.0.to_vec())),
             }
-            let relay: Vec<&ObjectKey> = union
-                .keys()
-                .filter(|k| k.kind == kinds::ANSWER)
-                .filter(|k| {
-                    source.typed::<Answer>(**k).ok().flatten().is_some_and(|a| {
-                        a.act == AnswerAct::Tag && a.item == format!("tag:{}", root.name)
-                    })
-                })
-                .collect();
+            // each answer read again: input changed since the checks refuses here, before any
+            // append, as an answer the holder holds is not read again by the append
+            let item = format!("tag:{}", root.name);
+            let mut relay: Vec<&ObjectKey> = Vec::new();
+            for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
+                if source
+                    .typed::<Answer>(*k)?
+                    .is_some_and(|a| a.act == AnswerAct::Tag && a.item == item)
+                {
+                    relay.push(k);
+                }
+            }
             match relay[..] {
                 [] => {}
                 [a] => {
@@ -1182,8 +1200,12 @@ pub(crate) fn prepare<E>(
                 .len() as u64
             })
             .sum();
-        let frames = scanned.frames + writes.len() as u64 + refs.len() as u64 + 1;
-        let bytes = scanned.bytes + new_payload_bytes + ref_bytes + MARKER_MAX;
+        // a batch, and so its marker, only when there is a frame to write: a complete retry
+        // writes none (`Store::seal_take`), and its log is checked as it stands
+        let batch = !(writes.is_empty() && refs.is_empty());
+        let frames = scanned.frames + writes.len() as u64 + refs.len() as u64 + u64::from(batch);
+        let bytes =
+            scanned.bytes + new_payload_bytes + ref_bytes + if batch { MARKER_MAX } else { 0 };
         let dropped = writes
             .values()
             .filter(|(w, _)| matches!(w, Write::Dropped { .. }))

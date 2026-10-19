@@ -821,3 +821,263 @@ fn ha11_receiver_scan_is_bounded() {
     }
     drop(Store::open(&b.holder).unwrap());
 }
+
+/// Records as kind and bytes.
+type Items = Vec<(u8, Vec<u8>)>;
+
+/// An edit of the secret's span, returning the extra records it needs.
+type SpanEdit = fn(&mut rdy_model::redaction::DropSpan) -> Items;
+
+/// A second removal of the base's secret version that is consistent in itself but not with the
+/// first: the source's request with `edit` applied to its block span (`edit` may return extra
+/// records, such as a residue), a landing that names it, its apply and a tag `v3` of that
+/// landing, with the block as a dropped record of that apply. Returns the batch file, the tag's
+/// landing, and the request, landing and apply records (with the extras first).
+fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items) {
+    use rdy_model::redaction::RedactionApply;
+    use rdy_store::sync_stream::StreamRecord;
+    let secret = b.secret_key();
+    let mut request = b.fixture.requests[0].draft.request.clone();
+    let span = request
+        .manifest
+        .spans
+        .iter_mut()
+        .find(|s| s.kind == secret.kind && s.hash == secret.hash)
+        .unwrap();
+    let mut records = edit(span);
+    let extras = records.len();
+    let (len, residue) = (span.len, span.residue);
+    let mut buf = vec![0u8; rdy_model::redaction::MAX_RECORD_BYTES];
+    let report_hash = request.manifest.report_hash(&mut buf).unwrap();
+    let request_bytes = enc(&request);
+    let rid = Hash::of(&request_bytes);
+    let mut landing = b.fixture.landing_record.clone().unwrap();
+    landing.checks = vec![rid];
+    let landing_bytes = enc(&landing);
+    let lid = Hash::of(&landing_bytes);
+    let apply_bytes = enc(&RedactionApply {
+        request: rid,
+        landing: lid,
+        report_hash,
+    });
+    let aid = Hash::of(&apply_bytes);
+    let tag_bytes = enc(&Tag {
+        name: "v3".into(),
+        landing: lid,
+        message: None,
+        tagged_by: prov("human:alice", Role::Approver),
+    });
+    let tid = Hash::of(&tag_bytes);
+    records.extend([
+        (kinds::REDACTION, request_bytes),
+        (kinds::LANDING, landing_bytes),
+        (kinds::REDACTION_APPLY, apply_bytes),
+    ]);
+    // the batch, ending with the tag; its prerequisites are every key a record names that the
+    // batch does not hold
+    let mut source: BTreeMap<ObjectKey, StreamRecord> = BTreeMap::new();
+    let mut order = vec![];
+    let mut prerequisites = BTreeSet::new();
+    let present: Vec<(u8, Vec<u8>)> = records
+        .iter()
+        .cloned()
+        .chain([(kinds::TAG, tag_bytes)])
+        .collect();
+    let in_batch: BTreeSet<ObjectKey> = present
+        .iter()
+        .map(|(k, p)| key(*k, Hash::of(p)))
+        .chain([secret])
+        .collect();
+    for (kind, payload) in &present {
+        for r in rdy_store::object_refs::refs_of(*kind, payload).unwrap() {
+            match r.kind {
+                Some(k) if !in_batch.contains(&key(k, r.hash)) => {
+                    prerequisites.insert(key(k, r.hash));
+                }
+                Some(_) => {}
+                None => assert!(in_batch.iter().any(|k| k.hash == r.hash)),
+            }
+        }
+    }
+    if let Some(r) = residue
+        && !in_batch.contains(&key(kinds::REDACTION_RESIDUE, r))
+    {
+        prerequisites.insert(key(kinds::REDACTION_RESIDUE, r));
+    }
+    // the extras, the dropped block (it names its residue, and the request names it), then the
+    // request, landing and apply
+    let mut put = |k: ObjectKey, r: StreamRecord| {
+        order.push(k);
+        source.insert(k, r);
+    };
+    let present_record = |kind: u8, payload: &Vec<u8>| {
+        let k = key(kind, Hash::of(payload));
+        (
+            k,
+            StreamRecord::Present {
+                key: k,
+                payload: payload.clone(),
+            },
+        )
+    };
+    for (kind, payload) in &present[..extras] {
+        let (k, r) = present_record(*kind, payload);
+        put(k, r);
+    }
+    put(
+        secret,
+        StreamRecord::Dropped {
+            key: secret,
+            original_len: len,
+            apply: aid,
+            residue,
+        },
+    );
+    for (kind, payload) in &present[extras..] {
+        let (k, r) = present_record(*kind, payload);
+        put(k, r);
+    }
+    let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
+    let header = StreamHeader::tag_history(repo, tid, prerequisites.into_iter().collect());
+    let out = b.dir.path().join(format!("{name}.rdysync"));
+    write_batch(&mut source, &header, &order, File::create(&out).unwrap()).unwrap();
+    (vec![File::open(&out).unwrap()], lid, records)
+}
+
+/// The secret span's length, one more than its frame's.
+fn longer(s: &mut rdy_model::redaction::DropSpan) -> Items {
+    s.len += 1;
+    vec![]
+}
+
+/// The secret span's residue, another residue of the same version (another order), stored.
+fn other_residue(s: &mut rdy_model::redaction::DropSpan) -> Items {
+    let block = block("b-00001", CANARY);
+    let mut res = rdy_model::redaction::BlockResidue::of(&block);
+    res.order = "W".into();
+    let bytes = enc(&rdy_model::redaction::RedactionResidue::Block(res));
+    s.residue = Some(Hash::of(&bytes));
+    vec![(kinds::REDACTION_RESIDUE, bytes)]
+}
+
+#[test]
+fn ha11_conflicting_tuple_of_a_removed_key_refuses_the_take() {
+    let b = base(0);
+    let mut h = Store::open(&b.holder).unwrap();
+    b.take_v2(&mut h).unwrap();
+    assert!(copies(&h, b.secret_key()).iter().all(|(_, d)| *d));
+    for (name, edit) in [("longer", longer as SpanEdit), ("residue", other_residue)] {
+        let (files, landing, _) = conflicting(&b, name, edit);
+        let before = (segment_bytes(&b.holder), h.log_end());
+        let e = match take(&mut h, &files, "v3", landing) {
+            Err(TakeError::Stream(e)) => e,
+            other => panic!("{name}: {other:?}"),
+        };
+        assert_eq!(
+            (e.code, e.message.as_str(), e.object),
+            (
+                "E_BAD_RECORD",
+                "stream record 0 at byte 0: invalid removal proof",
+                Some(b.secret_key())
+            ),
+            "{name}"
+        );
+        assert_eq!((segment_bytes(&b.holder), h.log_end()), before, "{name}");
+        assert_eq!(h.get_ref("tag/v3").unwrap(), None, "{name}");
+    }
+    drop(h);
+    drop(Store::open(&b.holder).unwrap());
+}
+
+#[test]
+fn ha11_conflicting_tuple_of_a_removed_key_refuses_the_open() {
+    for (name, edit) in [("longer", longer as SpanEdit), ("residue", other_residue)] {
+        let b = base(0);
+        let mut h = Store::open(&b.holder).unwrap();
+        b.take_v2(&mut h).unwrap();
+        drop(h);
+        // the conflicting removal's records reach the holder's log by a raw write
+        let (_, _, records) = conflicting(&b, name, edit);
+        let at = append_raw(&b.holder, &records);
+        let apply = *at.last().unwrap();
+        match Store::open(&b.holder) {
+            Err(StoreError::RedactionCorrupt { segment, offset }) => {
+                assert_eq!(Location { segment, offset }, apply, "{name}")
+            }
+            other => panic!("{name}: {:?}", other.err()),
+        }
+    }
+}
+
+#[test]
+fn ha11_complete_retry_fits_the_receiver_caps() {
+    let b = base(0);
+    let mut h = Store::open(&b.holder).unwrap();
+    b.take_v2(&mut h).unwrap();
+    let end = h.log_end();
+    // the log after the removal's take: its frames, payload bytes and spans
+    let all = frames(&h);
+    let spans = all.iter().filter(|f| f.3).count() as u64;
+    let mut bytes = 0u64;
+    for seg in segment_bytes(&b.holder).values() {
+        let mut at = 0usize;
+        while at + 37 <= seg.len() {
+            let len = u32::from_le_bytes(seg[at..at + 4].try_into().unwrap()) as u64;
+            bytes += len;
+            at += 37 + len as usize;
+        }
+    }
+    let exact = ReceiverCaps {
+        frames: all.len() as u64,
+        bytes,
+        spans,
+    };
+    let retry = |h: &mut Store, caps: ReceiverCaps| {
+        set_receiver_caps_for_tests(Some(caps));
+        let got = b.take_v2(h);
+        set_receiver_caps_for_tests(None);
+        got
+    };
+    // the log at exactly each cap: the complete retry writes nothing and returns the log's end
+    let before = segment_bytes(&b.holder);
+    let got = retry(&mut h, exact).unwrap();
+    assert_eq!(
+        (got.new_objects, got.frames, got.redacted_objects, got.end),
+        (0, 0, 0, end)
+    );
+    assert_eq!(segment_bytes(&b.holder), before);
+    // one under any cap: the existing log is still checked against it
+    for (caps, label) in [
+        (
+            ReceiverCaps {
+                frames: exact.frames - 1,
+                ..exact
+            },
+            format!("{} receiver frames", exact.frames - 1),
+        ),
+        (
+            ReceiverCaps {
+                bytes: exact.bytes - 1,
+                ..exact
+            },
+            format!("{} receiver bytes", exact.bytes - 1),
+        ),
+        (
+            ReceiverCaps {
+                spans: exact.spans - 1,
+                ..exact
+            },
+            format!("{} receiver spans", exact.spans - 1),
+        ),
+    ] {
+        let e = match retry(&mut h, caps) {
+            Err(TakeError::Stream(e)) => e,
+            other => panic!("{caps:?}: {other:?}"),
+        };
+        assert_eq!(
+            (e.code, e.message),
+            ("E_LIMIT", format!("stream exceeds {label}"))
+        );
+        assert_eq!(segment_bytes(&b.holder), before);
+    }
+}

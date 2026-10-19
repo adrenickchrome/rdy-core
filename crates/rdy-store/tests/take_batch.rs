@@ -839,3 +839,63 @@ fn ha11_signature_subjects_are_checked_at_take() {
     assert_eq!(h.signatures_of(&src.landing).unwrap().len(), 1);
     assert_eq!(h.signatures_of(&src.tag).unwrap().len(), 1);
 }
+
+#[test]
+fn ha11_changed_relay_answer_refuses_before_append() {
+    let src = source();
+    let paths = src.split(src.tag, 1, "one");
+    let relay = key(kinds::ANSWER, src.relay);
+    // the relay answer's place in the file
+    let (n, offset) = {
+        let (mut r, _) = StreamReader::open(File::open(&paths[0]).unwrap()).unwrap();
+        loop {
+            let rec = r.next().unwrap().expect("the relay answer is in the file");
+            if rec.key() == relay {
+                break r.position();
+            }
+        }
+    };
+    // a holder that holds every immutable record of the upload, the relay answer included, and
+    // no tag or answer ref
+    let (path, mut h) = holder(&src, "h");
+    let items: Vec<(u8, Vec<u8>)> = {
+        let records = src.closure(src.tag);
+        let (_s, r) = src.reader();
+        let mut source = StoreSource {
+            reader: &r,
+            end: END_OF_LOG,
+        };
+        records
+            .into_iter()
+            .map(|k| match source.record(k).unwrap().unwrap() {
+                StreamRecord::Present { payload, .. } => (k.kind, payload),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    h.write(items).unwrap();
+    assert!(h.has_kind(kinds::ANSWER, &src.relay).unwrap());
+    assert_eq!(h.get_ref("tag/v1").unwrap(), None);
+    let before = (segment_bytes(&path), h.log_end());
+    // the caller's check changes a byte of the answer's payload, then chooses the incoming tag
+    let p0 = paths[0].clone();
+    let got = h.take_batches(&open(&paths), &src.target(), move |_, _| {
+        let mut bytes = std::fs::read(&p0).unwrap();
+        bytes[offset as usize + 37] ^= 0xFF;
+        std::fs::write(&p0, &bytes).unwrap();
+        Ok::<_, StreamError>(TagChoice::Incoming)
+    });
+    let e = stream_err(got.unwrap_err());
+    assert_eq!(
+        (e.code, e.message),
+        (
+            "E_BAD_RECORD",
+            format!("stream record {n} at byte {offset}: input changed during take")
+        )
+    );
+    assert_eq!(h.log_end(), before.1);
+    assert_eq!(h.get_ref("tag/v1").unwrap(), None);
+    assert_eq!(h.get_ref("answer/tag:v1").unwrap(), None);
+    drop(h);
+    assert_eq!(segment_bytes(&path), before.0);
+}

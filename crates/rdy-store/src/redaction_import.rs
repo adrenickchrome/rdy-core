@@ -12,7 +12,8 @@
 //!    header must keep the tuple's length, and an intact payload must be what the residue
 //!    records (`residue_matches`). An all-zero or partly zero payload is an erased or
 //!    interrupted copy. The earliest apply in log order that approves a key authorizes its
-//!    frames, as an earlier apply keeps a frame in a project.
+//!    frames, as an earlier apply keeps a frame in a project. Every apply that approves a key
+//!    must give it the same tuple: another length or residue is damage at the later apply.
 //! 3. An intact CHANGE outside the approved tuples that embeds an approved block version is
 //!    damage: no approval covers that copy of the removed content.
 //!
@@ -329,6 +330,16 @@ fn derive(
     for (i, a) in applies.iter().enumerate() {
         for k in imported.removals[&a.hash].objects.keys() {
             approved.entry(*k).or_default().push(i);
+        }
+    }
+    // every approval of a key gives it one tuple: a later apply with another length or residue
+    // for a key an earlier one approves is damage at that apply
+    for (k, by) in &approved {
+        let first = imported.removals[&applies[by[0]].hash].objects[k];
+        for i in &by[1..] {
+            if imported.removals[&applies[*i].hash].objects[k] != first {
+                return Err(StoreError::corrupt_at(applies[*i].loc));
+            }
         }
     }
     let versions: HashSet<Hash> = approved
