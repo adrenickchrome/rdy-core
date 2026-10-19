@@ -128,15 +128,170 @@ impl<'a> Iterator for Kids<'a> {
     }
 }
 
+/// The resource bounds a scan of block text keeps, whatever the reference policy: one text value,
+/// all text together, the reference occurrences, the field depth, and one reference row's
+/// location and token. Each is checked before the value that would pass it is kept.
+pub(super) struct Budget {
+    l: Limits,
+    text: usize,
+    occurrences: usize,
+}
+
+impl Budget {
+    pub(super) fn new(l: &Limits) -> Budget {
+        Budget {
+            l: *l,
+            text: 0,
+            occurrences: 0,
+        }
+    }
+
+    /// Counts one reference or link occurrence.
+    fn occurrence(&mut self) -> Result<(), RdyError> {
+        self.occurrences += 1;
+        if self.occurrences > self.l.references {
+            return Err(limit("references", self.l.references, "occurrences"));
+        }
+        Ok(())
+    }
+
+    /// The bounds of one reference row: its location, then its target token.
+    fn row(&self, location: &str, token: &str) -> Result<(), RdyError> {
+        if location.len() > self.l.location {
+            return Err(limit("reference location", self.l.location, "bytes"));
+        }
+        if token.len() > self.l.token {
+            return Err(limit("reference token", self.l.token, "bytes"));
+        }
+        Ok(())
+    }
+
+    /// Counts one body or string value against the text bounds.
+    fn text(&mut self, text: &str) -> Result<(), RdyError> {
+        if text.len() > self.l.text_value {
+            return Err(limit("text value", self.l.text_value, "bytes"));
+        }
+        self.text += text.len();
+        if self.text > self.l.text {
+            return Err(limit("text", self.l.text, "bytes"));
+        }
+        Ok(())
+    }
+
+    /// The bound of a field value `level` levels down (the top-level value is level 1).
+    fn depth(&self, level: usize) -> Result<(), RdyError> {
+        if level > self.l.field_depth {
+            return Err(limit("field depth", self.l.field_depth, "levels"));
+        }
+        Ok(())
+    }
+}
+
+/// A walk over block text: the [`Budget`] it keeps, and what it does at each reference or link
+/// occurrence. [`walk_block`] and [`walk_field`] visit the text in one fixed order.
+trait Visit {
+    fn budget(&mut self) -> &mut Budget;
+
+    /// One reference or link occurrence from `b` to `token`, at the location `at` gives.
+    fn occur(&mut self, b: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError>;
+}
+
+/// Checks one body or string value against the text bounds, then visits its references.
+fn walk_text<V: Visit>(
+    v: &mut V,
+    b: &Block,
+    text: &str,
+    mode: RefMode,
+    at: &dyn Fn() -> String,
+) -> Result<(), RdyError> {
+    v.budget().text(text)?;
+    for span in ref_spans(text, mode) {
+        v.occur(b, &span.token, at)?;
+    }
+    Ok(())
+}
+
+/// Every string leaf of field `name`, in map-key order and index order, without recursion.
+fn walk_field<V: Visit>(
+    v: &mut V,
+    b: &Block,
+    name: &str,
+    value: &FieldValue,
+) -> Result<(), RdyError> {
+    // the open containers, and the pointer segments down to the current value
+    let mut stack: Vec<Kids<'_>> = vec![];
+    let mut path: Vec<String> = vec![];
+    let mut next = Some((escape(name), value));
+    loop {
+        let (segment, value) = match next.take() {
+            Some(item) => item,
+            None => {
+                let Some(top) = stack.last_mut() else {
+                    break;
+                };
+                match top.next() {
+                    Some(item) => item,
+                    None => {
+                        stack.pop();
+                        path.pop();
+                        continue;
+                    }
+                }
+            }
+        };
+        // the top-level value is level 1
+        v.budget().depth(stack.len() + 1)?;
+        match value {
+            FieldValue::Str(text) => {
+                path.push(segment);
+                let at = || format!("/fields/{}", path.join("/"));
+                let r = walk_text(v, b, text, RefMode::Strict, &at);
+                path.pop();
+                r?;
+            }
+            FieldValue::List(items) => {
+                path.push(segment);
+                stack.push(Kids::List(items.iter().enumerate()));
+            }
+            FieldValue::Map(m) => {
+                path.push(segment);
+                stack.push(Kids::Map(m.iter()));
+            }
+            FieldValue::Null | FieldValue::Bool(_) | FieldValue::Int(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// The body, then the fields, then the links of `b`. A removed version's stub holds no
+/// reference.
+fn walk_block<V: Visit>(v: &mut V, b: &Block) -> Result<(), RdyError> {
+    if b.is_redacted() {
+        return Ok(());
+    }
+    walk_text(v, b, &b.body, RefMode::for_body(&b.block_type), &|| {
+        "body".to_string()
+    })?;
+    for (name, value) in &b.fields {
+        walk_field(v, b, name, value)?;
+    }
+    for (kind, links) in &b.links {
+        for (i, l) in links.iter().enumerate() {
+            v.occur(b, l.target.as_str(), &|| {
+                format!("/links/{}/{i}", escape(kind))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// The scan of the selected blocks: its running counts and rows.
 struct Scan<'a> {
     source: &'a Materialized,
     keep: &'a BTreeSet<BlockId>,
-    l: &'a Limits,
+    budget: Budget,
     /// The source's keys, built on the first key-shaped token.
     keys: Option<Keys>,
-    text: usize,
-    occurrences: usize,
     rows: BTreeMap<(BlockId, String, String, Classification), u64>,
 }
 
@@ -171,99 +326,6 @@ impl Scan<'_> {
         }
     }
 
-    /// Counts one reference or link occurrence from `b` at the location `at` gives.
-    fn occur(&mut self, b: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError> {
-        self.occurrences += 1;
-        if self.occurrences > self.l.references {
-            return Err(limit("references", self.l.references, "occurrences"));
-        }
-        let Some(class) = self.classify(token) else {
-            return Ok(());
-        };
-        let location = at();
-        if location.len() > self.l.location {
-            return Err(limit("reference location", self.l.location, "bytes"));
-        }
-        if token.len() > self.l.token {
-            return Err(limit("reference token", self.l.token, "bytes"));
-        }
-        *self
-            .rows
-            .entry((b.id.clone(), location, token.to_string(), class))
-            .or_default() += 1;
-        Ok(())
-    }
-
-    /// Checks one body or string value against the text bounds, then counts its references.
-    fn text(
-        &mut self,
-        b: &Block,
-        text: &str,
-        mode: RefMode,
-        at: &dyn Fn() -> String,
-    ) -> Result<(), RdyError> {
-        if text.len() > self.l.text_value {
-            return Err(limit("text value", self.l.text_value, "bytes"));
-        }
-        self.text += text.len();
-        if self.text > self.l.text {
-            return Err(limit("text", self.l.text, "bytes"));
-        }
-        for span in ref_spans(text, mode) {
-            self.occur(b, &span.token, at)?;
-        }
-        Ok(())
-    }
-
-    /// Every string leaf of field `name`, in map-key order and index order, without recursion.
-    fn field(&mut self, b: &Block, name: &str, value: &FieldValue) -> Result<(), RdyError> {
-        // the open containers, and the pointer segments down to the current value
-        let mut stack: Vec<Kids<'_>> = vec![];
-        let mut path: Vec<String> = vec![];
-        let mut next = Some((escape(name), value));
-        loop {
-            let (segment, v) = match next.take() {
-                Some(item) => item,
-                None => {
-                    let Some(top) = stack.last_mut() else {
-                        break;
-                    };
-                    match top.next() {
-                        Some(item) => item,
-                        None => {
-                            stack.pop();
-                            path.pop();
-                            continue;
-                        }
-                    }
-                }
-            };
-            // the top-level value is level 1
-            if stack.len() + 1 > self.l.field_depth {
-                return Err(limit("field depth", self.l.field_depth, "levels"));
-            }
-            match v {
-                FieldValue::Str(text) => {
-                    path.push(segment);
-                    let at = || format!("/fields/{}", path.join("/"));
-                    let r = self.text(b, text, RefMode::Strict, &at);
-                    path.pop();
-                    r?;
-                }
-                FieldValue::List(items) => {
-                    path.push(segment);
-                    stack.push(Kids::List(items.iter().enumerate()));
-                }
-                FieldValue::Map(m) => {
-                    path.push(segment);
-                    stack.push(Kids::Map(m.iter()));
-                }
-                FieldValue::Null | FieldValue::Bool(_) | FieldValue::Int(_) => {}
-            }
-        }
-        Ok(())
-    }
-
     /// The fields of the chosen profile `b` that become the output's own metadata (its title
     /// and description), when `b` lies outside the selection; a selected profile's fields are
     /// already scanned as a selected block's.
@@ -273,33 +335,67 @@ impl Scan<'_> {
         }
         for name in METADATA_FIELDS {
             if let Some(value) = b.fields.get(name) {
-                self.field(b, name, value)?;
+                walk_field(self, b, name, value)?;
             }
         }
         Ok(())
+    }
+}
+
+impl Visit for Scan<'_> {
+    fn budget(&mut self) -> &mut Budget {
+        &mut self.budget
     }
 
-    /// The body, then the fields, then the links of `b`. A removed version's stub holds no
-    /// reference.
-    fn block(&mut self, b: &Block) -> Result<(), RdyError> {
-        if b.is_redacted() {
+    /// Counts one occurrence; one whose target lies outside the selection is a row.
+    fn occur(&mut self, b: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError> {
+        self.budget.occurrence()?;
+        let Some(class) = self.classify(token) else {
             return Ok(());
-        }
-        self.text(b, &b.body, RefMode::for_body(&b.block_type), &|| {
-            "body".to_string()
-        })?;
-        for (name, value) in &b.fields {
-            self.field(b, name, value)?;
-        }
-        for (kind, links) in &b.links {
-            for (i, l) in links.iter().enumerate() {
-                self.occur(b, l.target.as_str(), &|| {
-                    format!("/links/{}/{i}", escape(kind))
-                })?;
-            }
-        }
+        };
+        let location = at();
+        self.budget.row(&location, token)?;
+        *self
+            .rows
+            .entry((b.id.clone(), location, token.to_string(), class))
+            .or_default() += 1;
         Ok(())
     }
+}
+
+/// The resource walk of [`check_resources`]: no classification and no rows.
+struct Resources {
+    budget: Budget,
+}
+
+impl Visit for Resources {
+    fn budget(&mut self) -> &mut Budget {
+        &mut self.budget
+    }
+
+    /// Counts one occurrence and bounds it as a row: any occurrence becomes a row of a
+    /// selection that leaves its target out.
+    fn occur(&mut self, _: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError> {
+        self.budget.occurrence()?;
+        self.budget.row(&at(), token)
+    }
+}
+
+/// The text and reference bounds of `blocks` together, in the order a scan checks them, with
+/// no reference policy: every occurrence counts and has its location and token bounded, since
+/// any selection that leaves its target out makes it a row. So blocks within these bounds keep
+/// them in every selection of theirs.
+pub(super) fn check_resources<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+    l: &Limits,
+) -> Result<(), RdyError> {
+    let mut r = Resources {
+        budget: Budget::new(l),
+    };
+    for b in blocks {
+        walk_block(&mut r, b)?;
+    }
+    Ok(())
 }
 
 /// The fields of a chosen profile that its output shows as its own title and description.
@@ -320,14 +416,12 @@ pub(crate) fn scan<'a>(
     let mut s = Scan {
         source,
         keep,
-        l,
+        budget: Budget::new(l),
         keys: None,
-        text: 0,
-        occurrences: 0,
         rows: BTreeMap::new(),
     };
     for b in selected {
-        s.block(b)?;
+        walk_block(&mut s, b)?;
     }
     if let Some(b) = profile {
         s.metadata(b)?;

@@ -876,7 +876,21 @@ pub(crate) fn depth_of(
 /// header. No order between batch files is
 /// required, and E_UNRESOLVED_REF is never returned here: that needs the whole upload.
 pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
+    check_batch_with(input, |_| Ok(()), |_, _, _| Ok(()))
+}
+
+/// [`check_batch`] with two checks of the caller's own, in the same single pass: `on_header`
+/// runs once the header is read, before any object record; `on_record` runs on every object
+/// record once its frame, its typed decode and its key pass, with the record's number and frame
+/// offset, before the next record is read. Either one's error ends the check, and no report is
+/// returned. The record buffer is still the reader's one buffer: `on_record` borrows the record.
+pub fn check_batch_with<R: Read, E: From<StreamError>>(
+    input: R,
+    on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
+    mut on_record: impl FnMut(u64, u64, &StreamRecord) -> Result<(), E>,
+) -> Result<BatchReport, E> {
     let (mut reader, header) = StreamReader::open(input)?;
+    on_header(&header)?;
     let mut keys: Vec<ObjectKey> = Vec::new();
     let mut at: Vec<u64> = Vec::new();
     let mut index: HashMap<ObjectKey, u32> = HashMap::new();
@@ -889,20 +903,21 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
         let key = r.key();
         let grow = || StreamError::allocation(Some(n), offset);
         if index.contains_key(&key) {
-            return Err(
-                StreamError::bad_record(n, offset, Reason::ObjectIsRepeated).with_object(Some(key))
-            );
+            return Err(StreamError::bad_record(n, offset, Reason::ObjectIsRepeated)
+                .with_object(Some(key))
+                .into());
         }
         let refs = r
             .refs()
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
+        on_record(n, offset, &r)?;
         let proof = r.proof();
         if (edges.len() + proofs.len() + refs.len() + usize::from(proof.is_some())) as u64
             > MAX_EDGES
         {
-            return Err(
-                StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES).with_object(Some(key))
-            );
+            return Err(StreamError::limit(Some(n), offset, LIMIT_GRAPH_EDGES)
+                .with_object(Some(key))
+                .into());
         }
         edges.try_reserve(refs.len()).map_err(|_| grow())?;
         edges.extend(refs);
@@ -942,18 +957,18 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
                         .filter(|k| index.contains_key(k) || is_prerequisite(k));
                     let first = found.next().ok_or_else(bad_header)?;
                     if found.next().is_some() {
-                        return Err(fail(Reason::AmbiguousObjectKind));
+                        return Err(fail(Reason::AmbiguousObjectKind).into());
                     }
                     first
                 }
             };
             match index.get(&target) {
                 Some(&j) if (j as usize) < i => deps.push(depth[j as usize]),
-                Some(_) => return Err(fail(Reason::DependencyCycle)),
+                Some(_) => return Err(fail(Reason::DependencyCycle).into()),
                 None if is_prerequisite(&target) => {
                     needed.insert(target);
                 }
-                None => return Err(bad_header()),
+                None => return Err(bad_header().into()),
             }
         }
         depth.push(depth_of(n, at[i], deps).map_err(|e| e.with_object(Some(keys[i])))?);
@@ -963,7 +978,7 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
     for p in &proofs {
         if !index.contains_key(p) {
             if !is_prerequisite(p) {
-                return Err(bad_header());
+                return Err(bad_header().into());
             }
             needed.insert(*p);
         }
@@ -971,12 +986,12 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
     let root = header.root();
     if !index.contains_key(&root) {
         if !is_prerequisite(&root) {
-            return Err(bad_header());
+            return Err(bad_header().into());
         }
         needed.insert(root);
     }
     if needed.len() != prerequisites.len() {
-        return Err(bad_header());
+        return Err(bad_header().into());
     }
     Ok(BatchReport {
         header,
