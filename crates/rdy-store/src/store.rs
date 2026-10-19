@@ -388,6 +388,18 @@ pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
 }
 
+/// Checks one chunk of blob `h` against the length `put_blob` cuts there, with `left` bytes of
+/// the blob still due: every chunk but the last is a full chunk. Returns the bytes due after it.
+fn check_chunk_len(h: &Hash, left: u64, len: u64) -> Result<u64, StoreError> {
+    let want = left.min(CHUNK as u64);
+    if len != want {
+        return Err(StoreError::Decode(format!(
+            "blob {h} has a chunk of {len} bytes where {want} are due"
+        )));
+    }
+    Ok(left - want)
+}
+
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
     postcard::from_bytes(bytes).map_err(|e| StoreError::Decode(e.to_string()))
 }
@@ -2157,20 +2169,55 @@ impl StoreReader {
         Ok(out)
     }
 
-    /// Checks blob `h` by the rules a read keeps (`read_blob`), reading its chunks one at a time
-    /// and keeping none: true when every rule holds, false when an authorized removal masks the
-    /// manifest or a chunk (the removal's own checks cover it). Any other failure is the read's.
-    pub(crate) fn check_blob(&self, h: &Hash) -> Result<bool, StoreError> {
-        match self.read_blob(h, &mut |_| {}) {
-            Ok(()) => Ok(true),
-            Err(StoreError::Redacted { .. }) => Ok(false),
-            Err(e) => Err(e),
+    /// Checks blob `h` by the rules a read keeps (`read_blob`), keeping no chunk: true when every
+    /// rule holds, false when an authorized removal masks the manifest or a chunk (the removal's
+    /// own checks cover it). Any other failure is the read's.
+    ///
+    /// `lens` holds the length of each chunk already read, across every blob one check reaches:
+    /// a chunk is read once, however many positions or manifests list it, and each position is
+    /// checked against its length.
+    pub(crate) fn check_blob(
+        &self,
+        h: &Hash,
+        lens: &mut HashMap<Hash, u64>,
+    ) -> Result<bool, StoreError> {
+        let m = match self.blob_manifest(h) {
+            Ok(m) => m,
+            Err(StoreError::Redacted { .. }) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let mut left = m.len;
+        for c in &m.chunks {
+            let len = match lens.get(c) {
+                Some(&len) => len,
+                None => {
+                    let len = self.blob_chunk(c)?.len() as u64;
+                    lens.insert(*c, len);
+                    len
+                }
+            };
+            left = check_chunk_len(h, left, len)?;
         }
+        Ok(true)
     }
 
     /// Validates the manifest-kind object at `h` against what `put_blob` writes, then hands each
     /// chunk to `sink` in order. Nothing is read before the manifest is known to be canonical.
     fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
+        let m = self.blob_manifest(h)?;
+        let mut left = m.len;
+        for c in &m.chunks {
+            let bytes = self.blob_chunk(c)?;
+            left = check_chunk_len(h, left, bytes.len() as u64)?;
+            sink(&bytes);
+        }
+        Ok(())
+    }
+
+    /// The manifest of blob `h`, checked as `put_blob` writes it: a manifest-kind object, its own
+    /// canonical encoding, with no masked manifest or chunk, and the chunk count its length
+    /// gives. No chunk is read.
+    fn blob_manifest(&self, h: &Hash) -> Result<BlobManifest, StoreError> {
         let payload = match self.get_kind(kinds::BLOB_MANIFEST, h) {
             Ok(p) => p,
             // kind1: an object of another kind with this hash is never the blob
@@ -2202,27 +2249,17 @@ impl StoreReader {
                 m.len
             )));
         }
-        let mut left = m.len;
-        for c in &m.chunks {
-            // the chunk-kind object, or failing that any object with the chunk's hash: a chunk
-            // written before kind1 may have deduped into a block or snapshot of the same bytes,
-            // and the hash proves the bytes
-            let bytes = match self.get_kind(kinds::BLOB_CHUNK, c) {
-                Err(StoreError::NotFound(_)) => self.get_raw(c)?.1,
-                r => r?,
-            };
-            // every chunk but the last is a full chunk, as `put_blob` cuts them
-            let want = left.min(CHUNK as u64);
-            if bytes.len() as u64 != want {
-                return Err(StoreError::Decode(format!(
-                    "blob {h} has a chunk of {} bytes where {want} are due",
-                    bytes.len()
-                )));
-            }
-            left -= want;
-            sink(&bytes);
+        Ok(m)
+    }
+
+    /// The bytes of chunk `c`: the chunk-kind object, or failing that any object with the
+    /// chunk's hash. A chunk written before kind1 may have deduped into a block or snapshot of
+    /// the same bytes, and the hash proves the bytes.
+    fn blob_chunk(&self, c: &Hash) -> Result<Vec<u8>, StoreError> {
+        match self.get_kind(kinds::BLOB_CHUNK, c) {
+            Err(StoreError::NotFound(_)) => Ok(self.get_raw(c)?.1),
+            r => r,
         }
-        Ok(())
     }
 
     /// The change that carried `version` into canon: of its producers, the one whose landing was

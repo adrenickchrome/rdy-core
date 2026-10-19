@@ -725,3 +725,119 @@ fn ha7_tag_histories_read_each_landing_once() {
     let e = s.tag_histories_bounded_for_tests(&[l3], 2).unwrap_err();
     assert_eq!(holder_check_limit(&e), Some("2 landing depth"), "{e}");
 }
+
+/// The chunk size `put_blob` cuts.
+const CHUNK: usize = 1024 * 1024;
+
+/// A holder with one figure block per manifest that `put` writes, all in one tagged landing.
+fn figures_holder(
+    put: impl FnOnce(&mut Store) -> Vec<Hash>,
+) -> (tempfile::TempDir, Store, Vec<Hash>) {
+    let (d, mut s) = holder();
+    let ms = put(&mut s);
+    let mut blocks = vec![];
+    for (i, m) in ms.iter().enumerate() {
+        let mut b = block(&format!("b-{:05}", i + 1), "figure", "a figure");
+        b.fields
+            .insert("blob".into(), FieldValue::Str(m.to_string()));
+        put_block(&mut s, &b);
+        blocks.push(b);
+    }
+    let ops = blocks
+        .iter()
+        .map(|b| Op::Create { block: b.clone() })
+        .collect();
+    let c1 = put_change(&mut s, &change(ops, vec![], "one"));
+    let refs: Vec<&Block> = blocks.iter().collect();
+    let l1 = land(&mut s, None, &refs, &[c1], "first");
+    tag(&mut s, "v1.0.0", l1);
+    (d, s, ms)
+}
+
+/// Writes the manifest of `len` bytes over `chunks`.
+fn put_manifest(s: &mut Store, len: u64, chunks: Vec<Hash>) -> Hash {
+    s.put(kinds::BLOB_MANIFEST, &kinds::BlobManifest { len, chunks })
+        .unwrap()
+}
+
+/// The frames one holder check reads, which must pass.
+fn check_frames(s: &Store) -> u64 {
+    let before = s.frames_read();
+    s.check_holder().unwrap();
+    s.frames_read() - before
+}
+
+#[test]
+fn ha7_check_holder_reads_a_repeated_chunk_once() {
+    // one full chunk listed k times: the check reads it once, and still checks every position
+    let mut frames = vec![];
+    for k in [1usize, 8] {
+        let (_d, s, ms) = figures_holder(|s| {
+            let c = put_chunk(s, &vec![7; CHUNK]);
+            vec![put_manifest(s, (k * CHUNK) as u64, vec![c; k])]
+        });
+        assert_eq!(s.get_blob(&ms[0]).unwrap().len(), k * CHUNK);
+        frames.push(check_frames(&s));
+    }
+    assert_eq!(frames[1], frames[0], "a repeated chunk is read once");
+}
+
+#[test]
+fn ha7_check_holder_reads_a_chunk_shared_across_manifests_once() {
+    // two manifests over one chunk read one chunk; over two chunks, two
+    let shared = figures_holder(|s| {
+        let c = put_chunk(s, &vec![7; CHUNK]);
+        vec![
+            put_manifest(s, CHUNK as u64, vec![c]),
+            put_manifest(s, 2 * CHUNK as u64, vec![c, c]),
+        ]
+    });
+    let distinct = figures_holder(|s| {
+        let c = put_chunk(s, &vec![7; CHUNK]);
+        let d = put_chunk(s, &vec![8; CHUNK]);
+        vec![
+            put_manifest(s, CHUNK as u64, vec![c]),
+            put_manifest(s, 2 * CHUNK as u64, vec![d, d]),
+        ]
+    });
+    assert_eq!(
+        check_frames(&distinct.1) - check_frames(&shared.1),
+        1,
+        "a chunk two manifests share is read once"
+    );
+}
+
+#[test]
+fn ha7_check_holder_checks_each_position_of_a_cached_chunk() {
+    // a full chunk at the last position of a blob of CHUNK + 1 bytes: its length is known from
+    // the first position, and the last position is still checked against it
+    let (_d, s, ms) = figures_holder(|s| {
+        let f = put_chunk(s, &vec![7; CHUNK]);
+        vec![put_manifest(s, CHUNK as u64 + 1, vec![f, f])]
+    });
+    let text = format!(
+        "blob {} has a chunk of {CHUNK} bytes where 1 are due",
+        ms[0]
+    );
+    assert_eq!(decode_text(s.get_blob(&ms[0])), text);
+    assert_eq!(decode_text(s.check_holder()), text);
+    // the same across manifests: a good blob over the chunk and a bad one, in either order
+    for bad_first in [false, true] {
+        let (_d, s, ms) = figures_holder(|s| {
+            let f = put_chunk(s, &vec![7; CHUNK]);
+            let good = put_manifest(s, CHUNK as u64, vec![f]);
+            let bad = put_manifest(s, CHUNK as u64 + 1, vec![f, f]);
+            if bad_first {
+                vec![bad, good]
+            } else {
+                vec![good, bad]
+            }
+        });
+        let bad = ms[usize::from(!bad_first)];
+        assert_eq!(
+            decode_text(s.check_holder()),
+            format!("blob {bad} has a chunk of {CHUNK} bytes where 1 are due"),
+            "bad_first {bad_first}"
+        );
+    }
+}

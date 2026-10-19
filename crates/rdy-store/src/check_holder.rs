@@ -95,6 +95,8 @@ struct Closure<'a> {
     /// The snapshot entries whose version was not read yet, each with the first snapshot that
     /// holds it: checked once the walk has read every version it reaches.
     pending: BTreeMap<(BlockId, Hash), Hash>,
+    /// The length of each blob chunk read, so each is read once across every manifest.
+    chunk_lens: HashMap<Hash, u64>,
 }
 
 impl<'a> Closure<'a> {
@@ -108,6 +110,7 @@ impl<'a> Closure<'a> {
             landings: HashMap::new(),
             ids: HashMap::new(),
             pending: BTreeMap::new(),
+            chunk_lens: HashMap::new(),
         }
     }
 
@@ -168,7 +171,8 @@ impl<'a> Closure<'a> {
                 };
                 children.push(ObjectKey { kind, hash: r.hash });
             }
-            // a blob's chunks are read and checked with it, and not read again
+            // a blob's chunks are read and checked with it, each once across every manifest, and
+            // not read again
             let mut chunks_read = false;
             match key.kind {
                 kinds::LANDING => {
@@ -191,7 +195,9 @@ impl<'a> Closure<'a> {
                         }
                     }
                 }
-                kinds::BLOB_MANIFEST => chunks_read = self.reader.check_blob(&key.hash)?,
+                kinds::BLOB_MANIFEST => {
+                    chunks_read = self.reader.check_blob(&key.hash, &mut self.chunk_lens)?
+                }
                 _ => {}
             }
             for child in children {
