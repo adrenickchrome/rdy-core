@@ -18,7 +18,7 @@ use rdy_engine::hub_types::{Origin, Secret};
 use rdy_engine::{Rdy, now_ms};
 use rdy_qa::daemon::short_tempdir;
 use rdy_qa::fixtures::{land, rdy_bin, seed_doc};
-use rdy_qa::mcp::{McpClient, Reply as McpReply};
+use rdy_qa::mcp::{DEADLINE, McpClient, Reply as McpReply, Transcript, exposed_outputs};
 use rdy_qa::platform::{RecordingAgent, SocketAgent, set_mode};
 use rdy_qa::signing::{QaAgent, TestKey};
 use serde_json::{Value, json};
@@ -57,6 +57,17 @@ const HIDDEN: [&str; 8] = [
     PROOF_PREFIX,
     STATEMENT_PREFIX,
 ];
+
+/// What no raw output channel may hold: every hidden part, and an authorization header.
+fn sentinels() -> Vec<&'static str> {
+    HIDDEN.iter().copied().chain(["Bearer"]).collect()
+}
+
+/// The hidden parts that an MCP server's raw stdout (every reply, notification and line that
+/// is not JSON-RPC), its stderr, or `proj`'s daemon log hold.
+fn outputs_exposed(t: &Transcript, proj: &Path) -> Vec<String> {
+    exposed_outputs(&sentinels(), t, proj)
+}
 
 // ---------------------------------------------------------------------------------------------
 // Keys and hub replies
@@ -484,11 +495,11 @@ fn kit() -> Kit {
 }
 
 /// An MCP client of `p`'s daemon (`rdy mcp`, the proxy, which starts the daemon if none runs)
-/// for `home`, signing through `sock`, with an agent session.
+/// for `home`, signing through `sock`, with an agent session; it keeps all it writes.
 fn chat(p: &Path, home: &Home, sock: &Path) -> McpClient {
     let mut env = home.env();
     env.push(("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned()));
-    let mut c = McpClient::start_proxy_at(p, &env);
+    let mut c = McpClient::start_proxy_capturing(p, &env);
     let r = c.call(
         "rdy_session",
         json!({"actor": "agent:claude", "run": "r7", "role": "writer"}),
@@ -1177,6 +1188,14 @@ fn hsa9_all_client_surfaces_hide_credential_and_proof_bytes() {
     let _ = refusal(tool(&mut c, "rdy_key_bind", json!({"kind": "agent"})));
     let _ = ok(tool(&mut c, "rdy_remote", json!({"op": "list"})));
     let _ = ok(tool(&mut c, "rdy_key_show", json!({})));
+    // everything the chat server wrote, and the daemon's log once it has exited
+    let t = c.finish(DEADLINE);
+    stop_daemon(k.proj.path(), &me);
+    let log = std::fs::metadata(k.proj.path().join(".rdy/run/daemon.log")).unwrap();
+    assert!(log.len() > 0, "the daemon ran, so its log is checked");
+    assert!(!t.stdout.is_empty(), "the chat output is checked");
+    let found = outputs_exposed(&t, k.proj.path());
+    assert!(found.is_empty(), "exposed: {found:?}");
     // no config file holds a token or a proof, and the credential file holds no proof
     for file in [
         k.home.config(),
@@ -1199,6 +1218,75 @@ fn hsa9_all_client_surfaces_hide_credential_and_proof_bytes() {
             .any(|r| r.target == "/api/v1/me/keys" && r.body_text().contains(PROOF_PREFIX))
     );
     assert_eq!(k.hub.finish(), 0);
+}
+
+/// A stub MCP server: it answers `initialize`, reads `notifications/initialized` and one tool
+/// call, runs `emit`, answers the call with a pending bind and waits for its input to close.
+fn stub(emit: &str) -> McpClient {
+    let script = format!(
+        r#"read l
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+read l
+read l
+{emit}
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"{{\"state\":\"pending\"}}"}}]}}}}'
+cat >/dev/null"#
+    );
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &script]).stderr(Stdio::piped());
+    McpClient::launch(cmd)
+}
+
+#[test]
+fn hsa9_the_containment_check_fails_on_each_output_channel() {
+    // (where a sentinel goes, what the stub writes, what the project's daemon log holds)
+    type Case<'a> = (Option<(&'a str, &'a str)>, String, &'a str);
+    let note = format!(
+        r#"{{"jsonrpc":"2.0","method":"notifications/message","params":{{"data":"{NONCE}"}}}}"#
+    );
+    let cases: [Case; 6] = [
+        (None, String::new(), "daemon started\n"),
+        (Some(("mcp stdout", ACCESS)), format!("echo '{ACCESS}'"), ""),
+        (
+            Some(("mcp stdout", NONCE)),
+            format!("printf '%s\\n' '{note}'"),
+            "",
+        ),
+        (
+            Some(("mcp stdout", "Bearer")),
+            "echo '{\"Bearer'".to_string(),
+            "",
+        ),
+        (
+            Some(("mcp stderr", REFRESH)),
+            format!("echo '{REFRESH}' >&2"),
+            "",
+        ),
+        (
+            Some(("daemon.log", PROOF_PREFIX)),
+            String::new(),
+            PROOF_PREFIX,
+        ),
+    ];
+    for (leak, emit, log) in cases {
+        let proj = tempfile::tempdir().unwrap();
+        if !log.is_empty() {
+            std::fs::create_dir_all(proj.path().join(".rdy/run")).unwrap();
+            std::fs::write(proj.path().join(".rdy/run/daemon.log"), log).unwrap();
+        }
+        let mut c = stub(&emit);
+        // the reply alone is clean, so the reply check passes
+        let v = ok(tool(&mut c, "rdy_key_bind", json!({"kind": "person"})));
+        assert_eq!(v["state"], "pending", "{emit}");
+        let t = c.finish(DEADLINE);
+        assert_eq!(t.code, Some(0), "{t:?}");
+        let want: Vec<String> = leak.iter().map(|(ch, s)| format!("{ch}: {s}")).collect();
+        assert_eq!(
+            outputs_exposed(&t, proj.path()),
+            want,
+            "{emit} / {log}: {t:?}"
+        );
+    }
 }
 
 #[test]

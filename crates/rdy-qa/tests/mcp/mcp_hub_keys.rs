@@ -18,7 +18,7 @@ use rdy_engine::{Rdy, now_ms};
 use rdy_model::Hash;
 use rdy_qa::daemon::short_tempdir;
 use rdy_qa::fixtures::rdy_bin;
-use rdy_qa::mcp::{McpClient, Reply as McpReply};
+use rdy_qa::mcp::{DEADLINE, McpClient, Reply as McpReply, exposed, exposed_outputs};
 use rdy_qa::platform::{SocketAgent, set_mode};
 use rdy_qa::signing::{QaAgent, TestKey};
 use serde_json::{Value, json};
@@ -58,6 +58,11 @@ const HIDDEN: [&str; 7] = [
     "U1NIU0lH",
     "rdy-statement",
 ];
+
+/// What no raw output channel may hold: every hidden part, and an authorization header.
+fn sentinels() -> Vec<&'static str> {
+    HIDDEN.iter().copied().chain(["Bearer"]).collect()
+}
 
 fn sub(template: &str, origin: &str) -> String {
     template.replace("{o}", origin)
@@ -401,6 +406,29 @@ impl Side {
         self.hub.as_ref().expect("the hub").requests()
     }
 
+    /// Stops this side's daemon, waiting for it to exit, and returns its log (empty when no
+    /// daemon ran): the log is complete, and the project is still there.
+    fn stop_daemon(&self) -> String {
+        let home = self.home.path().to_string_lossy().into_owned();
+        let o = Command::new(rdy_bin())
+            .env_clear()
+            .env("XDG_CONFIG_HOME", &home)
+            .env("HOME", &home)
+            .env("USER", "qa")
+            .arg("--project")
+            .arg(self.proj.path())
+            .args(["serve", "--stop"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("rdy serve --stop");
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        match std::fs::read(self.proj.path().join(".rdy/run/daemon.log")) {
+            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => panic!("daemon.log: {e}"),
+        }
+    }
+
     /// Joins the hub's threads and proves that no further request waits; the unused replies.
     fn finish(&mut self) -> usize {
         self.hub.take().expect("the hub").finish()
@@ -555,7 +583,7 @@ fn hsa9_signin_remote_bind_retire_revoke_is_one_client_flow() {
     let o = chat_side.o.clone();
     let h = chat_side.home.path().to_string_lossy().into_owned();
     let sock = chat_side.agent.socket_path().to_string_lossy().into_owned();
-    let mut c = McpClient::start_with_env(
+    let mut c = McpClient::start_capturing(
         chat_side.proj.path(),
         &[
             ("XDG_CONFIG_HOME", h.as_str()),
@@ -624,7 +652,9 @@ fn hsa9_signin_remote_bind_retire_revoke_is_one_client_flow() {
         "signing settings unchanged"
     );
     assert_eq!(chat_side.fixed(), before, "store and settings unchanged");
-    drop(c);
+    // everything the chat server wrote: replies, notifications, any other line, and stderr
+    let chat_out = c.finish(DEADLINE);
+    assert!(!chat_out.stdout.is_empty(), "the chat output is checked");
 
     // the replies the flow promises
     assert_eq!(chat[0]["state"], "confirmation_required");
@@ -756,6 +786,19 @@ fn hsa9_signin_remote_bind_retire_revoke_is_one_client_flow() {
         assert_eq!(shape(a), shape(b), "step {i}");
         assert_eq!(normal(a, &o), normal(b, &p), "step {i}");
     }
+    // no raw output holds a secret: the chat server's stdout and stderr, and each daemon's log
+    // once the daemon has exited (the CLI side ran through its daemon)
+    let hidden = sentinels();
+    chat_side.stop_daemon();
+    let found = exposed_outputs(&hidden, &chat_out, chat_side.proj.path());
+    assert!(found.is_empty(), "chat side exposed: {found:?}");
+    let log = cli_side.stop_daemon();
+    assert!(
+        !log.is_empty(),
+        "the CLI side's daemon ran, so its log is checked"
+    );
+    let found = exposed(&hidden, &[("daemon.log", &log)]);
+    assert!(found.is_empty(), "CLI side exposed: {found:?}");
     assert_eq!(chat_side.finish(), 0);
     assert_eq!(cli_side.finish(), 0);
 }
