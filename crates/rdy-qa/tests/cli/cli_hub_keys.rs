@@ -19,7 +19,7 @@ use rdy_engine::{Rdy, now_ms};
 use rdy_qa::daemon::short_tempdir;
 use rdy_qa::fixtures::{land, rdy_bin, seed_doc};
 use rdy_qa::mcp::{DEADLINE, McpClient, Reply as McpReply, Transcript, exposed_outputs};
-use rdy_qa::platform::{RecordingAgent, SocketAgent, set_mode};
+use rdy_qa::platform::{RecordingAgent, SocketAgent, set_mode, shell_script};
 use rdy_qa::signing::{QaAgent, TestKey};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -1232,8 +1232,8 @@ read l
 printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"{{\"state\":\"pending\"}}"}}]}}}}'
 cat >/dev/null"#
     );
-    let mut cmd = Command::new("sh");
-    cmd.args(["-c", &script]).stderr(Stdio::piped());
+    let mut cmd = shell_script(&script);
+    cmd.stderr(Stdio::piped());
     McpClient::launch(cmd)
 }
 

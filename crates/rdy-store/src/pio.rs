@@ -12,7 +12,11 @@
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
 //!   `rename_at`, `is_link_refusal`): each names one entry of a directory handle, so a path that
 //!   is changed after the handle was opened cannot redirect it, and none follows a link at that
-//!   entry.
+//!   entry;
+//! - test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
+//!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
+//!   child process under another umask (`under_umask`), so the store's and the engine's tests
+//!   need no Unix-only call of their own.
 //!
 //! Every other store module, and the engine, calls these functions. The daemon's `sys` seam
 //! re-exports the no-follow and privacy calls under the same names.
@@ -297,6 +301,62 @@ fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// The permission bits of the file `meta` describes, with the set-id and sticky bits
+/// (mode & 0o7777). For test fixtures.
+#[cfg(unix)]
+pub fn mode_of(meta: &Metadata) -> u32 {
+    meta.permissions().mode() & 0o7777
+}
+
+/// Permissions of exactly `mode` (for example 0o644), for `fs::set_permissions` or a
+/// `tempfile::Builder`. For test fixtures.
+#[cfg(unix)]
+pub fn permissions(mode: u32) -> fs::Permissions {
+    fs::Permissions::from_mode(mode)
+}
+
+/// Sets the file or directory `path` to `mode`, following a link at `path`. For test fixtures.
+#[cfg(unix)]
+pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    fs::set_permissions(path, permissions(mode))
+}
+
+/// Makes the directories that `builder` creates `mode` less the umask. For test fixtures.
+#[cfg(unix)]
+pub fn dir_mode(builder: &mut fs::DirBuilder, mode: u32) -> &mut fs::DirBuilder {
+    builder.mode(mode)
+}
+
+/// Makes a file that `opts` creates `mode` less the umask. For test fixtures.
+#[cfg(unix)]
+pub fn file_mode(opts: &mut OpenOptions, mode: u32) -> &mut OpenOptions {
+    opts.mode(mode)
+}
+
+/// The inode number of the file `meta` describes: equal numbers on one device are one file.
+/// For test fixtures.
+#[cfg(unix)]
+pub fn inode(meta: &Metadata) -> u64 {
+    meta.ino()
+}
+
+/// Makes `link` a symbolic link to `target`. For test fixtures.
+#[cfg(unix)]
+pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// A command that runs `program` under the process umask `umask` (octal text, for example
+/// "002"); the caller adds the program's arguments. The umask is process-wide, so a test that
+/// needs another one runs a child under it. For test fixtures.
+#[cfg(unix)]
+pub fn under_umask(umask: &str, program: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
+        .arg(program);
+    cmd
+}
+
 #[cfg(not(unix))]
 compile_error!("rdy_store::pio has no implementation for this platform yet (FW-XP1 Phase 4)");
 
@@ -358,5 +418,43 @@ mod tests {
         assert_eq!(&buf[..2], b"ab");
         assert_eq!(&buf[2..10], &[0u8; 8]);
         assert_eq!(&buf[10..], b"xyz");
+    }
+
+    #[test]
+    fn ha1_pio_fixture_helpers_set_and_read_modes_links_and_umasks() {
+        let d = tempfile::Builder::new()
+            .permissions(permissions(0o700))
+            .tempdir()
+            .unwrap();
+        assert_eq!(mode_of(&fs::metadata(d.path()).unwrap()), 0o700);
+        let f = d.path().join("f");
+        file_mode(OpenOptions::new().write(true).create_new(true), 0o600)
+            .open(&f)
+            .unwrap();
+        assert_eq!(mode_of(&fs::metadata(&f).unwrap()), 0o600);
+        set_mode(&f, 0o644).unwrap();
+        assert_eq!(mode_of(&fs::metadata(&f).unwrap()), 0o644);
+        let sub = d.path().join("sub");
+        dir_mode(&mut fs::DirBuilder::new(), 0o700)
+            .create(&sub)
+            .unwrap();
+        assert_eq!(mode_of(&fs::metadata(&sub).unwrap()), 0o700);
+        set_mode(&sub, 0o1777).unwrap();
+        assert_eq!(mode_of(&fs::metadata(&sub).unwrap()), 0o1777);
+        let link = d.path().join("link");
+        symlink(&f, &link).unwrap();
+        let lm = fs::symlink_metadata(&link).unwrap();
+        assert!(lm.file_type().is_symlink());
+        assert_ne!(inode(&lm), inode(&fs::metadata(&f).unwrap()));
+        assert_eq!(
+            inode(&fs::metadata(&link).unwrap()),
+            inode(&fs::metadata(&f).unwrap())
+        );
+        let out = under_umask("077", Path::new("/bin/sh"))
+            .args(["-c", "umask"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0077");
     }
 }

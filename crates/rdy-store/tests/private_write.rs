@@ -1,7 +1,8 @@
-#![cfg(unix)]
-// Unix only: it reads file modes and owners. FW-XP1 Phase 4 ports it.
 //! Private and settings replacements (`fsutil::write_private_durable`,
 //! `fsutil::write_settings_durable`) and the privacy helpers moved into `pio`.
+//!
+//! Its file modes and owners go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected modes are
+//! Unix modes, which FW-XP1 Phase 4 ports with the Windows privacy rules.
 
 use rdy_store::fsutil::{
     PrivateWriteStage, with_private_write_probe_for_tests, write_durable, write_private_durable,
@@ -10,11 +11,10 @@ use rdy_store::fsutil::{
 use rdy_store::pio;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 fn mode(path: &Path) -> u32 {
-    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    pio::mode_of(&fs::symlink_metadata(path).unwrap()) & 0o777
 }
 
 fn names(dir: &Path) -> Vec<String> {
@@ -35,18 +35,14 @@ fn hsa2_private_bytes_are_private_before_write() {
     let path = d.path().join("credentials.yaml");
     // an old, wider file is replaced by a private one
     fs::write(&path, b"old").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&path, pio::permissions(0o644)).unwrap();
     let seen: std::rc::Rc<std::cell::RefCell<Vec<Seen>>> = Default::default();
     let log = seen.clone();
     let r = with_private_write_probe_for_tests(
         move |stage, p: &Path| {
             let m = fs::symlink_metadata(p)?;
-            log.borrow_mut().push((
-                stage,
-                p.to_path_buf(),
-                m.permissions().mode() & 0o777,
-                m.len(),
-            ));
+            log.borrow_mut()
+                .push((stage, p.to_path_buf(), pio::mode_of(&m) & 0o777, m.len()));
             Ok(())
         },
         || write_private_durable(&path, b"secret bytes"),
@@ -91,7 +87,7 @@ fn hsa2_settings_writes_keep_the_target_mode_and_new_files_are_0600() {
     let path = d.path().join("config.yaml");
     write_settings_durable(&path, b"a: 1\n").unwrap();
     assert_eq!(mode(&path), 0o600, "a new settings file is 0600");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&path, pio::permissions(0o644)).unwrap();
     let temp_modes: std::rc::Rc<std::cell::RefCell<Vec<u32>>> = Default::default();
     let log = temp_modes.clone();
     with_private_write_probe_for_tests(
@@ -135,7 +131,7 @@ fn hsa2_a_probe_fault_stops_the_write_and_cleans_the_temp() {
             let d = tempfile::tempdir().unwrap();
             let path = d.path().join("f.yaml");
             fs::write(&path, b"old bytes").unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&path, pio::permissions(0o600)).unwrap();
             let e = with_private_write_probe_for_tests(
                 move |stage, _: &Path| {
                     if stage == fault {
@@ -206,12 +202,12 @@ fn hsa2_pio_privacy_helpers_judge_files_by_owner_kind_and_mode() {
     let d = tempfile::tempdir().unwrap();
     let f = d.path().join("f");
     fs::write(&f, b"x").unwrap();
-    fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&f, pio::permissions(0o600)).unwrap();
     let m = fs::symlink_metadata(&f).unwrap();
     assert_eq!(pio::owner(&m), pio::own_uid());
     assert!(pio::is_private_file(&m));
     for wide in [0o640, 0o604, 0o644, 0o400, 0o700] {
-        fs::set_permissions(&f, fs::Permissions::from_mode(wide)).unwrap();
+        fs::set_permissions(&f, pio::permissions(wide)).unwrap();
         assert!(
             !pio::is_private_file(&fs::symlink_metadata(&f).unwrap()),
             "{wide:o}"
@@ -222,12 +218,12 @@ fn hsa2_pio_privacy_helpers_judge_files_by_owner_kind_and_mode() {
     pio::create_private_dir(&dir).unwrap();
     pio::make_private_dir(&dir).unwrap();
     assert!(pio::is_private_dir(&fs::symlink_metadata(&dir).unwrap()));
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&dir, pio::permissions(0o600)).unwrap();
     assert!(!pio::is_private_file(&fs::symlink_metadata(&dir).unwrap()));
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&dir, pio::permissions(0o700)).unwrap();
     // open_no_follow refuses a link
     let link = d.path().join("link");
-    std::os::unix::fs::symlink(&f, &link).unwrap();
+    pio::symlink(&f, &link).unwrap();
     assert!(pio::open_no_follow(fs::OpenOptions::new().read(true), &link).is_err());
     let file = pio::open_no_follow(
         pio::private_file(fs::OpenOptions::new().write(true).create_new(true)),
@@ -247,8 +243,8 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
     let dir = pio::open_dir(d.path()).unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     fs::write(elsewhere.path().join("victim"), b"keep").unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), d.path().join("ldir")).unwrap();
-    std::os::unix::fs::symlink(elsewhere.path().join("victim"), d.path().join("lfile")).unwrap();
+    pio::symlink(elsewhere.path(), d.path().join("ldir")).unwrap();
+    pio::symlink(elsewhere.path().join("victim"), d.path().join("lfile")).unwrap();
     fs::write(d.path().join("plain"), b"plain").unwrap();
     // a link, or a file where a directory is opened, is a link refusal
     for name in ["ldir", "plain"] {
@@ -295,7 +291,7 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
         (0o1777, true, false),
         (0o640, false, false),
     ] {
-        fs::set_permissions(d.path().join("plain"), fs::Permissions::from_mode(m)).unwrap();
+        fs::set_permissions(d.path().join("plain"), pio::permissions(m)).unwrap();
         let meta = fs::symlink_metadata(d.path().join("plain")).unwrap();
         assert_eq!(pio::is_shared_writable(&meta), shared, "{m:o}");
         assert_eq!(pio::is_owner_only(&meta), owner_only, "{m:o}");
@@ -312,11 +308,11 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
         (0o1757, false),
         (0o700, false),
     ] {
-        fs::set_permissions(&dir, fs::Permissions::from_mode(m)).unwrap();
+        fs::set_permissions(&dir, pio::permissions(m)).unwrap();
         let meta = fs::symlink_metadata(&dir).unwrap();
         assert_eq!(pio::is_world_writable_unsticky(&meta), unsticky, "{m:o}");
     }
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&dir, pio::permissions(0o700)).unwrap();
 }
 
 /// The umask check a config edit runs before it makes a directory: a probe file made with mode
@@ -325,17 +321,13 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
 #[test]
 fn hsa2_pio_the_umask_check_keeps_nothing_and_follows_no_link() {
     use std::ffi::OsStr;
-    use std::os::unix::fs::OpenOptionsExt;
     let d = tempfile::tempdir().unwrap();
     let dir = pio::open_dir(d.path()).unwrap();
     // the answer agrees with the mode a file made 0o700 gets under this process's umask
-    let made = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o700)
+    let made = pio::file_mode(fs::OpenOptions::new().write(true).create_new(true), 0o700)
         .open(d.path().join("witness"))
         .unwrap();
-    let whole = made.metadata().unwrap().permissions().mode() & 0o777 == 0o700;
+    let whole = pio::mode_of(&made.metadata().unwrap()) & 0o777 == 0o700;
     drop(made);
     fs::remove_file(d.path().join("witness")).unwrap();
     assert_eq!(
@@ -345,7 +337,7 @@ fn hsa2_pio_the_umask_check_keeps_nothing_and_follows_no_link() {
     assert!(names(d.path()).is_empty(), "the probe file is removed");
     // a link or a file at the name: AlreadyExists, the link not followed, nothing changed
     let elsewhere = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(elsewhere.path().join("victim"), d.path().join("lnk")).unwrap();
+    pio::symlink(elsewhere.path().join("victim"), d.path().join("lnk")).unwrap();
     fs::write(d.path().join("plain"), b"keep").unwrap();
     for name in ["lnk", "plain"] {
         let e = pio::umask_keeps_0700_at(&dir, OsStr::new(name)).unwrap_err();
@@ -384,7 +376,7 @@ fn hsa2_a_replacement_in_a_directory_handle_ignores_later_path_changes() {
     let a = pio::open_dir(&d.path().join("a")).unwrap();
     // a is renamed aside and replaced by a link to b: the handle still writes into a
     fs::rename(d.path().join("a"), d.path().join("a-aside")).unwrap();
-    std::os::unix::fs::symlink(d.path().join("b"), d.path().join("a")).unwrap();
+    pio::symlink(d.path().join("b"), d.path().join("a")).unwrap();
     let a_path = d.path().join("a");
     let seen: std::rc::Rc<std::cell::RefCell<Vec<(PrivateWriteStage, PathBuf)>>> =
         Default::default();
@@ -415,7 +407,7 @@ fn hsa2_a_replacement_in_a_directory_handle_ignores_later_path_changes() {
         ]
     );
     // kept permissions are applied to the temp file before the bytes
-    let keep = fs::Permissions::from_mode(0o640);
+    let keep = pio::permissions(0o640);
     let aside = pio::open_dir(&d.path().join("a-aside")).unwrap();
     rdy_store::fsutil::replace_in_dir(
         &aside,
