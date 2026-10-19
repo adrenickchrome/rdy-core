@@ -1,5 +1,6 @@
 mod alt;
 mod asset;
+mod auth;
 mod brief;
 mod coverage;
 mod decide;
@@ -174,7 +175,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 22] {
+    fn family_routers() -> [ToolRouter<Self>; 23] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -198,6 +199,7 @@ impl RdyServer {
             Self::site_router(),
             Self::store_router(),
             Self::signing_router(),
+            Self::auth_router(),
         ]
     }
 

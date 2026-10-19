@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod alt_cmd;
+mod auth_cmd;
 mod brief_cmd;
 mod brief_text;
 mod config_cmd;
@@ -170,6 +171,11 @@ enum Cmd {
     Serve(serve_cmd::ServeArgs),
     /// Show the settings in effect, one row per key (no daemon is started).
     Config(config_cmd::ConfigArgs),
+    /// Hub sign-in: start one (a confirmation card first), show its state, sign out, or list the saved sign-ins. No project or daemon is needed. The chat path is rdy_auth.
+    Auth {
+        #[command(subcommand)]
+        cmd: auth_cmd::AuthCmd,
+    },
     #[command(flatten)]
     Wc(wc::WcCmd),
 }
@@ -220,7 +226,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Clone(a) => dump_cmd::clone(env, a, cli.project),
         Cmd::Reindex => project_cmd::reindex(env),
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
-        Cmd::Check(_) | Cmd::Serve(_) => unreachable!("handled in main"),
+        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } => unreachable!("handled in main"),
     }
 }
 
@@ -233,6 +239,16 @@ fn main() -> ExitCode {
     // `rdy load` refuses a target a live daemon still serves; the engine asks this probe
     rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
     let cli = Cli::parse();
+    // hub sign-in reads the user config only: before the working directory, the project
+    // lookup, a store or a daemon
+    let cli = match cli {
+        Cli {
+            cmd: Cmd::Auth { cmd },
+            json,
+            ..
+        } => return auth_cmd::run(cmd, json),
+        cli => cli,
+    };
     let as_json = cli.json;
     let cwd = match std::env::current_dir() {
         Ok(d) => d,

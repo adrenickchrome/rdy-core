@@ -268,7 +268,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 45 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 48 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
     // `RelayParams`, `RecommendedParams`).
     check!(
@@ -279,6 +279,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         AltParams,
         AnswerParams,
         AssetParams,
+        AuthParams,
         BriefParams,
         CloneParams,
         CoverageParams,
@@ -767,4 +768,250 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
         .chain(warnings.iter().map(|(c, _)| *c))
         .collect();
     assert_eq!(codes, want);
+}
+
+/// hsa8 (D-KQ4CA, n-XZDQD): `rdy_auth` publishes exactly its eight fields and its two closed
+/// enums, refuses any other key with the nearest-key text, and checks which fields each op
+/// takes in one fixed order: a missing field needs `pass {field}`, an extra one `remove {field}`.
+/// There is no confirmed_host, token, relayed_by or complete-link input.
+#[test]
+fn hsa8_auth_tool_schema_is_strict_and_complete() {
+    let schema = rmcp::handler::server::common::schema_for_input::<AuthParams>().unwrap();
+    let schema = Value::Object((*schema).clone());
+    let mut props: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    props.sort();
+    assert_eq!(
+        props,
+        [
+            "answer",
+            "card_hash",
+            "evidence",
+            "install",
+            "machine_name",
+            "op",
+            "question",
+            "session_ref"
+        ]
+    );
+    assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
+    assert_eq!(schema["required"], json!(["op"]), "{schema}");
+    let text = schema.to_string();
+    for word in ["\"start\"", "\"state\"", "\"sign_out\"", "\"installs\""] {
+        assert!(text.contains(word), "{word}: {text}");
+    }
+    assert!(
+        text.contains("\"confirm\"") && text.contains("\"cancel\""),
+        "{text}"
+    );
+    // every published key parses, and the values of both enums are closed
+    let full = json!({"op": "start", "install": "https://127.0.0.1:1", "machine_name": "m",
+        "card_hash": "h", "answer": "confirm", "evidence": "e", "question": "q",
+        "session_ref": "s"});
+    let p = parse_params::<AuthParams>("rdy_auth", full.as_object().unwrap().clone()).unwrap();
+    assert_eq!(
+        (p.op, p.answer),
+        (AuthOp::Start, Some(AuthAnswerParam::Confirm))
+    );
+    for op in ["state", "sign_out", "installs"] {
+        let v = json!({ "op": op });
+        assert!(parse_params::<AuthParams>("rdy_auth", v.as_object().unwrap().clone()).is_ok());
+    }
+    for (args, message) in [
+        (
+            json!({"op": "login"}),
+            "rdy_auth: parameter \"op\" must be one of",
+        ),
+        (
+            json!({"op": "start", "answer": "yes"}),
+            "rdy_auth: parameter \"answer\" must be one of",
+        ),
+    ] {
+        let (code, m, _) = refusal::<AuthParams>("rdy_auth", args.clone());
+        assert_eq!(code, "E_BAD_INPUT", "{args}");
+        assert!(m.starts_with(message), "{args}: {m}");
+    }
+    // unknown keys: the shared nearest-key refusal, for near and far names alike
+    let all = "answer, card_hash, evidence, install, machine_name, op, question, session_ref";
+    assert_eq!(
+        refusal::<AuthParams>("rdy_auth", json!({"op": "start", "instal": "x"})),
+        bad(
+            "rdy_auth: unknown parameter \"instal\"",
+            &format!("did you mean \"install\"? the parameters here are {all}")
+        )
+    );
+    assert_eq!(
+        refusal::<AuthParams>("rdy_auth", json!({"op": "start", "card_hsh": "x"})),
+        bad(
+            "rdy_auth: unknown parameter \"card_hsh\"",
+            &format!("did you mean \"card_hash\"? the parameters here are {all}")
+        )
+    );
+    for key in [
+        "confirmed_host",
+        "token",
+        "access_token",
+        "relayed_by",
+        "verification_uri_complete",
+    ] {
+        let (code, m, fix) = refusal::<AuthParams>("rdy_auth", json!({"op": "start", key: "x"}));
+        assert_eq!(code, "E_BAD_INPUT", "{key}");
+        assert_eq!(m, format!("rdy_auth: unknown parameter \"{key}\""));
+        assert!(
+            fix.ends_with(&format!("the parameters here are {all}")),
+            "{key}: {fix}"
+        );
+    }
+
+    // which fields each op takes, checked in order
+    let check = |args: Value| -> Result<AuthRequest, (String, String, String)> {
+        let p = parse_params::<AuthParams>("rdy_auth", args.as_object().unwrap().clone())
+            .expect("parses");
+        auth_request(p, None).map_err(|e| (e.code.to_string(), e.message, e.fix))
+    };
+    let needs = |op: &str, f: &str| bad(&format!("auth {op} needs {f}"), &format!("pass {f}"));
+    let unused = |op: &str, f: &str| {
+        bad(
+            &format!("{f} is not used by auth {op}"),
+            &format!("remove {f}"),
+        )
+    };
+    let o = "https://127.0.0.1:1";
+    // start: install, then machine_name; card_hash and answer together; question and
+    // session_ref need evidence
+    assert_eq!(
+        check(json!({"op": "start"})).unwrap_err(),
+        needs("start", "install")
+    );
+    assert_eq!(
+        check(json!({"op": "start", "machine_name": "m", "answer": "confirm"})).unwrap_err(),
+        needs("start", "install"),
+        "install is checked first"
+    );
+    assert_eq!(
+        check(json!({"op": "start", "install": o})).unwrap_err(),
+        needs("start", "machine_name")
+    );
+    assert_eq!(
+        check(json!({"op": "start", "install": o, "machine_name": "m", "answer": "confirm"}))
+            .unwrap_err(),
+        needs("start", "card_hash")
+    );
+    assert_eq!(
+        check(json!({"op": "start", "install": o, "machine_name": "m", "card_hash": "h"}))
+            .unwrap_err(),
+        needs("start", "answer")
+    );
+    assert_eq!(
+        check(json!({"op": "start", "install": o, "machine_name": "m", "evidence": "yes"}))
+            .unwrap_err(),
+        needs("start", "card_hash"),
+        "a relay field makes it an answer"
+    );
+    for f in ["question", "session_ref"] {
+        assert_eq!(
+            check(
+                json!({"op": "start", "install": o, "machine_name": "m", "card_hash": "h",
+                "answer": "cancel", f: "x"})
+            )
+            .unwrap_err(),
+            needs("start", "evidence"),
+            "{f}"
+        );
+    }
+    // a card request, an answer with and without the relay
+    assert_eq!(
+        check(json!({"op": "start", "install": format!("{o}/"), "machine_name": "m"})).unwrap(),
+        AuthRequest::Start {
+            install: rdy_engine::hub_types::Origin::parse(o).unwrap(),
+            machine_name: "m".into(),
+            confirmation: None,
+        }
+    );
+    let Ok(AuthRequest::Start {
+        confirmation: Some(c),
+        ..
+    }) = check(
+        json!({"op": "start", "install": o, "machine_name": "m", "card_hash": "h",
+        "answer": "cancel", "evidence": "yes please", "question": "sign in?",
+        "session_ref": "chat-1"}),
+    )
+    else {
+        panic!("an answer");
+    };
+    assert_eq!(
+        (c.card_hash.as_str(), c.answer),
+        ("h", rdy_engine::hub_credentials::AuthAnswer::Cancel)
+    );
+    assert_eq!(
+        (
+            c.relay.relayed_by,
+            c.relay.evidence.as_deref(),
+            c.relay.question.as_deref(),
+            c.relay.session_ref.as_deref()
+        ),
+        (None, Some("yes please"), Some("sign in?"), Some("chat-1"))
+    );
+    // an install that is not an HTTPS origin is the shared address refusal
+    let e = check(json!({"op": "state", "install": "http://127.0.0.1:1"})).unwrap_err();
+    assert_eq!(e.0, "E_BAD_INPUT");
+    assert_eq!(e.1, rdy_engine::hub_types::BAD_URL_MESSAGE);
+    // state and sign_out: install only
+    for op in ["state", "sign_out"] {
+        assert_eq!(
+            check(json!({ "op": op })).unwrap_err(),
+            needs(op, "install")
+        );
+        assert_eq!(
+            check(json!({"op": op, "machine_name": "m"})).unwrap_err(),
+            needs(op, "install"),
+            "install first"
+        );
+        for f in [
+            "machine_name",
+            "card_hash",
+            "evidence",
+            "question",
+            "session_ref",
+        ] {
+            assert_eq!(
+                check(json!({"op": op, "install": o, f: "x"})).unwrap_err(),
+                unused(op, f),
+                "{op} {f}"
+            );
+        }
+        assert_eq!(
+            check(json!({"op": op, "install": o, "answer": "confirm"})).unwrap_err(),
+            unused(op, "answer")
+        );
+        assert!(check(json!({"op": op, "install": o})).is_ok());
+    }
+    // installs: nothing
+    assert_eq!(
+        check(json!({"op": "installs"})).unwrap(),
+        AuthRequest::Installs
+    );
+    for f in [
+        "install",
+        "machine_name",
+        "card_hash",
+        "evidence",
+        "question",
+        "session_ref",
+    ] {
+        assert_eq!(
+            check(json!({"op": "installs", f: "x"})).unwrap_err(),
+            unused("installs", f),
+            "{f}"
+        );
+    }
+    assert_eq!(
+        check(json!({"op": "installs", "machine_name": "m", "install": o})).unwrap_err(),
+        unused("installs", "install"),
+        "install first"
+    );
 }
