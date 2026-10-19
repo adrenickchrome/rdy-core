@@ -1,13 +1,111 @@
 //! Directory durability: a new file or directory entry survives a power loss only once its
 //! parent directory is fsynced.
+//!
+//! Private and settings replacements reach every mode call through [`crate::pio`].
+use crate::pio;
 use std::cell::RefCell;
-use std::fs::File;
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 thread_local! {
     /// The active sync recorder of this thread, if any (see [`record_syncs`]).
     static RECORDER: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
+    /// The private-write probe of this thread, if any (see
+    /// [`with_private_write_probe_for_tests`]).
+    static PROBE: RefCell<ProbeState> = const { RefCell::new(ProbeState::Off) };
+}
+
+/// A private-write probe, boxed.
+type Probe = Box<dyn FnMut(PrivateWriteStage, &Path) -> io::Result<()>>;
+
+/// This thread's probe: none, installed, or out on a call (so a probe that writes is not
+/// probed again).
+enum ProbeState {
+    Off,
+    On(Probe),
+    Running,
+}
+
+/// A stage of a private or settings replacement, or of a config edit's new directory, after
+/// which the test probe runs.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateWriteStage {
+    /// A config edit made a directory, and has not opened it yet (see [`probe_dir_made`]).
+    DirMade,
+    /// The temp file exists, with its final mode and no bytes.
+    Created,
+    /// The bytes are written to the temp file.
+    Written,
+    /// The temp file is fsynced.
+    Synced,
+    /// The temp file is renamed over the target.
+    Renamed,
+    /// The parent directory is fsynced.
+    DirSynced,
+}
+
+/// Runs `run` with `probe` called after each stage of every private or settings replacement on
+/// this thread (with the temp path, then the target, then the parent directory), and after a
+/// config edit makes a directory (with that directory's path). A probe error
+/// stops the replacement as that stage's own failure would, with the same cleanup. The probe is
+/// removed again even if `run` panics. A nested probe panics.
+#[doc(hidden)]
+pub fn with_private_write_probe_for_tests<T>(
+    probe: impl FnMut(PrivateWriteStage, &Path) -> io::Result<()> + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            PROBE.with(|p| *p.borrow_mut() = ProbeState::Off);
+        }
+    }
+    PROBE.with(|p| {
+        let mut p = p.borrow_mut();
+        assert!(
+            matches!(*p, ProbeState::Off),
+            "a private-write probe is already installed on this thread"
+        );
+        *p = ProbeState::On(Box::new(probe));
+    });
+    let _off = Off;
+    run()
+}
+
+/// Calls this thread's probe, if there is one, with [`PrivateWriteStage::DirMade`] at `path`: a
+/// config edit calls it after it makes the directory `path` and before it opens it. A probe error
+/// is returned, to be handled as a failed open.
+#[doc(hidden)]
+pub fn probe_dir_made(path: &Path) -> io::Result<()> {
+    probe(PrivateWriteStage::DirMade, path)
+}
+
+/// Calls this thread's probe, if there is one, after `stage` at `path`.
+fn probe(stage: PrivateWriteStage, path: &Path) -> io::Result<()> {
+    let taken = PROBE.with(|p| {
+        let mut p = p.borrow_mut();
+        match std::mem::replace(&mut *p, ProbeState::Running) {
+            ProbeState::On(f) => Some(f),
+            other => {
+                *p = other;
+                None
+            }
+        }
+    });
+    let Some(mut f) = taken else {
+        return Ok(());
+    };
+    let r = f(stage, path);
+    PROBE.with(|p| {
+        let mut p = p.borrow_mut();
+        if matches!(*p, ProbeState::Running) {
+            *p = ProbeState::On(f);
+        }
+    });
+    r
 }
 
 /// Appends `path` to this thread's active sync recorder, if there is one. Code that fsyncs a file
@@ -60,18 +158,117 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 /// one raced in after the removal fails the write. Something that cannot be removed there (a
 /// directory) fails the write with an error that names the temp path.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = parent_of(path);
     let tmp = temp_beside(path)?;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
+    let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path)?;
     record(path);
-    sync_dir(parent)
+    sync_dir(parent_of(path))
+}
+
+/// As [`write_durable`], for a secret: the temp file is created private (mode 0o600, whatever
+/// the umask) before any byte is written, so the target ends 0o600. A failure before the rename
+/// removes the temp file and leaves the target as it was. A failure of the directory fsync after
+/// the rename is an error, with the new bytes possibly in place. The parent directory is opened
+/// once (links in its path are followed), and every later step goes through that handle, as in
+/// [`replace_in_dir`].
+pub fn write_private_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (dir, name) = open_parent(path)?;
+    replace_in_dir(&dir, parent_of(path), name, bytes, None)
+}
+
+/// As [`write_private_durable`], for a settings file: an existing regular file at `path` keeps
+/// its permissions (the temp file gets them before any byte is written); a new file is 0o600.
+pub fn write_settings_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (dir, name) = open_parent(path)?;
+    let keep = match pio::open_read_at(&dir, name) {
+        Ok(f) => {
+            let m = f.metadata()?;
+            m.is_file().then(|| m.permissions())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound || pio::is_link_refusal(&e) => None,
+        Err(e) => return Err(e),
+    };
+    replace_in_dir(&dir, parent_of(path), name, bytes, keep.as_ref())
+}
+
+/// The open parent directory of `path`, and `path`'s file name.
+fn open_parent(path: &Path) -> io::Result<(File, &OsStr)> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    Ok((pio::open_dir(parent_of(path))?, name))
+}
+
+/// Makes `bytes` the durable content of the entry `name` of the open directory `dir`: the
+/// private and settings replacement. Every step names an entry of `dir`, never a path, so a
+/// directory moved or replaced after `dir` was opened cannot redirect the write.
+///
+/// Whatever stands at the temp name `.<name>.tmp` is removed (a directory there fails the write),
+/// then the temp file is created new (`O_EXCL`, never through a link) and set to `perms` (an
+/// existing settings file's permissions) or to 0o600, before any byte is written. It is written,
+/// fsynced and renamed over `name`, then `dir` is fsynced. A failure before the rename removes the
+/// temp file and leaves the target as it was; a failure of the directory fsync is an error, with
+/// the new bytes possibly in place. `dir_path` names `dir` for the probe and the sync recorder only.
+pub fn replace_in_dir(
+    dir: &File,
+    dir_path: &Path,
+    name: &OsStr,
+    bytes: &[u8],
+    perms: Option<&Permissions>,
+) -> io::Result<()> {
+    let tmp_name = temp_name(name);
+    let tmp = dir_path.join(&tmp_name);
+    let target = dir_path.join(name);
+    match pio::remove_file_at(dir, &tmp_name) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot remove {} to write through it ({e}); move it aside",
+                    tmp.display()
+                ),
+            ));
+        }
+        _ => {}
+    }
+    let f = pio::create_private_at(dir, &tmp_name)?;
+    // from here the temp file is this call's: a failure before the rename removes it
+    let staged = stage_private(f, dir, &tmp, &tmp_name, name, bytes, perms);
+    if let Err(e) = staged {
+        let _ = pio::remove_file_at(dir, &tmp_name);
+        return Err(e);
+    }
+    record(&target);
+    probe(PrivateWriteStage::Renamed, &target)?;
+    dir.sync_all()?;
+    record(dir_path);
+    probe(PrivateWriteStage::DirSynced, dir_path)
+}
+
+/// Sets the temp file's mode, writes and fsyncs it, then renames it over `name`.
+fn stage_private(
+    mut f: File,
+    dir: &File,
+    tmp: &Path,
+    tmp_name: &OsStr,
+    name: &OsStr,
+    bytes: &[u8],
+    perms: Option<&Permissions>,
+) -> io::Result<()> {
+    match perms {
+        Some(keep) => f.set_permissions(keep.clone())?,
+        None => pio::make_private_file(&f)?,
+    }
+    probe(PrivateWriteStage::Created, tmp)?;
+    f.write_all(bytes)?;
+    probe(PrivateWriteStage::Written, tmp)?;
+    f.sync_all()?;
+    probe(PrivateWriteStage::Synced, tmp)?;
+    drop(f);
+    pio::rename_at(dir, tmp_name, name)
 }
 
 /// As [`write_durable`] for many files at once, with the same temp-name rules and the same crash
@@ -118,10 +315,7 @@ fn temp_beside(path: &Path) -> io::Result<PathBuf> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(".tmp");
-    let tmp = parent_of(path).join(tmp_name);
+    let tmp = parent_of(path).join(temp_name(name));
     match std::fs::remove_file(&tmp) {
         // a directory (or anything else rdy cannot remove) at the temp name: the person moves it
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
@@ -133,6 +327,14 @@ fn temp_beside(path: &Path) -> io::Result<PathBuf> {
         )),
         _ => Ok(tmp),
     }
+}
+
+/// `.<name>.tmp`: the temp name of a replacement of `name`.
+fn temp_name(name: &OsStr) -> OsString {
+    let mut tmp = OsString::from(".");
+    tmp.push(name);
+    tmp.push(".tmp");
+    tmp
 }
 
 fn stage_all(

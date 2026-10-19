@@ -266,6 +266,70 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "the act was saved without signatures: {code}: {message}",
         SIGNING_FAILED_FIX,
     ),
+    (E_ACTOR_UNBOUND, ACTOR_UNBOUND_MESSAGE, ACTOR_UNBOUND_FIX),
+    (
+        E_REMOTE_REQUIRED,
+        REMOTE_REQUIRED_MESSAGE,
+        REMOTE_REQUIRED_FIX,
+    ),
+    (E_REMOTE_EXISTS, REMOTE_EXISTS_MESSAGE, REMOTE_EXISTS_FIX),
+    (
+        E_UPSTREAM_ORIGIN,
+        "the request destination is not trusted for {install}",
+        UPSTREAM_ORIGIN_FIX,
+    ),
+    (E_UPSTREAM_TOKEN, UPSTREAM_TOKEN_MESSAGE, UPSTREAM_TOKEN_FIX),
+    (
+        E_UPSTREAM_AUTH,
+        "sign-in is required for {install}",
+        UPSTREAM_AUTH_FIX,
+    ),
+    (
+        E_UPSTREAM_PROTOCOL,
+        UPSTREAM_PROTOCOL_MESSAGE,
+        UPSTREAM_PROTOCOL_FIX,
+    ),
+    (
+        E_UPSTREAM_TRANSPORT,
+        UPSTREAM_TRANSPORT_MESSAGE,
+        UPSTREAM_TRANSPORT_FIX,
+    ),
+    (
+        E_UPSTREAM_REFUSED,
+        UPSTREAM_REFUSED_MESSAGE,
+        UPSTREAM_REFUSED_FIX,
+    ),
+    (
+        E_UPSTREAM_UNCERTAIN,
+        UPSTREAM_UNCERTAIN_MESSAGE,
+        UPSTREAM_UNCERTAIN_FIX,
+    ),
+    (
+        E_UPSTREAM_CONFIRM_HOST,
+        UPSTREAM_CONFIRM_HOST_MESSAGE,
+        UPSTREAM_CONFIRM_HOST_FIX,
+    ),
+    (E_UPSTREAM_CA, UPSTREAM_CA_MESSAGE, UPSTREAM_CA_FIX),
+    (
+        E_UPSTREAM_KEY_PROOF,
+        UPSTREAM_KEY_PROOF_MESSAGE,
+        UPSTREAM_KEY_PROOF_FIX,
+    ),
+    (
+        E_UPSTREAM_ACTOR_CLAIM,
+        UPSTREAM_ACTOR_CLAIM_MESSAGE,
+        UPSTREAM_ACTOR_CLAIM_FIX,
+    ),
+    (
+        W_UPSTREAM_HANDLE_CHANGED,
+        "the hub handle changed from {old} to {new}",
+        "use human:{new} for this install",
+    ),
+    (
+        W_UPSTREAM_SIGNOUT_LOCAL,
+        UPSTREAM_SIGNOUT_LOCAL_MESSAGE,
+        UPSTREAM_SIGNOUT_LOCAL_FIX,
+    ),
     (
         E_PUBLICATION_REFERENCE,
         "a public profile refers to blocks outside its selection",

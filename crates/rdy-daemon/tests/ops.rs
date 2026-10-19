@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 45);
+    assert_eq!(OPS.len(), 49);
     assert_eq!(OPS[0], "session");
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
@@ -56,8 +56,15 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
     let answer = OPS.iter().position(|o| *o == "answer").unwrap();
     assert_eq!(
         &OPS[answer + 1..],
-        ["sign", "key_show"],
-        "sig9: sign and key_show follow answer"
+        [
+            "sign",
+            "key_show",
+            "remote",
+            "key_bind",
+            "key_retire",
+            "key_revoke"
+        ],
+        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show"
     );
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");

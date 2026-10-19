@@ -1,5 +1,6 @@
 mod alt;
 mod asset;
+mod auth;
 mod brief;
 mod coverage;
 mod decide;
@@ -11,6 +12,7 @@ mod intake;
 mod intent;
 mod propose;
 mod read;
+mod remote;
 mod resources;
 mod review;
 mod schema;
@@ -174,7 +176,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 22] {
+    fn family_routers() -> [ToolRouter<Self>; 24] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -198,6 +200,8 @@ impl RdyServer {
             Self::site_router(),
             Self::store_router(),
             Self::signing_router(),
+            Self::auth_router(),
+            Self::remote_router(),
         ]
     }
 
@@ -1430,14 +1434,24 @@ mod tests {
     #[test]
     fn mrt1_every_tool_is_in_exactly_one_family_router() {
         let families = RdyServer::family_routers();
-        // sig9: the signing family follows the store family and holds its two tools
+        // sig9: the signing family follows the store family; hsa9: it holds the three hub key
+        // tools too
         let mut signing: Vec<String> = families[21]
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())
             .collect();
         signing.sort();
-        assert_eq!(signing, ["rdy_key_show", "rdy_sign"]);
+        assert_eq!(
+            signing,
+            [
+                "rdy_key_bind",
+                "rdy_key_retire",
+                "rdy_key_revoke",
+                "rdy_key_show",
+                "rdy_sign"
+            ]
+        );
         assert!(
             families[20]
                 .list_all()
@@ -1445,6 +1459,13 @@ mod tests {
                 .any(|t| t.name == "rdy_clone"),
             "the store family precedes the signing family"
         );
+        // hsa9: the remote family is the last, after auth
+        let remote: Vec<String> = families[23]
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(remote, ["rdy_remote"]);
         let mut names: Vec<String> = families
             .iter()
             .flat_map(|r| r.list_all().into_iter().map(|t| t.name.to_string()))
