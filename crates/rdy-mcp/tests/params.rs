@@ -728,7 +728,7 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
         (
             "E_REDACTED_STATE",
             "This read state predates content removal.",
-            "Read the project again.",
+            "Read the project again, or run the dump again.",
         ),
         (
             "E_REDACTED",

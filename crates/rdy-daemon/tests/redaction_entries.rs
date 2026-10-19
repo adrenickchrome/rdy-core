@@ -249,7 +249,7 @@ async fn rdx12_all_registered_ops_tools_and_resources_cross_the_epoch_guard() {
         (
             E_REDACTED_STATE,
             "This read state predates content removal.",
-            "Read the project again."
+            "Read the project again, or run the dump again."
         )
     );
     rdy.read().ensure_current_epoch().unwrap();
@@ -326,7 +326,10 @@ async fn rdx12_all_registered_ops_tools_and_resources_cross_the_epoch_guard() {
         let (err, v) = c.call(name, json!({})).await;
         assert!(err, "{name}: {v}");
         assert_eq!(v["code"], E_REDACTED_STATE, "{name}: {v}");
-        assert_eq!(v["fix"], "Read the project again.", "{name}");
+        assert_eq!(
+            v["fix"], "Read the project again, or run the dump again.",
+            "{name}"
+        );
     }
     // a template is read with a valid fixture id
     let fixture = |name: &str| match name {

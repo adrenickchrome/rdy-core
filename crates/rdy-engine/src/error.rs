@@ -138,7 +138,7 @@ pub const REDACTION_PENDING_FIX: &str =
 /// The fix of `E_REDACTION_CORRUPT`.
 pub const REDACTION_CORRUPT_FIX: &str = "Keep the store unchanged and inspect it with rdy fsck.";
 /// The fix of `E_REDACTED_STATE`.
-pub const REDACTED_STATE_FIX: &str = "Read the project again.";
+pub const REDACTED_STATE_FIX: &str = "Read the project again, or run the dump again.";
 /// The fix of `E_REDACTED`.
 pub const REDACTED_FIX: &str = "Read the redaction details in the source history.";
 /// The message of `E_REDACTION_BUDGET`.
@@ -694,6 +694,11 @@ pub const W_SITE_LAN: &str = "W_SITE_LAN";
 
 /// A file that is not a dump this rdy reads, a damaged dump, or a loaded project that fails fsck.
 pub const E_DUMP: &str = "E_DUMP";
+/// A dump chain whose files do not follow one another, or an export that does not continue the
+/// chain it names. Built by [`crate::dump_error`].
+pub const E_DUMP_CHAIN: &str = "E_DUMP_CHAIN";
+/// A load stop the dump chain does not hold. Built by [`crate::dump_error`].
+pub const E_LOAD_STOP: &str = "E_LOAD_STOP";
 
 /// The session actor is not in the hub's `human:`, `agent:` or `ci:` form, an agent session
 /// claims a human actor, or a human claim is not bound to the install's account handle. Built by

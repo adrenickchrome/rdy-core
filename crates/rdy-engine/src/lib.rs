@@ -18,6 +18,8 @@ mod decide;
 pub mod did_you_mean;
 pub mod diff;
 pub mod dump;
+pub mod dump_error;
+pub mod dump_stop;
 pub mod engine;
 mod error;
 pub mod events;
