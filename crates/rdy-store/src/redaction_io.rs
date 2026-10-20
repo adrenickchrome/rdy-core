@@ -1330,8 +1330,8 @@ pub(crate) fn for_each_seen(
 ///
 /// The holes of `auth` are the applies' spans; the carried records' spans (`SpanAuth::carried`,
 /// laid over by `redaction_carried::overlay` before this check) take part only in the
-/// resolution of a kept reference: they never count as a span of an apply, as a selected
-/// version found, or as a copy the selection covers.
+/// resolution of a kept reference and the id of a selected version whose block they zeroed:
+/// they never count as a span of an apply or as a copy the selection covers.
 ///
 /// A failure is `RedactionCorrupt`: at the frame or span for a frame failure, else at the apply.
 fn check_log(
@@ -1471,9 +1471,13 @@ fn check_log(
                         }
                     }
                     // zeros a carried record explains: its block residue names the version a
-                    // change residue may keep, and nothing else (no selection, no copy)
+                    // change residue may keep, and gives the id of a selected version whose
+                    // retained copies (its changes) a fresh apply removes; no span, no copy
                     (false, None) => {
                         if let Some(id) = carried_id(&f.loc) {
+                            if selected_versions.contains(&f.hash) {
+                                id_of.entry(f.hash).or_insert_with(|| id.clone());
+                            }
                             let key = (id, f.hash);
                             if kept.get(&key).is_some_and(|need| f.loc < *need) {
                                 kept_found.insert(key);

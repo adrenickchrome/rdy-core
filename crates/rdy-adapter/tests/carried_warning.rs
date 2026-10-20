@@ -13,7 +13,7 @@ use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, Session, SessionKind, WriteRequest, stream_export};
 use rdy_model::redaction::{
     BlockResidue, CarriedSpan, ChangeResidue, FramePlace, ReasonClass, RedactTarget,
-    RedactionCarried, RedactionResidue,
+    RedactionApply, RedactionCarried, RedactionResidue,
 };
 use rdy_model::{Block, Change, Op, Provenance, Role};
 use rdy_store::LandRequest;
@@ -96,8 +96,19 @@ fn project(dir: &Path) -> (Rdy, String) {
     (r, secret)
 }
 
-/// Removes every version of block `target` through the store's own landing path.
-fn remove(r: &mut Rdy, target: &str) {
+/// The provenance of a removal a source store really applied: the request, the apply record it
+/// wrote, the landing that carries it, and the person who approved that landing.
+#[derive(Clone)]
+struct Source {
+    request: Hash,
+    apply: Hash,
+    landing: Hash,
+    approver: Provenance,
+}
+
+/// Removes every version of block `target` through the store's own landing path. Returns what
+/// the source wrote, read back from its log.
+fn remove(r: &mut Rdy, target: &str) -> Source {
     let s = session(Role::Writer);
     let req = r
         .redact(
@@ -110,21 +121,23 @@ fn remove(r: &mut Rdy, target: &str) {
             },
         )
         .unwrap();
-    assert!(req.redaction.is_some());
+    let request = req.redaction.expect("the recorded request");
     let p = r.propose(&s, "work", "Remove the code", None).unwrap();
     let version: Hash = p.id.parse().unwrap();
     r.seal_open().unwrap();
     r.store_mut().set_held(false).unwrap();
-    r.store_mut()
+    let approver = Provenance {
+        actor: "human:t".into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 1_000_000,
+    };
+    let landed = r
+        .store_mut()
         .land_atomic(LandRequest {
             proposal: version,
             accept: None,
-            approver: Provenance {
-                actor: "human:t".into(),
-                run: None,
-                role: Role::Approver,
-                at_ms: 1_000_000,
-            },
+            approver: approver.clone(),
             alt: None,
             relay: None,
             evidence: None,
@@ -132,6 +145,40 @@ fn remove(r: &mut Rdy, target: &str) {
         .unwrap();
     r.store_mut().set_held(true).unwrap();
     r.invalidate();
+    // the apply record that the landing wrote, and the landing it names
+    let mut applies: Vec<(Hash, RedactionApply)> = vec![];
+    let store = r.store();
+    store
+        .reader()
+        .for_each_record_from(
+            Location {
+                segment: 0,
+                offset: 0,
+            },
+            store.log_end(),
+            |_, f, _| {
+                if let StoredFrame::Present {
+                    kind: kinds::REDACTION_APPLY,
+                    hash,
+                    payload,
+                } = f
+                {
+                    applies.push((hash, rdy_store::bounded::decode(payload).unwrap()));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(applies.len(), 1, "one removal in the source");
+    let (apply, record) = applies.remove(0);
+    assert_eq!(record.request, request);
+    assert_eq!(record.landing, landed.landing);
+    Source {
+        request,
+        apply,
+        landing: landed.landing,
+        approver,
+    }
 }
 
 fn export(r: &Rdy, tag: Hash) -> Vec<u8> {
@@ -259,10 +306,19 @@ fn secret_target(frames: &[Found]) -> RedactTarget {
     }
 }
 
+/// Where a carried record's provenance comes from.
+#[derive(Clone)]
+enum Origin {
+    /// Made-up hashes named by a label: an approved apply of some other store.
+    Label(&'static str),
+    /// What the source really wrote when it removed the payload.
+    Source(Source),
+}
+
 /// The store directory `store`, closed, moved aside and ingested again with one carried record
-/// of source apply `apply` over `names` (the checked path of a stopped load). Returns the
-/// record and its hash.
-fn carry(store: &Path, apply: &str, names: &[Names]) -> (Hash, RedactionCarried) {
+/// of `origin` over `names` (the checked path of a stopped load). Returns the record and its
+/// hash.
+fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarried) {
     let aside = store.with_file_name("store-aside");
     std::fs::rename(store, &aside).unwrap();
     let frames = scan(&aside);
@@ -301,16 +357,25 @@ fn carry(store: &Path, apply: &str, names: &[Names]) -> (Hash, RedactionCarried)
         }
     }
     spans.sort_by_key(|s| s.place);
+    let (request, apply, landing, approved_by) = match origin {
+        Origin::Label(label) => (
+            Hash::of(format!("request {label}").as_bytes()),
+            Hash::of(format!("apply {label}").as_bytes()),
+            Hash::of(format!("landing {label}").as_bytes()),
+            Provenance {
+                actor: "human:founder".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 777,
+            },
+        ),
+        Origin::Source(src) => (src.request, src.apply, src.landing, src.approver.clone()),
+    };
     let rec = RedactionCarried {
-        request: Hash::of(format!("request {apply}").as_bytes()),
-        apply: Hash::of(format!("apply {apply}").as_bytes()),
-        landing: Hash::of(format!("landing {apply}").as_bytes()),
-        approved_by: Provenance {
-            actor: "human:founder".into(),
-            run: None,
-            role: Role::Approver,
-            at_ms: 777,
-        },
+        request,
+        apply,
+        landing,
+        approved_by,
         reason_class: ReasonClass::Secret,
         targets: vec![secret_target(&frames)],
         spans,
@@ -381,13 +446,23 @@ struct Fixture {
     record: RedactionCarried,
 }
 
+/// A fixture whose carried record names made-up hashes of another store's approved apply.
 fn fixture(names: &[Names]) -> Fixture {
+    fixture_from(names, false)
+}
+
+/// A fixture whose carried record names the removal the source really applied.
+fn fixture_of_the_source(names: &[Names]) -> Fixture {
+    fixture_from(names, true)
+}
+
+fn fixture_from(names: &[Names], real: bool) -> Fixture {
     let _clock = rdy_engine::pin_clock(1_000_000);
     let dir = tempfile::tempdir().unwrap();
     let (mut r, secret) = project(&dir.path().join("src"));
     let v1 = tag(&mut r, "v1.0.0");
     let export1 = export(&r, v1);
-    remove(&mut r, &secret);
+    let source = remove(&mut r, &secret);
     let v2 = tag(&mut r, "v2.0.0");
     let export2 = export(&r, v2);
     let id = r.store().repo_id().unwrap().unwrap();
@@ -402,7 +477,12 @@ fn fixture(names: &[Names]) -> Fixture {
     )
     .unwrap();
     h.close().unwrap();
-    let (carried, record) = carry(&store_of(&holder), "source", names);
+    let origin = if real {
+        Origin::Source(source)
+    } else {
+        Origin::Label("source")
+    };
+    let (carried, record) = carry(&store_of(&holder), &origin, names);
     Fixture {
         dir,
         id,
@@ -447,11 +527,29 @@ fn hc6_holder_warning_uses_the_holder_fix() {
     h.close().unwrap();
 }
 
+/// Whether `stream` carries a frame of hash `h` (every frame header holds its hash).
+fn carries(stream: &[u8], h: &Hash) -> bool {
+    stream.windows(32).any(|w| w == &h.0[..])
+}
+
 #[test]
 fn hc6_holder_take_of_the_source_apply_ends_the_warning() {
-    let f = fixture(&[Names::Secret { held: true }]);
+    // the record names the apply, landing, request and approver the source really wrote
+    let f = fixture_of_the_source(&[Names::Secret { held: true }]);
+    assert!(
+        !carries(&f.export2, &f.carried),
+        "a carried record is no part of an upload"
+    );
+    assert!(
+        carries(&f.export2, &f.record.apply),
+        "the upload holds the source's own apply"
+    );
+    assert!(carries(&f.export2, &f.record.landing));
     let mut h = StoreHandle::open_holder(&f.holder).unwrap();
-    assert_eq!(h.redaction_warnings().unwrap().len(), 1);
+    let before = h.redaction_warnings().unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].apply, f.record.apply);
+    assert_eq!(before[0].landing, f.record.landing);
     h.take(
         &upload(f.dir.path(), "up2", &f.export2),
         target("v2.0.0", f.land2),
@@ -463,6 +561,27 @@ fn hc6_holder_take_of_the_source_apply_ends_the_warning() {
     // the reopened holder derives the same end
     let h = StoreHandle::open_holder(&f.holder).unwrap();
     assert!(h.redaction_warnings().unwrap().is_empty());
+    h.close().unwrap();
+}
+
+#[test]
+fn hc6_holder_take_of_another_approved_apply_ends_the_warning() {
+    // the record names another store's apply (made-up hashes); a take of any approved apply that
+    // matches the span's kind, hash, length and residue erases the held payload
+    let f = fixture(&[Names::Secret { held: true }]);
+    assert!(
+        !carries(&f.export2, &f.record.apply),
+        "the upload does not hold the apply that the record names"
+    );
+    let mut h = StoreHandle::open_holder(&f.holder).unwrap();
+    assert_eq!(h.redaction_warnings().unwrap().len(), 1);
+    h.take(
+        &upload(f.dir.path(), "up2", &f.export2),
+        target("v2.0.0", f.land2),
+    )
+    .unwrap();
+    assert!(h.redaction_warnings().unwrap().is_empty());
+    assert!(h.fsck().unwrap().warnings.is_empty());
     h.close().unwrap();
 }
 
@@ -515,7 +634,11 @@ fn hc6_redaction_warnings_match_fsck_in_both_modes() {
     let (r, _) = project(&dir.path().join("p"));
     r.close().unwrap();
     let root = dir.path().join("p");
-    let (carried, rec) = carry(&store_of(&root), "source", &[Names::Secret { held: true }]);
+    let (carried, rec) = carry(
+        &store_of(&root),
+        &Origin::Label("source"),
+        &[Names::Secret { held: true }],
+    );
     let p = StoreHandle::open(&root).unwrap();
     let w = p.redaction_warnings().unwrap();
     assert_eq!(w.len(), 1);

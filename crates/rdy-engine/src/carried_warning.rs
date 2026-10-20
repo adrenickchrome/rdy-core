@@ -14,7 +14,6 @@ use rdy_store::closure::END_OF_LOG;
 use rdy_store::holder::StoreMode;
 use rdy_store::redaction_carried::{HOLDER_FIX, PROJECT_FIX};
 use rdy_store::transition::hex;
-use std::collections::BTreeSet;
 
 /// The code of the warning.
 pub const W_STOP_BEFORE_REDACTION: &str = "W_STOP_BEFORE_REDACTION";
@@ -127,12 +126,17 @@ impl ReadState {
         let reader = self.reader();
         let mode = reader.mode()?;
         let mut out: Vec<CarriedWarning> = Vec::new();
-        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        // the source applies met so far, sorted; growth is fallible like the output's
+        let mut seen: Vec<Hash> = Vec::new();
         let mut failed: Option<RdyError> = None;
         let visited = reader.visit_carried(END_OF_LOG, &mut |c| {
             let step = (|| {
-                if !seen.insert(c.record.apply) {
-                    return Ok(());
+                match seen.binary_search(&c.record.apply) {
+                    Ok(_) => return Ok(()),
+                    Err(at) => {
+                        seen.try_reserve(1).map_err(|_| too_many())?;
+                        seen.insert(at, c.record.apply);
+                    }
                 }
                 let (held, removed) = reader.carried_counts(&c.record)?;
                 if held == 0 {

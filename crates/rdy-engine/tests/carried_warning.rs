@@ -572,3 +572,52 @@ fn hc6_warnings_follow_source_order_and_survive_reindex() {
     let r = Rdy::open(dir.path()).unwrap();
     assert_eq!(r.read().carried_warnings().unwrap(), before);
 }
+
+#[test]
+fn hc6_one_target_with_a_removed_block_and_a_held_change_is_reapproved() {
+    let _clock = pin_clock(3_000_000);
+    let (dir, first, _) = project();
+    // one target: the carried record zeros its block frame and holds the change that wrote it
+    carry(
+        dir.path(),
+        &[Spec {
+            needle: "ZEBRA-7731",
+            apply: "mixed",
+            block: Some(false),
+            change: Some(true),
+        }],
+    );
+    assert!(on_disk(dir.path(), SECRET), "the change frame holds it");
+    let mut r = Rdy::open(dir.path()).unwrap();
+    assert_eq!(r.read().carried_warnings().unwrap().len(), 1);
+    // the report keeps the target, skips the removed block span and counts the held change
+    let rep = r
+        .read()
+        .redaction_report(&input(vec![first.to_string()], true))
+        .unwrap();
+    assert_eq!(rep.drop_frames, 1, "only the change frame");
+    assert!(
+        rep.already_redacted.is_empty(),
+        "{:?}",
+        rep.already_redacted
+    );
+    // a person approves a new local removal of the target: it erases the retained copy
+    let res = r
+        .redact_in(&writer(), "redact", input(vec![first.to_string()], false))
+        .unwrap();
+    assert!(res.redaction.is_some());
+    let prop = r
+        .propose(&writer(), "redact", "Remove the code", Some("Removes it."))
+        .unwrap();
+    r.land(&approver(), &prop.id).unwrap();
+    assert!(!on_disk(dir.path(), SECRET), "the fresh apply erased it");
+    assert!(r.read().carried_warnings().unwrap().is_empty());
+    assert!(r.fsck().unwrap().warnings.is_empty());
+    // the rebuilt index agrees: the same mask, the same empty warning, a clean fsck
+    r.reindex().unwrap();
+    assert!(r.read().carried_warnings().unwrap().is_empty());
+    assert!(r.fsck().unwrap().warnings.is_empty());
+    r.close().unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
+    assert!(r.fsck().unwrap().warnings.is_empty());
+}

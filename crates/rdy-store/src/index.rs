@@ -590,11 +590,16 @@ impl<'t> RedactionTables<'t> {
                 .get(&key[..])
                 .map_err(db)?
                 .map(|v| v.value().to_vec());
+            let mut residue = residue;
             if let Some(v) = held {
                 let row = active_object_from(&v)?;
                 if self.is_apply_row(&row.request, &row.apply)? {
                     continue;
                 }
+                // a carried record's row has the residue that reads the object; the apply takes
+                // the row over (it covers the object) but lists no span of it when the frame
+                // was removed before, so the residue stays
+                residue = residue.or(row.residue);
             }
             let mut v = Vec::with_capacity(108);
             v.extend_from_slice(&request.0);

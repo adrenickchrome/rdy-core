@@ -726,6 +726,16 @@ pub(crate) fn compute_excluding(
                 for (_, v) in versions {
                     all &= removed(kinds::BLOCK, v)?;
                 }
+                // a block frame can be removed (an earlier apply, or a carried record's zeros)
+                // while a change that wrote it still holds the payload: the target is then
+                // not wholly removed, and a new request drops the retained copies only
+                if all {
+                    for (_, v) in versions {
+                        for p in reader.producers(v)? {
+                            all &= removed(kinds::CHANGE, &p)?;
+                        }
+                    }
+                }
                 all
             }
         };
