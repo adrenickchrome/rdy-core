@@ -276,7 +276,7 @@ fn hc3_only_ingest_can_append_carried() {
     }
     // the checked path: a load's ingest appends one carried batch after the source's batches
     let to = src.at("to");
-    let report = load(&src.path, &to, &src.residues(), &[rec.clone()]).unwrap();
+    let report = load(&src.path, &to, &src.residues(), std::slice::from_ref(&rec)).unwrap();
     let source_batches = {
         let s = Store::open(&src.path).unwrap();
         let mut n = 0u64;
@@ -328,7 +328,7 @@ fn hc3_only_ingest_can_append_carried() {
     assert_eq!(carried[0].at, all[all.len() - 1].loc);
     drop(s);
     // the carried batch comes once, before the upgrade; an empty one writes nothing
-    let batches = carried_fixture::batches_with_drops(&src.path, &[rec.clone()]);
+    let batches = carried_fixture::batches_with_drops(&src.path, std::slice::from_ref(&rec));
     let mut i = Ingest::create(&src.at("twice")).unwrap();
     for (n, b) in batches.iter().enumerate() {
         i.batch(n as u64 + 1, b).unwrap();
@@ -337,7 +337,7 @@ fn hc3_only_ingest_can_append_carried() {
     i.append_carried(&src.residues(), &[]).unwrap();
     assert_eq!(i.end(), end);
     assert!(matches!(
-        i.append_carried(&src.residues(), &[rec.clone()]),
+        i.append_carried(&src.residues(), std::slice::from_ref(&rec)),
         Err(StoreError::Dump { .. })
     ));
     assert_eq!(i.end(), end);
@@ -393,7 +393,7 @@ fn hc3_carried_false_accepts_exact_zeros_and_never_erases() {
 fn hc3_carried_true_hashes_until_local_apply() {
     let src = source();
     let rec = src.record(true);
-    let to = src.loaded("to", &[rec.clone()]);
+    let to = src.loaded("to", std::slice::from_ref(&rec));
     {
         let s = Store::open(&to).unwrap();
         let r = s.reader();
@@ -532,10 +532,13 @@ fn hc3_reindex_and_missing_index_keep_carried_authority() {
     );
 }
 
+/// What a case does to the closed source copy at the path, returning where the open refuses.
+type Damage = Box<dyn Fn(&Src, &Path) -> Location>;
+
 /// One damaged carried log: what it changes in the source (closed), and where the open refuses.
 struct Case {
     name: &'static str,
-    damage: Box<dyn Fn(&Src, &Path) -> Location>,
+    damage: Damage,
 }
 
 /// Appends `records` (with the source's residues) as one sealed batch to the closed store at
@@ -731,7 +734,7 @@ fn dump_header(repo: RepoId, batches: &[DumpBatch]) -> rdy_store::dump::DumpHead
 fn hc3_dump_of_carried_store_loads_again() {
     let src = source();
     let rec = src.record(false);
-    let to = src.loaded("to", &[rec.clone()]);
+    let to = src.loaded("to", std::slice::from_ref(&rec));
     let (repo, batches, index) = {
         let s = Store::open(&to).unwrap();
         let mut batches = vec![];
@@ -873,7 +876,7 @@ fn hc3_holder_uses_local_spans_without_canon() {
     spans.sort_by_key(|s| s.place);
     let rec = record(src.targets(), spans);
     let to = src.at("holder-carried");
-    load(&holder, &to, &src.residues(), &[rec.clone()]).unwrap();
+    load(&holder, &to, &src.residues(), std::slice::from_ref(&rec)).unwrap();
     let s = Store::open(&to).unwrap();
     let r = s.reader();
     assert_eq!(r.mode().unwrap(), rdy_store::holder::StoreMode::Holder);
@@ -901,7 +904,7 @@ fn hc3_sync_never_treats_carried_as_approval() {
     // a carried record is no portable object: it has no links and never travels
     let e = refs_of(kinds::REDACTION_CARRIED, &bytes).unwrap_err();
     assert_eq!(e.to_string(), "unknown kind");
-    let to = src.loaded("to", &[rec.clone()]);
+    let to = src.loaded("to", std::slice::from_ref(&rec));
     let s = Store::open(&to).unwrap();
     let r = s.reader();
     let c = carried_hash(&rec);
@@ -1010,7 +1013,8 @@ fn hc3_carried_bounds_refuse_before_append() {
             .map(|f| span(f, None, true))
             .collect(),
     );
-    i.append_carried(&[], &[at_bound.clone()]).unwrap();
+    i.append_carried(&[], std::slice::from_ref(&at_bound))
+        .unwrap();
     i.upgrade(store_format()).unwrap();
     i.finish().unwrap();
     let s = Store::open(&to).unwrap();
@@ -1034,7 +1038,7 @@ fn hc3_nested_carried_recognition_keeps_earlier_bytes() {
         &src.path,
         &to,
         &[r[0].clone(), r[1].clone(), block_residue(&src.other)],
-        &[earlier.clone()],
+        std::slice::from_ref(&earlier),
     )
     .unwrap();
     let earlier_at = carried_of(&Store::open(&to).unwrap().reader())[0].at;
