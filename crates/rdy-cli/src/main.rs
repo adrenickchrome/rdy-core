@@ -24,6 +24,7 @@ mod land_cmd;
 mod output;
 mod project_cmd;
 mod publication_cmd;
+mod publish_cmd;
 mod read_cmd;
 mod redact_cmd;
 mod remote_cmd;
@@ -127,6 +128,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: publication_cmd::PublicationCmd,
     },
+    /// Upload a tag's publication to a publish remote's hub site as a candidate. The site selects the profile, and the tagged profile gives the audience. Prints the candidate and the link to its disclosure review on the hub, which authorizes publication. The chat path is rdy_publish. Through the daemon, hub sign-ins come from the daemon's user config: after changing XDG_CONFIG_HOME, run rdy serve --stop.
+    Publish(publish_cmd::PublishArgs),
     /// List the folder and doc tree.
     Ls(read_cmd::LsArgs),
     Edit(edit_cmd::EditArgs),
@@ -216,6 +219,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Show(a) => read_cmd::show(env, a),
         Cmd::New { what } => edit_cmd::new(env, what),
         Cmd::Publication { cmd } => publication_cmd::publication(env, cmd),
+        Cmd::Publish(a) => publish_cmd::publish(env, a),
         Cmd::Ls(a) => read_cmd::ls(env, a),
         Cmd::Log(a) => read_cmd::log(env, a),
         Cmd::Impact(a) => read_cmd::impact(env, a),
@@ -471,6 +475,88 @@ mod tests {
             );
             assert!(parse(&["approve", "P-0123@1", flag]).is_err(), "{flag}");
         }
+    }
+
+    /// hpb15 (D-50JXR, D-8QV9G): `rdy publish <tag> --to <remote> --site <site>
+    /// [--keep-latest <true|false>]` sends `keep_latest` only when the flag is given; any word
+    /// but true or false, and any other option, is clap's own refusal.
+    #[test]
+    fn hpb15_publish_sends_keep_latest_only_when_given() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["rdy", "publish", "v1.0.0", "--to", "pub", "--site", "docs"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        let request = |args: &[&str]| match parse(args) {
+            Ok(Cli {
+                cmd: Cmd::Publish(a),
+                ..
+            }) => publish_cmd::request(&a),
+            _ => panic!("publish parses: {args:?}"),
+        };
+        assert_eq!(
+            request(&[]),
+            serde_json::json!({"tag": "v1.0.0", "to": "pub", "site": "docs"})
+        );
+        for (word, b) in [("true", true), ("false", false)] {
+            assert_eq!(
+                request(&["--keep-latest", word]),
+                serde_json::json!({"tag": "v1.0.0", "to": "pub", "site": "docs", "keep_latest": b})
+            );
+        }
+        for word in ["yes", "no", "1", "0", "True", "on", ""] {
+            let e = parse(&["--keep-latest", word]).err().expect(word);
+            assert_eq!(e.kind(), clap::error::ErrorKind::InvalidValue, "{word}");
+        }
+        assert!(parse(&["--keep-latest"]).is_err(), "a value is required");
+        for flag in [
+            "--profile",
+            "--audience",
+            "--ratify",
+            "--authorize",
+            "--token",
+            "--origin",
+            "--format",
+            "--out",
+            "--force",
+            "--resume",
+        ] {
+            let e = parse(&[flag, "x"]).err().expect(flag);
+            assert_eq!(e.kind(), clap::error::ErrorKind::UnknownArgument, "{flag}");
+        }
+        for missing in [
+            vec!["rdy", "publish", "v1.0.0", "--site", "docs"],
+            vec!["rdy", "publish", "v1.0.0", "--to", "pub"],
+            vec!["rdy", "publish", "--to", "pub", "--site", "docs"],
+        ] {
+            assert!(Cli::try_parse_from(&missing).is_err(), "{missing:?}");
+        }
+    }
+
+    /// hpb15: the text says candidate and points to the hub's review: the full profile id or
+    /// implicit:org, then the result's warnings in the shared form, then the render warnings.
+    #[test]
+    fn hpb15_publish_text_names_the_candidate_and_its_review() {
+        let v = serde_json::json!({"id": "pubc_1", "state": "candidate",
+            "url": "https://hub.invalid/app/publications/pubc_1", "push": "p",
+            "audience": "org", "record": {"profile": null},
+            "inventory": {"selection_count": 7},
+            "warnings": [{"severity": "warning", "code": "W_CONFIG_UNKNOWN", "block": null,
+                "message": "unknown key x", "fix": "remove it"}],
+            "render_warnings": ["a reference leaves the selection"], "review": "hub"});
+        assert_eq!(
+            publish_cmd::result_text(&v),
+            "candidate pubc_1\nhttps://hub.invalid/app/publications/pubc_1\nprofile: implicit:org\naudience: org\nselected: 7 blocks\ndisclosure review: https://hub.invalid/app/publications/pubc_1\nwarning W_CONFIG_UNKNOWN: unknown key x; remove it\nwarning: a reference leaves the selection"
+        );
+        let mut v = v;
+        v["record"]["profile"] = serde_json::json!({"id": "p-ABCDE", "version": "00"});
+        v["warnings"] = serde_json::json!([]);
+        v["render_warnings"] = serde_json::json!([]);
+        v["audience"] = serde_json::json!("public");
+        assert_eq!(
+            publish_cmd::result_text(&v),
+            "candidate pubc_1\nhttps://hub.invalid/app/publications/pubc_1\nprofile: p-ABCDE\naudience: public\nselected: 7 blocks\ndisclosure review: https://hub.invalid/app/publications/pubc_1"
+        );
     }
 
     /// Final review M3: `rdy --help` names the mention form of `rdy resolve`, so a person finds
