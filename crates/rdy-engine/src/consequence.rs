@@ -470,13 +470,47 @@ impl<'a> Baseline<'a> {
     }
 }
 
+/// The names the state after the change is read with: a lexicon given, or a scope's, read on
+/// first use. Most changes have no dependent to judge, and a lexicon that is not built yet reads
+/// every block of the scope.
+enum Names<'a> {
+    Ready(Arc<Lexicon>),
+    Scope {
+        st: &'a ReadState,
+        scope: Scope,
+        read: OnceCell<Arc<Lexicon>>,
+    },
+}
+
+impl<'a> Names<'a> {
+    fn scope(st: &'a ReadState, scope: Scope) -> Names<'a> {
+        Names::Scope {
+            st,
+            scope,
+            read: OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> Result<&Arc<Lexicon>, RdyError> {
+        match self {
+            Names::Ready(l) => Ok(l),
+            Names::Scope { st, scope, read } => {
+                if read.get().is_none() {
+                    let _ = read.set(st.lexicon(scope)?);
+                }
+                Ok(read.get().expect("set above"))
+            }
+        }
+    }
+}
+
 /// What a consequence compares (O8): the state after the change (`m`, read with `names`), its
 /// ordinary baselines in order, and the lineage events of the change. Nothing is stored; each
 /// target's changed literals are worked out once.
 struct Compare<'a> {
     st: &'a ReadState,
     m: &'a Materialized,
-    names: Arc<Lexicon>,
+    names: Names<'a>,
     baselines: Vec<Baseline<'a>>,
     events: Events,
     cache: RefCell<BTreeMap<(BlockId, LiteralsKey), LiteralSet>>,
@@ -505,7 +539,7 @@ impl<'a> Compare<'a> {
     fn new(
         st: &'a ReadState,
         m: &'a Materialized,
-        names: Arc<Lexicon>,
+        names: Names<'a>,
         baselines: Vec<Baseline<'a>>,
         events: Events,
     ) -> Compare<'a> {
@@ -552,7 +586,7 @@ impl<'a> Compare<'a> {
                         }
                     }
                     // the final lexicon with the written blocks put back as they were
-                    let names = self.names.with_changes(
+                    let names = self.names.get()?.with_changes(
                         first.keys().filter_map(|id| self.m.get(id)),
                         blocks.values(),
                     );
@@ -585,7 +619,7 @@ impl<'a> Compare<'a> {
             return Ok(l.clone());
         }
         let pack = self.st.pack();
-        let names = &*self.names;
+        let names = &**self.names.get()?;
         let set = match lineage {
             Lineage::Retired(r) => match self.m.get(x) {
                 None => LiteralSet::default(),
@@ -660,7 +694,7 @@ impl<'a> Compare<'a> {
             }));
         }
         let lits = self.literals(x, lineage)?;
-        let ev = evidence(self.st.pack(), &lits, src, &self.names);
+        let ev = evidence(self.st.pack(), &lits, src, self.names.get()?);
         let hit = !ev.matched.is_empty();
         let (follow, fix) = match lineage {
             // D-M19GV: a refine or part supersede keeps confirm, whatever it matched
@@ -818,7 +852,7 @@ impl ReadState {
         let cmp = Compare::new(
             self,
             &m,
-            self.lexicon(scope)?,
+            Names::scope(self, scope.clone()),
             baselines,
             Events::of_ops(&ops, &reach),
         );
@@ -969,7 +1003,7 @@ impl ReadState {
         let cmp = Compare::new(
             self,
             &m,
-            self.lexicon(&scope)?,
+            Names::scope(self, scope.clone()),
             vec![Baseline::scope(before, scope.clone())],
             events,
         );
@@ -1025,7 +1059,7 @@ impl ReadState {
             (
                 self.materialized(&at)?,
                 self.graph(&at)?,
-                self.lexicon(&at)?,
+                Names::scope(self, at),
                 before,
             )
         } else {
@@ -1063,7 +1097,7 @@ impl ReadState {
             (
                 Arc::clone(&next.m),
                 g,
-                names,
+                Names::Ready(names),
                 Baseline::scope(self, Scope::Canon),
             )
         };
