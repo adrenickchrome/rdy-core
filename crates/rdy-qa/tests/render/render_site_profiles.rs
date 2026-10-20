@@ -374,6 +374,39 @@ fn spv4_every_live_surface_is_selected() {
             );
         }
     }
+
+    // a removed diagram reads its id-shaped references as the old selected side does: an
+    // excluded target in neutral words, authored display words as written, and never its id
+    let mut w = world();
+    let (xp, xt) = (id(&w.ids, "$xp"), id(&w.ids, "$xt"));
+    let diagram = put_land(
+        &mut w.r,
+        "w2",
+        json!([{"op": "create", "type": "diagram", "id": "$dg", "parent": id(&w.ids, "$is").to_string(),
+            "fields": {"lang": "mermaid"},
+            "body": format!("graph TD; A[{{{{{xp}}}}}] --> B[{{{{{xt}|Shown words}}}}]")}]),
+    )["$dg"]
+        .clone();
+    put(
+        &mut w.r,
+        "work",
+        json!([{"op": "delete", "id": diagram.to_string()}]),
+    );
+    let st = w.r.read();
+    let canon = build(&st, &profile(ScopeRef::Canon, "userguide"));
+    let view = build(&st, &profile(ScopeRef::View("work".into()), "userguide"));
+    for b in [&canon, &view] {
+        for word in [xp.to_string(), xt.to_string(), "SECRETCANARY".to_string()] {
+            assert_absent(b, &word);
+        }
+    }
+    let intro = file(&view, "guide/intro.html");
+    assert!(
+        intro.contains(
+            "<pre><code>graph TD; A[unavailable reference] --&gt; B[Shown words]</code></pre>"
+        ),
+        "{intro}"
+    );
 }
 
 // --- 2. a proposal-only profile -----------------------------------------------------------------
@@ -509,6 +542,69 @@ fn spv4_selection_changes_review_each_own_revision() {
     let base = build(&st, &profile(ScopeRef::Canon, "handbook"));
     assert_eq!(base.profile.id.as_ref(), Some(&other));
     assert!(!holding(&base.live.files, b"SECRETCANARY").is_empty());
+    drop(st);
+
+    // removed lines and removed rows read their words through the old selected side, on every
+    // surface: the doc page's removed line, the home and summary rows and the drawer
+    let mut w = world();
+    let (is, folder, intro, setup) = (
+        id(&w.ids, "$is"),
+        id(&w.ids, "$guide"),
+        id(&w.ids, "$intro"),
+        id(&w.ids, "$setup"),
+    );
+    let made = put_land(
+        &mut w.r,
+        "w2",
+        json!([
+            {"op": "create", "type": "prose", "id": "$rw", "parent": is.to_string(),
+             "body": format!("REMOVEDWORDS sees {{{{{setup}}}}}.")},
+            {"op": "create", "type": "doc", "id": "$old", "parent": folder.to_string(),
+             "fields": {"name": "old", "title": format!("Old {{{{{intro}}}}}"), "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$old", "body": "Old words."},
+            {"op": "update", "id": setup.to_string(), "fields": {"title": "OLDSELECTEDLABEL"}}
+        ]),
+    );
+    // the view deletes the paragraph, keeps only intro selected and renames intro and setup
+    put(
+        &mut w.r,
+        "work",
+        json!([
+            {"op": "delete", "id": made["$rw"].to_string()},
+            {"op": "update", "id": w.guide.to_string(), "fields": {"select": [intro.to_string()]}},
+            {"op": "update", "id": intro.to_string(), "fields": {"title": "NEWLABEL"}},
+            {"op": "update", "id": setup.to_string(), "fields": {"title": "NEWSETUPLABEL"}}
+        ]),
+    );
+    let st = w.r.read();
+    let b = build(&st, &profile(ScopeRef::View("work".into()), "userguide"));
+    let page = file(&b, "guide/intro.html");
+    // the old side holds setup: its old words, unlinked, as the current site has no setup page
+    assert!(
+        page.contains("REMOVEDWORDS sees OLDSELECTEDLABEL."),
+        "{page}"
+    );
+    assert!(
+        !page.contains("REMOVEDWORDS sees unavailable reference"),
+        "{page}"
+    );
+    assert!(!page.contains("href=\"setup.html"), "{page}");
+    let index = file(&b, "index.html");
+    assert!(index.contains("Old Intro page"), "{index}");
+    let changes = file(&b, "changes.html");
+    assert!(changes.contains("Old Intro page"), "{changes}");
+    assert!(
+        changes.contains("REMOVEDWORDS sees OLDSELECTEDLABEL."),
+        "{changes}"
+    );
+    assert!(page.contains("Old Intro page"), "the drawer: {page}");
+    for word in ["Old NEWLABEL", "NEWSETUPLABEL", "SECRETCANARY"] {
+        assert_absent(&b, word);
+    }
+    // the llms files keep the current selected text only
+    for path in ["llms.txt", "llms-full.txt"] {
+        assert!(!file(&b, path).contains("REMOVEDWORDS"), "{path}");
+    }
 }
 
 // --- 4. live warns, output refuses --------------------------------------------------------------

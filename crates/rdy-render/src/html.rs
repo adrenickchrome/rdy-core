@@ -146,7 +146,7 @@ pub fn diagram_source(
 
 /// The diagram's source as a reader reads it under "Diagram source": escaped, its references as
 /// labels (see [`diagram_label`]), so no id is shown.
-fn readable_source(
+pub(crate) fn readable_source(
     text: &str,
     link: &dyn Fn(&BlockId) -> Option<Link>,
     unavailable: &str,

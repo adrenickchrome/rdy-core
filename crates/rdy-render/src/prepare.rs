@@ -111,6 +111,10 @@ pub(crate) struct History {
     pub since: Option<changes::Summary>,
     /// The build's warnings for the scope, in order.
     pub warnings: Vec<String>,
+    /// A named profile's review base, its selected state (D-CWC91): the words only it holds (a
+    /// removed line, a removed page's row) read their references through it. None for the
+    /// source, whose removed text reads against the scope's site.
+    pub old: Option<Arc<Materialized>>,
 }
 
 impl History {
@@ -124,6 +128,7 @@ impl History {
             changes: None,
             since: None,
             warnings: vec![],
+            old: None,
         }
     }
 }
@@ -316,6 +321,7 @@ fn history(
         changes: changes_summary,
         since: since_summary,
         warnings,
+        old: None,
     })
 }
 

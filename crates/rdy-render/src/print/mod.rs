@@ -405,6 +405,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
             None => crate::inline::UNRESOLVED,
         },
         menu_url: None,
+        old_site: None,
     };
     // a named profile's label is its chosen tag's name (RULING F3)
     let label = match &profile {

@@ -623,6 +623,17 @@ impl ReadState {
         Ok(self.tags.as_ref().clone())
     }
 
+    /// Every version this state was published with, as its name and the landing it names, in
+    /// SemVer precedence order (as [`ReadState::version_position`] reads them). No landing is
+    /// read, so a caller that walks canon itself can stop at a tag incrementally.
+    pub fn version_landings(&self) -> Result<Vec<(String, Hash)>, RdyError> {
+        Ok(self
+            .version_tags()?
+            .into_iter()
+            .map(|(_, t)| (t.name, t.landing))
+            .collect())
+    }
+
     /// Canon's landings from this state's head, head first.
     pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
         self.landing_walk().collect()

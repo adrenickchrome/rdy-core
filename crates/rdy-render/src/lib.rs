@@ -1403,7 +1403,12 @@ fn with_shared<R>(
         changes: changes_summary,
         since: since_summary,
         warnings,
+        old,
     } = history;
+    // a named profile's review base: the words only it holds read through its selected state
+    let old_site = old
+        .as_deref()
+        .map(|o| Site::with_unavailable(o, &pack, &site_name, Some(inline::UNAVAILABLE)));
     // the review marks on the pages read only a base a scope names (the task-8 ruling)
     let review = listed.as_ref().filter(|_| review_marks);
     let header = match &profile {
@@ -1445,6 +1450,7 @@ fn with_shared<R>(
         local: local.as_ref(),
         unavailable,
         menu_url: menu_url.as_deref(),
+        old_site: old_site.as_ref(),
     };
     let extras = Extras {
         changes: changes_summary,

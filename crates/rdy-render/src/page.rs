@@ -72,6 +72,10 @@ pub struct Shared<'a> {
     /// Where a live page's pill opens the menu (`SiteTarget::menu_url`); none for the source's
     /// `/~versions/`. A static page never reads it.
     pub menu_url: Option<&'a str>,
+    /// A named profile's review base, its selected site (D-CWC91): a removed line and a removed
+    /// page's row read their words through it ([`Shared::removed_link`]). None for the source,
+    /// whose removed text reads against `site`.
+    pub old_site: Option<&'a Site<'a>>,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -86,6 +90,9 @@ pub struct SiteFacts<'a> {
     pub review: Option<&'a review::Review>,
     /// The rows of the home page's list of changes read it ([`Shared::listed`], O12).
     pub listed: Option<&'a review::Review>,
+    /// A named profile's review base, its selected site: a removed page's row and drawer entry
+    /// read their words through it ([`Shared::old_site`]).
+    pub old: Option<&'a Site<'a>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -509,6 +516,38 @@ impl Shared<'_> {
         })
     }
 
+    /// A link from `from` to the block `id` as a removed line reads it. A named profile's review
+    /// reads it through its old selected side (D-CWC91): the words that side holds, and an href
+    /// only to a page of this site (a target this site lacks reads as its words, unlinked; one
+    /// the old side lacks leads nowhere). Else as [`Shared::link`].
+    fn removed_link(&self, from: &str, id: &BlockId) -> Option<Link> {
+        let Some(old) = self.old_site else {
+            return self.link(from, id);
+        };
+        let target = old.m.get(id)?;
+        let (id, b) = match crate::site::is_profile(target) {
+            true => {
+                let doc = old.doc_of(id)?;
+                (&doc.id, doc)
+            }
+            false => (id, target),
+        };
+        let (href, title) = match (self.site.url_of(id), self.m.get(id)) {
+            (Some(url), Some(now)) => (
+                Some(url.href_from(from)),
+                self.hover(self.site.destination(id).unwrap_or(now), &url),
+            ),
+            _ => (None, String::new()),
+        };
+        Some(Link {
+            href,
+            label: old.label(b),
+            title,
+            key: crate::site::typed_key(b).map(String::from),
+            removed: target.is_redacted(),
+        })
+    }
+
     /// The href of the page of the doc that holds `id`, from page `from`, with no anchor; `""`
     /// when that is `from` itself (or the block has no doc with a page).
     fn doc_page(&self, from: &str, id: &BlockId) -> String {
@@ -598,6 +637,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_disagreements: !site.disagreements.is_empty(),
         review: sh.review,
         listed: sh.listed,
+        old: sh.old_site,
     };
     let (page_url, kind_name, title, current, chain, tail): (
         String,
@@ -1029,7 +1069,7 @@ fn edited_diff(sh: &Shared, id: &BlockId) -> Option<String> {
 /// The old text of removed blocks as HTML, written outside the block pipeline: each heading text
 /// is a plain paragraph (the page's outline stays the draft's), and no element has an id.
 fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
-    let link = |id: &BlockId| sh.link(page, id);
+    let link = |id: &BlockId| sh.removed_link(page, id);
     let local = |h: &str| sh.local_href(page, h);
     let ictx = Ctx {
         link: &link,
@@ -1077,6 +1117,12 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
             ));
         }
         match b.block_type.as_str() {
+            // a named profile's diagram source reads its id-shaped references as words, as its
+            // page does: never an id (D-CWC91)
+            "diagram" if sh.profile.is_some() => out.push_str(&format!(
+                "<pre><code>{}</code></pre>",
+                html::readable_source(&b.body, &link, sh.unavailable)
+            )),
             "code" | "diagram" => out.push_str(&format!(
                 "<pre><code>{}</code></pre>",
                 html::escape(&b.body)

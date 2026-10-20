@@ -171,42 +171,63 @@ pub(crate) fn build_within(
         hist.review_marks = base.is_some();
         hist.listed = Some(listed);
         hist.reviewed = reviewed;
+        // removed lines and removed rows read their words through the old selected side
+        hist.old = Some(Arc::clone(&old_m));
     }
 
-    // the neutral chip: canon's selected history since its tag, for a route that is not a tag
+    // the neutral chip: canon's selected history since its tag, for a route that is not a tag.
+    // The walk that counts it also finds the tag, so a rebuild reads only the new landings
     let mut since: Option<(u32, String, Hash)> = None;
     let mut over = false;
+    // the version a route's pill names, found by the memo's walks (never a full canon scan)
+    let mut route_version: Option<Tagged> = None;
     if route && !matches!(scope, Scope::At(_)) {
-        let at_canon = st.version_position(&Scope::Canon)?;
-        // a version's landing is the store's own hash text (as `prepare::since_of` reads it)
-        if let (Some(v), Some(tip)) = (at_canon.version, st.canon_head())
-            && let Ok(tag_landing) = v.landing.parse::<Hash>()
-        {
-            history.begin(Identity {
-                profile: profile.id.clone(),
-                epoch: st.redaction_epoch(),
-                pack: pack_identity(&pack),
-            });
-            let prev =
-                |h: &Hash| -> Result<Option<Hash>, RdyError> { Ok(st.reader().landing(h)?.prev) };
-            // only the two adjacent states of a walk are held; the shared side carries over
+        history.begin(Identity {
+            profile: profile.id.clone(),
+            epoch: st.redaction_epoch(),
+            pack: pack_identity(&pack),
+        });
+        let tags = Tags::of(st)?;
+        let prev =
+            |h: &Hash| -> Result<Option<Hash>, RdyError> { Ok(st.reader().landing(h)?.prev) };
+        let tip = st.canon_head();
+        let mut canon_tag: Option<Tagged> = None;
+        if let Some(tip) = tip {
+            // only the two adjacent states of a walk are held; the shared side carries over.
+            // Each side reads as its page would: a figure whose blob lost content is the notice
             let mut carried: Option<(Hash, Arc<Materialized>)> = None;
             let mut eval = |before: &Hash, after: &Hash| -> Result<bool, RdyError> {
                 let from = match carried.take() {
                     Some((h, m)) if h == *before => m,
-                    _ => selected_state(st, &Scope::At(*before), &profile)?,
+                    _ => selected_projected(st, &source, &Scope::At(*before), &profile)?,
                 };
-                let to = selected_state(st, &Scope::At(*after), &profile)?;
+                let to = selected_projected(st, &source, &Scope::At(*after), &profile)?;
                 let changed = review::between_states(&from, &to).changed_blocks() > 0;
                 carried = Some((*after, to));
                 Ok(changed)
             };
-            match history.count(tip, tag_landing, ceiling(), &prev, &mut eval)? {
-                Since::Count(n) if n > 0 => since = Some((n, v.name, tag_landing)),
-                Since::Count(_) => {}
-                Since::Over => over = true,
+            let counted = history.count(tip, &tags, ceiling(), &prev, &mut eval)?;
+            match (&counted.tag, counted.since) {
+                (Some(t), Since::Count(n)) if n > 0 => {
+                    since = Some((n, t.name.clone(), t.landing));
+                }
+                (_, Since::Over) => over = true,
+                _ => {}
             }
+            canon_tag = counted.tag;
         }
+        // a scope that stands where canon stands names canon's version; a fixed base (a pinned
+        // view's, a proposal version's) names its own, found once per tag set
+        let base = match &scope {
+            Scope::View(name) => st.effective_base(name),
+            Scope::Proposal(v) => st.proposal_base(v)?,
+            _ => tip,
+        };
+        route_version = match base {
+            Some(b) if Some(b) == tip => canon_tag,
+            Some(b) => history.version_at(b, &tags, &prev)?,
+            None => None,
+        };
     }
     // the summary since the tag: the tag's selected state against canon's
     if let Some((n, name, tag_landing)) = &since
@@ -270,7 +291,18 @@ pub(crate) fn build_within(
                 frozen: true,
                 label: String::new(),
             },
-            _ => st.version_position(&scope)?,
+            // a route's header reads only the version its pill names: its neutral chip counts
+            // the selected landings, so no raw landing count is read
+            _ => VersionPosition {
+                version: route_version.map(|t| VersionRef {
+                    name: t.name,
+                    landing: t.landing.to_string(),
+                }),
+                landings_since: 0,
+                view: None,
+                frozen: matches!(scope, Scope::At(_)),
+                label: String::new(),
+            },
         };
         let header = version::profile_header(
             &position,
@@ -337,19 +369,8 @@ fn selected_in(
     }
 }
 
-/// [`selected_in`]'s selected state, empty when the state does not hold the profile. No asset is
-/// read: the neutral chip compares blocks only.
-fn selected_state(
-    st: &ReadState,
-    scope: &Scope,
-    profile: &ResolvedProfile,
-) -> Result<Arc<Materialized>, RdyError> {
-    Ok(Arc::new(
-        selected_in(st, scope, profile)?.map_or_else(Materialized::default, |r| r.m),
-    ))
-}
-
-/// [`selected_state`] with each figure whose blob lost content read as removed.
+/// [`selected_in`]'s selected state, empty when the state does not hold the profile, with each
+/// figure whose blob lost content read as removed. No asset byte is read.
 fn selected_projected(
     st: &ReadState,
     source: &ReadPublicationSource<'_>,
@@ -428,16 +449,70 @@ struct Identity {
     pack: Hash,
 }
 
-/// The aggregate of the last count: the tag's landing, the canon tip it counted to, how many
-/// landings lie between them, how many of those changed what the profile shows, and whether the
-/// interval is past the ceiling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A version as a walk finds it: its name and the landing it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Tagged {
+    name: String,
+    landing: Hash,
+}
+
+/// A state's versions as a walk reads them: each tagged landing with its highest version (as
+/// `ReadState::version_position` reads it), and one identity of the whole set.
+struct Tags {
+    on: HashMap<Hash, String>,
+    id: Hash,
+}
+
+impl Tags {
+    /// The versions `st` was published with. No landing is read.
+    fn of(st: &ReadState) -> Result<Tags, RdyError> {
+        let mut on = HashMap::new();
+        let mut text = String::new();
+        // in precedence order: a later version on the same landing is the higher one
+        for (name, landing) in st.version_landings()? {
+            text.push_str(&format!("{landing} {name}\n"));
+            on.insert(landing, name);
+        }
+        Ok(Tags {
+            on,
+            id: Hash::of(text.as_bytes()),
+        })
+    }
+
+    /// The version on landing `h`, if one names it.
+    fn at(&self, h: &Hash) -> Option<Tagged> {
+        self.on.get(h).map(|name| Tagged {
+            name: name.clone(),
+            landing: *h,
+        })
+    }
+}
+
+/// The aggregate of the last count, for one tag set: the version canon stands after (none when
+/// no version lies on the chain), the canon tip it counted to, how many landings lie between
+/// them, how many of those changed what the profile shows, and whether the interval is past the
+/// ceiling.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Aggregate {
-    tag: Hash,
+    tags: Hash,
+    tag: Option<Tagged>,
     tip: Hash,
     visited: usize,
     selected: u32,
     over: bool,
+}
+
+impl Aggregate {
+    fn counted(&self) -> Counted {
+        Counted {
+            tag: self.tag.clone(),
+            since: if self.over {
+                Since::Over
+            } else {
+                Since::Count(self.selected)
+            },
+        }
+    }
 }
 
 /// What the neutral chip counts.
@@ -449,18 +524,41 @@ enum Since {
     Over,
 }
 
+/// A count: the version canon stands after, and what the chip counts since it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Counted {
+    tag: Option<Tagged>,
+    since: Since,
+}
+
+/// How a walk from the tip ended.
+enum End {
+    /// At a tagged landing: the interval's start.
+    Tag(Tagged),
+    /// At the saved tip: the chain extends it.
+    Saved,
+    /// At the chain's first landing, with no version on the way.
+    Root,
+}
+
+/// The most fixed bases (a pinned view's, a proposal version's) a memo keeps the version of.
+const MAX_BASES: usize = 64;
+
 /// The neutral chip's memo for one profile target (D-42YMF, D-PX5B0): for each landing, whether
 /// its selected before and after states differ in a block a reader sees, keyed by `(landing hash,
 /// profile id, redaction epoch)` (one id and one epoch per memo), and the aggregate of the last
-/// count. It holds no block body, graph or blob, and at most [`history_facts::MAX_LANDINGS`]
-/// results. A new profile id, epoch or pack clears it; a new tag resets the aggregate and keeps
-/// only the results of the new interval; a chain that does not extend the saved tip clears it.
-/// A failed read never becomes a result.
+/// count, which also holds the version canon stands after. It holds no block body, graph or
+/// blob, and at most [`history_facts::MAX_LANDINGS`] results. A new profile id, epoch or pack
+/// clears it; a new tag set resets the aggregate and keeps only the results of the new interval;
+/// a chain that does not extend the saved tip clears it. A failed read never becomes a result.
+/// It also keeps the version of up to [`MAX_BASES`] fixed bases, for one tag set.
 #[derive(Default)]
 pub struct ProfileHistoryMemo {
     identity: Option<Identity>,
     results: HashMap<Hash, bool>,
     aggregate: Option<Aggregate>,
+    bases: HashMap<Hash, Option<Tagged>>,
+    bases_tags: Option<Hash>,
     evaluations: u64,
 }
 
@@ -481,106 +579,109 @@ impl ProfileHistoryMemo {
         }
     }
 
-    /// The landings from the tag `tag` (exclusive) to the canon tip `tip` that change what the
-    /// profile shows, walking `prev` from the tip only to the tag or the saved tip. `eval` says
-    /// whether the pair (before, after) changes a block a reader sees; it runs only for a landing
-    /// with no result yet, oldest first. More than `limit` landings in the interval is
-    /// [`Since::Over`], found before any pair is evaluated and remembered for the tip, so an
-    /// unchanged or extended over-limit chain is not scanned again.
+    /// The version canon's tip `tip` stands after, and the landings since it (exclusive) to the
+    /// tip that change what the profile shows. The walk goes from the tip through `prev` only to
+    /// the first tagged landing of `tags` or to the saved tip, so a rebuild reads only the new
+    /// landings. `eval` says whether the pair (before, after) changes a block a reader sees; it
+    /// runs only for a landing with no result yet, oldest first. More than `limit` landings in
+    /// the interval is [`Since::Over`], found before any pair is evaluated and remembered for the
+    /// tip, so an unchanged or extended over-limit chain is not scanned again. Past the ceiling
+    /// the walk holds no more hashes; it reads on only to learn whether a version lies beyond.
     fn count(
         &mut self,
         tip: Hash,
-        tag: Hash,
+        tags: &Tags,
         limit: usize,
         prev: &dyn Fn(&Hash) -> Result<Option<Hash>, RdyError>,
         eval: &mut dyn FnMut(&Hash, &Hash) -> Result<bool, RdyError>,
-    ) -> Result<Since, RdyError> {
-        // a changed tag resets the aggregate; the results stay usable for the new interval
-        if self.aggregate.is_some_and(|a| a.tag != tag) {
+    ) -> Result<Counted, RdyError> {
+        // a changed tag set resets the aggregate; the results stay usable for the new interval
+        if self.aggregate.as_ref().is_some_and(|a| a.tags != tags.id) {
             self.aggregate = None;
         }
-        if let Some(a) = self.aggregate
+        if let Some(a) = &self.aggregate
             && a.tip == tip
         {
-            return Ok(if a.over {
-                Since::Over
-            } else {
-                Since::Count(a.selected)
-            });
+            return Ok(a.counted());
         }
-        let saved = self.aggregate;
-        // the new landings, newest first: to the tag, or to the saved tip
+        let saved = self.aggregate.clone();
+        // the new landings, newest first: to the tag, to the saved tip or to the first landing
         let mut fresh: Vec<Hash> = vec![];
         let mut cur = tip;
-        let mut extends = false;
-        loop {
-            if cur == tag {
-                break;
+        let end = loop {
+            if let Some(t) = tags.at(&cur) {
+                break End::Tag(t);
             }
-            if saved.is_some_and(|a| a.tip == cur) {
-                extends = true;
-                break;
+            if saved.as_ref().is_some_and(|a| a.tip == cur) {
+                break End::Saved;
             }
             if fresh.len() >= limit {
-                // past the ceiling before the walk ends: no pair is evaluated
-                self.aggregate = Some(Aggregate {
-                    tag,
-                    tip,
-                    visited: fresh.len().saturating_add(1),
-                    selected: 0,
-                    over: true,
-                });
-                return Ok(Since::Over);
+                return self.beyond(tip, cur, fresh.len(), tags, saved.as_ref(), prev);
             }
             fresh.push(cur);
             match prev(&cur)? {
                 Some(p) => cur = p,
-                // the tag is not on this chain: nothing to count, and nothing kept
-                None => {
-                    self.results.clear();
-                    self.aggregate = None;
-                    return Ok(Since::Count(0));
-                }
+                None => break End::Root,
             }
-        }
-        let (visited, mut selected, was_over) = match saved {
-            Some(a) if extends => (a.visited, a.selected, a.over),
-            // a chain that does not extend the saved tip: never reuse its aggregate
-            Some(_) => {
+        };
+        let (tag, visited, mut selected, before_oldest) = match end {
+            // no version on this chain: nothing to count, and nothing kept
+            End::Root => {
                 self.results.clear();
-                (0, 0, false)
+                self.aggregate = Some(Aggregate {
+                    tags: tags.id,
+                    tag: None,
+                    tip,
+                    visited: fresh.len(),
+                    selected: 0,
+                    over: false,
+                });
+                return Ok(Counted {
+                    tag: None,
+                    since: Since::Count(0),
+                });
             }
-            None => (0, 0, false),
+            End::Saved => {
+                let a = saved.expect("the saved tip ended the walk");
+                let total = a.visited.saturating_add(fresh.len());
+                if a.tag.is_none() || a.over || total > limit {
+                    let over = a.tag.is_some();
+                    self.aggregate = Some(Aggregate {
+                        tip,
+                        visited: total,
+                        selected: 0,
+                        over,
+                        ..a
+                    });
+                    return Ok(self.aggregate.as_ref().map(Aggregate::counted).unwrap());
+                }
+                (a.tag, a.visited, a.selected, a.tip)
+            }
+            End::Tag(t) => {
+                // a chain that does not extend the saved tip: never reuse its results
+                if saved.is_some() {
+                    self.results.clear();
+                }
+                // a walk from the tag holds the whole interval: results before the tag go
+                let keep: HashSet<&Hash> = fresh.iter().collect();
+                self.results.retain(|h, _| keep.contains(h));
+                let landing = t.landing;
+                (Some(t), 0, 0, landing)
+            }
         };
         let total = visited.saturating_add(fresh.len());
-        if was_over || total > limit {
-            self.aggregate = Some(Aggregate {
-                tag,
-                tip,
-                visited: total,
-                selected: 0,
-                over: true,
-            });
-            return Ok(Since::Over);
-        }
-        // a walk from the tag holds the whole interval: results before the tag are dropped
-        if !extends {
-            let keep: HashSet<&Hash> = fresh.iter().collect();
-            self.results.retain(|h, _| keep.contains(h));
-        }
         for i in (0..fresh.len()).rev() {
             let after = fresh[i];
             let changed = match self.results.get(&after) {
                 Some(b) => *b,
                 None => {
                     if self.results.len() >= limit {
-                        return Ok(Since::Over);
+                        return Ok(Counted {
+                            tag,
+                            since: Since::Over,
+                        });
                     }
-                    let before = match fresh.get(i + 1) {
-                        Some(b) => *b,
-                        None if extends => saved.map_or(tag, |a| a.tip),
-                        None => tag,
-                    };
+                    let before = fresh.get(i + 1).copied().unwrap_or(before_oldest);
                     let b = eval(&before, &after)?;
                     self.evaluations += 1;
                     self.results.insert(after, b);
@@ -592,13 +693,92 @@ impl ProfileHistoryMemo {
             }
         }
         self.aggregate = Some(Aggregate {
-            tag,
+            tags: tags.id,
+            tag: tag.clone(),
             tip,
             visited: total,
             selected,
             over: false,
         });
-        Ok(Since::Count(selected))
+        Ok(Counted {
+            tag,
+            since: Since::Count(selected),
+        })
+    }
+
+    /// [`ProfileHistoryMemo::count`] past the ceiling: `held` landings from `tip` are counted and
+    /// `cur` is the next, neither tagged nor the saved tip. The walk reads on, holding no hash,
+    /// to the first tagged landing (the interval is over the limit: no pair is evaluated), to the
+    /// saved tip (its version) or to the chain's first landing (no version: nothing to count).
+    fn beyond(
+        &mut self,
+        tip: Hash,
+        mut cur: Hash,
+        held: usize,
+        tags: &Tags,
+        saved: Option<&Aggregate>,
+        prev: &dyn Fn(&Hash) -> Result<Option<Hash>, RdyError>,
+    ) -> Result<Counted, RdyError> {
+        let mut walked = held;
+        let tag = loop {
+            if let Some(t) = tags.at(&cur) {
+                break Some(t);
+            }
+            if let Some(a) = saved.filter(|a| a.tip == cur) {
+                walked = walked.saturating_add(a.visited);
+                break a.tag.clone();
+            }
+            walked = walked.saturating_add(1);
+            match prev(&cur)? {
+                Some(p) => cur = p,
+                None => break None,
+            }
+        };
+        if tag.is_none() {
+            self.results.clear();
+        }
+        let a = Aggregate {
+            tags: tags.id,
+            over: tag.is_some(),
+            tag,
+            tip,
+            visited: walked,
+            selected: 0,
+        };
+        let counted = a.counted();
+        self.aggregate = Some(a);
+        Ok(counted)
+    }
+
+    /// The version a fixed landing `base` stands after: the first tagged landing walking back
+    /// from it. A landing's version changes only with the tag set, so each base is walked once
+    /// per tag set (at most [`MAX_BASES`] are kept).
+    fn version_at(
+        &mut self,
+        base: Hash,
+        tags: &Tags,
+        prev: &dyn Fn(&Hash) -> Result<Option<Hash>, RdyError>,
+    ) -> Result<Option<Tagged>, RdyError> {
+        if self.bases_tags != Some(tags.id) {
+            self.bases.clear();
+            self.bases_tags = Some(tags.id);
+        }
+        if let Some(v) = self.bases.get(&base) {
+            return Ok(v.clone());
+        }
+        let mut cur = Some(base);
+        let found = loop {
+            let Some(h) = cur else { break None };
+            if let Some(t) = tags.at(&h) {
+                break Some(t);
+            }
+            cur = prev(&h)?;
+        };
+        if self.bases.len() >= MAX_BASES {
+            self.bases.clear();
+        }
+        self.bases.insert(base, found.clone());
+        Ok(found)
     }
 }
 
@@ -823,6 +1003,111 @@ mod spv4 {
         assert_eq!(chip(&b).as_deref(), Some("+1"));
     }
 
+    /// The object frames a whole build of `key`'s canon route reads, with `memo`.
+    fn frames(p: &Project, memo: &mut ProfileHistoryMemo, key: &str) -> (u64, live::ProfileBuild) {
+        let st = p.r.read();
+        let before = st.reader().frames_read();
+        let b = build_profile_live(&st, &canon(key), memo).expect("build");
+        (st.reader().frames_read() - before, b)
+    }
+
+    /// The frames of a cold build, of an unchanged one and of one after one more landing, for a
+    /// tag followed by `n` landings that change what `guide` shows.
+    fn reads_after(n: usize) -> (u64, u64, live::ProfileBuild, u64) {
+        let mut p = project();
+        for i in 0..n {
+            p.edit("$ip", &format!("Intro words, {i}."));
+        }
+        let mut memo = ProfileHistoryMemo::default();
+        frames(&p, &mut memo, "guide");
+        let (unchanged, _) = frames(&p, &mut memo, "guide");
+        p.edit("$ip", "Intro words, appended.");
+        let (appended, b) = frames(&p, &mut memo, "guide");
+        (unchanged, appended, b, memo.evaluations_for_tests())
+    }
+
+    #[test]
+    fn spv4_selected_history_memo_reads_only_new_landings_in_the_whole_build() {
+        // every read of a whole build, not only its pairs: a rebuild of an unchanged or appended
+        // canon reads the same whatever the interval's length (the tag is found incrementally)
+        let (u2, a2, b2, e2) = reads_after(2);
+        let (u6, a6, b6, e6) = reads_after(6);
+        assert_eq!(chip(&b2).as_deref(), Some("+3"));
+        assert_eq!(chip(&b6).as_deref(), Some("+7"));
+        assert_eq!((e2, e6), (3, 7), "each pair once");
+        assert_eq!(u2, u6, "an unchanged rebuild");
+        assert_eq!(a2, a6, "an appended rebuild");
+        // past the ceiling: an extending chain stays over the limit and is not scanned again
+        let over = |n: usize| with_ceiling(2, || reads_after(n));
+        let (u4, a4, b4, e4) = over(4);
+        let (u8, a8, b8, e8) = over(8);
+        assert_eq!((e4, e8), (0, 0), "no pair past the ceiling");
+        for b in [&b4, &b8] {
+            assert_eq!(chip(b), None);
+            assert_eq!(b.live.warnings, vec![HISTORY_WARNING.to_string()]);
+        }
+        assert_eq!(u4, u8, "an unchanged over-limit rebuild");
+        assert_eq!(a4, a8, "an appended over-limit rebuild");
+    }
+
+    #[test]
+    fn spv4_selected_history_counts_what_redaction_leaves_visible() {
+        use rdy_engine::redaction::RedactInput;
+        let mut p = project();
+        let png = b"\x89PNG\r\n\x1a\nhistory figure bytes".to_vec();
+        let blob = p.r.store_mut().put_blob(&png).unwrap();
+        let fig = write(
+            &mut p.r,
+            "f1",
+            json!([{"op": "create", "type": "figure", "id": "$fig", "parent": p.ids["$intro"],
+                "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "Old alt"}}]),
+        )["$fig"]
+            .clone();
+        land(&mut p.r, "f1");
+        p.r.tag(&session(Role::Approver), "v1.1.0", None, None)
+            .expect("tag");
+        // a landing that edits only the figure's alt text: a reader sees it
+        write(
+            &mut p.r,
+            "f2",
+            json!([{"op": "update", "id": fig, "fields": {"alt": "New alt"}}]),
+        );
+        land(&mut p.r, "f2");
+        let mut memo = ProfileHistoryMemo::default();
+        let run = |p: &Project, memo: &mut ProfileHistoryMemo| {
+            build_profile_live(&p.r.read(), &canon("guide"), memo).expect("build")
+        };
+        let b = run(&p, &mut memo);
+        assert_eq!(chip(&b).as_deref(), Some("+1"));
+        assert_eq!(memo.evaluations_for_tests(), 1);
+        let epoch = p.r.read().redaction_epoch();
+
+        // a removal of the figure's blob: both sides of the alt edit read as the same notice
+        p.r.redact_in(
+            &session(Role::Writer),
+            "rx",
+            RedactInput {
+                targets: vec![format!("blob:{blob}")],
+                reason_class: "secret".into(),
+                reason: "a leaked figure".into(),
+                dry_run: false,
+            },
+        )
+        .expect("redact");
+        land(&mut p.r, "rx");
+        assert!(p.r.read().redaction_epoch() > epoch, "a real epoch change");
+        let b = run(&p, &mut memo);
+        // the retained memo is discarded for the new epoch, and the alt edit no longer counts
+        assert_eq!(chip(&b), None, "{}", b.live.header);
+        assert!(!b.live.files.contains_key("changes-since.html"));
+        assert_eq!(
+            memo.results.get(&p.r.read().canon_head().unwrap()),
+            Some(&false)
+        );
+        let intro = String::from_utf8(b.live.files["intro.html"].clone()).unwrap();
+        assert!(intro.contains("Content removed."), "{intro}");
+    }
+
     /// A synthetic landing: `h(i)`'s parent is `h(i - 1)`; `h(0)` is the tag.
     fn h(i: u64) -> Hash {
         Hash::of(&i.to_le_bytes())
@@ -849,13 +1134,25 @@ mod spv4 {
             epoch: 0,
             pack: Hash::of(b"pack"),
         };
+        let tagged = Tags {
+            on: HashMap::from([(h(0), "v1.0.0".to_string())]),
+            id: Hash::of(b"one tag"),
+        };
+        let tag = Some(Tagged {
+            name: "v1.0.0".into(),
+            landing: h(0),
+        });
+        let counted = |since| Counted {
+            tag: tag.clone(),
+            since,
+        };
         // exactly the ceiling: every pair once
         let mut memo = ProfileHistoryMemo::default();
         memo.begin(identity.clone());
         let got = memo
-            .count(h(limit as u64), h(0), limit, &prev, &mut eval)
+            .count(h(limit as u64), &tagged, limit, &prev, &mut eval)
             .unwrap();
-        assert_eq!(got, Since::Count(limit as u32 - 1));
+        assert_eq!(got, counted(Since::Count(limit as u32 - 1)));
         assert_eq!(evals.get(), limit as u64);
         // one more: over the ceiling before any pair is evaluated
         let mut memo = ProfileHistoryMemo::default();
@@ -863,8 +1160,8 @@ mod spv4 {
         evals.set(0);
         prevs.set(0);
         assert_eq!(
-            memo.count(h(n), h(0), limit, &prev, &mut eval).unwrap(),
-            Since::Over
+            memo.count(h(n), &tagged, limit, &prev, &mut eval).unwrap(),
+            counted(Since::Over)
         );
         assert_eq!(evals.get(), 0);
         assert!(
@@ -876,14 +1173,41 @@ mod spv4 {
         // an unchanged over-limit tip is not scanned again
         prevs.set(0);
         assert_eq!(
-            memo.count(h(n), h(0), limit, &prev, &mut eval).unwrap(),
-            Since::Over
+            memo.count(h(n), &tagged, limit, &prev, &mut eval).unwrap(),
+            counted(Since::Over)
         );
         assert_eq!((prevs.get(), evals.get()), (0, 0));
         // an extending tip walks only to the saved tip, and stays over
         assert_eq!(
-            memo.count(h(n + 1), h(0), limit, &prev, &mut eval).unwrap(),
-            Since::Over
+            memo.count(h(n + 1), &tagged, limit, &prev, &mut eval)
+                .unwrap(),
+            counted(Since::Over)
+        );
+        assert_eq!((prevs.get(), evals.get()), (1, 0));
+        // no version on a chain past the ceiling: nothing to count and no warning, found once;
+        // an extending chain is not scanned again
+        let untagged = Tags {
+            on: HashMap::new(),
+            id: Hash::of(b"no tag"),
+        };
+        let none = Counted {
+            tag: None,
+            since: Since::Count(0),
+        };
+        let mut memo = ProfileHistoryMemo::default();
+        memo.begin(identity.clone());
+        prevs.set(0);
+        assert_eq!(
+            memo.count(h(n), &untagged, limit, &prev, &mut eval)
+                .unwrap(),
+            none
+        );
+        assert_eq!((prevs.get(), evals.get()), (n + 1, 0));
+        prevs.set(0);
+        assert_eq!(
+            memo.count(h(n + 1), &untagged, limit, &prev, &mut eval)
+                .unwrap(),
+            none
         );
         assert_eq!((prevs.get(), evals.get()), (1, 0));
         // a read failure never becomes a cached boolean
@@ -892,7 +1216,7 @@ mod spv4 {
         let mut failing = |_: &Hash, _: &Hash| -> Result<bool, RdyError> {
             Err(RdyError::new(E_LIMIT, "boom", "fix"))
         };
-        memo.count(h(3), h(0), limit, &prev, &mut failing)
+        memo.count(h(3), &tagged, limit, &prev, &mut failing)
             .unwrap_err();
         assert!(memo.results.is_empty() && memo.aggregate.is_none());
 

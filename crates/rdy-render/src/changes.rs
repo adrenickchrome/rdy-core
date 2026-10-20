@@ -254,7 +254,7 @@ pub fn summary(
 
     // rule 2: the rows, each with its section's anchor
     let rows: Vec<ChangeRow> = match of {
-        Of::Review(_) => home::changes(site, rv),
+        Of::Review(_) => home::changes_with(site, rv, sides.from_text),
         Of::Since { .. } => since_rows(site, rv, &order, sides),
     };
     let mut taken = reserved_ids();
