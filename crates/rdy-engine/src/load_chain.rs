@@ -36,7 +36,7 @@ enum Inner {
     /// A single file of dump format 1 or 2 with no stop: the released single-file load reads it.
     Legacy { format: u32 },
     /// A chain of dump format 3.
-    Chain(ScanPlan),
+    Chain(Box<ScanPlan>),
 }
 
 impl ChainPlan {
@@ -109,7 +109,7 @@ pub(crate) fn inspect(files: &[PathBuf], stop: Option<&DumpStop>) -> Result<Chai
     }
     Ok(ChainPlan {
         files: files.to_vec(),
-        inner: Inner::Chain(plan),
+        inner: Inner::Chain(Box::new(plan)),
     })
 }
 

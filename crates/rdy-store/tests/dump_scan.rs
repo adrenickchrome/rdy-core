@@ -407,7 +407,7 @@ fn hc5_every_link_field_is_checked_before_target_writes() {
         ScanError::Input { file: 0, .. }
     ));
     assert_eq!(
-        link_of(ChainSource::open(&[h.i1.clone()]).unwrap_err()),
+        link_of(ChainSource::open(std::slice::from_ref(&h.i1)).unwrap_err()),
         (0, ChainLink::FirstIsIncrement)
     );
     assert_eq!(
@@ -1067,7 +1067,10 @@ fn hc5_later_apply_distinguishes_held_and_missing_bytes() {
     assert_eq!(hashes, sorted);
     // the full dump after the removal holds them dropped: missing, and written as zeros named by
     // the carried record
-    let missing = ok(&[h.f2.clone()], Some(StopMatch::Position(h.v1_end)));
+    let missing = ok(
+        std::slice::from_ref(&h.f2),
+        Some(StopMatch::Position(h.v1_end)),
+    );
     assert_eq!(missing.carried().len(), 1);
     let r = &missing.carried()[0];
     assert!(r.spans.iter().all(|s| !s.held));
@@ -1087,7 +1090,7 @@ fn hc5_later_apply_distinguishes_held_and_missing_bytes() {
         );
     }
     // the carried record keeps its source's identity, with no new time
-    let full = ok(&[h.f2.clone()], None);
+    let full = ok(std::slice::from_ref(&h.f2), None);
     assert!(full.carried().is_empty());
 }
 
@@ -1128,7 +1131,7 @@ fn hc5_pre_stop_apply_marks_present_input_for_zero_write() {
         );
     }
     // a frame the source already dropped is its own validated hole
-    let plan = ok(&[h.f2.clone()], None);
+    let plan = ok(std::slice::from_ref(&h.f2), None);
     for f in &h.secret_frames {
         assert_eq!(
             plan.frame_action(f.loc, f.kind, f.hash, f.len).unwrap(),
