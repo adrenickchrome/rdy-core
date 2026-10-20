@@ -338,8 +338,9 @@ pub fn build_profile(read: &ReadState, scope_text: &str, profile: &str) -> Resul
 }
 
 /// [`build`] and [`build_profile`] from what [`prepare::source`] or `publication::prepare`
-/// read: it reads no source.
-fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
+/// read, and a publication's print from what `publication::prepare_resolved` read: it reads no
+/// source. A publication's `Prepared` has an empty `rdy_dir`, which no writer places by.
+pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
     let Prepared {
         m,
         g,

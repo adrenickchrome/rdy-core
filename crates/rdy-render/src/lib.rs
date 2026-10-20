@@ -13,6 +13,7 @@ mod page;
 mod prepare;
 pub mod print;
 mod publication;
+pub mod render_input;
 pub mod review;
 mod search;
 mod site;
@@ -22,7 +23,12 @@ mod version;
 
 pub use html::{Link, escape, text_html};
 
-use rdy_engine::{E_IO, Materialized, RdyError, ReadState, Scope};
+use rdy_engine::publication::PublicationSource;
+use rdy_engine::publication_manifest::{
+    MANIFEST_RECIPE, Manifest, ManifestEntry, NOTICE_SLOT, manifest_hash,
+};
+use rdy_engine::render_inputs::RenderInputs;
+use rdy_engine::{E_BAD_INPUT, E_IO, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Hash, tree};
 use serde::Serialize;
 use site::Site;
@@ -69,6 +75,25 @@ struct HeaderHtml(String);
 
 impl minijinja::value::Object for HeaderHtml {}
 
+/// The empty notice slot of a publication page (hub D-YJ9TA), as a template writes it right after
+/// its opening main element (`{{ notice_slot }}`, which only a publication page's context holds):
+/// the formatter writes the 18 bytes of [`NOTICE_SLOT`] and records where they went in the page.
+/// The hub fills the slot; core writes neither a notice nor its text.
+#[derive(Debug)]
+struct NoticeHtml;
+
+impl minijinja::value::Object for NoticeHtml {}
+
+/// `E_BAD_INPUT`: a publication page whose template wrote no notice slot, or more than one, or
+/// whose recorded slot does not hold the empty slot's bytes.
+fn bad_notice_slot() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "publication page has an invalid notice slot",
+        "use the templates shipped with this rdy version",
+    )
+}
+
 /// What a recorded range of a page holds: the version label's text, or the header's markup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlotKind {
@@ -85,6 +110,19 @@ pub type Slot = (SlotKind, std::ops::Range<usize>);
 struct PageOut {
     bytes: Vec<u8>,
     label_at: Vec<Slot>,
+    /// Where the page wrote its notice slot ([`NoticeHtml`]), when it wrote one.
+    notice: Option<std::ops::Range<usize>>,
+    /// The page tried to write a second notice slot: the render fails.
+    second_notice: bool,
+}
+
+/// A page [`render_page_out`] rendered: its bytes, its label and header ranges, and its notice
+/// slot's range.
+#[derive(Debug)]
+struct Rendered {
+    bytes: Vec<u8>,
+    slots: Vec<Slot>,
+    notice: Option<std::ops::Range<usize>>,
 }
 
 thread_local! {
@@ -117,12 +155,53 @@ fn render_page<S: Serialize>(
     name: &str,
     ctx: S,
 ) -> Result<(Vec<u8>, Vec<Slot>), RdyError> {
+    render_page_out(env, name, ctx).map(|r| (r.bytes, r.slots))
+}
+
+/// [`render_page`], with the range of the notice slot the page wrote. A second notice slot is a
+/// render error, refused as an invalid notice slot.
+fn render_page_out<S: Serialize>(
+    env: &minijinja::Environment<'static>,
+    name: &str,
+    ctx: S,
+) -> Result<Rendered, RdyError> {
     let t = env.get_template(name).map_err(tpl)?;
     PAGE_OUT.set(Some(PageOut::default()));
     let rendered = t.render_captured_to(ctx, PageSink).map(drop);
     let out = PAGE_OUT.take().unwrap_or_default();
+    if out.second_notice {
+        return Err(bad_notice_slot());
+    }
     rendered.map_err(tpl)?;
-    Ok((out.bytes, out.label_at))
+    Ok(Rendered {
+        bytes: out.bytes,
+        slots: out.label_at,
+        notice: out.notice,
+    })
+}
+
+/// The context of a publication page: `ctx`, with the notice slot a template writes right after
+/// its opening main element.
+fn with_notice_slot<S: Serialize>(ctx: &S) -> minijinja::Value {
+    minijinja::context! {
+        notice_slot => minijinja::Value::from_object(NoticeHtml),
+        ..minijinja::Value::from_serialize(ctx)
+    }
+}
+
+/// The page's notice slot: its range checked to hold the empty slot's bytes, its start as the
+/// byte offset a manifest records. None when the page wrote no slot.
+fn notice_offset(
+    bytes: &[u8],
+    notice: Option<&std::ops::Range<usize>>,
+) -> Result<Option<u64>, RdyError> {
+    let Some(r) = notice else { return Ok(None) };
+    if bytes.get(r.clone()) != Some(NOTICE_SLOT) {
+        return Err(bad_notice_slot());
+    }
+    u64::try_from(r.start)
+        .map(Some)
+        .map_err(|_| bad_notice_slot())
 }
 
 fn write_failure() -> minijinja::Error {
@@ -166,6 +245,34 @@ fn write_slot(
     }
 }
 
+/// Writes the empty notice slot ([`NoticeHtml`]) straight into the page [`render_page`] is
+/// rendering, and records the bytes it took. A slot in a captured block, outside a page render or
+/// written a second time is an error.
+fn write_notice(out: &mut minijinja::Output) -> Result<(), minijinja::Error> {
+    let slot = std::str::from_utf8(NOTICE_SLOT).expect("the slot is ASCII");
+    let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
+    let start = len();
+    out.write_str(slot).map_err(|_| write_failure())?;
+    let refused =
+        |what: &'static str| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, what);
+    match (start, len()) {
+        (Some(start), Some(end)) if end - start == slot.len() => PAGE_OUT.with_borrow_mut(|o| {
+            let Some(o) = o else {
+                return Err(refused("no page is being rendered"));
+            };
+            if o.notice.is_some() {
+                o.second_notice = true;
+                return Err(refused("a page writes one notice slot"));
+            }
+            o.notice = Some(start..end);
+            Ok(())
+        }),
+        _ => Err(refused(
+            "the notice slot is written only straight into a page that render_page renders",
+        )),
+    }
+}
+
 /// Writes the version label (a [`LabelText`]): escaped in an HTML template.
 fn write_label(
     out: &mut minijinja::Output,
@@ -192,6 +299,9 @@ fn format_value(
     }
     if let Some(header) = value.downcast_object_ref::<HeaderHtml>() {
         return write_slot(out, SlotKind::Header, &header.0);
+    }
+    if value.downcast_object_ref::<NoticeHtml>().is_some() {
+        return write_notice(out);
     }
     if matches!(state.auto_escape(), minijinja::AutoEscape::Html)
         && !value.is_safe()
@@ -616,7 +726,12 @@ fn scope_warnings(
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 /// Without a profile it is the full source (RULING F2).
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
-    build_site_from(prepare::source(rdy, scope, prepare::Purpose::Site)?, mode)
+    build_site_from(
+        prepare::source(rdy, scope, prepare::Purpose::Site)?,
+        mode,
+        Slots::Source,
+    )
+    .map(|b| b.site)
 }
 
 /// Builds the static site of the publication profile `profile` (an id or key) at `scope_text`
@@ -630,7 +745,112 @@ pub fn build_profile_site(
     profile: &str,
 ) -> Result<SiteFiles, RdyError> {
     let prepared = publication::prepare(read, scope_text, profile, prepare::Purpose::Site)?;
-    build_site_from(prepared, Mode::Static)
+    build_site_from(prepared, Mode::Static, Slots::Source).map(|b| b.site)
+}
+
+/// A publication artifact (D-KDFZ3, hub r-50C97): every served file by its site-relative path,
+/// with its bytes, and the manifest that lists them. The manifest is no file of the artifact: it
+/// is kept beside the files and never hashes itself. `warnings` are the build's: an org
+/// profile's reference warning first, then the scope's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationArtifact {
+    pub files: BTreeMap<String, Vec<u8>>,
+    pub manifest: Manifest,
+    pub manifest_hash: Hash,
+    pub warnings: Vec<String>,
+}
+
+/// Builds the publication of `selector` (a profile id or key, or `implicit:org`) in the tagged
+/// snapshot `m` in memory (D-KDFZ3, D-0VCQ5, D-QYCRB): the static site of the profile's
+/// selection, read through `source` and the captured `inputs` alone, so equal inputs give equal
+/// bytes whatever the store's path, canon or tension state. `inputs` must be this renderer's and
+/// `source` must read with their effective pack. The site shows `tag_name` (and its `redacted`
+/// mark when `tag_redacted`) as its only history. Every HTML page holds one empty notice slot
+/// right after its opening main element, at the offset its manifest entry records; no other file
+/// has one. A public profile whose reference check is blocked refuses with
+/// `E_PUBLICATION_REFERENCE`. It writes no output directory.
+pub fn build_publication(
+    source: &dyn PublicationSource,
+    m: &Materialized,
+    tag_name: &str,
+    tag_redacted: bool,
+    selector: &str,
+    inputs: &RenderInputs,
+) -> Result<PublicationArtifact, RdyError> {
+    publication::check_inputs(source, inputs)?;
+    let resolved = rdy_engine::publication::resolve_source(source, m, selector)?;
+    let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
+    artifact(build_site_from(prepared, Mode::Static, Slots::Notices)?)
+}
+
+/// `E_BAD_INPUT`: a generated file whose media type rdy does not know (the manifest's own
+/// refusal).
+fn bad_manifest() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "publication manifest is invalid",
+        "use unique relative paths and valid file metadata",
+    )
+}
+
+/// The media type of the generated file at `path`, by its extension.
+fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e);
+    Ok(match ext {
+        Some("html") => "text/html",
+        Some("txt") => "text/plain",
+        Some("json") => "application/json",
+        Some("css") => "text/css",
+        Some("js") => "application/javascript",
+        Some("woff2") => "font/woff2",
+        _ => return Err(bad_manifest()),
+    })
+}
+
+/// A media type without its parameters (`image/svg+xml; charset=utf-8` reads `image/svg+xml`).
+fn without_parameters(media_type: &str) -> &str {
+    media_type
+        .split_once(';')
+        .map_or(media_type, |(t, _)| t)
+        .trim()
+}
+
+/// The artifact of a publication build: each file in path order with its hash, size and media
+/// type, and each HTML page's recorded notice offset; then the recipe-1 manifest hash.
+fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
+    let BuiltSite {
+        site,
+        notices,
+        media,
+    } = built;
+    let mut entries = Vec::with_capacity(site.files.len());
+    for (path, bytes) in &site.files {
+        // a figure's file keeps the media type its source named; every other file is generated
+        let media_type = match media.get(path) {
+            Some(m) => without_parameters(m).to_string(),
+            None => generated_media_type(path)?.to_string(),
+        };
+        let notice_offset = notices.get(path).copied();
+        let generated_html = !media.contains_key(path) && media_type == "text/html";
+        if generated_html != notice_offset.is_some() {
+            return Err(bad_notice_slot());
+        }
+        entries.push(ManifestEntry {
+            path: path.clone(),
+            hash: Hash::of(bytes),
+            media_type,
+            size: u64::try_from(bytes.len()).map_err(|_| bad_manifest())?,
+            notice_offset,
+        });
+    }
+    let manifest = Manifest { files: entries };
+    let manifest_hash = manifest_hash(&manifest, MANIFEST_RECIPE)?;
+    Ok(PublicationArtifact {
+        files: site.files,
+        manifest,
+        manifest_hash,
+        warnings: site.summary.warnings,
+    })
 }
 
 /// Renders [`build_profile_site`] at `out`, as [`render_site`] places a site. The whole site is
@@ -646,8 +866,29 @@ pub fn render_profile_site(
     place_site(out, || Ok(files))
 }
 
+/// Whether a build's HTML pages carry the notice slot: a publication's do (hub D-YJ9TA), every
+/// other site's keep their bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slots {
+    Source,
+    Notices,
+}
+
+/// What [`build_site_from`] built: the site, and, for a publication build, the byte offset of
+/// each HTML page's notice slot by path, recorded as the page was written. `media` holds each
+/// figure file's media type as the pages that use it named it, by path.
+struct BuiltSite {
+    site: SiteFiles,
+    notices: BTreeMap<String, u64>,
+    media: BTreeMap<String, String>,
+}
+
 /// [`build_site`] from what [`prepare::source`] read: it reads no source.
-fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles, RdyError> {
+fn build_site_from(
+    prepared: prepare::Prepared,
+    mode: Mode,
+    slots: Slots,
+) -> Result<BuiltSite, RdyError> {
     let prepare::Prepared {
         m,
         g,
@@ -764,13 +1005,20 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         page::finish(&sh, &ctx, &mut index);
         contexts.push(ctx);
     }
+    // a page with its notice slot's offset, recorded as it was written (a publication's pages)
+    let page_of = |ctx: &page::PageContext| -> Result<Page, RdyError> {
+        let r = match slots {
+            Slots::Source => render_page_out(&env, template_of(ctx.kind), ctx)?,
+            Slots::Notices => render_page_out(&env, template_of(ctx.kind), with_notice_slot(ctx))?,
+        };
+        let notice = notice_offset(&r.bytes, r.notice.as_ref())?;
+        Ok((ctx.page_url.clone(), r.bytes, r.slots, notice))
+    };
     // the pages are rendered on a few threads
-    let pages = par_map(&contexts, |ctx| {
-        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
-        Ok((ctx.page_url.clone(), html, at))
-    })?;
+    let pages = par_map(&contexts, page_of)?;
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut label_at: BTreeMap<String, Vec<Slot>> = BTreeMap::new();
+    let mut notices: BTreeMap<String, u64> = BTreeMap::new();
     // the change summaries: pages of the site, kept out of the navigation, the search index,
     // the llms files and the permalinks (sr6)
     let mut extra = vec![];
@@ -782,13 +1030,15 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
     }
     let mut pages = pages;
     for ctx in &extra {
-        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
-        pages.push((ctx.page_url.clone(), html, at));
+        pages.push(page_of(ctx)?);
     }
     summary.pages = pages.len();
-    for (path, html, at) in pages {
+    for (path, html, at, notice) in pages {
         if !at.is_empty() {
             label_at.insert(path.clone(), at);
+        }
+        if let Some(n) = notice {
+            notices.insert(path.clone(), n);
         }
         files.insert(path, html);
     }
@@ -808,26 +1058,29 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
             Some(t) => t,
             None => {
                 let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
-                redirect.insert(RedirectTemplate::new(&env, ctx)?)
+                redirect.insert(RedirectTemplate::new(&env, ctx, slots)?)
             }
         };
         let (page_url, label, href) = page::redirect_target(&sh, id, &url);
-        let html = t.fill(&label, &href);
+        let (html, notice) = t.fill_at(&label, &href);
         #[cfg(debug_assertions)]
         if summary.redirects.is_multiple_of(997) {
             let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
-            let full = env
-                .get_template("redirect.html")
-                .map_err(tpl)?
-                .render(&ctx)
-                .map_err(tpl)?;
+            let full = RedirectTemplate::render(&env, &ctx, slots)?;
             debug_assert_eq!(
-                html, full,
+                (html.as_bytes(), notice),
+                (full.bytes.as_slice(), full.notice.map(|r| r.start)),
                 "the prebuilt permalink page differs from the template"
             );
         }
         label_at.remove(&page_url);
-        files.insert(page_url, html.into_bytes());
+        notices.remove(&page_url);
+        let html = html.into_bytes();
+        let notice = notice.map(|n| n..n + NOTICE_SLOT.len());
+        if let Some(n) = notice_offset(&html, notice.as_ref())? {
+            notices.insert(page_url.clone(), n);
+        }
+        files.insert(page_url, html);
         summary.redirects += 1;
     }
 
@@ -859,6 +1112,10 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
     // of it (one hash under two paths is copied once)
     let used = sh.used_blobs.take();
     drop(sh);
+    let media: BTreeMap<String, String> = used
+        .iter()
+        .map(|(path, (_, media_type))| (path.clone(), media_type.clone()))
+        .collect();
     let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
     for (h, _) in used.values() {
         *uses.entry(h).or_default() += 1;
@@ -874,14 +1131,22 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         files.insert(path.clone(), bytes.expect("a used blob is held"));
         summary.assets += 1;
     }
-    Ok(SiteFiles {
-        files,
-        label: label.text,
-        header,
-        label_at,
-        summary,
+    Ok(BuiltSite {
+        site: SiteFiles {
+            files,
+            label: label.text,
+            header,
+            label_at,
+            summary,
+        },
+        notices,
+        media,
     })
 }
+
+/// One rendered page: its path, its bytes, its label and header ranges, and its notice slot's
+/// offset.
+type Page = (String, Vec<u8>, Vec<Slot>, Option<u64>);
 
 /// Writes every file of a built site under `out`.
 fn write_files(out: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), RdyError> {
@@ -894,33 +1159,63 @@ fn write_files(out: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), RdyE
 }
 
 /// The permalink template rendered once, with a marker where a page's href and label go: the
-/// template reads nothing else that differs from one permalink page to the next.
+/// template reads nothing else that differs from one permalink page to the next. A publication's
+/// prototype records where its notice slot went; each filled page moves it by the bytes the
+/// substitutions before it add.
 struct RedirectTemplate {
     /// The text between the markers, `slots.len() + 1` pieces.
     pieces: Vec<String>,
     /// Which value each marker stands for: true for the href, false for the label.
     slots: Vec<bool>,
+    /// Where the notice slot starts: the piece that holds it, and its byte offset in that piece.
+    notice: Option<(usize, usize)>,
 }
 
 impl RedirectTemplate {
     const HREF: char = '\u{E000}';
     const LABEL: char = '\u{E001}';
 
+    /// The permalink page of `ctx` rendered whole, with the notice slot when `slots` asks.
+    fn render(
+        env: &minijinja::Environment<'static>,
+        ctx: &page::PageContext,
+        slots: Slots,
+    ) -> Result<Rendered, RdyError> {
+        match slots {
+            Slots::Source => render_page_out(env, "redirect.html", ctx),
+            Slots::Notices => render_page_out(env, "redirect.html", with_notice_slot(ctx)),
+        }
+    }
+
     fn new(
         env: &minijinja::Environment<'static>,
         mut ctx: page::PageContext,
+        slots: Slots,
     ) -> Result<RedirectTemplate, RdyError> {
         ctx.body.redirect = Some(page::RedirectBody {
             label: Self::LABEL.to_string(),
             href: Self::HREF.to_string(),
         });
-        let html = env
-            .get_template("redirect.html")
-            .map_err(tpl)?
-            .render(&ctx)
-            .map_err(tpl)?;
+        let r = Self::render(env, &ctx, slots)?;
+        let html = String::from_utf8(r.bytes).map_err(|_| {
+            RdyError::new(
+                E_IO,
+                "template error: the permalink page is not UTF-8",
+                "this is a bug in rdy-render templates",
+            )
+        })?;
+        Self::split(&html, r.notice.map(|n| n.start))
+    }
+
+    /// The prototype `html` cut at its markers, with its notice slot at byte `at` kept as a
+    /// piece and an offset in it. A slot that starts at no character is refused.
+    fn split(html: &str, at: Option<usize>) -> Result<RedirectTemplate, RdyError> {
         let (mut pieces, mut slots, mut cur) = (vec![], vec![], String::new());
-        for c in html.chars() {
+        let mut notice = None;
+        for (i, c) in html.char_indices() {
+            if Some(i) == at {
+                notice = Some((pieces.len(), cur.len()));
+            }
             if c == Self::HREF || c == Self::LABEL {
                 pieces.push(std::mem::take(&mut cur));
                 slots.push(c == Self::HREF);
@@ -929,21 +1224,42 @@ impl RedirectTemplate {
             }
         }
         pieces.push(cur);
-        Ok(RedirectTemplate { pieces, slots })
+        if at.is_some() && notice.is_none() {
+            return Err(bad_notice_slot());
+        }
+        Ok(RedirectTemplate {
+            pieces,
+            slots,
+            notice,
+        })
     }
 
     /// The page for a target, its values escaped as the template escapes them.
+    #[cfg(test)]
     fn fill(&self, label: &str, href: &str) -> String {
+        self.fill_at(label, href).0
+    }
+
+    /// The page for a target, and where its notice slot starts: the prototype's offset moved by
+    /// the UTF-8 bytes of each value written before it, in place of its marker.
+    fn fill_at(&self, label: &str, href: &str) -> (String, Option<usize>) {
         let (label, href) = (escape(label), escape(href));
         let mut out = String::with_capacity(
             self.pieces.iter().map(String::len).sum::<usize>() + 2 * href.len() + label.len(),
         );
-        for (piece, slot) in self.pieces.iter().zip(&self.slots) {
+        let mut notice = None;
+        for (i, piece) in self.pieces.iter().enumerate() {
+            if let Some((p, at)) = self.notice
+                && p == i
+            {
+                notice = Some(out.len() + at);
+            }
             out.push_str(piece);
-            out.push_str(if *slot { &href } else { &label });
+            if let Some(slot) = self.slots.get(i) {
+                out.push_str(if *slot { &href } else { &label });
+            }
         }
-        out.push_str(self.pieces.last().map_or("", String::as_str));
-        out
+        (out, notice)
     }
 }
 
@@ -1017,6 +1333,7 @@ mod swap_tests {
         let t = RedirectTemplate {
             pieces: vec!["<a href=\"".into(), "\">".into(), "</a>".into()],
             slots: vec![true, false],
+            notice: None,
         };
         assert_eq!(
             t.fill("A & <B>", "../x.html#a\"b"),
@@ -1189,6 +1506,125 @@ mod label_tests {
         let env = env_with("<p>{% set x %}{{ a | label }}{% endset %}</p>{{ x }}");
         let e = render_page(&env, "t.html", serde_json::json!({"a": ""})).unwrap_err();
         assert!(e.message.contains("version label"), "{e}");
+    }
+
+    #[test]
+    fn hpb6_a_page_records_its_notice_slot_in_bytes() {
+        let env = env_with("<p>ä☃{{ a | label }}</p><main>{{ notice_slot }}{{ b }}</main>");
+        let ctx = serde_json::json!({"a": "é", "b": "<!--rdy-notices-->"});
+        let r = render_page_out(&env, "t.html", with_notice_slot(&ctx)).unwrap();
+        let html = String::from_utf8(r.bytes.clone()).unwrap();
+        let at = "<p>ä☃é</p><main>".len();
+        assert_eq!(r.notice, Some(at..at + NOTICE_SLOT.len()));
+        assert_eq!(
+            notice_offset(&r.bytes, r.notice.as_ref()).unwrap(),
+            Some(at as u64)
+        );
+        // the authored marker text is escaped, after the slot
+        assert!(html[at + NOTICE_SLOT.len()..].starts_with("&lt;!--rdy-notices--&gt;"));
+        // a source page's context has no slot, and the template writes nothing for it
+        let env =
+            env_with("<main>{% if notice_slot is defined %}{{ notice_slot }}{% endif %}</main>");
+        let r = render_page_out(&env, "t.html", &ctx).unwrap();
+        assert_eq!((r.bytes, r.notice), (b"<main></main>".to_vec(), None));
+    }
+
+    #[test]
+    fn hpb6_a_second_or_misplaced_notice_slot_is_refused() {
+        let ctx = with_notice_slot(&serde_json::json!({}));
+        let env = env_with("<main>{{ notice_slot }}{{ notice_slot }}</main>");
+        let e = render_page_out(&env, "t.html", &ctx).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_BAD_INPUT,
+                "publication page has an invalid notice slot",
+                "use the templates shipped with this rdy version"
+            )
+        );
+        let env = env_with("{% set x %}{{ notice_slot }}{% endset %}<main>{{ x }}</main>");
+        let e = render_page_out(&env, "t.html", &ctx).unwrap_err();
+        assert!(e.message.contains("notice slot"), "{e}");
+        let env = env_with("<main>{{ notice_slot }}</main>");
+        let e = env
+            .get_template("t.html")
+            .unwrap()
+            .render(&ctx)
+            .unwrap_err();
+        assert!(e.to_string().contains("notice slot"), "{e}");
+        // a recorded range that does not hold the empty slot's bytes
+        assert_eq!(
+            notice_offset(b"<main><!--rdy-notices--x", Some(&(6..24)))
+                .unwrap_err()
+                .message,
+            "publication page has an invalid notice slot"
+        );
+        assert!(notice_offset(b"<main>", Some(&(6..24))).is_err());
+    }
+
+    #[test]
+    fn hpb6_the_cached_permalink_page_moves_its_slot_by_each_substitution() {
+        let mut env = env().unwrap();
+        env.add_template(
+            "t.html",
+            "<a href=\"{{ h }}\">{{ l }}</a><main>{{ notice_slot }}</main><b>{{ l }}{{ h }}</b>",
+        )
+        .unwrap();
+        let render = |h: &str, l: &str| {
+            render_page_out(
+                &env,
+                "t.html",
+                with_notice_slot(&serde_json::json!({"h": h, "l": l})),
+            )
+            .unwrap()
+        };
+        let proto = render(
+            &RedirectTemplate::HREF.to_string(),
+            &RedirectTemplate::LABEL.to_string(),
+        );
+        let html = String::from_utf8(proto.bytes).unwrap();
+        let t = RedirectTemplate::split(&html, proto.notice.map(|n| n.start)).unwrap();
+        assert!(RedirectTemplate::split(&html, Some(html.len() + 1)).is_err());
+        for (h, l) in [
+            ("", ""),
+            ("a.html", "A"),
+            ("../ff/日本語.html#x", "Bé & <c> ☃☃"),
+            ("../../a/b/c/d.html", "x"),
+        ] {
+            let full = render(h, l);
+            let (page, at) = t.fill_at(l, h);
+            assert_eq!(page.as_bytes(), full.bytes.as_slice(), "{h} {l}");
+            assert_eq!(at, full.notice.map(|n| n.start), "{h} {l}");
+            assert_eq!(
+                &page.as_bytes()[at.unwrap()..][..NOTICE_SLOT.len()],
+                NOTICE_SLOT
+            );
+        }
+    }
+
+    #[test]
+    fn hpb6_generated_media_types_are_closed() {
+        for (path, want) in [
+            ("index.html", "text/html"),
+            ("llms.txt", "text/plain"),
+            ("search-index.json", "application/json"),
+            ("assets/site.css", "text/css"),
+            ("assets/app.js", "application/javascript"),
+            ("assets/fonts/onest.woff2", "font/woff2"),
+        ] {
+            assert_eq!(generated_media_type(path).unwrap(), want);
+        }
+        for path in ["assets/x.bin", "README", "a.htm"] {
+            assert_eq!(
+                generated_media_type(path).unwrap_err().message,
+                "publication manifest is invalid"
+            );
+        }
+        assert_eq!(
+            without_parameters("image/svg+xml; charset=utf-8"),
+            "image/svg+xml"
+        );
+        assert_eq!(without_parameters("image/png"), "image/png");
     }
 
     #[test]

@@ -28,6 +28,7 @@ mod render_publication_implicit;
 mod render_publication_prepare;
 mod render_publication_print;
 mod render_publication_site;
+mod render_publish;
 mod render_redaction;
 mod render_ref;
 mod render_review;
