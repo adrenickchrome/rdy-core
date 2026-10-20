@@ -102,9 +102,13 @@ pub(crate) mod ids {
     }
 }
 
+/// A test hook a dump calls after each batch it writes, with the count written so far.
+#[doc(hidden)]
+pub type BatchHook = Box<dyn FnMut(u64)>;
+
 thread_local! {
     static FILE_READS: Cell<u64> = const { Cell::new(0) };
-    static BATCH_HOOK: RefCell<Option<Box<dyn FnMut(u64)>>> = const { RefCell::new(None) };
+    static BATCH_HOOK: RefCell<Option<BatchHook>> = const { RefCell::new(None) };
 }
 
 /// Test hook: this thread's count of project files a dump has opened to read.
@@ -116,7 +120,7 @@ pub fn project_file_reads() -> u64 {
 /// Test hook: a dump on this thread calls `hook` with the count of batches written so far,
 /// after each batch it writes (a read barrier for race tests). None removes the hook.
 #[doc(hidden)]
-pub fn on_dump_batch(hook: Option<Box<dyn FnMut(u64)>>) {
+pub fn on_dump_batch(hook: Option<BatchHook>) {
     BATCH_HOOK.with(|h| *h.borrow_mut() = hook);
 }
 
