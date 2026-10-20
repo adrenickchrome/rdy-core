@@ -52,11 +52,15 @@ const REDACTION_OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("r
 const REDACTION_APPLIED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_applied");
 /// The active mask by object: an object's hash and kind byte (as `typed`) -> the request, the apply
 /// record and its location, then the residue's hash (or nothing). The earliest apply in log order
-/// keeps an object.
+/// keeps an object. A carried record's `held: false` span's object is a row too, with the carried
+/// record and its location in the apply's place, until an apply holds the object.
 const REDACTION_ACTIVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_active");
 /// The active mask by frame: a frame location (`loc_key`) -> the apply record, the request, the
 /// kind byte, the object's hash, the payload length (u32 little-endian) and the residue's hash (or
-/// nothing). The earliest apply in log order keeps a frame.
+/// nothing). The earliest apply in log order keeps a frame. A carried record's `held: false` span
+/// is a row too, with the carried record in the apply's place and its source request, while no
+/// apply covers the frame: a row whose apply is not the one `redaction_applied` holds for its
+/// request is a carried one, and an apply that covers the frame replaces it.
 const REDACTION_SPANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_spans");
 /// A signature's subject (32 bytes), then the signature's hash (32 bytes) -> empty: every
 /// signature of every subject (kind SIGNATURE, D-1Z951), derived from the frames alone.
@@ -130,6 +134,16 @@ pub enum IndexEntry {
     Signature {
         subject: Hash,
         signature: Hash,
+    },
+    /// Carried record `carried` (kind REDACTION_CARRIED), at `loc`, of source request `request`:
+    /// each span it accounts for, with its `held` flag. Only its `held: false` spans join the
+    /// active mask, with the record as their proof, and only where no apply holds the place or
+    /// the object; a later apply that covers one takes it over.
+    RedactionCarried {
+        carried: Hash,
+        request: Hash,
+        loc: Location,
+        spans: Vec<(RedactedSpan, bool)>,
     },
 }
 
@@ -532,8 +546,16 @@ impl<'t> RedactionTables<'t> {
         flag.store(true, Ordering::Release);
         for (kind, h, residue) in objects {
             let key = typed_key(kind, &h);
-            if self.active.get(&key[..]).map_err(db)?.is_some() {
-                continue;
+            let held = self
+                .active
+                .get(&key[..])
+                .map_err(db)?
+                .map(|v| v.value().to_vec());
+            if let Some(v) = held {
+                let row = active_object_from(&v)?;
+                if self.is_apply_row(&row.request, &row.apply)? {
+                    continue;
+                }
             }
             let mut v = Vec::with_capacity(108);
             v.extend_from_slice(&request.0);
@@ -543,14 +565,66 @@ impl<'t> RedactionTables<'t> {
         }
         for span in spans {
             let key = loc_key(&span.loc);
-            if self.spans.get(&key[..]).map_err(db)?.is_some() {
-                continue;
+            let held = self
+                .spans
+                .get(&key[..])
+                .map_err(db)?
+                .map(|v| v.value().to_vec());
+            if let Some(v) = held {
+                let row = active_span_from(span.loc, &v)?;
+                if self.is_apply_row(&row.request, &row.apply)? {
+                    continue;
+                }
             }
             let mut v = Vec::with_capacity(64 + 69);
             v.extend_from_slice(&apply.0);
             v.extend_from_slice(&request.0);
             v.extend_from_slice(&span_value(&span));
             self.spans.insert(&key[..], &v[..]).map_err(db)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a mask row of `request` and `apply` is an apply's: `redaction_applied` names that
+    /// apply for that request. Any other row is a carried record's.
+    fn is_apply_row(&self, request: &Hash, apply: &Hash) -> Result<bool, StoreError> {
+        Ok(self
+            .applied
+            .get(&request.0[..])
+            .map_err(db)?
+            .is_some_and(|v| v.value().get(..32) == Some(&apply.0[..])))
+    }
+
+    /// A carried record's rows: each `held: false` span, and its object, enters the active mask
+    /// with the record as its proof where no row holds it yet (an apply's, or an earlier carried
+    /// record's). Its `held: true` spans enter no table.
+    fn carried(
+        &mut self,
+        flag: &AtomicBool,
+        carried: &Hash,
+        request: &Hash,
+        loc: &Location,
+        spans: &[(RedactedSpan, bool)],
+    ) -> Result<(), StoreError> {
+        for (span, _) in spans.iter().filter(|(_, held)| !*held) {
+            flag.store(true, Ordering::Release);
+            let key = typed_key(span.kind, &span.hash);
+            if self.active.get(&key[..]).map_err(db)?.is_none() {
+                let mut v = Vec::with_capacity(108);
+                v.extend_from_slice(&request.0);
+                v.extend_from_slice(&carried.0);
+                v.extend_from_slice(&loc_key(loc));
+                v.extend_from_slice(residue_bytes(&span.residue));
+                self.active.insert(&key[..], &v[..]).map_err(db)?;
+            }
+            let key = loc_key(&span.loc);
+            if self.spans.get(&key[..]).map_err(db)?.is_none() {
+                let mut v = Vec::with_capacity(64 + 69);
+                v.extend_from_slice(&carried.0);
+                v.extend_from_slice(&request.0);
+                v.extend_from_slice(&span_value(span));
+                self.spans.insert(&key[..], &v[..]).map_err(db)?;
+            }
         }
         Ok(())
     }
@@ -781,6 +855,18 @@ impl Index {
                             None => redaction.insert(RedactionTables::open(&w)?),
                         };
                         t.apply(&self.redacted, apply, request, loc)?;
+                    }
+                    IndexEntry::RedactionCarried {
+                        carried,
+                        request,
+                        loc,
+                        spans,
+                    } => {
+                        let t = match &mut redaction {
+                            Some(t) => t,
+                            None => redaction.insert(RedactionTables::open(&w)?),
+                        };
+                        t.carried(&self.redacted, carried, request, loc, spans)?;
                     }
                     IndexEntry::Signature { subject, signature } => {
                         let t = match &mut signatures {

@@ -97,6 +97,13 @@ pub struct Ingest {
     rules: Option<RefRules>,
     /// The mode the first batch set (a project until then).
     mode: StoreMode,
+    /// Whether an ingested frame is a carried record (kind REDACTION_CARRIED): `finish` then
+    /// checks the log's authorization even when no frame was dropped.
+    has_carried: bool,
+    /// Whether `append_carried` succeeded: the carried batch comes once.
+    carried_done: bool,
+    /// Whether `upgrade` ran: the carried batch comes before it.
+    upgraded: bool,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -114,6 +121,13 @@ fn dump_error(what: String) -> StoreError {
 
 fn refused_allocation() -> StoreError {
     dump_error(drop_text::ALLOCATION.into())
+}
+
+/// The refusal of a record over the record bound (`16777216 bytes per record`).
+fn record_too_big() -> StoreError {
+    StoreError::RedactionLimit {
+        limit: crate::redaction::limit::RECORD,
+    }
 }
 
 impl Ingest {
@@ -143,6 +157,9 @@ impl Ingest {
             unauthorized: 0,
             rules: None,
             mode: StoreMode::Project,
+            has_carried: false,
+            carried_done: false,
+            upgraded: false,
         })
     }
 
@@ -194,6 +211,7 @@ impl Ingest {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
+                    self.has_carried |= *kind == kinds::REDACTION_CARRIED;
                     sets_repo_id |= *kind == kinds::REF_UPDATE
                         && postcard::from_bytes::<RefUpdate>(payload)
                             .is_ok_and(|u| u.name == REF_REPO_ID);
@@ -353,7 +371,7 @@ impl Ingest {
     /// apply than the record names, is `dropped frame has no valid authorization`; another
     /// residue is `dropped frame has an invalid residue`. An I/O error stays one.
     fn check_drops(&self) -> Result<(), StoreError> {
-        if self.pending.is_empty() && !self.has_apply {
+        if self.pending.is_empty() && !self.has_apply && !self.has_carried {
             return Ok(());
         }
         let refuse = |what: &str| Err(dump_error(what.into()));
@@ -423,8 +441,10 @@ impl Ingest {
     ///   (RULING F2); then its marker. Every earlier byte is kept;
     /// - `from` is newer: refused with `StoreError::Dump`, and nothing is appended.
     ///
-    /// Returns whether it appended the batch. Call it once, after the last `batch`.
+    /// Returns whether it appended the batch. Call it once, after the last `batch` (and after
+    /// `append_carried`, if it runs).
     pub fn upgrade(&mut self, from: u32) -> Result<bool, StoreError> {
+        self.upgraded = true;
         let current = Format::CURRENT.store_format;
         if from > current {
             return Err(dump_error(format!(
@@ -460,6 +480,83 @@ impl Ingest {
         self.log
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
         Ok(true)
+    }
+
+    /// Appends the carried records of a stopped load as one sealed batch after the source prefix
+    /// (D-QF2HQ: a carried record explains exact zero bytes and never authorizes an erasure).
+    /// It runs once, before `upgrade` and `finish`: a call after one that succeeded, or after
+    /// `upgrade`, is `StoreError::Dump`; a refused call writes nothing and counts for nothing.
+    /// The batch holds the residues of `residues` that the log does not hold yet, once each and
+    /// sorted by residue hash, then `records` in the caller's order (its validated source-apply
+    /// order). Before a byte is written:
+    ///
+    /// - each record keeps its bounds (`redaction_carried::check_bounds`: more than 100,000
+    ///   spans is `RedactionLimit` `100000 carried spans`, more than 16,777,216 encoded bytes
+    ///   `RedactionLimit` `16777216 bytes per record`), and so does each residue;
+    /// - the log as it would be, this batch included, passes the bootstrap of its mode with its
+    ///   carried records (`redaction_carried::overlay`): every span checked against the retained
+    ///   prefix, every `held: false` payload all zero. A failure is that bootstrap's refusal
+    ///   (`RedactionCorrupt`).
+    ///
+    /// An empty `records` writes nothing. The batch counts in no source batch or frame total.
+    pub fn append_carried(
+        &mut self,
+        residues: &[rdy_model::redaction::RedactionResidue],
+        records: &[rdy_model::RedactionCarried],
+    ) -> Result<(), StoreError> {
+        if self.carried_done || self.upgraded {
+            return Err(dump_error(
+                "carried records are appended once, after the source batches and before the upgrade"
+                    .into(),
+            ));
+        }
+        if records.is_empty() {
+            self.carried_done = true;
+            return Ok(());
+        }
+        let mut encoded: Vec<Vec<u8>> = Vec::new();
+        encoded
+            .try_reserve_exact(records.len())
+            .map_err(|_| refused_allocation())?;
+        for r in records {
+            encoded.push(crate::redaction_carried::check_bounds(r)?);
+        }
+        let mut c = redaction_io::collect(self.log.readers())?;
+        // the residues the log does not hold yet, once each, by residue hash, each within the
+        // record bound
+        let mut missing: std::collections::BTreeMap<Hash, Vec<u8>> = Default::default();
+        if !residues.is_empty() {
+            let mut buf = rdy_model::redaction::record_buffer().map_err(|_| record_too_big())?;
+            for r in residues {
+                let bytes =
+                    rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
+                let h = Hash::of(bytes);
+                if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
+                    missing.insert(h, bytes.to_vec());
+                }
+            }
+        }
+        let mut frames: Vec<(u8, Vec<u8>)> = missing
+            .into_values()
+            .map(|b| (kinds::REDACTION_RESIDUE, b))
+            .collect();
+        frames.extend(encoded.into_iter().map(|b| (kinds::REDACTION_CARRIED, b)));
+        let start = self.log.end();
+        let after = c.push_batch(start, &frames);
+        match self.mode {
+            StoreMode::Holder => {
+                crate::redaction_import::holder_of(&c, self.log.readers(), start, after)?;
+            }
+            StoreMode::Project => {
+                redaction_io::sealed_of(&c, self.log.readers(), after)?;
+            }
+        }
+        let placed = self.log.append_frames(&frames, false)?;
+        self.log
+            .append_marker(start, placed.iter().map(|(_, h)| h))?;
+        self.has_carried = true;
+        self.carried_done = true;
+        Ok(())
     }
 
     /// Checks every dropped frame's authorization against the complete log (see `batch`): a

@@ -8,6 +8,8 @@
 //! with coordination, review, answer and signature records around it; then the shared raw
 //! authorized batch (`redaction_fixture`) removes the secret block's version. The tag predates
 //! the removal, so its closure carries the later proof.
+#[path = "support/carried.rs"]
+mod carried_fixture;
 #[path = "support/redaction.rs"]
 mod redaction_fixture;
 
@@ -1175,4 +1177,208 @@ fn ha5_signatures_and_the_relay_tag_answer_are_attached() {
     for k in &after {
         assert!(store_source.record(*k).unwrap().is_some(), "{k}");
     }
+}
+
+/// A small project for carried exports: a kept block landed and tagged `v0`, then a secret and
+/// another block landed and tagged `v1`. Returns its path, the secret, the change that wrote
+/// it, and the two tags.
+fn carried_source(dir: &std::path::Path) -> (PathBuf, Block, Change, Hash, Hash) {
+    let path = dir.join("src");
+    let mut s = Store::create(&path).unwrap();
+    let w = prov("agent:w", Role::Writer);
+    let human = prov("human:alice", Role::Approver);
+    let kept = block("b-00003", "claim", "kept", BTreeMap::new());
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Create { block: kept }],
+            ChangeLinks::default(),
+        ),
+    )
+    .unwrap();
+    let p = s.propose("work", "kept", w.clone()).unwrap();
+    let l0 = s.land(&p, human.clone()).unwrap();
+    let v0 = s
+        .put_tag(&Tag {
+            name: "v0".into(),
+            landing: l0,
+            message: None,
+            tagged_by: human.clone(),
+        })
+        .unwrap();
+    let secret = block("b-00001", "claim", "canary alpha secret", BTreeMap::new());
+    let id = s
+        .commit_to_view(
+            "work",
+            change(
+                "work",
+                vec![
+                    Op::Create {
+                        block: secret.clone(),
+                    },
+                    Op::Create {
+                        block: block("b-00002", "claim", "other", BTreeMap::new()),
+                    },
+                ],
+                ChangeLinks::default(),
+            ),
+        )
+        .unwrap();
+    let c = s.change(&id).unwrap();
+    let p = s.propose("work", "secret", w).unwrap();
+    let l1 = s.land(&p, human.clone()).unwrap();
+    let v1 = s
+        .put_tag(&Tag {
+            name: "v1".into(),
+            landing: l1,
+            message: None,
+            tagged_by: human,
+        })
+        .unwrap();
+    drop(s);
+    (path, secret, c, v0, v1)
+}
+
+/// `from` loaded into `to` with one carried record over the store's frames of `secret` and its
+/// change, each `held`. Returns the record.
+fn carry(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    secret: &Block,
+    c: &Change,
+    held: bool,
+) -> rdy_model::redaction::RedactionCarried {
+    use carried_fixture::{block_residue, change_residue, find, framed_at, record, span};
+    let frames = framed_at(from);
+    let residues = vec![block_residue(secret), change_residue(c)];
+    let mut spans = vec![
+        span(
+            &find(&frames, kinds::BLOCK, secret.version_hash()),
+            Some(&residues[0]),
+            held,
+        ),
+        span(
+            &find(&frames, kinds::CHANGE, hash_of(c)),
+            Some(&residues[1]),
+            held,
+        ),
+    ];
+    spans.sort_by_key(|s| s.place);
+    let rec = record(
+        vec![RedactTarget::Version {
+            id: secret.id.clone(),
+            version: secret.version_hash(),
+        }],
+        spans,
+    );
+    carried_fixture::load(from, to, &residues, std::slice::from_ref(&rec)).unwrap();
+    rec
+}
+
+fn export(path: &std::path::Path, tag: Hash) -> Result<Vec<u8>, StreamError> {
+    let s = Store::open(path).unwrap();
+    let r = s.reader();
+    let c = closure(&r, tag, &BTreeSet::new())?;
+    let header = StreamHeader::tag_history(r.repo_id().unwrap().unwrap(), tag, c.prerequisites);
+    let mut source = StoreSource {
+        reader: &r,
+        end: END_OF_LOG,
+    };
+    Ok(write_batch(&mut source, &header, &c.records, Vec::new())?.0)
+}
+
+fn refusal(tag: &str, carried: Hash) -> String {
+    format!(
+        "Tag {tag} reaches content that carried record {carried} names, and no removal in this store covers it."
+    )
+}
+
+#[test]
+fn hc3_export_refuses_only_tags_reaching_uncovered_carried_spans() {
+    use rdy_store::redaction_carried::{HOLDER_FIX, PROJECT_FIX};
+    let dir = tempfile::tempdir().unwrap();
+    let (src, secret, c, v0, v1) = carried_source(dir.path());
+    // a Project: a held payload and zeros only the carried record explains are both refused
+    for held in [true, false] {
+        let to = dir.path().join(format!("project-{held}"));
+        let rec = carry(&src, &to, &secret, &c, held);
+        let e = export(&to, v1).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.clone(), e.fix.as_str()),
+            (
+                "E_REDACTED",
+                refusal("v1", carried_fixture::carried_hash(&rec)),
+                PROJECT_FIX
+            ),
+            "held {held}"
+        );
+        // another tag exports as before
+        let bytes = export(&to, v0).unwrap();
+        assert!(!bytes.windows(CANARY.len()).any(|w| w == CANARY));
+    }
+    // a holder: the holder's fix
+    let holder = dir.path().join("holder-pre");
+    {
+        let s = Store::open(&src).unwrap();
+        let repo = s.repo_id().unwrap().unwrap();
+        let t: Tag = s.get_typed(kinds::TAG, &v1).unwrap();
+        drop(s);
+        let bytes = export(&src, v1);
+        let file = dir.path().join("v1.rdysync");
+        std::fs::write(&file, bytes.unwrap()).unwrap();
+        let mut h = Store::create_holder(&holder, repo).unwrap();
+        h.take_batches(
+            &[std::fs::File::open(&file).unwrap()],
+            &rdy_store::take_batch::UploadTarget {
+                tag: t.name,
+                landing: t.landing,
+            },
+            |_: &mut dyn ObjectSource, _: &rdy_store::take_batch::UploadFacts| {
+                Ok::<_, StreamError>(rdy_store::take_batch::TagChoice::Incoming)
+            },
+        )
+        .unwrap();
+    }
+    let h = dir.path().join("holder");
+    let rec = carry(&holder, &h, &secret, &c, true);
+    let e = export(&h, v1).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.clone(), e.fix.as_str()),
+        (
+            "E_REDACTED",
+            refusal("v1", carried_fixture::carried_hash(&rec)),
+            HOLDER_FIX
+        )
+    );
+    // once an apply of this store covers every such span, the tag exports with that apply as
+    // its placeholders' proof
+    let to = dir.path().join("covered");
+    let rec = carry(&src, &to, &secret, &c, true);
+    let fixture = authorized_batch_fixture(
+        &to,
+        &[RequestSpec::new(
+            "work",
+            vec![RedactTarget::Version {
+                id: secret.id.clone(),
+                version: secret.version_hash(),
+            }],
+        )
+        .at(60)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let bytes = export(&to, v1).unwrap();
+    assert!(!bytes.windows(CANARY.len()).any(|w| w == CANARY));
+    let records = records_of(&bytes);
+    let carried = carried_fixture::carried_hash(&rec);
+    let mut placeholders = 0;
+    for r in records.values() {
+        assert_ne!(r.key().kind, kinds::REDACTION_CARRIED);
+        if let StreamRecord::Dropped { apply, .. } = r {
+            assert_ne!(*apply, carried);
+            assert_eq!(*apply, fixture.applies[0].0);
+            placeholders += 1;
+        }
+    }
+    assert_eq!(placeholders, 2);
 }

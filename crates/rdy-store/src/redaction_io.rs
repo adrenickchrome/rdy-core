@@ -21,6 +21,11 @@
 //! never erases unselected content, never leaves a readable copy and never changes the history
 //! a residue replays.
 //!
+//! A carried record (kind REDACTION_CARRIED, `crate::redaction_carried`) is laid over the
+//! validated applies last: its `held: false` spans whose payload is all zero join the holes, and
+//! a validated apply that covers a span stays its proof. Recognition is not erasure: only a span
+//! a validated apply covers is ever erased ([`Authorization::erasable`]).
+//!
 //! The scope is the active store files. File-system snapshots, backups, responses already sent,
 //! old dumps and media remnants are outside it (`W_REDACTION_COPIES`); quarantine files are
 //! possible copies (F2(c)), and nothing here lists or removes them.
@@ -158,13 +163,17 @@ pub(crate) fn hit(p: Failpoint) -> io::Result<()> {
     }
 }
 
-/// How one authorized span is known: the residue that replaces it for reads, and the apply and
-/// request that authorize it (the earliest apply in log order).
+/// How one span is known: the residue that replaces it for reads, and the record that is its
+/// proof with the request it names. The proof is the earliest validated apply in log order that
+/// covers the span; only while no apply covers it, the first carried record (kind
+/// REDACTION_CARRIED) that accounts for its zeros (`carried`). A carried proof recognizes exact
+/// zeros and never authorizes an erasure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SpanAuth {
     pub(crate) residue: Option<Hash>,
     pub(crate) apply: Hash,
     pub(crate) request: Hash,
+    pub(crate) carried: bool,
 }
 
 /// One validated apply record: where it is, its hash and its record.
@@ -191,12 +200,27 @@ pub(crate) struct Authorization {
     /// approves and the receiver spans each request's approved objects have. None in a project,
     /// whose spans are its requests' own places.
     pub(crate) imported: Option<crate::redaction_import::Imported>,
+    /// The validated carried records (kind REDACTION_CARRIED) of the sealed log, in log order
+    /// (`crate::redaction_carried::overlay`).
+    pub(crate) carried: Vec<crate::redaction_carried::CarriedAt>,
 }
 
 impl Authorization {
-    /// Whether an active redaction exists: a validated apply.
+    /// Whether an active redaction exists: a validated apply, or a span whose zeros a carried
+    /// record accounts for.
     pub(crate) fn is_active(&self) -> bool {
-        !self.applies.is_empty()
+        !self.applies.is_empty() || self.spans.values().any(|s| s.carried)
+    }
+
+    /// Whether the carried record frame at `loc` is one of the validated carried records.
+    pub(crate) fn holds_carried(&self, loc: Location) -> bool {
+        self.carried.binary_search_by_key(&loc, |c| c.at).is_ok()
+    }
+
+    /// Whether the span at `loc` may be erased: a validated apply covers it. A span only a
+    /// carried record explains is never erased.
+    pub(crate) fn erasable(&self, loc: &Location) -> bool {
+        self.spans.get(loc).is_some_and(|s| !s.carried)
     }
 
     /// Whether the apply frame at `loc` is one of the validated applies (kept in log order).
@@ -274,6 +298,9 @@ impl Authorization {
                     loc: a.loc,
                 },
             ));
+        }
+        for c in self.carried.iter().filter(|c| c.at < upto) {
+            at.push((c.at, crate::redaction_carried::entry_of(c)));
         }
         at.sort_by_key(|(l, _)| *l);
         Ok(at.into_iter().map(|(_, e)| e).collect())
@@ -387,15 +414,28 @@ pub(crate) struct ApplyFrame {
     landings: Vec<(Location, Hash)>,
 }
 
+/// One carried record frame (kind REDACTION_CARRIED) the header pass met in a sealed batch.
+pub(crate) struct CarriedFrame {
+    pub(crate) loc: Location,
+    pub(crate) hash: Hash,
+    /// None: its payload matched its hash but is no carried record in its bounded, canonical
+    /// form, or it did not match its hash.
+    pub(crate) record: Option<rdy_model::RedactionCarried>,
+    /// Where its batch starts: every span it names ends before it.
+    pub(crate) batch_start: Location,
+}
+
 /// The records of one batch while its marker is not yet met. Only redaction records and the
 /// batch's landings are kept: a plain store's header pass retains nothing per content frame.
 #[derive(Default)]
 struct Pending {
     since: Vec<(u64, Hash)>,
+    start: Option<Location>,
     requests: Vec<(Location, Hash)>,
     residues: Vec<(Location, Hash)>,
     landings: Vec<(Location, Hash)>,
     applies: Vec<ApplyFrame>,
+    carried: Vec<CarriedFrame>,
 }
 
 /// What the header pass collected from the sealed batches, in log order. It holds the redaction
@@ -406,10 +446,12 @@ struct Pending {
 pub(crate) struct Collected {
     pub(crate) requests: Vec<(Location, Hash)>,
     request_at: HashMap<Hash, Location>,
-    residue_at: HashMap<Hash, Location>,
+    pub(crate) residue_at: HashMap<Hash, Location>,
     pub(crate) applies: Vec<ApplyFrame>,
+    /// The carried record frames of the sealed batches, in log order.
+    pub(crate) carried: Vec<CarriedFrame>,
     /// Frames of a batch not yet written (the live writer's): kind and payload, by location.
-    memory: BTreeMap<Location, (u8, Vec<u8>)>,
+    pub(crate) memory: BTreeMap<Location, (u8, Vec<u8>)>,
     batches: u64,
     /// The end of the last batch whose marker matched it.
     pub(crate) sealed_end: Option<Location>,
@@ -425,21 +467,29 @@ impl Collected {
             self.residue_at.entry(h).or_insert(loc);
         }
         self.applies.extend(p.applies);
+        self.carried.extend(p.carried);
         self.batches += 1;
     }
 
-    /// Notes one data frame of the current batch: its kind decides what is kept. An apply's
-    /// payload is given when it is hash-checked; an apply noted without one (over the record
-    /// bound, or not matching its hash) is a broken record.
-    fn note(&self, p: &mut Pending, loc: Location, kind: u8, hash: Hash, apply: Option<&[u8]>) {
+    /// Notes one data frame of the current batch: its kind decides what is kept. An apply's or
+    /// carried record's payload is given when it is hash-checked; one noted without it (over the
+    /// record bound, or not matching its hash) is a broken record.
+    fn note(&self, p: &mut Pending, loc: Location, kind: u8, hash: Hash, payload: Option<&[u8]>) {
         p.since.push((loc.offset, hash));
+        let start = *p.start.get_or_insert(loc);
         match kind {
             kinds::REDACTION_APPLY => p.applies.push(ApplyFrame {
                 loc,
                 hash,
-                record: apply.and_then(apply_record),
+                record: payload.and_then(apply_record),
                 batch: self.batches,
                 landings: p.landings.clone(),
+            }),
+            kinds::REDACTION_CARRIED => p.carried.push(CarriedFrame {
+                loc,
+                hash,
+                record: payload.and_then(crate::redaction_carried::decode_record),
+                batch_start: start,
             }),
             kinds::LANDING => p.landings.push((loc, hash)),
             kinds::REDACTION => p.requests.push((loc, hash)),
@@ -575,7 +625,7 @@ pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                     segment: seg,
                     offset: end,
                 });
-            } else if kind == kinds::REDACTION_APPLY {
+            } else if kind == kinds::REDACTION_APPLY || kind == kinds::REDACTION_CARRIED {
                 let payload = if len as usize > MAX_RECORD_BYTES {
                     None
                 } else if len as usize <= ERASE_BUFFER {
@@ -807,6 +857,7 @@ fn validate(
                             residue: span.residue,
                             apply: a.hash,
                             request: record.request,
+                            carried: false,
                         },
                     );
                     if let Some((r, res)) = residue {
@@ -1145,22 +1196,30 @@ fn check_log(
 /// The authorization bootstrap of an open: the header pass, then the validation of every apply
 /// the acknowledged log holds. Which applies that is depends on the holes they authorize (the
 /// marker rule's scan reads them as frames), so the scan's end is found with the applies'
-/// unchecked holes and applies past it are left out until it is stable; the applies left are
-/// validated and checked against the log (`check_log`, both its passes, whatever the erasure has
-/// done), and any failure refuses the open. The index plays no part. A load checks a complete
-/// ingested log with it before it finishes the store.
+/// unchecked holes (with the carried records' `held: false` spans) and applies and carried
+/// records past it are left out until it is stable; the applies left are validated and checked
+/// against the log (`check_log`, both its passes, whatever the erasure has done), the carried
+/// records left are laid over them (`redaction_carried::overlay`), and any failure refuses the
+/// open. The index plays no part. A load checks a complete ingested log with it before it
+/// finishes the store.
 pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
-    if c.applies.is_empty() && c.requests.is_empty() {
+    if c.applies.is_empty() && c.requests.is_empty() && c.carried.is_empty() {
         return Ok(Authorization::default());
     }
     let mut applies: Vec<&ApplyFrame> = c.applies.iter().collect();
+    let mut below = Location {
+        segment: u32::MAX,
+        offset: u64::MAX,
+    };
     let end = loop {
-        let holes = candidate_holes(&c, readers, &applies)?;
+        let mut holes = candidate_holes(&c, readers, &applies)?;
+        crate::redaction_carried::candidate_holes(&c, below, &mut holes);
         let end = segment::acknowledged_end(readers, &holes)?;
-        let before = applies.len();
+        let before = (applies.len(), carried_below(&c, below));
         applies.retain(|a| a.loc < end);
-        if applies.len() == before {
+        below = end;
+        if (applies.len(), carried_below(&c, below)) == before {
             break end;
         }
     };
@@ -1172,26 +1231,49 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
         .filter(|(l, _)| *l < end)
         .copied()
         .collect();
+    crate::redaction_carried::overlay(&c, readers, &mut auth, end)?;
     Ok(auth)
+}
+
+/// How many carried record frames lie before `below`.
+fn carried_below(c: &Collected, below: Location) -> usize {
+    c.carried.iter().filter(|f| f.loc < below).count()
 }
 
 /// The authorization of a log whose every batch is whole (a load's ingest checked each batch
 /// against its digest before it wrote its marker): the header pass, then the validation of every
 /// apply of its sealed batches, as `bootstrap` validates them, and checked against the sealed
-/// batches (`check_log`). Frames after the last marker (a batch not yet sealed) play no part. A log
-/// with no apply authorizes nothing. Any failed apply refuses it, as it refuses an open.
+/// batches (`check_log`), with its carried records over them. Frames after the last marker (a
+/// batch not yet sealed) play no part. A log with no apply and no carried record authorizes
+/// nothing. Any failed apply or carried record refuses it, as it refuses an open.
 pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
-    if c.applies.is_empty() {
+    let upto = c.sealed_end.unwrap_or(Location {
+        segment: 0,
+        offset: 0,
+    });
+    sealed_of(&c, readers, upto)
+}
+
+/// The authorization of the sealed batches `c` collected, as [`bootstrap_sealed`] has it: the
+/// validated applies checked against the sealed log on disk, then the carried records before
+/// `carried_upto` over them (a batch of `c.memory` included).
+pub(crate) fn sealed_of(
+    c: &Collected,
+    readers: &[File],
+    carried_upto: Location,
+) -> Result<Authorization, StoreError> {
+    if c.applies.is_empty() && c.carried.is_empty() {
         return Ok(Authorization::default());
     }
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
-    let (auth, sel) = validate(&c, readers, &applies, None)?;
+    let (mut auth, sel) = validate(c, readers, &applies, None)?;
     let upto = c.sealed_end.unwrap_or(Location {
         segment: 0,
         offset: 0,
     });
     check_log(readers, &BTreeMap::new(), &auth, &sel, upto)?;
+    crate::redaction_carried::overlay(c, readers, &mut auth, carried_upto)?;
     Ok(auth)
 }
 
@@ -1207,20 +1289,31 @@ pub(crate) fn bootstrap_pending(
     batch: &[(u8, Vec<u8>)],
 ) -> Result<Authorization, StoreError> {
     let mut c = collect(readers)?;
-    let mut p = Pending::default();
-    let mut at = start;
-    for (kind, payload) in batch {
-        let hash = Hash::of(payload);
-        c.note(&mut p, at, *kind, hash, Some(payload));
-        c.memory.insert(at, (*kind, payload.clone()));
-        at.offset += HEADER + payload.len() as u64;
-    }
-    c.seal(p);
+    c.push_batch(start, batch);
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
     check_log(readers, &c.memory, &auth, &sel, start)?;
     auth.requests = c.requests.clone();
+    crate::redaction_carried::overlay(&c, readers, &mut auth, start)?;
     Ok(auth)
+}
+
+impl Collected {
+    /// Notes `batch` as one sealed batch not yet written, whose first frame goes at `start`: its
+    /// frames are kept in `memory`, and the end of the sealed log moves past it (its marker is
+    /// not counted). Returns the place after its last data frame.
+    pub(crate) fn push_batch(&mut self, start: Location, batch: &[(u8, Vec<u8>)]) -> Location {
+        let mut p = Pending::default();
+        let mut at = start;
+        for (kind, payload) in batch {
+            let hash = Hash::of(payload);
+            self.note(&mut p, at, *kind, hash, Some(payload));
+            self.memory.insert(at, (*kind, payload.clone()));
+            at.offset += HEADER + payload.len() as u64;
+        }
+        self.seal(p);
+        at
+    }
 }
 
 /// The span `loc` of `auth` as a `DropSpan` for `SegmentLog::zero_payload`.

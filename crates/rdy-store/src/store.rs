@@ -467,6 +467,9 @@ fn entries_for_frame(
         }
         kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
+        kinds::REDACTION_CARRIED => {
+            out.push(crate::redaction_carried::carried_entry(hash, loc, payload)?)
+        }
         kinds::TRANSITION => {
             let rec: Transitions = decode(payload)?;
             out.extend(
@@ -574,7 +577,9 @@ fn replay_into(
         rules.on_frame(loc, v.kind, v.payload)?;
         // the redaction rows come from the validated stream only: an apply the bootstrap did not
         // validate is never a row, and a removed payload's entries come from its residue
-        if v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc) {
+        if (v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc))
+            || (v.kind == kinds::REDACTION_CARRIED && !auth.holds_carried(loc))
+        {
             return Err(StoreError::corrupt_at(loc));
         }
         entries.extend(match v.payload {
@@ -1036,7 +1041,7 @@ impl Store {
     /// sync per batch, held or not. With no batch open and `last` empty it does nothing; with no
     /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
     ///
-    /// Like `write`, it refuses a redaction record (kinds 20 to 22) and an item that would bring
+    /// Like `write`, it refuses a redaction record (kinds 20 to 23) and an item that would bring
     /// back a removed hash, before anything is appended. If the batch holds a redaction apply,
     /// `last` must be empty or one TRANSITION frame (`Refused` otherwise, the batch still open).
     ///
@@ -1361,7 +1366,7 @@ impl Store {
     /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once;
     /// a held batch that holds a redaction apply takes no more writes until its seal.
     ///
-    /// A redaction record (kinds 20 to 22) is refused: only the store's checked redaction writers
+    /// A redaction record (kinds 20 to 23) is refused: only the store's checked redaction writers
     /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
     /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
     /// chunk, nor a change that embeds a removed block version. Nothing is written then.
@@ -2857,7 +2862,16 @@ impl Store {
         let mut counts = auth.counts();
         let mut affected: BTreeSet<u32> = BTreeSet::new();
         for (loc, hole) in &auth.holes {
-            match self.log.hole_state(*loc, hole)? {
+            let state = self.log.hole_state(*loc, hole)?;
+            if !auth.erasable(loc) {
+                // a span only a carried record explains is never erased: the bootstrap found it
+                // all zero, and anything else now is damage
+                if state != Some(true) {
+                    return Err(StoreError::corrupt_at(*loc));
+                }
+                continue;
+            }
+            match state {
                 Some(true) => continue,
                 Some(false) => counts.checked_payloads += 1,
                 None => {}

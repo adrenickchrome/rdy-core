@@ -246,12 +246,13 @@ fn locate(
     Ok((scanned, first))
 }
 
-/// The authorization bootstrap of a holder's log: [`derive`] over its sealed batches, then
-/// again over the acknowledged end that the marker rule's scan finds with the derived holes,
-/// until it is stable (as the native bootstrap leaves out applies past that end). Any failure
-/// refuses the open: an apply whose proof fails, a copy that its tuple does not describe and an
-/// uncovered embedding are `RedactionCorrupt` at the frame; work over the caps is
-/// `RedactionLimit`.
+/// The authorization bootstrap of a holder's log: [`derive`] over its sealed batches, with the
+/// carried records over it (`crate::redaction_carried::overlay`: local spans, checked as a
+/// project checks them), then again over the acknowledged end that the marker rule's scan finds
+/// with the derived holes, until it is stable (as the native bootstrap leaves out applies past
+/// that end). Any failure refuses the open: an apply whose proof fails, a copy that its tuple
+/// does not describe and an uncovered embedding are `RedactionCorrupt` at the frame; work over
+/// the caps is `RedactionLimit`.
 pub(crate) fn bootstrap_holder(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
     let mut upto = c.sealed_end.unwrap_or(Location {
@@ -259,13 +260,26 @@ pub(crate) fn bootstrap_holder(readers: &[File]) -> Result<Authorization, StoreE
         offset: 0,
     });
     loop {
-        let auth = derive(&c, readers, upto)?;
+        let auth = holder_of(&c, readers, upto, upto)?;
         let end = segment::acknowledged_end(readers, &auth.holes)?;
         if end >= upto {
             return Ok(auth);
         }
         upto = end;
     }
+}
+
+/// The holder authorization of the frames before `upto`, with the carried records before
+/// `carried_upto` over it (a batch of `c.memory` included).
+pub(crate) fn holder_of(
+    c: &crate::redaction_io::Collected,
+    readers: &[File],
+    upto: Location,
+    carried_upto: Location,
+) -> Result<Authorization, StoreError> {
+    let mut auth = derive(c, readers, upto)?;
+    crate::redaction_carried::overlay(c, readers, &mut auth, carried_upto)?;
+    Ok(auth)
 }
 
 /// The holder authorization of the frames before `upto` (see the module docs).
@@ -387,6 +401,7 @@ fn derive(
                     residue: tuple.residue,
                     apply: first.hash,
                     request: removal.request,
+                    carried: false,
                 },
             );
             for i in by {
@@ -426,6 +441,7 @@ fn derive(
         applies,
         requests,
         imported: Some(imported),
+        carried: vec![],
     })
 }
 

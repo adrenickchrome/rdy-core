@@ -155,6 +155,7 @@ impl StoreReader {
         let transitions = self.check_transitions()?;
         let answers = self.check_answers()?;
         self.check_signatures()?;
+        self.check_carried()?;
         self.check_meta()?;
         Ok(StoreCheck {
             views,
@@ -169,6 +170,36 @@ impl StoreReader {
             inboxes,
             transitions,
             answers,
+        })
+    }
+
+    /// Every carried record's `held: false` span is in the active mask with the span's own kind,
+    /// hash, length and residue: the zeros it explains read as removed. Otherwise `carried
+    /// record {hash}: the index does not remove the span at {segment}:{offset}; run rdy reindex`.
+    pub(crate) fn check_carried(&self) -> Result<(), StoreError> {
+        let end = Location {
+            segment: u32::MAX,
+            offset: u64::MAX,
+        };
+        self.visit_carried(end, &mut |c| {
+            for s in c.record.spans.iter().filter(|s| !s.held) {
+                let loc = Location {
+                    segment: s.place.segment,
+                    offset: s.place.offset,
+                };
+                let row = self.index().redaction_span_at(&loc)?;
+                let fits = row.is_some_and(|r| {
+                    (r.span.kind, r.span.hash, r.span.len, r.span.residue)
+                        == (s.kind, s.hash, s.len, s.residue)
+                });
+                if !fits {
+                    return Err(bad(format!(
+                        "carried record {}: the index does not remove the span at {}:{}; run rdy reindex",
+                        c.hash, loc.segment, loc.offset
+                    )));
+                }
+            }
+            Ok(())
         })
     }
 

@@ -257,3 +257,172 @@ fn ha10_export_refuses_a_stale_state_an_unknown_tag_and_too_many_known_keys() {
     // a state read after it does
     stream_export::write(&r.read(), v1, &none, Vec::new()).unwrap();
 }
+
+/// `value`'s record encoding, through the model's bounded encoder.
+fn enc<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    let mut buf = vec![0u8; 1 << 20];
+    rdy_model::redaction::encode_into(value, &mut buf)
+        .unwrap()
+        .to_vec()
+}
+
+/// The project's store, moved aside and loaded again with one carried record over the frames
+/// of the block whose body holds `CANARY` and of the change that wrote it, as zeros it explains
+/// (the checked path of a stopped load). Returns the record's hash.
+fn carry_canary(dir: &std::path::Path) -> Hash {
+    use rdy_model::redaction::{
+        BlockResidue, CarriedSpan, ChangeResidue, FramePlace, ReasonClass, RedactTarget,
+        RedactionCarried, RedactionResidue,
+    };
+    use rdy_store::dump::Frame;
+    use rdy_store::redaction::StoredFrame;
+    use rdy_store::segment::Location;
+    let store = dir.join(".rdy").join(rdy_store::layout::STORE_DIR);
+    let aside = dir.join("store-aside");
+    std::fs::rename(&store, &aside).unwrap();
+    let s = rdy_store::Store::open(&aside).unwrap();
+    let r = s.reader();
+    // the canary's block frame and the change frame that wrote it
+    let mut found: Vec<(Location, u8, Hash, u32, RedactionResidue)> = vec![];
+    r.for_each_record_from(
+        Location {
+            segment: 0,
+            offset: 0,
+        },
+        s.log_end(),
+        |loc, f, _| {
+            if let StoredFrame::Present {
+                kind,
+                hash,
+                payload,
+            } = f
+            {
+                let holds = |b: &Block| b.body.contains(CANARY);
+                if kind == kinds::BLOCK
+                    && let Ok(b) = rdy_store::bounded::decode::<Block>(payload)
+                    && holds(&b)
+                {
+                    let res = RedactionResidue::Block(BlockResidue::of(&b));
+                    found.push((loc, kind, hash, payload.len() as u32, res));
+                }
+                if kind == kinds::CHANGE
+                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                    && c.ops.iter().any(|op| match op {
+                        Op::Create { block } | Op::Update { block, .. } => holds(block),
+                        Op::Delete { .. } => false,
+                    })
+                {
+                    let res = RedactionResidue::Change(ChangeResidue::of(&c));
+                    found.push((loc, kind, hash, payload.len() as u32, res));
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(found.len(), 2, "the canary's block and change frames");
+    let block_id = found
+        .iter()
+        .find_map(|(_, _, _, _, r)| match r {
+            RedactionResidue::Block(b) => Some((b.id.clone(), b.version)),
+            _ => None,
+        })
+        .unwrap();
+    let rec = RedactionCarried {
+        request: Hash::of(b"source request"),
+        apply: Hash::of(b"source apply"),
+        landing: Hash::of(b"source landing"),
+        approved_by: Provenance {
+            actor: "human:founder".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 777,
+        },
+        reason_class: ReasonClass::Secret,
+        targets: vec![RedactTarget::Version {
+            id: block_id.0,
+            version: block_id.1,
+        }],
+        spans: found
+            .iter()
+            .map(|(loc, kind, hash, len, res)| CarriedSpan {
+                place: FramePlace {
+                    segment: loc.segment,
+                    offset: loc.offset,
+                },
+                kind: *kind,
+                hash: *hash,
+                len: *len,
+                residue: Some(Hash::of(&enc(res))),
+                held: false,
+            })
+            .collect(),
+    };
+    let carried = Hash::of(&enc(&rec));
+    let drops: std::collections::BTreeMap<Location, Option<Hash>> = rec
+        .spans
+        .iter()
+        .map(|sp| {
+            (
+                Location {
+                    segment: sp.place.segment,
+                    offset: sp.place.offset,
+                },
+                sp.residue,
+            )
+        })
+        .collect();
+    let mut batches = vec![];
+    r.for_each_batch(s.log_end(), |mut b| {
+        let mut at = b.start;
+        for f in b.frames.iter_mut() {
+            let len = f.original_len();
+            if let Some(residue) = drops.get(&at) {
+                *f = Frame::Dropped {
+                    kind: f.kind(),
+                    hash: *f.hash(),
+                    len,
+                    apply: carried,
+                    residue: *residue,
+                };
+            }
+            at.offset += 37 + u64::from(len);
+        }
+        batches.push(b);
+        Ok(())
+    })
+    .unwrap();
+    drop(r);
+    drop(s);
+    let mut i = rdy_store::ingest::Ingest::create(&store).unwrap();
+    for (n, b) in batches.iter().enumerate() {
+        i.batch(n as u64 + 1, b).unwrap();
+    }
+    let residues: Vec<RedactionResidue> = found.into_iter().map(|f| f.4).collect();
+    i.append_carried(&residues, &[rec]).unwrap();
+    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
+        .unwrap();
+    i.finish().unwrap();
+    carried
+}
+
+#[test]
+fn hc3_export_error_keeps_code_message_and_fix() {
+    let (dir, r, _secret, v1, _v2) = tagged();
+    drop(r);
+    let carried = carry_canary(dir.path());
+    let r = Rdy::open(dir.path()).unwrap();
+    let e = export(&r, v1, &BTreeSet::new()).unwrap_err();
+    assert_eq!(e.code, "E_REDACTED");
+    assert_eq!(
+        e.message,
+        format!(
+            "Tag v1.0.0 reaches content that carried record {carried} names, and no removal in this store covers it."
+        )
+    );
+    assert_eq!(e.fix, rdy_store::redaction_carried::PROJECT_FIX);
+    assert_eq!(
+        e.fix,
+        "Propose the redaction of the listed targets again, and have a person approve it."
+    );
+}

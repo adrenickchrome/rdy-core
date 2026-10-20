@@ -246,6 +246,30 @@ fn bad(reason: Reason, object: ObjectKey) -> StreamError {
     StreamError::bad_record(0, 0, reason).with_object(Some(object))
 }
 
+/// The placeholder of the union whose proof is `proof`, when `proof` is an apply key whose hash
+/// names a carried record (kind REDACTION_CARRIED) the holder holds: such a record is never a
+/// removal proof.
+fn names_carried(
+    rx: &Receiver,
+    union: &BTreeMap<ObjectKey, Entry>,
+    proof: &ObjectKey,
+) -> Result<Option<ObjectKey>, StreamError> {
+    if proof.kind != kinds::REDACTION_APPLY {
+        return Ok(None);
+    }
+    let carried = ObjectKey {
+        kind: kinds::REDACTION_CARRIED,
+        hash: proof.hash,
+    };
+    if !rx.holds(&carried)? {
+        return Ok(None);
+    }
+    Ok(union
+        .iter()
+        .find(|(_, e)| e.dropped.iter().any(|(_, d)| d.apply == proof.hash))
+        .map(|(k, _)| *k))
+}
+
 /// Where a record of a batch file is, and the frame it must still be there: its file, its
 /// record number and frame offset, and its frame's kind, payload length and hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -911,9 +935,13 @@ pub(crate) fn prepare<E>(
         }
         Err(IndexError::Stream(e)) => return Err(e.into()),
     };
-    // 2. every prerequisite, from the union or the holder
+    // 2. every prerequisite, from the union or the holder. A placeholder's proof that names a
+    // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused
     for p in &prerequisites {
         if !union.contains_key(p) && !rx.holds(p)? {
+            if let Some(placeholder) = names_carried(rx, &union, p)? {
+                return Err(bad(Reason::InvalidRemovalProof, placeholder).into());
+            }
             return Err(missing(*p).into());
         }
     }
