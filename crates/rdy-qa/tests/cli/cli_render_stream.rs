@@ -315,6 +315,19 @@ fn hpb9_render_stream_takes_no_global_options() {
         vec!["--project", project.as_str(), "render-stream"],
         vec!["render-stream", "--project", project.as_str()],
         vec!["--no-daemon", "render-stream"],
+        // malformed global options: a missing value, an inline value
+        vec!["render-stream", "--project"],
+        vec!["--project=x", "render-stream"],
+        vec!["render-stream", "--project="],
+        // no flag or argument of its own: no scope, out, audience, project or input file
+        vec!["render-stream", "--out", "x"],
+        vec!["render-stream", "--out"],
+        vec!["render-stream", "--scope", "x"],
+        vec!["render-stream", "--audience", "x"],
+        vec!["render-stream", "--file", "x"],
+        vec!["render-stream", "-o", "x"],
+        vec!["render-stream", "x"],
+        vec!["--bogus", "render-stream"],
     ] {
         let v = refusal(&rdy_in(dir.path(), home.path(), &args, &input));
         assert_eq!(
@@ -325,17 +338,6 @@ fn hpb9_render_stream_takes_no_global_options() {
                 "issues": []}),
             "{args:?}"
         );
-    }
-    // no flag of its own: no scope, out, audience, project or input file
-    for flag in ["--out", "--scope", "--audience", "--file"] {
-        let o = rdy_in(
-            dir.path(),
-            home.path(),
-            &["render-stream", flag, "x"],
-            &input,
-        );
-        assert!(!o.status.success(), "{flag}");
-        assert!(o.stdout.is_empty(), "{flag}");
     }
     // the same input through the CLI and the library gives the same bytes
     let o = rdy_in(dir.path(), home.path(), &["render-stream"], &input);

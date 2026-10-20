@@ -245,8 +245,10 @@ pub fn read_artifact<R: Read>(mut input: R) -> Result<PublicationArtifact, RdyEr
     }
     let json = read_vec(&mut input, len, bad_output, artifact_unreadable)?;
     check_json(&json, METADATA_LIMITS).map_err(|_| bad_output())?;
-    let meta: Metadata = serde_json::from_slice(&json).map_err(|_| bad_output())?;
+    let value: serde_json::Value = serde_json::from_slice(&json).map_err(|_| bad_output())?;
     drop(json);
+    let meta: Metadata = objects::from_value(&value).map_err(|_| bad_output())?;
+    drop(value);
     let computed = manifest_hash(&meta.manifest, meta.manifest_recipe)?;
     if computed != meta.manifest_hash || !path_ordered(&meta.manifest) {
         return Err(bad_output());
@@ -331,7 +333,7 @@ fn read_prelude(input: &mut impl Read) -> Result<Prelude, RdyError> {
 fn parse_prelude(json: &[u8]) -> Result<Prelude, RdyError> {
     check_json(json, PRELUDE_LIMITS).map_err(|_| bad_input())?;
     let value: serde_json::Value = serde_json::from_slice(json).map_err(|_| bad_input())?;
-    let prelude = Prelude::deserialize(&value).map_err(|e| {
+    let prelude: Prelude = objects::from_value(&value).map_err(|e| {
         unknown_field_error_in(CONTEXT, &e.to_string(), &value).unwrap_or_else(bad_input)
     })?;
     check_stable_selector(&prelude.profile)?;
@@ -567,4 +569,278 @@ fn read_vec(
     out.resize(len, 0);
     read_exactly(input, &mut out, short, failed)?;
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------------
+// objects only
+
+/// Strict reading of a checked JSON value: a struct is read from a JSON object only. A derived
+/// struct also reads a positional list (`[profile, format, render_inputs]`), and
+/// `deny_unknown_fields` does not stop that, so the prelude, the render inputs, the metadata and
+/// every struct inside them read through [`Objects`], which refuses a list wherever a struct is
+/// expected. Everything else reads as `serde_json::Value` reads it, so an unknown field gives the
+/// same serde text and its refusal names the same path.
+mod objects {
+    use serde::de::value::BorrowedStrDeserializer;
+    use serde::de::{
+        self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, Unexpected,
+        VariantAccess, Visitor,
+    };
+    use serde_json::{Error, Map, Value};
+
+    /// Reads a `T` from `value`, every struct in it from an object.
+    pub(super) fn from_value<'de, T: de::Deserialize<'de>>(value: &'de Value) -> Result<T, Error> {
+        T::deserialize(Objects(value))
+    }
+
+    /// One JSON value, read with structs from objects only.
+    #[derive(Clone, Copy)]
+    struct Objects<'de>(&'de Value);
+
+    fn unexpected(v: &Value) -> Unexpected<'_> {
+        match v {
+            Value::Null => Unexpected::Unit,
+            Value::Bool(b) => Unexpected::Bool(*b),
+            Value::Number(_) => Unexpected::Other("number"),
+            Value::String(s) => Unexpected::Str(s),
+            Value::Array(_) => Unexpected::Seq,
+            Value::Object(_) => Unexpected::Map,
+        }
+    }
+
+    fn visit_list<'de, V: Visitor<'de>>(items: &'de [Value], v: V) -> Result<V::Value, Error> {
+        let mut seq = List(items.iter());
+        let out = v.visit_seq(&mut seq)?;
+        match seq.0.len() {
+            0 => Ok(out),
+            _ => Err(de::Error::invalid_length(
+                items.len(),
+                &"fewer elements in the list",
+            )),
+        }
+    }
+
+    fn visit_object<'de, V: Visitor<'de>>(
+        map: &'de Map<String, Value>,
+        v: V,
+    ) -> Result<V::Value, Error> {
+        let mut access = Members {
+            iter: map.iter(),
+            value: None,
+        };
+        let out = v.visit_map(&mut access)?;
+        match access.iter.len() {
+            0 => Ok(out),
+            _ => Err(de::Error::invalid_length(
+                map.len(),
+                &"fewer elements in the map",
+            )),
+        }
+    }
+
+    macro_rules! forward {
+        ($($name:ident)*) => {$(
+            fn $name<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+                self.0.$name(v)
+            }
+        )*};
+    }
+
+    impl<'de> Deserializer<'de> for Objects<'de> {
+        type Error = Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            match self.0 {
+                Value::Array(items) => visit_list(items, v),
+                Value::Object(map) => visit_object(map, v),
+                other => other.deserialize_any(v),
+            }
+        }
+
+        forward! {
+            deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+            deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
+            deserialize_u128 deserialize_f32 deserialize_f64 deserialize_char deserialize_str
+            deserialize_string deserialize_bytes deserialize_byte_buf deserialize_unit
+            deserialize_identifier deserialize_ignored_any
+        }
+
+        fn deserialize_option<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            match self.0 {
+                Value::Null => v.visit_none(),
+                _ => v.visit_some(self),
+            }
+        }
+
+        fn deserialize_unit_struct<V: Visitor<'de>>(
+            self,
+            name: &'static str,
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.0.deserialize_unit_struct(name, v)
+        }
+
+        fn deserialize_newtype_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            v: V,
+        ) -> Result<V::Value, Error> {
+            v.visit_newtype_struct(self)
+        }
+
+        fn deserialize_seq<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            match self.0 {
+                Value::Array(items) => visit_list(items, v),
+                other => Err(de::Error::invalid_type(unexpected(other), &v)),
+            }
+        }
+
+        fn deserialize_tuple<V: Visitor<'de>>(self, _: usize, v: V) -> Result<V::Value, Error> {
+            self.deserialize_seq(v)
+        }
+
+        fn deserialize_tuple_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            _: usize,
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_seq(v)
+        }
+
+        fn deserialize_map<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            match self.0 {
+                Value::Object(map) => visit_object(map, v),
+                other => Err(de::Error::invalid_type(unexpected(other), &v)),
+            }
+        }
+
+        /// A struct from an object only: never from a positional list.
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_map(v)
+        }
+
+        fn deserialize_enum<V: Visitor<'de>>(
+            self,
+            name: &'static str,
+            variants: &'static [&'static str],
+            v: V,
+        ) -> Result<V::Value, Error> {
+            match self.0 {
+                Value::Object(map) => match (map.len(), map.iter().next()) {
+                    (1, Some((variant, value))) => v.visit_enum(Variant { variant, value }),
+                    _ => Err(de::Error::invalid_value(
+                        Unexpected::Map,
+                        &"map with a single key",
+                    )),
+                },
+                // a unit variant by name, or the value's own refusal
+                other => other.deserialize_enum(name, variants, v),
+            }
+        }
+    }
+
+    /// A list's items, each read as [`Objects`].
+    struct List<'de>(std::slice::Iter<'de, Value>);
+
+    impl<'de> SeqAccess<'de> for List<'de> {
+        type Error = Error;
+
+        fn next_element_seed<T: DeserializeSeed<'de>>(
+            &mut self,
+            seed: T,
+        ) -> Result<Option<T::Value>, Error> {
+            self.0
+                .next()
+                .map(|item| seed.deserialize(Objects(item)))
+                .transpose()
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(self.0.len())
+        }
+    }
+
+    /// An object's members: keys as borrowed strings, values as [`Objects`].
+    struct Members<'de> {
+        iter: serde_json::map::Iter<'de>,
+        value: Option<&'de Value>,
+    }
+
+    impl<'de> MapAccess<'de> for Members<'de> {
+        type Error = Error;
+
+        fn next_key_seed<K: DeserializeSeed<'de>>(
+            &mut self,
+            seed: K,
+        ) -> Result<Option<K::Value>, Error> {
+            match self.iter.next() {
+                Some((key, value)) => {
+                    self.value = Some(value);
+                    seed.deserialize(BorrowedStrDeserializer::new(key))
+                        .map(Some)
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Error> {
+            match self.value.take() {
+                Some(value) => seed.deserialize(Objects(value)),
+                None => Err(de::Error::custom("a value is read before its key")),
+            }
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(self.iter.len())
+        }
+    }
+
+    /// One `{"variant": value}` enum member.
+    struct Variant<'de> {
+        variant: &'de str,
+        value: &'de Value,
+    }
+
+    impl<'de> EnumAccess<'de> for Variant<'de> {
+        type Error = Error;
+        type Variant = Objects<'de>;
+
+        fn variant_seed<S: DeserializeSeed<'de>>(
+            self,
+            seed: S,
+        ) -> Result<(S::Value, Objects<'de>), Error> {
+            let name = BorrowedStrDeserializer::<Error>::new(self.variant);
+            Ok((seed.deserialize(name)?, Objects(self.value)))
+        }
+    }
+
+    impl<'de> VariantAccess<'de> for Objects<'de> {
+        type Error = Error;
+
+        fn unit_variant(self) -> Result<(), Error> {
+            de::Deserialize::deserialize(self)
+        }
+
+        fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, Error> {
+            seed.deserialize(self)
+        }
+
+        fn tuple_variant<V: Visitor<'de>>(self, _: usize, v: V) -> Result<V::Value, Error> {
+            self.deserialize_seq(v)
+        }
+
+        fn struct_variant<V: Visitor<'de>>(
+            self,
+            _: &'static [&'static str],
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_map(v)
+        }
+    }
 }

@@ -830,6 +830,93 @@ fn hpb9_process_refusals_write_no_output() {
     );
 }
 
+/// The values of `v`'s `keys`, in that order: the positional (list) form of a struct.
+fn positional(v: &Value, keys: &[&str]) -> Value {
+    Value::Array(keys.iter().map(|k| v[*k].clone()).collect())
+}
+
+#[test]
+fn hpb9_positional_lists_are_refused_where_objects_are_required() {
+    const PRELUDE: [&str; 3] = ["profile", "format", "render_inputs"];
+    const INPUTS: [&str; 6] = [
+        "rdy",
+        "pack",
+        "theme",
+        "title",
+        "description",
+        "disagreements",
+    ];
+    const META: [&str; 4] = ["manifest_recipe", "manifest_hash", "manifest", "warnings"];
+    const ENTRY: [&str; 5] = ["path", "hash", "media_type", "size", "notice_offset"];
+    const PACK: [&str; 11] = [
+        "name",
+        "version",
+        "extends",
+        "link_types",
+        "block_types",
+        "doc_types",
+        "default_doc_type",
+        "tensions",
+        "duplicate_text_min_words",
+        "areas",
+        "coverage",
+    ];
+    let p = project("Positional project", "POSITIONCANARY", [31, 32, 33]);
+    let stream = p.stream();
+    let inputs = serde_json::to_value(p.inputs()).unwrap();
+    let base = json!({"profile": IMPLICIT_ORG, "format": "site", "render_inputs": inputs});
+    let (_, out, _) = process(&framed(&base, &stream));
+    // the prelude, the render inputs and the pack as complete positional lists: the fixed
+    // refusal, and no output byte
+    let inputs_list = positional(&inputs, &INPUTS);
+    for (what, prelude) in [
+        ("prelude", positional(&base, &PRELUDE)),
+        ("render inputs", {
+            let mut v = base.clone();
+            v["render_inputs"] = inputs_list.clone();
+            v
+        }),
+        ("prelude and render inputs", {
+            let mut v = base.clone();
+            v["render_inputs"] = inputs_list.clone();
+            positional(&v, &PRELUDE)
+        }),
+        // a struct inside the render inputs: the pack, its keys in declared order
+        ("pack", {
+            let mut v = base.clone();
+            v["render_inputs"]["pack"] = positional(&inputs["pack"], &PACK);
+            v
+        }),
+    ] {
+        let e = refused(&framed(&prelude, &stream));
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (E_BAD_INPUT, BAD_INPUT.0, BAD_INPUT.1),
+            "{what}: {e}"
+        );
+    }
+    // the metadata, the manifest and one manifest entry as complete positional lists: the
+    // reader's fixed refusal
+    let (meta, files) = split(&out);
+    let refs: Vec<&[u8]> = files.iter().map(Vec::as_slice).collect();
+    let mut manifest_list = meta.clone();
+    manifest_list["manifest"] = positional(&meta["manifest"], &["files"]);
+    let mut entry_list = meta.clone();
+    entry_list["manifest"]["files"][0] = positional(&meta["manifest"]["files"][0], &ENTRY);
+    for (what, m) in [
+        ("metadata", positional(&meta, &META)),
+        ("manifest", manifest_list),
+        ("manifest entry", entry_list),
+    ] {
+        let e = read_artifact(Cursor::new(packet(&m, &refs))).expect_err(what);
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (E_BAD_INPUT, BAD_OUTPUT.0, BAD_OUTPUT.1),
+            "{what}: {e}"
+        );
+    }
+}
+
 #[test]
 fn hpb9_error_line_is_one_bounded_json_line() {
     let e = RdyError::new(E_BAD_INPUT, "a message", "a fix");

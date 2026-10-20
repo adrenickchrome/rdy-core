@@ -259,9 +259,15 @@ pub(crate) fn config_warning_line(w: &rdy_schema::Issue) -> String {
 fn main() -> ExitCode {
     // `rdy load` refuses a target a live daemon still serves; the engine asks this probe
     rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
-    let cli = Cli::parse();
-    // hpb9: the render process reads its standard input alone: before the hub sign-in, the
-    // working directory, the project lookup, a config, a store or a daemon
+    // hpb9: the render process reads its standard input alone: before clap (so an argument
+    // error is its JSON refusal), the hub sign-in, the working directory, the project lookup, a
+    // config, a store or a daemon
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(extra) = render_stream_cmd::invocation(&args) {
+        return render_stream_cmd::render_stream(extra);
+    }
+    let cli = Cli::parse_from(args);
+    // the scan above finds every render-stream clap parses; this keeps the refusal if not
     if let Cmd::RenderStream = cli.cmd {
         return render_stream_cmd::render_stream(
             cli.json || cli.project.is_some() || cli.no_daemon,
