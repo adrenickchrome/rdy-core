@@ -46,6 +46,12 @@
 //!    the frames, payload bytes and spans of the batch included; the marker counts only when
 //!    there is a frame to write (a complete retry writes none).
 //!
+//! Steps 2, 3 (the root), 5 and 6 (the portable proofs, the dropped records and the one tuple of
+//! each key) and the relay answers of step 8 are `crate::stream_source`'s checks, which a checked
+//! stream runs with nothing held; the take runs them over the union and the holder. The
+//! receiver's own steps stay here: the repo, the upload target, SIG's rule over the holder, the
+//! scan of the holder's local copies, the receiver caps, the tag choice and the append.
+//!
 //! The take keeps one record payload buffer at a time: it indexes each record's file, number,
 //! offset and frame, and reads a record again when a check or the append needs it. Each re-read
 //! checks the frame's kind, length and hash (and a drop's descriptor), so input that changed
@@ -65,17 +71,17 @@ use crate::stream_error::{
     LIMIT_GRAPH_EDGES, LIMIT_OBJECT_RECORDS, LIMIT_PENDING_DROPPED_BYTES, LIMIT_PENDING_DROPS,
     LIMIT_TOTAL_BYTES, Reason, StreamError,
 };
-use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
+use crate::stream_source::{self, Drop, Records, bad};
+use crate::sync_proof::{ObjectSource, PortableRemoval, RemovalObject};
 use crate::sync_stream::{
     LIMIT_BATCH_FILES, MAX_BATCH_FILES, MAX_EDGES, MAX_PENDING_DROPPED_BYTES, MAX_PENDING_DROPS,
-    MAX_RECORDS, MAX_STREAM_BYTES, SYNC_KINDS, StreamHeader, StreamReader, StreamRecord,
-    check_batch, rec,
+    MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamReader, StreamRecord, check_batch, rec,
 };
-use rdy_model::redaction::{Redaction, RedactionApply, RedactionResidue};
+use rdy_model::redaction::RedactionResidue;
 use rdy_model::signature::Signature;
-use rdy_model::{Answer, Change, Hash, RepoId, Tag};
+use rdy_model::{Change, Hash, RepoId, Tag};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
@@ -230,22 +236,6 @@ fn target_mismatch(root: ObjectKey) -> StreamError {
     }
 }
 
-/// The refusal of a prerequisite that neither the upload nor the holder holds.
-fn missing(key: ObjectKey) -> StreamError {
-    StreamError {
-        code: "E_UNRESOLVED_REF",
-        message: format!("stream prerequisite {key} is missing"),
-        fix: "send the missing object with its dependencies".into(),
-        record: Some(0),
-        offset: 0,
-        object: Some(key),
-    }
-}
-
-fn bad(reason: Reason, object: ObjectKey) -> StreamError {
-    StreamError::bad_record(0, 0, reason).with_object(Some(object))
-}
-
 /// Where a record of a batch file is, and the frame it must still be there: its file, its
 /// record number and frame offset, and its frame's kind, payload length and hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,14 +246,6 @@ pub(crate) struct At {
     kind: u8,
     len: u32,
     hash: Hash,
-}
-
-/// A dropped record's descriptor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Drop {
-    original_len: u32,
-    apply: Hash,
-    residue: Option<Hash>,
 }
 
 /// One key of the union: its present record, if any file holds one, each distinct dropped
@@ -433,6 +415,53 @@ impl ObjectSource for UploadSource<'_> {
             }
         }
         self.store.record(key)
+    }
+}
+
+/// The take's lookups for the shared checks (`crate::stream_source`): a union key from the
+/// union's index (its links as indexed, with no read), any other from the holder.
+impl Records for UploadSource<'_> {
+    fn object_source(&mut self) -> &mut dyn ObjectSource {
+        self
+    }
+
+    fn has(&mut self, k: &ObjectKey) -> Result<bool, StreamError> {
+        Ok(self.union.contains_key(k)
+            || self
+                .store
+                .reader
+                .has_kind(k.kind, &k.hash)
+                .map_err(|e| store_error(e, Some(*k)))?)
+    }
+
+    fn links(&mut self, k: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError> {
+        if let Some(e) = self.union.get(&k) {
+            let mut links = e.refs.clone();
+            for (_, d) in &e.dropped {
+                links.extend(d.residue.map(|r| ObjectRef {
+                    kind: Some(kinds::REDACTION_RESIDUE),
+                    hash: r,
+                }));
+                links.push(ObjectRef {
+                    kind: Some(kinds::REDACTION_APPLY),
+                    hash: d.apply,
+                });
+            }
+            return Ok(Some(links));
+        }
+        match self.store.record(k)? {
+            Some(record) => {
+                let mut links = record
+                    .refs()
+                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
+                links.extend(record.proof().map(|p| ObjectRef {
+                    kind: Some(p.kind),
+                    hash: p.hash,
+                }));
+                Ok(Some(links))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -625,260 +654,6 @@ fn index_files(
     Ok(first.expect("at least one file"))
 }
 
-/// The key a link names: its own kind, or for a kind-None link the one record of the union or
-/// the holder of its hash (none: kind 0; two or more: `ambiguous object kind`).
-fn resolve(
-    rx: &Receiver,
-    union: &BTreeMap<ObjectKey, Entry>,
-    from: ObjectKey,
-    r: ObjectRef,
-) -> Result<ObjectKey, StreamError> {
-    if let Some(kind) = r.kind {
-        return Ok(ObjectKey { kind, hash: r.hash });
-    }
-    let mut found = None;
-    for &kind in &SYNC_KINDS {
-        let k = ObjectKey { kind, hash: r.hash };
-        if union.contains_key(&k) || rx.holds(&k)? {
-            if found.is_some() {
-                return Err(bad(Reason::AmbiguousObjectKind, from));
-            }
-            found = Some(k);
-        }
-    }
-    Ok(found.unwrap_or(ObjectKey {
-        kind: 0,
-        hash: r.hash,
-    }))
-}
-
-/// The reverse attachments of the union's records, by what triggers them.
-#[derive(Default)]
-struct Attachments {
-    /// Answers by each hash they target.
-    answers: HashMap<Hash, Vec<ObjectKey>>,
-    /// Signatures by subject.
-    signatures: HashMap<Hash, Vec<ObjectKey>>,
-    /// Requests by carrier.
-    requests: HashMap<Hash, Vec<ObjectKey>>,
-    /// Applies by each object their request names.
-    applies: HashMap<ObjectKey, Vec<ObjectKey>>,
-    /// The relay answers of the root (O11).
-    relay: Vec<ObjectKey>,
-}
-
-/// Collects the union's attachments: every answer, signature, request and apply it holds. The
-/// root's relay answer is one that targets exactly the root TAG (`is_relay_answer_of`): an
-/// answer to a tag of the same name that targets another tag object is not attached by name.
-fn attachments(
-    source: &mut UploadSource,
-    root_key: ObjectKey,
-    root: &Tag,
-) -> Result<Attachments, StreamError> {
-    let mut a = Attachments::default();
-    let keys: Vec<ObjectKey> = source
-        .union
-        .keys()
-        .filter(|k| {
-            matches!(
-                k.kind,
-                kinds::ANSWER | kinds::SIGNATURE | kinds::REDACTION | kinds::REDACTION_APPLY
-            )
-        })
-        .copied()
-        .collect();
-    for k in keys {
-        match k.kind {
-            kinds::ANSWER => {
-                let Some(answer) = source.typed::<Answer>(k)? else {
-                    continue;
-                };
-                for t in &answer.targets {
-                    a.answers.entry(*t).or_default().push(k);
-                }
-                if crate::holder::is_relay_answer_of(&answer, &root_key.hash, &root.name) {
-                    a.relay.push(k);
-                }
-            }
-            kinds::SIGNATURE => {
-                if let Some(g) = source.typed::<Signature>(k)? {
-                    a.signatures.entry(g.subject).or_default().push(k);
-                }
-            }
-            kinds::REDACTION => {
-                if let Some(r) = source.typed::<Redaction>(k)? {
-                    a.requests.entry(r.carrier).or_default().push(k);
-                }
-            }
-            _ => {
-                let Some(apply) = source.typed::<RedactionApply>(k)? else {
-                    continue;
-                };
-                let request = ObjectKey {
-                    kind: kinds::REDACTION,
-                    hash: apply.request,
-                };
-                if let Some(r) = source.typed::<Redaction>(request)? {
-                    for named in named_objects(&r) {
-                        a.applies.entry(named).or_default().push(k);
-                    }
-                }
-            }
-        }
-    }
-    Ok(a)
-}
-
-/// The objects a request names, as the index's request entry names them: its spans' objects,
-/// its versions and its blobs.
-fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
-    let m = &r.manifest;
-    m.spans
-        .iter()
-        .map(|s| ObjectKey {
-            kind: s.kind,
-            hash: s.hash,
-        })
-        .chain(m.versions.iter().map(|(_, v)| ObjectKey {
-            kind: kinds::BLOCK,
-            hash: *v,
-        }))
-        .chain(m.blobs.iter().map(|b| ObjectKey {
-            kind: kinds::BLOB_MANIFEST,
-            hash: *b,
-        }))
-        .collect()
-}
-
-/// Checks that every union key is in the root's closure (module docs, step 5), walking forward
-/// links through the union and the holder and the union's attachments.
-fn check_closure(
-    rx: &Receiver,
-    source: &mut UploadSource,
-    root_key: ObjectKey,
-    root: &Tag,
-) -> Result<(), StreamError> {
-    let att = attachments(source, root_key, root)?;
-    let mut reached: HashSet<ObjectKey> = HashSet::new();
-    let mut queue: Vec<ObjectKey> = Vec::new();
-    let mut edges = 0u64;
-    fn reach(
-        k: ObjectKey,
-        reached: &mut HashSet<ObjectKey>,
-        queue: &mut Vec<ObjectKey>,
-    ) -> Result<(), StreamError> {
-        if reached.contains(&k) {
-            return Ok(());
-        }
-        if reached.len() as u64 >= MAX_RECORDS {
-            return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
-        }
-        reached
-            .try_reserve(1)
-            .map_err(|_| StreamError::allocation(None, 0))?;
-        queue
-            .try_reserve(1)
-            .map_err(|_| StreamError::allocation(None, 0))?;
-        reached.insert(k);
-        queue.push(k);
-        Ok(())
-    }
-    reach(root_key, &mut reached, &mut queue)?;
-    for r in &att.relay {
-        reach(*r, &mut reached, &mut queue)?;
-    }
-    while let Some(k) = queue.pop() {
-        // forward links
-        let mut links: Vec<ObjectKey> = Vec::new();
-        if let Some(e) = source.union.get(&k) {
-            for r in &e.refs {
-                links.push(resolve(rx, source.union, k, *r)?);
-            }
-            for (_, d) in &e.dropped {
-                links.extend(d.residue.map(|r| ObjectKey {
-                    kind: kinds::REDACTION_RESIDUE,
-                    hash: r,
-                }));
-                links.push(ObjectKey {
-                    kind: kinds::REDACTION_APPLY,
-                    hash: d.apply,
-                });
-            }
-        } else if let Some(record) = source.store.record(k)? {
-            for r in record
-                .refs()
-                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?
-            {
-                links.push(resolve(rx, source.union, k, r)?);
-            }
-            links.extend(record.proof());
-        }
-        // attachments
-        if matches!(k.kind, kinds::LANDING | kinds::TAG) {
-            links.extend(att.answers.get(&k.hash).into_iter().flatten());
-        }
-        if k.kind == kinds::LANDING || k == root_key {
-            links.extend(att.signatures.get(&k.hash).into_iter().flatten());
-        }
-        if k.kind == kinds::CHANGE {
-            links.extend(att.requests.get(&k.hash).into_iter().flatten());
-        }
-        links.extend(att.applies.get(&k).into_iter().flatten());
-        edges += links.len() as u64;
-        if edges > MAX_EDGES {
-            return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES));
-        }
-        for l in links {
-            if l.kind != 0 {
-                reach(l, &mut reached, &mut queue)?;
-            }
-        }
-    }
-    match source.union.keys().find(|k| !reached.contains(k)) {
-        Some(k) => Err(bad(Reason::OutsideTagClosure, *k)),
-        None => Ok(()),
-    }
-}
-
-/// The relay answer of each TAG object, of the union or the holder, that has one in the union
-/// (tag hash to answer hash): an answer of the union of act `tag`, item `tag:<name>` and targets
-/// exactly that TAG object, whose name is `<name>` (`crate::holder::is_relay_answer_of`). An
-/// answer to a tag of the same name that targets another tag object is not that tag's. Two
-/// relay answers of one tag object refuse the upload at the second.
-fn relay_answers(
-    source: &mut UploadSource,
-    union: &BTreeMap<ObjectKey, Entry>,
-) -> Result<BTreeMap<Hash, Hash>, StreamError> {
-    let mut out: BTreeMap<Hash, Hash> = BTreeMap::new();
-    for k in union.keys().filter(|k| k.kind == kinds::ANSWER) {
-        let Some(a) = source.typed::<Answer>(*k)? else {
-            continue;
-        };
-        let [tag] = a.targets[..] else {
-            continue;
-        };
-        if a.act != rdy_model::AnswerAct::Tag {
-            continue;
-        }
-        // the tag object of the union, or one the holder holds already (a retry's root)
-        let tag_key = ObjectKey {
-            kind: kinds::TAG,
-            hash: tag,
-        };
-        let Some(t) = source.typed::<Tag>(tag_key)? else {
-            continue;
-        };
-        if !crate::holder::is_relay_answer_of(&a, &tag, &t.name) {
-            continue;
-        }
-        if out.contains_key(&tag) {
-            return Err(bad(Reason::OutsideTagClosure, *k));
-        }
-        out.insert(tag, k.hash);
-    }
-    Ok(out)
-}
-
 /// The residue `r`, decoded, from the union or the holder.
 fn residue(source: &mut UploadSource, r: Hash) -> Result<RedactionResidue, StreamError> {
     let key = ObjectKey {
@@ -911,12 +686,7 @@ pub(crate) fn prepare<E>(
         }
         Err(IndexError::Stream(e)) => return Err(e.into()),
     };
-    // 2. every prerequisite, from the union or the holder
-    for p in &prerequisites {
-        if !union.contains_key(p) && !rx.holds(p)? {
-            return Err(missing(*p).into());
-        }
-    }
+    let objects: Vec<ObjectKey> = union.keys().copied().collect();
     let reader = rx.reader;
     let mut source = UploadSource {
         files,
@@ -927,9 +697,11 @@ pub(crate) fn prepare<E>(
         },
         masked: BTreeMap::new(),
     };
+    // 2. every prerequisite, from the union or the holder
+    stream_source::check_prerequisites(&mut source, &prerequisites)?;
     // 3. the root names the target
     let root_key = header.root();
-    let root: Tag = source.typed(root_key)?.ok_or_else(|| missing(root_key))?;
+    let root: Tag = stream_source::root_tag(&mut source, root_key)?;
     if root.name.as_bytes() != target.tag.as_bytes() || root.landing != target.landing {
         return Err(target_mismatch(root_key).into());
     }
@@ -957,32 +729,26 @@ pub(crate) fn prepare<E>(
         reader.check_new_signatures(&items)?;
     }
     // 5. the closure
-    check_closure(rx, &mut source, root_key, &root)?;
+    stream_source::check_closure(&mut source, root_key, &root, &objects)?;
     // 6. the approvals: every new apply's proof, and the holder's active ones
     let empty = Imported::default();
     let active: &Imported = rx.auth.imported.as_ref().unwrap_or(&empty);
-    let mut incoming: BTreeMap<Hash, PortableRemoval> = BTreeMap::new();
+    let mut new_applies: Vec<Hash> = Vec::new();
     for k in union.keys().filter(|k| k.kind == kinds::REDACTION_APPLY) {
-        if rx.holds(k)? {
-            continue;
+        if !rx.holds(k)? {
+            new_applies.push(k.hash);
         }
-        incoming.insert(k.hash, sync_proof::check(&mut source, k.hash)?);
     }
+    let incoming: BTreeMap<Hash, PortableRemoval> =
+        stream_source::check_applies(&mut source, new_applies)?;
     let removal_of = |apply: &Hash| incoming.get(apply).or_else(|| active.removals.get(apply));
     // the approved tuples of each key: the holder's applies in log order, then the upload's
-    let mut approved: BTreeMap<ObjectKey, Vec<(Hash, RemovalObject)>> = BTreeMap::new();
-    for a in &rx.auth.applies {
-        if let Some(r) = active.removals.get(&a.hash) {
-            for (k, t) in &r.objects {
-                approved.entry(*k).or_default().push((a.hash, *t));
-            }
-        }
-    }
-    for (h, r) in &incoming {
-        for (k, t) in &r.objects {
-            approved.entry(*k).or_default().push((*h, *t));
-        }
-    }
+    let held = rx
+        .auth
+        .applies
+        .iter()
+        .filter_map(|a| active.removals.get(&a.hash).map(|r| (a.hash, r)));
+    let approved = stream_source::approved_tuples(held, &incoming);
     let incoming_keys: BTreeSet<ObjectKey> = incoming
         .values()
         .flat_map(|r| r.objects.keys().copied())
@@ -990,27 +756,18 @@ pub(crate) fn prepare<E>(
     // every dropped record names a validated apply that approves its exact tuple
     for (key, e) in &union {
         for (_, d) in &e.dropped {
-            let fits = removal_of(&d.apply)
-                .and_then(|r| r.objects.get(key))
-                .is_some_and(|t| t.len == d.original_len && t.residue == d.residue);
-            if !fits {
+            if !stream_source::drop_fits(removal_of(&d.apply), key, d) {
                 return Err(bad(Reason::InvalidRemovalProof, *key).into());
             }
         }
     }
     // one tuple per key this take touches
     let one_tuple = |key: &ObjectKey, e: Option<&Entry>| -> Result<RemovalObject, StreamError> {
-        let mut tuples: BTreeSet<(u32, Option<Hash>)> = BTreeSet::new();
-        for (_, t) in approved.get(key).into_iter().flatten() {
-            tuples.insert((t.len, t.residue));
-        }
-        for (_, d) in e.into_iter().flat_map(|e| &e.dropped) {
-            tuples.insert((d.original_len, d.residue));
-        }
-        match tuples.into_iter().collect::<Vec<_>>()[..] {
-            [(len, residue)] => Ok(RemovalObject { len, residue }),
-            _ => Err(bad(Reason::InvalidRemovalProof, *key)),
-        }
+        stream_source::one_tuple(
+            &approved,
+            key,
+            e.into_iter().flat_map(|e| e.dropped.iter().map(|(_, d)| d)),
+        )
     };
     // every key the upload approves or drops has one tuple across the holder's approvals, the
     // upload's and its dropped records, held or not: a key the holder removed already keeps the
@@ -1093,7 +850,7 @@ pub(crate) fn prepare<E>(
             }
             let mut children = Vec::with_capacity(e.refs.len());
             for r in &e.refs {
-                children.push(resolve(rx, &union, *key, *r)?);
+                children.push(stream_source::resolve(&mut source, *key, *r)?);
             }
             children.sort_unstable();
             children.dedup();
@@ -1186,7 +943,7 @@ pub(crate) fn prepare<E>(
     // its tag object whichever tag stays the version: at most one per tag object, and never
     // another one than the holder holds for it. The caller's check judges signatures against
     // them, so they are found before it runs
-    let relayed = relay_answers(&mut source, &union)?;
+    let relayed = stream_source::relay_answers(&mut source, &objects)?;
     let mut answer_refs: Vec<(String, Vec<u8>)> = Vec::new();
     for (tag, answer) in &relayed {
         let name = crate::holder::answer_tag_object_ref(tag);
@@ -1207,14 +964,14 @@ pub(crate) fn prepare<E>(
         repo_id: header.repo_id,
         root_hash: root_key.hash,
         root: root.clone(),
-        objects: union.keys().copied().collect(),
+        objects,
         relay_answers: relayed,
     };
     let choice = check(&mut source, &facts).map_err(TakeError::Validation)?;
     // each answer is read again after the check (a reread checks its frame and hash): input
     // changed since then refuses here, before any append, as an answer the holder holds is not
     // read again by the append
-    if relay_answers(&mut source, &union)? != facts.relay_answers {
+    if stream_source::relay_answers(&mut source, &facts.objects)? != facts.relay_answers {
         return Err(StreamError::bad_record(0, 0, Reason::InputChangedDuringTake).into());
     }
     let mut refs: Vec<(String, Vec<u8>)> = Vec::new();

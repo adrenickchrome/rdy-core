@@ -58,6 +58,7 @@ mod read_state;
 pub mod redaction;
 pub mod related;
 pub mod render_inputs;
+pub mod render_source;
 pub mod repo;
 pub mod search;
 pub mod section;

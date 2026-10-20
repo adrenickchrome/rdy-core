@@ -35,6 +35,9 @@ time.workspace = true
 # Every log record is compiled out: ureq-proto writes raw request bytes, Authorization included,
 # at trace level.
 log = { workspace = true, features = ["max_level_off", "release_max_level_off"] }
+# A stream render's one anonymous scratch file (`render_source`): unlinked at creation, so it
+# needs no cleanup and leaves no name behind.
+tempfile.workspace = true
 
 [features]
 # Test hooks that lower the redaction report's bounds for a test thread
@@ -44,7 +47,6 @@ test-support = []
 
 [dev-dependencies]
 rdy-engine = { path = ".", features = ["test-support"] }
-tempfile.workspace = true
 rdy-graph.workspace = true
 proptest.workspace = true
 criterion.workspace = true
