@@ -251,18 +251,30 @@ fn segment_digests(project: &Path, end: Location) -> Value {
     Value::Object(out)
 }
 
-/// The bytes of the log of the store under `project` from `from` to its end.
-fn tail_bytes(project: &Path, from: Location) -> Vec<u8> {
+/// The bytes of the log of the store under `project` from `from` to `to`, in `from`'s segment;
+/// with no `to`, to the log's end, which must be in that segment.
+fn tail_bytes(project: &Path, from: Location, to: Option<Location>) -> Vec<u8> {
     let dir = project.join(".rdy/store/segments");
-    let mut out = std::fs::read(seg_path(&dir, from.segment)).unwrap()
-        [usize::try_from(from.offset).unwrap()..]
-        .to_vec();
-    assert!(
-        !seg_path(&dir, from.segment + 1).exists(),
-        "the tail stays in the stop's segment"
-    );
-    out.shrink_to_fit();
-    out
+    let bytes = std::fs::read(seg_path(&dir, from.segment)).unwrap();
+    let start = usize::try_from(from.offset).unwrap();
+    match to {
+        Some(to) => {
+            assert_eq!(
+                to.segment, from.segment,
+                "the tail stays in the stop's segment"
+            );
+            let end = usize::try_from(to.offset).unwrap();
+            assert!(end <= bytes.len(), "the log ends before {to:?}");
+            bytes[start..end].to_vec()
+        }
+        None => {
+            assert!(
+                !seg_path(&dir, from.segment + 1).exists(),
+                "the tail stays in the stop's segment"
+            );
+            bytes[start..].to_vec()
+        }
+    }
 }
 
 /// Every removal record and dropped frame of the log of `r` before `upto`: each dropped frame
@@ -393,11 +405,16 @@ fn chain_end(files: &[PathBuf]) -> Location {
 /// source end, and the store's facts.
 fn whole_facts(files: &[PathBuf], to: &Path, holder: bool) -> Value {
     let s = chain_load(files, to, None);
+    whole_facts_of(&s, files, to, holder)
+}
+
+/// The facts of the whole load of `files` into `to` that gave `s`.
+fn whole_facts_of(s: &LoadSummary, files: &[PathBuf], to: &Path, holder: bool) -> Value {
     let end = chain_end(files);
     let r = open(to, holder);
     let v = json!({
         "end": loc(end),
-        "summary": summary_facts(&s),
+        "summary": summary_facts(s),
         "segments": segment_digests(to, end),
         "store": store_facts(&r, end),
     });
@@ -410,8 +427,22 @@ fn whole_facts(files: &[PathBuf], to: &Path, holder: bool) -> Value {
 /// carried batch's end.
 fn stop_facts(files: &[PathBuf], selector: &str, to: &Path, holder: bool) -> Value {
     let s = chain_load(files, to, Some(selector));
+    stop_facts_of(&s, selector, to, holder, None)
+}
+
+/// The facts of the load into `to`, stopped at `selector`, that gave `s`. `end` is the end of
+/// the carried batch as the expect file pins it: the tail and the store's facts stop there, and
+/// any upgrade batch after it is checked apart (`upgrade_after`). With no `end` (the writer, of
+/// this rdy's own store format), the carried batch ends at the log's end.
+fn stop_facts_of(
+    s: &LoadSummary,
+    selector: &str,
+    to: &Path,
+    holder: bool,
+    end: Option<Location>,
+) -> Value {
     let at = s.stopped_at.as_ref().unwrap().position;
-    let tail = tail_bytes(to, at);
+    let tail = tail_bytes(to, at, end);
     let end = Location {
         segment: at.segment,
         offset: at.offset + tail.len() as u64,
@@ -421,7 +452,7 @@ fn stop_facts(files: &[PathBuf], selector: &str, to: &Path, holder: bool) -> Val
         "selector": selector,
         "position": loc(at),
         "end": loc(end),
-        "summary": summary_facts(&s),
+        "summary": summary_facts(s),
         "tail": hex(&tail),
         "fsck_warnings": r.fsck().unwrap().warnings,
         "store": store_facts(&r, end),
@@ -637,8 +668,12 @@ fn as_read_now(want: &Value, upgrade: u64) -> Value {
     if upgrade > 0 {
         let n = &mut want["facts"]["objects"][kinds::REF_UPDATE.to_string()];
         *n = json!(n.as_u64().unwrap() + upgrade);
-        for member in ["frames", "checked_payloads"] {
-            let n = &mut want["facts"]["fsck"][member];
+        let fsck = want["facts"]["fsck"].as_object_mut().unwrap();
+        let n = &mut fsck["frames"];
+        *n = json!(n.as_u64().unwrap() + upgrade);
+        // a redaction count: in the report only while a redaction is active, and kept absent
+        // when it is not
+        if let Some(n) = fsck.get_mut("checked_payloads") {
             *n = json!(n.as_u64().unwrap() + upgrade);
         }
     }
@@ -665,10 +700,11 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
     }
 }
 
-/// The data frames of the upgrade batch after `end`: none while this rdy writes store format 16.
-fn upgrade_after(dir: &Path, end: Location, holder: bool) -> u64 {
+/// The data frames of the upgrade batch after `end`, for fixtures of store format `format`: none
+/// while this rdy writes that format.
+fn upgrade_after(dir: &Path, end: Location, holder: bool, format: u32) -> u64 {
     let r = open(dir, holder);
-    let n = crate::io_dump_fixture_s15::upgrade_tail(&r, end, 16);
+    let n = crate::io_dump_fixture_s15::upgrade_tail(&r, end, format);
     r.close().unwrap();
     n
 }
@@ -681,28 +717,34 @@ fn check_whole(got: &Value, want: &Value, upgrade: u64, what: &str) {
     check_store(&got["store"], &want["store"], upgrade, what);
 }
 
-/// Checks the facts of a stopped load (`got`) against the expect file's `want`. The bytes after
-/// the stop are the pinned carried batch, then at most one upgrade batch.
+/// Checks the facts of a stopped load (`got`, read up to the pinned end of its carried batch)
+/// against the expect file's `want`. The bytes from the stop to that end are the pinned carried
+/// batch; `upgrade_after` checks the at most one upgrade batch after it.
 fn check_stop(got: &Value, want: &Value, upgrade: u64, what: &str) {
-    for member in ["selector", "position", "summary", "fsck_warnings"] {
+    for member in ["selector", "position", "end", "summary", "fsck_warnings"] {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
-    let (got_tail, want_tail) = (
-        got["tail"].as_str().unwrap(),
-        want["tail"].as_str().unwrap(),
-    );
-    assert!(
-        got_tail.starts_with(want_tail),
+    assert_eq!(
+        got["tail"], want["tail"],
         "{what}: the carried batch, byte for byte"
     );
-    if upgrade == 0 {
-        assert_eq!(
-            got_tail, want_tail,
-            "{what}: nothing after the carried batch"
-        );
-        assert_eq!(got["end"], want["end"], "{what}");
-    }
     check_store(&got["store"], &want["store"], upgrade, what);
+}
+
+/// A load of `files` into `to` stopped at the expect file's stop `want`, checked as this rdy or,
+/// when `later`, as a later one (`as_a_later_rdy`): its facts up to the pinned end of its carried
+/// batch, and the data frames of the upgrade batch after that end.
+fn stopped(files: &[PathBuf], want: &Value, to: &Path, holder: bool, later: bool) -> (Value, u64) {
+    let selector = want["selector"].as_str().unwrap();
+    let s = chain_load(files, to, Some(selector));
+    let format = if later {
+        as_a_later_rdy(to, holder)
+    } else {
+        16
+    };
+    let end = loc_of(&want["end"]);
+    let got = stop_facts_of(&s, selector, to, holder, Some(end));
+    (got, upgrade_after(to, end, holder, format))
 }
 
 #[test]
@@ -758,11 +800,21 @@ fn hc9_full_and_three_file_chains_load_whole() {
             assert_eq!(f["batches"], f["trailer"]["batches"]);
             assert_eq!(f["frames"], f["trailer"]["frames"]);
         }
-        // the whole load: the source log, byte for byte up to its end, then at most an upgrade
+        // the whole load: the source log, byte for byte up to its end, then at most an upgrade.
+        // A payload an earlier file holds intact and a later file's apply removes is written as
+        // zeros from the start: no segment write ever holds a removed payload, even one that the
+        // load would erase before it ends
         let to = d.path().join(format!("{what}-whole"));
-        let got = whole_facts(&files, &to, input.holder);
+        let w = watch(input.canaries.to_vec());
+        let s = chain_load(&files, &to, None);
+        assert!(
+            !w.0.get(),
+            "{what}: a write held a payload removed in the chain"
+        );
+        drop(w);
+        let got = whole_facts_of(&s, &files, &to, input.holder);
         let end = chain_end(&files);
-        let upgrade = upgrade_after(&to, end, input.holder);
+        let upgrade = upgrade_after(&to, end, input.holder, 16);
         check_whole(&got, &expect["whole"], upgrade, what);
         assert!(
             got["summary"]["warnings"] == json!([]),
@@ -799,7 +851,7 @@ fn hc9_full_and_three_file_chains_load_whole() {
         if files.len() > 1 {
             let to = d.path().join(format!("{what}-alone"));
             let got = whole_facts(&files[..1], &to, input.holder);
-            let upgrade = upgrade_after(&to, chain_end(&files[..1]), input.holder);
+            let upgrade = upgrade_after(&to, chain_end(&files[..1]), input.holder, 16);
             check_whole(&got, &expect["full_alone"], upgrade, what);
             assert!(
                 holds(&to, input.canaries[0]),
@@ -901,8 +953,6 @@ fn hc9_fixed_stops_before_removal_load_and_warn() {
         for name in input.stops {
             let what = format!("{}: {name}", input.expect);
             let want = &expect[*name];
-            // the stop's literal selector and position, from the expect file
-            let selector = want["selector"].as_str().unwrap();
             let to = d.path().join(format!("{}-{name}", input.expect));
             // the payloads that stay removed at the stop are never written
             let missing: Vec<&'static [u8]> = input
@@ -912,7 +962,7 @@ fn hc9_fixed_stops_before_removal_load_and_warn() {
                 .filter(|c| !stop_holds(want, input, c))
                 .collect();
             let w = watch(missing.clone());
-            let got = stop_facts(&files, selector, &to, input.holder);
+            let (got, upgrade) = stopped(&files, want, &to, input.holder, false);
             assert!(
                 !w.0.get(),
                 "{what}: a write held a payload removed at the stop"
@@ -921,8 +971,6 @@ fn hc9_fixed_stops_before_removal_load_and_warn() {
             for c in &missing {
                 assert!(!holds(&to, c), "{what}");
             }
-            let end = loc_of(&got["end"]);
-            let upgrade = upgrade_after(&to, end, input.holder);
             check_stop(&got, want, upgrade, &what);
             // one warning for each appended carried record, with the fix of the store's mode
             let carried = tail_carried(want);
@@ -1087,6 +1135,71 @@ fn hc9_stopped_fixtures_redump_reload_and_reindex() {
             }
         }
     }
+}
+
+/// Appends to the store under `dir` the batch a later rdy's load appends after the source log
+/// and the carried batch: one ref update that names this rdy's store format, and its marker.
+/// Returns the store format the checks then take the fixtures to hold: 15, as if this rdy were a
+/// later one. When this rdy writes a later store format than 16, its load appended that batch
+/// already, and nothing is appended.
+fn as_a_later_rdy(dir: &Path, holder: bool) -> u32 {
+    if STORE_FORMAT != 16 {
+        return 16;
+    }
+    let mut r = open(dir, holder);
+    r.store_mut()
+        .set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(STORE_FORMAT))])
+        .unwrap();
+    r.close().unwrap();
+    15
+}
+
+#[test]
+fn hc9_a_later_store_format_reads_the_fixtures_after_one_upgrade_batch() {
+    // the checks of a later rdy, which appends one upgrade batch after each load: the whole
+    // loads, a chain's full dump alone, and each fixed stop, of a project (whose report holds the
+    // redaction counts) and of a holder (whose chain's full dump and stops hold none)
+    let d = tempfile::tempdir().unwrap();
+    let (mut with_counts, mut without) = (0, 0);
+    let mut count = |want: &Value| {
+        if want["store"]["facts"]["fsck"]
+            .get("checked_payloads")
+            .is_some()
+        {
+            with_counts += 1;
+        } else {
+            without += 1;
+        }
+    };
+    for input in &INPUTS {
+        let expect = read_expect(input.expect);
+        let files = input.files();
+        let mut wholes = vec![(files.clone(), "whole")];
+        if files.len() > 1 {
+            wholes.push((files[..1].to_vec(), "full_alone"));
+        }
+        for (files, name) in wholes {
+            let what = format!("{}: {name}, upgraded", input.expect);
+            let to = d.path().join(format!("{}-{name}", input.expect));
+            let s = chain_load(&files, &to, None);
+            let format = as_a_later_rdy(&to, input.holder);
+            let got = whole_facts_of(&s, &files, &to, input.holder);
+            let upgrade = upgrade_after(&to, chain_end(&files), input.holder, format);
+            assert_eq!(upgrade, 1, "{what}");
+            check_whole(&got, &expect[name], upgrade, &what);
+            count(&expect[name]);
+        }
+        for name in input.stops {
+            let what = format!("{}: {name}, upgraded", input.expect);
+            let want = &expect[*name];
+            let to = d.path().join(format!("{}-{name}", input.expect));
+            let (got, upgrade) = stopped(&files, want, &to, input.holder, true);
+            assert_eq!(upgrade, 1, "{what}");
+            check_stop(&got, want, upgrade, &what);
+            count(want);
+        }
+    }
+    assert!(with_counts > 0 && without > 0, "{with_counts} {without}");
 }
 
 /// An ordinary write to a loaded project: one block, landed.
