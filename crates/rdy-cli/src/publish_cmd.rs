@@ -42,10 +42,9 @@ pub(crate) fn request(a: &PublishArgs) -> Value {
 /// settings or credential warning in the shared warning form, then each render warning.
 pub(crate) fn result_text(v: &Value) -> String {
     let url = text(&v["url"]);
-    let profile = match v["record"]["profile"]["id"].as_str() {
-        Some(id) => id,
-        None => "implicit:org",
-    };
+    let profile = v["record"]["profile"]["id"]
+        .as_str()
+        .unwrap_or("implicit:org");
     let mut out = format!(
         "candidate {}\n{url}\nprofile: {profile}\naudience: {}\nselected: {} blocks\ndisclosure review: {url}",
         text(&v["id"]),
