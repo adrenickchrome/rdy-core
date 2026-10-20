@@ -224,6 +224,11 @@ fn spec_target(op: &str) -> Option<String> {
         "export_profile_md" => "no spec target: print selected docs as Markdown (reported)",
         "export_profile_html" => "no spec target: print selected docs as HTML (reported)",
         "export_profile_pdf" => "no spec target: print selected docs as PDF (reported)",
+        "publication_manifest" => "no spec target: hash a publication manifest (reported)",
+        "render_stream_site" => "no spec target: render a site from a tag stream (reported)",
+        "render_stream_markdown" => "no spec target: render Markdown from a tag stream (reported)",
+        "render_stream_techdocs" => "no spec target: render TechDocs from a tag stream (reported)",
+        "render_one_page" => "no spec target: render one publication page (reported)",
         "signature_check" => {
             "no spec target: one stored ssh-ed25519 signature checked offline against its landing, trust input parsed beforehand (reported; no ceiling)"
         }
@@ -3516,6 +3521,235 @@ fn tier_publication(
     std::fs::remove_dir_all(&copy).expect("remove the copy");
 }
 
+/// The tag the publication cost ops render from.
+const PUBLICATION_COST_TAG: &str = "v0.2.0";
+
+/// The publication cost ops (hub tb-G28CM, core tb-A4DAV), in the order [`publication_costs`]
+/// measures them. All are reported with no ceiling.
+const PUBLICATION_COST_OPS: [&str; 5] = [
+    "publication_manifest",
+    "render_stream_site",
+    "render_stream_markdown",
+    "render_stream_techdocs",
+    "render_one_page",
+];
+
+/// What one publication cost op produced, for the ledger: its output's file count, bytes and
+/// hash. Every run of an op must give the same facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PublicationCost {
+    op: String,
+    files: u64,
+    bytes: u64,
+    hash: Hash,
+}
+
+/// The facts of an artifact's manifest: files, bytes and the manifest hash.
+fn manifest_cost(
+    op: String,
+    manifest: &rdy_engine::publication_manifest::Manifest,
+) -> PublicationCost {
+    use rdy_engine::publication_manifest::{MANIFEST_RECIPE, manifest_hash};
+    PublicationCost {
+        op,
+        files: manifest.files.len() as u64,
+        bytes: manifest.files.iter().map(|e| e.size).sum(),
+        hash: manifest_hash(manifest, MANIFEST_RECIPE).expect("hash the manifest"),
+    }
+}
+
+/// The page whose body the one-page op renders: the first doc page of `files`, a `.html` file in
+/// a folder that is not a folder's index page.
+fn first_doc_page(files: &BTreeMap<String, Vec<u8>>) -> String {
+    files
+        .keys()
+        .find(|p| {
+            p.ends_with(".html")
+                && !p.starts_with("go/")
+                && p.split('/').count() == 2
+                && !p.ends_with("/index.html")
+        })
+        .expect("the publication has a doc page")
+        .clone()
+}
+
+/// The publication stream-render and recipe ops, all reported with no ceiling. `proj` is closed.
+/// A copy of it gets an org profile that selects the first half of its doc ids in sorted order,
+/// rounded up and capped at [`PUBLICATION_SELECT_CAP`], and a tag; the profile and tag, the
+/// copy's handle, the captured inputs, the tag's history stream, the three render requests, the
+/// directly built site and the selected page are all made outside every timer. The copy is
+/// removed before this returns. Returns the measures and, in the same order, the output facts of
+/// the ledger; every run of an op must give the same facts.
+///
+/// - `publication_manifest`: the manifest hash (recipe 1, after validation) of the built site's
+///   manifest.
+/// - `render_stream_site`, `render_stream_markdown`, `render_stream_techdocs`: one render
+///   request (`rdy_render::process::run`) over the prelude and the stream, to a sink. It
+///   includes the stream's copy to its scratch file, its check, the materialization, the build,
+///   the output check and the packet; not the project open and not a subprocess start.
+/// - `render_one_page`: `render_publication_page` of one doc page against the warm state.
+fn publication_costs(
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) -> (Vec<Measure>, Vec<PublicationCost>) {
+    use rdy_engine::publication::ReadPublicationSource;
+    use rdy_engine::publication_manifest::{MANIFEST_RECIPE, manifest_hash};
+    use rdy_render::process::{ProcessSummary, RenderFormat, run, write_request_prelude};
+    use rdy_render::render_input::capture_inputs;
+    use rdy_render::{build_publication, render_publication_page};
+    let copy = parent.join(format!("p-pubcost{sfx}"));
+    copy_project(proj, &copy);
+    let mut r = Rdy::open(&copy).expect("open the copy");
+    let m = r.read().materialized(&Scope::Canon).expect("canon");
+    let mut docs: Vec<BlockId> = m
+        .iter()
+        .filter(|b| b.block_type == rdy_model::tree::DOC)
+        .map(|b| b.id.clone())
+        .collect();
+    docs.sort();
+    drop(m);
+    let take = docs.len().div_ceil(2).min(PUBLICATION_SELECT_CAP);
+    let select: Vec<String> = docs[..take].iter().map(ToString::to_string).collect();
+    land_org_profile(&mut r, "pubc", PUBLICATION_KEY, &select);
+    r.tag(&approver(), PUBLICATION_COST_TAG, None, None)
+        .expect("tag the profile's state");
+    let tag = r
+        .store()
+        .tags()
+        .expect("tags")
+        .into_iter()
+        .find(|(n, _, _)| n == PUBLICATION_COST_TAG)
+        .expect("the tag")
+        .1;
+    let landing = r.store().read_tag(&tag).expect("read the tag").landing;
+
+    let read = r.read();
+    let scope = Scope::At(landing);
+    let canon = read.materialized(&Scope::Canon).expect("canon");
+    let profile = canon
+        .iter()
+        .find(|b| b.block_type == rdy_schema::publication::PROFILE_TYPE)
+        .expect("the profile")
+        .id
+        .to_string();
+    drop(canon);
+    let inputs = capture_inputs(&read, &scope).expect("capture the inputs");
+    let mut stream = Vec::new();
+    rdy_engine::stream_export::write(&read, tag, &BTreeSet::new(), &mut stream)
+        .expect("write the tag stream");
+    let request = |format: RenderFormat| {
+        let mut bytes = Vec::new();
+        write_request_prelude(&profile, format, &inputs, &mut bytes).expect("the prelude");
+        bytes.extend_from_slice(&stream);
+        bytes
+    };
+    let source = ReadPublicationSource::with_settings(
+        &read,
+        &inputs.pack,
+        &inputs.title,
+        inputs.description.as_deref(),
+    );
+    let tagged = read.materialized(&scope).expect("the tagged state");
+    let site = build_publication(
+        &source,
+        &tagged,
+        PUBLICATION_COST_TAG,
+        false,
+        &profile,
+        &inputs,
+    )
+    .expect("build the site");
+    let page = first_doc_page(&site.files);
+
+    let mut measures = vec![];
+    let mut costs = vec![];
+    let name = |i: usize| format!("{}{sfx}", PUBLICATION_COST_OPS[i]);
+
+    assert_eq!(
+        manifest_hash(&site.manifest, MANIFEST_RECIPE).expect("hash"),
+        site.manifest_hash,
+        "the built site's hash is its manifest's"
+    );
+    measures.push(measure(&name(0), runs, |_| {
+        let got = manifest_hash(&site.manifest, MANIFEST_RECIPE).expect("hash");
+        std::hint::black_box(got);
+    }));
+    costs.push(manifest_cost(name(0), &site.manifest));
+
+    for (i, format) in [
+        (1, RenderFormat::Site),
+        (2, RenderFormat::Markdown),
+        (3, RenderFormat::Techdocs),
+    ] {
+        let bytes = request(format);
+        let mut got: Vec<ProcessSummary> = vec![];
+        measures.push(measure(&name(i), runs, |_| {
+            got.push(run(bytes.as_slice(), std::io::sink()).expect("render from the stream"));
+        }));
+        assert!(got.windows(2).all(|w| w[0] == w[1]), "{}: {got:?}", name(i));
+        let s = got.swap_remove(0);
+        costs.push(PublicationCost {
+            op: name(i),
+            files: u64::from(s.files),
+            bytes: s.bytes,
+            hash: s.manifest_hash,
+        });
+    }
+
+    let mut pages: Vec<rdy_render::RenderedPage> = vec![];
+    measures.push(measure(&name(4), runs, |_| {
+        pages.push(
+            render_publication_page(
+                &source,
+                &tagged,
+                PUBLICATION_COST_TAG,
+                false,
+                &profile,
+                &inputs,
+                &page,
+            )
+            .expect("render the page"),
+        );
+    }));
+    let first = &pages[0];
+    assert!(pages.iter().all(|p| p == first), "{}: runs differ", name(4));
+    assert!(
+        first.html == site.files[&page],
+        "the page is the site's page"
+    );
+    costs.push(manifest_cost(name(4), &first.manifest));
+
+    drop(pages);
+    drop(site);
+    drop(tagged);
+    drop(source);
+    drop(read);
+    drop(r);
+    std::fs::remove_dir_all(&copy).expect("remove the copy");
+    (measures, costs)
+}
+
+/// [`publication_costs`] into `out`, with each op's output facts on standard error for the
+/// ledger. `sfx` names the tier (`""` or `_50k`).
+fn tier_publication_costs(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+) {
+    let (measures, costs) = publication_costs(proj, parent, sfx, runs);
+    for c in &costs {
+        eprintln!(
+            "{}: {} files, {} bytes, hash {}",
+            c.op, c.files, c.bytes, c.hash
+        );
+    }
+    out.extend(measures);
+}
+
 /// The runs of each signature op, in both tiers: the ops are pure reads of a few microseconds.
 const SIGNATURE_RUNS: usize = 200;
 
@@ -4053,6 +4287,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_export(&mut out, &proj, dir.path(), 5);
     tier_clone(&mut out, &proj, dir.path(), "", 5);
     tier_publication(&mut out, &proj, dir.path(), 5);
+    tier_publication_costs(&mut out, &proj, dir.path(), "", 5);
     tier_signatures(&mut out, &proj, dir.path(), "", SIGNATURE_RUNS);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
@@ -4809,6 +5044,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_dump(&mut out, &proj, parent, sfx, 3);
     tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);
     tier_clone(&mut out, &proj, parent, sfx, 3);
+    tier_publication_costs(&mut out, &proj, parent, sfx, 3);
     tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
@@ -5796,6 +6032,124 @@ mod tests {
             .map(|e| e.expect("entry").file_name())
             .collect();
         assert_eq!(left, [std::ffi::OsString::from("p")]);
+    }
+
+    /// The reported operations of Task 16, in order, with their exact target texts.
+    const HPB16_TARGETS: [(&str, &str); 5] = [
+        (
+            "publication_manifest",
+            "no spec target: hash a publication manifest (reported)",
+        ),
+        (
+            "render_stream_site",
+            "no spec target: render a site from a tag stream (reported)",
+        ),
+        (
+            "render_stream_markdown",
+            "no spec target: render Markdown from a tag stream (reported)",
+        ),
+        (
+            "render_stream_techdocs",
+            "no spec target: render TechDocs from a tag stream (reported)",
+        ),
+        (
+            "render_one_page",
+            "no spec target: render one publication page (reported)",
+        ),
+    ];
+
+    /// Task 16: the stream-render and recipe operations are information only (hub tb-G28CM, core
+    /// tb-A4DAV): exactly five, with the exact target texts in operation order, in both tiers, no
+    /// ceiling and no baseline entry.
+    #[test]
+    fn hpb16_operations_have_closed_targets() {
+        assert_eq!(PUBLICATION_COST_OPS.len(), HPB16_TARGETS.len());
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for (op, (name, text)) in PUBLICATION_COST_OPS.iter().zip(HPB16_TARGETS) {
+            assert_eq!(*op, name);
+            let large = format!("{op}{LARGE_SUFFIX}");
+            assert_eq!(spec_target(op).as_deref(), Some(text), "{op}");
+            // the large tier's name carries the shared large-tier note after the same text
+            assert_eq!(
+                spec_target(&large),
+                Some(format!("{text}{LARGE_TIER_NOTE}")),
+                "{large}"
+            );
+            for name in [op.to_string(), large] {
+                assert_eq!(spec_ceiling_ms(&name), None, "{name} has a ceiling");
+                for class in baseline["classes"].as_object().expect("classes").values() {
+                    assert!(class["ops"].get(&name).is_none(), "{name} is baselined");
+                }
+            }
+        }
+    }
+
+    /// Task 16: the operations run end to end on a small fixture with two runs. The checks are on
+    /// results, order, output equality, file counts and cleanup: no duration is asserted.
+    #[test]
+    fn hpb16_operations_run_on_a_small_fixture() {
+        rdy_model::seed_ids_for_tests(0x6870_6231);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        drop(r);
+        for sfx in ["", LARGE_SUFFIX] {
+            let (measures, costs) = publication_costs(&proj, dir.path(), sfx, 2);
+            let names: Vec<String> = measures.iter().map(|m| m.op.clone()).collect();
+            let want: Vec<String> = PUBLICATION_COST_OPS
+                .iter()
+                .map(|o| format!("{o}{sfx}"))
+                .collect();
+            assert_eq!(names, want);
+            for m in &measures {
+                assert_eq!(m.runs, 2, "{m:?}");
+            }
+            let cost_names: Vec<String> = costs.iter().map(|c| c.op.clone()).collect();
+            assert_eq!(cost_names, want);
+            for c in &costs {
+                assert!(c.files > 0 && c.bytes > 0, "{c:?}");
+            }
+            // the site the stream process renders is the site the manifest hash covers
+            assert_eq!(costs[0].hash, costs[1].hash, "site from a stream");
+            assert_eq!(costs[0].files, costs[1].files);
+            assert_eq!(costs[0].bytes, costs[1].bytes);
+            // the prints differ from the site and from each other in layout, not in input
+            assert_ne!(costs[2].hash, costs[1].hash);
+            assert_ne!(costs[3].hash, costs[2].hash);
+            // one page is a page and its assets, not a site
+            assert!(costs[4].files < costs[1].files, "{:?}", costs[4]);
+            // the same fixture again gives the same facts
+            let (_, again) = publication_costs(&proj, dir.path(), sfx, 2);
+            assert_eq!(again, costs, "a second run of the tier");
+        }
+        rdy_model::unseed_ids_for_tests();
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("p")]);
+    }
+
+    /// Task 16: both workloads call the tier with their own suffix and run count.
+    #[test]
+    fn hpb16_both_workloads_call_the_new_tier() {
+        let src = include_str!("perf.rs");
+        let body = |name: &str| {
+            let from = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(
+            body("pub fn run_workload(")
+                .contains("tier_publication_costs(&mut out, &proj, dir.path(), \"\", 5);")
+        );
+        assert!(
+            body("fn run_large_tier(")
+                .contains("tier_publication_costs(&mut out, &proj, parent, sfx, 3);")
+        );
     }
 
     /// The intake ops run end to end on a small tree with two proposals, and each has a reported
