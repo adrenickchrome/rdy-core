@@ -28,6 +28,7 @@ mod cli_publication_identity;
 mod cli_publication_implicit;
 mod cli_publication_isolation;
 mod cli_publication_output;
+mod cli_publish;
 mod cli_quarantine;
 mod cli_redaction;
 mod cli_ref;
