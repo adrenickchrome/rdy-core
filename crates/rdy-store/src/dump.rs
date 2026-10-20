@@ -91,21 +91,29 @@
 //!   `first_removed.offset: u64`, `digest: [u8; 32]` (the digest of format 1). The flag is 0 or
 //!   1; with 0 the position is zero. `removals` counts the dump's `REDACTION_APPLY` frames;
 //!   `first_removed` is the lowest local span those applies removed, absent when none has one.
+//!   A dropped frame names its authority in its `DROPPED` record: a span of an apply of this
+//!   file counts, a hole only a carried record explains does not ([`RemovalTally`]).
 //!
 //! A full dump has base `0.0`, a zero base marker and a zero `prev`. An increment holds at least
 //! one batch. The first batch starts at `base`, or at offset zero of the next segment. The last
 //! batch ends at the header's end (its start, plus `37 + original_len` per frame, plus the marker
 //! frame), and its marker is `end_batch`; a dump of no batches ends at its base with its base
-//! marker. The reader also checks `removals` against the dump's applies, and a full dump's
-//! `first_removed` against its first dropped frame. The chain links between files are checked by
-//! the loader of a chain.
+//! marker. The reader also checks `removals` against the dump's applies, and `first_removed`
+//! against the lowest dropped frame whose authority is one of those applies; an increment may
+//! instead name a span before its base, which an earlier file holds. Every place is checked
+//! arithmetic: one past `u64::MAX` is `dump position overflows`. The chain links between files
+//! are checked by the loader of a chain.
+//!
+//! A record payload holds at most `MAX_BLOB_BYTES` (64 MiB): a longer one is refused by its
+//! length, before it is read or written. A carried removal record (kind 23) is decoded by the
+//! bounded record decoder (`crate::bounded`) when it is read or written, and refused with that
+//! decoder's error; the released kinds keep their own limits.
 //!
 //! The reader allocates only by fallible growth: a payload in chunks of at most `ERASE_BUFFER`
-//! bytes, each frame slot, the trailer chain, both batch digests and each project file. A refused
-//! allocation is the dump refusal `record allocation failed`, never an abort.
-use crate::dump_chain::{
-    self, BatchMarker, DumpChainHeader, DumpKind, chain_text, first_dropped, follows,
-};
+//! bytes, each frame slot, the trailer chain, both batch digests, the removal tally and each
+//! project file. A refused allocation is the dump refusal `record allocation failed`, never an
+//! abort.
+use crate::dump_chain::{self, BatchMarker, DumpChainHeader, DumpKind, chain_text, follows};
 use crate::error::StoreError;
 use crate::kinds::{self, BatchCommit};
 use crate::redaction::StoredFrame;
@@ -114,6 +122,7 @@ use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{MAX_BLOB_BYTES, StoreReader};
 use rdy_model::{Hash, RepoId};
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 /// The 8 bytes every dump starts with.
@@ -402,24 +411,87 @@ pub struct RemovalFacts {
     pub first_removed: Option<Location>,
 }
 
-impl RemovalFacts {
-    /// Adds batch `b` of a full dump, as the checked source walker hands it out: each of its
-    /// applies, and its first dropped frame when no earlier batch had one. In a full dump every
-    /// dropped frame is a span of an apply the dump holds, so the first is the lowest. Refuses
-    /// more than `u32::MAX` applies and a place past `u64::MAX` (`dump position overflows`).
-    pub fn observe_full(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
-        let overflow = || StoreError::Refused(chain_text::OVERFLOW.into());
-        let applies = b
-            .frames
+/// The removal facts of a dump, gathered batch by batch, in file order, from the frames the
+/// checked source walker hands the writer or the reader reads: every `REDACTION_APPLY` frame
+/// counts (each physical one), and the first removed span is the lowest place of a dropped frame
+/// whose `DROPPED` record names one of those applies as its authority. A dropped frame that names
+/// anything else, a carried record or an apply of no frame here, is not a span of the dump's
+/// applies. Only the frames are read: no manifest position is trusted. Growth is fallible.
+#[derive(Clone, Debug, Default)]
+pub struct RemovalTally {
+    /// The `REDACTION_APPLY` frames seen.
+    applies: u64,
+    /// The hashes of those frames.
+    apply_hashes: HashSet<Hash>,
+    /// The lowest dropped place seen for each authority a `DROPPED` record names.
+    lowest: HashMap<Hash, Location>,
+}
+
+impl RemovalTally {
+    /// Adds batch `b`. Refuses a place past `u64::MAX` (`dump position overflows`) and a refused
+    /// growth (`record allocation failed`), as `StoreError::Refused`.
+    pub fn observe(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
+        self.add(b).map_err(|what| StoreError::Refused(what.into()))
+    }
+
+    /// The facts of the batches added so far. Refuses more than `u32::MAX` applies (`dump
+    /// position overflows`).
+    pub fn facts(&self) -> Result<RemovalFacts, StoreError> {
+        let removals = u32::try_from(self.applies)
+            .map_err(|_| StoreError::Refused(chain_text::OVERFLOW.into()))?;
+        Ok(RemovalFacts {
+            removals,
+            first_removed: self.first_removed(),
+        })
+    }
+
+    /// The `REDACTION_APPLY` frames added so far.
+    fn applies(&self) -> u64 {
+        self.applies
+    }
+
+    /// The lowest place of a dropped frame whose authority is an apply added so far.
+    fn first_removed(&self) -> Option<Location> {
+        self.lowest
             .iter()
-            .filter(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY))
-            .count();
-        self.removals = u32::try_from(applies)
-            .ok()
-            .and_then(|n| self.removals.checked_add(n))
-            .ok_or_else(overflow)?;
-        if self.first_removed.is_none() {
-            self.first_removed = first_dropped(b).ok_or_else(overflow)?;
+            .filter(|(authority, _)| self.apply_hashes.contains(*authority))
+            .map(|(_, at)| *at)
+            .min()
+    }
+
+    /// [`RemovalTally::observe`], with the refusal's text only.
+    fn add(&mut self, b: &DumpBatch) -> Result<(), &'static str> {
+        let mut at = b.start.offset;
+        for f in &b.frames {
+            match f {
+                Frame::Present { kind, hash, .. } if *kind == kinds::REDACTION_APPLY => {
+                    self.applies = self.applies.saturating_add(1);
+                    self.apply_hashes
+                        .try_reserve(1)
+                        .map_err(|_| drop_text::ALLOCATION)?;
+                    self.apply_hashes.insert(*hash);
+                }
+                Frame::Present { .. } => {}
+                Frame::Dropped { apply, .. } => {
+                    let place = Location {
+                        segment: b.start.segment,
+                        offset: at,
+                    };
+                    match self.lowest.get_mut(apply) {
+                        Some(low) => *low = (*low).min(place),
+                        None => {
+                            self.lowest
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.lowest.insert(*apply, place);
+                        }
+                    }
+                }
+            }
+            at = at
+                .checked_add(FRAME_HEADER)
+                .and_then(|a| a.checked_add(u64::from(f.original_len())))
+                .ok_or(chain_text::OVERFLOW)?;
         }
         Ok(())
     }
@@ -683,6 +755,17 @@ fn cannot_stand(kind: u8) -> String {
     format!("a record of kind {kind} cannot stand here")
 }
 
+/// The bounded decode of a carried removal record (kind 23), the only kind of a dump frame that
+/// is decoded on the way: the decoder's own error when it refuses one. Other kinds pass.
+fn check_carried(kind: u8, payload: &[u8]) -> Result<(), String> {
+    if kind != kinds::REDACTION_CARRIED {
+        return Ok(());
+    }
+    crate::bounded::decode::<rdy_model::RedactionCarried>(payload)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn not_carried(path: &str) -> String {
     format!("the project file path {path:?} is not one rdy carries")
 }
@@ -941,9 +1024,10 @@ impl<W: Write> DumpWriter<W> {
     /// Writes one sealed batch: its `BATCH` record, then its frames byte for byte, each dropped
     /// frame as its `DROPPED` record. Refuses a frame of a kind that cannot stand in a batch (a
     /// batch marker or an unassigned kind among them), a frame whose hash is not its payload's, a
-    /// dropped frame in a dump format that has no `DROPPED` record or one that breaks its record
-    /// rules, a batch whose original frames run past `u64::MAX`, and a batch whose digest is not
-    /// its frames'.
+    /// payload over `MAX_BLOB_BYTES`, a carried removal record the bounded decoder refuses (its
+    /// error), a dropped frame in a dump format that has no `DROPPED` record or one that breaks
+    /// its record rules, a batch with a dropped frame whose original frames run past `u64::MAX`
+    /// (`dump position overflows`), and a batch whose digest is not its frames'.
     pub fn batch(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
         let n = self.totals.batches + 1;
         // every check before the first byte, so a refused batch writes nothing; no store writes
@@ -957,12 +1041,20 @@ impl<W: Write> DumpWriter<W> {
                 return Err(StoreError::Refused(cannot_stand(f.kind())));
             }
             match f {
-                Frame::Present { hash, payload, .. } => {
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } => {
+                    if payload.len() as u64 > MAX_BLOB_BYTES {
+                        return Err(StoreError::Refused(cannot_stand(*kind)));
+                    }
                     if Hash::of(payload) != *hash {
                         return Err(StoreError::Refused(
                             "a record's hash does not match its bytes".into(),
                         ));
                     }
+                    check_carried(*kind, payload).map_err(StoreError::Refused)?;
                 }
                 Frame::Dropped {
                     kind, residue, len, ..
@@ -977,7 +1069,7 @@ impl<W: Write> DumpWriter<W> {
             }
         }
         if dropped && batch_end(b.start.offset, &b.frames).is_none() {
-            return Err(StoreError::Refused(drop_text::SPAN.into()));
+            return Err(StoreError::Refused(chain_text::OVERFLOW.into()));
         }
         let refused_allocation = || StoreError::Refused(drop_text::ALLOCATION.into());
         if try_batch_digest(b.frames.iter().map(|f| f.hash())).ok_or_else(refused_allocation)?
@@ -1094,10 +1186,8 @@ pub struct DumpReader<R: Read> {
     links: Option<DumpChainHeader>,
     /// The physical end and the marker of the last batch read (format 3).
     last: Option<(Location, BatchMarker)>,
-    /// The `REDACTION_APPLY` frames read (format 3).
-    applies: u64,
-    /// The place of the first dropped frame read (format 3).
-    first_drop: Option<Location>,
+    /// The removal facts of the batches read (format 3).
+    tally: RemovalTally,
     /// The trailer, once it and the end of the file are verified.
     trailer: Option<DumpTrailer>,
 }
@@ -1318,11 +1408,12 @@ impl<R: Read> DumpReader<R> {
             log_end: BatchMarker::ZERO.start,
             links: None,
             last: None,
-            applies: 0,
-            first_drop: None,
+            tally: RemovalTally::default(),
             trailer: None,
         };
         let format = read_prelude(&mut me.r)?;
+        // the record bound of format 3 holds from its header on
+        me.format = format;
         me.totals.bytes = PRELUDE_LEN;
         me.drops = drops_allowed(format);
         let first = me.record(false)?;
@@ -1478,14 +1569,23 @@ impl<R: Read> DumpReader<R> {
             if !self.kinds.contains(&frame.kind()) {
                 return Err(damaged(f.at, cannot_stand(frame.kind())));
             }
+            if let Some(payload) = frame.present_payload() {
+                check_carried(frame.kind(), payload).map_err(|what| damaged(f.at, what))?;
+            }
             frames
                 .try_reserve(1)
                 .map_err(|_| damaged(f.at, drop_text::ALLOCATION))?;
             frames.push(frame);
         }
-        // a dropped frame's place is the batch start plus the original sizes before it
+        // a dropped frame's place is the batch start plus the original sizes before it; past
+        // u64::MAX it has none (a position overflow from format 3 on)
         if dropped && batch_end(start.offset, &frames).is_none() {
-            return Err(damaged(record.at, drop_text::SPAN));
+            let what = if self.format >= 3 {
+                chain_text::OVERFLOW
+            } else {
+                drop_text::SPAN
+            };
+            return Err(damaged(record.at, what));
         }
         let refused = || damaged(record.at, drop_text::ALLOCATION);
         if try_batch_digest(frames.iter().map(|f| f.hash())).ok_or_else(refused)? != digest
@@ -1510,7 +1610,7 @@ impl<R: Read> DumpReader<R> {
     }
 
     /// The format-3 checks of one batch read at `at`: the first follows the header's base; each
-    /// one's physical end, marker, applies and first dropped frame are kept for the trailer.
+    /// one's physical end and marker, and its removal facts, are kept for the trailer.
     fn follow(
         &mut self,
         at: u64,
@@ -1522,15 +1622,7 @@ impl<R: Read> DumpReader<R> {
         }
         let end = dump_chain::batch_end(b).ok_or_else(|| damaged(at, chain_text::OVERFLOW))?;
         self.last = Some((end, BatchMarker::of(b)));
-        self.applies += b
-            .frames
-            .iter()
-            .filter(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY))
-            .count() as u64;
-        if self.first_drop.is_none() {
-            self.first_drop = first_dropped(b).ok_or_else(|| damaged(at, chain_text::OVERFLOW))?;
-        }
-        Ok(())
+        self.tally.add(b).map_err(|what| damaged(at, what))
     }
 
     fn read_trailer(&mut self, record: &Record) -> Result<(), StoreError> {
@@ -1575,8 +1667,9 @@ impl<R: Read> DumpReader<R> {
 
     /// The format-3 checks at trailer `t` (read at `at`): an increment holds a batch; the last
     /// batch (or, with none, the base) ends at the header's end with the header's end marker; the
-    /// trailer counts the dump's applies; a full dump's first removed span is its first dropped
-    /// frame, and an increment with no apply names none.
+    /// trailer counts the dump's applies; its first removed span is the lowest dropped frame of
+    /// those applies (none without one), or, with an apply, a span before the base, which only
+    /// an increment has: an earlier file holds it.
     fn check_ends(
         &self,
         at: u64,
@@ -1593,13 +1686,11 @@ impl<R: Read> DumpReader<R> {
         if end != self.log_end || marker != links.end_batch {
             return Err(damaged(at, chain_text::LAST_BATCH));
         }
-        // a full dump holds every apply of its log: its first removed span is its first
-        // dropped frame (a dropped frame no apply authorizes is the ingest's refusal)
-        let first_ok = match links.kind {
-            DumpKind::Full => t.first_removed == self.first_drop,
-            DumpKind::Increment => t.removals > 0 || t.first_removed.is_none(),
-        };
-        if u64::from(t.removals) != self.applies || !first_ok {
+        // a hole that names no apply of this file (a carried record's, say) is no span of its
+        // applies; whether every hole is authorized is the ingest's check
+        let earlier = t.removals > 0 && t.first_removed.is_some_and(|q| q < links.base);
+        let first_ok = t.first_removed == self.tally.first_removed() || earlier;
+        if u64::from(t.removals) != self.tally.applies() || !first_ok {
             return Err(damaged(at, chain_text::REMOVALS));
         }
         Ok(())
@@ -1615,9 +1706,11 @@ impl<R: Read> DumpReader<R> {
     /// Reads one record and checks its hash. The end of the file inside a record, or where a
     /// record should start, is a dump that ends before its trailer. `frame` says a batch's data
     /// frame is expected: there a `DROPPED` record is refused by its header alone, before its
-    /// payload is read, in a dump format without one or with another length than 102 bytes. The
-    /// payload is read in chunks of at most `ERASE_BUFFER` bytes, each taken by fallible growth:
-    /// a length the header claims is never reserved before its bytes arrive.
+    /// payload is read, in a dump format without one or with another length than 102 bytes. From
+    /// dump format 3 on, a record that claims more than `MAX_BLOB_BYTES` is refused by its header
+    /// alone (`record allocation failed`). The payload is read in chunks of at most
+    /// `ERASE_BUFFER` bytes, each taken by fallible growth: a length the header claims is never
+    /// reserved before its bytes arrive.
     fn record(&mut self, frame: bool) -> Result<Record, StoreError> {
         let at = self.totals.bytes;
         let mut head = [0u8; FRAME_HEADER as usize];
@@ -1632,6 +1725,10 @@ impl<R: Read> DumpReader<R> {
             if len != DROPPED_LEN as u64 {
                 return Err(damaged(at, drop_text::WRONG_LENGTH));
             }
+        }
+        // no record of format 3 holds more than a frame can: its claim is never read
+        if self.format >= 3 && len > MAX_BLOB_BYTES {
+            return Err(damaged(at, drop_text::ALLOCATION));
         }
         let mut payload: Vec<u8> = Vec::new();
         let mut left = len;
@@ -1680,15 +1777,35 @@ impl StoreReader {
 
     /// [`StoreReader::for_each_batch`] of the sealed batches of `[base, end)`: the suffix of the
     /// log after the batch that ends at `base`. The first batch starts at `base`, or at offset
-    /// zero of the next segment when the log rolled there; a `base` that is not a batch end (a
-    /// place inside a frame, or a frame inside a batch) does not match its marker. `end` must be
-    /// a batch end too.
+    /// zero of the next segment when the log rolled there.
+    ///
+    /// Before any batch is visited, `base` and `end` are each checked to be a physical batch end
+    /// by [`StoreReader::batch_marker_at`]: their segment is walked from offset zero, frame by
+    /// frame. So a place inside a payload, even one whose bytes hold a hash-valid frame and
+    /// marker, is never a boundary, and a place inside a frame or a batch is refused. An `end`
+    /// before `base` is refused; an `end` equal to it visits nothing. A refusal is
+    /// `StoreError::Decode` (or the walk's own error).
     pub fn for_each_batch_after(
         &self,
         base: Location,
         end: Location,
         visit: &mut dyn FnMut(DumpBatch) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
+        if end < base {
+            return Err(StoreError::Decode(format!(
+                "segment {} offset {} is before segment {} offset {}; run rdy fsck",
+                end.segment, end.offset, base.segment, base.offset
+            )));
+        }
+        // offset zero of a segment is a boundary; any other place must close a batch
+        for at in [base, end] {
+            if at.offset > 0 && self.batch_marker_at(at)?.is_none() {
+                return Err(StoreError::Decode(format!(
+                    "segment {} offset {} is not a batch end; run rdy fsck",
+                    at.segment, at.offset
+                )));
+            }
+        }
         let mut first = true;
         self.walk_batches(base, end, true, &mut |marker, frames| {
             if std::mem::take(&mut first) && !follows(base, marker.start) {

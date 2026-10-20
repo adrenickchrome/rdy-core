@@ -304,7 +304,7 @@ fn rewrite(
     out: &Path,
     edit: impl FnOnce(&mut rdy_store::dump::DumpHeader, &mut Vec<rdy_store::dump::DumpBatch>),
 ) {
-    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter, RemovalFacts};
+    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter, RemovalTally};
     let f = std::io::BufReader::new(std::fs::File::open(file).unwrap());
     let (mut r, _, mut header) = DumpReader::open(f).unwrap();
     let mut files = vec![];
@@ -320,12 +320,12 @@ fn rewrite(
     for (path, bytes) in &files {
         w.file(path, bytes).unwrap();
     }
-    let mut facts = RemovalFacts::default();
+    let mut facts = RemovalTally::default();
     for b in &batches {
-        facts.observe_full(b).unwrap();
+        facts.observe(b).unwrap();
         w.batch(b).unwrap();
     }
-    w.finish(facts).unwrap();
+    w.finish(facts.facts().unwrap()).unwrap();
 }
 
 #[test]

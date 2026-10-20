@@ -21,7 +21,7 @@ use crate::read_state::ReadState;
 use crate::wc::ignore::IGNORE_FILE;
 use rdy_store::StoreError;
 use rdy_store::dump::{
-    DUMP_FORMAT, DumpHeader, DumpTotals, DumpWriter, MAX_FILE_BYTES, MAX_FILES, RemovalFacts,
+    DUMP_FORMAT, DumpHeader, DumpTotals, DumpWriter, MAX_FILE_BYTES, MAX_FILES, RemovalTally,
     is_project_file,
 };
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
@@ -166,10 +166,10 @@ impl ReadState {
             w.file(path, bytes).map_err(dest)?;
         }
         let mut failed = None;
-        let mut facts = RemovalFacts::default();
+        let mut facts = RemovalTally::default();
         let read = self.reader().for_each_batch(self.seq(), |b| {
-            // the source walker's facts: its applies and its first dropped frame
-            facts.observe_full(&b)?;
+            // the source walker's facts: its applies and the lowest span of one of them
+            facts.observe(&b)?;
             w.batch(&b).map_err(|e| {
                 let stop = StoreError::Refused(e.to_string());
                 failed = Some(dest(e));
@@ -182,7 +182,7 @@ impl ReadState {
         // a removal that landed during the batches: what they read is no one epoch's
         self.ensure_current_epoch()?;
         read?;
-        w.finish(facts).map_err(dest)
+        w.finish(facts.facts()?).map_err(dest)
     }
 }
 

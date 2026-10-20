@@ -11,7 +11,7 @@
 //! there.
 //!
 //! In JSON every hash is 64 lowercase hex digits and every repo id 32.
-use crate::dump::{DumpBatch, Frame};
+use crate::dump::DumpBatch;
 use crate::kinds::BatchCommit;
 use crate::segment::{HEADER as FRAME_HEADER, Location, MARKER_MAX};
 use crate::transition::hex;
@@ -200,24 +200,6 @@ pub fn batch_end(b: &DumpBatch) -> Option<Location> {
         segment: b.start.segment,
         offset,
     })
-}
-
-/// The place of `b`'s first dropped frame in the source log, if it has one. None when a place
-/// passes `u64::MAX`.
-pub(crate) fn first_dropped(b: &DumpBatch) -> Option<Option<Location>> {
-    let mut at = b.start.offset;
-    for f in &b.frames {
-        if matches!(f, Frame::Dropped { .. }) {
-            return Some(Some(Location {
-                segment: b.start.segment,
-                offset: at,
-            }));
-        }
-        at = at
-            .checked_add(FRAME_HEADER)?
-            .checked_add(u64::from(f.original_len()))?;
-    }
-    Some(None)
 }
 
 fn hex_repo<S: Serializer>(r: &RepoId, s: S) -> Result<S::Ok, S::Error> {

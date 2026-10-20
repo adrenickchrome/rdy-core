@@ -28,11 +28,12 @@ use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
     Redaction, RedactionCarried, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
 };
+use rdy_store::bounded;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
 use rdy_store::segment::Location;
 use rdy_store::transition::Transitions;
-use rdy_store::{StoreReader, ViewOp, ViewOpKind};
+use rdy_store::{StoreError, StoreReader, ViewOp, ViewOpKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -1028,8 +1029,12 @@ pub(crate) fn compute_excluding(
                 quotes.scan(audit, &rec, false, &r)?;
             }
             kinds::REDACTION_CARRIED => {
-                // the approver's and the selectors' text; it holds no reason text
-                let c: RedactionCarried = reader.get_typed(kinds::REDACTION_CARRIED, &h)?;
+                // the approver's and the selectors' text; it holds no reason text. A carried
+                // record is decoded within the bounded record decoder's limits, and refused with
+                // its error
+                let bytes = reader.get_kind(kinds::REDACTION_CARRIED, &h)?;
+                let c: RedactionCarried = bounded::decode(&bytes)
+                    .map_err(|e| StoreError::Decode(format!("{h} (object kind 23): {e}")))?;
                 quotes.scan(audit, &rec, false, &c)?;
             }
             kinds::REF_UPDATE => {

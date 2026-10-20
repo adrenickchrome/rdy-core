@@ -7,7 +7,7 @@ mod common;
 use rdy_engine::clone::{CloneSource, clone};
 use rdy_engine::*;
 use rdy_model::*;
-use rdy_store::dump::{DumpHeader, DumpItem, DumpReader, DumpWriter, RemovalFacts};
+use rdy_store::dump::{DumpHeader, DumpItem, DumpReader, DumpWriter, RemovalFacts, RemovalTally};
 use rdy_store::dump_chain::{BatchMarker, batch_end};
 use rdy_store::holder::StoreMode;
 use rdy_store::kinds;
@@ -372,15 +372,15 @@ fn ha12_holder_files_are_refused_and_target_is_restored() {
         let out = std::fs::File::create(&carrying).unwrap();
         let mut w = DumpWriter::new(std::io::BufWriter::new(out), &header).unwrap();
         w.file(".rdy.yaml", b"pack: rdy-standard\n").unwrap();
-        let mut facts = RemovalFacts::default();
+        let mut facts = RemovalTally::default();
         for item in &batches {
             let DumpItem::Batch(b) = item else {
                 unreachable!()
             };
-            facts.observe_full(b).unwrap();
+            facts.observe(b).unwrap();
             w.batch(b).unwrap();
         }
-        let (buf, _) = w.finish(facts).unwrap();
+        let (buf, _) = w.finish(facts.facts().unwrap()).unwrap();
         buf.into_inner().unwrap().sync_all().unwrap();
     }
     // a new directory is not left behind

@@ -2882,3 +2882,68 @@ fn sig4_redaction_scan_reports_signature_text() {
         "check the source of this signature; it may be damaged or forged"
     );
 }
+
+/// The bytes of a carried removal record approved by `actor`, with one span.
+fn carried_record(actor: String) -> Vec<u8> {
+    let mut buf = vec![0u8; 2 << 20];
+    let record = rdy_model::RedactionCarried {
+        request: Hash([1; 32]),
+        apply: Hash([2; 32]),
+        landing: Hash([3; 32]),
+        approved_by: Provenance {
+            actor,
+            run: None,
+            role: Role::Approver,
+            at_ms: 0,
+        },
+        reason_class: ReasonClass::Secret,
+        targets: vec![RedactTarget::Blob(Hash([5; 32]))],
+        spans: vec![rdy_model::redaction::CarriedSpan {
+            place: rdy_model::redaction::FramePlace {
+                segment: 0,
+                offset: 0,
+            },
+            kind: kinds::BLOB_CHUNK,
+            hash: Hash([6; 32]),
+            len: 1,
+            residue: None,
+            held: false,
+        }],
+    };
+    encode_into(&record, &mut buf).unwrap().to_vec()
+}
+
+#[test]
+fn hc1_the_report_decodes_carried_records_within_bounds() {
+    let _clock = pin_clock(1_000_000);
+    let report = |payload: Vec<u8>| {
+        let mut p = base();
+        let h =
+            p.r.store_mut()
+                .write_guarded_for_tests(vec![(kinds::REDACTION_CARRIED, payload)])
+                .unwrap()[0];
+        p.r.invalidate();
+        p.r.read()
+            .redaction_report(&input(&[p.prose.to_string()], true))
+            .map(|d| (h, d))
+    };
+    // its strings are scanned: an approver whose actor quotes the removed text is audit text
+    let (h, d) = report(carried_record(format!("human:{SECRET}"))).unwrap();
+    assert!(
+        d.quotes
+            .iter()
+            .any(|q| q.kind == ImpactKind::AuditText && q.record == h.to_string()),
+        "{:?}",
+        d.quotes
+    );
+    // an approver's text of 1048576 bytes is read; one more byte is the bounded record's refusal
+    report(carried_record("a".repeat(1_048_576))).unwrap();
+    let e = report(carried_record("a".repeat(1_048_577))).unwrap_err();
+    assert!(e.message.contains("1048576 text bytes"), "{e}");
+    // an empty or truncated record does not decode
+    let full = carried_record("person:ann".into());
+    for p in [vec![], full[..full.len() - 1].to_vec()] {
+        let e = report(p).unwrap_err();
+        assert!(e.message.contains("record does not decode"), "{e}");
+    }
+}

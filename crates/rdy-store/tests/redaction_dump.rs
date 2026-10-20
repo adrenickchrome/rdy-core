@@ -42,6 +42,7 @@ const INVALID_KIND: &str = "dropped frame has an invalid kind";
 const INVALID_RESIDUE: &str = "dropped frame has an invalid residue";
 const NO_AUTHORIZATION: &str = "dropped frame has no valid authorization";
 const SPAN: &str = "dropped frame does not match its authorized span";
+const OVERFLOW: &str = "dump position overflows";
 const ENDS_EARLY: &str = "the file ends before its trailer";
 const TRAILER_MISMATCH: &str = "the trailer's counts or digest do not match the dump";
 const ALLOCATION: &str = "record allocation failed";
@@ -286,11 +287,11 @@ fn header(batches: &[DumpBatch]) -> DumpHeader {
 
 /// The removal facts of a full dump of `batches`, as the source walker reports them.
 fn facts_of(batches: &[DumpBatch]) -> RemovalFacts {
-    let mut facts = RemovalFacts::default();
+    let mut facts = RemovalTally::default();
     for b in batches {
-        facts.observe_full(b).unwrap();
+        facts.observe(b).unwrap();
     }
-    facts
+    facts.facts().unwrap()
 }
 
 fn write_dump(batches: &[DumpBatch]) -> Vec<u8> {
@@ -360,9 +361,54 @@ fn forge(dump_format: u32, recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// The batches `recs` holds, each `BATCH` record with its frames as a reader decodes them; None
+/// when the records do not form batches.
+fn batches_in(recs: &[(u8, Vec<u8>)]) -> Option<Vec<DumpBatch>> {
+    let mut out = vec![];
+    let mut i = 0;
+    while i < recs.len() {
+        let (k, p) = &recs[i];
+        i += 1;
+        if *k != rec::BATCH {
+            continue;
+        }
+        let start = Location {
+            segment: u32::from_le_bytes(p.get(0..4)?.try_into().ok()?),
+            offset: u64::from_le_bytes(p.get(4..12)?.try_into().ok()?),
+        };
+        let n = u32::from_le_bytes(p.get(12..16)?.try_into().ok()?) as usize;
+        let mut frames = vec![];
+        for (k, p) in recs.get(i..i + n)? {
+            frames.push(if *k == rec::DROPPED {
+                Frame::Dropped {
+                    kind: p[0],
+                    hash: Hash(p.get(1..33)?.try_into().ok()?),
+                    len: u32::from_le_bytes(p.get(33..37)?.try_into().ok()?),
+                    apply: Hash(p.get(37..69)?.try_into().ok()?),
+                    residue: (p[69] == 1).then(|| Hash(p[70..102].try_into().unwrap())),
+                }
+            } else {
+                Frame::Present {
+                    kind: *k,
+                    hash: Hash::of(p),
+                    payload: p.clone(),
+                }
+            });
+        }
+        i += n;
+        out.push(DumpBatch {
+            start,
+            digest: Hash(p.get(16..48)?.try_into().ok()?),
+            frames,
+        });
+    }
+    Some(out)
+}
+
 /// `recs` with its last record (the trailer) made true again: every record before it counted
-/// and chained as `kind || len (u64) || hash`, in the format-3 layout. The removal facts stay as
-/// they were (none when the trailer holds none yet).
+/// and chained as `kind || len (u64) || hash`, in the format-3 layout. The removal facts are the
+/// tally of its batches, as a forger computes them; when the tally refuses them (a place past
+/// `u64::MAX`), they stay as they were (none when the trailer holds none yet).
 fn reseal(recs: &mut [(u8, Vec<u8>)]) {
     let n = recs.len() - 1;
     let mut chain = vec![];
@@ -377,7 +423,19 @@ fn reseal(recs: &mut [(u8, Vec<u8>)]) {
         .filter(|(k, _)| *k < rec::HEADER || *k == rec::DROPPED)
         .count() as u64;
     let files = recs[..n].iter().filter(|(k, _)| *k == rec::FILE).count() as u32;
-    let facts = recs[n].1.get(20..37).unwrap_or(&[0u8; 17]).to_vec();
+    let mut facts = recs[n].1.get(20..37).unwrap_or(&[0u8; 17]).to_vec();
+    let tally = batches_in(&recs[..n]).and_then(|bs| {
+        let mut t = RemovalTally::default();
+        bs.iter().try_for_each(|b| t.observe(b)).ok()?;
+        t.facts().ok()
+    });
+    if let Some(t) = tally {
+        facts = t.removals.to_le_bytes().to_vec();
+        let at = t.first_removed.unwrap_or(BatchMarker::ZERO.start);
+        facts.push(u8::from(t.first_removed.is_some()));
+        facts.extend_from_slice(&at.segment.to_le_bytes());
+        facts.extend_from_slice(&at.offset.to_le_bytes());
+    }
     let mut p = batches.to_le_bytes().to_vec();
     p.extend_from_slice(&frames.to_le_bytes());
     p.extend_from_slice(&files.to_le_bytes());
@@ -700,7 +758,7 @@ fn one_drop(dump_format: u32, store_format: u32) -> Vec<u8> {
 /// A dump of `dump_format` whose header names `store_format`: one batch at the start of the log
 /// whose one data frame is a `DROPPED` record of `kind` that claims `len` bytes, and its trailer
 /// (of the format-3 layout: a format-1 reader refuses the record before it). A format-3 header is
-/// a full dump's that ends at the batch's end, its first removed span the dropped frame.
+/// a full dump's that ends at the batch's end; with no apply, its trailer names no removed span.
 fn drop_stream(
     dump_format: u32,
     store_format: u32,
@@ -742,9 +800,8 @@ fn drop_stream(
     }
     h.extend_from_slice(&4u16.to_le_bytes());
     h.extend_from_slice(b"test");
-    // no apply; the first removed span is the dropped frame at 0.0
-    let mut facts = vec![0u8; 69];
-    facts[24] = 1;
+    // no apply, so no removed span: the dropped frame names no apply of this file
+    let facts = vec![0u8; 69];
     let mut kinds = vec![kind];
     kinds.extend_from_slice(&hash.0);
     let mut b = 0u32.to_le_bytes().to_vec();
@@ -807,19 +864,31 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
     claim.push(rec::DROPPED);
     claim.extend_from_slice(&[0u8; 32]);
     assert_eq!(read(&claim), WRONG_LENGTH);
-    // an ordinary frame that claims 4 GiB and ends: the end of the file, not an allocation
-    let mut claim = good[..at].to_vec();
-    claim.extend_from_slice(&u32::MAX.to_le_bytes());
-    claim.push(BLOCK);
-    claim.extend_from_slice(&[0u8; 32]);
-    claim.extend_from_slice(&[1u8; 1000]);
-    assert_eq!(read(&claim), ENDS_EARLY);
+    // an ordinary frame that claims 4 GiB and ends: over the 64 MiB record bound of format 3,
+    // refused by its length, never read or allocated
+    let claim_after = |prefix: &[u8]| {
+        let mut claim = prefix.to_vec();
+        claim.extend_from_slice(&u32::MAX.to_le_bytes());
+        claim.push(BLOCK);
+        claim.extend_from_slice(&[0u8; 32]);
+        claim.extend_from_slice(&[1u8; 1000]);
+        claim
+    };
+    assert_eq!(read(&claim_after(&good[..at])), ALLOCATION);
+    // a released format keeps its reader: there the claim is read in chunks until the file ends
+    let old = one_drop(2, 15);
+    let old_at = 12
+        + records(&old)[..2]
+            .iter()
+            .map(|(_, p)| HEAD + p.len())
+            .sum::<usize>();
+    assert_eq!(read(&claim_after(&old[..old_at])), ENDS_EARLY);
     // overflowing offsets: a batch start whose original frames run past u64::MAX
     let (j, _) = batch_of(&recs, i);
     let mut r = recs.clone();
     r[j].1[4..12].copy_from_slice(&(u64::MAX - 40).to_le_bytes());
     reseal(&mut r);
-    assert_eq!(read(&forge(DUMP_FORMAT, &r)), SPAN);
+    assert_eq!(read(&forge(DUMP_FORMAT, &r)), OVERFLOW);
     // the residue flag: 0 or 1; 0 with a zero hash; a block or change names one, a chunk none
     let chunk = recs
         .iter()
@@ -894,6 +963,45 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
         assert_eq!(t.batches, 0, "nothing of the refused batch was written");
         assert!(read_dump(&bytes).unwrap().2.is_empty());
     }
+}
+
+#[test]
+fn hc1_a_dropped_frame_past_u64_max_overflows_in_format_3_only() {
+    // dump format 3: the place of a dropped frame past u64::MAX is a position overflow, in the
+    // reader and the writer
+    let hash = Hash::of(b"a removed chunk");
+    let apply = Hash::of(b"apply");
+    let current = drop_stream(DUMP_FORMAT, STORE_FORMAT, BLOB_CHUNK, hash, 15, apply, None);
+    let past = |stream: &[u8], dump_format: u32| {
+        let mut r = records(stream);
+        let (j, _) = batch_of(&r, 2);
+        r[j].1[4..12].copy_from_slice(&(u64::MAX - 40).to_le_bytes());
+        reseal(&mut r);
+        what(read_dump(&forge(dump_format, &r)).unwrap_err())
+    };
+    assert_eq!(past(&current, DUMP_FORMAT), OVERFLOW);
+    let b = DumpBatch {
+        start: Location {
+            segment: 0,
+            offset: u64::MAX - 40,
+        },
+        digest: batch_digest([&hash]),
+        frames: vec![Frame::Dropped {
+            kind: BLOB_CHUNK,
+            hash,
+            len: 15,
+            apply,
+            residue: None,
+        }],
+    };
+    let mut w = DumpWriter::new(Vec::new(), &header(&[])).unwrap();
+    match w.batch(&b) {
+        Err(StoreError::Refused(m)) => assert_eq!(m, OVERFLOW),
+        other => panic!("not refused: {other:?}"),
+    }
+    // the released format-2 reader keeps its text
+    let old = drop_stream(2, 15, BLOB_CHUNK, hash, 15, apply, None);
+    assert_eq!(past(&old, 2), SPAN);
 }
 
 #[test]

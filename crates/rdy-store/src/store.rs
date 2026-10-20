@@ -3327,6 +3327,17 @@ impl Store {
         self.faults.take_append = Some(Box::new(hook));
     }
 
+    /// Test hook: writes `items` as the store's own checked writers do (any kind, a removed hash
+    /// refused), so a test can place a record of a redaction kind that no checked writer builds,
+    /// such as a malformed one, and read it back through a production path.
+    #[doc(hidden)]
+    pub fn write_guarded_for_tests(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.write_guarded(items)
+    }
+
     /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the
     /// checked apply writer (`seal_apply_batch`): the batch is validated exactly as an open
     /// validates a stored one, before anything is written. The store's own landing path

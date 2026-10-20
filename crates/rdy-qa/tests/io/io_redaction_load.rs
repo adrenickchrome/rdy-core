@@ -13,7 +13,9 @@ use rdy_engine::clone::{CloneSource, clone};
 use rdy_engine::{E_DUMP, Rdy, load::load};
 use rdy_model::Hash;
 use rdy_model::redaction::RedactTarget;
-use rdy_store::dump::{DUMP_FORMAT, DumpItem, DumpReader, MAGIC, rec};
+use rdy_store::dump::{
+    DUMP_FORMAT, DumpBatch, DumpItem, DumpReader, Frame, MAGIC, RemovalFacts, RemovalTally, rec,
+};
 use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
 use rdy_store::kinds;
 use rdy_store::meta::Origin;
@@ -336,8 +338,55 @@ fn dump_records(good: &[u8]) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
+/// The removal facts of the batches `recs` holds, as a forger computes them: the tally of each
+/// `BATCH` record's frames (a present frame by its payload, a `DROPPED` record by its fields).
+/// None when the records do not form batches or the tally refuses them.
+fn facts_of(recs: &[(u8, Vec<u8>)]) -> Option<RemovalFacts> {
+    let mut tally = RemovalTally::default();
+    let mut i = 0;
+    while i < recs.len() {
+        let (k, p) = &recs[i];
+        i += 1;
+        if *k != rec::BATCH {
+            continue;
+        }
+        let start = Location {
+            segment: u32::from_le_bytes(p.get(0..4)?.try_into().ok()?),
+            offset: u64::from_le_bytes(p.get(4..12)?.try_into().ok()?),
+        };
+        let n = u32::from_le_bytes(p.get(12..16)?.try_into().ok()?) as usize;
+        let mut frames = vec![];
+        for (k, p) in recs.get(i..i + n)? {
+            frames.push(if *k == rec::DROPPED {
+                Frame::Dropped {
+                    kind: *p.first()?,
+                    hash: Hash(p.get(1..33)?.try_into().ok()?),
+                    len: u32::from_le_bytes(p.get(33..37)?.try_into().ok()?),
+                    apply: Hash(p.get(37..69)?.try_into().ok()?),
+                    residue: None,
+                }
+            } else {
+                Frame::Present {
+                    kind: *k,
+                    hash: Hash::of(p),
+                    payload: p.clone(),
+                }
+            });
+        }
+        i += n;
+        let b = DumpBatch {
+            start,
+            digest: Hash(p.get(16..48)?.try_into().ok()?),
+            frames,
+        };
+        tally.observe(&b).ok()?;
+    }
+    tally.facts().ok()
+}
+
 /// A dump of the current format (3) of hash-valid `recs`, its trailer made true again: its
-/// counts and digest recomputed, its removal facts kept.
+/// counts and digest recomputed, its removal facts the tally of its batches (kept as they were
+/// when the tally refuses them).
 fn forge(recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let n = recs.len() - 1;
     let mut chain = vec![];
@@ -350,7 +399,16 @@ fn forge(recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let mut trailer = count(&|k| k == rec::BATCH).to_le_bytes().to_vec();
     trailer.extend_from_slice(&count(&|k| k < rec::HEADER || k == rec::DROPPED).to_le_bytes());
     trailer.extend_from_slice(&(count(&|k| k == rec::FILE) as u32).to_le_bytes());
-    trailer.extend_from_slice(&recs[n].1[20..37]);
+    match facts_of(&recs[..n]) {
+        Some(f) => {
+            let at = f.first_removed.unwrap_or(ORIGIN);
+            trailer.extend_from_slice(&f.removals.to_le_bytes());
+            trailer.push(u8::from(f.first_removed.is_some()));
+            trailer.extend_from_slice(&at.segment.to_le_bytes());
+            trailer.extend_from_slice(&at.offset.to_le_bytes());
+        }
+        None => trailer.extend_from_slice(&recs[n].1[20..37]),
+    }
     trailer.extend_from_slice(&Hash::of(&chain).0);
     let mut out = MAGIC.to_vec();
     out.extend_from_slice(&DUMP_FORMAT.to_le_bytes());
@@ -405,7 +463,7 @@ fn rdx9_a_forged_drop_preserves_the_target() {
         (
             "offset",
             |r, _, j| r[j].1[4..12].copy_from_slice(&(u64::MAX - 40).to_le_bytes()),
-            "dropped frame does not match its authorized span",
+            "dump position overflows",
         ),
     ];
     for (name, bend, want) in cases {

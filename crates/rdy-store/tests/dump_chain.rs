@@ -322,10 +322,11 @@ fn hc1_full_and_increment_boundaries_are_exact() {
 
     // a full dump: zero base, every batch, the end marker of the last
     let full = header(end, DumpChainHeader::full(repo, last));
-    let mut facts = RemovalFacts::default();
+    let mut tally = RemovalTally::default();
     for b in &batches {
-        facts.observe_full(b).unwrap();
+        tally.observe(b).unwrap();
     }
+    let facts = tally.facts().unwrap();
     assert_eq!(
         facts,
         RemovalFacts::default(),
@@ -672,20 +673,31 @@ fn hc1_large_lengths_flags_and_offsets_refuse() {
     ))
     .unwrap_err();
     assert_eq!(damaged(e), "dump position overflows");
-    let mut f = RemovalFacts::default();
-    let dropped = DumpBatch {
-        start: at(0, u64::MAX - 10),
+    // the tally: a dropped place near u64::MAX is a place, one past it overflows
+    let apply = b"an apply".to_vec();
+    let near = |offset: u64, len: u32| DumpBatch {
+        start: at(0, offset),
         digest: kinds::batch_digest([Hash([1; 32])].iter()),
         frames: vec![Frame::Dropped {
             kind: kinds::BLOB_CHUNK,
             hash: Hash([1; 32]),
-            len: 5,
-            apply: Hash([2; 32]),
+            len,
+            apply: Hash::of(&apply),
             residue: None,
         }],
     };
-    f.observe_full(&dropped).unwrap();
-    assert_eq!(f.first_removed, Some(at(0, u64::MAX - 10)));
+    let mut f = RemovalTally::default();
+    f.observe(&batch_of(
+        at(0, 0),
+        vec![present(kinds::REDACTION_APPLY, &apply)],
+    ))
+    .unwrap();
+    f.observe(&near(u64::MAX - 42, 5)).unwrap();
+    assert_eq!(f.facts().unwrap().first_removed, Some(at(0, u64::MAX - 42)));
+    let e = RemovalTally::default()
+        .observe(&near(u64::MAX - 41, 5))
+        .unwrap_err();
+    assert_eq!(refused(e), "dump position overflows");
     // the first base segment has no successor past u32::MAX
     let mut b = batch_at(0, b"x");
     b.start = at(0, 0);
@@ -932,4 +944,376 @@ fn hc1_carried_encoding_adds_no_existing_bytes() {
         serde_json::to_value(DumpKind::Full).unwrap(),
         serde_json::json!("full")
     );
+}
+
+/// A present frame of `kind` holding `payload`, with its hash.
+fn present(kind: u8, payload: &[u8]) -> Frame {
+    Frame::Present {
+        kind,
+        hash: Hash::of(payload),
+        payload: payload.to_vec(),
+    }
+}
+
+/// A batch at `start` holding `frames`, with its digest.
+fn batch_of(start: Location, frames: Vec<Frame>) -> DumpBatch {
+    DumpBatch {
+        start,
+        digest: kinds::batch_digest(frames.iter().map(|f| f.hash())),
+        frames,
+    }
+}
+
+/// The header of a full dump of `batches`: it ends where the last one ends, with its marker.
+fn full_of(batches: &[DumpBatch]) -> DumpHeader {
+    let last = batches.last().expect("a batch");
+    header(
+        batch_end(last).unwrap(),
+        DumpChainHeader::full(RepoId([4; 16]), BatchMarker::of(last)),
+    )
+}
+
+/// The increment of `batches` after `base`, the end of a batch of `base_batch`.
+fn increment_of(base: Location, base_batch: BatchMarker, batches: &[DumpBatch]) -> DumpHeader {
+    let last = batches.last().expect("a batch");
+    let prev = ChainEnd {
+        repo_id: RepoId([4; 16]),
+        store_format: STORE_FORMAT,
+        end: base,
+        end_batch: base_batch,
+        digest: Hash([8; 32]),
+    };
+    header(
+        batch_end(last).unwrap(),
+        DumpChainHeader::after(&prev, BatchMarker::of(last)),
+    )
+}
+
+/// A dropped chunk of 10 bytes whose authority (the DROPPED record's apply field) is `authority`.
+fn hole(n: u8, authority: Hash) -> Frame {
+    Frame::Dropped {
+        kind: kinds::BLOB_CHUNK,
+        hash: Hash([n; 32]),
+        len: 10,
+        apply: authority,
+        residue: None,
+    }
+}
+
+/// A carried record's bytes: approved by `actor`, accounting for one zero span.
+fn carried_bytes(actor: String) -> Vec<u8> {
+    postcard::to_allocvec(&RedactionCarried {
+        request: Hash([1; 32]),
+        apply: Hash([2; 32]),
+        landing: Hash([3; 32]),
+        approved_by: Provenance {
+            actor,
+            run: None,
+            role: Role::Approver,
+            at_ms: 0,
+        },
+        reason_class: ReasonClass::Secret,
+        targets: vec![RedactTarget::Blob(Hash([5; 32]))],
+        spans: vec![CarriedSpan {
+            place: FramePlace {
+                segment: 0,
+                offset: 0,
+            },
+            kind: kinds::BLOB_CHUNK,
+            hash: Hash([1; 32]),
+            len: 10,
+            residue: None,
+            held: false,
+        }],
+    })
+    .unwrap()
+}
+
+/// A full dump built by hand, record by record, of one batch at the origin whose one frame is a
+/// present frame of `kind` holding `payload`; its trailer names no removal. The writer refuses
+/// some of what this forges.
+fn forge_one(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let b = batch_of(at(0, 0), vec![present(kind, payload)]);
+    let empty = write(
+        &full_of(std::slice::from_ref(&b)),
+        &[],
+        RemovalFacts::default(),
+    );
+    let mut out = empty[..trailer_at(&empty)].to_vec();
+    let mut chain = vec![];
+    let mut add = |out: &mut Vec<u8>, kind: u8, p: &[u8]| {
+        chain.push(kind);
+        chain.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        chain.extend_from_slice(&Hash::of(p).0);
+        out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+        out.push(kind);
+        out.extend_from_slice(&Hash::of(p).0);
+        out.extend_from_slice(p);
+    };
+    let head = out[12 + HEAD..].to_vec();
+    out.truncate(12);
+    add(&mut out, rec::HEADER, &head);
+    let mut kinds_of = vec![kind];
+    kinds_of.extend_from_slice(&Hash::of(payload).0);
+    let mut p = 0u32.to_le_bytes().to_vec();
+    p.extend_from_slice(&0u64.to_le_bytes());
+    p.extend_from_slice(&1u32.to_le_bytes());
+    p.extend_from_slice(&b.digest.0);
+    p.extend_from_slice(&Hash::of(&kinds_of).0);
+    add(&mut out, rec::BATCH, &p);
+    add(&mut out, kind, payload);
+    let mut t = 1u64.to_le_bytes().to_vec();
+    t.extend_from_slice(&1u64.to_le_bytes());
+    t.extend_from_slice(&[0u8; 4 + 4 + 1 + 12]);
+    t.extend_from_slice(&Hash::of(&chain).0);
+    out.extend_from_slice(&(t.len() as u32).to_le_bytes());
+    out.push(rec::TRAILER);
+    out.extend_from_slice(&Hash::of(&t).0);
+    out.extend_from_slice(&t);
+    out
+}
+
+#[test]
+fn hc1_removal_facts_count_only_the_applies_in_the_file() {
+    let removals = "the removal facts do not match the batches";
+    let carried = carried_bytes("person:ann".into());
+    let apply = postcard::to_allocvec(&RedactionApply {
+        request: Hash([1; 32]),
+        landing: Hash([2; 32]),
+        report_hash: Hash([3; 32]),
+    })
+    .unwrap();
+    let facts = |removals, first_removed| RemovalFacts {
+        removals,
+        first_removed,
+    };
+    // a hole that only a carried record explains, then that record: no apply, so no span
+    let b1 = batch_of(at(0, 0), vec![hole(1, Hash::of(&carried))]);
+    let b2 = batch_of(
+        batch_end(&b1).unwrap(),
+        vec![present(kinds::REDACTION_CARRIED, &carried)],
+    );
+    let carried_only = [b1.clone(), b2.clone()];
+    let h = full_of(&carried_only);
+    let (_, read, t) = read_all(&write(&h, &carried_only, facts(0, None))).unwrap();
+    assert_eq!(read, carried_only);
+    assert_eq!((t.removals, t.first_removed), (0, None));
+    let e = read_all(&write(&h, &carried_only, facts(0, Some(b1.start)))).unwrap_err();
+    assert_eq!(damaged(e), removals, "a carried hole is no removal");
+
+    // mixed authority: the carried hole first, then a hole of the apply the dump holds
+    let b3 = batch_of(
+        batch_end(&b2).unwrap(),
+        vec![hole(2, Hash::of(&apply)), hole(3, Hash([9; 32]))],
+    );
+    let b4 = batch_of(
+        batch_end(&b3).unwrap(),
+        vec![present(kinds::REDACTION_APPLY, &apply)],
+    );
+    let mixed = [b1.clone(), b2.clone(), b3.clone(), b4.clone()];
+    let h = full_of(&mixed);
+    let (_, _, t) = read_all(&write(&h, &mixed, facts(1, Some(b3.start)))).unwrap();
+    assert_eq!((t.removals, t.first_removed), (1, Some(b3.start)));
+    for bad in [
+        facts(1, Some(b1.start)),
+        facts(1, None),
+        facts(0, Some(b3.start)),
+        facts(2, Some(b3.start)),
+    ] {
+        let e = read_all(&write(&h, &mixed, bad)).unwrap_err();
+        assert_eq!(damaged(e), removals, "{bad:?}");
+    }
+    // a hole that names an apply of no file here is no span of the dump's applies
+    let b3x = batch_of(batch_end(&b2).unwrap(), vec![hole(2, Hash([9; 32]))]);
+    let b4x = batch_of(
+        batch_end(&b3x).unwrap(),
+        vec![present(kinds::REDACTION_APPLY, &apply)],
+    );
+    let foreign = [b1.clone(), b2.clone(), b3x, b4x];
+    read_all(&write(&full_of(&foreign), &foreign, facts(1, None))).unwrap();
+    // each physical apply counts; the lowest span of either names the first removed
+    let b5 = batch_of(
+        batch_end(&b4).unwrap(),
+        vec![present(kinds::REDACTION_APPLY, &apply)],
+    );
+    let twice = [b1.clone(), b2.clone(), b3.clone(), b4.clone(), b5];
+    read_all(&write(&full_of(&twice), &twice, facts(2, Some(b3.start)))).unwrap();
+
+    // an increment after b2: its own hole, or a span before its base that an earlier file holds
+    let tail = [b3.clone(), b4.clone()];
+    let inc = increment_of(batch_end(&b2).unwrap(), BatchMarker::of(&b2), &tail);
+    for ok in [facts(1, Some(b3.start)), facts(1, Some(b1.start))] {
+        read_all(&write(&inc, &tail, ok)).unwrap();
+    }
+    for bad in [
+        facts(1, Some(b4.start)),
+        facts(1, None),
+        facts(0, Some(b1.start)),
+    ] {
+        let e = read_all(&write(&inc, &tail, bad)).unwrap_err();
+        assert_eq!(damaged(e), removals, "{bad:?}");
+    }
+}
+
+#[test]
+fn hc1_a_suffix_walk_starts_and_ends_at_frame_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    s.put_blob(b"before").unwrap();
+    // a blob chunk whose payload holds a hash-valid frame and the marker that closes it
+    let base = s.log_end();
+    let pad = 16u64;
+    let inner_at = at(base.segment, base.offset + HEAD as u64 + pad);
+    let inner = b"a frame inside a payload";
+    let marker = postcard::to_allocvec(&kinds::BatchCommit {
+        start: inner_at,
+        frames: 1,
+        digest: kinds::batch_digest([&Hash::of(inner)]),
+    })
+    .unwrap();
+    let mut payload = vec![0u8; pad as usize];
+    for (kind, p) in [
+        (kinds::BLOB_CHUNK, &inner[..]),
+        (kinds::BATCH_COMMIT, &marker[..]),
+    ] {
+        payload.extend_from_slice(&(p.len() as u32).to_le_bytes());
+        payload.push(kind);
+        payload.extend_from_slice(&Hash::of(p).0);
+        payload.extend_from_slice(p);
+    }
+    let inner_end = at(
+        base.segment,
+        inner_at.offset + 2 * HEAD as u64 + (inner.len() + marker.len()) as u64,
+    );
+    payload.extend_from_slice(&[0u8; 8]);
+    s.write(vec![(kinds::BLOB_CHUNK, payload)]).unwrap();
+    s.put_blob(b"after").unwrap();
+    let end = s.log_end();
+    let r = s.reader();
+    let mut real = vec![];
+    r.for_each_batch(end, |b| {
+        real.push(b);
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        real.iter().all(|b| b.start != inner_at),
+        "no real batch there"
+    );
+    // the marker-shaped bytes are no batch end, and no batch starts inside the payload
+    assert!(r.batch_marker_at(inner_end).is_err());
+    assert!(r.batch_marker_at(inner_at).is_err());
+    let cases = [(inner_at, inner_end), (inner_at, end), (base, inner_end)];
+    for (from, to) in cases {
+        let mut seen = 0;
+        let e = r.for_each_batch_after(from, to, &mut |_| {
+            seen += 1;
+            Ok(())
+        });
+        assert!(e.is_err(), "{from:?}..{to:?}");
+        assert_eq!(
+            seen, 0,
+            "{from:?}..{to:?}: nothing visited before the check"
+        );
+    }
+    // the real boundaries still walk
+    let mut suffix = vec![];
+    r.for_each_batch_after(base, end, &mut |b| {
+        suffix.push(b);
+        Ok(())
+    })
+    .unwrap();
+    let from = real.iter().position(|b| b.start == base).unwrap();
+    assert_eq!(suffix, real[from..]);
+    // an end before the base is refused, an equal one visits nothing
+    assert!(r.for_each_batch_after(end, base, &mut |_| Ok(())).is_err());
+    let mut seen = 0;
+    r.for_each_batch_after(base, base, &mut |_| {
+        seen += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, 0);
+}
+
+#[test]
+fn hc1_carried_records_are_decoded_within_bounds_on_read() {
+    let none = RemovalFacts::default();
+    // the approver's text: 1048576 bytes read, one more is refused at the frame
+    let fits = carried_bytes("a".repeat(bounded::MAX_TEXT_BYTES));
+    let b = batch_of(at(0, 0), vec![present(kinds::REDACTION_CARRIED, &fits)]);
+    let bs = [b];
+    let (_, read, _) = read_all(&write(&full_of(&bs), &bs, none)).unwrap();
+    assert_eq!(read, bs);
+    assert_eq!(
+        read_all(&forge_one(kinds::REDACTION_CARRIED, &fits))
+            .unwrap()
+            .1,
+        bs
+    );
+    let over = carried_bytes("a".repeat(bounded::MAX_TEXT_BYTES + 1));
+    let e = read_all(&forge_one(kinds::REDACTION_CARRIED, &over)).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 179 + HEAD + 80) as u64),
+        "blamed on the frame: {e:?}"
+    );
+    assert_eq!(damaged(e), "1048576 text bytes");
+    // an empty or truncated record does not decode
+    for p in [&[][..], &fits[..fits.len() - 1]] {
+        let e = read_all(&forge_one(kinds::REDACTION_CARRIED, p)).unwrap_err();
+        assert_eq!(damaged(e), "record does not decode", "{} bytes", p.len());
+    }
+    // the writer refuses what the reader refuses, before it writes a byte
+    for (p, want) in [
+        (over, "1048576 text bytes"),
+        (vec![], "record does not decode"),
+    ] {
+        let b = batch_of(at(0, 0), vec![present(kinds::REDACTION_CARRIED, &p)]);
+        let mut w = DumpWriter::new(Vec::new(), &full_of(std::slice::from_ref(&b))).unwrap();
+        assert_eq!(refused(w.batch(&b).unwrap_err()), want);
+        assert_eq!(w.finish(none).unwrap().1.batches, 0);
+    }
+    // the released kinds keep their limits: a record of another kind is not decoded on read
+    let bs = [batch_of(
+        at(0, 0),
+        vec![present(kinds::REDACTION, b"not a request")],
+    )];
+    read_all(&write(&full_of(&bs), &bs, none)).unwrap();
+}
+
+#[test]
+fn hc1_a_record_payload_holds_at_most_64_mib() {
+    let ceiling = 67_108_864usize;
+    let none = RemovalFacts::default();
+    // exactly the ceiling: written and read back
+    let max = vec![7u8; ceiling];
+    let bs = [batch_of(at(0, 0), vec![present(kinds::BLOB_CHUNK, &max)])];
+    let bytes = write(&full_of(&bs), &bs, none);
+    let (_, read, _) = read_all(&bytes).unwrap();
+    assert_eq!(read[0].frames[0].original_len() as usize, ceiling);
+    drop((bytes, read, bs));
+    // one more: the writer refuses it before it writes a byte
+    let over = vec![7u8; ceiling + 1];
+    let b = batch_of(at(0, 0), vec![present(kinds::BLOB_CHUNK, &over)]);
+    let mut w = DumpWriter::new(Vec::new(), &full_of(std::slice::from_ref(&b))).unwrap();
+    assert_eq!(
+        refused(w.batch(&b).unwrap_err()),
+        "a record of kind 6 cannot stand here"
+    );
+    assert_eq!(w.finish(none).unwrap().1.batches, 0);
+    drop(b);
+    // and the reader refuses its length before it reads the payload
+    let forged = forge_one(kinds::BLOB_CHUNK, &over);
+    let frame_at = 12 + HEAD + 179 + HEAD + 80;
+    let e = read_all(&forged).unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Dump { at, .. } if *at == frame_at as u64),
+        "{e:?}"
+    );
+    assert_eq!(damaged(e), "record allocation failed");
+    // a stream that claims more and ends there is refused by the claim, not by its end
+    let e = read_all(&forged[..frame_at + HEAD]).unwrap_err();
+    assert_eq!(damaged(e), "record allocation failed");
+    let e = read_all(&forged[..frame_at + HEAD - 1]).unwrap_err();
+    assert_eq!(damaged(e), "the file ends before its trailer");
 }
