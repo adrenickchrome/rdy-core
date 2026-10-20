@@ -4,6 +4,10 @@ use serde::Serialize;
 use std::fmt;
 
 pub const E_LOCKED: &str = "E_LOCKED";
+/// The store's lock was free, but an earlier read state of this process still holds its index.
+pub const E_HELD_BY_READER: &str = "E_HELD_BY_READER";
+/// The fix for [`E_HELD_BY_READER`].
+pub const HELD_BY_READER_FIX: &str = "release the earlier read state, then try again";
 pub const E_NO_PROJECT: &str = "E_NO_PROJECT";
 pub const E_CONFIG: &str = "E_CONFIG";
 pub const E_PERMISSION: &str = "E_PERMISSION";
@@ -475,12 +479,12 @@ impl From<StoreError> for RdyError {
                 "drop --no-daemon, or stop the daemon with rdy serve --stop",
             ),
             StoreError::HeldByReader(p) => RdyError::new(
-                E_LOCKED,
+                E_HELD_BY_READER,
                 format!(
                     "the project store at {} is still open in this process through a read state of an earlier open",
                     p.display()
                 ),
-                "drop every read state (and store reader) of the earlier open, then reopen",
+                HELD_BY_READER_FIX,
             ),
             StoreError::StaleBase {
                 id,
@@ -955,8 +959,9 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 96] = [
+const CORE_ERROR_CODES: [&str; 97] = [
     E_LOCKED,
+    E_HELD_BY_READER,
     E_NO_PROJECT,
     E_CONFIG,
     E_PERMISSION,
