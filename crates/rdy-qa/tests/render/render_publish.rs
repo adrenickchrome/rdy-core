@@ -851,16 +851,17 @@ fn hpb6_profile_filters_disagreement_projection() {
     let other = publish(&read, &inputs, &p["$speconly"].to_string());
     let d = pages(&other).expect("the page");
     assert!(d.contains(CONTRADICT) && !d.contains(RETIRED), "{d}");
-    // every side selected: both, in the captured order
+    // every side selected: both captured entries, each once. The page lists them in the docs'
+    // reading order (Site::set_disagreements), which the capture order need not follow.
     let both = publish(&read, &inputs, &p["$both"].to_string());
     let d = pages(&both).expect("the page");
-    let order = |s: &str| d.find(s).unwrap();
-    let captured: Vec<&str> = inputs
-        .disagreements
-        .iter()
-        .map(|r| r.sentence.as_str())
-        .collect();
-    assert!(order(captured[0]) < order(captured[1]), "{d}");
+    assert_eq!(inputs.disagreements.len(), 2, "guard: two captured entries");
+    for row in &inputs.disagreements {
+        assert_eq!(d.matches(row.sentence.as_str()).count(), 1, "{d}");
+    }
+    for sentence in [RETIRED, CONTRADICT] {
+        assert_eq!(d.matches(sentence).count(), 1, "{sentence}: {d}");
+    }
 
     // supplied rows are filtered side by side: a row with an excluded side is dropped, a row
     // whose every side is selected is kept

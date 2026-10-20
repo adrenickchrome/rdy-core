@@ -25,15 +25,17 @@ pub use html::{Link, escape, text_html};
 
 use rdy_engine::publication::PublicationSource;
 use rdy_engine::publication_manifest::{
-    MANIFEST_RECIPE, Manifest, ManifestEntry, NOTICE_SLOT, manifest_hash,
+    MANIFEST_RECIPE, MAX_ARTIFACT_BYTES, MAX_FILE_BYTES, MAX_FILES, Manifest, ManifestEntry,
+    NOTICE_SLOT, manifest_hash,
 };
 use rdy_engine::render_inputs::RenderInputs;
-use rdy_engine::{E_BAD_INPUT, E_IO, Materialized, RdyError, ReadState, Scope};
+use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Hash, tree};
 use serde::Serialize;
 use site::Site;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RenderSummary {
@@ -114,6 +116,8 @@ struct PageOut {
     notice: Option<std::ops::Range<usize>>,
     /// The page tried to write a second notice slot: the render fails.
     second_notice: bool,
+    /// A write the build's limits refused: the render fails with it.
+    refused: Option<RdyError>,
 }
 
 /// A page [`render_page_out`] rendered: its bytes, its label and header ranges, and its notice
@@ -129,13 +133,22 @@ thread_local! {
     static PAGE_OUT: std::cell::RefCell<Option<PageOut>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`].
-struct PageSink;
+/// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`], each
+/// write admitted first by a publication build's limits when there are some.
+struct PageSink<'b>(Option<&'b Budget>);
 
-impl std::io::Write for PageSink {
+impl std::io::Write for PageSink<'_> {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         PAGE_OUT.with_borrow_mut(|o| match o {
             Some(o) => {
+                if let Some(budget) = self.0 {
+                    let len = u64::try_from(o.bytes.len()).unwrap_or(u64::MAX);
+                    let n = u64::try_from(b.len()).unwrap_or(u64::MAX);
+                    if let Err(e) = budget.admit(len, n) {
+                        o.refused = Some(e);
+                        return Err(std::io::Error::other("over the publication's limits"));
+                    }
+                }
                 o.bytes.extend_from_slice(b);
                 Ok(b.len())
             }
@@ -165,10 +178,24 @@ fn render_page_out<S: Serialize>(
     name: &str,
     ctx: S,
 ) -> Result<Rendered, RdyError> {
+    render_page_within(env, name, ctx, None)
+}
+
+/// [`render_page_out`], each write admitted by `budget` first when there is one: a write over
+/// its limits stops the render with the limit's error, before the page holds those bytes.
+fn render_page_within<S: Serialize>(
+    env: &minijinja::Environment<'static>,
+    name: &str,
+    ctx: S,
+    budget: Option<&Budget>,
+) -> Result<Rendered, RdyError> {
     let t = env.get_template(name).map_err(tpl)?;
     PAGE_OUT.set(Some(PageOut::default()));
-    let rendered = t.render_captured_to(ctx, PageSink).map(drop);
+    let rendered = t.render_captured_to(ctx, PageSink(budget)).map(drop);
     let out = PAGE_OUT.take().unwrap_or_default();
+    if let Some(e) = out.refused {
+        return Err(e);
+    }
     if out.second_notice {
         return Err(bad_notice_slot());
     }
@@ -730,6 +757,7 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
         prepare::source(rdy, scope, prepare::Purpose::Site)?,
         mode,
         Slots::Source,
+        None,
     )
     .map(|b| b.site)
 }
@@ -745,7 +773,7 @@ pub fn build_profile_site(
     profile: &str,
 ) -> Result<SiteFiles, RdyError> {
     let prepared = publication::prepare(read, scope_text, profile, prepare::Purpose::Site)?;
-    build_site_from(prepared, Mode::Static, Slots::Source).map(|b| b.site)
+    build_site_from(prepared, Mode::Static, Slots::Source, None).map(|b| b.site)
 }
 
 /// A publication artifact (D-KDFZ3, hub r-50C97): every served file by its site-relative path,
@@ -780,7 +808,14 @@ pub fn build_publication(
     publication::check_inputs(source, inputs)?;
     let resolved = rdy_engine::publication::resolve_source(source, m, selector)?;
     let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
-    artifact(build_site_from(prepared, Mode::Static, Slots::Notices)?)
+    // the manifest's limits hold while the site is built, not only once it is
+    let budget = Budget::publication();
+    artifact(build_site_from(
+        prepared,
+        Mode::Static,
+        Slots::Notices,
+        Some(&budget),
+    )?)
 }
 
 /// `E_BAD_INPUT`: a generated file whose media type rdy does not know (the manifest's own
@@ -883,11 +918,267 @@ struct BuiltSite {
     media: BTreeMap<String, String>,
 }
 
-/// [`build_site`] from what [`prepare::source`] read: it reads no source.
+/// The manifest's limits (`publication_manifest`), as a publication build keeps them while it
+/// builds: the number of files, the bytes of one file and the bytes of all files. Each page
+/// write, permalink page and file is admitted before its bytes are kept, so the build refuses
+/// with `E_LIMIT` before it holds more than the limits allow. It also counts the page contexts
+/// the build made, and how many waited to be rendered at once.
+struct Budget {
+    max_files: usize,
+    max_file: u64,
+    max_total: u64,
+    /// The bytes admitted to the artifact's files so far.
+    bytes: AtomicU64,
+    /// A limit was reached: the build makes no further page context.
+    stopped: AtomicBool,
+    /// The page contexts made.
+    built: AtomicUsize,
+    /// The page contexts made and not yet rendered, and the most there were at once.
+    pending: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Budget {
+    fn new(max_files: usize, max_file: u64, max_total: u64) -> Budget {
+        Budget {
+            max_files,
+            max_file,
+            max_total,
+            bytes: AtomicU64::new(0),
+            stopped: AtomicBool::new(false),
+            built: AtomicUsize::new(0),
+            pending: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+
+    /// The limits of a publication manifest.
+    fn publication() -> Budget {
+        Budget::new(MAX_FILES, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES)
+    }
+
+    /// `E_LIMIT`: the artifact would exceed `limit`, in the manifest's words. The build stops.
+    fn over(&self, limit: String) -> RdyError {
+        self.stopped.store(true, Ordering::SeqCst);
+        RdyError::new(
+            E_LIMIT,
+            format!("publication manifest exceeds {limit}"),
+            "reduce the artifact to the stated limit",
+        )
+    }
+
+    /// Admits `n` more bytes to a file that holds `len` bytes so far.
+    fn admit(&self, len: u64, n: u64) -> Result<(), RdyError> {
+        if len.checked_add(n).is_none_or(|end| end > self.max_file) {
+            return Err(self.over(format!("{} file bytes", self.max_file)));
+        }
+        self.bytes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
+                t.checked_add(n).filter(|t| *t <= self.max_total)
+            })
+            .map(drop)
+            .map_err(|_| self.over(format!("{} artifact bytes", self.max_total)))
+    }
+
+    /// Gives back the bytes of a file the build replaced.
+    fn release(&self, n: usize) {
+        let n = u64::try_from(n).unwrap_or(u64::MAX);
+        let _ = self
+            .bytes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
+                Some(t.saturating_sub(n))
+            });
+    }
+
+    /// Checks that the artifact may hold `files` files.
+    fn count(&self, files: usize) -> Result<(), RdyError> {
+        if files > self.max_files {
+            return Err(self.over(format!("{} files", self.max_files)));
+        }
+        Ok(())
+    }
+
+    /// Admits a file of `len` bytes at `path` to `files`: one more file, unless it replaces the
+    /// one there.
+    fn reserve(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        path: &str,
+        len: usize,
+    ) -> Result<(), RdyError> {
+        if !files.contains_key(path) {
+            self.count(files.len().saturating_add(1))?;
+        }
+        self.admit(0, u64::try_from(len).unwrap_or(u64::MAX))
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// A page context was made.
+    fn made(&self) {
+        self.built.fetch_add(1, Ordering::SeqCst);
+        let now = self.pending.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+    }
+
+    /// A page context was rendered.
+    fn rendered(&self) {
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn admitted(&self) -> u64 {
+        self.bytes.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn built(&self) -> usize {
+        self.built.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+}
+
+/// Puts `bytes` at `path` in `files`, admitted by `budget` first when there is one; a file it
+/// replaces gives its bytes back.
+fn put_file(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    budget: Option<&Budget>,
+    path: String,
+    bytes: Vec<u8>,
+) -> Result<(), RdyError> {
+    if let Some(b) = budget {
+        b.reserve(files, &path, bytes.len())?;
+    }
+    if let (Some(old), Some(b)) = (files.insert(path, bytes), budget) {
+        b.release(old.len());
+    }
+    Ok(())
+}
+
+/// What a page context keeps once its page is rendered: what `llms.txt` and `llms-full.txt`
+/// read (its kind, title, path, body and items). The parts every page repeats (the navigation,
+/// the crumbs, the pager, the header and the site's name and description) are dropped, so the
+/// contexts the build holds grow with the source, not with the pages times the navigation.
+fn keep_for_llms(ctx: &mut page::PageContext) {
+    ctx.site_name = String::new();
+    ctx.site_description = None;
+    ctx.root = String::new();
+    ctx.header = String::new();
+    ctx.crumbs = vec![];
+    ctx.nav = Default::default();
+    ctx.toc = Default::default();
+    ctx.pager = Default::default();
+    ctx.search_href = String::new();
+    ctx.review_bar = None;
+}
+
+/// A page made by `build` for each of `kinds` and rendered by `render`, in order: the contexts
+/// (as [`keep_for_llms`] keeps them) and the pages. `build` makes the contexts one by one on
+/// this thread while a few threads render them; it waits while a made context waits for a
+/// thread, so few contexts with their navigation are held at once. After a
+/// failure (a limit of `budget` included) no further context is made, and the first failed
+/// page's error is returned.
+fn build_and_render<'k>(
+    kinds: Vec<page::Kind<'k>>,
+    mut build: impl FnMut(page::Kind<'k>) -> page::PageContext,
+    render: impl Fn(&page::PageContext) -> Result<Page, RdyError> + Sync,
+    budget: Option<&Budget>,
+) -> Result<(Vec<page::PageContext>, Vec<Page>), RdyError> {
+    use std::sync::mpsc;
+    type Done = (usize, page::PageContext, Result<Page, RdyError>);
+    let n = kinds.len();
+    let threads = render_threads();
+    let failed = AtomicBool::new(false);
+    // one context waits in the queue: with one being rendered on each thread and one being
+    // made, at most `threads + 2` are held unrendered
+    let (jobs, queue) = mpsc::sync_channel::<(usize, page::PageContext)>(1);
+    // the workers own the queue: should they all stop, a send fails and nothing waits
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+    let (done, results) = mpsc::channel::<Done>();
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            let (queue, done, render, failed) = (queue.clone(), done.clone(), &render, &failed);
+            s.spawn(move || {
+                loop {
+                    let job = queue.lock().map(|q| q.recv());
+                    let Ok(Ok((i, mut ctx))) = job else { break };
+                    let page = render(&ctx);
+                    if page.is_err() {
+                        failed.store(true, Ordering::SeqCst);
+                    }
+                    if let Some(b) = budget {
+                        b.rendered();
+                    }
+                    keep_for_llms(&mut ctx);
+                    if done.send((i, ctx, page)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop((done, queue));
+        for (i, kind) in kinds.into_iter().enumerate() {
+            if failed.load(Ordering::SeqCst) || budget.is_some_and(Budget::stopped) {
+                break;
+            }
+            let ctx = build(kind);
+            if let Some(b) = budget {
+                b.made();
+            }
+            if jobs.send((i, ctx)).is_err() {
+                break;
+            }
+        }
+        drop(jobs);
+    });
+    let mut out: Vec<Option<(page::PageContext, Result<Page, RdyError>)>> =
+        (0..n).map(|_| None).collect();
+    for (i, ctx, page) in results {
+        out[i] = Some((ctx, page));
+    }
+    if let Some(e) = out
+        .iter()
+        .find_map(|o| o.as_ref().and_then(|(_, p)| p.as_ref().err()))
+    {
+        return Err(e.clone());
+    }
+    let mut contexts = Vec::with_capacity(n);
+    let mut pages = Vec::with_capacity(n);
+    for o in out {
+        // every context was made and rendered: no page failed, so none was skipped
+        let (ctx, page) = o.ok_or_else(|| {
+            RdyError::new(
+                E_IO,
+                "template error: a page was not rendered",
+                "this is a bug in rdy-render",
+            )
+        })?;
+        contexts.push(ctx);
+        pages.push(page?);
+    }
+    Ok((contexts, pages))
+}
+
+/// How many threads render pages.
+fn render_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8)
+}
+
+/// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
+/// passes the manifest's limits as `budget`, kept while it builds.
 fn build_site_from(
     prepared: prepare::Prepared,
     mode: Mode,
     slots: Slots,
+    budget: Option<&Budget>,
 ) -> Result<BuiltSite, RdyError> {
     let prepare::Prepared {
         m,
@@ -997,25 +1288,38 @@ fn build_site_from(
         kinds.push(page::Kind::Disagreements);
     }
     let mut index = search::Index::default();
-    let mut contexts = vec![];
     let mut has_mermaid = false;
-    for kind in kinds {
-        let ctx = page::build(&sh, kind);
-        has_mermaid |= ctx.has_mermaid;
-        page::finish(&sh, &ctx, &mut index);
-        contexts.push(ctx);
+    // a publication has at most as many files as its limit: count its pages (the change
+    // summaries included) before making any
+    if let Some(b) = budget {
+        let summaries =
+            usize::from(changes_summary.is_some()) + usize::from(since_summary.is_some());
+        b.count(kinds.len().saturating_add(summaries))?;
     }
-    // a page with its notice slot's offset, recorded as it was written (a publication's pages)
+    // a page with its notice slot's offset, recorded as it was written (a publication's pages),
+    // each write admitted by the budget
     let page_of = |ctx: &page::PageContext| -> Result<Page, RdyError> {
         let r = match slots {
-            Slots::Source => render_page_out(&env, template_of(ctx.kind), ctx)?,
-            Slots::Notices => render_page_out(&env, template_of(ctx.kind), with_notice_slot(ctx))?,
+            Slots::Source => render_page_within(&env, template_of(ctx.kind), ctx, budget)?,
+            Slots::Notices => {
+                render_page_within(&env, template_of(ctx.kind), with_notice_slot(ctx), budget)?
+            }
         };
         let notice = notice_offset(&r.bytes, r.notice.as_ref())?;
         Ok((ctx.page_url.clone(), r.bytes, r.slots, notice))
     };
-    // the pages are rendered on a few threads
-    let pages = par_map(&contexts, page_of)?;
+    // the pages are made one by one and rendered on a few threads
+    let (contexts, pages) = build_and_render(
+        kinds,
+        |kind| {
+            let ctx = page::build(&sh, kind);
+            has_mermaid |= ctx.has_mermaid;
+            page::finish(&sh, &ctx, &mut index);
+            ctx
+        },
+        page_of,
+        budget,
+    )?;
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut label_at: BTreeMap<String, Vec<Slot>> = BTreeMap::new();
     let mut notices: BTreeMap<String, u64> = BTreeMap::new();
@@ -1030,7 +1334,13 @@ fn build_site_from(
     }
     let mut pages = pages;
     for ctx in &extra {
+        if let Some(b) = budget {
+            b.made();
+        }
         pages.push(page_of(ctx)?);
+        if let Some(b) = budget {
+            b.rendered();
+        }
     }
     summary.pages = pages.len();
     for (path, html, at, notice) in pages {
@@ -1040,7 +1350,15 @@ fn build_site_from(
         if let Some(n) = notice {
             notices.insert(path.clone(), n);
         }
-        files.insert(path, html);
+        // the page's bytes were admitted as it was written: it counts as a file here
+        if let Some(b) = budget
+            && !files.contains_key(&path)
+        {
+            b.count(files.len() + 1)?;
+        }
+        if let (Some(old), Some(b)) = (files.insert(path, html), budget) {
+            b.release(old.len());
+        }
     }
 
     // a permalink page for every folder, doc and block that has a place on the site: the
@@ -1062,6 +1380,10 @@ fn build_site_from(
             }
         };
         let (page_url, label, href) = page::redirect_target(&sh, id, &url);
+        // the filled page's length is known before it is made
+        if let Some(b) = budget {
+            b.reserve(&files, &page_url, t.filled_len(&label, &href))?;
+        }
         let (html, notice) = t.fill_at(&label, &href);
         #[cfg(debug_assertions)]
         if summary.redirects.is_multiple_of(997) {
@@ -1080,7 +1402,9 @@ fn build_site_from(
         if let Some(n) = notice_offset(&html, notice.as_ref())? {
             notices.insert(page_url.clone(), n);
         }
-        files.insert(page_url, html);
+        if let (Some(old), Some(b)) = (files.insert(page_url, html), budget) {
+            b.release(old.len());
+        }
         summary.redirects += 1;
     }
 
@@ -1089,24 +1413,26 @@ fn build_site_from(
         Mode::Live { .. } => sh.header_html(""),
         Mode::Static => String::new(),
     };
-    files.insert(
+    put_file(
+        &mut files,
+        budget,
         "search-index.json".into(),
         search::bytes(&index, &site_name),
-    );
+    )?;
     // a label slot takes bytes: a named profile with no chosen tag writes no label
     let (llms, at) =
         llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
-    files.insert("llms.txt".into(), llms);
+    put_file(&mut files, budget, "llms.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
     }
     let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
-    files.insert("llms-full.txt".into(), llms);
+    put_file(&mut files, budget, "llms-full.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
     }
     for (path, bytes) in assets::files(has_mermaid) {
-        files.insert(path.into(), bytes);
+        put_file(&mut files, budget, path.into(), bytes)?;
     }
     // each blob moves into the file map at its last path, so the build never holds two copies
     // of it (one hash under two paths is copied once)
@@ -1123,12 +1449,20 @@ fn build_site_from(
     for (path, (h, _)) in &used {
         let left = uses.get_mut(h).expect("counted above");
         *left -= 1;
+        // a copy is admitted before it is made
+        if let Some(b) = budget {
+            let len = blobs.bytes.get(h).map_or(0, Vec::len);
+            b.reserve(&files, path, len)?;
+        }
         let bytes = if *left == 0 {
             blobs.bytes.remove(h)
         } else {
             blobs.bytes.get(h).cloned()
         };
-        files.insert(path.clone(), bytes.expect("a used blob is held"));
+        let bytes = bytes.expect("a used blob is held");
+        if let (Some(old), Some(b)) = (files.insert(path.clone(), bytes), budget) {
+            b.release(old.len());
+        }
         summary.assets += 1;
     }
     Ok(BuiltSite {
@@ -1240,6 +1574,17 @@ impl RedirectTemplate {
         self.fill_at(label, href).0
     }
 
+    /// The bytes of the page [`RedirectTemplate::fill_at`] gives for a target, known before it
+    /// is made.
+    fn filled_len(&self, label: &str, href: &str) -> usize {
+        let (label, href) = (escape(label).len(), escape(href).len());
+        self.slots
+            .iter()
+            .map(|h| if *h { href } else { label })
+            .chain(self.pieces.iter().map(String::len))
+            .fold(0usize, usize::saturating_add)
+    }
+
     /// The page for a target, and where its notice slot starts: the prototype's offset moved by
     /// the UTF-8 bytes of each value written before it, in place of its marker.
     fn fill_at(&self, label: &str, href: &str) -> (String, Option<usize>) {
@@ -1268,9 +1613,7 @@ fn par_map<T: Sync, R: Send>(
     items: &[T],
     f: impl Fn(&T) -> Result<R, RdyError> + Sync,
 ) -> Result<Vec<R>, RdyError> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 8);
+    let threads = render_threads();
     let chunk = items.len().div_ceil(threads).max(1);
     let f = &f;
     std::thread::scope(|s| {
@@ -1529,6 +1872,65 @@ mod label_tests {
         assert_eq!((r.bytes, r.notice), (b"<main></main>".to_vec(), None));
     }
 
+    /// Fix round 1 (finding 4): literal marker bytes in the template, before and after the
+    /// formatter's slot, never move the recorded offset. A first-match or a last-match search for
+    /// the marker would find a decoy, so this test fails for either.
+    #[test]
+    fn hpb6_the_recorded_offset_is_the_formatters_slot_among_literal_markers() {
+        let marker = std::str::from_utf8(NOTICE_SLOT).unwrap();
+        let env = env_with(
+            "<!--rdy-notices-->ä<p>{{ a | label }}</p><main>{{ notice_slot }}</main>☃<!--rdy-notices-->",
+        );
+        let r = render_page_out(
+            &env,
+            "t.html",
+            with_notice_slot(&serde_json::json!({"a": "é"})),
+        )
+        .unwrap();
+        let html = String::from_utf8(r.bytes.clone()).unwrap();
+        let at = "<!--rdy-notices-->ä<p>é</p><main>".len();
+        // guards: three literal markers, and neither the first nor the last is the slot
+        assert_eq!(html.matches(marker).count(), 3, "{html}");
+        assert_ne!(html.find(marker), Some(at));
+        assert_ne!(html.rfind(marker), Some(at));
+        assert_eq!(r.notice, Some(at..at + NOTICE_SLOT.len()));
+        assert_eq!(
+            notice_offset(&r.bytes, r.notice.as_ref()).unwrap(),
+            Some(at as u64)
+        );
+        // the cached permalink path keeps the formatter's slot among the same decoys
+        let mut env = super::env().unwrap();
+        env.add_template(
+            "t.html",
+            "<!--rdy-notices--><a href=\"{{ h }}\">{{ l }}</a><main>{{ notice_slot }}</main>{{ l }}<!--rdy-notices-->",
+        )
+        .unwrap();
+        let render = |h: &str, l: &str| {
+            render_page_out(
+                &env,
+                "t.html",
+                with_notice_slot(&serde_json::json!({"h": h, "l": l})),
+            )
+            .unwrap()
+        };
+        let proto = render(
+            &RedirectTemplate::HREF.to_string(),
+            &RedirectTemplate::LABEL.to_string(),
+        );
+        let html = String::from_utf8(proto.bytes).unwrap();
+        let t = RedirectTemplate::split(&html, proto.notice.map(|n| n.start)).unwrap();
+        let (page, notice) = t.fill_at("Lâbel ☃", "../dïr/x.html");
+        let at = "<!--rdy-notices--><a href=\"../dïr/x.html\">Lâbel ☃</a><main>".len();
+        assert_ne!(page.find(marker), Some(at));
+        assert_ne!(page.rfind(marker), Some(at));
+        assert_eq!(notice, Some(at));
+        let notice = notice.map(|n| n..n + NOTICE_SLOT.len());
+        assert_eq!(
+            notice_offset(page.as_bytes(), notice.as_ref()).unwrap(),
+            Some(at as u64)
+        );
+    }
+
     #[test]
     fn hpb6_a_second_or_misplaced_notice_slot_is_refused() {
         let ctx = with_notice_slot(&serde_json::json!({}));
@@ -1633,5 +2035,116 @@ mod label_tests {
         let t = env.get_template("t.html").unwrap();
         let e = t.render(serde_json::json!({"a": "v1"})).unwrap_err();
         assert!(e.to_string().contains("version label"), "{e}");
+    }
+}
+
+/// Fix round 1 (finding 1): a publication build keeps the manifest's limits while it builds,
+/// never only after every page context and file has been made.
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use rdy_engine::E_LIMIT;
+    use rdy_engine::publication_manifest::{MAX_ARTIFACT_BYTES, MAX_FILE_BYTES, MAX_FILES};
+
+    /// A generated project of 4 folders of 30 docs with a claim each: every page's navigation
+    /// repeats the folders and the current folder's docs, so the pages' bytes grow faster than
+    /// the source's.
+    fn project() -> (tempfile::TempDir, rdy_engine::Rdy) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 4, 30, 1);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        (dir, r)
+    }
+
+    fn build(r: &rdy_engine::Rdy, budget: Option<&Budget>) -> Result<BuiltSite, RdyError> {
+        let read = r.read();
+        let prepared = prepare::source(&read, &Scope::View("work".into()), prepare::Purpose::Site)?;
+        build_site_from(prepared, Mode::Static, Slots::Notices, budget)
+    }
+
+    /// The number of HTML pages of `b` that are not permalinks, and their bytes.
+    fn pages(b: &BuiltSite) -> (usize, u64) {
+        b.site
+            .files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".html") && !p.starts_with("go/"))
+            .fold((0, 0), |(n, s), (_, f)| (n + 1, s + f.len() as u64))
+    }
+
+    fn total(b: &BuiltSite) -> u64 {
+        b.site.files.values().map(|f| f.len() as u64).sum()
+    }
+
+    #[track_caller]
+    fn over(e: &RdyError, limit: String) {
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                format!("publication manifest exceeds {limit}").as_str(),
+                "reduce the artifact to the stated limit"
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn hpb6_a_publication_build_within_the_limits_is_unchanged() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let b = Budget::publication();
+        let kept = build(&r, Some(&b)).unwrap();
+        assert_eq!(kept.site.files, free.site.files);
+        assert_eq!(kept.notices, free.notices);
+        // every byte of the artifact was counted once, as it was written
+        assert_eq!(b.admitted(), total(&free));
+        assert_eq!(b.built(), pages(&free).0);
+    }
+
+    #[test]
+    fn hpb6_a_publication_build_stops_at_its_artifact_limit_while_it_writes() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let (n, bytes) = pages(&free);
+        assert!(n > 120, "guard: {n} pages");
+        let limit = bytes / 20;
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, limit);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} artifact bytes"));
+        // no write went past the limit
+        assert!(b.admitted() <= limit, "{} > {limit}", b.admitted());
+        // the build stopped making page contexts: the pages that fit and those in flight
+        let in_flight = render_threads() + 2;
+        assert!(b.peak() <= in_flight, "{} contexts in flight", b.peak());
+        assert!(
+            b.built() < n / 2,
+            "{} of {n} page contexts built",
+            b.built()
+        );
+    }
+
+    #[test]
+    fn hpb6_a_publication_build_stops_at_its_file_limits() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let (n, _) = pages(&free);
+        let largest = free.site.files.values().map(Vec::len).max().unwrap() as u64;
+        // one file over the per-file limit
+        let b = Budget::new(MAX_FILES, largest - 1, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} file bytes", largest - 1));
+        assert!(b.admitted() < total(&free));
+        // more pages than files: refused before any page context is made
+        let b = Budget::new(n - 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} files", n - 1));
+        assert_eq!((b.built(), b.admitted()), (0, 0));
+        // the pages fit, the permalinks and assets do not
+        let files = free.site.files.len();
+        let b = Budget::new(files - 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} files", files - 1));
+        assert_eq!(b.built(), n);
+        assert!(b.admitted() < total(&free));
     }
 }
