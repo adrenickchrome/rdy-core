@@ -206,7 +206,8 @@ pub(crate) fn build_within(
                 carried = Some((*after, to));
                 Ok(changed)
             };
-            let counted = history.count(tip, &tags, ceiling(), &prev, &mut eval)?;
+            let limit = history.ceiling.unwrap_or_else(ceiling);
+            let counted = history.count(tip, &tags, limit, &prev, &mut eval)?;
             match (&counted.tag, counted.since) {
                 (Some(t), Since::Count(n)) if n > 0 => {
                     since = Some((n, t.name.clone(), t.landing));
@@ -560,6 +561,8 @@ pub struct ProfileHistoryMemo {
     bases: HashMap<Hash, Option<Tagged>>,
     bases_tags: Option<Hash>,
     evaluations: u64,
+    /// Tests only: the ceiling in place of [`history_facts::MAX_LANDINGS`] for this memo.
+    ceiling: Option<usize>,
 }
 
 impl ProfileHistoryMemo {
@@ -567,6 +570,14 @@ impl ProfileHistoryMemo {
     #[doc(hidden)]
     pub fn evaluations_for_tests(&self) -> u64 {
         self.evaluations
+    }
+
+    /// Tests only: the builds with this memo take `n` as the ceiling of the interval they count
+    /// (`None`: [`history_facts::MAX_LANDINGS`]), so a test reaches the over-limit path with a
+    /// short chain. The live site's cache sets it from its own test hook.
+    #[doc(hidden)]
+    pub fn set_ceiling_for_tests(&mut self, n: Option<usize>) {
+        self.ceiling = n;
     }
 
     /// Readies the memo for `identity`: one of another profile, epoch or pack is cleared before

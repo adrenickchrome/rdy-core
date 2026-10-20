@@ -1,7 +1,7 @@
 //! The perf-regression tier: a fixed workload, per-machine baselines, regression verdicts.
 use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{approver, land, write, writer};
-use rdy_daemon::site::guard::ScopeRef;
+use rdy_daemon::site::guard::{ScopeRef, SiteTarget};
 use rdy_daemon::site::live::{LiveEvent, LiveSite, STREAM_QUEUE, Subscription};
 use rdy_daemon::{
     Attempt, Client, Hello, IdleHold, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, Shared,
@@ -3890,7 +3890,8 @@ fn tier_versions_page(out: &mut Vec<Measure>, r: &mut Rdy, view: &str, runs: usi
 /// `render`, which writes the same pages to disk).
 fn tier_site_build(out: &mut Vec<Measure>, r: &Rdy, sfx: &str, runs: usize) {
     out.push(measure(&format!("site_build_live{sfx}"), runs, |_| {
-        rdy_render::live::build_live(&r.read(), &Scope::Canon, "/").expect("build_live");
+        let canon = SiteTarget::Source(ScopeRef::Canon);
+        rdy_render::live::build_live(&r.read(), &Scope::Canon, &canon).expect("build_live");
     }));
 }
 
@@ -4004,14 +4005,14 @@ fn site_ops(
     let sh = std::sync::Arc::clone(run.shared());
     let claim = fx.claim.to_string();
     let page = format!("{}.html", fx.doc_path);
-    let canon = ScopeRef::Canon;
+    let canon = SiteTarget::Source(ScopeRef::Canon);
     let mut out = vec![];
 
     let b = sh.site.refresh(&sh, &canon).expect("canon builds");
-    assert!(b.revs.contains_key(&page), "no page {page}");
+    assert!(b.live.revs.contains_key(&page), "no page {page}");
     let mut sub = sh
         .site
-        .subscribe(&sh, &canon, &page, &b.revs[&page], &b.label_rev)
+        .subscribe(&sh, &canon, &page, &b.live.revs[&page], &b.live.label_rev)
         .unwrap_or_else(|_| panic!("the site is busy"));
     out.push(measure_timed(
         &format!("site_event_after_land{sfx}"),
@@ -4035,13 +4036,16 @@ fn site_ops(
     ));
     drop(sub);
 
-    let view = ScopeRef::View("sev".into());
+    let view = SiteTarget::Source(ScopeRef::View("sev".into()));
     edit_claim_on_writer(&sh, &claim, "sev", "Seed.".into(), false);
     let b = sh.site.refresh(&sh, &view).expect("the view builds");
-    assert!(b.revs.contains_key(&page), "no page {page} in the view");
+    assert!(
+        b.live.revs.contains_key(&page),
+        "no page {page} in the view"
+    );
     let mut sub = sh
         .site
-        .subscribe(&sh, &view, &page, &b.revs[&page], &b.label_rev)
+        .subscribe(&sh, &view, &page, &b.live.revs[&page], &b.live.label_rev)
         .unwrap_or_else(|_| panic!("the site is busy"));
     out.push(measure_timed(
         &format!("site_event_after_view_write{sfx}"),
@@ -4065,6 +4069,7 @@ fn site_ops(
     pages.extend(
         site.refresh(&sh, &canon)
             .expect("canon builds")
+            .live
             .revs
             .keys()
             .filter(|p| **p != page)
@@ -4092,7 +4097,7 @@ fn site_ops(
                 .map(|_| tokio::sync::mpsc::channel::<LiveEvent>(STREAM_QUEUE))
                 .unzip();
             let s = Instant::now();
-            let sent = fan_out(&old, &new, &pages, &txs);
+            let sent = fan_out(&old.live, &new.live, &pages, &txs);
             let took = s.elapsed();
             assert!(
                 sent > 0,
@@ -4114,7 +4119,7 @@ fn site_ops(
     let b = sh.site.refresh(&sh, &canon).expect("canon builds");
     let longest = docs
         .iter()
-        .max_by_key(|d| b.files.get(&format!("{d}.html")).map_or(0, Vec::len))
+        .max_by_key(|d| b.live.files.get(&format!("{d}.html")).map_or(0, Vec::len))
         .expect("a doc");
     let url = format!("{base}{longest}.html");
     // one untimed request, so the timed ones read a warm build

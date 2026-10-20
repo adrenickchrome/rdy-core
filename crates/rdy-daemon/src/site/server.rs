@@ -9,15 +9,16 @@
 //! asset, and closes the connection.
 use crate::daemon::{DaemonHandle, log};
 use crate::shared::Shared;
-use crate::site::guard::{Guard, Refusal, Route, ScopeRef, refusal};
+use crate::site::guard::{Guard, Refusal, Route, SiteTarget, refusal};
 use crate::site::http::{
     MAX_HEAD_BYTES, Method, ParseError, Response, content_type, parse_head, to_bytes,
 };
-use crate::site::live::resolve;
+use crate::site::live::{label, resolve};
 use crate::site::{LanOverride, SiteInfo, addr, sse};
-use rdy_engine::E_REDACTED_STATE;
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
+use rdy_engine::publication::{IMPLICIT_ORG, profile_at};
 use rdy_engine::serve_config;
+use rdy_engine::{E_NOT_FOUND, E_REDACTED_STATE, ReadState};
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -371,16 +372,16 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
             headers: vec![("Content-Type", content_type("live.js").to_string())],
             body: rdy_render::live::LIVE_JS.as_bytes().to_vec(),
         },
-        Ok(Route::Page { scope, path }) => page(&ctx, scope, path).await,
+        Ok(Route::Page { target, path }) => page(&ctx, target, path).await,
         Ok(Route::Events {
-            scope,
+            target,
             page,
             rev,
             label,
         }) => {
             let sh = Arc::clone(&ctx.shared);
             let sub = tokio::task::spawn_blocking(move || {
-                sh.site.subscribe(&sh, &scope, &page, &rev, &label)
+                sh.site.subscribe(&sh, &target, &page, &rev, &label)
             })
             .await;
             match sub {
@@ -400,36 +401,32 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>) {
     send(stream, &response, head_only).await;
 }
 
-/// A page or file of `scope`: the config check on an HTML page, then the scope's build as of
+/// A page or file of `target`: the config check on an HTML page, then the target's build as of
 /// the latest publish, then the bytes the server sends for `path`.
-async fn page(ctx: &Ctx, scope: ScopeRef, path: String) -> Response {
+async fn page(ctx: &Ctx, target: SiteTarget, path: String) -> Response {
     let sh = Arc::clone(&ctx.shared);
     let built = tokio::task::spawn_blocking(move || {
         // a page load reloads a changed config, as a new connection does (`session_started`)
         if path.ends_with(".html") && sh.watch.changed() {
             let _ = sh.writer.reload();
         }
-        let build = match sh.site.refresh(&sh, &scope) {
+        let build = match sh.site.refresh(&sh, &target) {
             Ok(b) => b,
             // a removal since the entry check: the build of the old state was discarded
             Err(e) if e.code == E_REDACTED_STATE => return Err(Refusal::Busy),
-            // a scope that does not resolve names no view or proposal: not found (the versions
-            // page never resolves, and a failed build of it is broken, not missing)
-            Err(_)
-                if scope != ScopeRef::Versions
-                    && resolve(&sh.state.load_full(), &scope).is_err() =>
-            {
-                return Err(Refusal::NotFound);
-            }
+            // a scope that does not resolve names no view or proposal, and a profile its scope
+            // does not hold has no pages: not found, the plain answer (the menu of canon always
+            // resolves, and a failed build of it is broken, not missing)
+            Err(_) if missing(&sh.state.load_full(), &target) => return Err(Refusal::NotFound),
             Err(e) => {
                 log(&format!(
                     "site: the {} pages did not build ({e})",
-                    scope.text()
+                    label(&target)
                 ));
                 return Err(Refusal::Broken);
             }
         };
-        rdy_render::live::page(&build, &path, &scope.text())
+        rdy_render::live::page(&build.live, &path, &target)
             .map(|body| (content_type(&path), body))
             .ok_or(Refusal::NotFound)
     })
@@ -443,6 +440,24 @@ async fn page(ctx: &Ctx, scope: ScopeRef, path: String) -> Response {
         Ok(Err(f)) => refusal(f),
         Err(_panicked) => refusal(Refusal::Broken),
     }
+}
+
+/// Whether `target` names what `st` does not hold: a scope that does not resolve, or a profile
+/// (of a route, of only-mode or of a menu's context) its scope has no block for. Only the
+/// profile's metadata is read, by its lookup; malformed or redacted metadata is not missing, so
+/// it takes the build-error path.
+fn missing(st: &ReadState, target: &SiteTarget) -> bool {
+    let Ok(scope) = resolve(st, &target.scope()) else {
+        return true;
+    };
+    let key = match target {
+        SiteTarget::Profile { key, .. } | SiteTarget::ProfileOnly { key } => key,
+        SiteTarget::Menu {
+            profile: Some(key), ..
+        } => key,
+        _ => return false,
+    };
+    key != IMPLICIT_ORG && matches!(profile_at(st, &scope, key), Err(e) if e.code == E_NOT_FOUND)
 }
 
 /// Writes `r` (its head only for `HEAD`), then closes: the write side first, then what the peer

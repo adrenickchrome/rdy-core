@@ -2,8 +2,10 @@
 //! scope's build. It tells when the inputs of a build changed (so an unrelated commit costs no
 //! build), which pages changed between two builds, and the bytes to send for a page: its version
 //! label and header filled in and the live script added. Nothing here touches the file system.
-use crate::{Mode, SiteFiles, Slot, SlotKind, build_site, disagree, escape};
-use rdy_engine::{RdyError, ReadState, Scope};
+use crate::{Mode, SiteFiles, Slot, SlotKind, Slots, build_site_from, disagree, escape, prepare};
+use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_target::SiteTarget;
+use rdy_engine::{E_BAD_INPUT, RdyError, ReadState, Scope};
 use rdy_model::Hash;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,13 +74,30 @@ fn label_rev(label: &str, header: &str) -> String {
     rev(&k.0)
 }
 
-/// Builds the site of `scope` as the live server serves it, with the revision of each page.
-/// `root` is the scope's absolute path on the site (`/`, `/~view/<enc>/`, `/~proposal/<ref>/` or
-/// `/~tag/<name>/`): the header's links lead under it.
-pub fn build_live(st: &ReadState, scope: &Scope, root: &str) -> Result<LiveBuild, RdyError> {
+/// Builds the site of `scope` (the scope `target` names, resolved) as the live server serves it,
+/// with the revision of each page. `target` is a source target: its root (`/`, `/~view/<enc>/`,
+/// `/~proposal/<ref>/` or `/~tag/<name>/`) is where the header's links lead, and its menu link
+/// (`SiteTarget::menu_url`) is where the pill opens the menu, so an unfiltered proposal's page
+/// opens that proposal's lists. Any other target is refused with the invalid-target error.
+pub fn build_live(
+    st: &ReadState,
+    scope: &Scope,
+    target: &SiteTarget,
+) -> Result<LiveBuild, RdyError> {
     rdy_engine::refuse_inflight_export(scope)?;
-    let site = build_site(st, scope, Mode::Live { root })?;
-    Ok(of_site(site, st.redaction_epoch()))
+    target.validate()?;
+    if !matches!(target, SiteTarget::Source(s) if *s != ScopeRef::Versions) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "invalid live site target",
+            "use a source scope and a publication profile key",
+        ));
+    }
+    let mut prepared = prepare::source(st, scope, prepare::Purpose::Site)?;
+    prepared.menu_url = target.menu_url();
+    let root = target.root();
+    let built = build_site_from(prepared, Mode::Live { root: &root }, Slots::Source, None)?;
+    Ok(of_site(built.site, st.redaction_epoch()))
 }
 
 /// A live build of a publication profile (D-CWC91, D-DK03K): the site of the profile's selected
@@ -241,27 +260,15 @@ pub fn diff(old: &LiveBuild, new: &LiveBuild) -> Change {
     }
 }
 
-/// `s` with every byte outside `A-Z a-z 0-9 - . _ ~ : @` as `%XX`.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~:@".contains(&b) {
-            out.push(char::from(b));
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// The bytes the server sends for `path`, or none for a path the site does not have. The
 /// version label and the header go into exactly the ranges the build recorded (the label escaped
 /// in an HTML page and on one line in `llms.txt` and `llms-full.txt`, as the static build writes
 /// them; the header as it is), last range first, and nothing else is searched or changed. An
 /// HTML page also gets the live script tag right before its first `</head>`. Any other file is
-/// sent as it is. `scope_text` is the scope as the events route reads it (`canon`,
-/// `view:<name>`, `proposal:P-<x>@<n>`).
-pub fn page(build: &LiveBuild, path: &str, scope_text: &str) -> Option<Vec<u8>> {
+/// sent as it is. The script's event query is `target`'s ([`SiteTarget::events_query`]), then
+/// the page, its revision and the label's, so the stream it opens is of the target it was
+/// served for.
+pub fn page(build: &LiveBuild, path: &str, target: &SiteTarget) -> Option<Vec<u8>> {
     let mut bytes = build.files.get(path)?.clone();
     let html = path.ends_with(".html");
     if let Some(ranges) = build.label_at.get(path) {
@@ -281,9 +288,10 @@ pub fn page(build: &LiveBuild, path: &str, scope_text: &str) -> Option<Vec<u8>> 
     }
     // a permalink page has no revision and takes no script
     if let (true, Some(rev)) = (html, build.revs.get(path)) {
+        // the query's values are encoded: only its separators need the attribute's escape
         let tag = format!(
-            "<script src=\"/_rdy/live.js\" data-events=\"/_rdy/events?scope={}&amp;page={}&amp;rev={}&amp;label={}\" defer></script>",
-            percent_encode(scope_text),
+            "<script src=\"/_rdy/live.js\" data-events=\"/_rdy/events?{}&amp;page={}&amp;rev={}&amp;label={}\" defer></script>",
+            target.events_query().replace('&', "&amp;"),
             path,
             rev,
             build.label_rev

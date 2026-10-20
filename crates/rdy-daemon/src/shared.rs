@@ -12,6 +12,7 @@ use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteLink, WriteFn
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Session};
 use rdy_mcp::notify::NotifyHub;
 use serde_json::Value;
@@ -229,7 +230,8 @@ impl Engine for DaemonEngine {
     }
 
     fn site_warnings(&self, scope: &ScopeRef) -> Result<Vec<String>, RdyError> {
-        Ok(self.0.site.refresh(&self.0, scope)?.warnings.clone())
+        let target = crate::site::live::normalize(&SiteTarget::Source(scope.clone()));
+        Ok(self.0.site.refresh(&self.0, &target)?.live.warnings.clone())
     }
 
     /// `rdy_export`: the `export` op's print. A relative `out` is under the project directory;
@@ -419,7 +421,10 @@ mod tests {
             let path = url.strip_prefix(ROOT).unwrap();
             let head = format!("GET {path}index.html HTTP/1.1\r\nHost: 127.0.0.1:51000\r\n\r\n");
             match guard.check(&parse_head(head.as_bytes()).unwrap()) {
-                Ok(Route::Page { scope, path }) => {
+                Ok(Route::Page {
+                    target: SiteTarget::Source(scope),
+                    path,
+                }) => {
                     assert_eq!(scope.text(), want, "{given}: {url}");
                     assert_eq!(path, "index.html", "{given}: {url}");
                 }

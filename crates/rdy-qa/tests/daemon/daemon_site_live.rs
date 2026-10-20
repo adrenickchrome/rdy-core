@@ -2,7 +2,7 @@
 //! to each open page (D-N5NSN, D-FV6G9; the founder addition of 2026-10-12: a write reloads each
 //! open page it changes, and no other).
 use rdy_daemon::Shared;
-use rdy_daemon::site::guard::ScopeRef;
+use rdy_daemon::site::guard::{ScopeRef, SiteTarget};
 use rdy_daemon::site::live::*;
 use rdy_engine::engine::write_typed;
 use rdy_engine::tensions::*;
@@ -10,17 +10,16 @@ use rdy_engine::{Rdy, Scope};
 use rdy_model::BlockId;
 use rdy_qa::daemon::Hosted;
 use rdy_qa::golden::{approver, land, retired_reference, tiny, writer};
-use rdy_render::live::LiveBuild;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 
-const C: ScopeRef = ScopeRef::Canon;
+const C: SiteTarget = SiteTarget::Source(ScopeRef::Canon);
 const OLD: &str = "0000000000000000";
 
-fn d() -> ScopeRef {
-    ScopeRef::View("draft".into())
+fn d() -> SiteTarget {
+    SiteTarget::Source(ScopeRef::View("draft".into()))
 }
 
 /// Two landed docs, Alpha and Beta, each with one section of two prose blocks (as `render_live`).
@@ -98,9 +97,9 @@ fn on_writer<T: serde::Serialize + 'static>(
 }
 
 /// A stream of `page` of `scope` that has the page as `b` built it.
-fn sub(sh: &Arc<Shared>, scope: &ScopeRef, page: &str, b: &LiveBuild) -> Subscription {
+fn sub(sh: &Arc<Shared>, scope: &SiteTarget, page: &str, b: &SiteBuild) -> Subscription {
     sh.site
-        .subscribe(sh, scope, page, &b.revs[page], &b.label_rev)
+        .subscribe(sh, scope, page, &b.live.revs[page], &b.live.label_rev)
         .unwrap()
 }
 
@@ -156,7 +155,10 @@ fn ls5_a_view_commit_reaches_only_that_view() {
                 text.ends_with(" · view: draft, 2 changes, not landed"),
                 "{text}"
             );
-            assert!(html.contains(">+2</a>") && html == after.header, "{html}");
+            assert!(
+                html.contains(">+2</a>") && html == after.live.header,
+                "{html}"
+            );
         }
         other => panic!("the view's other page gets the new label and header: {other:?}"),
     }
@@ -185,14 +187,15 @@ fn ls5_a_tag_sends_label_not_reload() {
     let after = sh.site.refresh(&sh, &C).unwrap();
     assert!(
         after
+            .live
             .header
             .contains("<span class=\"pill-text\">v1.0.0</span>"),
         "{}",
-        after.header
+        after.live.header
     );
     let label = LiveEvent::Label {
         text: "v1.0.0".into(),
-        html: after.header.clone(),
+        html: after.live.header.clone(),
     };
     assert_eq!(alpha.rx.try_recv(), Ok(label.clone()));
     assert_eq!(beta.rx.try_recv(), Ok(label));
@@ -214,8 +217,8 @@ fn ls5_a_proposal_version_holds_still_and_its_latest_follows() {
     let pref = p["ref"].as_str().unwrap().to_string();
     assert!(pref.ends_with("@1"), "guard: version 1: {pref}");
     let stable = pref.split('@').next().unwrap().to_string();
-    let v1 = ScopeRef::Proposal(pref.clone());
-    let latest = ScopeRef::Proposal(stable);
+    let v1 = SiteTarget::Source(ScopeRef::Proposal(pref.clone()));
+    let latest = SiteTarget::Source(ScopeRef::Proposal(stable));
     let b1 = sh.site.refresh(&sh, &v1).unwrap();
     let bl = sh.site.refresh(&sh, &latest).unwrap();
     let mut s1 = sub(&sh, &v1, "index.html", &b1);
@@ -242,23 +245,23 @@ fn ls5_a_stale_revision_gets_reload_on_subscribe() {
     let b = sh.site.refresh(&sh, &C).unwrap();
     let mut stale = sh
         .site
-        .subscribe(&sh, &C, "alpha.html", OLD, &b.label_rev)
+        .subscribe(&sh, &C, "alpha.html", OLD, &b.live.label_rev)
         .unwrap();
     assert_eq!(stale.rx.try_recv(), Ok(LiveEvent::Reload));
     let mut label = sh
         .site
-        .subscribe(&sh, &C, "alpha.html", &b.revs["alpha.html"], OLD)
+        .subscribe(&sh, &C, "alpha.html", &b.live.revs["alpha.html"], OLD)
         .unwrap();
     assert_eq!(
         label.rx.try_recv(),
         Ok(LiveEvent::Label {
-            text: b.label.clone(),
-            html: b.header.clone()
+            text: b.live.label.clone(),
+            html: b.live.header.clone()
         })
     );
     let mut gone = sh
         .site
-        .subscribe(&sh, &C, "gone.html", OLD, &b.label_rev)
+        .subscribe(&sh, &C, "gone.html", OLD, &b.live.label_rev)
         .unwrap();
     assert_eq!(gone.rx.try_recv(), Ok(LiveEvent::Reload));
 }
@@ -268,7 +271,7 @@ fn ls5_no_open_page_no_build() {
     let h = host_two_docs();
     let sh = shared(&h);
     let b = sh.site.refresh(&sh, &C).unwrap();
-    let rev = b.revs["alpha.html"].clone();
+    let rev = b.live.revs["alpha.html"].clone();
     let builds = sh.site.builds();
     on_writer(&sh, |r| {
         edit_second_prose(r, "work", "Alpha", "Nobody reads this.", true)
@@ -277,7 +280,7 @@ fn ls5_no_open_page_no_build() {
     assert_eq!(sh.site.builds(), builds);
     let mut s = sh
         .site
-        .subscribe(&sh, &C, "alpha.html", &rev, &b.label_rev)
+        .subscribe(&sh, &C, "alpha.html", &rev, &b.live.label_rev)
         .unwrap();
     assert_eq!(sh.site.builds(), builds + 1, "the subscribe built once");
     assert_eq!(s.rx.try_recv(), Ok(LiveEvent::Reload));
@@ -311,9 +314,13 @@ fn ls5_the_streams_are_capped() {
         .map(|_| sub(&sh, &C, "alpha.html", &b))
         .collect();
     assert_eq!(sh.site.streams(), MAX_STREAMS);
-    let refused = sh
-        .site
-        .subscribe(&sh, &C, "alpha.html", &b.revs["alpha.html"], &b.label_rev);
+    let refused = sh.site.subscribe(
+        &sh,
+        &C,
+        "alpha.html",
+        &b.live.revs["alpha.html"],
+        &b.live.label_rev,
+    );
     assert!(matches!(refused, Err(SiteBusy)), "the 33rd is refused");
     drop(open.pop());
     assert_eq!(sh.site.streams(), MAX_STREAMS - 1);
@@ -357,7 +364,7 @@ fn ls5_a_new_term_reloads_the_glossary() {
     on_writer(&sh, term("Alpha", "Ledger", "Balances."));
     let b = sh.site.refresh(&sh, &C).unwrap();
     assert!(
-        b.revs.contains_key("glossary.html"),
+        b.live.revs.contains_key("glossary.html"),
         "guard: the glossary exists"
     );
     let mut glossary = sub(&sh, &C, "glossary.html", &b);
@@ -410,14 +417,15 @@ fn ls5_an_unknown_scope_leaves_nothing_behind() {
     let sh = shared(&h);
     for i in 0..1000 {
         let name = format!("{}{i}", "x".repeat(4000));
-        assert!(sh.site.refresh(&sh, &ScopeRef::View(name)).is_err());
+        let target = SiteTarget::Source(ScopeRef::View(name));
+        assert!(sh.site.refresh(&sh, &target).is_err());
     }
     assert_eq!(sh.site.scopes(), 0, "a failed refresh keeps no scope");
     let s = sh
         .site
         .subscribe(
             &sh,
-            &ScopeRef::View("nowhere".into()),
+            &SiteTarget::Source(ScopeRef::View("nowhere".into())),
             "index.html",
             OLD,
             OLD,

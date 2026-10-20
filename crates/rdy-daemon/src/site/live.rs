@@ -16,10 +16,18 @@
 //! effort: a full or closed queue drops the stream, and the page's revision repairs it when it
 //! reconnects.
 //!
-//! The versions page (`/~versions/`, D-2F29G, RULING F5) is one more scope here, with its own key
-//! (`rdy_render::menu::menu_key`) and its own build: a view commit rebuilds it and never canon.
-//! The number of docs each view or proposal version changes is cached by what it reads, so one
-//! view commit recounts one view.
+//! The versions page (`/~versions/`, D-2F29G, RULING F5) is one more target here, with its own
+//! key (`rdy_render::menu::menu_key_for`, which reads profile metadata and expands no selection)
+//! and its own build: a view commit rebuilds it and never canon. The number of docs each view or
+//! proposal version changes is cached by what it reads, so one view commit recounts one view.
+//!
+//! What the site serves is a [`SiteTarget`] (D-CWC91): a scope's source, a publication profile
+//! under a scope, the profile-only site of canon, or the versions menu seen from a scope and
+//! profile. The cache keys builds and streams by the whole normalized target, so no two scopes,
+//! profiles or menu contexts share bytes, warnings or events. A profile build keeps one
+//! [`ProfileHistoryMemo`] in its slot across successful builds, so a rebuild resolves only the
+//! landings it has not seen; the slot's eviction drops it, and a failed build leaves no new memo
+//! state behind.
 //!
 //! Every build, cache key and doc count belongs to one redaction epoch (D-CC90E: "every view that
 //! holds the content shows the stub"). A build is published only while the store's epoch is
@@ -30,12 +38,16 @@
 //! a response begun before it may complete as an outside copy.
 use crate::daemon::log;
 use crate::shared::Shared;
-use crate::site::guard::ScopeRef;
+use crate::site::guard::{ScopeRef, SiteTarget};
 use crate::writer::panic_text;
+use rdy_engine::publication::ResolvedProfile;
+use rdy_engine::site_scope::{CHANGES_PAGE, SINCE_PAGE, summary_page_taken};
 use rdy_engine::{E_REDACTED_STATE, RdyError, ReadState, Scope};
 use rdy_model::Hash;
-use rdy_render::live::{LiveBuild, build_live, diff, inputs_key};
-use rdy_render::menu::{build_versions, docs_changed, menu_key};
+use rdy_render::live::{
+    LiveBuild, ProfileHistoryMemo, build_live, build_profile_live, diff, inputs_key,
+};
+use rdy_render::menu::{build_versions_for, docs_changed, menu_key_for};
 use rdy_render::review;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -49,9 +61,11 @@ use tokio::sync::mpsc;
 pub const MAX_STREAMS: usize = 32;
 /// The events a stream holds before it is dropped.
 pub const STREAM_QUEUE: usize = 8;
-/// The scopes that keep a build while no page of theirs is open. A scope with an open page
+/// The targets that keep a build while no page of theirs is open. A target with an open page
 /// keeps its build as long as the page is open (the next build is diffed against it), so at most
 /// [`MAX_STREAMS`] builds stay, one per open page at worst: [`MAX_STREAMS`] bounds the memory.
+/// Each profile target's slot also keeps its history memo, so at most `MAX_STREAMS + MAX_SCOPES`
+/// memos stay, each of at most `history_facts::MAX_LANDINGS` results.
 pub const MAX_SCOPES: usize = 8;
 
 /// How often the worker looks whether any `Shared` still lives while no publish wakes it. A
@@ -66,11 +80,51 @@ pub const MAX_COUNTS: usize = 256;
 pub type DocsChanged = Box<dyn Fn(&ReadState, &Scope) -> Result<usize, RdyError> + Send + Sync>;
 
 /// A test's barrier at the publication check of a build ([`LiveSite::set_before_publish`]): it
-/// runs with the scope after the build and before the epoch check that may discard it.
-pub type BeforePublish = Box<dyn Fn(&ScopeRef) + Send + Sync>;
+/// runs with the (normalized) target after the build and before the epoch check that may
+/// discard it.
+pub type BeforePublish = Box<dyn Fn(&SiteTarget) + Send + Sync>;
 
 /// A [`BeforePublish`] as the site keeps it: cloned out of its lock before it runs.
-type Barrier = Arc<dyn Fn(&ScopeRef) + Send + Sync>;
+type Barrier = Arc<dyn Fn(&SiteTarget) + Send + Sync>;
+
+/// A test's sink for the lines the site logs ([`LiveSite::set_log_hook`]), beside the log.
+pub type LogHook = Box<dyn Fn(&str) + Send + Sync>;
+
+/// One build of a target: its pages, and the facts the same build captured, from one read
+/// state: the profile it resolved to (a profile target only), and the change summary page it
+/// generated (`changes.html`, or `changes-since.html` for canon's source), if any.
+pub struct SiteBuild {
+    pub live: LiveBuild,
+    pub profile: Option<ResolvedProfile>,
+    pub changes: Option<&'static str>,
+}
+
+/// `target` in its one form for the cache: the source of the versions page is the menu of
+/// canon.
+pub fn normalize(target: &SiteTarget) -> SiteTarget {
+    match target {
+        SiteTarget::Source(ScopeRef::Versions) => SiteTarget::Menu {
+            scope: ScopeRef::Canon,
+            profile: None,
+        },
+        other => other.clone(),
+    }
+}
+
+/// How the site's log names `target`: a source scope as rdy reads it (`canon`, `view:<name>`),
+/// a profile by its complete root (`/~view/<name>/~profile/<key>/`), the menu of canon as
+/// `versions` and another menu by its link.
+pub fn label(target: &SiteTarget) -> String {
+    match normalize(target) {
+        SiteTarget::Source(scope) => scope.text(),
+        t @ (SiteTarget::Profile { .. } | SiteTarget::ProfileOnly { .. }) => t.root(),
+        SiteTarget::Menu {
+            scope: ScopeRef::Canon,
+            profile: None,
+        } => ScopeRef::Versions.text(),
+        t @ SiteTarget::Menu { .. } => t.menu_url().unwrap_or_default(),
+    }
+}
 
 /// What a stream sends an open page: the closed set of the site's events.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,24 +190,28 @@ impl Stream {
     }
 }
 
-/// One served scope: its last build and the open pages of it.
+/// One served target: its last build and the open pages of it.
 #[derive(Default)]
 struct ScopeState {
-    build: Option<Arc<LiveBuild>>,
+    build: Option<Arc<SiteBuild>>,
     /// The input key of `build`, with the redaction epoch its state captured.
     key: Option<(u64, Hash)>,
     /// The publish count the build (or a check that found the same key) read.
     seen: u64,
     /// When the scope was last used, on `Inner::clock`.
     used: u64,
-    /// A build of the scope failed on the worker and the failure was logged; cleared by a success.
+    /// A build of the target failed on the worker and the failure was logged; cleared by a
+    /// success.
     failing: bool,
     streams: Vec<Stream>,
+    /// A profile target's neutral-chip memo, kept across its successful builds (empty for any
+    /// other target). Taken out for a build and put back only when the build is published.
+    memo: ProfileHistoryMemo,
 }
 
 #[derive(Default)]
 struct Inner {
-    scopes: BTreeMap<ScopeRef, ScopeState>,
+    scopes: BTreeMap<SiteTarget, ScopeState>,
     clock: u64,
     next_id: u64,
     closed: bool,
@@ -164,9 +222,9 @@ impl Inner {
         self.scopes.values().map(|s| s.streams.len()).sum()
     }
 
-    /// The state of `scope`, marked as used now. Only a resolved scope with a build, or a scope
-    /// with an open stream, gets one: a request names any scope it likes.
-    fn touch(&mut self, scope: &ScopeRef) -> &mut ScopeState {
+    /// The state of target `scope`, marked as used now. Only a resolved target with a build, or
+    /// a target with an open stream, gets one: a request names any target it likes.
+    fn touch(&mut self, scope: &SiteTarget) -> &mut ScopeState {
         self.clock += 1;
         let now = self.clock;
         let s = self.scopes.entry(scope.clone()).or_default();
@@ -175,7 +233,7 @@ impl Inner {
     }
 
     /// Drops the state of `scope` when it holds neither a build nor a stream.
-    fn forget_if_empty(&mut self, scope: &ScopeRef) {
+    fn forget_if_empty(&mut self, scope: &SiteTarget) {
         if self
             .scopes
             .get(scope)
@@ -231,6 +289,10 @@ pub struct LiveSite {
     before_publish: Mutex<Option<Barrier>>,
     /// Test hook: the barrier of a subscribe after its refresh, before its stream is registered.
     after_subscribe_refresh: Mutex<Option<Barrier>>,
+    /// Test hook: each line the site logs, beside the log.
+    log_hook: Mutex<Option<LogHook>>,
+    /// Test hook: the history ceiling of every profile build (`None`: the real one).
+    history_ceiling: Mutex<Option<usize>>,
 }
 
 /// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
@@ -279,13 +341,70 @@ fn count_key(st: &ReadState, scope: &Scope, generation: u64) -> Option<(ScopeRef
     Some((r, Hash::of(&k)))
 }
 
+/// The input key of `target` (normalized and valid) in `st`: for a source or profile target,
+/// the scope's [`inputs_key`] with the target's mode, scope and key; for a menu, the
+/// metadata-only [`menu_key_for`]. No key expands a profile's selection: the scope's head
+/// already covers a change inside a selected doc.
+fn target_key(st: &ReadState, target: &SiteTarget, generation: u64) -> Result<Hash, RdyError> {
+    let mut k = Vec::new();
+    let text = |k: &mut Vec<u8>, s: &str| {
+        k.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        k.extend_from_slice(s.as_bytes());
+    };
+    let (mode, base) = match target {
+        SiteTarget::Source(scope) => (0u8, inputs_key(st, &resolve(st, scope)?, generation)?),
+        SiteTarget::Profile { scope, .. } => (1, inputs_key(st, &resolve(st, scope)?, generation)?),
+        SiteTarget::ProfileOnly { .. } => (2, inputs_key(st, &Scope::Canon, generation)?),
+        SiteTarget::Menu { .. } => (3, menu_key_for(st, target, generation)?),
+    };
+    k.push(mode);
+    k.extend_from_slice(&base.0);
+    text(&mut k, &target.scope().text());
+    match target {
+        SiteTarget::Profile { key, .. } | SiteTarget::ProfileOnly { key } => {
+            k.push(1);
+            text(&mut k, key);
+        }
+        SiteTarget::Menu {
+            profile: Some(key), ..
+        } => {
+            k.push(1);
+            text(&mut k, key);
+        }
+        _ => k.push(0),
+    }
+    Ok(Hash::of(&k))
+}
+
+/// The change summary a source build of `scope` (`resolved` in `st`) generated, by the rules
+/// `rdy_site` gives its link by: a view or a proposal version has `changes.html`, and canon
+/// `changes-since.html` while it has landings since its tag, unless a top-level doc owns that
+/// page (the build then keeps the doc's page). A tag has none.
+fn source_changes(
+    st: &ReadState,
+    resolved: &Scope,
+    scope: &ScopeRef,
+    live: &LiveBuild,
+) -> Result<Option<&'static str>, RdyError> {
+    let page = match scope {
+        ScopeRef::View(_) | ScopeRef::Proposal(_) => CHANGES_PAGE,
+        ScopeRef::Canon => SINCE_PAGE,
+        ScopeRef::Tag(_) | ScopeRef::Versions => return Ok(None),
+    };
+    if !live.files.contains_key(page) {
+        return Ok(None);
+    }
+    let owned = summary_page_taken(&*st.materialized(resolved)?, page);
+    Ok((!owned).then_some(page))
+}
+
 /// An open page's stream. Dropping it removes the stream.
 pub struct Subscription {
     pub id: u64,
     pub rx: mpsc::Receiver<LiveEvent>,
     /// The redaction epoch the stream was compared in (see `Stream::epoch`).
     epoch: u64,
-    scope: ScopeRef,
+    scope: SiteTarget,
     inner: Weak<Mutex<Inner>>,
 }
 
@@ -322,7 +441,40 @@ impl LiveSite {
             docs_changed: Mutex::new(None),
             before_publish: Mutex::new(None),
             after_subscribe_refresh: Mutex::new(None),
+            log_hook: Mutex::new(None),
+            history_ceiling: Mutex::new(None),
         })
+    }
+
+    /// Test hook: from now on, `f` also gets each line the site logs (`None` removes it).
+    #[doc(hidden)]
+    pub fn set_log_hook(&self, f: Option<LogHook>) {
+        *lock(&self.log_hook) = f;
+    }
+
+    /// Test hook: from now on, each profile build counts at most `n` landings since its tag
+    /// before it omits the neutral chip (`None`: `history_facts::MAX_LANDINGS`).
+    #[doc(hidden)]
+    pub fn set_history_ceiling(&self, n: Option<usize>) {
+        *lock(&self.history_ceiling) = n;
+    }
+
+    /// Test hook: how many landing pairs the history memo kept for `target` has evaluated, if
+    /// the site keeps a slot for it.
+    #[doc(hidden)]
+    pub fn history_evaluations(&self, target: &SiteTarget) -> Option<u64> {
+        lock(&self.inner)
+            .scopes
+            .get(&normalize(target))
+            .map(|s| s.memo.evaluations_for_tests())
+    }
+
+    /// A line of the site's log, and the test hook's.
+    fn log(&self, text: &str) {
+        log(text);
+        if let Some(f) = &*lock(&self.log_hook) {
+            f(text);
+        }
     }
 
     /// Test hook: counts the docs a view or proposal version changes with `f` from now on.
@@ -331,15 +483,15 @@ impl LiveSite {
         *lock(&self.docs_changed) = Some(f);
     }
 
-    /// Test hook: from now on, each build runs `f` with its scope at its publication check, after
-    /// the build and before the epoch check (`None` removes it). A barrier in `f` holds the build
-    /// there; the build runs on the thread that refreshes, holding the one-build lock.
+    /// Test hook: from now on, each build runs `f` with its target at its publication check,
+    /// after the build and before the epoch check (`None` removes it). A barrier in `f` holds
+    /// the build there; the build runs on the thread that refreshes, holding the one-build lock.
     #[doc(hidden)]
     pub fn set_before_publish(&self, f: Option<BeforePublish>) {
         *lock(&self.before_publish) = f.map(Arc::from);
     }
 
-    /// Test hook: from now on, each subscribe runs `f` with its scope after its refresh returns
+    /// Test hook: from now on, each subscribe runs `f` with its target after its refresh returns
     /// and before its stream is registered (`None` removes it). A barrier in `f` holds the
     /// subscribe there, holding no lock.
     #[doc(hidden)]
@@ -386,19 +538,22 @@ impl LiveSite {
         }
     }
 
-    /// The build of `scope` as of the latest publish, built when its inputs changed. A new
-    /// build sends each open page of the scope what changed for it (see the module docs). A
-    /// failed build is the error, and the last build stays.
-    pub fn refresh(&self, sh: &Shared, scope: &ScopeRef) -> Result<Arc<LiveBuild>, RdyError> {
-        self.refresh_counted(sh, scope).map(|(b, _)| b)
+    /// The build of `target` as of the latest publish, built when its inputs changed. A new
+    /// build sends each open page of the target what changed for it (see the module docs). A
+    /// failed build is the error, and the last build stays. `Source(Versions)` is the menu of
+    /// canon; an invalid target is refused before anything is kept.
+    pub fn refresh(&self, sh: &Shared, target: &SiteTarget) -> Result<Arc<SiteBuild>, RdyError> {
+        self.refresh_counted(sh, target).map(|(b, _)| b)
     }
 
     /// [`Self::refresh`], and whether it built.
     fn refresh_counted(
         &self,
         sh: &Shared,
-        scope: &ScopeRef,
-    ) -> Result<(Arc<LiveBuild>, bool), RdyError> {
+        target: &SiteTarget,
+    ) -> Result<(Arc<SiteBuild>, bool), RdyError> {
+        let scope = &normalize(target);
+        scope.validate()?;
         let _one = lock(&self.building);
         // the count before the state: a publish after this load counts past `now`, so the next
         // refresh reads it
@@ -406,13 +561,13 @@ impl LiveSite {
         // the store's epoch now: a cached build of another epoch is never served (a removal
         // between a build's check and its insertion leaves it in the cache, unused)
         let current = sh.state.load().reader().redaction_epoch();
-        // an unknown scope leaves no state: nothing is touched before the scope resolves and
+        // an unknown target leaves no state: nothing is touched before the target resolves and
         // builds (or finds its build)
         let cached = |inner: &mut Inner, fresh: &dyn Fn(&ScopeState) -> bool| {
             let hit = inner.scopes.get(scope).and_then(|s| {
                 s.build
                     .as_ref()
-                    .filter(|b| b.epoch == current && fresh(s))
+                    .filter(|b| b.live.epoch == current && fresh(s))
                     .map(Arc::clone)
             })?;
             let s = inner.touch(scope);
@@ -429,23 +584,27 @@ impl LiveSite {
         let st = sh.state.load_full();
         // a state older than a removal builds nothing: the writer publishes the fresh one next
         st.ensure_current_epoch()?;
-        // the versions page is not a read scope: it has its own key and its own build
-        let (resolved, key) = match scope {
-            ScopeRef::Versions => (None, menu_key(&st, generation)),
-            _ => {
-                let resolved = resolve(&st, scope)?;
-                let key = inputs_key(&st, &resolved, generation)?;
-                (Some(resolved), key)
-            }
-        };
-        let key = (st.redaction_epoch(), key);
+        let key = (st.redaction_epoch(), target_key(&st, scope, generation)?);
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.key == Some(key)) {
             return Ok((b, false));
         }
-        let new = Arc::new(match &resolved {
-            Some(resolved) => build_live(&st, resolved, &format!("/{}", scope.path_prefix()))?,
-            None => build_versions(&st, &mut |s| self.docs_changed(&st, s, generation))?,
-        });
+        // a profile build continues its slot's memo; the memo goes back only with a published
+        // build, so a failed build leaves no new cursor or result behind
+        let selected = matches!(
+            scope,
+            SiteTarget::Profile { .. } | SiteTarget::ProfileOnly { .. }
+        );
+        let mut memo = if selected {
+            lock(&self.inner)
+                .scopes
+                .get_mut(scope)
+                .map(|s| std::mem::take(&mut s.memo))
+                .unwrap_or_default()
+        } else {
+            ProfileHistoryMemo::default()
+        };
+        memo.set_ceiling_for_tests(*lock(&self.history_ceiling));
+        let new = Arc::new(self.build(&st, scope, generation, &mut memo)?);
         self.builds.fetch_add(1, Ordering::SeqCst);
         let hook = lock(&self.before_publish).clone();
         if let Some(hook) = hook {
@@ -456,18 +615,27 @@ impl LiveSite {
         // made old is discarded, and the last build stays (never served in the new epoch)
         st.ensure_current_epoch()?;
         let s = inner.touch(scope);
-        // the render's warnings, logged once each when a build of the scope first has them
-        // (FW-UX1: the person hears of them through the agent's `rdy_site` too)
-        let before: &[String] = s.build.as_ref().map_or(&[], |old| &old.warnings);
-        for w in new.warnings.iter().filter(|w| !before.contains(w)) {
-            log(&format!("site: {}: warning: {w}", scope.text()));
+        // the render's warnings, logged once each when a build of the target first has them
+        // (FW-UX1: the person hears of them through the agent's `rdy_site` too); a warning that
+        // stays while it holds is not logged again, and one that comes back after a build
+        // without it is
+        let before: &[String] = s.build.as_ref().map_or(&[], |old| &old.live.warnings);
+        let fresh: Vec<&String> = new
+            .live
+            .warnings
+            .iter()
+            .filter(|w| !before.contains(w))
+            .collect();
+        for w in fresh {
+            self.log(&format!("site: {}: warning: {w}", label(scope)));
         }
-        let change = s.build.as_ref().map(|old| diff(old, &new));
+        let change = s.build.as_ref().map(|old| diff(&old.live, &new.live));
+        let built = &new.live;
         s.streams.retain_mut(|stream| {
             let event = match &change {
                 // a page compared in another epoch (opened before a removal) loads again: the
                 // event carries nothing, and the page it loads is this epoch's
-                _ if stream.epoch != new.epoch => Some(LiveEvent::Reload),
+                _ if stream.epoch != built.epoch => Some(LiveEvent::Reload),
                 // the fan-out rule: what changed between the two builds
                 Some(change) if stream.checked => {
                     if change.reload.contains(&stream.page) {
@@ -475,13 +643,13 @@ impl LiveSite {
                     } else {
                         change.label.clone().map(|text| LiveEvent::Label {
                             text,
-                            html: new.header.clone(),
+                            html: built.header.clone(),
                         })
                     }
                 }
                 // no build to diff, or the stream opened with no comparison: compared with
                 // what it opened at, as a subscribe compares it
-                _ => stream.against(&new),
+                _ => stream.against(built),
             };
             stream.checked = true;
             match event {
@@ -493,14 +661,54 @@ impl LiveSite {
         s.build = Some(Arc::clone(&new));
         s.key = Some(key);
         s.seen = now;
+        if selected {
+            s.memo = memo;
+        }
         inner.evict();
         Ok((new, true))
     }
 
-    /// One wake of the worker: refreshes each scope with an open stream, and returns how many
-    /// it built. A failure is logged once per run of failures of a scope.
+    /// Builds `target` (normalized and valid) from `st`, with `memo` for a profile's history.
+    fn build(
+        &self,
+        st: &ReadState,
+        target: &SiteTarget,
+        generation: u64,
+        memo: &mut ProfileHistoryMemo,
+    ) -> Result<SiteBuild, RdyError> {
+        match target {
+            SiteTarget::Source(scope) => {
+                let resolved = resolve(st, scope)?;
+                let live = build_live(st, &resolved, target)?;
+                let changes = source_changes(st, &resolved, scope, &live)?;
+                Ok(SiteBuild {
+                    live,
+                    profile: None,
+                    changes,
+                })
+            }
+            SiteTarget::Profile { .. } | SiteTarget::ProfileOnly { .. } => {
+                let b = build_profile_live(st, target, memo)?;
+                Ok(SiteBuild {
+                    live: b.live,
+                    profile: Some(b.profile),
+                    changes: b.changes,
+                })
+            }
+            SiteTarget::Menu { .. } => Ok(SiteBuild {
+                live: build_versions_for(st, target, &mut |s| {
+                    self.docs_changed(st, s, generation)
+                })?,
+                profile: None,
+                changes: None,
+            }),
+        }
+    }
+
+    /// One wake of the worker: refreshes each target with an open stream, and returns how many
+    /// it built. A failure is logged once per run of failures of a target.
     pub fn step(&self, sh: &Shared) -> usize {
-        let open: Vec<ScopeRef> = lock(&self.inner)
+        let open: Vec<SiteTarget> = lock(&self.inner)
             .scopes
             .iter()
             .filter(|(_, s)| !s.streams.is_empty())
@@ -524,9 +732,10 @@ impl LiveSite {
                 Err(e) => {
                     if !s.failing {
                         s.failing = true;
-                        log(&format!(
+                        drop(inner);
+                        self.log(&format!(
                             "site: the {} pages did not build ({e}); open pages keep what they show until a build succeeds",
-                            scope.text()
+                            label(&scope)
                         ));
                     }
                 }
@@ -535,8 +744,8 @@ impl LiveSite {
         built
     }
 
-    /// Opens a stream for `page` of `scope`, which the reader has at revision `rev` with the
-    /// label at `label_rev`. The scope is refreshed first. A page the build does not have, or
+    /// Opens a stream for `page` of `target`, which the reader has at revision `rev` with the
+    /// label at `label_rev`. The target is refreshed first. A page the build does not have, or
     /// has at another revision, gets `Reload` at once; else a page with another label gets the
     /// label. When the scope does not build, the stream opens with no event. When a removal
     /// makes the build old before it is compared, the stream is compared with a build of the
@@ -545,11 +754,12 @@ impl LiveSite {
     pub fn subscribe(
         &self,
         sh: &Shared,
-        scope: &ScopeRef,
+        target: &SiteTarget,
         page: &str,
         rev: &str,
         label_rev: &str,
     ) -> Result<Subscription, SiteBusy> {
+        let scope = &normalize(target);
         {
             let inner = lock(&self.inner);
             if inner.closed || inner.streams() >= MAX_STREAMS {
@@ -592,9 +802,9 @@ impl LiveSite {
         // a build of an older epoch is never compared with (the epoch check before each event)
         if refreshed
             && let Some(b) = &s.build
-            && b.epoch == current
+            && b.live.epoch == current
         {
-            if let Some(event) = stream.against(b) {
+            if let Some(event) = stream.against(&b.live) {
                 let _ = stream.tx.try_send(event);
             }
             stream.checked = true;
@@ -621,7 +831,7 @@ impl LiveSite {
             && sh.state.load().ensure_current_epoch().is_ok()
             && let Ok(b) = self.refresh(sh, scope)
         {
-            self.compare(scope, id, &b);
+            self.compare(scope, id, &b.live);
         }
         Ok(sub)
     }
@@ -629,7 +839,7 @@ impl LiveSite {
     /// Compares stream `id` of `scope` with `b` if no build has been compared with it yet (a
     /// build's fan-out compares every registered stream): `Reload` when `b` is of another
     /// epoch, else what [`Stream::against`] finds.
-    fn compare(&self, scope: &ScopeRef, id: u64, b: &LiveBuild) {
+    fn compare(&self, scope: &SiteTarget, id: u64, b: &LiveBuild) {
         let mut inner = lock(&self.inner);
         let Some(stream) = inner
             .scopes
@@ -652,12 +862,12 @@ impl LiveSite {
         stream.checked = true;
     }
 
-    /// The open streams, across every scope.
+    /// The open streams, across every target.
     pub fn streams(&self) -> usize {
         lock(&self.inner).streams()
     }
 
-    /// The scopes the site keeps state for: a build, an open stream or both.
+    /// The targets the site keeps state for: a build, an open stream or both.
     pub fn scopes(&self) -> usize {
         lock(&self.inner).scopes.len()
     }
@@ -722,7 +932,7 @@ mod tests {
     use rdy_model::Role;
     use serde_json::{Value, json};
 
-    const C: ScopeRef = ScopeRef::Canon;
+    const C: SiteTarget = SiteTarget::Source(ScopeRef::Canon);
 
     /// Writes `ops` into `view` as a writer, then lands the view as an approver.
     fn write_and_land(r: &mut Rdy, view: &str, ops: Value) {
@@ -765,7 +975,13 @@ mod tests {
             let b = sh.site.refresh(&sh, &C).unwrap();
             let mut home = sh
                 .site
-                .subscribe(&sh, &C, "index.html", &b.revs["index.html"], &b.label_rev)
+                .subscribe(
+                    &sh,
+                    &C,
+                    "index.html",
+                    &b.live.revs["index.html"],
+                    &b.live.label_rev,
+                )
                 .unwrap();
             sh.writer
                 .run(Box::new(|r: &mut Rdy| {
@@ -826,13 +1042,13 @@ mod tests {
         let out = sh.writer.reload().unwrap();
         assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
         let served = sh.site.refresh(&sh, &C).unwrap();
-        let fresh = build_live(&sh.state.load_full(), &Scope::Canon, "/").unwrap();
+        let fresh = build_live(&sh.state.load_full(), &Scope::Canon, &C).unwrap();
         assert_ne!(
-            before.revs, fresh.revs,
+            before.live.revs, fresh.revs,
             "the pack change moves canon's pages"
         );
         assert_eq!(
-            served.revs, fresh.revs,
+            served.live.revs, fresh.revs,
             "the served build is the reloaded pack's"
         );
         sh.shutdown().unwrap();
