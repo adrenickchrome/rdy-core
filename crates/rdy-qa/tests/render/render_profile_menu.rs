@@ -843,10 +843,18 @@ const PROFILE_CASES: &str = r##"
     out[k + '_prevented'] = x.click(x.pill); await tick();
     out[k] = x.state();
   }
-  // the same origin spelled out is fetched as the path and query the browser resolves it to
+  // the same origin spelled out is fetched as the absolute URL the browser resolves it to, without its fragment
   const q = setup({ menu: true, href: 'http://127.0.0.1/~versions/?scope=tag%3A1.0.0#top' });
   q.click(q.pill); await tick();
   out.q = q.state();
+  // a path that normalizes to one beginning with "//" is the same origin; it is fetched as the
+  // absolute URL, so fetch cannot read it as another host (here or the current one)
+  const r = setup({ menu: true, href: '/a/..//elsewhere.example/~versions/?scope=tag%3A1.0.0#top' });
+  r.click(r.pill); await tick();
+  out.r = r.state();
+  const t = setup({ menu: true, href: '/a/..//127.0.0.1/~versions/' });
+  t.click(t.pill); await tick();
+  out.t = t.state();
   out.leaked = Object.keys(a.window).sort().filter((k) => !before.includes(k));
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -873,8 +881,9 @@ fn spv5_script_fetches_the_pills_context_and_keeps_focus() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-    let a_url = "/~versions/?scope=view%3Aw&profile=docs";
-    let b_url = "/~versions/?scope=tag%3A1.0.0";
+    // the script fetches the validated absolute URL, not a path: the page is http://127.0.0.1/
+    let a_url = "http://127.0.0.1/~versions/?scope=view%3Aw&profile=docs";
+    let b_url = "http://127.0.0.1/~versions/?scope=tag%3A1.0.0";
     assert_eq!(v["errors"], json!([]), "no callback throws: {v}");
     // two contexts, two requests: each page fetched its own pill's href
     assert_eq!(v["a"]["fetched"], json!([a_url]), "{v}");
@@ -894,7 +903,10 @@ fn spv5_script_fetches_the_pills_context_and_keeps_focus() {
     assert_eq!(v["c"]["replaced"], true, "{v}");
     assert_eq!(v["c"]["open"], true, "{v}");
     // a failed fetch follows the pill's own link
-    assert_eq!(v["d"]["followed"], a_url, "{v}");
+    assert_eq!(
+        v["d"]["followed"], "/~versions/?scope=view%3Aw&profile=docs",
+        "{v}"
+    );
     assert_eq!(v["d"]["open"], false, "{v}");
     // the keyboard closes it and gives the focus back
     assert_eq!(v["a_closed"]["open"], false, "{v}");
@@ -915,6 +927,16 @@ fn spv5_script_fetches_the_pills_context_and_keeps_focus() {
         assert_eq!(v[k]["open"], false, "{k}: {v}");
     }
     assert_eq!(v["q"]["fetched"], json!([b_url]), "{v}");
+    assert_eq!(
+        v["r"]["fetched"],
+        json!(["http://127.0.0.1//elsewhere.example/~versions/?scope=tag%3A1.0.0"]),
+        "{v}"
+    );
+    assert_eq!(
+        v["t"]["fetched"],
+        json!(["http://127.0.0.1//127.0.0.1/~versions/"]),
+        "{v}"
+    );
     // the script leaves nothing on the window object
     assert_eq!(v["leaked"], json!([]), "{v}");
 }

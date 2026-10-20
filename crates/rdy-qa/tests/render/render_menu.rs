@@ -509,7 +509,7 @@ fn sr8_the_menu_script_opens_and_closes_the_popover() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
-    let page = "/~versions/";
+    let page = "http://127.0.0.1/~versions/";
     let s1 = "/_rdy/events?scope=versions&page=index.html&rev=1";
     let s2 = "/_rdy/events?scope=versions&page=index.html&rev=2";
     let label = "Versions, proposals, views and profiles";

@@ -14,8 +14,10 @@
   }
 
   // the URL a pill asks for: its href as the browser resolves it against the page, when that stays
-  // on this origin (http or https), as a path and query; else none. The browser's own parser
-  // decides, so a tab, a newline or a "\\" inside "//" cannot hide another host.
+  // on this origin (http or https), as that absolute URL without its fragment; else none. The
+  // browser's own parser decides, so a tab, a newline or a "\\" inside "//" cannot hide another
+  // host. The URL keeps its origin: as a bare path, one that normalizes to "//host/..." would be
+  // read by fetch as another origin.
   function menuUrl(p) {
     var h = p.getAttribute("href");
     if (!h || !window.URL) return null;
@@ -26,7 +28,8 @@
       return null;
     }
     if ((u.protocol !== "http:" && u.protocol !== "https:") || u.origin !== window.location.origin) return null;
-    return u.pathname + u.search;
+    u.hash = "";
+    return u.href;
   }
 
   // the menu and its stream's URL, from the versions page at `url`; no markup from anywhere else
