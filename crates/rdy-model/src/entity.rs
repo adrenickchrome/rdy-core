@@ -207,15 +207,15 @@ pub fn code_literal_spans(text: &str) -> Vec<Range<usize>> {
         // backticks pair up in order on a line: the first with the second, the third with the
         // fourth; a last unpaired one is ignored
         let ticks: Vec<usize> = line.match_indices('`').map(|(i, _)| i).collect();
-        for pair in ticks.chunks_exact(2) {
-            let inner = &line[pair[0] + 1..pair[1]];
+        for &[open, close] in ticks.as_chunks::<2>().0 {
+            let inner = &line[open + 1..close];
             let lit = inner.trim();
             let n = lit.chars().count();
             if (LITERAL_MIN_CHARS..=LITERAL_MAX_CHARS).contains(&n)
                 && !lit.contains("{{")
                 && !lit.contains('\0')
             {
-                let start = at + pair[0] + 1 + (inner.len() - inner.trim_start().len());
+                let start = at + open + 1 + (inner.len() - inner.trim_start().len());
                 out.push(start..start + lit.len());
             }
         }
