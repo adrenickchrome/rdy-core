@@ -478,10 +478,16 @@ fn rdx9_a_forged_drop_preserves_the_target() {
         let before = tree(&to);
         let e = load(&forged, &to).unwrap_err();
         assert_eq!(e.code, E_DUMP, "{name}: {e:?}");
+        // a load's pre-pass checks the batch order before it frames a batch's drops; the clone's
+        // stream reader still meets the overflow first
+        let load_want = match name {
+            "offset" => "a batch does not follow the batch before it",
+            _ => want,
+        };
         assert!(
             e.message
                 .starts_with(&format!("{} is damaged at byte ", forged.display()))
-                && e.message.ends_with(&format!(": {want}")),
+                && e.message.ends_with(&format!(": {load_want}")),
             "{name}: {}",
             e.message
         );

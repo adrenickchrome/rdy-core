@@ -21,8 +21,8 @@ use rdy_store::StoreError;
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, TRAILER_LEN, read_envelope};
 use rdy_store::dump_chain::DumpKind;
 use rdy_store::dump_scan::{
-    ChainLink, ChainSource, Envelope, FileRole, ProjectFile, ScanError, ScanPlan, StopFailure,
-    StopMatch, scan,
+    ChainLink, ChainSource, Envelope, FileRole, METADATA_MISMATCH, ProjectFile, ScanError,
+    ScanPlan, StopFailure, StopMatch, scan,
 };
 use rdy_store::holder::StoreMode;
 use rdy_store::ingest::Ingest;
@@ -120,7 +120,16 @@ pub(crate) fn inspect(files: &[PathBuf], stop: Option<&DumpStop>) -> Result<Chai
             inner: Inner::Legacy { format },
         });
     }
-    let plan = scan(&mut src, stop.map(stop_match)).map_err(|e| scan_error(files, e))?;
+    // inputs whose verified trailers count no batch hold no log: the released refusal, not the
+    // metadata check that such a log cannot pass (every store holds its format batch)
+    let empty = src.envelopes().iter().all(|e| e.trailer.batches == 0);
+    let plan = scan(&mut src, stop.map(stop_match)).map_err(|e| match e {
+        ScanError::Input {
+            source: StoreError::Dump { ref what, .. },
+            ..
+        } if empty && what == METADATA_MISMATCH => incomplete("it holds no batches".to_string()),
+        e => scan_error(files, e),
+    })?;
     // a holder carries no project file, in any input (D-BPYN8)
     if plan.mode() == StoreMode::Holder && plan.files().iter().any(|f| !f.files.is_empty()) {
         return Err(holder_files());
