@@ -1,12 +1,16 @@
 //! Maintenance calls (D-WWAK7, D-69AY3): format facts, dump inspection and load, as the engine
-//! gives them. They open no store, so they need no handle; `StoreHandle::dump` and
-//! `StoreHandle::fsck` are the calls that read an open store. A holder dumps and loads with no
-//! project file (D-BPYN8). There is no upgrade call: load reads every released dump format and
-//! `fsck` checks the result.
+//! gives them. They open no store, so they need no handle; `StoreHandle::dump`,
+//! `StoreHandle::dump_after` and `StoreHandle::fsck` are the calls that read an open store. The
+//! chain types of a dump summary (`ChainEnd`, `BatchMarker`, `DumpKind`, `Location`) are here,
+//! so a consumer can build every field of one through this crate alone. A holder dumps and loads
+//! with no project file (D-BPYN8). There is no upgrade call: load reads every released dump
+//! format and `fsck` checks the result.
 
 use rdy_engine::RdyError;
 pub use rdy_engine::formats::{DumpFormatFacts, DumpPair, FormatFacts};
-pub use rdy_engine::{DumpSummary, FsckReport, LoadSummary};
+pub use rdy_engine::{
+    BatchMarker, ChainEnd, DumpKind, DumpSummary, FsckReport, LoadSummary, Location,
+};
 use std::path::Path;
 
 /// The formats this rdy writes and reads.

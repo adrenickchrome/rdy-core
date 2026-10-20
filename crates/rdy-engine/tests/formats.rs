@@ -1,13 +1,17 @@
 use rdy_engine::formats::{DumpFormatFacts, DumpPair, formats, inspect_dump};
-use rdy_engine::{E_BAD_INPUT, E_DUMP, Rdy};
+use rdy_engine::{BatchMarker, DumpKind, E_BAD_INPUT, E_DUMP, Location, Rdy};
 use std::path::Path;
 
 fn make_dump(dir: &Path) -> std::path::PathBuf {
+    make_dump_summary(dir).0
+}
+
+fn make_dump_summary(dir: &Path) -> (std::path::PathBuf, rdy_engine::DumpSummary) {
     let proj = dir.join("proj");
     let r = Rdy::init(&proj, "rdy-standard").unwrap();
     let out = dir.join("p.rdydump");
-    r.read().dump(&out).unwrap();
-    out
+    let summary = r.read().dump(&out).unwrap();
+    (out, summary)
 }
 
 #[test]
@@ -50,7 +54,7 @@ fn ha8_formats_match_current_constants_and_released_pairs() {
 #[test]
 fn ha8_inspect_reads_only_the_dump_header() {
     let t = tempfile::tempdir().unwrap();
-    let good = make_dump(t.path());
+    let (good, summary) = make_dump_summary(t.path());
     let facts = inspect_dump(&good).unwrap();
     assert_eq!(
         facts,
@@ -58,6 +62,16 @@ fn ha8_inspect_reads_only_the_dump_header() {
             dump: rdy_store::dump::DUMP_FORMAT,
             store: rdy_store::format::STORE_FORMAT,
             rdy: env!("CARGO_PKG_VERSION").to_string(),
+            kind: Some(DumpKind::Full),
+            repo_id: Some(summary.repo_id),
+            base: Some(Location {
+                segment: 0,
+                offset: 0
+            }),
+            base_batch: Some(BatchMarker::ZERO),
+            prev: Some(rdy_model::Hash([0; 32])),
+            end: Some(summary.end),
+            end_batch: Some(summary.end_batch),
         }
     );
 

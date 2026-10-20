@@ -109,7 +109,7 @@ fn dl5_a_dump_holds_every_sealed_batch_of_the_published_state() {
     assert_eq!(marker.digest, got.last().unwrap().digest);
 
     assert_eq!(summary.bytes, std::fs::metadata(&out).unwrap().len());
-    assert_eq!(summary.out, out.display().to_string());
+    assert_eq!(summary.out, Some(out.display().to_string()));
 }
 
 #[test]

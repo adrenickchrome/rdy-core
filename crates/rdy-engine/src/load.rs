@@ -703,7 +703,7 @@ impl Made {
 
 /// An error of the dump reader at `file`: the prelude and format cases name the file, every
 /// other case is damage at a byte.
-fn read_error(file: &Path, e: StoreError) -> RdyError {
+pub(crate) fn read_error(file: &Path, e: StoreError) -> RdyError {
     match e {
         StoreError::Dump { at, what } => match DumpRefusal::of(&what) {
             DumpRefusal::NotADump => RdyError::new(

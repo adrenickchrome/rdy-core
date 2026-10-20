@@ -15,6 +15,7 @@ pub mod stream;
 pub mod take;
 mod value;
 
+pub use maintenance::ChainEnd;
 pub use rdy_engine::RdyError;
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::meta::Origin;

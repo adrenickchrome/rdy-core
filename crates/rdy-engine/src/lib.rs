@@ -120,6 +120,7 @@ pub use query::{
 };
 pub use query::{RedactionRef, source_body};
 pub use rdy_store::Relay;
+pub use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpKind};
 pub use read_state::{
     AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
 };
@@ -159,7 +160,7 @@ pub use wc_check::{check_wc, lexical_path};
 use arc_swap::ArcSwap;
 use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::Store;
-use rdy_store::segment::Location;
+pub use rdy_store::segment::Location;
 use read_state::AsOfCache;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -213,3 +213,49 @@ fn ha12_a_holder_dump_refuses_a_removal_taken_while_it_is_written() {
         "the removal was taken during the dump"
     );
 }
+
+#[test]
+fn hc4_stale_state_clone_places_no_target() {
+    let _clock = crate::pin_clock(1_000_000);
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, prop) = removable(&d.path().join("p"));
+    let old = r.read();
+    r.land(&approver(), &prop.id).unwrap();
+    let target = d.path().join("clone");
+    let e =
+        crate::clone::clone(crate::clone::CloneSource::State(&old), &target, false).unwrap_err();
+    assert_eq!(e.code, E_REDACTED_STATE, "{e:?}");
+    assert!(!target.exists());
+    // a state read after the removal clones
+    crate::clone::clone(crate::clone::CloneSource::State(&r.read()), &target, false).unwrap();
+    Rdy::open(&target).unwrap().fsck().unwrap();
+}
+
+#[test]
+fn hc4_removal_during_a_clone_stream_places_no_target() {
+    let _clock = crate::pin_clock(1_000_000);
+    let d = tempfile::tempdir().unwrap();
+    let (r, prop) = removable(&d.path().join("p"));
+    let st = r.read();
+    // the removal lands after the clone's stream holds its first batch
+    let source = std::rc::Rc::new(std::cell::RefCell::new((r, Some(prop))));
+    let hook = source.clone();
+    super::on_dump_batch(Some(Box::new(move |n| {
+        let (r, prop) = &mut *hook.borrow_mut();
+        if n == 1
+            && let Some(prop) = prop.take()
+        {
+            r.land(&approver(), &prop.id).unwrap();
+        }
+    })));
+    let target = d.path().join("clone");
+    let got = crate::clone::clone(crate::clone::CloneSource::State(&st), &target, false);
+    super::on_dump_batch(None);
+    assert!(
+        source.borrow().1.is_none(),
+        "the removal landed during the stream"
+    );
+    let e = got.unwrap_err();
+    assert_eq!(e.code, E_REDACTED_STATE, "{e:?}");
+    assert!(!target.exists());
+}

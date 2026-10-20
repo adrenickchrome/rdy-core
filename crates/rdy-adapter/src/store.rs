@@ -1,8 +1,8 @@
 //! The store handle and its captured read snapshot.
 
 use rdy_engine::{
-    DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy, RdyError, ReadState,
-    parse_version,
+    ChainEnd, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy, RdyError,
+    ReadState, parse_version,
 };
 use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::meta::Origin;
@@ -57,6 +57,17 @@ impl StoreHandle {
     pub fn dump(&self, out: &Path) -> Result<DumpSummary, RdyError> {
         // one captured state: the dump ends where that state ends, whatever is written meanwhile
         self.local.read().dump(out)
+    }
+
+    /// Writes the increment after `prev`, the chain end of an earlier dump or increment of this
+    /// store (`DumpSummary::chain_end`), to `out`: the sealed batches after it, up to the store's
+    /// current published state, captured once, through the lock this handle already holds. A
+    /// predecessor that does not fit this store is `E_DUMP_CHAIN`, naming it `previous dump`.
+    /// When the store has no batch after `prev`, no file is written and the summary has no
+    /// `out`.
+    pub fn dump_after(&self, prev: &ChainEnd, out: &Path) -> Result<DumpSummary, RdyError> {
+        // one captured state, as `dump` takes it
+        self.local.read().dump_after(prev, out)
     }
 
     /// Checks the store with the engine's own `fsck`, by mode (a holder checks each tag's own

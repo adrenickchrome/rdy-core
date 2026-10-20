@@ -9,57 +9,128 @@
 //! payload an applied redaction removed travels as its dropped record: its original header, its
 //! apply and its residue, never its bytes (plan Redaction, D-3M81W).
 //!
+//! An increment (D-2FMRR) holds the sealed batches after the end of an earlier dump or
+//! increment of the same store: its header names that end, the marker of the batch that ends
+//! there and that file's trailer digest. Each batch keeps its source position. When the store has
+//! no batch past that end, there is nothing to write and no file is made.
+//!
 //! A dump is atomic at the target: it writes `<out>.partial-<pid>`, syncs it, and hard-links it
 //! to `out`, so `out` is a complete dump or nothing. It never overwrites a file. A dump is of one
 //! redaction epoch: a state read before a removal, or one whose removal lands during the dump, is
 //! `E_REDACTED_STATE`, and nothing is placed (TASK-293).
 use crate::config_levels::PROJECT_FILE;
+use crate::dump_error;
 use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_IO, RdyError};
 use crate::handle::io;
+use crate::load::{open_dump, read_error};
 use crate::pack_load::pack_files;
 use crate::read_state::ReadState;
 use crate::wc::ignore::IGNORE_FILE;
+use rdy_model::{Hash, RepoId};
 use rdy_store::StoreError;
 use rdy_store::dump::{
-    DUMP_FORMAT, DumpHeader, DumpTotals, DumpWriter, MAX_FILE_BYTES, MAX_FILES, RemovalTally,
-    is_project_file,
+    DUMP_FORMAT, DumpHeader, DumpReader, DumpTotals, DumpWriter, MAX_FILE_BYTES, MAX_FILES,
+    RemovalTally, is_project_file, read_envelope,
 };
-use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
+use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpChainHeader, DumpKind};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::fsutil::sync_dir;
 use rdy_store::holder::StoreMode;
+use rdy_store::segment::Location;
+use rdy_store::transition::hex;
 use serde::Serialize;
-use std::fs::OpenOptions;
-use std::io::{BufWriter, ErrorKind, Write};
+use std::cell::{Cell, RefCell};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, ErrorKind, Read, Seek, Write};
 use std::path::Path;
 
 /// The directory of the pack files a dump carries, relative to the project root.
 const PACKS_DIR: &str = ".rdy/packs";
 
-/// What `rdy dump` wrote: the file, its formats, what it holds and its length.
-#[derive(Clone, Debug, Serialize)]
+/// What `rdy dump` wrote: the file (none when an increment had no batch to hold), its formats,
+/// its kind, its chain facts (repo, base, end, end marker and trailer digest), its removal facts,
+/// what it holds and its length. In JSON every hash is 64 lowercase hex digits and the repo id
+/// 32.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DumpSummary {
-    pub out: String,
+    pub out: Option<String>,
     pub dump_format: u32,
+    pub kind: DumpKind,
     pub store_format: u32,
+    #[serde(serialize_with = "ids::repo")]
+    pub repo_id: RepoId,
+    pub base: Location,
+    pub end: Location,
+    pub end_batch: BatchMarker,
+    #[serde(serialize_with = "hex::one::serialize")]
+    pub digest: Hash,
+    pub removals: u32,
+    pub first_removed: Option<Location>,
     pub batches: u64,
     pub frames: u64,
     pub files: Vec<String>,
     pub bytes: u64,
 }
 
+impl DumpSummary {
+    /// Where the chain ends after this file: the next increment follows this.
+    pub fn chain_end(&self) -> ChainEnd {
+        ChainEnd {
+            repo_id: self.repo_id,
+            store_format: self.store_format,
+            end: self.end,
+            end_batch: self.end_batch,
+            digest: self.digest,
+        }
+    }
+}
+
+/// The serializers of repo ids in reply types: 32 lowercase hex digits, or null.
+pub(crate) mod ids {
+    use rdy_model::RepoId;
+    use serde::Serializer;
+
+    pub(crate) fn repo<S: Serializer>(r: &RepoId, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(r)
+    }
+
+    pub(crate) fn opt_repo<S: Serializer>(r: &Option<RepoId>, s: S) -> Result<S::Ok, S::Error> {
+        match r {
+            Some(r) => s.collect_str(r),
+            None => s.serialize_none(),
+        }
+    }
+}
+
+thread_local! {
+    static FILE_READS: Cell<u64> = const { Cell::new(0) };
+    static BATCH_HOOK: RefCell<Option<Box<dyn FnMut(u64)>>> = const { RefCell::new(None) };
+}
+
+/// Test hook: this thread's count of project files a dump has opened to read.
+#[doc(hidden)]
+pub fn project_file_reads() -> u64 {
+    FILE_READS.with(Cell::get)
+}
+
+/// Test hook: a dump on this thread calls `hook` with the count of batches written so far,
+/// after each batch it writes (a read barrier for race tests). None removes the hook.
+#[doc(hidden)]
+pub fn on_dump_batch(hook: Option<Box<dyn FnMut(u64)>>) {
+    BATCH_HOOK.with(|h| *h.borrow_mut() = hook);
+}
+
 /// The project files a dump carries (F5, a closed set), with their bytes, in ascending path
 /// order: `.rdy.yaml` (required), `.rdyignore` if present, and each `.rdy/packs` file that the
-/// pack loader reads. A pack file whose name is outside the set is refused.
+/// pack loader reads. A pack file whose name is outside the set is refused, and so is a file
+/// larger than 16 MiB, before its bytes are read.
 pub fn project_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
     let mut files = vec![(
         PROJECT_FILE.to_string(),
-        read_named(&root.join(PROJECT_FILE))?,
+        read_named(&root.join(PROJECT_FILE), PROJECT_FILE)?,
     )];
-    match std::fs::read(root.join(IGNORE_FILE)) {
-        Ok(bytes) => files.push((IGNORE_FILE.to_string(), bytes)),
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(io_at(&root.join(IGNORE_FILE), e)),
+    if let Some(bytes) = read_bounded(&root.join(IGNORE_FILE), IGNORE_FILE)? {
+        files.push((IGNORE_FILE.to_string(), bytes));
     }
     for f in pack_files(&root.join(PACKS_DIR))? {
         let name = f.file_name().unwrap_or_default();
@@ -73,17 +144,147 @@ pub fn project_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
                 "rename the pack file",
             ));
         }
-        files.push((path, read_named(&f)?));
+        let bytes = read_named(&f, &path)?;
+        files.push((path, bytes));
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
 }
 
+/// The chain end of the dump file `file`, open as `r`, from its envelope only: its header is read
+/// first, and a dump of format 1 or 2, which holds no chain facts, is refused. For format 3 the
+/// header and the final trailer are read (`read_envelope`); the body between them is not.
+/// A malformed envelope is the load's `E_DUMP` at its byte.
+pub fn chain_end_of<R: Read + Seek>(file: &Path, r: &mut R) -> Result<ChainEnd, RdyError> {
+    let (_, format, _) = DumpReader::open(&mut *r).map_err(|e| read_error(file, e))?;
+    if format < 3 {
+        return Err(dump_error::export_legacy_predecessor(Some(file), format));
+    }
+    let (format, header, trailer, _) = read_envelope(r).map_err(|e| read_error(file, e))?;
+    let Some(chain) = header.chain else {
+        return Err(dump_error::export_legacy_predecessor(Some(file), format));
+    };
+    Ok(ChainEnd {
+        repo_id: chain.repo_id,
+        store_format: header.store_format,
+        end: header.log_end,
+        end_batch: chain.end_batch,
+        digest: trailer.digest,
+    })
+}
+
 impl ReadState {
-    /// Writes this state as a dump to `out`: the project files, then every sealed batch of the
-    /// log up to `seq()`. Refuses an `out` that exists, an `out` whose directory does not, and
-    /// an `out` in the project's `.rdy` directory.
+    /// Writes this state as a full dump to `out`: the project files, then every sealed batch of
+    /// the log up to `seq()`. Refuses an `out` that exists, an `out` whose directory does not,
+    /// and an `out` in the project's `.rdy` directory.
     pub fn dump(&self, out: &Path) -> Result<DumpSummary, RdyError> {
+        self.dump_to(out, None)
+    }
+
+    /// Writes this state as an increment to `out`: the project files, then the sealed batches
+    /// after `prev`, the end of an earlier dump or increment of this store, up to `seq()`. The
+    /// predecessor is checked first, in this order: its repo, its store format, an end at or
+    /// before this state's, an end that closes a batch of this store, and that batch's marker.
+    /// Its errors name it `previous dump`. When this state ends at `prev`, nothing is written,
+    /// no project file is read, and the summary has no `out` and names `prev`'s end.
+    pub fn dump_after(&self, prev: &ChainEnd, out: &Path) -> Result<DumpSummary, RdyError> {
+        self.dump_following(None, prev, out)
+    }
+
+    /// [`ReadState::dump_after`] the dump file `after`, whose envelope alone is read
+    /// ([`chain_end_of`]); its errors name the file.
+    pub fn dump_after_file(&self, after: &Path, out: &Path) -> Result<DumpSummary, RdyError> {
+        self.ensure_current_epoch()?;
+        let mut f = open_dump(after)?;
+        let prev = chain_end_of(after, &mut f)?;
+        drop(f);
+        self.dump_following(Some(after), &prev, out)
+    }
+
+    /// The increment after `prev`; `file` names the predecessor in the texts (None: the
+    /// `previous dump`).
+    fn dump_following(
+        &self,
+        file: Option<&Path>,
+        prev: &ChainEnd,
+        out: &Path,
+    ) -> Result<DumpSummary, RdyError> {
+        self.ensure_current_epoch()?;
+        let repo_id = repo_id_of(self)?;
+        if prev.repo_id != repo_id {
+            return Err(dump_error::export_repo_mismatch(
+                file,
+                &prev.repo_id,
+                &repo_id,
+            ));
+        }
+        if prev.store_format != STORE_FORMAT {
+            return Err(dump_error::export_store_mismatch(
+                file,
+                prev.store_format,
+                STORE_FORMAT,
+            ));
+        }
+        let at = prev.end;
+        if at > self.seq() {
+            return Err(dump_error::export_end_past_state(
+                file, at.segment, at.offset,
+            ));
+        }
+        let Some(marker) = self.marker_at(at)? else {
+            return Err(dump_error::export_end_inside_batch(
+                file, at.segment, at.offset,
+            ));
+        };
+        if marker != prev.end_batch {
+            return Err(dump_error::export_marker_mismatch(
+                file, at.segment, at.offset,
+            ));
+        }
+        if at == self.seq() {
+            // no batch to hold: no file, and no project file read; still one epoch's answer
+            self.ensure_current_epoch()?;
+            return Ok(DumpSummary {
+                out: None,
+                dump_format: DUMP_FORMAT,
+                kind: DumpKind::Increment,
+                store_format: STORE_FORMAT,
+                repo_id,
+                base: at,
+                end: at,
+                end_batch: prev.end_batch,
+                digest: prev.digest,
+                removals: 0,
+                first_removed: None,
+                batches: 0,
+                frames: 0,
+                files: Vec::new(),
+                bytes: 0,
+            });
+        }
+        self.dump_to(out, Some(prev))
+    }
+
+    /// The marker of the batch of this store that ends at `at`, or None when `at` closes no
+    /// batch: a place inside a frame or a batch, or offset zero of a segment (the origin
+    /// included). `at` is at or before `seq()`, inside the checked log, so a walk to it that
+    /// meets damage met a place that is not a frame boundary.
+    fn marker_at(&self, at: Location) -> Result<Option<BatchMarker>, RdyError> {
+        match self.reader().batch_marker_at(at) {
+            Ok(marker) => Ok(marker),
+            Err(StoreError::Decode(_)) | Err(StoreError::RedactionCorrupt { .. }) => Ok(None),
+            Err(StoreError::Io(e))
+                if matches!(e.kind(), ErrorKind::InvalidData | ErrorKind::UnexpectedEof) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Writes the dump (`prev` None) or the increment after `prev` to `out`, through the
+    /// output guards and [`place`].
+    fn dump_to(&self, out: &Path, prev: Option<&ChainEnd>) -> Result<DumpSummary, RdyError> {
         if std::fs::symlink_metadata(out).is_ok() {
             return Err(exists(out, DUMP_CMD));
         }
@@ -100,20 +301,28 @@ impl ReadState {
         }
         inside_rdy(self.root(), dir, out)?;
         let files = self.dump_files()?;
-        let totals = place(out, DUMP_CMD, |partial, file| {
-            self.write_dump(BufWriter::new(file), &files)
-                .and_then(|(buf, t)| {
+        let (totals, chain) = place(out, DUMP_CMD, |partial, file| {
+            self.write_chain(BufWriter::new(file), &files, prev)
+                .and_then(|(buf, t, chain)| {
                     let file = buf
                         .into_inner()
                         .map_err(|e| io_at(partial, e.into_error()))?;
                     file.sync_all().map_err(|e| io_at(partial, e))?;
-                    Ok(t)
+                    Ok((t, chain))
                 })
         })?;
         Ok(DumpSummary {
-            out: out.display().to_string(),
+            out: Some(out.display().to_string()),
             dump_format: DUMP_FORMAT,
+            kind: chain.kind,
             store_format: STORE_FORMAT,
+            repo_id: chain.repo_id,
+            base: chain.base,
+            end: self.seq(),
+            end_batch: chain.end_batch,
+            digest: totals.digest,
+            removals: totals.removals,
+            first_removed: totals.first_removed,
             batches: totals.batches,
             frames: totals.frames,
             files: files.into_iter().map(|(path, _)| path).collect(),
@@ -131,33 +340,53 @@ impl ReadState {
     }
 
     /// Writes the whole dump into `w` and returns `w`, flushed (a dump, and a clone's stream).
-    ///
-    /// The dump belongs to this state's redaction epoch (TASK-293): a state read before a
-    /// removal, or one whose removal lands while the batches are written, is `E_REDACTED_STATE`.
-    /// The epoch is checked before anything is written and again after the last batch, before
-    /// the trailer (so before a dump file is placed): the batches read the live removal spans,
-    /// and a removal past this state's log end would leave a dropped frame that no record of the
-    /// dump authorizes. The caller removes its partial output on any error.
+    /// See [`ReadState::write_chain`].
     pub(crate) fn write_dump<W: Write>(
         &self,
         w: W,
         files: &[(String, Vec<u8>)],
     ) -> Result<(W, DumpTotals), RdyError> {
+        self.write_chain(w, files, None).map(|(w, t, _)| (w, t))
+    }
+
+    /// Writes the full dump (`prev` None), or the increment after `prev`, into `w`, and returns
+    /// `w`, its totals and its chain facts. An increment's batches are those of `(prev.end,
+    /// seq()]`, each at its source position; the caller has checked `prev` against this store.
+    ///
+    /// The dump belongs to this state's redaction epoch (TASK-293): a state read before a
+    /// removal, or one whose removal lands while the batches are written, is `E_REDACTED_STATE`.
+    /// The epoch is checked before anything is written and again after the last batch is read,
+    /// before the trailer (so before a dump file is placed, and before a clone's loader can read
+    /// a whole stream): the batches read the live removal spans, and a removal past this state's
+    /// log end would leave a dropped frame that no record of the dump authorizes. A walk that
+    /// fails is checked too, so a removal that broke it is `E_REDACTED_STATE`. The caller
+    /// removes its partial output on any error.
+    fn write_chain<W: Write>(
+        &self,
+        w: W,
+        files: &[(String, Vec<u8>)],
+        prev: Option<&ChainEnd>,
+    ) -> Result<(W, DumpTotals, DumpChainHeader), RdyError> {
         self.ensure_current_epoch()?;
         let reader = self.reader();
-        let repo_id = reader.repo_id()?.ok_or_else(|| {
-            StoreError::Decode("the store has no meta/repo_id; run rdy fsck".into())
-        })?;
+        let repo_id = repo_id_of(self)?;
         // the marker of the batch that ends at this state's log end
         let end_batch = reader
             .batch_marker_at(self.seq())?
             .unwrap_or(BatchMarker::ZERO);
+        let (chain, base) = match prev {
+            None => (
+                DumpChainHeader::full(repo_id, end_batch),
+                BatchMarker::ZERO.start,
+            ),
+            Some(prev) => (DumpChainHeader::after(prev, end_batch), prev.end),
+        };
         let header = DumpHeader {
             store_format: STORE_FORMAT,
             log_end: self.seq(),
             // the workspace version: the header names the rdy that wrote the dump (O17)
             rdy: env!("CARGO_PKG_VERSION").to_string(),
-            chain: Some(DumpChainHeader::full(repo_id, end_batch)),
+            chain: Some(chain),
         };
         check_limits(files)?;
         // the writer's i/o errors are the destination's (disk full, say), never the store's
@@ -167,25 +396,44 @@ impl ReadState {
         }
         let mut failed = None;
         let mut facts = RemovalTally::default();
-        let read = self.reader().for_each_batch(self.seq(), |b| {
+        let mut written = 0u64;
+        let read = reader.for_each_batch_after(base, self.seq(), &mut |b| {
             // the source walker's applies; their spans are resolved by the store below
             facts.observe(&b)?;
             w.batch(&b).map_err(|e| {
                 let stop = StoreError::Refused(e.to_string());
                 failed = Some(dest(e));
                 stop
-            })
+            })?;
+            written += 1;
+            BATCH_HOOK.with(|h| {
+                if let Some(hook) = h.borrow_mut().as_mut() {
+                    hook(written);
+                }
+            });
+            Ok(())
         });
-        if let Some(e) = failed {
-            return Err(e);
-        }
-        // a removal that landed during the batches: what they read is no one epoch's
-        self.ensure_current_epoch()?;
-        read?;
+        let read = match failed {
+            Some(e) => Err(e),
+            None => read.map_err(RdyError::from),
+        };
         // each apply's resolved local spans, as the store's authorization has them
-        let facts = facts.resolved(reader, self.seq())?;
-        w.finish(facts).map_err(dest)
+        let facts = read.and_then(|()| Ok(facts.resolved(reader, self.seq())?));
+        // a removal that landed during the batches: what they read is no one epoch's, and a
+        // walk it broke fails for that reason
+        self.ensure_current_epoch()?;
+        let facts = facts?;
+        let (w, totals) = w.finish(facts).map_err(dest)?;
+        Ok((w, totals, chain))
     }
+}
+
+/// The repo id of the store `st` reads.
+fn repo_id_of(st: &ReadState) -> Result<RepoId, RdyError> {
+    Ok(st
+        .reader()
+        .repo_id()?
+        .ok_or_else(|| StoreError::Decode("the store has no meta/repo_id; run rdy fsck".into()))?)
 }
 
 /// The command `rdy dump` names in its texts.
@@ -343,11 +591,7 @@ fn check_limits(files: &[(String, Vec<u8>)]) -> Result<(), RdyError> {
         ));
     }
     if let Some((path, _)) = files.iter().find(|(_, b)| b.len() > MAX_FILE_BYTES) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{path} is larger than 16 MiB"),
-            "make the file 16 MiB or smaller",
-        ));
+        return Err(too_large(path));
     }
     Ok(())
 }
@@ -360,9 +604,45 @@ fn dest(e: StoreError) -> RdyError {
     }
 }
 
-/// Reads one project file; an error names it.
-fn read_named(path: &Path) -> Result<Vec<u8>, RdyError> {
-    std::fs::read(path).map_err(|e| io_at(path, e))
+/// Reads one project file, `name` in the dump; an error names it.
+fn read_named(path: &Path, name: &str) -> Result<Vec<u8>, RdyError> {
+    match read_bounded(path, name)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(io_at(path, std::io::Error::from(ErrorKind::NotFound))),
+    }
+}
+
+/// Reads one project file, `name` in the dump, or None when it does not exist. A file larger
+/// than a dump carries is refused by its length before a byte is read, and a file that grows
+/// past it is refused at its first byte over the limit: no buffer is sized from a claim.
+fn read_bounded(path: &Path, name: &str) -> Result<Option<Vec<u8>>, RdyError> {
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_at(path, e)),
+    };
+    FILE_READS.with(|n| n.set(n.get() + 1));
+    let limit = MAX_FILE_BYTES as u64;
+    if f.metadata().map_err(|e| io_at(path, e))?.len() > limit {
+        return Err(too_large(name));
+    }
+    let mut bytes = Vec::new();
+    f.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_at(path, e))?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(too_large(name));
+    }
+    Ok(Some(bytes))
+}
+
+/// The project file `name` is larger than a dump carries.
+fn too_large(name: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("{name} is larger than 16 MiB"),
+        "make the file 16 MiB or smaller",
+    )
 }
 
 /// An i/o error at `path`, named.
