@@ -376,7 +376,7 @@ fn tail(r: &Rdy, from: Location) -> Vec<(u8, Vec<u8>)> {
 /// Past a fixture's log end, a load holds nothing while the store format is 15, and for a newer
 /// store format only the upgrade batch, which holds `meta/store_format` alone. Returns the
 /// number of data frames past the end.
-fn upgrade_tail(r: &Rdy, log_end: Location, fixture_format: u32) -> u64 {
+pub(crate) fn upgrade_tail(r: &Rdy, log_end: Location, fixture_format: u32) -> u64 {
     let tail = tail(r, log_end);
     if STORE_FORMAT == fixture_format {
         assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
@@ -768,9 +768,9 @@ struct Released {
     holder: bool,
 }
 
-/// Every released fixture. The checksums repeat the ones each pair's own test pins: a change to
-/// any file needs a founder decision, and none is made here.
-const RELEASED: [Released; 7] = [
+/// Every released fixture of a full dump. The checksums repeat the ones each pair's own test pins:
+/// a change to any file needs a founder decision, and none is made here.
+const RELEASED: [Released; 9] = [
     Released {
         dump: "v1-s10.rdydump",
         expect: "v1-s10.expect.json",
@@ -827,11 +827,135 @@ const RELEASED: [Released; 7] = [
         pair: (2, 15),
         holder: true,
     },
+    Released {
+        dump: "v3-s16.rdydump",
+        expect: "v3-s16.expect.json",
+        dump_blake3: "5de4badbd1e5692e12b8465f06fce5f6cea1f42fd619a18cde756584c792c2b5",
+        expect_blake3: "0df206615c985815d676a5ca91efd865899209464f06f575ea235976425e6232",
+        pair: (3, 16),
+        holder: false,
+    },
+    Released {
+        dump: "v3-s16-holder.rdydump",
+        expect: "v3-s16-holder.expect.json",
+        dump_blake3: "dc4ca5b0fcce7e097db9ecf64196ce00a26ad6c0233df11341a578f8d9e7f26e",
+        expect_blake3: "c188d8ff41afdb9ecd2e6a172a20e285aef89826dcf3442bab9730ce446b1372",
+        pair: (3, 16),
+        holder: true,
+    },
 ];
+
+/// A released dump chain: its full dump and increments in chain order, its expect file, the
+/// checksums of each (in that order) and its pair.
+struct ReleasedChain {
+    files: [&'static str; 3],
+    expect: &'static str,
+    blake3: [&'static str; 4],
+    pair: (u32, u32),
+    holder: bool,
+}
+
+/// Every released dump chain. The checksums repeat the ones `io_dump_fixture_s16` pins.
+const RELEASED_CHAINS: [ReleasedChain; 2] = [
+    ReleasedChain {
+        files: [
+            "v3-s16-chain-full.rdydump",
+            "v3-s16-chain-1.rdydump",
+            "v3-s16-chain-2.rdydump",
+        ],
+        expect: "v3-s16-chain.expect.json",
+        blake3: [
+            "7deafdc1a6b2d42a5f71165ca2961d7f32c9c8f4f2a0012a1798d230d1935a62",
+            "23f64d4625407f257e5a0ceb55a133c7472188f21a2ea78e291e49fd02d9069c",
+            "d8735bd462d05edf2d371bed9cf56ce3ca04080fd06882b5e1a02d3e2e2b8111",
+            "2b00f08d44c55b74e6e97375f52acd9e6ed9458ab15790bb31fd6d391a05b615",
+        ],
+        pair: (3, 16),
+        holder: false,
+    },
+    ReleasedChain {
+        files: [
+            "v3-s16-holder-chain-full.rdydump",
+            "v3-s16-holder-chain-1.rdydump",
+            "v3-s16-holder-chain-2.rdydump",
+        ],
+        expect: "v3-s16-holder-chain.expect.json",
+        blake3: [
+            "bf1a88b6d553393f34ad812131bdcb4497347c5a1ec16273a8a8e86c2565f300",
+            "f4069d58ca2dc9705f8b95cf1ae1d5795edf8af5a87ba8a30cc01289debf4262",
+            "3aa9e3303fe228c02b79e3e219494992a7f4b6250e602bf0bcaea6f869150057",
+            "369da6d39efc8aeb46369ed36aff7b52e5f5b20f6ba22d0c73531639159bef80",
+        ],
+        pair: (3, 16),
+        holder: true,
+    },
+];
+
+/// Checks the store loaded at `dir` from the dump files whose batches are `batches` and whose
+/// log ends at `log_end`: every original frame under its hash and kind, at most an upgrade batch
+/// after the source log, and the fsck (a holder), or the invariants and a reindex (a project).
+fn check_loaded(
+    what: &str,
+    dir: &Path,
+    batches: &[DumpBatch],
+    log_end: Location,
+    store_format: u32,
+    pair: (u32, u32),
+    holder: bool,
+) {
+    let r = if holder {
+        Rdy::open_holder(dir).unwrap()
+    } else {
+        Rdy::open(dir).unwrap()
+    };
+    let mut frames = 0;
+    for b in batches {
+        for fr in &b.frames {
+            frames += 1;
+            assert!(
+                r.store().has_kind(fr.kind(), fr.hash()).unwrap(),
+                "{what}: kind {} {} is gone",
+                fr.kind(),
+                fr.hash()
+            );
+        }
+    }
+    assert!(frames > 0, "{what}");
+    assert!(
+        batches
+            .iter()
+            .flat_map(|b| &b.frames)
+            .any(|fr| matches!(fr, Frame::Dropped { .. }))
+            || pair.0 == 1,
+        "{what}: a dump format 2 or 3 fixture holds dropped records"
+    );
+    // the loaded store carries the fixture's log, then at most the upgrade batch of ref updates
+    let tail = tail(&r, log_end);
+    assert!(
+        tail.iter()
+            .all(|(k, _)| *k == kinds::REF_UPDATE || *k == kinds::BATCH_COMMIT),
+        "{what}: the load adds ref updates only: {tail:?}"
+    );
+    assert_eq!(
+        tail.is_empty(),
+        store_format == STORE_FORMAT,
+        "{what}: an upgrade batch only for an older store format"
+    );
+    let facts = every_kind::facts(&r);
+    assert_eq!(facts["fsck"]["unlogged_moves"], 0, "{what}");
+    if holder {
+        r.fsck().unwrap();
+        r.close().unwrap();
+    } else {
+        rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{what}: {v:#?}"));
+        r.close().unwrap();
+        rdy_qa::reindex_check::reindex_reproduces(dir).unwrap_or_else(|v| panic!("{what}: {v:#?}"));
+    }
+}
 
 #[test]
 fn ha17_all_released_dump_pairs_still_load() {
-    // the fixtures on disk are exactly the released ones, and each pair this rdy reads has one
+    // the fixtures on disk are exactly the released ones
     let mut on_disk = BTreeSet::new();
     for e in std::fs::read_dir(fixture("")).unwrap() {
         on_disk.insert(e.unwrap().file_name().to_string_lossy().into_owned());
@@ -839,22 +963,39 @@ fn ha17_all_released_dump_pairs_still_load() {
     let listed: BTreeSet<String> = RELEASED
         .iter()
         .flat_map(|f| [f.dump.to_string(), f.expect.to_string()])
+        .chain(
+            RELEASED_CHAINS
+                .iter()
+                .flat_map(|c| c.files.iter().chain([&c.expect]).map(|n| n.to_string())),
+        )
         .collect();
     assert_eq!(on_disk, listed, "every fixture member is a released one");
+    // the seven released pairs, each with its fixture, and each pair this rdy reads among them
     let pairs: BTreeSet<(u32, u32)> = RELEASED.iter().map(|f| f.pair).collect();
     assert_eq!(
         pairs,
-        BTreeSet::from([(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)])
+        BTreeSet::from([
+            (1, 10),
+            (1, 11),
+            (1, 12),
+            (2, 13),
+            (2, 14),
+            (2, 15),
+            (3, 16)
+        ])
     );
-    // the current output pair has no released fixture yet
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 16));
-    let mut with_current = pairs.clone();
-    with_current.insert((DUMP_FORMAT, STORE_FORMAT));
     assert_eq!(
         READS.iter().copied().collect::<BTreeSet<_>>(),
-        with_current,
-        "each released pair this rdy reads has a fixture"
+        pairs,
+        "each released pair this rdy reads has a fixture, and each fixture's pair is read"
     );
+    assert!(
+        pairs.contains(&(DUMP_FORMAT, STORE_FORMAT)),
+        "the pair this rdy writes"
+    );
+    for c in &RELEASED_CHAINS {
+        assert!(pairs.contains(&c.pair), "{}", c.expect);
+    }
     for f in &RELEASED {
         // the checksum guards of each fixture are unchanged
         let bytes = std::fs::read(fixture(f.dump)).unwrap();
@@ -866,6 +1007,15 @@ fn ha17_all_released_dump_pairs_still_load() {
             "{}",
             f.expect
         );
+        if f.pair == (3, 16) {
+            for (name, digest) in [(f.dump, f.dump_blake3), (f.expect, f.expect_blake3)] {
+                assert_eq!(
+                    digest,
+                    crate::io_dump_fixture_s16::digest_of(name),
+                    "{name}"
+                );
+            }
+        }
         // the dump still loads into this store format with every original object under its
         // hash and kind
         let (batches, log_end, format, store_format) = dump_batches(&fixture(f.dump));
@@ -874,59 +1024,44 @@ fn ha17_all_released_dump_pairs_still_load() {
         let dir = to.path().join("p");
         let s = load(&fixture(f.dump), &dir).unwrap();
         assert_eq!((s.dump_format, s.store_format), f.pair, "{}", f.dump);
-        let r = if f.holder {
-            Rdy::open_holder(&dir).unwrap()
-        } else {
-            Rdy::open(&dir).unwrap()
-        };
-        let mut frames = 0;
-        for b in &batches {
-            for fr in &b.frames {
-                frames += 1;
-                assert!(
-                    r.store().has_kind(fr.kind(), fr.hash()).unwrap(),
-                    "{}: kind {} {} is gone",
-                    f.dump,
-                    fr.kind(),
-                    fr.hash()
-                );
-            }
+        check_loaded(
+            f.dump,
+            &dir,
+            &batches,
+            log_end,
+            store_format,
+            f.pair,
+            f.holder,
+        );
+    }
+    for c in &RELEASED_CHAINS {
+        // the checksum guards of each chain member are unchanged
+        for (name, digest) in c.files.iter().chain([&c.expect]).zip(c.blake3) {
+            let bytes = std::fs::read(fixture(name)).unwrap();
+            assert_eq!(Hash::of(&bytes).to_string(), digest, "{name}");
+            assert_eq!(
+                digest,
+                crate::io_dump_fixture_s16::digest_of(name),
+                "{name}"
+            );
         }
-        assert!(frames > 0, "{}", f.dump);
-        assert!(
-            batches
-                .iter()
-                .flat_map(|b| &b.frames)
-                .any(|fr| matches!(fr, Frame::Dropped { .. }))
-                || f.pair.0 == 1,
-            "{}: a dump format 2 fixture holds dropped records",
-            f.dump
-        );
-        // the loaded store carries the fixture's log, then at most the upgrade batch of ref
-        // updates
-        let tail = tail(&r, log_end);
-        assert!(
-            tail.iter()
-                .all(|(k, _)| *k == kinds::REF_UPDATE || *k == kinds::BATCH_COMMIT),
-            "{}: the load adds ref updates only: {tail:?}",
-            f.dump
-        );
-        assert_eq!(
-            tail.is_empty(),
-            store_format == STORE_FORMAT,
-            "{}: an upgrade batch only for an older store format",
-            f.dump
-        );
-        let facts = every_kind::facts(&r);
-        assert_eq!(facts["fsck"]["unlogged_moves"], 0, "{}", f.dump);
-        if f.holder {
-            r.fsck().unwrap();
-            r.close().unwrap();
-        } else {
-            rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{}: {v:#?}", f.dump));
-            r.close().unwrap();
-            rdy_qa::reindex_check::reindex_reproduces(&dir)
-                .unwrap_or_else(|v| panic!("{}: {v:#?}", f.dump));
+        // the whole chain still loads, as one log, with every original object
+        let mut batches = vec![];
+        let mut log_end = ORIGIN;
+        for name in c.files {
+            let (bs, end, format, store_format) = dump_batches(&fixture(name));
+            assert_eq!((format, store_format), c.pair, "{name}");
+            batches.extend(bs);
+            log_end = end;
         }
+        let to = tempfile::tempdir().unwrap();
+        let dir = to.path().join("p");
+        let files: Vec<PathBuf> = c.files.iter().map(|n| fixture(n)).collect();
+        let s = rdy_engine::load::load_chain(&files, &dir, None).unwrap();
+        assert_eq!((s.dump_format, s.store_format), c.pair, "{}", c.expect);
+        assert_eq!(s.chain.len(), 3);
+        check_loaded(
+            c.expect, &dir, &batches, log_end, c.pair.1, c.pair, c.holder,
+        );
     }
 }

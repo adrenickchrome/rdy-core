@@ -7,11 +7,12 @@
 //! absence has exact active authorization; it never validates the stub's missing fields as
 //! content (D-600CW, D-3M81W).
 use rdy_engine::{Rdy, ReadState, Scope};
-use rdy_model::redaction::RedactedBlockIdentity;
+use rdy_model::redaction::{RedactTarget, RedactedBlockIdentity};
 use rdy_model::{
     Block, BlockId, FieldValue, Hash, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
 };
 use rdy_schema::{Severity, validate_prefix, validate_read_block};
+use rdy_store::segment::Location;
 use rdy_store::{Conflict, StoreReader, ViewOpKind, kinds};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -244,9 +245,14 @@ fn authorized(
             ));
         }
     }
-    let req = reader
-        .redaction_request(&ident.request)
-        .map_err(|e| format!("cannot read request {}: {e}", ident.request))?;
+    let req = match reader.redaction_request(&ident.request) {
+        Ok(req) => req,
+        // a load stopped before the source's apply holds the source's request only in its
+        // carried record: a span of it with held: false is this version's exact authorization
+        // (D-QF2HQ), and the record's targets select the block
+        Err(_) if carried_selects(reader, id, ident)? => return Ok(()),
+        Err(e) => return Err(format!("cannot read request {}: {e}", ident.request)),
+    };
     if !req
         .manifest
         .versions
@@ -259,6 +265,37 @@ fn authorized(
         ));
     }
     Ok(())
+}
+
+/// Whether a carried record of the store names `ident`'s request, holds a span with held: false
+/// for its version, and selects block `id` in its targets.
+fn carried_selects(
+    reader: &StoreReader,
+    id: &BlockId,
+    ident: &RedactedBlockIdentity,
+) -> Result<bool, String> {
+    let mut found = false;
+    let end = Location {
+        segment: u32::MAX,
+        offset: u64::MAX,
+    };
+    reader
+        .visit_carried(end, &mut |c| {
+            let r = &c.record;
+            let span = r
+                .spans
+                .iter()
+                .any(|s| s.kind == kinds::BLOCK && s.hash == ident.version && !s.held);
+            let target = r.targets.iter().any(|t| match t {
+                RedactTarget::AllVersions(i) => i == id,
+                RedactTarget::Version { id: i, version } => i == id && *version == ident.version,
+                RedactTarget::Blob(_) => false,
+            });
+            found |= r.request == ident.request && span && target;
+            Ok(())
+        })
+        .map_err(|e| format!("cannot read the carried records: {e}"))?;
+    Ok(found)
 }
 
 /// A frozen decision whose content comparison is unavailable: a compared version (its first
