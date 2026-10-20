@@ -102,7 +102,7 @@ pub struct ItemOption {
     pub label: String,
     /// What this answer does, one sentence a line.
     pub consequences: Vec<String>,
-    /// The reason, when this option is the recommended one.
+    /// The reason for recommending this option. Some marks the option, even with an empty reason; label holds its words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended: Option<String>,
 }

@@ -457,6 +457,24 @@ fn di12_every_tool_is_in_one_family() {
     }
 }
 
+#[test]
+fn sdc3_pending_describes_recommended_as_a_reason() {
+    // pins the tool text: options[].recommended is the reason and its presence marks the
+    // option; rdy_question's input recommended names an option label instead
+    let (d, r) = rdy_qa::fixtures::project();
+    drop(r);
+    let mut c = McpClient::start(d.path());
+    let tools = c.tools();
+    let tool = tools
+        .iter()
+        .find(|t| t["name"] == "rdy_pending")
+        .expect("rdy_pending is listed");
+    assert_eq!(
+        tool["description"].as_str().unwrap(),
+        "Read what waits for the person: {items, not_ready, snoozed, omitted}. Each item has a ref, kind (approve, confirm, answer, resolve), options, card and card_hash. Each option's label holds its exact words. options[].recommended, when present, marks the recommended option and holds its reason; an empty reason still marks it. rdy_question's input recommended instead names an option label.\n\nShow the card to the person word for word. Keep its options, recommendation and consequences unchanged. A batch (approve) stands first, its exceptions (confirm) beside it. Pass session_ref (the chat session) so Later hides a card only there; max_tokens cuts each card. not_ready lists the versions that need work from you first."
+    );
+}
+
 /// The spec doc in canon, then `n` open questions with authored options landed under its
 /// section: the project, with its person, and an agent state on it.
 fn with_questions(n: usize) -> (tempfile::TempDir, McpState) {
