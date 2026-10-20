@@ -192,7 +192,7 @@ thread_local! {
     static BLOB_PAYLOAD_READS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Counts one blob payload read of a take's publication source.
+/// Counts one blob chunk payload that a take's publication source returned.
 pub(crate) fn count_blob_payload_read() {
     BLOB_PAYLOAD_READS.with(|c| c.set(c.get().wrapping_add(1)));
 }
@@ -204,8 +204,8 @@ pub fn materializations_for_tests() -> u64 {
     MATERIALIZATIONS.with(Cell::get)
 }
 
-/// Tests only: how many blob payloads publication takes have read on this thread (a take reads
-/// none to report its facts).
+/// Tests only: how many blob chunk payloads the sources of publication takes have returned on
+/// this thread (a take reads none to report its facts).
 #[doc(hidden)]
 pub fn blob_payload_reads_for_tests() -> u64 {
     BLOB_PAYLOAD_READS.with(Cell::get)

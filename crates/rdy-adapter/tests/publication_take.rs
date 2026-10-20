@@ -980,6 +980,87 @@ fn hpb17_holder_and_upload_removals_shape_the_same_facts() {
     h.close().unwrap();
 }
 
+/// Two figures whose blobs share their first chunk: one full store chunk (1 MiB) of the same
+/// bytes, then one byte of their own.
+fn shared_chunk_blobs() -> (Vec<u8>, Vec<u8>) {
+    let head: Vec<u8> = (0..1u32 << 20).map(|i| (i % 251) as u8).collect();
+    let (mut a, mut b) = (head.clone(), head);
+    a.push(b'a');
+    b.push(b'b');
+    (a, b)
+}
+
+#[test]
+fn hpb17_a_dropped_shared_chunk_shapes_the_facts() {
+    // removing blob `a` drops its chunks, the shared one too: blob `b`'s manifest names no
+    // removal, so only the chunk's drop makes it unavailable, by the holder's mask or by the
+    // upload's approval
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut r = Rdy::init(&src, "rdy-standard").unwrap();
+    let (a, b) = shared_chunk_blobs();
+    let (ba, bb) = (
+        r.store_mut().put_blob(&a).unwrap(),
+        r.store_mut().put_blob(&b).unwrap(),
+    );
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "D", "doc_type": "page"}},
+            {"op": "create", "type": "figure", "id": "$fa", "parent": "$d", "fields": {"blob": ba.to_string(), "media_type": "application/octet-stream", "alt": "a"}},
+            {"op": "create", "type": "figure", "id": "$fb", "parent": "$d", "fields": {"blob": bb.to_string(), "media_type": "application/octet-stream", "alt": "b"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let (d, admin) = (bid(&w, "$d"), bid(&w, "$admin"));
+    let w = write(
+        &mut r,
+        json!([{"op": "create", "type": "publication_profile", "id": "$s", "parent": admin.to_string(),
+            "fields": {"key": "site", "title": "Site", "audience": "org", "select": [d.to_string()]}}]),
+    );
+    let site = bid(&w, "$s").to_string();
+    land(&mut r);
+    let v1 = tag(&mut r, "v1.0.0");
+    let before = export(&r, v1);
+    redact(&mut r, &[format!("blob:{ba}")]);
+    let v2 = tag(&mut r, "v2.0.0");
+    let (l1, l2) = (landing_of(&r, v1), landing_of(&r, v2));
+
+    // the approval arrives in the upload
+    let one = dir.path().join("one");
+    let mut h = StoreHandle::create_holder(&one, repo(&r)).unwrap();
+    let seen = Seen::default();
+    let got = taken(h.take_publication(
+        &files(dir.path(), "v2", &[&export(&r, v2)]),
+        target("v2.0.0", l2, &site),
+        seen.pass(),
+    ));
+    let incoming = got.facts.profile.unwrap();
+    assert_row(&incoming, &row(&h, "v2.0.0", &site));
+    h.close().unwrap();
+
+    // the holder holds the removal already, and the upload was made before it
+    let two = dir.path().join("two");
+    let mut h = StoreHandle::create_holder(&two, repo(&r)).unwrap();
+    h.take(
+        &files(dir.path(), "v2b", &[&export(&r, v2)]),
+        upload("v2.0.0", l2),
+    )
+    .unwrap();
+    let got = taken(h.take_publication(
+        &files(dir.path(), "v1", &[&before]),
+        target("v1.0.0", l1, &site),
+        seen.pass(),
+    ));
+    let held = got.facts.profile.unwrap();
+    assert_row(&held, &row(&h, "v1.0.0", &site));
+    assert_eq!(held.selection_identity, incoming.selection_identity);
+    assert_eq!(seen.calls(), 2);
+    h.close().unwrap();
+}
+
 #[test]
 fn hpb17_verdict_rejection_and_panic_leave_the_holder_reusable() {
     let _clock = rdy_engine::pin_clock(1_000_000);

@@ -85,8 +85,11 @@ fn repo(r: &Rdy) -> RepoId {
     r.store().repo_id().unwrap().unwrap()
 }
 
-/// The figure's bytes: its blob is one chunk of this length.
-const FIGURE: &[u8] = b"figure bytes of the publication take";
+/// The figure's bytes: one full store chunk (1 MiB) and five bytes more, so its blob is two
+/// chunks and a facts walk that read chunk payloads would show in the source's count.
+fn figure() -> Vec<u8> {
+    (0..(1u32 << 20) + 5).map(|i| (i % 251) as u8).collect()
+}
 
 /// A source project: doc `guide` with a prose block that holds the canary and a figure, and an
 /// org profile `site` that selects the doc, landed and tagged `v1.0.0`. Returns the project, the
@@ -94,7 +97,7 @@ const FIGURE: &[u8] = b"figure bytes of the publication take";
 fn source(dir: &Path) -> (Rdy, String, String, Hash) {
     std::fs::create_dir_all(dir).unwrap();
     let mut r = Rdy::init(dir, "rdy-standard").unwrap();
-    let blob = r.store_mut().put_blob(FIGURE).unwrap();
+    let blob = r.store_mut().put_blob(&figure()).unwrap();
     let w = write(
         &mut r,
         json!([
@@ -438,7 +441,7 @@ fn hpb17_limits_precede_materialization_and_asset_reads() {
         .count();
     let (root, mut h) = holder(dir.path(), repo(&r));
     let before = state(&root, &h);
-    let len = FIGURE.len() as u64;
+    let len = figure().len() as u64;
     let at_bound = Limits {
         selection: blocks,
         blob: len,

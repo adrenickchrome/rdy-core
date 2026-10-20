@@ -981,16 +981,17 @@ pub(crate) struct SourceSettings<'a> {
 /// removals as their drops), borrowed for one resolution, with the holder's captured settings.
 /// Nothing of the upload is collected: each read goes to the source, through a `RefCell` that
 /// lends its cursor to the trait's shared reads. A blob is masked as the holder will mask it once
-/// the take is sealed: by a removal that names its manifest (the holder's own, then one of the
-/// upload's applies) or by a dropped chunk.
+/// the take is sealed: by a removal that names its manifest or drops one of its chunks (the
+/// holder's own, then one of the upload's applies). The masks come from the holder's index and
+/// the upload's request records: no chunk payload is read to report facts.
 pub(crate) struct ObjectPublicationSource<'a, 's> {
     source: RefCell<&'a mut (dyn ObjectSource + 's)>,
     held: &'a dyn Held,
     facts: &'a UploadFacts,
     settings: SourceSettings<'a>,
-    /// The manifests the upload's own applies name, to their requests; read once, when a blob
-    /// is first asked about.
-    marks: RefCell<Option<BTreeMap<Hash, Hash>>>,
+    /// The manifests the upload's own applies name and the chunks their spans drop, to their
+    /// requests; read once, when a blob is first asked about.
+    marks: RefCell<Option<BTreeMap<ObjectKey, Hash>>>,
 }
 
 impl<'a, 's> ObjectPublicationSource<'a, 's> {
@@ -1012,12 +1013,20 @@ impl<'a, 's> ObjectPublicationSource<'a, 's> {
     /// The present record `key`, decoded within its bounds; None when the source does not hold
     /// it intact.
     fn typed<T: serde::de::DeserializeOwned>(&self, key: ObjectKey) -> Result<Option<T>, RdyError> {
-        typed(&mut **self.source.borrow_mut(), key)
+        match self.record(key)? {
+            Some(StreamRecord::Present { payload, .. }) => decode(&payload, key).map(Some),
+            _ => Ok(None),
+        }
     }
 
-    /// The record `key` as the source gives it.
+    /// The record `key` as the source gives it: every read of this source goes through here, so
+    /// a chunk payload it returns is counted (a take reads none to report its facts).
     fn record(&self, key: ObjectKey) -> Result<Option<StreamRecord>, RdyError> {
-        self.source.borrow_mut().record(key).map_err(to_rdy)
+        let record = self.source.borrow_mut().record(key).map_err(to_rdy)?;
+        if key.kind == kinds::BLOB_CHUNK && matches!(record, Some(StreamRecord::Present { .. })) {
+            crate::publication_take::count_blob_payload_read();
+        }
+        Ok(record)
     }
 
     /// The request of the approved apply `apply`.
@@ -1031,13 +1040,11 @@ impl<'a, 's> ObjectPublicationSource<'a, 's> {
             .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, key)))
     }
 
-    /// The request that names blob manifest `h`: the holder's, else the first of the upload's
-    /// new applies (in key order, as the take masks) whose request names it.
-    fn manifest_mark(&self, h: &Hash) -> Result<Option<Hash>, RdyError> {
-        let key = ObjectKey {
-            kind: kinds::BLOB_MANIFEST,
-            hash: *h,
-        };
+    /// The request that removes or names object `key` once the take is sealed: the holder's,
+    /// else the first of the upload's new applies (in key order, as the take masks) whose
+    /// request names it. Reads the holder's index and the upload's request records only, never a
+    /// chunk payload.
+    fn mark(&self, key: ObjectKey) -> Result<Option<Hash>, RdyError> {
         if let Some(request) = self.held.redaction_of(&key)? {
             return Ok(Some(request));
         }
@@ -1060,17 +1067,38 @@ impl<'a, 's> ObjectPublicationSource<'a, 's> {
                 let Some(r) = self.typed::<rdy_model::redaction::Redaction>(request_key)? else {
                     continue;
                 };
-                for b in &r.manifest.blobs {
-                    marks.entry(*b).or_insert(request);
+                // the manifests it names, and the chunks its spans drop (the objects
+                // `sync_proof::check` authorizes)
+                let manifests = r.manifest.blobs.iter().map(|b| ObjectKey {
+                    kind: kinds::BLOB_MANIFEST,
+                    hash: *b,
+                });
+                let chunks = r
+                    .manifest
+                    .spans
+                    .iter()
+                    .filter(|s| s.kind == kinds::BLOB_CHUNK)
+                    .map(|s| ObjectKey {
+                        kind: kinds::BLOB_CHUNK,
+                        hash: s.hash,
+                    });
+                for k in manifests.chain(chunks) {
+                    marks.entry(k).or_insert(request);
                 }
             }
             *self.marks.borrow_mut() = Some(marks);
         }
-        Ok(self.marks.borrow().as_ref().and_then(|m| m.get(h).copied()))
+        Ok(self
+            .marks
+            .borrow()
+            .as_ref()
+            .and_then(|m| m.get(&key).copied()))
     }
 
-    /// The one removal walk of blob `h`: the manifest's mark, then each chunk's drop. `step`
-    /// answers each request and may break the walk. A blob the source lacks has none.
+    /// The one removal walk of blob `h`: the manifest's mark, then each chunk's. `step` answers
+    /// each request and may break the walk. A blob the source lacks has none. A chunk's mark is
+    /// the request that drops it ([`Self::mark`]): every dropped chunk of the take fits an
+    /// approval, so no chunk record is read.
     fn walk(
         &self,
         h: &Hash,
@@ -1079,7 +1107,11 @@ impl<'a, 's> ObjectPublicationSource<'a, 's> {
         let Some(manifest) = PublicationSource::manifest(self, h)? else {
             return Ok(());
         };
-        if let Some(request) = self.manifest_mark(h)?
+        let manifest_key = ObjectKey {
+            kind: kinds::BLOB_MANIFEST,
+            hash: *h,
+        };
+        if let Some(request) = self.mark(manifest_key)?
             && step(request)?.is_break()
         {
             return Ok(());
@@ -1089,8 +1121,8 @@ impl<'a, 's> ObjectPublicationSource<'a, 's> {
                 kind: kinds::BLOB_CHUNK,
                 hash: *c,
             };
-            if let Some(StreamRecord::Dropped { apply, .. }) = self.record(key)?
-                && step(self.request_of(apply)?)?.is_break()
+            if let Some(request) = self.mark(key)?
+                && step(request)?.is_break()
             {
                 break;
             }
@@ -1127,7 +1159,6 @@ impl PublicationSource for ObjectPublicationSource<'_, '_> {
     }
 
     fn blob(&self, blob: &Hash) -> Result<Vec<u8>, RdyError> {
-        crate::publication_take::count_blob_payload_read();
         if let Some(request) = self.removed_blob(blob)? {
             return Err(StoreError::Redacted { request }.into());
         }
