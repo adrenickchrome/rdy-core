@@ -330,15 +330,13 @@ fn check_span(
         if !zero {
             return Err(bad());
         }
-        if !auth.holes.contains_key(&loc) {
-            auth.holes.insert(
-                loc,
-                Hole {
-                    kind: s.kind,
-                    hash: s.hash,
-                    len: s.len,
-                },
-            );
+        // the first record that accounts for the zeros is their proof
+        if let std::collections::btree_map::Entry::Vacant(e) = auth.holes.entry(loc) {
+            e.insert(Hole {
+                kind: s.kind,
+                hash: s.hash,
+                len: s.len,
+            });
             auth.spans.insert(
                 loc,
                 SpanAuth {
