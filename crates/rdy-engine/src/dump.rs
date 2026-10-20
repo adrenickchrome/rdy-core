@@ -183,7 +183,7 @@ impl ReadState {
         self.ensure_current_epoch()?;
         read?;
         // each apply's resolved local spans, as the store's authorization has them
-        let facts = facts.resolved(&reader, self.seq())?;
+        let facts = facts.resolved(reader, self.seq())?;
         w.finish(facts).map_err(dest)
     }
 }
