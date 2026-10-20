@@ -308,14 +308,12 @@ fn serve(stream: TcpStream, shared: &Shared) {
         return;
     };
     shared.log.lock().unwrap().push(req.clone());
-    match answer(&req, shared) {
-        Some(bytes) => {
-            let _ = tls.write_all(&bytes);
-            let _ = tls.flush();
-            tls.conn.send_close_notify();
-            let _ = tls.conn.complete_io(&mut tls.sock);
-        }
-        None => {}
+    // no reply closes the connection at once: a lost response
+    if let Some(bytes) = answer(&req, shared) {
+        let _ = tls.write_all(&bytes);
+        let _ = tls.flush();
+        tls.conn.send_close_notify();
+        let _ = tls.conn.complete_io(&mut tls.sock);
     }
     let _ = tls.sock.shutdown(Shutdown::Both);
 }
