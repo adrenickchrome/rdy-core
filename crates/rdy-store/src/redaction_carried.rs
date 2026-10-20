@@ -382,22 +382,6 @@ pub(crate) fn entry_of(c: &CarriedAt) -> IndexEntry {
     }
 }
 
-/// The index entry of the carried record frame `hash` at `loc` with `payload`. A payload that is
-/// not a carried record is `RedactionCorrupt` at it.
-pub(crate) fn carried_entry(
-    hash: Hash,
-    loc: Location,
-    payload: &[u8],
-) -> Result<IndexEntry, StoreError> {
-    let record = decode_record(payload).ok_or_else(|| StoreError::corrupt_at(loc))?;
-    Ok(IndexEntry::RedactionCarried {
-        carried: hash,
-        request: record.request,
-        loc,
-        spans: spans_of(&record),
-    })
-}
-
 /// A record's spans as index rows, each with its `held` flag.
 fn spans_of(r: &RedactionCarried) -> Vec<(RedactedSpan, bool)> {
     r.spans

@@ -467,9 +467,6 @@ fn entries_for_frame(
         }
         kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
-        kinds::REDACTION_CARRIED => {
-            out.push(crate::redaction_carried::carried_entry(hash, loc, payload)?)
-        }
         kinds::TRANSITION => {
             let rec: Transitions = decode(payload)?;
             out.extend(
@@ -583,6 +580,17 @@ fn replay_into(
             return Err(StoreError::corrupt_at(loc));
         }
         entries.extend(match v.payload {
+            // a carried record's rows are the validated record's: no live writer writes one, so
+            // only the bootstrap of an open or a reindex makes them
+            Some(_) if v.kind == kinds::REDACTION_CARRIED => vec![
+                IndexEntry::Object {
+                    kind: v.kind,
+                    hash: v.hash,
+                    loc,
+                },
+                auth.carried_entry_at(loc)
+                    .ok_or_else(|| StoreError::corrupt_at(loc))?,
+            ],
             // a request's spans are the log's own: a holder's come from its approvals
             Some(payload) if v.kind == kinds::REDACTION => vec![
                 IndexEntry::Object {

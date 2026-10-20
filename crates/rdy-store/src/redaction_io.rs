@@ -217,6 +217,12 @@ impl Authorization {
         self.carried.binary_search_by_key(&loc, |c| c.at).is_ok()
     }
 
+    /// The index entry of the validated carried record at `loc`, if it is one.
+    pub(crate) fn carried_entry_at(&self, loc: Location) -> Option<IndexEntry> {
+        let i = self.carried.binary_search_by_key(&loc, |c| c.at).ok()?;
+        Some(crate::redaction_carried::entry_of(&self.carried[i]))
+    }
+
     /// Whether the span at `loc` may be erased: a validated apply covers it. A span only a
     /// carried record explains is never erased.
     pub(crate) fn erasable(&self, loc: &Location) -> bool {
