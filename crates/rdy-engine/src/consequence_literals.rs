@@ -721,15 +721,23 @@ fn scan_prefix(
     hit: &mut dyn FnMut(usize, usize, usize, usize, usize),
 ) {
     let masked = mask(prefix, mode);
-    let end = match cut.then(|| unclosed_ref(prefix, mode)).flatten() {
-        Some(at) => at,
-        None => masked.len(),
+    // nothing past a reference the cut leaves open is read, but its first `{` is: the full
+    // text has there either that `{` or the masked reference, and neither joins a token. Only
+    // a cut elsewhere leaves the end open, where a token may go on past it.
+    let (end, open) = match cut.then(|| unclosed_ref(prefix, mode)).flatten() {
+        Some(at) => (at, false),
+        None => (masked.len(), cut),
     };
-    let scan = &masked[..end];
+    let scan = if open || end == masked.len() {
+        &masked[..end]
+    } else {
+        debug_assert!(masked[end..].starts_with("{{"));
+        &masked[..end + 1]
+    };
     // the masked copy has the stored bytes' positions; its lines are the stored text's
     let stored = &prefix[..end];
-    // a token that reaches the end of a cut prefix may go on past it
-    let whole = |r: &Range<usize>| !cut || r.end < end;
+    // a token that reaches an open end may go on past it; none goes into the read `{`
+    let whole = |r: &Range<usize>| if open { r.end < end } else { r.end <= end };
     let lines = line_starts(stored);
     let line_of = |at: usize| lines.partition_point(|&s| s <= at) - 1;
     let mut row = |r: Range<usize>, lit: usize| {
@@ -1374,6 +1382,80 @@ mod tests {
         let before = text_scans();
         evidence(&p, &lits, &req("r-00002", &body), &names);
         assert_eq!(text_scans() - before, 1);
+    }
+
+    /// Final review fix round 1, finding 2: the opener of a reference that the 16,384-byte cut
+    /// leaves unclosed is read, so a literal that ends right before it is whole. What the
+    /// opener cannot settle (a longer name that could go on past it, a token that the cut
+    /// itself ends) is still refused.
+    #[test]
+    fn sdc1_a_cut_reference_opener_ends_the_literal_before_it() {
+        let p = pack();
+        let names = lex(&p, &[named("m-0000E", "Ledger", &[])]);
+        let target = req(
+            "r-00001",
+            "Keep 30 days, set `max_retries`, use the Ledger.",
+        );
+        let lits = covered(&p, &target, &names);
+        assert_eq!(
+            ident(&lits),
+            ["30|days", "`max_retries`", "m-0000E"],
+            "{:?}",
+            spell(&lits)
+        );
+        let cut_ref = |before: &str| {
+            req(
+                "r-00002",
+                &format!("{before}{{{{v-00001|{}}}}}", "x".repeat(17_000)),
+            )
+        };
+        for (before, span, value) in [
+            ("30 days", [0, 7], "30 days"),
+            ("max_retries", [0, 11], "max_retries"),
+            ("the Ledger", [4, 10], "Ledger"),
+        ] {
+            let dep = cut_ref(before);
+            let ev = evidence(&p, &lits, &dep, &names);
+            assert_eq!(rows(&ev), [row("body", 1, span, value)], "{before}");
+            assert!(ev.cut, "{before}");
+            assert_eq!(
+                states(&p, &lits, &dep, &names),
+                (vec![value.to_string()], true),
+                "{before}"
+            );
+        }
+        // an escaped opener is text, and the cut falls in the filler past it
+        let dep = req("r-00002", &format!("30 days\\{{{{{}", "x".repeat(17_000)));
+        assert_eq!(evidence(&p, &lits, &dep, &names).matched.len(), 1);
+
+        // a longer known name could go on past an opener the full text never closes
+        let longer = lex(
+            &p,
+            &[
+                named("m-0000E", "Ledger", &[]),
+                named("m-0000F", "Ledger Service", &[]),
+            ],
+        );
+        let lits = covered(&p, &req("r-00001", "the Ledger posts"), &longer);
+        assert_eq!(ident(&lits), ["m-0000E"]);
+        let ev = evidence(&p, &lits, &cut_ref("pay the Ledger"), &longer);
+        assert!(ev.matched.is_empty(), "{:?}", rows(&ev));
+        assert!(ev.cut);
+        // a masked reference before the opener still settles it
+        let ev = evidence(&p, &lits, &cut_ref("pay the Ledger {{v-00002}} "), &longer);
+        assert_eq!(rows(&ev), [row("body", 1, [8, 14], "Ledger")]);
+
+        // a literal the cut itself ends is refused, also when an opener follows past the cut
+        let lits = covered(&p, &req("r-00001", "Keep 30 days"), &names);
+        let fill = 16_384 - " 30 days".len();
+        let dep = req(
+            "r-00002",
+            &format!("{} 30 days{{{{v-00001}}}}", "y".repeat(fill)),
+        );
+        let ev = evidence(&p, &lits, &dep, &names);
+        assert!(ev.matched.is_empty(), "{:?}", rows(&ev));
+        assert!(ev.cut);
+        assert_eq!(states(&p, &lits, &dep, &names), (vec![], true));
     }
 
     #[test]

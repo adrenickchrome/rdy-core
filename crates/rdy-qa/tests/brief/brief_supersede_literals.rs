@@ -1880,3 +1880,129 @@ fn sdc5_a_later_write_cannot_change_a_write_reply() {
         "{v:#}"
     );
 }
+
+// ---------------------------------------------------------------- final review, fix round 1
+
+/// Final review fix round 1, finding 1: two baselines with the same target text still name
+/// different entities when the names moved between them (D-EGXAS, D-CFC6V). Canon has A
+/// (Storage) and B (Queue), T says "Use Storage."; in the view A becomes Archive and B
+/// becomes Storage, then T drops the name. The base names A, the write's start names B: both
+/// are removed, so X (Archive, now A's name) and Y (Storage, now B's name) both update.
+#[test]
+fn sdc5_moved_names_keep_both_baselines_of_an_unchanged_target() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "base", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "parts", "title": "Parts", "doc_type": "page"}},
+        {"op": "create", "type": "component", "id": "$a", "parent": "$d", "fields": {"name": "Storage"}, "body": "One part."},
+        {"op": "create", "type": "component", "id": "$b", "parent": "$d", "fields": {"name": "Queue"}, "body": "Another part."},
+        {"op": "create", "type": "claim", "id": "$t", "parent": "$d", "body": "Use Storage."},
+        {"op": "create", "type": "claim", "id": "$x", "parent": "$d", "body": "X follows {{$t}}: Use Archive."},
+        {"op": "create", "type": "claim", "id": "$y", "parent": "$d", "body": "Y follows {{$t}}: Use Storage."}
+    ]))
+    .unwrap();
+    land(&mut r, "base").unwrap();
+    let id = |n: &str| created(&w, n);
+    let (a, b, t, x, y) = (id("$a"), id("$b"), id("$t"), id("$x"), id("$y"));
+    let e = Local::new(r);
+    write_in(
+        &e,
+        "w",
+        json!([
+            {"op": "update", "id": a.to_string(), "fields": {"name": "Archive"}},
+            {"op": "update", "id": b.to_string(), "fields": {"name": "Storage"}}
+        ]),
+        &[],
+        None,
+    );
+    let v = write_in(
+        &e,
+        "w",
+        json!([{"op": "update", "id": t.to_string(), "body": "No selected component."}]),
+        &[],
+        None,
+    );
+    for (block, matched) in [(&x, "Archive"), (&y, "Storage")] {
+        let c = entry(&v, block);
+        assert_eq!(
+            c["because"]["values"],
+            json!(["Storage", "Storage"]),
+            "A from the base, B from the start: {c}"
+        );
+        assert_eq!(c["follow_up"], "update", "{c}");
+        assert_eq!(c["matched"][0]["value"], "Storage", "{c}");
+        let span = c["matched"][0]["span"].clone();
+        let body = e
+            .read()
+            .materialized(&view("w"))
+            .unwrap()
+            .get(block)
+            .unwrap()
+            .body
+            .clone();
+        let [s, en] = [span[0].as_u64().unwrap(), span[1].as_u64().unwrap()];
+        assert_eq!(&body[s as usize..en as usize], matched, "{c}");
+    }
+    // the public read agrees with the write reply
+    let public = e
+        .read()
+        .consequences(&view("w"), &change_of(&v), None)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&public.items).unwrap(),
+        v["consequences"]
+    );
+}
+
+/// Final review fix round 1, finding 2: a reference that the 16,384-byte cut leaves open ends
+/// the literal right before it. The briefing states it, and a write that removes it matches
+/// it at its stored bytes; the cut flag stays.
+#[test]
+fn sdc5_a_literal_before_a_cut_reference_is_stated_and_matched() {
+    let (_d, mut r) = project();
+    let filler = "x".repeat(17_000);
+    let w = write(&mut r, "base", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "logs", "title": "Logs", "doc_type": "page"}},
+        {"op": "create", "type": "component", "id": "$m", "parent": "$d", "fields": {"name": "Ledger"}, "body": "The book of entries."},
+        {"op": "create", "type": "claim", "id": "$t", "parent": "$d", "body": "Keep 30 days, set `max_retries`, use the Ledger."},
+        {"op": "create", "type": "claim", "id": "$num", "parent": "$d", "body": format!("30 days{{{{$t|{filler}}}}}")},
+        {"op": "create", "type": "claim", "id": "$code", "parent": "$d", "body": format!("max_retries{{{{$t|{filler}}}}}")},
+        {"op": "create", "type": "claim", "id": "$ent", "parent": "$d", "body": format!("the Ledger{{{{$t|{filler}}}}}")}
+    ]))
+    .unwrap();
+    land(&mut r, "base").unwrap();
+    let id = |n: &str| created(&w, n);
+    let t = id("$t");
+    let cases = [
+        (id("$num"), "30 days", [0, 7]),
+        (id("$code"), "max_retries", [0, 11]),
+        (id("$ent"), "Ledger", [4, 10]),
+    ];
+    let e = Local::new(r);
+    let b = brief_in(&e, &view("w"), &[&t], None);
+    for (block, value, _) in &cases {
+        let row = b["will_go_stale"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["block"] == block.to_string())
+            .unwrap_or_else(|| panic!("no row for {block}: {b:#}"));
+        assert_eq!(row["states"], json!([value]), "{row}");
+        assert_eq!(row["follow_up"], "update", "{row}");
+    }
+    let v = write_in(
+        &e,
+        "w",
+        json!([{"op": "update", "id": t.to_string(), "body": "Keep nothing."}]),
+        &[],
+        None,
+    );
+    for (block, value, span) in &cases {
+        let c = entry(&v, block);
+        assert_eq!(c["follow_up"], "update", "{c}");
+        assert!(c.get("fix").is_none(), "a match, not the cutoff fix: {c}");
+        assert_eq!(c["matched"][0]["value"], *value, "{c}");
+        assert_eq!(c["matched"][0]["field"], "body", "{c}");
+        assert_eq!(c["matched"][0]["line"], 1, "{c}");
+        assert_eq!(c["matched"][0]["span"], json!(span), "{c}");
+    }
+}

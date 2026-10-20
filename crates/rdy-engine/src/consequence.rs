@@ -610,10 +610,13 @@ impl<'a> Compare<'a> {
                 }
             },
             Lineage::Ordinary => {
+                // an equal block read under other names can hold other entities (D-CFC6V), so
+                // a baseline is skipped only when both its block and its names are the same;
+                // `changed_from` keeps each identity once
                 let mut olds: Vec<(Block, Arc<Lexicon>)> = vec![];
                 for b in &self.baselines {
                     if let Some((blk, lex)) = self.in_baseline(b, x)?
-                        && !olds.iter().any(|(o, _)| *o == blk)
+                        && !olds.iter().any(|(o, l)| *o == blk && Arc::ptr_eq(l, &lex))
                     {
                         olds.push((blk, lex));
                     }
