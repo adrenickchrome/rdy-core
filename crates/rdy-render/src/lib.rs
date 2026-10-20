@@ -936,6 +936,11 @@ struct Budget {
     /// The page contexts made and not yet rendered, and the most there were at once.
     pending: AtomicUsize,
     peak: AtomicUsize,
+    /// The most bytes the search index's entries held at once.
+    index_held: AtomicUsize,
+    /// The bytes each agent or search file's buffer held, by path: what it held when it was
+    /// refused, else what it held when it was kept.
+    aux: std::sync::Mutex<BTreeMap<String, usize>>,
 }
 
 impl Budget {
@@ -949,6 +954,8 @@ impl Budget {
             built: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            index_held: AtomicUsize::new(0),
+            aux: Default::default(),
         }
     }
 
@@ -1012,6 +1019,38 @@ impl Budget {
         self.admit(0, u64::try_from(len).unwrap_or(u64::MAX))
     }
 
+    /// The most bytes one file may take, and the limit's words: the per-file limit, or the
+    /// aggregate one when it is lower.
+    fn file_cap(&self) -> (u64, String) {
+        self.capped(self.max_total)
+    }
+
+    /// The room for a file at `path` in `files`: one more file must fit (unless it replaces the
+    /// one there), and its bytes may take no more than the per-file limit nor what the aggregate
+    /// limit leaves. The room's bytes, and the words of the limit that sets them.
+    fn room(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        path: &str,
+    ) -> Result<(u64, String), RdyError> {
+        if !files.contains_key(path) {
+            self.count(files.len().saturating_add(1))?;
+        }
+        let left = self
+            .max_total
+            .saturating_sub(self.bytes.load(Ordering::SeqCst));
+        Ok(self.capped(left))
+    }
+
+    /// The per-file limit, or `total` with the aggregate limit's words when it is lower.
+    fn capped(&self, total: u64) -> (u64, String) {
+        if self.max_file <= total {
+            (self.max_file, format!("{} file bytes", self.max_file))
+        } else {
+            (total, format!("{} artifact bytes", self.max_total))
+        }
+    }
+
     fn stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
@@ -1026,6 +1065,32 @@ impl Budget {
     /// A page context was rendered.
     fn rendered(&self) {
         self.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The search index's entries hold `n` bytes.
+    fn index_holds(&self, n: usize) {
+        self.index_held.fetch_max(n, Ordering::SeqCst);
+    }
+
+    /// The buffer of the file at `path` held `n` bytes.
+    fn aux_holds(&self, path: &str, n: usize) {
+        if let Ok(mut aux) = self.aux.lock() {
+            let held = aux.entry(path.to_string()).or_default();
+            *held = (*held).max(n);
+        }
+    }
+
+    #[cfg(test)]
+    fn index_held(&self) -> usize {
+        self.index_held.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn aux(&self, path: &str) -> usize {
+        self.aux
+            .lock()
+            .map(|a| a.get(path).copied().unwrap_or(0))
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -1061,6 +1126,37 @@ fn put_file(
     Ok(())
 }
 
+/// An agent file at `path`, made by `make` within the room `budget` leaves for it: a file with
+/// no room is refused before it is made, and one that outgrows its room is refused before its
+/// buffer holds more.
+fn aux_file<T>(
+    budget: Option<&Budget>,
+    files: &BTreeMap<String, Vec<u8>>,
+    path: &str,
+    make: impl FnOnce(usize) -> Result<(Vec<u8>, T), llms::Over>,
+) -> Result<(Vec<u8>, T), RdyError> {
+    let Some(b) = budget else {
+        return make(usize::MAX).map_err(|_| {
+            RdyError::new(
+                E_IO,
+                format!("template error: {path} is too large to hold"),
+                "this is a bug in rdy-render",
+            )
+        });
+    };
+    let (room, limit) = b.room(files, path)?;
+    match make(usize::try_from(room).unwrap_or(usize::MAX)) {
+        Ok((bytes, t)) => {
+            b.aux_holds(path, bytes.capacity());
+            Ok((bytes, t))
+        }
+        Err(o) => {
+            b.aux_holds(path, o.held);
+            Err(b.over(limit))
+        }
+    }
+}
+
 /// What a page context keeps once its page is rendered: what `llms.txt` and `llms-full.txt`
 /// read (its kind, title, path, body and items). The parts every page repeats (the navigation,
 /// the crumbs, the pager, the header and the site's name and description) are dropped, so the
@@ -1082,11 +1178,11 @@ fn keep_for_llms(ctx: &mut page::PageContext) {
 /// (as [`keep_for_llms`] keeps them) and the pages. `build` makes the contexts one by one on
 /// this thread while a few threads render them; it waits while a made context waits for a
 /// thread, so few contexts with their navigation are held at once. After a
-/// failure (a limit of `budget` included) no further context is made, and the first failed
-/// page's error is returned.
+/// failure (a limit of `budget` included) no further context is made, and the error of the
+/// context that could not be made, else of the first failed page, is returned.
 fn build_and_render<'k>(
     kinds: Vec<page::Kind<'k>>,
-    mut build: impl FnMut(page::Kind<'k>) -> page::PageContext,
+    mut build: impl FnMut(page::Kind<'k>) -> Result<page::PageContext, RdyError>,
     render: impl Fn(&page::PageContext) -> Result<Page, RdyError> + Sync,
     budget: Option<&Budget>,
 ) -> Result<(Vec<page::PageContext>, Vec<Page>), RdyError> {
@@ -1101,6 +1197,7 @@ fn build_and_render<'k>(
     // the workers own the queue: should they all stop, a send fails and nothing waits
     let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
     let (done, results) = mpsc::channel::<Done>();
+    let mut unmade: Option<RdyError> = None;
     std::thread::scope(|s| {
         for _ in 0..threads {
             let (queue, done, render, failed) = (queue.clone(), done.clone(), &render, &failed);
@@ -1127,7 +1224,13 @@ fn build_and_render<'k>(
             if failed.load(Ordering::SeqCst) || budget.is_some_and(Budget::stopped) {
                 break;
             }
-            let ctx = build(kind);
+            let ctx = match build(kind) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    unmade = Some(e);
+                    break;
+                }
+            };
             if let Some(b) = budget {
                 b.made();
             }
@@ -1141,6 +1244,9 @@ fn build_and_render<'k>(
         (0..n).map(|_| None).collect();
     for (i, ctx, page) in results {
         out[i] = Some((ctx, page));
+    }
+    if let Some(e) = unmade {
+        return Err(e);
     }
     if let Some(e) = out
         .iter()
@@ -1287,7 +1393,9 @@ fn build_site_from(
     if !site.disagreements.is_empty() {
         kinds.push(page::Kind::Disagreements);
     }
-    let mut index = search::Index::default();
+    // the search index is held to the bytes one file may take while its entries are collected
+    let (index_cap, index_limit) = budget.map_or((u64::MAX, String::new()), Budget::file_cap);
+    let mut index = search::Index::new(&site_name, index_cap);
     let mut has_mermaid = false;
     // a publication has at most as many files as its limit: count its pages (the change
     // summaries included) before making any
@@ -1315,7 +1423,13 @@ fn build_site_from(
             let ctx = page::build(&sh, kind);
             has_mermaid |= ctx.has_mermaid;
             page::finish(&sh, &ctx, &mut index);
-            ctx
+            if let Some(b) = budget {
+                b.index_holds(index.held());
+                if index.over() {
+                    return Err(b.over(index_limit.clone()));
+                }
+            }
+            Ok(ctx)
         },
         page_of,
         budget,
@@ -1413,20 +1527,34 @@ fn build_site_from(
         Mode::Live { .. } => sh.header_html(""),
         Mode::Static => String::new(),
     };
-    put_file(
-        &mut files,
-        budget,
-        "search-index.json".into(),
-        search::bytes(&index, &site_name),
-    )?;
+    // the agent and search files: each is admitted before its buffer is made, and held to its
+    // room while it is written
+    let (bytes, ()) = aux_file(budget, &files, "search-index.json", |room| {
+        match index.len() <= u64::try_from(room).unwrap_or(u64::MAX) {
+            true => Ok((search::bytes(&index), ())),
+            false => Err(llms::Over { held: 0 }),
+        }
+    })?;
+    drop(index);
+    put_file(&mut files, budget, "search-index.json".into(), bytes)?;
     // a label slot takes bytes: a named profile with no chosen tag writes no label
-    let (llms, at) =
-        llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
+    let (llms, at) = aux_file(budget, &files, "llms.txt", |room| {
+        llms::index_bytes(
+            &site,
+            &contexts,
+            &site_name,
+            description.as_deref(),
+            &label,
+            room,
+        )
+    })?;
     put_file(&mut files, budget, "llms.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
     }
-    let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
+    let (llms, at) = aux_file(budget, &files, "llms-full.txt", |room| {
+        llms::full_bytes(&contexts, &site_name, description.as_deref(), &label, room)
+    })?;
     put_file(&mut files, budget, "llms-full.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
@@ -2146,5 +2274,112 @@ mod limit_tests {
         over(&e, format!("{} files", files - 1));
         assert_eq!(b.built(), n);
         assert!(b.admitted() < total(&free));
+    }
+
+    /// A project of one doc with a title of `title` bytes and `sections` sections: every search
+    /// entry of the doc repeats its title, so the index grows as the title times the sections.
+    fn titled(title: usize, sections: usize) -> (tempfile::TempDir, rdy_engine::Rdy) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = rdy_engine::Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let s = rdy_engine::Session {
+            actor: "agent:bench".into(),
+            run: None,
+            role: rdy_model::Role::Writer,
+            kind: rdy_engine::SessionKind::Human,
+        };
+        let mut ops = vec![
+            serde_json::json!({"op": "create", "type": "doc", "id": "$d",
+            "fields": {"title": "t".repeat(title), "doc_type": "constraints"}}),
+        ];
+        ops.extend((0..sections).map(|i| {
+            serde_json::json!({"op": "create", "type": "section", "parent": "$d",
+                "fields": {"title": format!("S{i}")}})
+        }));
+        r.write(
+            &s,
+            rdy_engine::WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(serde_json::json!(ops)).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write");
+        (dir, r)
+    }
+
+    /// Fix round 2: the search index is held to the limits while its entries are collected. An
+    /// entry that would take the file over them is never kept, and the file's buffer is never
+    /// made.
+    #[test]
+    fn hpb6_a_search_index_over_the_limits_is_refused_before_its_entries_are_held() {
+        let (_d, r) = titled(16 << 10, 300);
+        let free = build(&r, None).unwrap();
+        let limit: u64 = 1 << 20;
+        let index = free.site.files["search-index.json"].len() as u64;
+        // guard: the repeated title amplifies the index past the limit (the doc's page repeats
+        // it too, and its writes are refused at the limit; its entries are collected first)
+        assert!(index > 4 * limit, "guard: {index} bytes");
+        let b = Budget::new(MAX_FILES, limit, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} file bytes"));
+        // the entries kept never took more bytes than the file may have
+        assert!(
+            b.index_held() as u64 <= limit,
+            "{} entry bytes held",
+            b.index_held()
+        );
+        // the file's buffer was never made
+        assert_eq!(b.aux("search-index.json"), 0);
+        // the aggregate limit holds the entries the same way
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, limit);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} artifact bytes"));
+        assert!(b.index_held() as u64 <= limit, "{}", b.index_held());
+        assert_eq!(b.aux("search-index.json"), 0);
+    }
+
+    /// Fix round 2: `search-index.json`, `llms.txt` and `llms-full.txt` are admitted before their
+    /// buffers are made or grow: a file the artifact has no room for is never made, and a
+    /// buffer never holds more than its room.
+    #[test]
+    fn hpb6_agent_files_over_the_limits_are_refused_before_their_buffers_grow() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let f = &free.site.files;
+        let assets = f.keys().filter(|p| p.starts_with("assets/")).count();
+        // the pages and permalinks are put first, then the index and the two llms files
+        let before_index = f.len() - assets - 3;
+        let b = Budget::new(before_index, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{before_index} files"));
+        assert_eq!(b.aux("search-index.json"), 0);
+        let b = Budget::new(before_index + 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} files", before_index + 1));
+        assert!(b.aux("search-index.json") > 0);
+        assert_eq!(b.aux("llms.txt"), 0);
+        // room for every byte before `llms-full.txt` and for all but one of its own
+        let full = f["llms-full.txt"].len() as u64;
+        let before: u64 = f
+            .iter()
+            .filter(|(p, _)| *p != "llms-full.txt" && !p.starts_with("assets/"))
+            .map(|(_, f)| f.len() as u64)
+            .sum();
+        let limit = before + full - 1;
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, limit);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} artifact bytes"));
+        assert!(b.aux("llms.txt") > 0);
+        assert!(
+            (b.aux("llms-full.txt") as u64) < full,
+            "{} of {full} bytes held",
+            b.aux("llms-full.txt")
+        );
+        assert!(b.admitted() <= limit);
+        // with room for exactly its bytes the file is kept, as a free build makes it
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, total(&free));
+        let kept = build(&r, Some(&b)).unwrap();
+        assert_eq!(kept.site.files, free.site.files);
     }
 }

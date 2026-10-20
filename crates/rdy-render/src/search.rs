@@ -7,6 +7,7 @@ use rdy_engine::Materialized;
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, entity, tree};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 /// The most characters of an entry's own text the index keeps.
@@ -15,25 +16,138 @@ const TEXT_MAX: usize = 400;
 /// The most characters of a question's prompt its entry's title keeps (the text holds the rest).
 const TITLE_MAX: usize = 120;
 
-/// One searchable place on the site.
+/// One searchable place on the site. Its fields are in the order the file has always written
+/// them, by name: an entry is measured as written, borrowing what its page holds, before it is
+/// kept.
 #[derive(Clone, Debug, Serialize)]
-struct Entry {
+struct Entry<'a> {
+    anchor: Option<Cow<'a, str>>,
+    /// The title of the doc (or folder) the entry is on.
+    doc: Cow<'a, str>,
     kind: &'static str,
     /// Site-relative page url.
-    page: String,
-    anchor: Option<String>,
-    /// The title of the doc (or folder) the entry is on.
-    doc: String,
-    title: String,
-    text: String,
+    page: Cow<'a, str>,
+    text: Cow<'a, str>,
+    title: Cow<'a, str>,
 }
 
-#[derive(Default)]
+impl Entry<'_> {
+    /// The entry with its own copy of what it borrowed.
+    fn into_owned(self) -> Entry<'static> {
+        let own = |c: Cow<str>| Cow::Owned(c.into_owned());
+        Entry {
+            anchor: self.anchor.map(own),
+            doc: own(self.doc),
+            kind: self.kind,
+            page: own(self.page),
+            text: own(self.text),
+            title: own(self.title),
+        }
+    }
+
+    /// The bytes its text takes.
+    fn held(&self) -> usize {
+        [&self.doc, &self.page, &self.text, &self.title]
+            .into_iter()
+            .chain(self.anchor.as_ref())
+            .map(|s| s.len())
+            .sum()
+    }
+}
+
+/// `search-index.json`: its keys in the order it has always written them, by name.
+#[derive(Serialize)]
+struct File<'a> {
+    entries: Vec<&'a Entry<'static>>,
+    site: &'a str,
+    version: u8,
+}
+
+/// The bytes `v` takes as JSON, counted as it is written: nothing is kept.
+fn json_len<T: Serialize>(v: &T) -> u64 {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(b.len() as u64);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut c = Count(0);
+    serde_json::to_writer(&mut c, v).expect("json");
+    c.0
+}
+
+/// The entries of `search-index.json`, held to the bytes the file may take: each entry is
+/// measured as the file will write it before it is kept, and an entry that would take the file
+/// over `cap` is not kept. The index is then over, and keeps no further entry.
 pub struct Index {
     /// Entries with the tree position of their page; pages are built in no particular order.
-    entries: Vec<(usize, Entry)>,
+    entries: Vec<(usize, Entry<'static>)>,
     /// A page's position in a depth-first walk of the tree, filled by the first page.
     rank: Option<BTreeMap<String, (usize, BlockId)>>,
+    site: String,
+    /// The bytes of the file with the entries kept so far.
+    len: u64,
+    /// The most bytes the file may take.
+    cap: u64,
+    over: bool,
+    /// The bytes the kept entries hold.
+    held: usize,
+}
+
+impl Index {
+    /// An empty index of the site named `site`, its file held to `cap` bytes.
+    pub fn new(site: &str, cap: u64) -> Index {
+        let len = json_len(&File {
+            entries: vec![],
+            site,
+            version: 1,
+        });
+        Index {
+            entries: vec![],
+            rank: None,
+            site: site.to_string(),
+            len,
+            cap,
+            over: len > cap,
+            held: 0,
+        }
+    }
+
+    /// An entry would have taken the file over its cap.
+    pub fn over(&self) -> bool {
+        self.over
+    }
+
+    /// The bytes the file takes with the entries kept.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// The bytes the kept entries hold.
+    pub fn held(&self) -> usize {
+        self.held
+    }
+
+    /// Keeps `entry` at `rank` when the file has room for it.
+    fn add(&mut self, rank: usize, entry: Entry) {
+        if self.over {
+            return;
+        }
+        // one more entry is parted from the one before it by a comma
+        let n = json_len(&entry) + u64::from(!self.entries.is_empty());
+        match self.len.checked_add(n).filter(|end| *end <= self.cap) {
+            Some(end) => {
+                self.len = end;
+                self.held += entry.held();
+                self.entries.push((rank, entry.into_owned()));
+            }
+            None => self.over = true,
+        }
+    }
 }
 
 /// The tree's folders and docs by page url, with each one's position in a depth-first walk in
@@ -245,9 +359,27 @@ fn first_prose(doc: &BlockId, m: &Materialized, site: &Site) -> String {
     String::new()
 }
 
+/// An entry on `page`, borrowing the page's url and title.
+fn entry_on<'a>(
+    page: &'a PageContext,
+    kind: &'static str,
+    anchor: Option<&'a str>,
+    title: String,
+    text: String,
+) -> Entry<'a> {
+    Entry {
+        anchor: anchor.filter(|a| !a.is_empty()).map(Cow::Borrowed),
+        doc: Cow::Borrowed(page.title.as_str()),
+        kind,
+        page: Cow::Borrowed(page.page_url.as_str()),
+        text: Cow::Owned(text),
+        title: Cow::Owned(title),
+    }
+}
+
 /// Adds the page's entries to the index.
 pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &Site) {
-    if page.kind != "doc" && page.kind != "folder" {
+    if index.over || (page.kind != "doc" && page.kind != "folder") {
         return;
     }
     let Some((rank, id)) = index
@@ -262,21 +394,15 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
     if !site.in_nav(&id) {
         return;
     }
-    let mut add = |entry: Entry| index.entries.push((rank, entry));
-    let entry = |kind, anchor: Option<String>, title: String, text: String| Entry {
-        kind,
-        page: page.page_url.clone(),
-        anchor: anchor.filter(|a| !a.is_empty()),
-        doc: page.title.clone(),
-        title,
-        text,
-    };
     if let Some(folder) = &page.body.folder {
         let text = clip(
             &site.description_words(folder.description.as_deref().unwrap_or("")),
             TEXT_MAX,
         );
-        add(entry("folder", None, folder.title.clone(), text));
+        index.add(
+            rank,
+            entry_on(page, "folder", None, folder.title.clone(), text),
+        );
         return;
     }
     let Some(doc) = &page.body.doc else { return };
@@ -286,7 +412,7 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
         .map(|d| section_text(d, m, site))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| first_prose(&id, m, site));
-    add(entry("doc", None, doc.title.clone(), direct));
+    index.add(rank, entry_on(page, "doc", None, doc.title.clone(), direct));
     for item in &page.items {
         let Some(b) = BlockId::parse(&item.id).ok().and_then(|id| m.get(&id)) else {
             continue;
@@ -294,17 +420,24 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
         match b.block_type.as_str() {
             "section" => {
                 let title = item.title.clone().unwrap_or_else(|| site.label(b));
-                add(entry(
-                    "section",
-                    Some(item.anchor.clone()),
-                    title,
-                    section_text(b, m, site),
-                ));
+                index.add(
+                    rank,
+                    entry_on(
+                        page,
+                        "section",
+                        Some(item.anchor.as_str()),
+                        title,
+                        section_text(b, m, site),
+                    ),
+                );
             }
             "term" => {
                 let title = item.title.clone().unwrap_or_else(|| site.label(b));
                 let text = clip(&plain(&b.body, RefMode::Strict, Form::Body, site), TEXT_MAX);
-                add(entry("term", Some(item.anchor.clone()), title, text));
+                index.add(
+                    rank,
+                    entry_on(page, "term", Some(item.anchor.as_str()), title, text),
+                );
             }
             "question" => {
                 // a removed question's prompt is the notice: its stub has no prompt
@@ -313,37 +446,99 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
                     false => clip(&field(b, "prompt", site), TEXT_MAX),
                 };
                 let url = site.url_of(&b.id);
-                let mut e = entry(
+                let mut e = entry_on(
+                    page,
                     "question",
-                    url.as_ref().and_then(|u| u.anchor.clone()),
+                    url.as_ref().and_then(|u| u.anchor.as_deref()),
                     clip(&prompt, TITLE_MAX),
                     prompt,
                 );
-                if let Some(u) = url {
-                    e.page = u.page;
+                if let Some(u) = &url {
+                    e.page = Cow::Borrowed(u.page.as_str());
                 }
-                add(e);
+                index.add(rank, e);
             }
             _ => {}
         }
     }
 }
 
-/// The bytes of `search-index.json`, the entries in tree order.
-pub fn bytes(index: &Index, site_name: &str) -> Vec<u8> {
+/// The bytes of `search-index.json`, the entries in tree order: exactly [`Index::len`] bytes,
+/// written straight from the entries.
+pub fn bytes(index: &Index) -> Vec<u8> {
     let mut entries: Vec<&(usize, Entry)> = index.entries.iter().collect();
     entries.sort_by_key(|(rank, _)| *rank);
-    let json = serde_json::json!({
-        "version": 1,
-        "site": site_name,
-        "entries": entries.iter().map(|(_, e)| e).collect::<Vec<_>>(),
-    });
-    serde_json::to_vec(&json).expect("json")
+    let file = File {
+        entries: entries.into_iter().map(|(_, e)| e).collect(),
+        site: &index.site,
+        version: 1,
+    };
+    let mut out = Vec::with_capacity(usize::try_from(index.len).unwrap_or(0));
+    serde_json::to_writer(&mut out, &file).expect("json");
+    debug_assert_eq!(out.len() as u64, index.len, "the measured index");
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(doc: &str, title: &str, anchor: Option<&str>) -> Entry<'static> {
+        Entry {
+            anchor: anchor.map(|a| Cow::Owned(a.to_string())),
+            doc: Cow::Owned(doc.to_string()),
+            kind: "section",
+            page: Cow::Owned("a/b.html".to_string()),
+            text: Cow::Owned("Text with \"quotes\", a \\ and \u{1} é \u{2028}.".to_string()),
+            title: Cow::Owned(title.to_string()),
+        }
+    }
+
+    /// Fix round 2: the file is written straight from the entries, in the bytes the `json!`
+    /// value always wrote (its keys by name), and is exactly as long as it was measured.
+    #[test]
+    fn hpb6_the_index_is_written_as_the_json_value_wrote_it_and_measured_exactly() {
+        let mut index = Index::new("Site \"é\"", u64::MAX);
+        index.add(2, sample("Doc ü", "Two", None));
+        index.add(0, sample("Doc", "Zero", Some("s0")));
+        index.add(1, sample("Doc </script>", "One", Some("é")));
+        let mut entries: Vec<&(usize, Entry)> = index.entries.iter().collect();
+        entries.sort_by_key(|(rank, _)| *rank);
+        let was = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "site": "Site \"é\"",
+            "entries": entries.iter().map(|(_, e)| e).collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let out = bytes(&index);
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            String::from_utf8(was).unwrap()
+        );
+        assert_eq!(out.len() as u64, index.len());
+        let empty = Index::new("S", u64::MAX);
+        assert_eq!(bytes(&empty), br#"{"entries":[],"site":"S","version":1}"#);
+        assert_eq!(empty.len(), 37);
+    }
+
+    /// Fix round 2: an entry that would take the file over its cap is never kept, and nothing is
+    /// kept after it.
+    #[test]
+    fn hpb6_an_entry_over_the_cap_is_not_kept() {
+        let mut free = Index::new("S", u64::MAX);
+        free.add(0, sample("D", "T", None));
+        let one = free.len();
+        let mut index = Index::new("S", one + 3);
+        index.add(0, sample("D", "T", None));
+        assert_eq!((index.len(), index.over()), (one, false));
+        index.add(1, sample(&"d".repeat(1 << 16), "T", None));
+        assert!(index.over());
+        index.add(2, sample("D", "T", None));
+        assert_eq!((index.entries.len(), index.len()), (1, one));
+        assert_eq!(index.held(), index.entries[0].1.held());
+        // an index with no room for its frame is over before any entry
+        assert!(Index::new("S", 10).over());
+    }
 
     #[test]
     fn clip_collapses_whitespace_and_cuts_by_characters() {
