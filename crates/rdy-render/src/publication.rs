@@ -117,6 +117,7 @@ pub(crate) fn prepare_resolved(
     tag_redacted: bool,
     inputs: &RenderInputs,
 ) -> Result<Prepared, RdyError> {
+    crate::probe::hit();
     check_inputs(source, inputs)?;
     resolved.require_output()?;
     let blobs = selected_blobs(source, &resolved)?;

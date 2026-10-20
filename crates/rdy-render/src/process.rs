@@ -197,6 +197,7 @@ fn error_too_long() -> RdyError {
 /// after the render is complete. Nothing is written on a refusal. No process is spawned and no
 /// file is made but the render source's anonymous scratch file.
 pub fn run<R: Read, W: Write>(mut input: R, out: W) -> Result<ProcessSummary, RdyError> {
+    crate::probe::hit();
     let prelude = read_prelude(&mut input)?;
     let artifact = render(prelude, input)?;
     let summary = check_packet(&artifact)?;
@@ -387,6 +388,7 @@ fn build_markdown(
     inputs: &RenderInputs,
     layout: Layout,
 ) -> Result<PublicationArtifact, RdyError> {
+    crate::probe::hit();
     publication::check_inputs(source, inputs)?;
     let resolved = resolve_source(source, m, selector)?;
     resolved.require_output()?;

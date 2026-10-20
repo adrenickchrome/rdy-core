@@ -14,6 +14,7 @@ use rdy_engine::publication::{IMPLICIT_ORG, ReadPublicationSource};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, Scope, Session, SessionKind, WriteRequest, stream_export};
 use rdy_model::{Provenance, Role};
+use rdy_render::probe;
 use rdy_render::process::write_request_prelude;
 use rdy_render::render_input::capture_inputs;
 use rdy_render::{build_publication, render_publication_page};
@@ -431,6 +432,49 @@ fn hpb13_full_render_request_calls_no_renderer_in_holder() {
     odd.disagreements = vec![];
     request(&snap, "v1.0.0", &src.profile, &odd, RenderFormat::Markdown).unwrap();
 
+    // the renderer's entry points count themselves (rdy-render's `probe`, on for this crate's
+    // tests): the request writer, whatever the profile and format, runs none of them
+    let before = probe::renders();
+    for format in [
+        RenderFormat::Site,
+        RenderFormat::Markdown,
+        RenderFormat::Techdocs,
+    ] {
+        for profile in [src.profile.as_str(), IMPLICIT_ORG] {
+            snap.write_render_request("v1.0.0", profile, &inputs, format, Vec::new())
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        probe::renders(),
+        before,
+        "the request writer ran the renderer"
+    );
+
+    // positive control: the probe sees every real render, one per format, and the one-page render
+    let mut seen = probe::renders();
+    for format in [
+        RenderFormat::Site,
+        RenderFormat::Markdown,
+        RenderFormat::Techdocs,
+    ] {
+        let bytes = request(&snap, "v1.0.0", &src.profile, &inputs, format).unwrap();
+        assert_eq!(
+            probe::renders(),
+            seen,
+            "{format:?}: writing is not rendering"
+        );
+        process(&bytes).unwrap();
+        assert!(
+            probe::renders() > seen,
+            "{format:?}: the probe missed a render"
+        );
+        seen = probe::renders();
+    }
+    snap.render_page("v1.0.0", &src.profile, &inputs, "index.html")
+        .unwrap();
+    assert!(probe::renders() > seen, "the probe missed the page render");
+
     // the bytes are the prelude and the stream, written to a sink that records every call
     struct Sink {
         writes: Vec<usize>,
@@ -450,6 +494,7 @@ fn hpb13_full_render_request_calls_no_renderer_in_holder() {
         writes: vec![],
         bytes: vec![],
     };
+    let before = probe::renders();
     let report = snap
         .write_render_request(
             "v1.0.0",
@@ -459,6 +504,8 @@ fn hpb13_full_render_request_calls_no_renderer_in_holder() {
             &mut sink,
         )
         .unwrap();
+    assert_eq!(probe::renders(), before);
+    assert!(!sink.writes.is_empty());
     let mut stream = Vec::new();
     let want = snap
         .write_stream("v1.0.0", &BTreeSet::new(), &mut stream)
@@ -475,18 +522,6 @@ fn hpb13_full_render_request_calls_no_renderer_in_holder() {
     );
     assert_eq!(value["format"], "techdocs");
     assert_eq!(value["profile"], src.profile.as_str());
-
-    // the module calls no builder: the render is the process's, in the child the hub starts
-    let module = include_str!("../src/rendering.rs");
-    let body = &module[..module.find("#[cfg(test)]").unwrap_or(module.len())];
-    for call in [
-        "build_publication(",
-        "build_site(",
-        "run_render_process(",
-        "Command",
-    ] {
-        assert!(!body.contains(call), "rendering.rs mentions {call}");
-    }
     holder.close().unwrap();
 }
 

@@ -16,6 +16,8 @@ postcard.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# the render entry-point counter the no-render-in-the-holder test reads (test builds only)
+rdy-render = { workspace = true, features = ["probe"] }
 
 [lints]
 workspace = true

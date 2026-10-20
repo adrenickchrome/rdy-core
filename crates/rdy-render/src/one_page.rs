@@ -112,6 +112,7 @@ pub fn render_publication_page(
     inputs: &RenderInputs,
     path: &str,
 ) -> Result<RenderedPage, RdyError> {
+    crate::probe::hit();
     check_path(path)?;
     publication::check_inputs(source, inputs)?;
     let resolved = rdy_engine::publication::resolve_source(source, m, profile)?;

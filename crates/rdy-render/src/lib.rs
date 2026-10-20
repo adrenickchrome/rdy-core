@@ -13,6 +13,7 @@ mod one_page;
 mod page;
 mod prepare;
 pub mod print;
+pub mod probe;
 pub mod process;
 mod publication;
 pub mod publish;
@@ -809,6 +810,7 @@ pub fn build_publication(
     selector: &str,
     inputs: &RenderInputs,
 ) -> Result<PublicationArtifact, RdyError> {
+    probe::hit();
     publication::check_inputs(source, inputs)?;
     let resolved = rdy_engine::publication::resolve_source(source, m, selector)?;
     let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
