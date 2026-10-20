@@ -77,13 +77,31 @@ fn label_rev(label: &str, header: &str) -> String {
 /// `/~tag/<name>/`): the header's links lead under it.
 pub fn build_live(st: &ReadState, scope: &Scope, root: &str) -> Result<LiveBuild, RdyError> {
     rdy_engine::refuse_inflight_export(scope)?;
+    let site = build_site(st, scope, Mode::Live { root })?;
+    Ok(of_site(site, st.redaction_epoch()))
+}
+
+/// A live build of a publication profile (D-CWC91, D-DK03K): the site of the profile's selected
+/// state as the live server serves it, the profile the target resolved to, and the generated
+/// change summary's page (`changes.html`) when the build wrote one.
+pub struct ProfileBuild {
+    pub live: LiveBuild,
+    pub profile: rdy_engine::publication::ResolvedProfile,
+    pub changes: Option<&'static str>,
+}
+
+pub use crate::profile_live::{ProfileHistoryMemo, build_profile_live};
+
+/// The live build of a built site whose state captured redaction epoch `epoch`: its files and
+/// slots, with the revision of each page and of the label and the header.
+pub(crate) fn of_site(site: SiteFiles, epoch: u64) -> LiveBuild {
     let SiteFiles {
         files,
         label,
         header,
         label_at,
         summary,
-    } = build_site(st, scope, Mode::Live { root })?;
+    } = site;
     let revs = files
         .iter()
         .filter(|(path, bytes)| path.ends_with(".html") && !is_redirect(bytes))
@@ -93,7 +111,7 @@ pub fn build_live(st: &ReadState, scope: &Scope, root: &str) -> Result<LiveBuild
         })
         .collect();
     let label_rev = label_rev(&label, &header);
-    Ok(LiveBuild {
+    LiveBuild {
         files,
         revs,
         label,
@@ -101,8 +119,8 @@ pub fn build_live(st: &ReadState, scope: &Scope, root: &str) -> Result<LiveBuild
         label_rev,
         label_at,
         warnings: summary.warnings,
-        epoch: st.redaction_epoch(),
-    })
+        epoch,
+    }
 }
 
 /// A hash input: every field after its length, so no two inputs share bytes.

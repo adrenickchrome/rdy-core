@@ -1,7 +1,7 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
 use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx, LocalLink};
-use crate::prepare::ProfilePresentation;
+use crate::prepare::{Presentation, ProfilePresentation};
 use crate::publication::LocalTargets;
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
@@ -69,6 +69,9 @@ pub struct Shared<'a> {
     /// What a reference that leads nowhere reads as: the source's unresolved marker words, or a
     /// named profile's [`inline::UNAVAILABLE`].
     pub unavailable: &'a str,
+    /// Where a live page's pill opens the menu (`SiteTarget::menu_url`); none for the source's
+    /// `/~versions/`. A static page never reads it.
+    pub menu_url: Option<&'a str>,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -368,10 +371,17 @@ impl Shared<'_> {
     /// to `/~versions/`, whose menu the pill opens, and to the change pages under the scope's
     /// path, the same on every page. Each distinct markup is rendered once.
     pub fn header_html(&self, root: &str) -> String {
-        // a named profile's pill leads nowhere: the same on every page (RULING F3)
-        if let Some(p) = self.profile {
-            return version::chosen_header_html(&self.header, p.tag_redacted);
-        }
+        // a named profile's output pill leads nowhere, and the profile-only site has none: the
+        // same on every page (RULING F3, D-DK03K); a live profile route keeps the live header
+        let route_redacted = match self.profile {
+            Some(p) => match p.presentation {
+                Presentation::Output | Presentation::LiveOnly { .. } => {
+                    return version::chosen_header_html(&self.header, p.tag_redacted);
+                }
+                Presentation::LiveRoute { .. } => p.tag_redacted,
+            },
+            None => false,
+        };
         let key = match self.mode {
             Mode::Static => root,
             Mode::Live { .. } => "",
@@ -387,16 +397,19 @@ impl Shared<'_> {
             ),
             Mode::Live { root } => (
                 root.to_string(),
-                format!(
-                    "/{}",
-                    rdy_engine::site_scope::ScopeRef::Versions.path_prefix()
-                ),
+                match self.menu_url {
+                    Some(url) => url.to_string(),
+                    None => format!(
+                        "/{}",
+                        rdy_engine::site_scope::ScopeRef::Versions.path_prefix()
+                    ),
+                },
                 true,
             ),
         };
         let since = format!("{base}{}", rdy_engine::site_scope::SINCE_PAGE);
         let changes = format!("{base}{}", rdy_engine::site_scope::CHANGES_PAGE);
-        let html = version::header_html(
+        let mut html = version::header_html(
             &self.header,
             &version::HeaderLinks {
                 versions: &versions,
@@ -405,6 +418,10 @@ impl Shared<'_> {
                 menu,
             },
         );
+        // a profile route's tag keeps the profile's `redacted` badge (RULING F3)
+        if route_redacted {
+            html.push_str(" <span class=\"badge badge-redacted\">redacted</span>");
+        }
         self.headers
             .borrow_mut()
             .insert(key.to_string(), html.clone());
@@ -414,10 +431,32 @@ impl Shared<'_> {
     /// The colophon's and the llms files' label: a named profile's chosen tag name, or empty
     /// (RULING F3); else the source's label.
     pub fn label(&self) -> version::Label {
-        match self.profile {
-            Some(p) => version::chosen_label(p.tag_name.as_deref(), self.position.frozen),
+        match self.profile.map(|p| (p, &p.presentation)) {
+            Some((p, Presentation::Output)) => {
+                version::chosen_label(p.tag_name.as_deref(), self.position.frozen)
+            }
+            // a live profile's label is its whole colophon sentence (p-750KT)
+            Some((_, Presentation::LiveRoute { colophon, .. }))
+            | Some((_, Presentation::LiveOnly { colophon })) => {
+                version::profile_label(colophon, self.position.frozen)
+            }
             None => version::text_label(self.position, self.reviewed.as_ref()),
         }
+    }
+
+    /// The review bar's words: the source's (`version::review_bar`), and on a live profile route
+    /// ` · as {profile title}` after them (D-CWC91). None on canon and tags.
+    fn review_bar(&self) -> Option<String> {
+        let r = self.reviewed.as_ref()?;
+        let mut text = version::review_bar(r);
+        if let Some(ProfilePresentation {
+            presentation: Presentation::LiveRoute { .. },
+            ..
+        }) = self.profile
+        {
+            text.push_str(&format!(" · as {}", self.site_name));
+        }
+        Some(text)
     }
 
     /// Whether blocks show their decision trail: a source output does; a named profile only
@@ -771,7 +810,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_terms,
         has_questions,
         reviewing: sh.review.is_some(),
-        review_bar: sh.reviewed.as_ref().map(version::review_bar),
+        review_bar: sh.review_bar(),
         review_heading: sh
             .reviewed
             .as_ref()

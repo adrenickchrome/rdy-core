@@ -6,16 +6,20 @@
 //! profiles or local configuration reaches a [`Prepared`] made here.
 use crate::inline;
 use crate::page::lede_of;
-use crate::prepare::{FigureBlobs, History, Prepared, ProfilePresentation, Purpose};
+use crate::prepare::{FigureBlobs, History, Prepared, Presentation, ProfilePresentation, Purpose};
 use crate::render_input::{capture_inputs, disagreements};
 use crate::site::{Site, Url};
 use crate::{disagree, scope_warnings};
-use rdy_engine::publication::{self, PublicationSource, ReadPublicationSource, Resolved};
+use rdy_engine::publication::{
+    self, PublicationSource, PublicationWarning, ReadPublicationSource, Resolved, ResolvedProfile,
+};
 use rdy_engine::render_inputs::{RenderInputs, validate_inputs};
 use rdy_engine::{
-    E_BAD_INPUT, E_NOT_FOUND, RdyError, ReadState, Scope, VersionPosition, parse_version,
+    E_BAD_INPUT, E_NOT_FOUND, Materialized, RdyError, ReadState, Scope, VersionPosition,
+    parse_version,
 };
 use rdy_model::Hash;
+use rdy_schema::Pack;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -103,13 +107,14 @@ pub(crate) fn check_inputs(
 
 /// The publication view of `resolved` (D-0VCQ5, D-KDFZ3), read through `source` and the captured
 /// `inputs` alone: no store, scope, canon, tension or project path. A public profile whose check
-/// is blocked is refused first. The selected state with each removed figure read as the notice,
-/// the induced graph, the selected figures' bytes (bounded by the source's limits), the pack of
-/// the inputs, the title and description (an explicit profile's own, the implicit profile's from
-/// the inputs) read through the selection, the captured disagreements whose every side is
-/// selected and has a page, the org warning first and then the scope's warnings. The chosen tag's
-/// name `tag_name` (empty for none) is the only history the output shows: no tag message, version
-/// list, canon label or in-flight link. `rdy_dir` is empty: an in-memory output has no placement.
+/// is blocked is refused first, before any asset is read. The selected state with each removed
+/// figure read as the notice, the induced graph, the selected figures' bytes (bounded by the
+/// source's limits), the pack of the inputs, the title and description (an explicit profile's
+/// own, the implicit profile's from the inputs) read through the selection, the captured
+/// disagreements whose every side is selected and has a page, the org warning first and then the
+/// scope's warnings. The chosen tag's name `tag_name` (empty for none) is the only history the
+/// output shows: no tag message, version list, canon label or in-flight link. `rdy_dir` is empty:
+/// an in-memory output has no placement.
 pub(crate) fn prepare_resolved(
     source: &dyn PublicationSource,
     resolved: Resolved,
@@ -119,9 +124,27 @@ pub(crate) fn prepare_resolved(
 ) -> Result<Prepared, RdyError> {
     crate::probe::hit();
     check_inputs(source, inputs)?;
+    // the durable-output gate, before any asset is read
     resolved.require_output()?;
     let blobs = selected_blobs(source, &resolved)?;
     let warning = resolved.references.warning();
+    prepare_selected(resolved, blobs, warning, inputs, tag_name, tag_redacted)
+}
+
+/// The selected preparation every profile output shares (D-0VCQ5, D-CWC91): `resolved` with the
+/// figure blobs its caller read (`blobs`) and the reference warning its caller chose (`warning`:
+/// the org warning for durable output, the live warning for a live inspection), read through the
+/// captured `inputs` alone. It applies no output gate and reads no asset: a durable output calls
+/// it only through [`prepare_resolved`], after the gate. The result presents the profile as a
+/// durable output ([`Presentation::Output`]); a live caller sets its own presentation.
+pub(crate) fn prepare_selected(
+    resolved: Resolved,
+    blobs: FigureBlobs,
+    warning: Option<PublicationWarning>,
+    inputs: &RenderInputs,
+    tag_name: &str,
+    tag_redacted: bool,
+) -> Result<Prepared, RdyError> {
     let Resolved {
         profile: chosen,
         m,
@@ -131,21 +154,7 @@ pub(crate) fn prepare_resolved(
     // a figure whose blob lost content reads as removed from here on, as in source preparation
     let m = blobs.project(Arc::new(m));
     let pack = inputs.pack.clone();
-    // the implicit profile shows the captured source title; an explicit one its own
-    let (title, description) = match chosen.id {
-        Some(_) => (chosen.title.as_str(), chosen.description.as_deref()),
-        None => (inputs.title.as_str(), inputs.description.as_deref()),
-    };
-    // the title and description read their references through the selection, as every other
-    // text does: display words kept, else the target's label, else `unavailable reference` (the
-    // profile's own doc need not be selected)
-    let (site_name, description) = {
-        let words = Site::with_unavailable(&m, &pack, "", Some(inline::UNAVAILABLE));
-        (
-            words.as_written(title),
-            description.map(|d| words.as_written(d)),
-        )
-    };
+    let (site_name, description) = profile_words(&chosen, &m, &pack, inputs);
     let site = Site::with_unavailable(&m, &pack, &site_name, Some(inline::UNAVAILABLE));
     // an entry stays only when every side is selected and has a page: an excluded side's text,
     // count or existence never reaches the page
@@ -192,13 +201,36 @@ pub(crate) fn prepare_resolved(
             trail: chosen.trail,
             tag_name,
             tag_redacted,
+            presentation: Presentation::Output,
         }),
+        menu_url: None,
     })
+}
+
+/// The title and description a profile's output shows, read through the selected state `m`: the
+/// implicit profile shows the captured source title, an explicit one its own. Their references
+/// read through the selection, as every other text does: display words kept, else the target's
+/// label, else `unavailable reference` (the profile's own doc need not be selected).
+pub(crate) fn profile_words(
+    chosen: &ResolvedProfile,
+    m: &Materialized,
+    pack: &Pack,
+    inputs: &RenderInputs,
+) -> (String, Option<String>) {
+    let (title, description) = match chosen.id {
+        Some(_) => (chosen.title.as_str(), chosen.description.as_deref()),
+        None => (inputs.title.as_str(), inputs.description.as_deref()),
+    };
+    let words = Site::with_unavailable(m, pack, "", Some(inline::UNAVAILABLE));
+    (
+        words.as_written(title),
+        description.map(|d| words.as_written(d)),
+    )
 }
 
 /// The stored tag `name` names by semantic-version precedence (as `resolve_scope` matches it):
 /// its canonical name and whether its history holds removed content. Nothing else of it.
-fn chosen_tag(read: &ReadState, name: &str) -> Result<(Option<String>, bool), RdyError> {
+pub(crate) fn chosen_tag(read: &ReadState, name: &str) -> Result<(Option<String>, bool), RdyError> {
     let want = parse_version(name)?;
     read.versions()?
         .into_iter()
@@ -213,14 +245,29 @@ fn chosen_tag(read: &ReadState, name: &str) -> Result<(Option<String>, bool), Rd
         })
 }
 
-/// The selected figures' blobs, read through `source`: the bytes of each available one through
-/// the bounded asset reader, and each unavailable one the source holds, by the request that
-/// removed its content (`PublicationSource::removed_blob`). Any other error refuses.
+/// The selected figures' blobs for a durable output, read through `source`: the bytes of each
+/// available one through the gated asset reader ([`publication::load_source_assets`]), and each
+/// unavailable one by the request that removed its content ([`removed_blobs`]). Any other error
+/// refuses. A live inspection reads its bytes through `publication::load_inspection_assets` and
+/// never comes here.
 fn selected_blobs(
     source: &dyn PublicationSource,
     resolved: &Resolved,
 ) -> Result<FigureBlobs, RdyError> {
     let bytes = publication::load_source_assets(source, resolved)?;
+    Ok(FigureBlobs::selected(
+        bytes,
+        removed_blobs(source, resolved)?,
+    ))
+}
+
+/// Each unavailable selected figure blob the source holds, by the request that removed its
+/// content (`PublicationSource::removed_blob`): the projection every profile output shares. No
+/// blob byte is read.
+pub(crate) fn removed_blobs(
+    source: &dyn PublicationSource,
+    resolved: &Resolved,
+) -> Result<BTreeMap<Hash, Hash>, RdyError> {
     let mut removed: BTreeMap<Hash, Hash> = BTreeMap::new();
     for a in resolved.attachments.iter().filter(|a| !a.available) {
         if removed.contains_key(&a.blob) {
@@ -230,7 +277,7 @@ fn selected_blobs(
             removed.insert(a.blob, request);
         }
     }
-    Ok(FigureBlobs::selected(bytes, removed))
+    Ok(removed)
 }
 
 /// The pages a named profile's site writes and the anchors each emits: an authored local link

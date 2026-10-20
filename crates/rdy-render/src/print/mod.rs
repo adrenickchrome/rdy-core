@@ -356,6 +356,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         rdy_dir,
         history,
         profile,
+        menu_url: _,
     } = prepared;
     let m: &rdy_engine::Materialized = &m;
     let mut site = Site::with_unavailable(
@@ -403,6 +404,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
             Some(_) => crate::inline::UNAVAILABLE,
             None => crate::inline::UNRESOLVED,
         },
+        menu_url: None,
     };
     // a named profile's label is its chosen tag's name (RULING F3)
     let label = match &profile {
