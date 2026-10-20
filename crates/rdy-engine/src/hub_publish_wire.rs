@@ -9,9 +9,11 @@
 //! - **Bounds before allocation.** Each request is checked against its count bounds and
 //!   encoded through a capped writer. Each reply is read within its byte cap and walked by the
 //!   bounded JSON guard, whose value budget a known step sets from its own request, before it is
-//!   decoded.
+//!   decoded. A list with a smaller bound of its own stops at that bound while it is decoded,
+//!   before a further element is built.
 //! - **Origins.** Discovery's sync base is a path on the install or an HTTPS URL the install's
-//!   origin fence admits. Fixed routes are appended as path segments and the push id and hash
+//!   origin fence admits, kept in the URL parser's canonical form; its raw path is checked for
+//!   dot segments before the parser could remove them. Fixed routes are appended as path segments and the push id and hash
 //!   as query pairs; no supplied text is concatenated into a URL. A redirect is never followed.
 //! - **Refusals.** A hub error object keeps a recognized hub or core code with its bounded
 //!   message and fix, its valid issues and a request-id issue. Any other code is the generic
@@ -22,7 +24,7 @@
 //!   are writes: once the request may have been sent, a lost or invalid reply is
 //!   `E_UPSTREAM_UNCERTAIN`. Nothing is retried.
 use crate::error::{
-    E_BAD_INPUT, E_BAD_TAG_NAME, E_UPSTREAM_REFUSED, RdyError, actor_unbound, core_error_code,
+    E_BAD_INPUT, E_LIMIT, E_UPSTREAM_REFUSED, RdyError, actor_unbound, core_error_code,
     upstream_protocol, upstream_refused, upstream_transport, upstream_uncertain,
 };
 use crate::formats::formats;
@@ -40,10 +42,12 @@ use crate::render_inputs::{RenderInputs, validate_inputs};
 use rdy_model::{BlockId, Hash, RepoId};
 use rdy_schema::{Issue, Severity};
 use rdy_store::object_refs::ObjectKey;
-use serde::de::{self, DeserializeOwned};
+use rdy_store::take_batch::MAX_UPLOAD_TAG_BYTES;
+use serde::de::{self, DeserializeOwned, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::io::{Cursor, Read, Write};
+use std::marker::PhantomData;
 use std::path::PathBuf;
 
 /// The media type a discovery request accepts.
@@ -207,8 +211,11 @@ pub struct PublishState {
     #[serde(deserialize_with = "nullable_repo_id")]
     pub repo_id: Option<RepoId>,
     pub rdy: String,
+    #[serde(deserialize_with = "at_most::<_, _, MAX_FORMATS>")]
     pub stream_read: Vec<u32>,
+    #[serde(deserialize_with = "at_most::<_, _, MAX_FORMATS>")]
     pub stream_write: Vec<u32>,
+    #[serde(deserialize_with = "at_most::<_, _, MAX_FEATURES>")]
     pub features: Vec<FeatureUse>,
     #[serde(deserialize_with = "nullable")]
     pub min_rdy: Option<String>,
@@ -371,9 +378,47 @@ fn present_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error>
     u64::deserialize(d).map(Some)
 }
 
-/// An optional member that, when present, is an object; its value is not kept.
-fn present_object<'de, D: Deserializer<'de>>(d: D) -> Result<Option<()>, D::Error> {
-    serde_json::Map::<String, serde_json::Value>::deserialize(d).map(|_| Some(()))
+/// An optional member that, when present, is an object. Its value is kept only until the
+/// refusal has checked each of its strings and keys for a token, then dropped.
+fn present_object<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error> {
+    serde_json::Map::<String, serde_json::Value>::deserialize(d).map(Some)
+}
+
+/// A list of at most `N` elements. The elements are built one at a time; once `N` are built, a
+/// further element is skipped unbuilt and the list refused, so nothing past the bound is ever
+/// allocated. The JSON guard has already bounded the whole body.
+fn at_most<'de, D, T, const N: usize>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Bounded<T, const N: usize>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const N: usize> Visitor<'de> for Bounded<T, N> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a list of at most {N} elements")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::new();
+            while out.len() < N {
+                match seq.next_element()? {
+                    Some(v) => out.push(v),
+                    None => return Ok(out),
+                }
+            }
+            if seq.next_element::<IgnoredAny>()?.is_some() {
+                return Err(de::Error::custom("too many elements"));
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_seq(Bounded::<T, N>(PhantomData))
 }
 
 fn ser_hash<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
@@ -461,6 +506,7 @@ struct PublishBody<'a> {
 #[serde(deny_unknown_fields)]
 struct DiscoveryDto {
     sync_base: String,
+    #[serde(deserialize_with = "at_most::<_, _, MAX_PROTOCOLS>")]
     protocols: Vec<u32>,
 }
 
@@ -504,8 +550,9 @@ struct IssueDto {
     fix: String,
 }
 
-/// The hub's error object (hub tb-68J50). `corrected` is bounded and discarded: the upload has
-/// no payload to send again.
+/// The hub's error object (hub tb-68J50). `corrected` is bounded, checked for tokens and then
+/// discarded: the upload has no payload to send again. `issues` stops at its 200-issue bound
+/// before a further issue is built.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ErrorDto {
@@ -513,11 +560,12 @@ struct ErrorDto {
     message: String,
     fix: String,
     request_id: String,
+    #[serde(deserialize_with = "at_most::<_, _, MAX_ERROR_ISSUES>")]
     issues: Vec<IssueDto>,
     #[serde(default, deserialize_with = "present_u64")]
     retry_after: Option<u64>,
-    #[serde(default, deserialize_with = "present_object", rename = "corrected")]
-    _corrected: Option<()>,
+    #[serde(default, deserialize_with = "present_object")]
+    corrected: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -614,13 +662,16 @@ fn unordered(what: &str) -> RdyError {
 /// Checks the record and its manifest before the publish body is encoded: the count bounds
 /// first, then the manifest (validated and hashed), then the render inputs.
 fn check_record(record: &PublicationInputs, manifest: &Manifest) -> Result<(), RdyError> {
-    if !crate::site_scope::tag_name_ok(&record.tag) {
+    // HA1's upload bound first, then the version grammar every stored tag meets. The live
+    // site's shorter bound on new names is not a stored tag's (version.rs MAX_VERSION_BYTES).
+    if record.tag.len() > MAX_UPLOAD_TAG_BYTES {
         return Err(RdyError::new(
-            E_BAD_TAG_NAME,
-            "the publication tag is not a version name",
-            "publish a tag named like v1.2.0",
+            E_LIMIT,
+            format!("upload tag exceeds {MAX_UPLOAD_TAG_BYTES} bytes"),
+            "reduce the tag name to the stated limit",
         ));
     }
+    crate::version::parse_version(&record.tag)?;
     check_count(
         record.selection.len(),
         MAX_SELECTION_ROWS,
@@ -755,24 +806,44 @@ fn base_text_ok(text: &str) -> bool {
         && !text.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// An absolute HTTPS sync base that the URL parser keeps byte for byte: no userinfo, query or
-/// fragment, and a path [`base_path_ok`] accepts. The origin is not checked here.
+/// An absolute HTTPS sync base, parsed: no userinfo, query or fragment, and a path
+/// [`base_path_ok`] accepts. The raw path is checked before the URL parser normalizes it, so a
+/// dot segment the parser would remove is refused; the parser's harmless normalizations (scheme
+/// and host case, the default port, an empty path as `/`) are kept in its canonical text. The
+/// origin is not checked here.
 fn absolute_base(text: &str) -> Option<url::Url> {
     if !base_text_ok(text) || text.contains(['?', '#', '\\']) {
         return None;
     }
+    if !text
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
+        return None;
+    }
+    let after = &text[8..];
+    let (authority, raw_path) = after.split_at(after.find('/').unwrap_or(after.len()));
+    if authority.is_empty()
+        || authority.contains(['@', '%'])
+        || !(raw_path.is_empty() || base_path_ok(raw_path))
+    {
+        return None;
+    }
     let url = url::Url::parse(text).ok()?;
     let ok = url.scheme() == "https"
-        && url.as_str() == text
         && url.username().is_empty()
         && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
         && url.host_str().is_some_and(|h| !h.is_empty())
+        && url.as_str().len() <= MAX_URL_BYTES
         && base_path_ok(url.path());
     ok.then_some(url)
 }
 
-/// The sync base of a discovery reply as an absolute URL: a path on `install`, or an HTTPS URL
-/// that `fence` admits (its refusal keeps the pin-aware fix). A listed origin adds no trust.
+/// The sync base of a discovery reply as a canonical absolute URL: a path on `install`, or an
+/// HTTPS URL that `fence` admits (its refusal keeps the pin-aware fix). A listed origin adds no
+/// trust.
 fn resolve_base(fence: &OriginFence, install: &Origin, text: &str) -> Result<String, RdyError> {
     if !base_text_ok(text) {
         return Err(upstream_protocol());
@@ -782,10 +853,9 @@ fn resolve_base(fence: &OriginFence, install: &Origin, text: &str) -> Result<Str
             return Err(upstream_protocol());
         }
         let full = format!("{install}{text}");
-        if absolute_base(&full).is_none() {
-            return Err(upstream_protocol());
-        }
-        return Ok(full);
+        return absolute_base(&full)
+            .map(String::from)
+            .ok_or_else(upstream_protocol);
     }
     let https = text
         .get(..8)
@@ -794,9 +864,10 @@ fn resolve_base(fence: &OriginFence, install: &Origin, text: &str) -> Result<Str
         return Err(upstream_protocol());
     }
     fence.check(text)?;
-    absolute_base(text)
-        .map(|_| text.to_string())
-        .ok_or_else(upstream_protocol)
+    let url = absolute_base(text).ok_or_else(upstream_protocol)?;
+    // The canonical text names the origin the fence admitted.
+    fence.check(url.as_str())?;
+    Ok(url.into())
 }
 
 /// The URL of the fixed route `segments` under the context's sync base, with `query` pairs.
@@ -884,6 +955,23 @@ fn echoes_token(text: &str, bearer: &Secret) -> bool {
     (!b.is_empty() && text.contains(b)) || TOKEN_PREFIXES.iter().any(|p| text.contains(p))
 }
 
+/// Whether any key or string of `object`, at any depth, holds the bearer or a token prefix. The
+/// JSON guard bounds the depth to 32, so the recursion is bounded too.
+fn object_echoes(object: &serde_json::Map<String, serde_json::Value>, bearer: &Secret) -> bool {
+    object
+        .iter()
+        .any(|(k, v)| echoes_token(k, bearer) || value_echoes(v, bearer))
+}
+
+fn value_echoes(value: &serde_json::Value, bearer: &Secret) -> bool {
+    match value {
+        serde_json::Value::String(s) => echoes_token(s, bearer),
+        serde_json::Value::Array(a) => a.iter().any(|v| value_echoes(v, bearer)),
+        serde_json::Value::Object(m) => object_echoes(m, bearer),
+        _ => false,
+    }
+}
+
 /// 1 to 64 upper-case ASCII letters, digits and underscores.
 fn code_ok(code: &str) -> bool {
     !code.is_empty()
@@ -953,11 +1041,11 @@ fn notice(message: String, fix: &str) -> Issue {
 fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyError> {
     let dto: ErrorDto = decode_bounded_json(body, limits(cap, MAX_JSON_VALUES)).ok()?;
     let raw = std::str::from_utf8(body).ok()?;
-    let issues_ok = dto.issues.len() <= MAX_ERROR_ISSUES
-        && dto
-            .issues
-            .iter()
-            .all(|i| code_ok(&i.code) && text_ok(&i.message) && text_ok(&i.fix));
+    // The decoder stopped `issues` at its bound; each issue's text is checked here.
+    let issues_ok = dto
+        .issues
+        .iter()
+        .all(|i| code_ok(&i.code) && text_ok(&i.message) && text_ok(&i.fix));
     let shape_ok = code_ok(&dto.code)
         && text_ok(&dto.message)
         && text_ok(&dto.fix)
@@ -969,7 +1057,8 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
     if !shape_ok {
         return None;
     }
-    // Every decoded string, and the raw body for what is not decoded (`corrected`).
+    // Every decoded string, `corrected`'s strings and keys at any depth included, and the raw
+    // body.
     let texts_echo = [&dto.code, &dto.message, &dto.fix, &dto.request_id]
         .into_iter()
         .chain(
@@ -983,7 +1072,11 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
         .iter()
         .filter_map(|i| i.block.as_ref())
         .any(|b| echoes_token(b.as_str(), bearer));
-    if texts_echo || block_echo || echoes_token(raw, bearer) {
+    let corrected_echo = dto
+        .corrected
+        .as_ref()
+        .is_some_and(|m| object_echoes(m, bearer));
+    if texts_echo || block_echo || corrected_echo || echoes_token(raw, bearer) {
         return None;
     }
     // The pair first, so a code with several statuses reaches each of its rows.
@@ -1310,5 +1403,91 @@ impl PublishWire for HttpPublishWire {
             return Err(upstream_uncertain());
         }
         Ok(c)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn fence() -> (OriginFence, Origin) {
+        let install = Origin::parse("https://hub.invalid").unwrap();
+        (OriginFence::new(install.clone(), []).unwrap(), install)
+    }
+
+    /// The spellings of one admitted base that a URL parser normalizes are taken canonically.
+    #[test]
+    fn hpb7_a_sync_base_takes_harmless_normalization() {
+        let (fence, install) = fence();
+        for (given, canonical) in [
+            ("https://hub.invalid", "https://hub.invalid/"),
+            ("HTTPS://hub.invalid/sync", "https://hub.invalid/sync"),
+            ("https://HUB.invalid/sync", "https://hub.invalid/sync"),
+            ("https://hub.invalid:443/sync", "https://hub.invalid/sync"),
+            ("HTTPS://Hub.Invalid:443", "https://hub.invalid/"),
+            ("https://hub.invalid/sync", "https://hub.invalid/sync"),
+            ("/sync/v1", "https://hub.invalid/sync/v1"),
+        ] {
+            assert_eq!(
+                resolve_base(&fence, &install, given).ok().as_deref(),
+                Some(canonical),
+                "{given}"
+            );
+        }
+        // Each hostile spelling stays refused: the raw path is checked before normalization.
+        for bad in [
+            "https://hub.invalid/a/../sync",
+            "HTTPS://HUB.invalid:443/a/./b",
+            "https://hub.invalid/a/%2e%2E/sync",
+            "https://hub.invalid/a/.%2e",
+            "https://hub.invalid/sync/..",
+            "https://hub.invalid//sync",
+            "https://hub.invalid/sync?x=1",
+            "https://hub.invalid/sync#f",
+            "https://u@hub.invalid/sync",
+            "https://hub.invalid\\sync",
+            "https://hub.invalid:444/sync",
+            "https://other.invalid/sync",
+            "http://hub.invalid/sync",
+        ] {
+            assert!(resolve_base(&fence, &install, bad).is_err(), "{bad}");
+        }
+    }
+
+    thread_local! {
+        static BUILT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// An element that counts how many times it is built.
+    struct Probe;
+
+    impl<'de> Deserialize<'de> for Probe {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Probe, D::Error> {
+            de::IgnoredAny::deserialize(d)?;
+            BUILT.with(|b| b.set(b.get() + 1));
+            Ok(Probe)
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct Three {
+        #[serde(deserialize_with = "at_most::<_, _, 3>")]
+        list: Vec<Probe>,
+    }
+
+    /// A bounded list builds no element past its bound: the next one is skipped, then refused.
+    #[test]
+    fn hpb7_a_bounded_list_builds_nothing_past_its_bound() {
+        BUILT.with(|b| b.set(0));
+        let ok: Three = serde_json::from_str(r#"{"list":[1,2,3]}"#).unwrap();
+        assert_eq!((ok.list.len(), BUILT.with(Cell::get)), (3, 3));
+        BUILT.with(|b| b.set(0));
+        let long = format!(
+            r#"{{"list":[{}]}}"#,
+            vec!["{\"a\":\"b\"}"; 10_000].join(",")
+        );
+        assert!(serde_json::from_str::<Three>(&long).is_err());
+        assert_eq!(BUILT.with(Cell::get), 3);
     }
 }

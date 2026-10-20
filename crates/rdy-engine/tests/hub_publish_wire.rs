@@ -1571,3 +1571,258 @@ fn hpb7_no_call_retries_after_a_lost_reply() {
     );
     assert_eq!(s.finish(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1 regressions
+// ---------------------------------------------------------------------------------------------
+
+/// A global allocator that counts, on a thread that asks for it, the allocations of one size.
+/// Other threads and other tests run unwatched, so the count is this call's alone.
+mod sized_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Sized;
+
+    thread_local! {
+        /// The watched size and how many allocations of it this thread made.
+        static WATCH: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+    }
+
+    fn note(size: usize) {
+        let _ = WATCH.try_with(|w| {
+            if let Some((watched, n)) = w.get()
+                && watched == size
+            {
+                w.set(Some((watched, n + 1)));
+            }
+        });
+    }
+
+    // SAFETY: every call goes to `System` with the caller's arguments unchanged.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Sized {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc_zeroed` requires.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// `f`'s result and how many allocations of exactly `size` bytes this thread made in it.
+    pub fn count<T>(size: usize, f: impl FnOnce() -> T) -> (T, usize) {
+        WATCH.with(|w| w.set(Some((size, 0))));
+        let out = f();
+        let n = WATCH.with(|w| w.replace(None)).map_or(0, |(_, n)| n);
+        (out, n)
+    }
+}
+
+#[global_allocator]
+static ALLOC: sized_alloc::Sized = sized_alloc::Sized;
+
+/// A stored tag reads at any length up to HA1's upload bound (1,048,576 bytes); the live site's
+/// 256-byte limit on new names does not apply to a publication of an existing tag.
+#[test]
+fn hpb7_publication_takes_every_stored_tag_within_the_upload_bound() {
+    let m = manifest();
+    let mut rec = record(None, &m);
+    // 257 bytes and more: a valid stored tag the site would not serve.
+    rec.tag = format!("v1.0.0-{}", "a".repeat(250));
+    let body = encode_publish(PUSH, SITE, &rec, &m, None).unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["record"]["tag"], json!(rec.tag));
+    // Exactly the upload bound.
+    let max = 1_048_576;
+    rec.tag = format!("v1.0.0-{}", "a".repeat(max - "v1.0.0-".len()));
+    assert_eq!(rec.tag.len(), max);
+    encode_publish(PUSH, SITE, &rec, &m, None).unwrap();
+    // One byte past it: HA1's limit refusal, checked before the version grammar.
+    rec.tag.push('a');
+    let e = err(encode_publish(PUSH, SITE, &rec, &m, None));
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_LIMIT,
+            "upload tag exceeds 1048576 bytes",
+            "reduce the tag name to the stated limit"
+        )
+    );
+    rec.tag = format!("x{}", "a".repeat(max));
+    assert_eq!(
+        err(encode_publish(PUSH, SITE, &rec, &m, None)).code,
+        E_LIMIT
+    );
+    // Not a version: the version grammar's refusal.
+    for name in ["v1.2", "release", "v1.2.0+build", ""] {
+        rec.tag = name.to_string();
+        let e = err(encode_publish(PUSH, SITE, &rec, &m, None));
+        assert_eq!(e.code, rdy_engine::E_BAD_TAG_NAME, "{name}");
+    }
+    // The long tag reaches the hub through the wire as well.
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    rec.tag = format!("v1.0.0-{}", "a".repeat(250));
+    let (r, req) = served(&mut s, Reply::json(201, CANDIDATE), || {
+        hub.wire.publish(&cx, PUSH, SITE, &rec, &m, None)
+    });
+    r.unwrap();
+    let sent: Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(sent["record"]["tag"], json!(rec.tag));
+    assert_eq!(s.finish(), 0);
+}
+
+/// A refusal with more issues than its 200-issue bound is refused before the issues past the
+/// bound are allocated: of 10,000 issue messages, at most 200 are ever built.
+#[test]
+fn hpb7_error_issues_stop_at_their_bound_before_allocation() {
+    /// An odd message length no other allocation of the exchange shares.
+    const LEN: usize = 1009;
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let keys = sorted(vec![key(1, 1)]);
+    let message = "m".repeat(LEN);
+    let issues = |n: usize| {
+        let one = format!(
+            r#"{{"severity":"error","code":"E_HUB_VALIDATION","block":null,"message":"{message}","fix":"f"}}"#
+        );
+        format!("[{}]", vec![one; n].join(","))
+    };
+    // 200 issues: kept, each message built once.
+    let body = error_body("E_HUB_VALIDATION", "m", "f", &issues(200), "");
+    let ((r, _), n) = sized_alloc::count(LEN, || {
+        served(&mut s, Reply::json(422, &body), || {
+            hub.wire.known(&cx, PUSH, &keys)
+        })
+    });
+    let e = err(r);
+    assert_eq!((e.code, e.issues.len()), ("E_HUB_VALIDATION", 201));
+    assert_eq!(n, 200, "each kept message once");
+    // 10,000 issues, within the known reply's byte and value caps: refused, and no message past
+    // the 200th is built.
+    let body = error_body("E_HUB_VALIDATION", "m", "f", &issues(10_000), "");
+    assert!(body.len() <= KNOWN_REPLY_BYTES, "{}", body.len());
+    let ((r, _), n) = sized_alloc::count(LEN, || {
+        served(&mut s, Reply::json(422, &body), || {
+            hub.wire.known(&cx, PUSH, &keys)
+        })
+    });
+    protocol(r);
+    assert!(n <= 200, "{n} issue messages built");
+    assert_eq!(s.finish(), 0);
+}
+
+/// A token in `corrected`, however its JSON escapes spell it and at any depth, as a string or a
+/// key, discards the whole body: a read is the protocol refusal and a sent write uncertain.
+#[test]
+fn hpb7_escaped_tokens_in_corrected_discard_the_body() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let m = manifest();
+    let rec = record(None, &m);
+    // Its first `r` as a JSON `\u` escape: the raw body never holds the token's text.
+    let r_escaped = format!("\\u{:04x}", u32::from('r'));
+    assert_eq!(r_escaped.len(), 6);
+    let escape = |t: &str| t.replacen('r', &r_escaped, 1);
+    // A harmless `corrected` is still bounded and discarded, and the refusal kept.
+    let plain = error_body(
+        "E_HUB_VALIDATION",
+        "m",
+        "f",
+        "[]",
+        r#","corrected":{"a":{"b":["fine",1,null]}}"#,
+    );
+    let (r, _) = served(&mut s, Reply::json(422, &plain), || {
+        hub.wire.state(&cx, &state_request())
+    });
+    assert_eq!(err(r).code, "E_HUB_VALIDATION");
+    for token in [ACCESS, REFRESH, REFRESH_X] {
+        let t = escape(token);
+        assert!(!t.contains(token));
+        for corrected in [
+            format!(r#","corrected":{{"a":{{"b":["x","{t}"]}}}}"#),
+            format!(r#","corrected":{{"a":[{{"{t}":1}}]}}"#),
+            format!(r#","corrected":{{"{t}":null}}"#),
+            format!(r#","corrected":{{"a":"before {t} after"}}"#),
+        ] {
+            let body = error_body("E_HUB_VALIDATION", "m", "f", "[]", &corrected);
+            let (r, _) = served(&mut s, Reply::json(422, &body), || {
+                hub.wire.state(&cx, &state_request())
+            });
+            protocol(r);
+            let (r, _) = served(&mut s, Reply::json(422, &body), || {
+                hub.wire.publish(&cx, PUSH, SITE, &rec, &m, None)
+            });
+            let e = err(r);
+            assert_eq!(e.code, E_UPSTREAM_UNCERTAIN, "{corrected}");
+            assert!(!format!("{e:?}").contains(token));
+        }
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// A sync base the origin fence admits in another spelling of the same URL is taken in its
+/// canonical form: an upper-case scheme and an empty path.
+#[test]
+fn hpb7_discovery_takes_harmless_spellings_of_an_admitted_base() {
+    let mut a = Server::start();
+    let hub = Hub::new(&a, &[], &[]);
+    let cx = hub.cx_with(None, Some("r7"));
+    let remote = format!("{}{REMOTE}", a.origin());
+    let host = a.origin()["https://".len()..].to_string();
+    for (given, canonical) in [
+        (
+            format!("HTTPS://{host}/sync"),
+            format!("https://{host}/sync"),
+        ),
+        (
+            format!("Https://{host}/sync/"),
+            format!("https://{host}/sync/"),
+        ),
+        (format!("https://{host}"), format!("https://{host}/")),
+    ] {
+        let reply = format!(r#"{{"sync_base":{},"protocols":[1]}}"#, json!(given));
+        let (r, _) = served(&mut a, Reply::json(200, &reply), || {
+            hub.wire.discovery(&cx, &remote)
+        });
+        assert_eq!(r.unwrap().sync_base, canonical, "{given}");
+    }
+    // The empty path's routes sit at the root.
+    let root = hub.cx_with(Some(format!("https://{host}/")), Some("r7"));
+    let (r, req) = served(&mut a, Reply::json(200, &state_reply("[]", "null")), || {
+        hub.wire.state(&root, &state_request())
+    });
+    r.unwrap();
+    assert_eq!(req.target, "/state");
+    // Dot segments are refused in the raw text, before the parser removes them.
+    for bad in [
+        format!("HTTPS://{host}/a/../sync"),
+        format!("https://{host}/a/%2E%2e/sync"),
+        format!("https://{host}/sync/."),
+        format!("https://{host}//sync"),
+    ] {
+        let reply = format!(r#"{{"sync_base":{},"protocols":[1]}}"#, json!(bad));
+        let (r, _) = served(&mut a, Reply::json(200, &reply), || {
+            hub.wire.discovery(&cx, &remote)
+        });
+        protocol(r);
+    }
+    assert_eq!(a.finish(), 0);
+}
