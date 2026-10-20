@@ -16,13 +16,15 @@ thread_local! {
 }
 
 /// Test hook: how many block texts this thread has read for a mention or literal scan
-/// ([`text_in`] and the lexicon's own reads), so a test can bound the blocks a read touches.
+/// ([`text_in`], the lexicon's own reads and the changed-literal scans of
+/// [`crate::consequence_literals`]), so a test can bound the blocks a read touches.
 #[doc(hidden)]
 pub fn text_scans() -> usize {
     TEXT_SCANS.with(Cell::get)
 }
 
-fn count_scan() {
+/// Counts one block text read for [`text_scans`].
+pub(crate) fn count_scan() {
     TEXT_SCANS.with(|c| c.set(c.get() + 1));
 }
 
@@ -159,29 +161,52 @@ impl Lexicon {
         if self.phrases.is_empty() {
             return vec![];
         }
+        let mut seen: BTreeSet<BlockId> = BTreeSet::new();
+        let mut out = vec![];
+        for (field, text) in self.sources(b) {
+            for (id, range) in self.mention_spans(&text, &b.id) {
+                if seen.insert(id.clone()) {
+                    out.push(Mention {
+                        entity: id.to_string(),
+                        field: field.clone(),
+                        text: text[range].to_string(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Each entity `text` names by name or alias (never by key), with the byte range of the
+    /// words that name it, in text order; the phrases are [`find_phrases`]'s, longest first.
+    /// A phrase that names several entities gives each, in id order. `source`, the block the
+    /// text is in, is never among them. Each occurrence of a name is given.
+    pub(crate) fn mention_spans(
+        &self,
+        text: &str,
+        source: &BlockId,
+    ) -> Vec<(BlockId, std::ops::Range<usize>)> {
+        if self.phrases.is_empty() {
+            return vec![];
+        }
         let known = |p: &str| {
             self.phrases
                 .get(p)
                 .is_some_and(|set| set.iter().any(|(_, k)| *k != NameKind::Key))
         };
-        let mut seen: BTreeSet<BlockId> = BTreeSet::new();
-        let mut out = vec![];
-        for (field, text) in self.sources(b) {
-            for (p, range) in find_phrases(&text, &known) {
-                let Some(set) = self.phrases.get(&p) else {
+        let mut out: Vec<(BlockId, std::ops::Range<usize>)> = vec![];
+        for (p, range) in find_phrases(text, &known) {
+            let Some(set) = self.phrases.get(&p) else {
+                continue;
+            };
+            // the set is ordered by (id, kind): an id that names by two kinds comes twice
+            let mut last: Option<&BlockId> = None;
+            for (id, kind) in set {
+                if *kind == NameKind::Key || id == source || last == Some(id) {
                     continue;
-                };
-                for (id, kind) in set {
-                    if *kind == NameKind::Key || *id == b.id || seen.contains(id) {
-                        continue;
-                    }
-                    seen.insert(id.clone());
-                    out.push(Mention {
-                        entity: id.to_string(),
-                        field: field.clone(),
-                        text: text[range.clone()].to_string(),
-                    });
                 }
+                last = Some(id);
+                out.push((id.clone(), range.clone()));
             }
         }
         out
@@ -358,22 +383,22 @@ fn without(sources: Vec<(String, String)>, skip: impl Fn(&str) -> bool) -> Vec<(
 /// list, never prose.
 pub fn text_in(pack: &Pack, b: &Block) -> Vec<(String, String)> {
     count_scan();
-    let def = pack.block_types.get(&b.block_type);
-    without(text_sources(b), |f| {
-        def.and_then(|d| d.fields.get(f))
-            .is_some_and(|fd| fd.kind == FieldKind::Enum)
-    })
+    without(text_sources(b), |f| is_enum_field(pack, &b.block_type, f))
+}
+
+/// Whether `pack` gives `field` of `block_type` kind `enum`: a fixed list, never read as text.
+pub(crate) fn is_enum_field(pack: &Pack, block_type: &str, field: &str) -> bool {
+    pack.block_types
+        .get(block_type)
+        .and_then(|d| d.fields.get(field))
+        .is_some_and(|fd| fd.kind == FieldKind::Enum)
 }
 
 /// The text of `b` as a reader sees it, under `pack`: the fields of [`text_in`], with each
 /// reference shown the way `rdy_read` shows it (its bare token), never blanked. Not for a
 /// mention scan.
 pub fn shown_text_in(pack: &Pack, b: &Block) -> Vec<(String, String)> {
-    let def = pack.block_types.get(&b.block_type);
-    without(shown_sources(b), |f| {
-        def.and_then(|d| d.fields.get(f))
-            .is_some_and(|fd| fd.kind == FieldKind::Enum)
-    })
+    without(shown_sources(b), |f| is_enum_field(pack, &b.block_type, f))
 }
 
 /// The link a block of `b`'s type makes to an entity: none for an unknown type and for a type
