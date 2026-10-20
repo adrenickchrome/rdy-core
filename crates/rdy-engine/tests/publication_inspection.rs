@@ -193,6 +193,30 @@ fn longest_text(res: &Resolved) -> u64 {
     out
 }
 
+/// UTF-8 bytes of every selected body and string field value together, plus the chosen
+/// profile's title and description, which the scan reads though the profile is not selected.
+fn total_text(res: &Resolved) -> u64 {
+    fn walk(v: &FieldValue, out: &mut u64) {
+        match v {
+            FieldValue::Str(x) => *out += x.len() as u64,
+            FieldValue::List(xs) => xs.iter().for_each(|x| walk(x, out)),
+            FieldValue::Map(xs) => xs.values().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = 0;
+    for b in res.m.iter() {
+        out += b.body.len() as u64;
+        b.fields.values().for_each(|v| walk(v, &mut out));
+    }
+    out + res.profile.title.len() as u64
+        + res
+            .profile
+            .description
+            .as_ref()
+            .map_or(0, |d| d.len() as u64)
+}
+
 // ---------------------------------------------------------------------------------------------
 // tests
 
@@ -902,11 +926,16 @@ fn spv1_inspection_is_bounded_and_read_only() {
     );
     let pf = id(&w, "$pf");
     land(&mut r, "work");
-    // a view and a proposal that add references leaving the selection
+    // a view and a proposal that add references leaving the selection, one of them in a
+    // nested table cell so the location and field-depth bounds have a deep value to meet
     write(
         &mut r,
         "draft",
-        json!([{"op": "create", "type": "prose", "parent": a, "body": format!("See {{{{{out}}}}}.")}]),
+        json!([
+            {"op": "create", "type": "prose", "parent": a, "body": format!("See {{{{{out}}}}}.")},
+            {"op": "create", "type": "table", "parent": a,
+             "fields": {"columns": ["c"], "rows": [[[format!("Cell {{{{{out}}}}}.")]]]}}
+        ]),
     );
     let p = propose(&mut r, "draft");
     // a view where the selected folder is gone: metadata still reads, selection does not
@@ -966,13 +995,26 @@ fn spv1_inspection_is_bounded_and_read_only() {
         let path = res.docs.iter().map(|d| d.path.len()).max().unwrap() as u64;
         assert_eq!(path, "top/a-long-name".len() as u64);
         let token = out.len() as u64;
+        // the body reference and the table-cell reference, both leaving the selection
+        let occurrences: u64 = res.references.rows.iter().map(|r| r.occurrences).sum();
+        assert_eq!(occurrences, 2);
+        let location = res
+            .references
+            .rows
+            .iter()
+            .map(|r| r.location.len())
+            .max()
+            .unwrap() as u64;
+        assert_eq!(location, "/fields/rows/0/0/0".len() as u64);
+        // rows (1), a row (2), a cell (3), the string in it (4)
+        let depth = 4u64;
         type Set = fn(&mut Limits, u64);
         let cases: Vec<(&str, &str, u64, Set)> = vec![
             ("selection", "blocks", blocks, |l, n| {
                 l.selection = n as usize
             }),
             ("graph", "edges", edges, |l, n| l.graph = n as usize),
-            ("references", "occurrences", 1, |l, n| {
+            ("references", "occurrences", occurrences, |l, n| {
                 l.references = n as usize
             }),
             ("attachments", "rows", 1, |l, n| l.attachments = n as usize),
@@ -982,6 +1024,15 @@ fn spv1_inspection_is_bounded_and_read_only() {
             }),
             ("text value", "bytes", longest_text(&res), |l, n| {
                 l.text_value = n as usize
+            }),
+            ("text", "bytes", total_text(&res), |l, n| {
+                l.text = n as usize
+            }),
+            ("reference location", "bytes", location, |l, n| {
+                l.location = n as usize
+            }),
+            ("field depth", "levels", depth, |l, n| {
+                l.field_depth = n as usize
             }),
         ];
         for (part, unit, n, set) in cases {
