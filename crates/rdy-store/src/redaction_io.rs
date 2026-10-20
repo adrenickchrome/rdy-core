@@ -44,6 +44,7 @@ use rdy_model::redaction::{
     MAX_RECORD_BYTES, Redaction, RedactionApply, RedactionResidue, ResidualOp, record_buffer,
 };
 use rdy_model::{Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Role};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -442,12 +443,14 @@ impl ApplyFrame {
     }
 }
 
-/// One carried record frame (kind REDACTION_CARRIED) the header pass met in a sealed batch.
+/// One carried record frame (kind REDACTION_CARRIED) the header pass met in a sealed batch. The
+/// checks read its record through [`FrameLog::carried_record`].
 pub(crate) struct CarriedFrame {
     pub(crate) loc: Location,
     pub(crate) hash: Hash,
-    /// None: its payload matched its hash but is no carried record in its bounded, canonical
-    /// form, or it did not match its hash.
+    /// A log's header pass: the decoded record, or None when its payload is no carried record in
+    /// its bounded, canonical form or did not match its hash. A dump chain keeps no record here
+    /// (None): its source reads the record again by its place.
     pub(crate) record: Option<rdy_model::RedactionCarried>,
     /// Where its batch starts: every span it names ends before it.
     pub(crate) batch_start: Location,
@@ -627,15 +630,20 @@ pub(crate) fn refuse_oversized_records(items: &[(u8, Vec<u8>)]) -> Result<(), St
     Ok(())
 }
 
+/// The refusal of a removal check whose fallible allocation failed (an I/O error of kind
+/// `OutOfMemory`).
+pub(crate) fn out_of_memory() -> StoreError {
+    StoreError::Io(io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        "cannot allocate a record buffer",
+    ))
+}
+
 /// Reads `len` payload bytes at `at` into a fallibly allocated buffer.
 pub(crate) fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
     let mut buf = Vec::new();
-    buf.try_reserve_exact(len as usize).map_err(|_| {
-        StoreError::Io(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            "cannot allocate a record buffer",
-        ))
-    })?;
+    buf.try_reserve_exact(len as usize)
+        .map_err(|_| out_of_memory())?;
     buf.resize(len as usize, 0);
     crate::pio::read_exact_at(f, &mut buf, at)?;
     Ok(buf)
@@ -787,6 +795,22 @@ pub(crate) trait FrameLog: RecordAccess {
         memory: &BTreeMap<Location, (u8, Vec<u8>)>,
         f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError>;
+
+    /// The carried record of frame `f` in its bounded, canonical form; None when the frame holds
+    /// no such record. A log's header pass keeps each record decoded (`f.record`); a dump chain
+    /// keeps none and reads each one again by its place, one at a time.
+    fn carried_record<'f>(
+        &mut self,
+        f: &'f CarriedFrame,
+    ) -> Result<Option<Cow<'f, rdy_model::RedactionCarried>>, StoreError> {
+        Ok(f.record.as_ref().map(Cow::Borrowed))
+    }
+
+    /// Whether the carried overlay keeps the validated records (`Authorization::carried`): a
+    /// log's bootstrap does, for its index and its reads; a dump chain's checks keep none.
+    fn keeps_carried(&self) -> bool {
+        true
+    }
 }
 
 /// The log's segment files, and the frames of a batch not yet written, as a [`RecordAccess`].

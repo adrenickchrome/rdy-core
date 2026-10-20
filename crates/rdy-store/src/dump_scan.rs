@@ -82,6 +82,7 @@ use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, Redaction, RedactionCarried, RedactionResidue,
 };
 use rdy_model::{Hash, LandingRecord, Provenance, RepoId, Tag};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -1016,6 +1017,21 @@ impl FrameLog for ChainAccess<'_, '_> {
         Ok(true)
     }
 
+    fn carried_record<'f>(
+        &mut self,
+        f: &'f CarriedFrame,
+    ) -> Result<Option<Cow<'f, RedactionCarried>>, StoreError> {
+        // the chain keeps no record: it reads this one again by its place
+        Ok(self
+            .record(f.loc, kinds::REDACTION_CARRIED, &f.hash)?
+            .and_then(|p| decode_record(&p))
+            .map(Cow::Owned))
+    }
+
+    fn keeps_carried(&self) -> bool {
+        false
+    }
+
     fn walk(
         &mut self,
         upto: Location,
@@ -1152,8 +1168,8 @@ impl ObjectSource for ChainObjects<'_, '_> {
 
 /// One proof event of a batch, handled in physical order once the batch's framing is checked.
 /// An event holds no payload: an apply its decoded record (96 bytes) and how many of the batch's
-/// landings come before it, a carried record its decoded record (which the meaning checks keep
-/// for the chain, as a log's bootstrap keeps its carried records).
+/// landings come before it, a carried record only where it is (each check reads it again by
+/// its offset, one record at a time).
 enum Event {
     Drop {
         at: Location,
@@ -1172,7 +1188,6 @@ enum Event {
         offset: u64,
         hash: Hash,
         rec: Rec,
-        record: Option<Box<RedactionCarried>>,
     },
     Copy {
         at: Location,
@@ -1795,18 +1810,21 @@ impl<'p> Scan<'p> {
                             fh.at,
                         )?;
                     }
-                    _ => push(
-                        events,
-                        Event::Carried {
-                            at,
-                            offset: fh.at,
-                            hash: fh.hash,
-                            rec: rec_,
-                            record: decode_record(&p).map(Box::new),
-                        },
-                        i,
-                        fh.at,
-                    )?,
+                    _ => {
+                        // the checks read the record again by its place
+                        self.note(at, rec_, i, fh.at)?;
+                        push(
+                            events,
+                            Event::Carried {
+                                at,
+                                offset: fh.at,
+                                hash: fh.hash,
+                                rec: rec_,
+                            },
+                            i,
+                            fh.at,
+                        )?
+                    }
                 }
             }
             kinds::REF_UPDATE => {
@@ -1977,8 +1995,7 @@ impl<'p> Scan<'p> {
                 offset,
                 hash,
                 rec,
-                record,
-            } => self.on_carried(f.file, at, offset, hash, rec, record, start, end),
+            } => self.on_carried(f.file, at, offset, hash, rec, start, end),
             Event::Copy { at, rec } => self.on_copy(at, rec, false),
         }
     }
@@ -2343,7 +2360,8 @@ impl<'p> Scan<'p> {
     /// `held: false`, each of its own input and with its exact identity. A dropped frame that
     /// names another proof is left to that proof (an apply that covers a span after a carried
     /// record recognized it becomes its proof: D-0VG72), and an unreleased one is refused at the
-    /// end. The record is kept for the meaning checks.
+    /// end. The record is read again by its offset and released after these checks; the meaning
+    /// checks keep only where it is, and read it again themselves.
     #[allow(clippy::too_many_arguments)]
     fn on_carried(
         &mut self,
@@ -2352,11 +2370,13 @@ impl<'p> Scan<'p> {
         offset: u64,
         hash: Hash,
         rec_: Rec,
-        record: Option<Box<RedactionCarried>>,
         start: Location,
         end: Location,
     ) -> Result<(), StoreError> {
-        let record = record.ok_or_else(|| damaged(offset, drop_text::NO_AUTHORIZATION))?;
+        let payload = self.lookups.read(&rec_)?;
+        let record =
+            decode_record(&payload).ok_or_else(|| damaged(offset, drop_text::NO_AUTHORIZATION))?;
+        drop(payload);
         // one record per source apply: another record of the same source apply conflicts
         match self.carried_by_apply.get(&record.apply) {
             Some(h) if *h != hash => return Err(damaged(offset, PROVENANCE_CONFLICT)),
@@ -2388,7 +2408,7 @@ impl<'p> Scan<'p> {
             batch_end: end,
             apply: record.apply,
         });
-        // kept for the meaning checks, as a log's bootstrap keeps its carried records
+        // where it is, for the meaning checks: they read the record again (`carried_record`)
         self.collected
             .carried
             .try_reserve(1)
@@ -2396,7 +2416,7 @@ impl<'p> Scan<'p> {
         self.collected.carried.push(CarriedFrame {
             loc: at,
             hash,
-            record: Some(*record),
+            record: None,
             batch_start: start,
         });
         Ok(())
@@ -2572,6 +2592,9 @@ impl<'p> Scan<'p> {
                 let source = match e {
                     StoreError::RedactionHuman | StoreError::Decode(_) => {
                         damaged(PRELUDE_LEN, drop_text::NO_AUTHORIZATION)
+                    }
+                    StoreError::Io(e) if e.kind() == io::ErrorKind::OutOfMemory => {
+                        damaged(PRELUDE_LEN, drop_text::ALLOCATION)
                     }
                     e => e,
                 };

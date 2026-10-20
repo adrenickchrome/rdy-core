@@ -38,14 +38,16 @@ use crate::redaction::{
     MAX_TARGET_BYTES, MAX_TARGETS, is_removable, limit, residue_matches, residue_names,
     selector_len,
 };
-use crate::redaction_io::{Authorization, Collected, FrameLog, SpanAuth, for_each_seen};
+use crate::redaction_io::{
+    Authorization, Collected, FrameLog, SpanAuth, for_each_seen, out_of_memory,
+};
 use crate::segment::{HEADER, Hole, Holes, Location, seg_path};
 use crate::store::{StoreReader, decode, encode};
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, RedactionCarried, RedactionResidue,
 };
 use rdy_model::{Hash, Role};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 
 /// The fix of a Project's carried warning and export refusal: a fresh removal needs a person's
@@ -146,6 +148,11 @@ pub(crate) fn candidate_holes(c: &Collected, below: Location, holes: &mut Holes)
     }
 }
 
+/// The hash key of place `l` (a `Location` is ordered, not hashed).
+fn key(l: Location) -> (u32, u64) {
+    (l.segment, l.offset)
+}
+
 /// One span of a carried record checked against the log.
 struct Identity {
     kind: u8,
@@ -157,35 +164,41 @@ struct Identity {
 /// Validates every carried record of `c` before `upto` (see the module docs) and lays it over
 /// `auth`, whose applies are already validated: each `held: false` span that no apply covers
 /// joins `auth.holes` with the record as its proof (`SpanAuth::carried`), each residue a span
-/// names joins `auth.residues`, and the records are kept in `auth.carried`. Any failure is
-/// `RedactionCorrupt`: at the record for a malformed record, at the span for a span.
+/// names joins `auth.residues`, and the records are kept in `auth.carried` when `log` keeps them
+/// ([`FrameLog::keeps_carried`]). Each record is read through `log`
+/// ([`FrameLog::carried_record`]) once per step, one at a time, and only the facts the checks
+/// need are kept: the places the records name, one identity per place, the held places with
+/// zero bytes, and one record hash per source apply; each grows by fallible reservation (an
+/// I/O error of kind `OutOfMemory`). Any other failure is `RedactionCorrupt`: at the record for a
+/// malformed record, at the span for a span.
 pub(crate) fn overlay(
     c: &Collected,
     log: &mut dyn FrameLog,
     auth: &mut Authorization,
     upto: Location,
 ) -> Result<(), StoreError> {
-    let frames: Vec<_> = c.carried.iter().filter(|f| f.loc < upto).collect();
-    if frames.is_empty() {
+    let frames = || c.carried.iter().filter(move |f| f.loc < upto);
+    if frames().next().is_none() {
         return Ok(());
     }
     // 1. each record's own shape, and one record per source apply
     let mut by_apply: HashMap<Hash, Hash> = HashMap::new();
-    let mut wanted: BTreeSet<Location> = BTreeSet::new();
+    let mut wanted: HashSet<(u32, u64)> = HashSet::new();
     let mut walk_to = Location {
         segment: 0,
         offset: 0,
     };
-    for f in &frames {
+    for f in frames() {
         let at = || StoreError::corrupt_at(f.loc);
-        let r = f.record.as_ref().ok_or_else(at)?;
-        if !metadata_ok(r) {
+        let r = log.carried_record(f)?.ok_or_else(at)?;
+        if !metadata_ok(&r) {
             return Err(at());
         }
         match by_apply.get(&r.apply) {
             Some(h) if *h != f.hash => return Err(at()),
             Some(_) => {}
             None => {
+                by_apply.try_reserve(1).map_err(|_| out_of_memory())?;
                 by_apply.insert(r.apply, f.hash);
             }
         }
@@ -217,56 +230,84 @@ pub(crate) fn overlay(
                 return Err(bad());
             }
             prev = Some((loc, end));
-            wanted.insert(loc);
+            wanted.try_reserve(1).map_err(|_| out_of_memory())?;
+            wanted.insert(key(loc));
         }
         walk_to = walk_to.max(f.batch_start);
     }
-    // 2. every span is a frame start of the log
-    let mut found: BTreeSet<Location> = BTreeSet::new();
+    // 2. every span is a frame start of the log: the first place no frame starts at fails
     log.walk(walk_to, &BTreeMap::new(), &mut |seen| {
-        if wanted.contains(&seen.loc) {
-            found.insert(seen.loc);
-        }
+        wanted.remove(&key(seen.loc));
         Ok(())
     })?;
-    if let Some(loc) = wanted.iter().find(|l| !found.contains(l)) {
-        return Err(StoreError::corrupt_at(*loc));
-    }
-    // 3. each span against its frame, its residue and every other proof of its place
-    let mut identity: BTreeMap<Location, Identity> = auth
-        .holes
-        .iter()
-        .map(|(loc, h)| {
-            (
-                *loc,
-                Identity {
-                    kind: h.kind,
-                    hash: h.hash,
-                    len: h.len,
-                    residue: auth.spans.get(loc).and_then(|s| s.residue),
-                },
-            )
-        })
-        .collect();
-    let mut held_zero: Vec<Location> = vec![];
-    let mut kept: Vec<CarriedAt> = Vec::with_capacity(frames.len());
-    for f in &frames {
-        let r = f.record.as_ref().expect("a checked record");
-        for s in &r.spans {
-            check_span(c, log, auth, &mut identity, &mut held_zero, f, r, s)?;
-        }
-        kept.push(CarriedAt {
-            at: f.loc,
-            hash: f.hash,
-            record: r.clone(),
+    if let Some((segment, offset)) = wanted.iter().min() {
+        return Err(StoreError::RedactionCorrupt {
+            segment: *segment,
+            offset: *offset,
         });
     }
+    drop(wanted);
+    // 3. each span against its frame, its residue and every other proof of its place
+    let mut identity: HashMap<(u32, u64), Identity> = HashMap::new();
+    identity
+        .try_reserve(auth.holes.len())
+        .map_err(|_| out_of_memory())?;
+    for (loc, h) in &auth.holes {
+        identity.insert(
+            key(*loc),
+            Identity {
+                kind: h.kind,
+                hash: h.hash,
+                len: h.len,
+                residue: auth.spans.get(loc).and_then(|s| s.residue),
+            },
+        );
+    }
+    let mut held_zero = HeldZero::default();
+    let mut kept: Vec<CarriedAt> = vec![];
+    for f in frames() {
+        let r = log
+            .carried_record(f)?
+            .ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+        for s in &r.spans {
+            check_span(c, log, auth, &mut identity, &mut held_zero, f, &r, s)?;
+        }
+        if log.keeps_carried() {
+            kept.try_reserve(1).map_err(|_| out_of_memory())?;
+            kept.push(CarriedAt {
+                at: f.loc,
+                hash: f.hash,
+                record: r.into_owned(),
+            });
+        }
+    }
     // a held payload that is zero: some proof of its place accounts for its zeros
-    if let Some(loc) = held_zero.iter().find(|l| !auth.holes.contains_key(l)) {
+    if let Some(loc) = held_zero.order.iter().find(|l| !auth.holes.contains_key(l)) {
         return Err(StoreError::corrupt_at(*loc));
     }
     auth.carried = kept;
     Ok(())
+}
+
+/// The places of `held: true` spans whose payload is zero, each once, in the order the checks
+/// first met them.
+#[derive(Default)]
+struct HeldZero {
+    order: Vec<Location>,
+    seen: HashSet<(u32, u64)>,
+}
+
+impl HeldZero {
+    fn note(&mut self, loc: Location) -> Result<(), StoreError> {
+        if self.seen.contains(&key(loc)) {
+            return Ok(());
+        }
+        self.seen.try_reserve(1).map_err(|_| out_of_memory())?;
+        self.order.try_reserve(1).map_err(|_| out_of_memory())?;
+        self.seen.insert(key(loc));
+        self.order.push(loc);
+        Ok(())
+    }
 }
 
 /// Checks span `s` of carried record `r` (frame `f`): its header, its residue, its identity
@@ -277,8 +318,8 @@ fn check_span(
     c: &Collected,
     log: &mut dyn FrameLog,
     auth: &mut Authorization,
-    identity: &mut BTreeMap<Location, Identity>,
-    held_zero: &mut Vec<Location>,
+    identity: &mut HashMap<(u32, u64), Identity>,
+    held_zero: &mut HeldZero,
     f: &crate::redaction_io::CarriedFrame,
     r: &RedactionCarried,
     s: &CarriedSpan,
@@ -313,15 +354,16 @@ fn check_span(
         None => None,
     };
     // one identity per place, across applies and carried records
-    match identity.get(&loc) {
+    match identity.get(&key(loc)) {
         Some(i) => {
             if (i.kind, i.hash, i.len, i.residue) != (s.kind, s.hash, s.len, s.residue) {
                 return Err(bad());
             }
         }
         None => {
+            identity.try_reserve(1).map_err(|_| out_of_memory())?;
             identity.insert(
-                loc,
+                key(loc),
                 Identity {
                     kind: s.kind,
                     hash: s.hash,
@@ -358,7 +400,7 @@ fn check_span(
             );
         }
         if let Some((h, res)) = residue {
-            auth.residues.entry(h).or_insert(res);
+            keep_residue(auth, h, res)?;
         }
         return Ok(());
     }
@@ -375,9 +417,22 @@ fn check_span(
     if !zero {
         return Err(bad());
     }
-    held_zero.push(loc);
+    held_zero.note(loc)?;
     if let Some((h, res)) = residue {
-        auth.residues.entry(h).or_insert(res);
+        keep_residue(auth, h, res)?;
+    }
+    Ok(())
+}
+
+/// Keeps residue `res` (hash `h`) in `auth` unless it holds one, by fallible growth.
+fn keep_residue(
+    auth: &mut Authorization,
+    h: Hash,
+    res: RedactionResidue,
+) -> Result<(), StoreError> {
+    if !auth.residues.contains_key(&h) {
+        auth.residues.try_reserve(1).map_err(|_| out_of_memory())?;
+        auth.residues.insert(h, res);
     }
     Ok(())
 }

@@ -2211,3 +2211,73 @@ fn hc5_distinct_carried_records_of_one_source_apply_conflict() {
         assert_eq!((file, got, what.as_str()), (1, at_, PROVENANCE_CONFLICT));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 2: the carried records of a chain are read one at a time.
+
+/// The length of the approver name each flooded carried record holds, in bytes.
+const FLOOD_ACTOR: usize = 200_000;
+
+/// `f0` of `h`, then two increments with `n` identical copies of one carried record (held, over
+/// `f0`'s intact secret frames, whose approver's name is `FLOOD_ACTOR` bytes long): in the first
+/// increment, one batch with the residues and `n / 2` copies; in the second, `n / 2` batches of
+/// one copy each. Returns the chain and the encoded length of one copy.
+fn carried_flood(h: &History, n: usize) -> (Vec<PathBuf>, usize) {
+    let f0 = h.bytes(&h.f0);
+    let it = items(&f0);
+    let c1 = h.secret_frames[1].hash;
+    let stored: Change = postcard::from_bytes(&payload_of(&it, kinds::CHANGE, c1)).unwrap();
+    let residues = vec![block_residue(&h.secret), change_residue(&stored)];
+    let spans = vec![
+        span(&h.secret_frames[0], Some(&residues[0]), true),
+        span(&h.secret_frames[1], Some(&residues[1]), true),
+    ];
+    let mut r = carried_fixture::record(secret_target(&h.secret), spans);
+    r.approved_by.actor = format!("human:{}", "a".repeat(FLOOD_ACTOR));
+    let copy = postcard::to_allocvec(&r).unwrap();
+    let mut first: Vec<Frame> = carried_fixture::carried_frames(&residues, &[r])
+        .into_iter()
+        .map(|(k, p)| present(k, p))
+        .collect();
+    for _ in 1..n / 2 {
+        first.push(present(kinds::REDACTION_CARRIED, copy.clone()));
+    }
+    let i1 = increment(&f0, vec![batch_of(end_of(&f0).end, first)]);
+    let mut batches = vec![];
+    let mut start = end_of(&i1).end;
+    for _ in 0..n / 2 {
+        let b = batch_of(start, vec![present(kinds::REDACTION_CARRIED, copy.clone())]);
+        start = batch_end(&b).unwrap();
+        batches.push(b);
+    }
+    let i2 = increment(&i1, batches);
+    (
+        vec![
+            h.f0.clone(),
+            h.write(&format!("flood-{n}-i1.rdydump"), &i1),
+            h.write(&format!("flood-{n}-i2.rdydump"), &i2),
+        ],
+        copy.len(),
+    )
+}
+
+#[test]
+fn hc5_carried_record_flood_holds_one_record_at_a_time() {
+    let h = history();
+    let (small, one) = carried_flood(&h, 8);
+    let (large, _) = carried_flood(&h, 16);
+    for stop in [None, Some(StopMatch::Position(h.f0_end()))] {
+        let (plan, at_small) = counting::peak_during(|| run(&small, stop.clone()));
+        let tail = plan.unwrap().carried().len();
+        let (plan, at_large) = counting::peak_during(|| run(&large, stop.clone()));
+        assert_eq!(plan.unwrap().carried().len(), tail);
+        // a stop before the copies prepares one carried record of them; no stop, none
+        assert_eq!(tail, usize::from(stop.is_some()));
+        // eight more copies, in one batch and in more batches of another file, hold less than
+        // one more record
+        assert!(
+            at_large < at_small + one,
+            "stop {stop:?}: {at_small} bytes at 8 copies, {at_large} bytes at 16 (one copy: {one})"
+        );
+    }
+}
