@@ -187,6 +187,47 @@ fn count_hashed(n: usize) {
     HASHED.with(|h| h.set(h.get() + n as u64));
 }
 
+/// A test observer of segment writes: it sees each byte slice a log append is about to write,
+/// before the write, and keeps nothing of it unless it chooses to.
+#[doc(hidden)]
+pub type WriteObserver = Box<dyn FnMut(&[u8])>;
+
+thread_local! {
+    static WRITE_OBSERVER: std::cell::RefCell<Option<WriteObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether any thread has set a write observer: the write path skips the thread-local lookup
+/// until one is set.
+static OBSERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test hook: every log append on this thread (frames, markers, a dropped frame's header and
+/// zeros) calls `observer` with each byte slice right before it is written. None removes it.
+#[doc(hidden)]
+pub fn on_segment_write(observer: Option<WriteObserver>) {
+    if observer.is_some() {
+        OBSERVED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    WRITE_OBSERVER.with(|o| *o.borrow_mut() = observer);
+}
+
+/// Shows `bytes`, about to be written to a segment, to this thread's write observer.
+fn observe(bytes: &[u8]) {
+    if OBSERVED.load(std::sync::atomic::Ordering::Relaxed) {
+        WRITE_OBSERVER.with(|o| {
+            if let Some(f) = o.borrow_mut().as_mut() {
+                f(bytes);
+            }
+        });
+    }
+}
+
+/// A positioned write of segment bytes, shown first to the write observer.
+fn write_observed(f: &File, bytes: &[u8], at: u64) -> io::Result<()> {
+    observe(bytes);
+    pio::write_all_at(f, bytes, at)
+}
+
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
 fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Hash, Vec<u8>)>> {
     let Some(payload_start) = offset.checked_add(HEADER).filter(|end| *end <= file_len) else {
@@ -1228,10 +1269,10 @@ impl SegmentLog {
         buf.extend_from_slice(&hash.0);
         buf.extend_from_slice(payload);
         if let Some(n) = self.fail_partial.take() {
-            pio::write_all_at(&self.writer, &buf[..n.min(buf.len())], self.len)?;
+            write_observed(&self.writer, &buf[..n.min(buf.len())], self.len)?;
             return Err(io::Error::other("injected partial append"));
         }
-        pio::write_all_at(&self.writer, &buf, self.len)?;
+        write_observed(&self.writer, &buf, self.len)?;
         let loc = Location {
             segment: self.current(),
             offset: self.len,
@@ -1366,10 +1407,10 @@ impl SegmentLog {
         small[5..head_len].copy_from_slice(&hash.0);
         if frame_len <= SMALL_FRAME {
             small[head_len..frame_len].copy_from_slice(payload);
-            pio::write_all_at(&self.writer, &small[..frame_len], self.len)?;
+            write_observed(&self.writer, &small[..frame_len], self.len)?;
         } else {
-            pio::write_all_at(&self.writer, &small[..head_len], self.len)?;
-            pio::write_all_at(&self.writer, payload, self.len + HEADER)?;
+            write_observed(&self.writer, &small[..head_len], self.len)?;
+            write_observed(&self.writer, payload, self.len + HEADER)?;
         }
         self.len += frame_len as u64;
         Ok(loc)
@@ -1400,11 +1441,11 @@ impl SegmentLog {
         head[0..4].copy_from_slice(&len.to_le_bytes());
         head[4] = kind;
         head[5..37].copy_from_slice(&hash.0);
-        pio::write_all_at(&self.writer, &head, self.len)?;
+        write_observed(&self.writer, &head, self.len)?;
         let mut at = self.len + HEADER;
         while at < end {
             let n = (end - at).min(ERASE_BUFFER as u64) as usize;
-            pio::write_all_at(&self.writer, &ZEROS[..n], at)?;
+            write_observed(&self.writer, &ZEROS[..n], at)?;
             at += n as u64;
         }
         self.len = end;

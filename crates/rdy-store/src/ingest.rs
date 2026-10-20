@@ -46,6 +46,8 @@
 use crate::dump::{
     DROPPED_LEN, DumpBatch, Frame, drop_text, dropped_payload, parse_dropped, try_batch_digest,
 };
+use crate::dump_chain::chain_text;
+use crate::dump_scan::{FrameAction, ScanPlan};
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
@@ -53,7 +55,7 @@ use crate::holder::{FirstBatch, RefRules, StoreMode};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_REPO_ID, encode_repo_id};
 use crate::redaction_io;
-use crate::segment::{Location, SegmentLog};
+use crate::segment::{HEADER, Location, SegmentLog};
 use crate::store::{MAX_BLOB_BYTES, encode};
 use rdy_model::{Hash, RepoId};
 use std::path::{Path, PathBuf};
@@ -198,11 +200,65 @@ impl Ingest {
     /// Each failure is `StoreError::Dump`, but a ref the holder rules refuse is the store's own
     /// `StoreError::Decode`, before the batch writes a byte. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
+        self.take_batch(n, b, None)
+    }
+
+    /// [`Ingest::batch`] of a chain load, by the verified plan of its pre-pass
+    /// (`crate::dump_scan`): for each original physical frame of `b`, `plan` decides what is
+    /// written at its place ([`ScanPlan::frame_action`]). A `Keep` frame is written as `batch`
+    /// writes it: its payload, or its validated hole. A `Zero` frame is written directly as its
+    /// original 37-byte header and zeros of its original length, through the dropped-frame
+    /// writer (`ERASE_BUFFER` bytes at a time): a present payload is checked against its hash
+    /// and never written, not even for a moment. Its authority is the plan's (the retained apply,
+    /// or the carried record the load appends later), and it waits for `finish` as any dropped
+    /// frame does, within the same bounds: the frame counts as a pending drop and its length as
+    /// zeros not yet validated. The batch's frame hashes, digest, marker and places are the
+    /// source's. A frame the plan names with another identity is refused before the batch writes
+    /// a byte (`dropped frame does not match its authorized span`).
+    pub fn batch_with_plan(
+        &mut self,
+        n: u64,
+        b: &DumpBatch,
+        plan: &ScanPlan,
+    ) -> Result<(), StoreError> {
+        self.take_batch(n, b, Some(plan))
+    }
+
+    /// `batch`, with each frame's action from `plan` when there is one (`batch_with_plan`).
+    fn take_batch(
+        &mut self,
+        n: u64,
+        b: &DumpBatch,
+        plan: Option<&ScanPlan>,
+    ) -> Result<(), StoreError> {
         for f in &b.frames {
             if let Frame::Dropped { len, .. } = f
                 && u64::from(*len) > MAX_BLOB_BYTES
             {
                 return Err(dump_error(drop_text::claim(*len)));
+            }
+        }
+        // every frame's action before the first byte, so a refused batch writes nothing
+        let mut actions: Vec<FrameAction> = Vec::new();
+        if let Some(plan) = plan {
+            actions
+                .try_reserve_exact(b.frames.len())
+                .map_err(|_| refused_allocation())?;
+            let mut place = b.start;
+            for f in &b.frames {
+                let action = plan.frame_action(place, f.kind(), *f.hash(), f.original_len())?;
+                if let (FrameAction::Zero { .. }, Frame::Present { hash, payload, .. }) =
+                    (action, f)
+                    && Hash::of(payload) != *hash
+                {
+                    return Err(dump_error(format!("batch {n} does not match its digest")));
+                }
+                actions.push(action);
+                place.offset = place
+                    .offset
+                    .checked_add(HEADER)
+                    .and_then(|o| o.checked_add(u64::from(f.original_len())))
+                    .ok_or_else(|| dump_error(chain_text::OVERFLOW.into()))?;
             }
         }
         self.check_refs(b)?;
@@ -225,8 +281,19 @@ impl Ingest {
             .try_reserve_exact(b.frames.len())
             .map_err(|_| refused_allocation())?;
         let mut sets_repo_id = false;
-        for f in &b.frames {
-            match f {
+        for (i, f) in b.frames.iter().enumerate() {
+            // a frame the plan zeroes is written as a dropped frame with the plan's authority
+            let zeroed = match actions.get(i) {
+                Some(FrameAction::Zero { authority, residue }) => Some(Frame::Dropped {
+                    kind: f.kind(),
+                    hash: *f.hash(),
+                    len: f.original_len(),
+                    apply: *authority,
+                    residue: *residue,
+                }),
+                _ => None,
+            };
+            match zeroed.as_ref().unwrap_or(f) {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);

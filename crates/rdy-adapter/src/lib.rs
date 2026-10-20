@@ -19,7 +19,7 @@ pub mod stream;
 pub mod take;
 mod value;
 
-pub use maintenance::ChainEnd;
+pub use maintenance::{ChainEnd, DumpStop, LoadedChainFile, StoppedAt};
 pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
