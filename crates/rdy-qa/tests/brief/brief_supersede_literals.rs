@@ -1665,3 +1665,218 @@ fn sdc5_unlinked_blocks_are_not_scanned() {
     assert!(few > 0, "the evidence scan counts its reads");
     assert_eq!(scans(200), few, "only declared dependents are read");
 }
+
+// ---------------------------------------------------------------- fix round 1
+
+/// Fix round 1, finding 1: one reply compares the write's own replacement for a normal entry
+/// and every active replacement for a retained link, each with its own set. X (untouched) is
+/// compared with the new decision that keeps 30 days; Y (rewritten, keeping its link) with that
+/// one and the pending 7-day replacement, which removes 30 days.
+#[test]
+fn sdc5_each_comparison_uses_its_own_replacements() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let (d, x) = decided_claim(
+        &mut r,
+        &s,
+        "Keep the logs for 30 days",
+        "The logs stay for 30 days.",
+    );
+    let y = write(
+        &mut r,
+        "d2",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.section.to_string(),
+                "body": "Y keeps the logs for 30 days.",
+                "links": {"decided_by": [{"target": d.to_string()}]}}]),
+    )
+    .unwrap();
+    let y = created(&y, "$y");
+    land(&mut r, "d2").unwrap();
+    let e = Local::new(r);
+    supersede_in(&e, "w", &d, None, replace("Keep the logs for 7 days", &s));
+    let v = write_in(
+        &e,
+        "w",
+        json!([
+            {"op": "create", "type": "decision", "id": "$n", "parent": s.section.to_string(),
+             "fields": {"statement": "Keep the logs for 30 days, firmly", "status": "proposed"},
+             "links": {"supersedes": [{"target": d.to_string()}]}},
+            {"op": "update", "id": y.to_string(), "body": "Y keeps the logs for 30 days, still."}
+        ]),
+        &[],
+        None,
+    );
+    // the normal entry: the write's own replacement keeps 30 days
+    let cx = entry(&v, &x);
+    assert_eq!(cx["because"]["changed"], d.to_string(), "{cx}");
+    assert_eq!(cx["because"]["values"], json!([]), "{cx}");
+    assert_eq!(cx["follow_up"], "confirm", "{cx}");
+    assert_eq!(cx["fix"], SUP_CONFIRM, "{cx}");
+    // the retained link: the pending 7-day replacement removes 30 days
+    let cy = entry(&v, &y);
+    assert_eq!(cy["kind"], "dependent", "{cy}");
+    assert_eq!(cy["already_written"], true, "{cy}");
+    assert_eq!(cy["because"]["changed"], d.to_string(), "{cy}");
+    assert_eq!(cy["because"]["values"], json!(["30 days"]), "{v:#}");
+    assert_eq!(cy["follow_up"], "update", "{cy}");
+    assert_eq!(cy["fix"], SUP_UPDATE, "{cy}");
+    assert_eq!(cy["matched"][0]["value"], "30 days", "{cy}");
+}
+
+/// Fix round 1, finding 2: a batch that only creates, citing only what it creates, still
+/// reports a retained link to a decision another created decision supersedes: in the write, at
+/// propose and after the landing.
+#[test]
+fn sdc5_an_all_created_batch_reports_its_retained_link() {
+    let (_d, r) = project();
+    let e = Local::new(r);
+    let v = write_in(
+        &e,
+        "w",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "logs", "title": "Logs", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "decision", "id": "$d30", "parent": "$s",
+             "fields": {"statement": "Keep the logs for 30 days", "status": "proposed"}},
+            {"op": "create", "type": "decision", "id": "$d7", "parent": "$s",
+             "fields": {"statement": "Keep the logs for 7 days", "status": "proposed"},
+             "links": {"supersedes": [{"target": "$d30"}]}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$s",
+             "body": "The logs stay for 30 days.",
+             "links": {"decided_by": [{"target": "$d30"}]}}
+        ]),
+        &[],
+        None,
+    );
+    let (d30, x) = (created_in(&v, "$d30"), created_in(&v, "$x"));
+    let check = |v: &Value, at: &str| {
+        let c = entry(v, &x);
+        assert_eq!(c["because"]["changed"], d30.to_string(), "{at}: {v:#}");
+        assert_eq!(c["because"]["edges"], json!(["decided_by"]), "{at}: {c}");
+        assert_eq!(c["because"]["values"], json!(["30 days"]), "{at}: {c}");
+        assert_eq!(c["follow_up"], "update", "{at}: {c}");
+        assert_eq!(c["fix"], SUP_UPDATE, "{at}: {c}");
+        assert_eq!(c["already_written"], true, "{at}: {c}");
+        assert_eq!(c["matched"][0]["value"], "30 days", "{at}: {c}");
+        assert_eq!(c["kind"], "dependent", "{at}: {c}");
+    };
+    check(&v, "write");
+    let (p, l) = propose_and_land(&e, "w");
+    check(&p, "propose");
+    // the landing accepted both decisions: D30 is superseded in canon, and the kept link is a
+    // kept suspect, with its own follow-up and fix
+    let c = entry(&l, &x);
+    assert_eq!(c["kind"], "suspect", "{l:#}");
+    assert_eq!(c["because"]["changed"], d30.to_string(), "{c}");
+    assert_eq!(c["because"]["edges"], json!(["decided_by"]), "{c}");
+    assert_eq!(c["follow_up"], "update", "{c}");
+    assert_eq!(c["fix"], KEPT_REPLACED_FIX, "{c}");
+    assert_eq!(c["already_written"], true, "{c}");
+    assert_eq!(
+        c["id"],
+        consequence_id(
+            &l["version"].as_str().unwrap().parse().unwrap(),
+            &format!("suspect {d30}"),
+            &x
+        ),
+        "{c}"
+    );
+}
+
+/// An engine that runs `next` as a separate write right after the first write it is given
+/// returns, before its caller reads the state again: a later write that lands between a write
+/// and its report.
+struct Interleaved {
+    inner: Local,
+    next: Mutex<Option<rdy_engine::engine::WriteFn>>,
+}
+
+impl Engine for Interleaved {
+    fn read(&self) -> Arc<ReadState> {
+        self.inner.read()
+    }
+    fn write(&self, f: rdy_engine::engine::WriteFn) -> Result<Value, RdyError> {
+        let out = self.inner.write(f);
+        if let Some(g) = self.next.lock().unwrap().take() {
+            self.inner.write(g).expect("the interleaved write");
+        }
+        out
+    }
+    fn open_report(&self) -> OpenReport {
+        self.inner.open_report()
+    }
+    fn root(&self) -> std::path::PathBuf {
+        self.inner.root()
+    }
+    fn briefs(&self) -> Arc<rdy_engine::brief::BriefRegistry> {
+        self.inner.briefs()
+    }
+    fn leases(&self) -> Arc<rdy_engine::semantic::lease::LeaseRegistry> {
+        self.inner.leases()
+    }
+}
+
+/// Fix round 1, finding 3: a write's consequences come from the state it published. A second
+/// write that restores T's 30 days between the first write and its report changes nothing in
+/// the first reply.
+#[test]
+fn sdc5_a_later_write_cannot_change_a_write_reply() {
+    let edit = |days: &str, t: &BlockId| {
+        let (t, days) = (t.to_string(), days.to_string());
+        move |r: &mut Rdy| {
+            r.write(
+                &writer(),
+                WriteRequest {
+                    view: "w".into(),
+                    ops: parse_test_ops(
+                        json!([{"op": "update", "id": t, "body": format!("Keep the logs for {days}.")}]),
+                    )?,
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+        }
+    };
+    // the reference: the same write with nothing after it
+    let (_d0, r0, t0, [x0, y0, z0]) = days_fixture();
+    let alone = write_and_report(&Local::new(r0), "w", None, edit("7 days", &t0)).unwrap();
+    // the same write, with a write back to 30 days between it and its report
+    let (_d, r, t, [x, y, z]) = days_fixture();
+    let back = edit("30 days", &t);
+    let e = Interleaved {
+        inner: Local::new(r),
+        next: Mutex::new(Some(Box::new(move |r: &mut Rdy| {
+            Ok(serde_json::to_value(back(r)?).unwrap())
+        }))),
+    };
+    let v = write_and_report(&e, "w", None, edit("7 days", &t)).unwrap();
+    assert!(e.next.lock().unwrap().is_none(), "the second write ran");
+    assert_eq!(
+        e.read()
+            .materialized(&view("w"))
+            .unwrap()
+            .get(&t)
+            .unwrap()
+            .body,
+        "Keep the logs for 30 days.",
+        "the second write landed before the report"
+    );
+    let c = entry(&v, &x);
+    assert_eq!(c["because"]["values"], json!(["30 days"]), "{v:#}");
+    assert_eq!(c["follow_up"], "update", "{c}");
+    // the reply equals the one with nothing after it, up to the fixtures' own ids
+    let named = |v: &Value, ids: [&BlockId; 4]| -> Vec<Value> {
+        let mut text = serde_json::to_string(&without_ids(v)).unwrap();
+        for (id, name) in ids.iter().zip(["T", "X", "Y", "Z"]) {
+            text = text.replace(&id.to_string(), name);
+        }
+        let mut rows: Vec<Value> = serde_json::from_str(&text).unwrap();
+        rows.sort_by_key(|c| c["block"].as_str().unwrap().to_string());
+        rows
+    };
+    assert_eq!(
+        named(&v, [&t, &x, &y, &z]),
+        named(&alone, [&t0, &x0, &y0, &z0]),
+        "{v:#}"
+    );
+}

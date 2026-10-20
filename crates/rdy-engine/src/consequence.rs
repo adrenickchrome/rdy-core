@@ -300,6 +300,24 @@ fn creates_cite_outside(ops: &[Op]) -> bool {
     })
 }
 
+/// Whether `ops` create a decision that fully supersedes or revokes a block: then a block they
+/// create can keep a link to a target a pending decision replaces (O9), even when every block
+/// they cite is one they write.
+fn creates_retirement(ops: &[Op]) -> bool {
+    ops.iter().any(|o| match o {
+        Op::Create { block } if block.block_type == DECISION => {
+            block.links.get(REVOKES).is_some_and(|l| !l.is_empty())
+                || block
+                    .links
+                    .get(SUPERSEDES)
+                    .into_iter()
+                    .flatten()
+                    .any(|l| l.part.is_none())
+        }
+        _ => false,
+    })
+}
+
 /// D-W7KAK: the follow-up and the fix of a kept `suspect` entry, by the suspect's reason and
 /// whether the block is a live or partly superseded decision; `None` for any other reason. A
 /// live decision is frozen, so it gets `reaffirm` for every reason, as `follow_up` gives it.
@@ -461,7 +479,16 @@ struct Compare<'a> {
     names: Arc<Lexicon>,
     baselines: Vec<Baseline<'a>>,
     events: Events,
-    cache: RefCell<BTreeMap<(BlockId, u8), LiteralSet>>,
+    cache: RefCell<BTreeMap<(BlockId, LiteralsKey), LiteralSet>>,
+}
+
+/// What a target's changed literals depend on besides the target: its lineage event and, for
+/// a retirement, whether a revoke is among them and which decisions replace it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LiteralsKey {
+    Ordinary,
+    Retired(bool, BTreeSet<BlockId>),
+    Partial,
 }
 
 /// The follow-up of one entry, its fix and its evidence.
@@ -546,12 +573,15 @@ impl<'a> Compare<'a> {
     /// supersede those the new decisions lack (each a decision's title, then statement); else
     /// those that a baseline holds and the final text lacks, each once, under one cap.
     fn literals(&self, x: &BlockId, lineage: Lineage<'_>) -> Result<LiteralSet, RdyError> {
+        // a retired target is compared with the replacements given: the change's own (a normal
+        // entry) and every active one (a retained link) can differ in one reply
         let key = match lineage {
-            Lineage::Ordinary => 0,
-            Lineage::Retired(_) => 1,
-            Lineage::Partial => 2,
+            Lineage::Ordinary => LiteralsKey::Ordinary,
+            Lineage::Retired(r) => LiteralsKey::Retired(r.revoke, r.by.clone()),
+            Lineage::Partial => LiteralsKey::Partial,
         };
-        if let Some(l) = self.cache.borrow().get(&(x.clone(), key)) {
+        let key = (x.clone(), key);
+        if let Some(l) = self.cache.borrow().get(&key) {
             return Ok(l.clone());
         }
         let pack = self.st.pack();
@@ -596,9 +626,7 @@ impl<'a> Compare<'a> {
                 changed_from(pack, &refs, new, names, pair)
             }
         };
-        self.cache
-            .borrow_mut()
-            .insert((x.clone(), key), set.clone());
+        self.cache.borrow_mut().insert(key, set.clone());
         Ok(set)
     }
 
@@ -751,7 +779,8 @@ impl ReadState {
             Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
         };
         // nothing can point at a block that did not exist, and a new block that cites nothing
-        // outside the write cannot be suspect: no graph to read
+        // outside the write cannot be suspect: no graph to read, unless the write also retires
+        // a block it creates (a retained link to it is reported, O9)
         let only_creates = chs
             .iter()
             .flat_map(|ch| &ch.ops)
@@ -760,6 +789,7 @@ impl ReadState {
             && changed == touched
             && reach.is_empty()
             && !chs.iter().any(|ch| creates_cite_outside(&ch.ops))
+            && !chs.iter().any(|ch| creates_retirement(&ch.ops))
         {
             return Ok(Consequences {
                 tensions_error,
@@ -972,7 +1002,11 @@ impl ReadState {
         let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
         let (touched, changed) = changed_by_ops(&ops);
         let only_creates = ops.iter().all(|o| matches!(o, Op::Create { .. }));
-        if only_creates && changed == touched && !creates_cite_outside(&ops) {
+        if only_creates
+            && changed == touched
+            && !creates_cite_outside(&ops)
+            && !creates_retirement(&ops)
+        {
             return Ok(Consequences::default());
         }
         // O8: a landed version compares its landing's prev with the state it recorded, and reads
@@ -1579,7 +1613,10 @@ fn report<T: Serialize + 'static>(
         return Ok(v);
     }
     let st = engine.read();
-    let c = st.consequences_of(&scope, &changes, max_tokens);
+    // the state the write published, not a later one: a write that lands before this read
+    // changes nothing in this reply (O8); the view base is that state's too
+    let published = states.as_ref().map_or(&st, |s| &s.1);
+    let c = published.consequences_of(&scope, &changes, max_tokens);
     attach(&mut v, c);
     if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
         && !notes.is_empty()
