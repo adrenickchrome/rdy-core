@@ -1,11 +1,11 @@
-// The version menu, on the live site only: a click on the pill shows the versions, the open proposals and the open views in a popover under it, and keeps it current while it is open. A pill without data-menu (a static render) stays a plain link. When the menu cannot load, the click follows the link to the full page.
+// The version menu, on the live site only: a click on the pill shows the versions, the open proposals, the open views and the profiles in a popover under it, and keeps it current while it is open. The pill's own href is the menu's URL, with the page's scope and profile in it. A pill without data-menu (a static render), or with an href that leaves the site, stays a plain link. When the menu cannot load, the click follows the link to the full page.
 (function () {
   "use strict";
-  var PAGE = "/~versions/index.html";
-  var LABEL = "Versions, proposals and views";
+  var LABEL = "Versions, proposals, views and profiles";
   if (!window.fetch || !window.DOMParser) return;
-  // the open menu: its pill, its popover once loaded, its stream and the stream's URL, and the
-  // number of its latest load (a load that a newer one replaced changes nothing)
+  // the open menu: its pill, its URL (the pill's href when it opened), its popover once loaded,
+  // its stream and the stream's URL, and the number of its latest load (a load that a newer one
+  // replaced changes nothing)
   var open = null;
 
   // the pill in the header now: a label event (live.js) rewrites the version slot and the pill in it
@@ -13,9 +13,16 @@
     return document.querySelector(".pill[data-menu]");
   }
 
-  // the menu and its stream's URL, from the versions page; no markup from anywhere else
-  function load() {
-    return window.fetch(PAGE, { credentials: "same-origin" }).then(function (r) {
+  // the URL a pill asks for: its href when that is a path of this site, else none. A scheme, a
+  // host, "//" and "/\\" all leave the site, so they are not fetched.
+  function menuUrl(p) {
+    var h = p.getAttribute("href");
+    return h && /^\/(?![\/\\])/.test(h) ? h : null;
+  }
+
+  // the menu and its stream's URL, from the versions page at `url`; no markup from anywhere else
+  function load(url) {
+    return window.fetch(url, { credentials: "same-origin" }).then(function (r) {
       if (!r.ok) throw new Error("the menu did not load");
       return r.text();
     }).then(function (text) {
@@ -79,7 +86,7 @@
     if (!o || !o.pop) return;
     var n = ++o.n;
     stopStream();
-    load().then(function (got) {
+    load(o.url).then(function (got) {
       if (!current(o, n)) return;
       // the popover stays where it is; a new pill says the menu is open
       claim(o);
@@ -91,11 +98,11 @@
     });
   }
 
-  function show(p) {
-    var o = { pill: p, pop: null, es: null, events: null, n: 0 };
+  function show(p, url) {
+    var o = { pill: p, url: url, pop: null, es: null, events: null, n: 0 };
     open = o;
     p.setAttribute("aria-expanded", "true");
-    load().then(function (got) {
+    load(url).then(function (got) {
       if (!current(o, 0)) return;
       if (!claim(o)) {
         follow(o);
@@ -138,9 +145,12 @@
     if (p) {
       // a new tab or window follows the link
       if (e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      var url = open ? null : menuUrl(p);
+      // a link that leaves the site is the browser's
+      if (!open && !url) return;
       e.preventDefault();
       if (open) hide();
-      else show(p);
+      else show(p, url);
       return;
     }
     if (open && !(open.pop && open.pop.contains(t))) hide();

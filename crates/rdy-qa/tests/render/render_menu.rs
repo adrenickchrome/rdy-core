@@ -94,11 +94,13 @@ fn sr8_the_menu_lists_versions_proposals_and_views() {
     // the page holds the same rows, in three sections inside one navigation landmark
     let html = page_of(&r);
     assert!(
-        html.contains("<h1>Versions, proposals and views</h1>"),
+        html.contains("<h1>Versions, proposals, views and profiles</h1>"),
         "{html}"
     );
     assert!(
-        html.contains("<nav class=\"vmenu\" aria-label=\"Versions, proposals and views\">"),
+        html.contains(
+            "<nav class=\"vmenu\" aria-label=\"Versions, proposals, views and profiles\">"
+        ),
         "{html}"
     );
     let at = |needle: &str| {
@@ -187,7 +189,7 @@ fn sr8_the_menu_has_no_call_to_action() {
 
 /// F1 (visual review 2.4, 2.5): `/~versions/` sits in the site's own layout: the header with
 /// the brand, the theme toggle and the Menu button, the frame that gives the side gutters, the
-/// breadcrumb "Home › Versions, proposals and views", a drawer with the page links and the
+/// breadcrumb "Home › Versions, proposals, views and profiles", a drawer with the page links and the
 /// phone's theme toggle, and the footer. It stays complete without script and read-only.
 #[test]
 fn sr12_the_versions_page_has_the_site_layout() {
@@ -229,12 +231,16 @@ fn sr12_the_versions_page_has_the_site_layout() {
     assert!(drawer.contains("<nav aria-label=\"Pages\">"), "{drawer}");
     assert!(drawer.contains("<a href=\"/\">Home</a>"), "{drawer}");
     assert!(
-        html.contains("<nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"/\">Home</a><span class=\"crumb-sep\" aria-hidden=\"true\"></span><span aria-current=\"page\">Versions, proposals and views</span></nav>"),
+        html.contains("<nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"/\">Home</a><span class=\"crumb-sep\" aria-hidden=\"true\"></span><span aria-current=\"page\">Versions, proposals, views and profiles</span></nav>"),
         "{html}"
     );
     let main = &html[at("<main class=\"content\" id=\"main\"")..at("</main>")];
     assert!(main.find("<nav class=\"crumbs\"").unwrap() < main.find("<h1>").unwrap());
-    assert!(main.contains("<nav class=\"vmenu\" aria-label=\"Versions, proposals and views\">"));
+    assert!(
+        main.contains(
+            "<nav class=\"vmenu\" aria-label=\"Versions, proposals, views and profiles\">"
+        )
+    );
     // the footer names the site and where canon stands, as the Latest row does
     let st = r.read();
     let m = menu(&st, &mut |s| docs_changed(&st, s)).unwrap();
@@ -333,7 +339,7 @@ fn sr8_the_key_moves_with_what_the_menu_shows() {
 /// A just-enough DOM for `menu.js`: a header with the pill, stub `fetch`, `DOMParser` and
 /// `EventSource`, and a log of what the script fetched, streamed and followed. With `defer`, each
 /// fetch waits in `log.pending` until the case completes it (`ok(rev)`) or fails it (`fail()`).
-const MENU_DOM: &str = r##"
+pub(crate) const MENU_DOM: &str = r##"
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
 let doc = null;
@@ -368,12 +374,12 @@ function menuPage(n) {
   return h('html', {},
     h('head', {}, h('script', { src: '/_rdy/live.js', 'data-events': '/_rdy/events?scope=versions&page=index.html&rev=' + n })),
     h('body', {}, h('main', {}, h('h1', {}),
-      h('nav', { class: 'vmenu', 'aria-label': 'Versions, proposals and views' },
+      h('nav', { class: 'vmenu', 'aria-label': 'Versions, proposals, views and profiles' },
         h('a', { href: '/' }), h('a', { href: '/~tag/v1.0.0/' }), h('a', { href: '/~view/editing/?' + n })))));
 }
 function setup(opts) {
   const log = { fetched: [], streams: [], followed: null, pending: [] };
-  const pillAttrs = { class: 'pill', href: '/~versions/' };
+  const pillAttrs = { class: 'pill', href: opts.href || '/~versions/' };
   if (opts.menu) Object.assign(pillAttrs, { 'data-menu': '', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' });
   const pill = h('a', pillAttrs, h('span', { class: 'pill-text' }));
   const version = h('span', { class: 'version', 'data-rdy-version': '' }, pill);
@@ -433,7 +439,7 @@ function setup(opts) {
       followed: log.followed,
     };
   };
-  return { pill, other, header, document, log, click, key, state, relabel, visibility };
+  return { pill, other, header, document, window, log, click, key, state, relabel, visibility };
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
 "##;
@@ -501,10 +507,10 @@ fn sr8_the_menu_script_opens_and_closes_the_popover() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
-    let page = "/~versions/index.html";
+    let page = "/~versions/";
     let s1 = "/_rdy/events?scope=versions&page=index.html&rev=1";
     let s2 = "/_rdy/events?scope=versions&page=index.html&rev=2";
-    let label = "Versions, proposals and views";
+    let label = "Versions, proposals, views and profiles";
     assert_eq!(v["prevented"], true, "{v}");
     assert_eq!(v["pending"], "true", "{v}");
     assert_eq!(

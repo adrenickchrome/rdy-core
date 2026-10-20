@@ -903,7 +903,7 @@ fn sr10_no_review_chrome_says_draft() {
     for h in hovers(&page) {
         says_draft("the versions page label", &h);
     }
-    assert_eq!(titles[0].1, "Versions, proposals and views");
+    assert_eq!(titles[0].1, "Versions, proposals, views and profiles");
 }
 
 #[test]
