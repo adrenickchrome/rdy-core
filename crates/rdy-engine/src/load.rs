@@ -494,7 +494,7 @@ fn sets_holder_mode(b: &DumpBatch) -> bool {
 }
 
 /// A holder dump that carries a project file.
-fn holder_files() -> RdyError {
+pub(crate) fn holder_files() -> RdyError {
     RdyError::new(
         E_DUMP,
         "a holder dump must not contain project files",

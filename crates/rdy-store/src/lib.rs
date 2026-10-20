@@ -6,6 +6,7 @@ pub mod closure;
 pub mod coord;
 pub mod dump;
 pub mod dump_chain;
+pub mod dump_scan;
 pub mod error;
 pub mod fileid;
 pub mod format;

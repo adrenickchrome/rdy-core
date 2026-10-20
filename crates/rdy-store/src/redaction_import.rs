@@ -152,7 +152,7 @@ pub(crate) fn log_mode(readers: &[File]) -> Result<StoreMode, StoreError> {
 
 /// The kinds a removal proof reads by key (`sync_proof::check`): an apply, its landing and
 /// approved proposal, its request and carrier, residues and blob manifests.
-const PROOF_KINDS: [u8; 7] = [
+pub(crate) const PROOF_KINDS: [u8; 7] = [
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
@@ -200,7 +200,7 @@ pub(crate) struct Scanned {
 
 impl Scanned {
     /// Counts one frame of `len` payload bytes; over a cap is `RedactionLimit`.
-    fn add(&mut self, len: u32, caps: &ReceiverCaps) -> Result<(), StoreError> {
+    pub(crate) fn add(&mut self, len: u32, caps: &ReceiverCaps) -> Result<(), StoreError> {
         self.frames += 1;
         self.bytes += u64::from(len);
         if self.frames > caps.frames {
@@ -376,9 +376,7 @@ fn derive(
             if f.len != tuple.len {
                 return Err(StoreError::corrupt_at(f.loc));
             }
-            if let (Some(p), Some(r)) = (f.intact()?, tuple.residue)
-                && !residue_matches(f.kind, &p, &residues[&r])
-            {
+            if !copy_fits(f.kind, f.len, f.intact()?.as_deref(), &tuple, &residues) {
                 return Err(StoreError::corrupt_at(f.loc));
             }
             spans_count += 1;
@@ -445,6 +443,26 @@ fn derive(
     })
 }
 
+/// Whether a local copy of an approved key (rule 2) is what its approved `tuple` says: its header
+/// keeps the tuple's length `len`, and its payload, when it is intact (`intact`), is what the
+/// tuple's residue records (`residue_matches`, the residue decoded in `residues`). An all-zero or
+/// partly zero payload is an erased or interrupted copy, and passes.
+pub(crate) fn copy_fits(
+    kind: u8,
+    len: u32,
+    intact: Option<&[u8]>,
+    tuple: &crate::sync_proof::RemovalObject,
+    residues: &HashMap<Hash, RedactionResidue>,
+) -> bool {
+    len == tuple.len
+        && match (intact, tuple.residue) {
+            (Some(p), Some(r)) => residues
+                .get(&r)
+                .is_some_and(|res| residue_matches(kind, p, res)),
+            _ => true,
+        }
+}
+
 /// Whether `change` creates or updates a block of a version in `versions`.
 pub(crate) fn embeds(change: &Change, versions: &HashSet<Hash>) -> bool {
     change.ops.iter().any(|op| match op {
@@ -455,7 +473,7 @@ pub(crate) fn embeds(change: &Change, versions: &HashSet<Hash>) -> bool {
 
 /// The open's refusal of a stored apply whose proof fails: an I/O failure stays one, anything
 /// else is `RedactionCorrupt` at the apply.
-fn proof_error(e: StreamError, at: Location) -> StoreError {
+pub(crate) fn proof_error(e: StreamError, at: Location) -> StoreError {
     if e.code == "E_IO" {
         StoreError::Io(std::io::Error::other(e.message))
     } else {

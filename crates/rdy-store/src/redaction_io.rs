@@ -422,6 +422,26 @@ pub(crate) struct ApplyFrame {
     landings: Vec<(Location, Hash)>,
 }
 
+impl ApplyFrame {
+    /// The apply frame at `loc` with hash `hash` and its record (None: none decodes), of batch
+    /// number `batch` (a counter in log order), after the `landings` of its batch.
+    pub(crate) fn new(
+        loc: Location,
+        hash: Hash,
+        record: Option<RedactionApply>,
+        batch: u64,
+        landings: Vec<(Location, Hash)>,
+    ) -> ApplyFrame {
+        ApplyFrame {
+            loc,
+            hash,
+            record,
+            batch,
+            landings,
+        }
+    }
+}
+
 /// One carried record frame (kind REDACTION_CARRIED) the header pass met in a sealed batch.
 pub(crate) struct CarriedFrame {
     pub(crate) loc: Location,
@@ -466,6 +486,27 @@ pub(crate) struct Collected {
 }
 
 impl Collected {
+    /// Notes the sealed request frame `hash` at `loc` by its first place (a source that is not a
+    /// segment log, `crate::dump_scan`).
+    pub(crate) fn note_request(&mut self, loc: Location, hash: Hash) {
+        self.request_at.entry(hash).or_insert(loc);
+    }
+
+    /// Notes the sealed residue frame `hash` at `loc` by its first place.
+    pub(crate) fn note_residue(&mut self, loc: Location, hash: Hash) {
+        self.residue_at.entry(hash).or_insert(loc);
+    }
+
+    /// The first place of the request `hash`, if a sealed batch holds one.
+    pub(crate) fn request_place(&self, hash: &Hash) -> Option<Location> {
+        self.request_at.get(hash).copied()
+    }
+
+    /// The first place of the residue `hash`, if a sealed batch holds one.
+    pub(crate) fn residue_place(&self, hash: &Hash) -> Option<Location> {
+        self.residue_at.get(hash).copied()
+    }
+
     fn seal(&mut self, p: Pending) {
         for (loc, h) in &p.requests {
             self.request_at.entry(*h).or_insert(*loc);
@@ -547,7 +588,7 @@ impl<'f> Window<'f> {
 /// `MAX_RECORD_BYTES` bytes, and exactly the canonical encoding of the record it decodes to
 /// (postcard ignores trailing bytes, so a decode alone accepts a padded payload). None: no apply
 /// record.
-fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
+pub(crate) fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
     if payload.len() > MAX_RECORD_BYTES {
         return None;
     }
@@ -681,10 +722,64 @@ pub(crate) fn read_record(
     Ok((Hash::of(&payload) == *hash).then_some(payload))
 }
 
+/// Where the apply validator reads the records it needs (the proof source seam): a frame's
+/// header by its place, and a record by its place, kind and hash. The log's segment files (with
+/// a batch not yet written) are one source ([`LogAccess`]); the files of a dump chain are another
+/// (`crate::dump_scan`). The validator's rules are the same over both.
+pub(crate) trait RecordAccess {
+    /// Whether a frame starts at `loc` whose header holds `len`, `kind` and `hash`.
+    fn has_frame(
+        &mut self,
+        loc: Location,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<bool, StoreError>;
+
+    /// The record of `kind` with hash `hash` at `loc`, read and hash-checked; None when the
+    /// frame there is not that record or does not match its hash.
+    fn record(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<Option<Vec<u8>>, StoreError>;
+}
+
+/// The log's segment files, and the frames of a batch not yet written, as a [`RecordAccess`].
+pub(crate) struct LogAccess<'a> {
+    pub(crate) readers: &'a [File],
+    pub(crate) memory: &'a BTreeMap<Location, (u8, Vec<u8>)>,
+}
+
+impl RecordAccess for LogAccess<'_> {
+    fn has_frame(
+        &mut self,
+        loc: Location,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<bool, StoreError> {
+        let Some(f) = self.readers.get(loc.segment as usize) else {
+            return Ok(false);
+        };
+        Ok(header_at(f, loc.offset, f.metadata()?.len())? == Some((len, kind, *hash)))
+    }
+
+    fn record(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        read_record(self.readers, self.memory, loc, kind, hash)
+    }
+}
+
 /// The request an apply names, if the log holds it sealed before the apply and it decodes.
 fn request_of(
     c: &Collected,
-    readers: &[File],
+    access: &mut dyn RecordAccess,
     a: &ApplyFrame,
 ) -> Result<Option<(Location, Redaction)>, StoreError> {
     let Some(record) = &a.record else {
@@ -693,8 +788,7 @@ fn request_of(
     let Some(loc) = c.request_at.get(&record.request).filter(|l| **l < a.loc) else {
         return Ok(None);
     };
-    let Some(payload) = read_record(readers, &c.memory, *loc, kinds::REDACTION, &record.request)?
-    else {
+    let Some(payload) = access.record(*loc, kinds::REDACTION, &record.request)? else {
         return Ok(None);
     };
     Ok(decode::<Redaction>(&payload).ok().map(|r| (*loc, r)))
@@ -708,8 +802,12 @@ fn candidate_holes(
     applies: &[&ApplyFrame],
 ) -> Result<Holes, StoreError> {
     let mut holes = Holes::new();
+    let mut access = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
     for a in applies {
-        if let Some((_, r)) = request_of(c, readers, a)? {
+        if let Some((_, r)) = request_of(c, &mut access, a)? {
             for s in &r.manifest.spans {
                 holes
                     .entry(Location {
@@ -765,17 +863,51 @@ fn validate(
     applies: &[&ApplyFrame],
     pending_from: Option<Location>,
 ) -> Result<(Authorization, Vec<Selected>), StoreError> {
-    let mut auth = Authorization::default();
-    let mut selected = Vec::with_capacity(applies.len());
-    let mut report_buf: Option<Vec<u8>> = None;
-    let mut prev_in_batch: Option<(u64, Hash)> = None;
+    let mut v = Validator::default();
+    let mut access = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
     for a in applies {
+        v.apply(c, &mut access, a, pending_from)?;
+    }
+    Ok((v.auth, v.selected))
+}
+
+/// The validation of applies in log order ([`validate`]), one apply at a time: what the applies
+/// validated so far authorize, and what each one's request selects. A source that reads its
+/// records as it walks them (a dump chain, `crate::dump_scan`) validates each apply when it meets
+/// it; the rules are [`validate`]'s.
+#[derive(Default)]
+pub(crate) struct Validator {
+    /// What the validated applies authorize: each span by the earliest apply that covers it.
+    pub(crate) auth: Authorization,
+    selected: Vec<Selected>,
+    report_buf: Option<Vec<u8>>,
+    prev_in_batch: Option<(u64, Hash)>,
+}
+
+impl Validator {
+    /// Validates `a`, the next apply in log order, with its records read through `access` (see
+    /// [`validate`]), and adds what it authorizes. After a failure the validator is not used
+    /// again: a caller stops at the first failure.
+    pub(crate) fn apply(
+        &mut self,
+        c: &Collected,
+        access: &mut dyn RecordAccess,
+        a: &ApplyFrame,
+        pending_from: Option<Location>,
+    ) -> Result<(), StoreError> {
+        let auth = &mut self.auth;
         let at = || StoreError::corrupt_at(a.loc);
         let record = a.record.as_ref().ok_or_else(at)?;
-        if prev_in_batch.is_some_and(|(b, r)| b == a.batch && r >= record.request) {
+        if self
+            .prev_in_batch
+            .is_some_and(|(b, r)| b == a.batch && r >= record.request)
+        {
             return Err(at());
         }
-        prev_in_batch = Some((a.batch, record.request));
+        self.prev_in_batch = Some((a.batch, record.request));
         // the same-batch human landing
         let (lloc, _) = a
             .landings
@@ -783,7 +915,8 @@ fn validate(
             .find(|(_, h)| *h == record.landing)
             .ok_or_else(at)?;
         let landing: LandingRecord = decode(
-            &read_record(readers, &c.memory, *lloc, kinds::LANDING, &record.landing)?
+            &access
+                .record(*lloc, kinds::LANDING, &record.landing)?
                 .ok_or_else(at)?,
         )
         .map_err(|_| at())?;
@@ -795,14 +928,16 @@ fn validate(
             });
         }
         // the request, its carrier's landing and its report
-        let (rloc, request) = request_of(c, readers, a)?.ok_or_else(at)?;
-        if !request_agrees(&request, &landing, record, &mut report_buf)? {
+        let (rloc, request) = request_of(c, access, a)?.ok_or_else(at)?;
+        if !request_agrees(&request, &landing, record, &mut self.report_buf)? {
             return Err(at());
         }
         // its spans
         let versions: BTreeSet<(BlockId, Hash)> =
             request.manifest.versions.iter().cloned().collect();
         let version_hashes: HashSet<Hash> = versions.iter().map(|(_, v)| *v).collect();
+        // each distinct residue of this request is read once
+        let mut read: HashMap<Hash, RedactionResidue> = HashMap::new();
         let mut prev: Option<Location> = None;
         let mut spans = Vec::with_capacity(request.manifest.spans.len());
         for span in &request.manifest.spans {
@@ -815,25 +950,30 @@ fn validate(
                 return Err(bad());
             }
             prev = Some(loc);
-            let f = readers.get(loc.segment as usize).ok_or_else(bad)?;
-            if header_at(f, loc.offset, f.metadata()?.len())?
-                != Some((span.len, span.kind, span.hash))
-            {
+            if !access.has_frame(loc, span.len, span.kind, &span.hash)? {
                 return Err(bad());
             }
             let residue = match span.kind {
                 kinds::BLOCK | kinds::CHANGE => {
                     let r = span.residue.ok_or_else(bad)?;
-                    let rloc = c
-                        .residue_at
-                        .get(&r)
-                        .filter(|l| **l < a.loc)
-                        .ok_or_else(bad)?;
-                    let res: RedactionResidue = decode(
-                        &read_record(readers, &c.memory, *rloc, kinds::REDACTION_RESIDUE, &r)?
-                            .ok_or_else(bad)?,
-                    )
-                    .map_err(|_| bad())?;
+                    let res = match read.get(&r) {
+                        Some(res) => res.clone(),
+                        None => {
+                            let rloc = c
+                                .residue_at
+                                .get(&r)
+                                .filter(|l| **l < a.loc)
+                                .ok_or_else(bad)?;
+                            let res: RedactionResidue = decode(
+                                &access
+                                    .record(*rloc, kinds::REDACTION_RESIDUE, &r)?
+                                    .ok_or_else(bad)?,
+                            )
+                            .map_err(|_| bad())?;
+                            read.insert(r, res.clone());
+                            res
+                        }
+                    };
                     if !residue_fits(span.kind, &span.hash, &res, &versions, &version_hashes) {
                         return Err(bad());
                     }
@@ -880,7 +1020,7 @@ fn validate(
             hash: a.hash,
             record: record.clone(),
         });
-        selected.push(Selected {
+        self.selected.push(Selected {
             apply: a.loc,
             request: rloc,
             all_ids: request
@@ -895,8 +1035,18 @@ fn validate(
             blobs: request.manifest.blobs,
             spans,
         });
+        Ok(())
     }
-    Ok((auth, selected))
+
+    /// Takes the span places of the last validated apply's request, in manifest order, and
+    /// forgets the rest of what it selects: a source that runs no log pass ([`check_log`]) keeps
+    /// one apply's selection at a time.
+    pub(crate) fn take_last_spans(&mut self) -> Vec<Location> {
+        self.selected
+            .pop()
+            .map(|s| s.spans.into_iter().map(|(l, _, _)| l).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// One frame the log pass reads: its place, kind, hash and length, and how to read its payload.

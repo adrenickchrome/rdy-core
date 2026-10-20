@@ -45,6 +45,7 @@ mod keys;
 pub mod lexicon;
 mod lint;
 pub mod load;
+pub mod load_chain;
 mod materialize;
 pub mod mention_review;
 mod pack_load;
