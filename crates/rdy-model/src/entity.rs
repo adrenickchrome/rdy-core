@@ -103,8 +103,21 @@ pub fn phrase(text: &str) -> String {
 /// shorter than [`MIN_MENTION_CHARS`] characters is skipped. Matches never overlap. A `'\0'`
 /// between two words (a blanked reference) ends a window: no phrase spans it.
 pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Range<usize>)> {
-    let ws = words(text);
     let mut out = vec![];
+    visit_phrases(text, known, &mut |p, range| {
+        out.push((p.to_string(), range))
+    });
+    out
+}
+
+/// Calls `visit` with each phrase [`find_phrases`] gives, in the same order, as it is found:
+/// nothing is collected.
+pub fn visit_phrases(
+    text: &str,
+    known: &dyn Fn(&str) -> bool,
+    visit: &mut dyn FnMut(&str, Range<usize>),
+) {
+    let ws = words(text);
     // the window of n words is the first n words of the longest window: one join per word,
     // and each shorter window is a prefix of it (`ends[n - 1]` bytes, `chars[n - 1]` chars)
     let mut joined = String::new();
@@ -135,16 +148,12 @@ pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Ra
             .find(|&n| chars[n - 1] >= MIN_MENTION_CHARS && known(&joined[..ends[n - 1]]));
         match hit {
             Some(n) => {
-                out.push((
-                    joined[..ends[n - 1]].to_string(),
-                    ws[i].start..ws[i + n - 1].end,
-                ));
+                visit(&joined[..ends[n - 1]], ws[i].start..ws[i + n - 1].end);
                 i += n;
             }
             None => i += 1,
         }
     }
-    out
 }
 
 /// The `aliases` of `b`: its string items, trimmed, non-empty, without case-insensitive

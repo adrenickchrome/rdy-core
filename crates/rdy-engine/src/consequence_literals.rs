@@ -28,7 +28,7 @@ use crate::tensions::value::{
 };
 use rdy_model::decision::DECISION;
 use rdy_model::entity::{
-    MAX_NAME_WORDS, VALUE, code_literal_spans, source_field, value_text, visit_leaves,
+    MAX_NAME_WORDS, VALUE, code_literal_spans, lines_at, source_field, value_text, visit_leaves,
     visit_text_sources, words,
 };
 use rdy_model::{Block, BlockId, RefMode, RefSpan, ref_spans};
@@ -283,7 +283,9 @@ fn scan_target(
     });
 }
 
-/// The literals of one source of a target, in the closed order.
+/// The literals of one source of a target, in the closed order, each identity once at its first
+/// place: sorting every occurrence and keeping the first of each gives the same list. Only
+/// distinct identities are held, never an (occurrence, entity) pair.
 fn scan_source(
     text: &str,
     mode: RefMode,
@@ -292,25 +294,36 @@ fn scan_source(
     found: &mut dyn FnMut(LiteralIdentity, &str),
 ) {
     let masked = mask(text, mode);
+    // (start, kind, identity, range); every scan gives its places in start order, so the first
+    // place an identity is offered is its first
     let mut cands: Vec<(usize, u8, LiteralIdentity, Range<usize>)> = vec![];
+    let mut held: BTreeSet<LiteralIdentity> = BTreeSet::new();
     for n in number_literal_spans(&masked) {
         let identity = LiteralIdentity::Number {
             number: n.number,
             unit: masked[n.unit].to_string(),
         };
-        cands.push((n.span.start, 0, identity, n.span));
+        if held.insert(identity.clone()) {
+            cands.push((n.span.start, 0, identity, n.span));
+        }
     }
-    for r in code_literal_spans(&masked) {
-        cands.push((
-            r.start,
-            1,
-            LiteralIdentity::Code(masked[r.clone()].to_string()),
-            r,
-        ));
+    // backticks pair on stored lines: a newline that a masked reference hides still ends one
+    for (at, line) in lines_at(text) {
+        for r in code_literal_spans(&masked[at..at + line.len()]) {
+            let r = at + r.start..at + r.end;
+            let identity = LiteralIdentity::Code(masked[r.clone()].to_string());
+            if held.insert(identity.clone()) {
+                cands.push((r.start, 1, identity, r));
+            }
+        }
     }
-    for (id, r) in names.mention_spans(&masked, own) {
-        cands.push((r.start, 2, LiteralIdentity::Entity(id), r));
-    }
+    let mut entities: BTreeSet<BlockId> = BTreeSet::new();
+    names.visit_mention_spans(&masked, own, &mut |id, r| {
+        if !entities.contains(id) {
+            entities.insert(id.clone());
+            cands.push((r.start, 2, LiteralIdentity::Entity(id.clone()), r));
+        }
+    });
     cands.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
     for (_, _, identity, r) in cands {
         found(identity, &text[r]);
@@ -376,11 +389,14 @@ fn unclosed_ref(text: &str, mode: RefMode) -> Option<usize> {
     None
 }
 
-/// In a cut prefix, the byte from which a name match is not settled: the mention scan tries up
-/// to [`MAX_NAME_WORDS`] words from each word, so a window that reaches the cut (no masked
-/// reference ends it first) could read differently with the rest of the text. Matches that start
-/// at or after it are not accepted.
-fn settled_before(scan: &str) -> usize {
+/// In a cut prefix, the byte from which a name match is not settled. The mention scan takes,
+/// at each word it visits, the longest known phrase of up to [`MAX_NAME_WORDS`] words. Where
+/// that window reaches past the words the prefix holds whole (no masked reference ends it
+/// first), the rest of the text could change the choice, but only when the choice uses the cut
+/// word, or when some known phrase is longer than the whole words from there and starts with
+/// them (and with what the cut word begins with). A match that starts at or after the first
+/// such word is not accepted; every match before it is the full text's.
+fn settled_before(scan: &str, names: &Lexicon) -> usize {
     let ws = words(scan);
     let n = ws.len();
     let Some(last) = ws.last() else {
@@ -390,19 +406,57 @@ fn settled_before(scan: &str) -> usize {
     // the last word is whole when a character that cannot join it follows it in the prefix
     let mut t = tail.chars();
     let last_whole = !matches!((t.next(), t.next()), (None, _) | (Some('-' | '.'), None));
-    let tail_breaks = tail.contains('\0');
-    for i in n.saturating_sub(MAX_NAME_WORDS)..n {
-        let m = MAX_NAME_WORDS.min(n - i);
-        let broken = (1..m).any(|k| scan[ws[i + k - 1].end..ws[i + k].start].contains('\0'));
-        let settled = broken
-            || if m == MAX_NAME_WORDS {
-                last_whole
-            } else {
-                tail_breaks
-            };
-        if !settled {
+    // the words the prefix holds whole
+    let k = if last_whole { n } else { n - 1 };
+    // the first word whose window can reach past them
+    let zone = (k + 1).saturating_sub(MAX_NAME_WORDS);
+    // the phrases the scan takes that can cover a word from `zone` on: first word, word count
+    let mut taken: BTreeMap<usize, usize> = BTreeMap::new();
+    names.visit_phrase_spans(scan, &mut |r| {
+        let first = ws.partition_point(|w| w.start < r.start);
+        if first + MAX_NAME_WORDS > zone {
+            let last = ws.partition_point(|w| w.end < r.end);
+            taken.insert(first, last + 1 - first);
+        }
+    });
+    // whether the gap before word `j` (the prefix's tail when `j` is `n`) holds a masked reference
+    let breaks = |j: usize| {
+        let to = ws.get(j).map_or(scan.len(), |w| w.start);
+        scan[ws[j - 1].end..to].contains('\0')
+    };
+    // the first word the scan visits from `zone` on
+    let mut i = zone;
+    if let Some((&first, &len)) = taken.range(..zone).next_back() {
+        i = i.max(first + len);
+    }
+    while i < n {
+        let len = taken.get(&i).copied();
+        if len.is_some_and(|len| i + len > k) {
             return ws[i].start;
         }
+        if !(i + 1..=k).any(breaks) {
+            let mut p = ws[i..k]
+                .iter()
+                .map(|w| w.folded.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if last_whole {
+                p.push(' ');
+            } else {
+                // what the cut word begins with, less its last character: folding can change
+                // at a word's end (a final sigma)
+                let part = &ws[n - 1].folded;
+                let keep = part.char_indices().last().map_or(0, |(at, _)| at);
+                if i < k {
+                    p.push(' ');
+                }
+                p.push_str(&part[..keep]);
+            }
+            if names.extends_known(&p) {
+                return ws[i].start;
+            }
+        }
+        i += len.unwrap_or(1);
     }
     scan.len()
 }
@@ -429,6 +483,23 @@ fn line_from(text: &str, at: usize) -> &str {
     match rest.find('\n') {
         Some(i) => rest[..i].strip_suffix('\r').unwrap_or(&rest[..i]),
         None => rest,
+    }
+}
+
+/// The byte each stored line of `stored` starts at. They come from the stored text, never a
+/// masked copy, which hides a newline inside a reference.
+fn line_starts(stored: &str) -> Vec<usize> {
+    let mut lines = vec![0];
+    lines.extend(stored.match_indices('\n').map(|(i, _)| i + 1));
+    lines
+}
+
+/// The end of stored line `l`'s text, before its `\n` or `\r\n`, as [`str::lines`] ends it.
+fn line_end(stored: &str, lines: &[usize], l: usize) -> usize {
+    match lines.get(l + 1) {
+        Some(&next) if next - 1 > lines[l] && stored.as_bytes()[next - 2] == b'\r' => next - 2,
+        Some(&next) => next - 1,
+        None => stored.len(),
     }
 }
 
@@ -639,10 +710,11 @@ fn scan_prefix(
         None => masked.len(),
     };
     let scan = &masked[..end];
+    // the masked copy has the stored bytes' positions; its lines are the stored text's
+    let stored = &prefix[..end];
     // a token that reaches the end of a cut prefix may go on past it
     let whole = |r: &Range<usize>| !cut || r.end < end;
-    let mut lines = vec![0];
-    lines.extend(scan.match_indices('\n').map(|(i, _)| i + 1));
+    let lines = line_starts(stored);
     let line_of = |at: usize| lines.partition_point(|&s| s <= at) - 1;
     let mut row = |r: Range<usize>, lit: usize| {
         let l = line_of(r.start);
@@ -657,15 +729,7 @@ fn scan_prefix(
     };
     // a unit that text can hold is matched by the text grammar; for those the exact-unit scan of
     // the value check gives the same numbers. Another unit (a value's `MB/s`) is matched exactly.
-    if wanted.numbers.iter().any(|(_, _, u)| text_unit(u)) {
-        for n in number_literal_spans(scan) {
-            if whole(&n.span)
-                && let Some(lit) = number(&n.number, &scan[n.unit.clone()])
-            {
-                row(n.span, lit);
-            }
-        }
-    }
+    let general = wanted.numbers.iter().any(|(_, _, u)| text_unit(u));
     let mut exact: Vec<&str> = wanted
         .numbers
         .iter()
@@ -674,12 +738,38 @@ fn scan_prefix(
         .collect();
     exact.sort_unstable();
     exact.dedup();
-    for unit in exact {
-        for (n, r) in stated_number_spans(scan, unit) {
-            if whole(&r)
-                && let Some(lit) = number(&n, unit)
-            {
-                row(r, lit);
+    // a number and its unit stay on one stored line
+    let numbers = if general || !exact.is_empty() {
+        lines.len()
+    } else {
+        0
+    };
+    for l in 0..numbers {
+        let at = lines[l];
+        let line = &scan[at..line_end(stored, &lines, l)];
+        let shift = |r: Range<usize>| at + r.start..at + r.end;
+        if general {
+            for n in number_literal_spans(line) {
+                let r = shift(n.span);
+                if whole(&r)
+                    && let Some(lit) = number(&n.number, &line[n.unit])
+                {
+                    row(r, lit);
+                }
+            }
+        }
+        for unit in &exact {
+            for (n, r) in stated_number_spans(line, unit) {
+                // an exact unit never reads into a masked reference
+                if line[r.clone()].contains('\0') {
+                    continue;
+                }
+                let r = shift(r);
+                if whole(&r)
+                    && let Some(lit) = number(&n, unit)
+                {
+                    row(r, lit);
+                }
             }
         }
     }
@@ -701,37 +791,32 @@ fn scan_prefix(
     }
     if !wanted.entities.is_empty() {
         let settled = if cut {
-            settled_before(scan)
+            settled_before(scan, names)
         } else {
             scan.len()
         };
-        for (id, r) in names.mention_spans(scan, own) {
-            let Some(&lit) = wanted.entities.get(&id) else {
-                continue;
+        // each occurrence is filtered by the wanted identities as it is found
+        names.visit_mention_spans(scan, own, &mut |id, r| {
+            let Some(&lit) = wanted.entities.get(id) else {
+                return;
             };
             if r.start >= settled {
-                continue;
+                return;
             }
             // one row per nonempty fragment on each stored line
             let mut l = line_of(r.start);
             loop {
                 let ls = lines[l];
-                let next = lines.get(l + 1).copied();
-                let content_end = match next {
-                    Some(nx) if nx - 1 > ls && scan.as_bytes()[nx - 2] == b'\r' => nx - 2,
-                    Some(nx) => nx - 1,
-                    None => scan.len(),
-                };
-                let (fs, fe) = (r.start.max(ls), r.end.min(content_end));
+                let (fs, fe) = (r.start.max(ls), r.end.min(line_end(stored, &lines, l)));
                 if fs < fe {
                     hit(l, fs - ls, fe - ls, lit, ls);
                 }
-                match next {
-                    Some(nx) if nx < r.end => l += 1,
+                match lines.get(l + 1) {
+                    Some(&next) if next < r.end => l += 1,
                     _ => break,
                 }
             }
-        }
+        });
     }
 }
 
@@ -1459,6 +1544,199 @@ mod tests {
         let before = text_scans();
         union(&[(&base, &n), (&start, &n)], Some(&fin));
         assert_eq!(text_scans() - before, 3);
+    }
+
+    /// A global allocator that keeps the live bytes each thread holds, and their peak, so a test
+    /// can bound what one call allocates. Each count is per thread: parallel tests do not mix.
+    mod live_alloc {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        pub struct Live;
+
+        thread_local! {
+            static LIVE: Cell<isize> = const { Cell::new(0) };
+            static PEAK: Cell<isize> = const { Cell::new(0) };
+        }
+
+        fn grow(n: usize) {
+            let _ = LIVE.try_with(|l| {
+                let now = l.get().saturating_add(n as isize);
+                l.set(now);
+                let _ = PEAK.try_with(|p| p.set(p.get().max(now)));
+            });
+        }
+
+        fn shrink(n: usize) {
+            let _ = LIVE.try_with(|l| l.set(l.get().saturating_sub(n as isize)));
+        }
+
+        // SAFETY: every call goes to `System` with the caller's arguments unchanged.
+        #[allow(unsafe_code)]
+        unsafe impl GlobalAlloc for Live {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                grow(layout.size());
+                // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+                unsafe { System.alloc(layout) }
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                grow(layout.size());
+                // SAFETY: the caller's layout, as `GlobalAlloc::alloc_zeroed` requires.
+                unsafe { System.alloc_zeroed(layout) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                shrink(layout.size());
+                // SAFETY: `ptr` came from `System` with `layout` (every allocation is System's).
+                unsafe { System.dealloc(ptr, layout) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                shrink(layout.size());
+                grow(new_size);
+                // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+        }
+
+        /// `f`'s result and the most bytes above the start this thread held while it ran.
+        pub fn peak_above_start<T>(f: impl FnOnce() -> T) -> (T, usize) {
+            let start = LIVE.with(Cell::get);
+            PEAK.with(|p| p.set(start));
+            let out = f();
+            (out, (PEAK.with(Cell::get) - start).max(0) as usize)
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: live_alloc::Live = live_alloc::Live;
+
+    #[test]
+    fn sdc1_fix1_hidden_newlines_keep_stored_line_coordinates() {
+        let p = pack();
+        let n = lex(&p, &[]);
+        let lits = covered(&p, &req("r-00001", "Keep 30 days"), &n);
+        // a newline inside a reference, before its display text, still ends stored line 1
+        let dep = req("r-00002", "{{v-00001|\n30 days}}");
+        let ev = evidence(&p, &lits, &dep, &n);
+        assert_eq!(rows(&ev), [row("body", 2, [0, 7], "30 days")]);
+        assert_eq!(ev.matched[0].text, "30 days}}");
+        // a first line shorter than the masked one: no slice past the stored line
+        let dep = req(
+            "r-00002",
+            &format!("{}{{{{v-00001|\n30 days}}}}", "x".repeat(300)),
+        );
+        let ev = evidence(&p, &lits, &dep, &n);
+        assert_eq!(rows(&ev), [row("body", 2, [0, 7], "30 days")]);
+        assert_eq!(ev.matched[0].text, "30 days}}");
+        // a target's backticks pair on stored lines, not across a hidden newline
+        let target = req("r-00001", "`ab` `q {{v-00001|\nx}} `cd`");
+        assert_eq!(cov(&p, &target.body), ["`ab`", "`cd`"]);
+    }
+
+    #[test]
+    fn sdc1_fix1_ambiguous_names_are_matched_without_occurrence_pairs() {
+        let p = pack();
+        // 256 entities share one name: each occurrence names all of them
+        let blocks: Vec<Block> = (0..256)
+            .map(|i| named(&format!("m-{i:05X}"), "Gateway", &[]))
+            .collect();
+        let names = lex(&p, &blocks);
+        let text = "Gateway ".repeat(2048);
+        assert_eq!(text.len(), EVIDENCE_BYTES);
+        let target = req("r-00001", &text);
+        let (lits, peak) = live_alloc::peak_above_start(|| covered(&p, &target, &names));
+        assert_eq!(lits.len(), MAX_LITERALS);
+        // 524,288 (id, range) pairs would hold 20 MiB; the text itself is 16 KiB
+        assert!(peak < 1 << 20, "covered held {peak} bytes");
+        let (_, peak) =
+            live_alloc::peak_above_start(|| changed(&p, &target, None, &names, &names, false));
+        assert!(peak < 1 << 20, "changed held {peak} bytes");
+        let dep = req("r-00002", &text);
+        let (ev, peak) = live_alloc::peak_above_start(|| evidence(&p, &lits, &dep, &names));
+        assert!(peak < 1 << 20, "evidence held {peak} bytes");
+        assert!(!ev.cut);
+        assert_eq!(ev.matched.len(), MAX_SHOWN);
+        // every occurrence states each of the 32 identities: one row each
+        assert_eq!(ev.matched_omitted, 2048 * MAX_LITERALS - MAX_SHOWN);
+        assert_eq!(rows(&ev)[0], row("body", 1, [0, 7], "Gateway"));
+        assert_eq!(rows(&ev)[7], row("body", 1, [0, 7], "Gateway"));
+        let (st, peak) = live_alloc::peak_above_start(|| states(&p, &lits, &dep, &names));
+        assert!(peak < 1 << 20, "states held {peak} bytes");
+        assert_eq!(st, (vec!["Gateway".to_string(); MAX_SHOWN], false));
+        // the mention scan keeps its first-found result without the pairs
+        let (m, peak) = live_alloc::peak_above_start(|| names.mentions(&dep));
+        assert!(peak < 1 << 20, "mentions held {peak} bytes");
+        assert_eq!(m.len(), 256);
+        assert_eq!(m[0].entity, "m-00000");
+        assert_eq!(m[255].entity, "m-000FF");
+    }
+
+    #[test]
+    fn sdc1_fix1_settled_names_before_a_cut_are_kept() {
+        let p = pack();
+        // the only name is complete and nothing longer can start with it: it is kept
+        let gate = lex(&p, &[named("m-0000G", "Gateway", &[])]);
+        let lits = covered(&p, &req("r-00001", "the Gateway"), &gate);
+        let dep = req("r-00002", &format!("Gateway {}", "x".repeat(20_000)));
+        let ev = evidence(&p, &lits, &dep, &gate);
+        assert_eq!(rows(&ev), [row("body", 1, [0, 7], "Gateway")]);
+        assert_eq!(ev.matched_omitted, 0);
+        assert!(ev.cut);
+        assert_eq!(
+            states(&p, &lits, &dep, &gate),
+            (vec!["Gateway".to_string()], true)
+        );
+        // a cut word that no known name can continue does not unsettle the name before it
+        let names = lex(
+            &p,
+            &[
+                named("m-0000E", "Ledger", &[]),
+                named("m-0000F", "Ledger Service", &[]),
+            ],
+        );
+        let lits = covered(&p, &req("r-00001", "the Ledger posts"), &names);
+        let at_cut = |tail: &str, rest: &str| {
+            let body = format!(
+                "{} {tail}{rest}",
+                "x".repeat(EVIDENCE_BYTES - tail.len() - 1)
+            );
+            evidence(&p, &lits, &req("r-00002", &body), &names)
+        };
+        let ev = at_cut("pay Ledger now", "here");
+        assert_eq!(ev.matched.len(), 1);
+        assert!(ev.cut);
+        // a longer known name could follow a whole last word: not settled
+        let ev = at_cut("pay Ledger ", "Service now");
+        assert!(ev.matched.is_empty());
+        assert!(ev.cut);
+        // the cut word could still be the longer name's: not settled
+        let ev = at_cut("pay Ledger Se", "rvice now");
+        assert!(ev.matched.is_empty());
+        assert!(ev.cut);
+        // the name itself is the cut word: not settled
+        let ev = at_cut("pay Ledg", "er now");
+        assert!(ev.matched.is_empty());
+        assert!(ev.cut);
+    }
+
+    #[test]
+    fn sdc1_fix1_exact_units_stay_on_one_stored_line() {
+        let p = pack();
+        let n = lex(&p, &[]);
+        // a unit with a newline is never stated across two stored lines
+        let lits = covered(&p, &value("v-00002", "5", "MB/\ns"), &n);
+        assert_eq!(ident(&lits), ["5|MB/\ns"]);
+        let ev = evidence(&p, &lits, &req("r-00002", "5 MB/\ns"), &n);
+        assert!(ev.matched.is_empty(), "{:?}", rows(&ev));
+        // an exact unit never reads into a masked reference
+        let lits = covered(&p, &value("v-00002", "5", "MB\0"), &n);
+        assert_eq!(ident(&lits), ["5|MB\0"]);
+        let ev = evidence(&p, &lits, &req("r-00002", "5 MB{{v-00001}}"), &n);
+        assert!(ev.matched.is_empty(), "{:?}", rows(&ev));
+        // a unit on one line still matches there, on its own stored line
+        let lits = covered(&p, &value("v-00002", "5", "MB/s"), &n);
+        let ev = evidence(&p, &lits, &req("r-00002", "first\nat 5 MB/s\r\nend"), &n);
+        assert_eq!(rows(&ev), [row("body", 2, [3, 9], "5 MB/s")]);
+        assert_eq!(ev.matched[0].text, "at 5 MB/s");
     }
 
     #[test]

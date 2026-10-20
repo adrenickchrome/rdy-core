@@ -2,7 +2,7 @@
 use crate::Materialized;
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::entity::{
-    aliases, code_literals, find_phrases, phrase, shown_sources, source_field, text_sources, words,
+    aliases, code_literals, phrase, shown_sources, source_field, text_sources, visit_phrases, words,
 };
 use rdy_model::{Block, BlockId, decision};
 use rdy_schema::{FieldKind, Pack, Trait};
@@ -164,40 +164,52 @@ impl Lexicon {
         let mut seen: BTreeSet<BlockId> = BTreeSet::new();
         let mut out = vec![];
         for (field, text) in self.sources(b) {
-            for (id, range) in self.mention_spans(&text, &b.id) {
-                if seen.insert(id.clone()) {
+            self.visit_mention_spans(&text, &b.id, &mut |id, range| {
+                if !seen.contains(id) {
+                    seen.insert(id.clone());
                     out.push(Mention {
                         entity: id.to_string(),
                         field: field.clone(),
                         text: text[range].to_string(),
                     });
                 }
-            }
+            });
         }
         out
     }
 
     /// Each entity `text` names by name or alias (never by key), with the byte range of the
-    /// words that name it, in text order; the phrases are [`find_phrases`]'s, longest first.
+    /// words that name it, in text order; the phrases are those of
+    /// [`find_phrases`](rdy_model::entity::find_phrases), longest first.
     /// A phrase that names several entities gives each, in id order. `source`, the block the
     /// text is in, is never among them. Each occurrence of a name is given.
+    /// [`Lexicon::visit_mention_spans`], collected.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn mention_spans(
         &self,
         text: &str,
         source: &BlockId,
     ) -> Vec<(BlockId, std::ops::Range<usize>)> {
+        let mut out = vec![];
+        self.visit_mention_spans(text, source, &mut |id, range| out.push((id.clone(), range)));
+        out
+    }
+
+    /// Calls `visit` with each (entity, range) [`Lexicon::mention_spans`] gives, in the same
+    /// order, as the phrases are found: no occurrence is collected, so a name that many
+    /// entities share costs no memory per occurrence.
+    pub(crate) fn visit_mention_spans(
+        &self,
+        text: &str,
+        source: &BlockId,
+        visit: &mut dyn FnMut(&BlockId, std::ops::Range<usize>),
+    ) {
         if self.phrases.is_empty() {
-            return vec![];
+            return;
         }
-        let known = |p: &str| {
-            self.phrases
-                .get(p)
-                .is_some_and(|set| set.iter().any(|(_, k)| *k != NameKind::Key))
-        };
-        let mut out: Vec<(BlockId, std::ops::Range<usize>)> = vec![];
-        for (p, range) in find_phrases(text, &known) {
-            let Some(set) = self.phrases.get(&p) else {
-                continue;
+        visit_phrases(text, &|p| self.known(p), &mut |p, range| {
+            let Some(set) = self.phrases.get(p) else {
+                return;
             };
             // the set is ordered by (id, kind): an id that names by two kinds comes twice
             let mut last: Option<&BlockId> = None;
@@ -206,10 +218,39 @@ impl Lexicon {
                     continue;
                 }
                 last = Some(id);
-                out.push((id.clone(), range.clone()));
+                visit(id, range.clone());
             }
+        });
+    }
+
+    /// Calls `visit` with the range of each phrase the mention scan takes in `text`, in order,
+    /// including a phrase that names only `text`'s own block: the words the scan consumes.
+    pub(crate) fn visit_phrase_spans(
+        &self,
+        text: &str,
+        visit: &mut dyn FnMut(std::ops::Range<usize>),
+    ) {
+        if self.phrases.is_empty() {
+            return;
         }
-        out
+        visit_phrases(text, &|p| self.known(p), &mut |_, range| visit(range));
+    }
+
+    /// Whether a phrase the mention scan accepts starts with `prefix` (folded words joined by
+    /// one space, perhaps ending in part of a word) and is longer than it.
+    pub(crate) fn extends_known(&self, prefix: &str) -> bool {
+        use std::ops::Bound;
+        self.phrases
+            .range::<_, str>((Bound::Excluded(prefix), Bound::Unbounded))
+            .take_while(|(p, _)| p.starts_with(prefix))
+            .any(|(p, _)| self.known(p))
+    }
+
+    /// Whether the mention scan accepts phrase `p`: it names some entity by name or alias.
+    fn known(&self, p: &str) -> bool {
+        self.phrases
+            .get(p)
+            .is_some_and(|set| set.iter().any(|(_, k)| *k != NameKind::Key))
     }
 
     /// The blocks whose text holds `literal` (exact text), sorted by id.
@@ -250,7 +291,8 @@ impl Lexicon {
     }
 
     /// The blocks whose text holds every word of `phrase` (a [`phrase`]: folded words joined by
-    /// one space), sorted by id. Every block in which [`find_phrases`] can find `phrase` is
+    /// one space), sorted by id. Every block in which
+    /// [`find_phrases`](rdy_model::entity::find_phrases) can find `phrase` is
     /// among them. Empty for an empty phrase.
     pub fn blocks_with_words(&self, phrase: &str) -> Vec<BlockId> {
         let mut sets = vec![];
