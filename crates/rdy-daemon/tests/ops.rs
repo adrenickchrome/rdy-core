@@ -1321,19 +1321,29 @@ fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
     let err = dispatch(&c, "publication_check", json!({})).unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
     assert!(err.message.contains("missing field `profile`"), "{err}");
-    // a view is no scope
-    for key in ["scope", "against"] {
-        let err = dispatch(
-            &c,
-            "publication_check",
-            json!({"profile": "open", key: "view:work"}),
-        )
-        .unwrap_err();
-        assert_eq!(err.code, E_BAD_INPUT, "{err}");
-        assert_eq!(
-            err.message,
-            format!("Publication check {key} must be canon, tag:<name>, or landing:<hash>.")
-        );
-    }
+    // an existing view is a candidate (D-CWC91), and still no baseline
+    let v = dispatch(
+        &c,
+        "publication_check",
+        json!({"profile": "open", "scope": "view:work"}),
+    )
+    .unwrap();
+    assert_eq!(
+        v["scope"],
+        json!({"kind": "view", "landing": null, "view": "work"}),
+        "{v}"
+    );
+    assert_eq!(v["references"]["status"], "blocked", "{v}");
+    let err = dispatch(
+        &c,
+        "publication_check",
+        json!({"profile": "open", "against": "view:work"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(
+        err.message,
+        "Publication check against must be canon, tag:<name>, or landing:<hash>."
+    );
     assert_eq!(e.read().seq(), end, "no check wrote anything");
 }

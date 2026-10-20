@@ -146,22 +146,58 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
     assert!(format!("{r:?}").contains("against"), "{r:?}");
     let r = c.call("rdy_publication_check", json!({"scope": "canon"}));
     assert_eq!(r.code(), Some("E_BAD_INPUT"), "{r:?}");
-    // a scope is canon, a tag or a landing: a view is not
-    for (key, bad) in [
-        ("scope", "view:work"),
-        ("scope", "work"),
-        ("scope", "inflight"),
-        ("against", "work"),
-        ("against", "proposal:P-ABCDE@1"),
-    ] {
+    // a candidate may be an existing view (D-CWC91): bare and explicit are one report
+    let in_view = c
+        .call(
+            "rdy_publication_check",
+            json!({"profile": "site", "scope": "view:work"}),
+        )
+        .ok();
+    assert_eq!(
+        in_view["scope"],
+        json!({"kind": "view", "landing": null, "view": "work"}),
+        "{in_view}"
+    );
+    let bare = c
+        .call(
+            "rdy_publication_check",
+            json!({"profile": "site", "scope": "work"}),
+        )
+        .ok();
+    assert_eq!(bare, in_view);
+    // the in-flight scope and an empty text are no candidate
+    for bad in ["inflight", ""] {
         let r = c.call(
             "rdy_publication_check",
-            json!({"profile": "site", key: bad}),
+            json!({"profile": "site", "scope": bad}),
         );
-        assert_eq!(r.code(), Some("E_BAD_INPUT"), "{key} {bad}: {r:?}");
+        assert_eq!(r.code(), Some("E_BAD_INPUT"), "{bad}: {r:?}");
         assert!(
-            format!("{r:?}").contains("must be canon, tag:<name>, or landing:<hash>."),
-            "{key} {bad}: {r:?}"
+            format!("{r:?}").contains(
+                "Publication check scope must be canon, tag:<name>, landing:<hash>, a view, or proposal:P-x@n."
+            ),
+            "{bad}: {r:?}"
+        );
+    }
+    // a view name is case-sensitive: `Canon` names a view, and none exists
+    let r = c.call(
+        "rdy_publication_check",
+        json!({"profile": "site", "scope": "Canon"}),
+    );
+    assert_eq!(r.code(), Some("E_NOT_FOUND"), "{r:?}");
+    assert!(format!("{r:?}").contains(r#"no view \"Canon\""#), "{r:?}");
+    // a baseline is canon, a tag or a landing: a view or a proposal is not
+    for bad in ["work", "view:work", "inflight", "proposal:P-ABCDE@1"] {
+        let r = c.call(
+            "rdy_publication_check",
+            json!({"profile": "site", "against": bad}),
+        );
+        assert_eq!(r.code(), Some("E_BAD_INPUT"), "{bad}: {r:?}");
+        assert!(
+            format!("{r:?}").contains(
+                "Publication check against must be canon, tag:<name>, or landing:<hash>."
+            ),
+            "{bad}: {r:?}"
         );
     }
     let r = c.call(

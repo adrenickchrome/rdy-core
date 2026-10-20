@@ -315,7 +315,8 @@ pub(crate) fn name_replaced(m: &Materialized, id: &BlockId) -> bool {
 
 /// `profile` (a full profile id or an existing key) resolved in `scope`, which must be canon or
 /// a landing (a tag resolves to one). The profile is the version that scope holds: a tag selects
-/// what its own profile revision selected. A blocked check is returned, not refused.
+/// what its own profile revision selected. A blocked check is returned, not refused. This is the
+/// stable entry durable output resolves through; [`resolve_inspection`] also reads review scopes.
 ///
 /// The exact value [`IMPLICIT_ORG`] names the implicit profile instead (D-48NYM, RULING F5): no
 /// profile block, every block of the snapshot, a null id, version and key, the project's title
@@ -332,6 +333,79 @@ pub fn resolve(read: &ReadState, scope: &Scope, profile: &str) -> Result<Resolve
             ));
         }
     }
+    resolve_scoped(read, scope, profile)
+}
+
+/// `E_BAD_INPUT` for a scope an inspection does not read: the in-flight scope, an empty scope
+/// text or an empty view name (D-CWC91).
+pub(crate) fn bad_inspection_scope() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "Publication check scope must be canon, tag:<name>, landing:<hash>, a view, or proposal:P-x@n.",
+        "Use canon, tag:<name>, landing:<hash>, view:<name>, or proposal:P-x@n.",
+    )
+}
+
+/// The scopes an inspection reads: canon, a landing, a view and a proposal version; the
+/// in-flight scope merges every open view and selects no one state, so it is refused.
+fn check_inspection_scope(scope: &Scope) -> Result<(), RdyError> {
+    match scope {
+        Scope::Canon | Scope::At(_) | Scope::View(_) | Scope::Proposal(_) => Ok(()),
+        Scope::Inflight => Err(bad_inspection_scope()),
+    }
+}
+
+/// [`resolve`] for an inspection (D-CWC91): the live site and the publication check also read a
+/// view or a proposal version, with the same selection, bounds and errors. A blocked check is
+/// returned, not refused; output still asks [`Resolved::require_output`]. The caller owns
+/// whether a view exists ([`ReadState::resolve_read_scope`]).
+pub fn resolve_inspection(
+    read: &ReadState,
+    scope: &Scope,
+    profile: &str,
+) -> Result<Resolved, RdyError> {
+    check_inspection_scope(scope)?;
+    resolve_scoped(read, scope, profile)
+}
+
+/// The revision of profile `id` that `scope` holds, resolved for an inspection: None only when
+/// `scope`'s state holds no block `id`. A block of another type, a removed profile, invalid
+/// fields or a missing selected doc are the errors [`resolve_inspection`] gives.
+pub fn resolve_revision(
+    read: &ReadState,
+    scope: &Scope,
+    id: &BlockId,
+) -> Result<Option<Resolved>, RdyError> {
+    check_inspection_scope(scope)?;
+    let l = limits();
+    check_name(id.as_str(), &l)?;
+    let m = read.materialized(scope)?;
+    if m.get(id).is_none() {
+        return Ok(None);
+    }
+    with_read_source(read, |source| resolve_in(source, &m, id.as_str(), &l)).map(Some)
+}
+
+/// The metadata of `profile` in `scope`, an inspection scope, by the lookup every resolution
+/// makes: the same name bound, key, type, parent, removal and field checks and errors, but no
+/// selection is expanded and no blob is read. A valid result does not stand for the selection
+/// and reference checks a build still makes.
+pub fn profile_at(
+    read: &ReadState,
+    scope: &Scope,
+    profile: &str,
+) -> Result<ResolvedProfile, RdyError> {
+    check_inspection_scope(scope)?;
+    let l = limits();
+    check_name(profile, &l)?;
+    let m = read.materialized(scope)?;
+    with_read_source(read, |source| {
+        lookup(source, &m, profile, &l).map(|(p, _)| p)
+    })
+}
+
+/// `profile` resolved in `scope`'s state through `read`'s store, with no scope rule.
+fn resolve_scoped(read: &ReadState, scope: &Scope, profile: &str) -> Result<Resolved, RdyError> {
     check_name(profile, &limits())?;
     let m = read.materialized(scope)?;
     with_read_source(read, |source| resolve_in(source, &m, profile, &limits()))
@@ -742,21 +816,18 @@ fn subtree(sel: &Materialized, id: &BlockId) -> BTreeSet<BlockId> {
     out
 }
 
-fn resolve_in(
+/// Step 1: the profile `name` names in `m`, as metadata, with the selectors of a profile block
+/// (None for the implicit profile, which selects every block). Reads no blob and selects nothing.
+fn lookup(
     source: &dyn PublicationSource,
     m: &Materialized,
     name: &str,
     l: &Limits,
-) -> Result<Resolved, RdyError> {
-    let pack = source.pack();
+) -> Result<(ResolvedProfile, Option<Vec<BlockId>>), RdyError> {
     check_name(name, l)?;
-    let (profile, keep) = match request(name)? {
-        // the implicit profile reads no profile block and selects every block of the snapshot,
-        // profile blocks included (O12); every ancestor is already selected, so the selector
-        // and ancestor steps do not apply. The selection bound (O14) and the named profile's
-        // tree check still do, before any text is scanned.
-        Request::Implicit(audience) => {
-            let profile = ResolvedProfile {
+    match request(name)? {
+        Request::Implicit(audience) => Ok((
+            ResolvedProfile {
                 id: None,
                 version: None,
                 key: None,
@@ -764,32 +835,55 @@ fn resolve_in(
                 description: source.description().map(str::to_string),
                 audience,
                 trail: audience == Audience::Org,
-            };
+            },
+            None,
+        )),
+        Request::Named => {
+            // the profile, in this snapshot only
+            let (pid, fields) = find_profile(source.pack(), m, name)?;
+            Ok((
+                ResolvedProfile {
+                    version: m.version_of(&pid),
+                    id: Some(pid),
+                    key: Some(fields.key),
+                    title: fields.title,
+                    description: fields.description,
+                    audience: fields.audience,
+                    trail: fields.trail,
+                },
+                Some(fields.select),
+            ))
+        }
+    }
+}
+
+fn resolve_in(
+    source: &dyn PublicationSource,
+    m: &Materialized,
+    name: &str,
+    l: &Limits,
+) -> Result<Resolved, RdyError> {
+    let pack = source.pack();
+    // 1. the profile, in this snapshot only
+    let (profile, selectors) = lookup(source, m, name, l)?;
+    let keep = match selectors {
+        // the implicit profile reads no profile block and selects every block of the snapshot,
+        // profile blocks included (O12); every ancestor is already selected, so the selector
+        // and ancestor steps do not apply. The selection bound (O14) and the named profile's
+        // tree check still do, before any text is scanned.
+        None => {
             let mut keep = BTreeSet::new();
             for b in m.iter() {
                 retain(&mut keep, &b.id, l)?;
             }
             check_tree(&|id| m.get(id), &keep)?;
-            (profile, keep)
+            keep
         }
-        Request::Named => {
-            // 1. the profile, in this snapshot only
-            let (pid, fields) = find_profile(pack, m, name)?;
-            let profile = ResolvedProfile {
-                version: m.version_of(&pid),
-                id: Some(pid),
-                key: Some(fields.key),
-                title: fields.title,
-                description: fields.description,
-                audience: fields.audience,
-                trail: fields.trail,
-            };
-            // 2, 3. whole docs and folders, then their ancestor folders' own records
-            let mut selectors = fields.select;
+        // 2, 3. whole docs and folders, then their ancestor folders' own records
+        Some(mut selectors) => {
             selectors.sort();
             selectors.dedup();
-            let keep = select(m, &selectors, l)?;
-            (profile, keep)
+            select(m, &selectors, l)?
         }
     };
 
@@ -901,15 +995,26 @@ pub fn load_assets(
 }
 
 /// The bytes of every distinct available attachment blob of `resolved`, by hash, read through
-/// `source`. A public profile whose reference check is blocked is refused first
-/// ([`Resolved::require_output`]), before any manifest or byte is read. Then every manifest
-/// length is checked against the per-blob and total bounds before any blob byte is read, and
-/// each blob's bytes against the same bounds once read; an unavailable blob is skipped.
+/// `source`: the gated loader every durable output uses. A public profile whose reference check
+/// is blocked is refused first ([`Resolved::require_output`]), before any manifest or byte is
+/// read; then [`load_inspection_assets`].
 pub fn load_source_assets(
     source: &dyn PublicationSource,
     resolved: &Resolved,
 ) -> Result<BTreeMap<Hash, Vec<u8>>, RdyError> {
     resolved.require_output()?;
+    load_inspection_assets(source, resolved)
+}
+
+/// The bytes of every distinct available attachment blob of `resolved`, by hash, read through
+/// `source`, with no output gate: the live inspection reads a blocked public selection's figures
+/// and shows its warning (D-CWC91). Every manifest length is checked against the per-blob and
+/// total bounds before any blob byte is read, and each blob's bytes against the same bounds
+/// once read; an unavailable blob (one the store lacks or a removal masks) is skipped.
+pub fn load_inspection_assets(
+    source: &dyn PublicationSource,
+    resolved: &Resolved,
+) -> Result<BTreeMap<Hash, Vec<u8>>, RdyError> {
     let l = limits();
     let hashes: BTreeSet<Hash> = resolved
         .attachments
