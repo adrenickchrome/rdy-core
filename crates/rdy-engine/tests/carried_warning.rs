@@ -613,6 +613,14 @@ fn hc6_one_target_with_a_removed_block_and_a_held_change_is_reapproved() {
     assert!(!on_disk(dir.path(), SECRET), "the fresh apply erased it");
     assert!(r.read().carried_warnings().unwrap().is_empty());
     assert!(r.fsck().unwrap().warnings.is_empty());
+    // ruling task-6-round2: the new approval is the one in force, so the stub names the new request
+    let stub = r.read().block(&Scope::Canon, &first).unwrap();
+    assert!(stub.is_redacted());
+    assert_eq!(
+        stub.read_identity.as_ref().map(|i| i.request),
+        res.redaction,
+        "the stub names the new request"
+    );
     // the rebuilt index agrees: the same mask, the same empty warning, a clean fsck
     r.reindex().unwrap();
     assert!(r.read().carried_warnings().unwrap().is_empty());
