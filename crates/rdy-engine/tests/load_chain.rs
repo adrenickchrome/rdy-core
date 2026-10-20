@@ -1442,7 +1442,7 @@ fn last_landing(dir: &Path, end: Location) -> Hash {
         .flat_map(|b| b.frames.iter())
         .filter(|f| f.kind() == kinds::LANDING)
         .map(|f| *f.hash())
-        .last()
+        .next_back()
         .unwrap()
 }
 
