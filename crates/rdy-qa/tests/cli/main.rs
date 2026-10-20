@@ -24,6 +24,7 @@ mod cli_output;
 mod cli_proposal;
 mod cli_publication_check;
 mod cli_publication_create;
+mod cli_publication_identity;
 mod cli_publication_implicit;
 mod cli_publication_isolation;
 mod cli_publication_output;

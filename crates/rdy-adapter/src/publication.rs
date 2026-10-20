@@ -3,7 +3,8 @@
 //! Selection, the reference check and the disclosure comparison are Publications' own
 //! (`rdy_engine::publication`); this module only pins them to a captured tag and shapes what a
 //! host needs. It adds no selector and no text of its own beyond the prior-identity refusal.
-//! Which publication was last made is the host's record: it passes that record in.
+//! Which publication was last made is the host's record: it passes that record in, bound by the
+//! profile version and the selection identity (D-Z8Q4N, D-075QD), which a later removal keeps.
 
 use crate::store::Snapshot;
 use rdy_engine::publication::{IMPLICIT_ORG, Resolved, disclosure_diff, resolve};
@@ -12,10 +13,14 @@ use rdy_model::{BlockId, Hash, tree};
 use rdy_schema::publication::PROFILE_TYPE;
 
 pub use rdy_engine::RdyError;
-pub use rdy_engine::publication::{Audience, DisclosureDiff, ReferenceReport};
+pub use rdy_engine::publication::{
+    AttachmentEntry, Audience, CheckStatus, DisclosureDiff, ProfileFacts, ReferenceReport,
+    SelectionEntry, profile_facts,
+};
 
 /// One publication profile as a tag holds it. `selector` is the value to pass back to
-/// [`Snapshot::disclosure`]: the full profile id, or `implicit:org`.
+/// [`Snapshot::disclosure`]: the full profile id, or `implicit:org`. Every fact but `name`,
+/// `docs` and `folders` is the profile's [`ProfileFacts`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileSummary {
     pub selector: String,
@@ -25,33 +30,44 @@ pub struct ProfileSummary {
     pub version: Option<Hash>,
     /// The profile's key, or `implicit:org`.
     pub name: String,
+    /// The profile's key; None for the implicit profile.
+    pub key: Option<String>,
     pub title: String,
     pub audience: Audience,
+    pub trail: bool,
     /// The selected docs, in id order.
     pub docs: Vec<BlockId>,
     /// The selected folders (chosen or kept as ancestors), in id order.
     pub folders: Vec<BlockId>,
+    /// Every selected block's id, version and removal request, in id order.
+    pub selection: Vec<SelectionEntry>,
     pub selection_hash: Hash,
+    /// The ids and versions of the selection alone: what a host binds a publication by.
+    pub selection_identity: Hash,
+    /// The status of the reference check; a blocked status is a result here, not a refusal.
+    pub references: CheckStatus,
 }
 
-/// What the host recorded about the previous publication of one profile: the version it was made
-/// at and the identity that publication read back then.
+/// What the host recorded about the previous publication of one profile: the tag it was made
+/// from, the profile version then and the selection identity it read back then.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviousPublication {
     pub tag: String,
     /// The profile block's version then; None for the implicit profile.
     pub profile_version: Option<Hash>,
-    pub selection_hash: Hash,
+    pub selection_identity: Hash,
 }
 
 /// The check of one candidate publication: its profile, its reference check, and what it
 /// discloses beyond the previous publication. `comparison` is None when there is no previous
-/// publication; that is not an empty diff.
+/// publication; that is not an empty diff. Then `first_attachments` lists every attachment of
+/// the candidate (the complete docs are `profile.docs`); with a previous publication it is None.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicationCheck {
     pub profile: ProfileSummary,
     pub references: ReferenceReport,
     pub comparison: Option<DisclosureDiff>,
+    pub first_attachments: Option<Vec<AttachmentEntry>>,
 }
 
 /// Publications' refusal when the baseline holds no such profile (`diff.rs`); the baseline cannot
@@ -68,14 +84,15 @@ fn identity_mismatch(tag: &str) -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         format!("previous publication does not match version {tag}"),
-        "read that version's profile and selection hash again",
+        "read that version's profile and selection identity again",
     )
 }
 
 fn summarize(r: &Resolved) -> Result<ProfileSummary, RdyError> {
-    let (selector, name) = match (&r.profile.id, &r.profile.key) {
-        (None, _) => (IMPLICIT_ORG.to_string(), IMPLICIT_ORG.to_string()),
-        (Some(id), Some(key)) => (id.to_string(), key.clone()),
+    let facts = profile_facts(r);
+    let name = match (&facts.id, &facts.key) {
+        (None, _) => IMPLICIT_ORG.to_string(),
+        (Some(_), Some(key)) => key.clone(),
         (Some(_), None) => {
             return Err(RdyError::new(
                 E_INTERNAL,
@@ -94,15 +111,20 @@ fn summarize(r: &Resolved) -> Result<ProfileSummary, RdyError> {
         .collect();
     folders.sort();
     Ok(ProfileSummary {
-        selector,
-        id: r.profile.id.clone(),
-        version: r.profile.version,
+        selector: facts.selector,
+        id: facts.id,
+        version: facts.version,
         name,
-        title: r.profile.title.clone(),
-        audience: r.profile.audience,
+        key: facts.key,
+        title: facts.title,
+        audience: facts.audience,
+        trail: facts.trail,
         docs,
         folders,
-        selection_hash: r.selection_hash,
+        selection: facts.selection,
+        selection_hash: facts.selection_hash,
+        selection_identity: facts.selection_identity,
+        references: facts.references,
     })
 }
 
@@ -142,7 +164,9 @@ impl Snapshot {
     /// Checks publishing `profile` (a profile id, a key, or `implicit:org`) at the captured tag
     /// `tag`, against `previous` when the host holds one. The previous tag is read by the
     /// candidate's profile id, so a key that was reassigned since cannot pick another profile. The
-    /// host's record must match what that tag holds, or the comparison is refused.
+    /// host's record (profile version and selection identity) must match what that tag holds
+    /// now, or the comparison is refused; a missing tag or a mismatch is an error, never a first
+    /// publication. With no previous publication the check lists every attachment instead.
     pub fn disclosure(
         &self,
         tag: &str,
@@ -167,17 +191,19 @@ impl Snapshot {
                 };
                 let prior = resolve(read, &prior_scope, &selector)?;
                 if prior.profile.version != prev.profile_version
-                    || prior.selection_hash != prev.selection_hash
+                    || prior.selection_identity != prev.selection_identity
                 {
                     return Err(identity_mismatch(&prev.tag));
                 }
                 Some(disclosure_diff(&prior, &candidate)?)
             }
         };
+        let first_attachments = comparison.is_none().then(|| candidate.attachments.clone());
         Ok(PublicationCheck {
             profile: summarize(&candidate)?,
             references: candidate.references,
             comparison,
+            first_attachments,
         })
     }
 }
@@ -303,7 +329,7 @@ mod tests {
         let prev = PreviousPublication {
             tag: "v1.0.0".into(),
             profile_version: rows[1].version,
-            selection_hash: rows[1].selection_hash,
+            selection_identity: rows[1].selection_identity,
         };
         snap.disclosure("v1.0.0", &selector, Some(&prev)).unwrap();
 

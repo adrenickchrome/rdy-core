@@ -2,7 +2,7 @@
 //! whole docs and folders, their ancestor folders' own records, the selected state and induced
 //! graph, the digests, the attachments and the reference check. Nothing here is stored.
 
-use super::references::{self, ReferenceReport};
+use super::references::{self, CheckStatus, ReferenceReport};
 use super::source::{PublicationSource, ReadPublicationSource};
 use crate::error::*;
 use crate::materialize::Materialized;
@@ -148,11 +148,14 @@ pub struct SelectionEntry {
 }
 
 /// One selected doc: its path in the selected tree and the digest of it and its descendants.
+/// `redacted` is true when a removal replaced the doc's own name or an ancestor folder's name in
+/// that path with the block's id (D-3M81W).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocEntry {
     pub id: BlockId,
     pub path: String,
     pub digest: Hash,
+    pub redacted: bool,
 }
 
 /// One selected figure's blob: its nearest selected doc, and whether the store can read the
@@ -177,6 +180,11 @@ pub struct PublicationWarning {
 /// One profile resolved in one snapshot. `m` and `graph` hold the selected blocks alone;
 /// `entries` (every retained block), `docs` and `attachments` are sorted, and with
 /// `selection_hash` they identify the selection. None of it is stored or written beside output.
+///
+/// `selection_identity` (D-Z8Q4N, D-075QD) hashes each entry's id and version and nothing else,
+/// so a removal, which keeps a block's recorded version, keeps it, while `selection_hash` moves.
+/// `redactions` lists, sorted and once each, the approved removal requests this resolution
+/// applies: those of the selected blocks and of the selected attachments' manifests and chunks.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub profile: ResolvedProfile,
@@ -187,6 +195,8 @@ pub struct Resolved {
     pub attachments: Vec<AttachmentEntry>,
     pub references: ReferenceReport,
     pub selection_hash: Hash,
+    pub selection_identity: Hash,
+    pub redactions: Vec<Hash>,
 }
 
 impl Resolved {
@@ -195,6 +205,112 @@ impl Resolved {
     pub fn require_output(&self) -> Result<(), RdyError> {
         self.references.require_output()
     }
+}
+
+/// The facts of one resolved profile that every surface shows the same way (D-91DZW): its stable
+/// selector, its metadata, the complete id-sorted selection with its hash and identity, and the
+/// status of its reference check. `selector` is the full profile id, or [`IMPLICIT_ORG`], whose
+/// id, version and key are None.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileFacts {
+    pub selector: String,
+    pub id: Option<BlockId>,
+    pub version: Option<Hash>,
+    pub key: Option<String>,
+    pub title: String,
+    pub audience: Audience,
+    pub trail: bool,
+    pub selection: Vec<SelectionEntry>,
+    pub selection_hash: Hash,
+    pub selection_identity: Hash,
+    pub references: CheckStatus,
+}
+
+/// The [`ProfileFacts`] of `r`, copied from its resolution: no title, selector or hash of its own.
+pub fn profile_facts(r: &Resolved) -> ProfileFacts {
+    ProfileFacts {
+        selector: r
+            .profile
+            .id
+            .as_ref()
+            .map_or_else(|| IMPLICIT_ORG.to_string(), BlockId::to_string),
+        id: r.profile.id.clone(),
+        version: r.profile.version,
+        key: r.profile.key.clone(),
+        title: r.profile.title.clone(),
+        audience: r.profile.audience,
+        trail: r.profile.trail,
+        selection: r.entries.clone(),
+        selection_hash: r.selection_hash,
+        selection_identity: r.selection_identity,
+        references: r.references.status,
+    }
+}
+
+/// The most distinct removal requests one resolution, or one comparison, lists.
+pub(crate) const REDACTION_REQUESTS: usize = 1_000_000;
+
+/// A sorted set of removal requests, bounded by [`REDACTION_REQUESTS`] before each new request
+/// is kept; a request already held costs nothing.
+#[derive(Default)]
+pub(crate) struct RequestSet(BTreeSet<Hash>);
+
+impl RequestSet {
+    pub(crate) fn insert(&mut self, request: Hash) -> Result<(), RdyError> {
+        if self.0.contains(&request) {
+            return Ok(());
+        }
+        if self.0.len() >= REDACTION_REQUESTS {
+            return Err(limit(
+                "redaction request list",
+                REDACTION_REQUESTS,
+                "requests",
+            ));
+        }
+        self.0.insert(request);
+        Ok(())
+    }
+
+    pub(crate) fn into_sorted(self) -> Vec<Hash> {
+        self.0.into_iter().collect()
+    }
+}
+
+/// The selection identity of `entries` (D-075QD), which are in id order: ASCII
+/// `rdy-publication-selection-identity`, one NUL, u32 LE 1, u32 LE entry count, then per entry
+/// its u32 LE id length, its UTF-8 id bytes and its 32 raw version bytes. Nothing else enters:
+/// no attachment row, removal mark, availability, title, path, selector or audience. A transient
+/// read identity, not a stored format.
+fn selection_identity(entries: &[SelectionEntry], l: &Limits) -> Result<Hash, RdyError> {
+    let over = || limit("selection", l.selection, "blocks");
+    let count = u32::try_from(entries.len()).map_err(|_| over())?;
+    let mut h = blake3::Hasher::new();
+    h.update(b"rdy-publication-selection-identity\0");
+    h.update(&1u32.to_le_bytes());
+    h.update(&count.to_le_bytes());
+    for e in entries {
+        let id = e.id.as_str().as_bytes();
+        let len = u32::try_from(id.len()).map_err(|_| over())?;
+        h.update(&len.to_le_bytes());
+        h.update(id);
+        h.update(&e.version.0);
+    }
+    Ok(Hash(*h.finalize().as_bytes()))
+}
+
+/// Whether a removal replaced the name of the doc or folder `id`, or of a folder above it, in
+/// `m`: a removed version's stub names itself by its id (D-3M81W). Iterative and bounded by the
+/// state's size, so a damaged chain cannot loop.
+pub(crate) fn name_replaced(m: &Materialized, id: &BlockId) -> bool {
+    let mut cur = m.get(id);
+    for _ in 0..=m.len() {
+        let Some(b) = cur else { break };
+        if b.is_redacted() {
+            return true;
+        }
+        cur = b.parent.as_ref().and_then(|p| m.get(p));
+    }
+    false
 }
 
 /// `profile` (a full profile id or an existing key) resolved in `scope`, which must be canon or
@@ -331,7 +447,7 @@ fn not_found(name: &str) -> RdyError {
     )
 }
 
-fn invalid_tree() -> RdyError {
+pub(crate) fn invalid_tree() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         "Publication selection has an invalid document tree.",
@@ -692,8 +808,19 @@ fn resolve_in(
     check_graph(sel.iter(), l)?;
     let graph = Graph::build_with(sel.iter(), Arc::new(pack.tracking())).induced(&keep);
 
-    // 6. attachments
+    // 6. attachments, then the removal requests of the selected blocks and of the selected
+    // attachments' manifests and chunks, each bounded before it is kept; no payload is read
     let attachments = attachments(source, &sel, l)?;
+    let mut requests = RequestSet::default();
+    for b in sel.iter() {
+        if let Some(request) = b.redaction() {
+            requests.insert(request)?;
+        }
+    }
+    let blobs: BTreeSet<Hash> = attachments.iter().map(|a| a.blob).collect();
+    for blob in &blobs {
+        source.visit_blob_redactions(blob, &mut |request| requests.insert(request))?;
+    }
 
     // 7. entries, paths and digests
     let entries: Vec<SelectionEntry> = sel
@@ -726,6 +853,7 @@ fn resolve_in(
             id: b.id.clone(),
             path,
             digest: Hash::of(&bytes),
+            redacted: name_replaced(&sel, &b.id),
         });
     }
     let mut bytes = b"rdy-publication-selection-1\0".to_vec();
@@ -748,6 +876,7 @@ fn resolve_in(
     for a in &attachments {
         put_attachment(&mut bytes, a);
     }
+    let selection_identity = selection_identity(&entries, l)?;
     Ok(Resolved {
         profile,
         m: sel,
@@ -757,6 +886,8 @@ fn resolve_in(
         attachments,
         references,
         selection_hash: Hash::of(&bytes),
+        selection_identity,
+        redactions: requests.into_sorted(),
     })
 }
 

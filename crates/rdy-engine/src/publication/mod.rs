@@ -15,11 +15,11 @@ mod source;
 pub use diff::{ChangedAttachment, ChangedDoc, ChangedFolder, DisclosureDiff, disclosure_diff};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
-pub use report::{REPORT_BYTES, REPORT_ROWS, check};
+pub use report::{REPORT_BYTES, REPORT_ROWS, check, reference_summary};
 pub use select::{
-    AttachmentEntry, DocEntry, IMPLICIT_ORG, Limits, PublicationWarning, Resolved, ResolvedProfile,
-    SelectionEntry, blob_reads_for_tests, check_stable_selector, limits, load_assets,
-    load_source_assets, resolve, resolve_source,
+    AttachmentEntry, DocEntry, IMPLICIT_ORG, Limits, ProfileFacts, PublicationWarning, Resolved,
+    ResolvedProfile, SelectionEntry, blob_reads_for_tests, check_stable_selector, limits,
+    load_assets, load_source_assets, profile_facts, resolve, resolve_source,
 };
 #[cfg(feature = "test-support")]
 pub use select::{
