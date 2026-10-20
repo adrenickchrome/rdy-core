@@ -15,8 +15,8 @@ Each crate is in `crates/`.
 - `rdy-schema`: schema packs, path globs and block validation.
 - `rdy-graph`: the block graph and the coordination graph.
 - `rdy-engine`: reads, writes, briefings, tensions, working copies and config.
-- `rdy-adapter`: the in-process store handle and captured read snapshots for a host that embeds rdy core.
 - `rdy-render`: renders a project as a static site.
+- `rdy-adapter`: the in-process store handle and captured read snapshots for a host that embeds rdy core.
 - `rdy-mcp`: the MCP server and its tools.
 - `rdy-daemon`: the per-project Unix socket that serves `ctl` and `mcp` connections.
 - `rdy-cli`: the `rdy` binary.
@@ -27,8 +27,8 @@ A crate depends only on crates listed before it.
 - `rdy-model` depends on no rdy crate.
 - `rdy-store`, `rdy-schema` and `rdy-graph` depend on `rdy-model`.
 - `rdy-engine` depends on `rdy-model`, `rdy-schema`, `rdy-store` and `rdy-graph`.
-- `rdy-adapter` depends on `rdy-model`, `rdy-store`, `rdy-schema` and `rdy-engine`.
 - `rdy-render` depends on `rdy-model`, `rdy-engine`, `rdy-graph` and `rdy-schema`.
+- `rdy-adapter` depends on `rdy-model`, `rdy-store`, `rdy-schema`, `rdy-engine` and `rdy-render`.
 - `rdy-mcp` depends on `rdy-model`, `rdy-engine`, `rdy-schema` and `rdy-graph`.
 - `rdy-daemon` depends on `rdy-engine`, `rdy-mcp`, `rdy-render` and `rdy-model`.
 - `rdy-cli` depends on `rdy-model`, `rdy-engine`, `rdy-schema`, `rdy-render`, `rdy-mcp` and `rdy-daemon`.
