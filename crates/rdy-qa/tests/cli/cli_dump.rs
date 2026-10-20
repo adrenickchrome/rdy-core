@@ -269,3 +269,77 @@ fn dl7_rdy_load_help_gives_the_in_place_move_in_order() {
         "{help}"
     );
 }
+
+/// The dump file's bytes and the reply without its `out` field.
+fn dump_reply_without_out(s: &Served, args: &[&str]) -> Value {
+    let (ok, mut v) = s.json(args);
+    assert!(ok, "{v}");
+    v.as_object_mut().unwrap().remove("out").expect("out");
+    v
+}
+
+#[test]
+fn sdc4_bare_path_and_out_make_the_same_dump() {
+    let s = golden_served();
+    let scratch = short_tempdir();
+    let a = scratch.path().join("a.rdydump");
+    let b = scratch.path().join("b.rdydump");
+    let flagged = dump_reply_without_out(&s, &["--json", "dump", "--out", a.to_str().unwrap()]);
+    let bare = dump_reply_without_out(&s, &["--json", "dump", b.to_str().unwrap()]);
+    assert_eq!(flagged, bare);
+    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+
+    let to = scratch.path().join("new");
+    let to_arg = to.to_str().unwrap();
+    let text = stdout(&s.rdy(&["load", b.to_str().unwrap(), to_arg]));
+    assert!(
+        is_the_load_line(text.lines().next().unwrap(), to_arg),
+        "{text:?}"
+    );
+    let env = s.env_pairs();
+    let _stop = StopOnDrop {
+        dir: &to,
+        env: env.clone(),
+    };
+    let fsck = human_command(&to, &env, &["fsck"]).output().unwrap();
+    assert!(
+        fsck.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+}
+
+#[test]
+fn sdc4_dump_requires_exactly_one_output() {
+    let s = Served::new();
+    let cases: [&[&str]; 4] = [
+        &["dump"],
+        &["dump", "x.rdydump", "--out", "x.rdydump"],
+        &["dump", "x.rdydump", "--out", "y.rdydump"],
+        &["dump", "x.rdydump", "y.rdydump"],
+    ];
+    for args in cases {
+        let out = s.rdy(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("Usage:"), "{args:?} {err}");
+    }
+    for name in ["x.rdydump", "y.rdydump"] {
+        assert!(!s.dir.path().join(name).exists(), "{name}");
+    }
+}
+
+#[test]
+fn sdc4_dump_accepts_a_hyphen_path_after_separator() {
+    let s = golden_served();
+    let out = s.rdy(&["dump", "--", "-copy.rdydump"]);
+    let text = stdout(&out);
+    let file = s.dir.path().join("-copy.rdydump");
+    assert!(file.is_file());
+    let canonical = file.canonicalize().unwrap();
+    assert!(
+        is_the_dump_line(text.trim_end(), file.to_str().unwrap())
+            || is_the_dump_line(text.trim_end(), canonical.to_str().unwrap()),
+        "{text:?}"
+    );
+}
