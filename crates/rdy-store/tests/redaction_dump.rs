@@ -1584,3 +1584,79 @@ fn sibling_with_another_id(d: &mut redaction_fixture::Draft, _: &Block, b: &Bloc
     let residues = d.residues.clone();
     redaction_fixture::relink(&mut d.request, &residues);
 }
+
+/// hc1 (fix round 3): a project request may list more physical copies than the sync decoder's
+/// 100000 entries per collection (`rdy_store::bounded::MAX_ELEMENTS`): its selection stays within
+/// the request's own bound (`MAX_SELECTED`), and each listed span is one frame of the log. The
+/// removal tally reads such a request's spans, so the writer's resolved facts and the file's own
+/// facts agree, and the checking reader takes the trailer.
+#[test]
+fn hc1_a_request_over_100000_physical_copies_keeps_its_removal_facts() {
+    const COPIES: usize = rdy_store::bounded::MAX_ELEMENTS + 1;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("src");
+    let mut s = Store::create(&path).unwrap();
+    let a = block("b-00001", "canary alpha secret");
+    s.commit_to_view(
+        "work",
+        change("work", vec![Op::Create { block: a.clone() }]),
+    )
+    .unwrap();
+    let raw = s.get_raw(&a.version_hash()).unwrap().1;
+    drop(s);
+    // more physical copies of the selected version, appended while the store is closed
+    let (mut log, q) =
+        rdy_store::segment::SegmentLog::open_marked(&path.join("segments"), 64 * 1024 * 1024, None)
+            .unwrap();
+    assert!(q.is_empty());
+    log.append_batch(&vec![(BLOCK, raw); COPIES]).unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let spec = RequestSpec::new(
+        "work",
+        vec![RedactTarget::Version {
+            id: a.id.clone(),
+            version: a.version_hash(),
+        }],
+    );
+    let fixture = authorized_batch_fixture(
+        &path,
+        &[spec],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let spans = &fixture.requests[0].draft.request.manifest.spans;
+    assert!(spans.len() > COPIES, "{} spans", spans.len());
+    let lowest = spans
+        .iter()
+        .map(|s| Location {
+            segment: s.place.segment,
+            offset: s.place.offset,
+        })
+        .min();
+    // the open finishes the removal
+    let s = Store::open(&path).unwrap();
+    let end = s.log_end();
+    let r = s.reader();
+    let mut tally = RemovalTally::default();
+    let mut batches = vec![];
+    r.for_each_batch(end, |b| {
+        tally.observe(&b)?;
+        batches.push(b);
+        Ok(())
+    })
+    .unwrap();
+    let want = RemovalFacts {
+        removals: 1,
+        first_removed: lowest,
+    };
+    assert_eq!(tally.resolved(&r, end).unwrap(), want, "the writer's facts");
+    assert_eq!(tally.facts().unwrap(), want, "the file's facts");
+    let mut w = DumpWriter::new(Vec::new(), &header(&batches)).unwrap();
+    for b in &batches {
+        w.batch(b).unwrap();
+    }
+    let (bytes, _) = w.finish(want).unwrap();
+    let (mut rd, _, _) = DumpReader::open(&bytes[..]).unwrap();
+    while rd.next().unwrap().is_some() {}
+    assert_eq!(rd.trailer().unwrap().first_removed, lowest);
+}

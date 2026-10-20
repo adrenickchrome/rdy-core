@@ -619,7 +619,6 @@ impl RemovalTally {
 /// read names nothing; whether it is a valid record is the load's check.
 mod wire {
     use super::drop_text;
-    use crate::bounded::MAX_ELEMENTS;
     use crate::segment::Location;
     use rdy_model::Hash;
 
@@ -683,12 +682,12 @@ mod wire {
             }
         }
 
-        /// A sequence of at most `MAX_ELEMENTS` elements, each read by `f`.
+        /// A sequence, each element read by `f`. Its count is the record's own: the bounds of an
+        /// existing record are the checks that wrote it, never the sync decoder's smaller ones.
+        /// Every element reads at least one byte, so a count the bytes cannot hold ends at the
+        /// end of the payload.
         fn seq(&mut self, mut f: impl FnMut(&mut Self) -> Option<()>) -> Option<usize> {
             let n = self.len()?;
-            if n > MAX_ELEMENTS {
-                return None;
-            }
             for _ in 0..n {
                 f(self)?;
             }
@@ -730,7 +729,10 @@ mod wire {
         let Some(()) = head(&mut c) else {
             return Ok(false);
         };
-        let Some(n) = c.len().filter(|n| *n <= MAX_ELEMENTS) else {
+        // no count bound but the payload's own (the existing record limits): a count the
+        // remaining bytes cannot hold is a record that cannot be read, so the reservation never
+        // passes what the payload holds
+        let Some(n) = c.len().filter(|n| *n <= c.0.len() / MIN_SPAN_BYTES) else {
             return Ok(false);
         };
         out.try_reserve_exact(n)
@@ -754,6 +756,10 @@ mod wire {
         }
         Ok(true)
     }
+
+    /// The fewest bytes one encoded manifest span takes: one-byte varint segment, offset and
+    /// length, the kind, the 32-byte hash and an absent residue.
+    const MIN_SPAN_BYTES: usize = 1 + 1 + 1 + 32 + 1 + 1;
 
     /// Reads a request's fields before its manifest's spans.
     fn head(c: &mut Cur) -> Option<()> {
@@ -868,6 +874,17 @@ mod wire {
                 })
                 .collect();
             assert_eq!(out, want);
+            // a span count the remaining bytes cannot hold reads as nothing, and reserves nothing
+            let mut c = Cur(&bytes);
+            head(&mut c).unwrap();
+            let at = bytes.len() - c.0.len();
+            assert_eq!(bytes[at], 2, "the span count");
+            let mut forged = bytes[..at].to_vec();
+            forged.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]); // 2^35
+            forged.extend_from_slice(&bytes[at + 1..]);
+            let mut out = vec![];
+            assert_eq!(request_spans(&forged, &mut out), Ok(false));
+            assert_eq!(out.capacity(), 0);
             // a record cut inside its spans reads as nothing
             let spans_at = bytes.len() - 6;
             let mut out = vec![];
