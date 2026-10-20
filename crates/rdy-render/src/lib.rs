@@ -9,6 +9,7 @@ pub mod live;
 mod llms;
 pub mod menu;
 mod nav;
+mod one_page;
 mod page;
 mod prepare;
 pub mod print;
@@ -23,6 +24,7 @@ mod trail;
 mod version;
 
 pub use html::{Link, escape, text_html};
+pub use one_page::{RenderedPage, render_publication_page};
 
 use rdy_engine::publication::PublicationSource;
 use rdy_engine::publication_manifest::{
@@ -851,17 +853,16 @@ fn without_parameters(media_type: &str) -> &str {
         .trim()
 }
 
-/// The artifact of a publication build: each file in path order with its hash, size and media
-/// type, and each HTML page's recorded notice offset; then the recipe-1 manifest hash.
-fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
-    let BuiltSite {
-        site,
-        notices,
-        media,
-    } = built;
-    let mut entries = Vec::with_capacity(site.files.len());
-    for (path, bytes) in &site.files {
-        // a figure's file keeps the media type its source named; every other file is generated
+/// The manifest of `files`: each file in path order with its hash, size and media type, and each
+/// HTML page's recorded notice offset. A figure's file keeps the media type its source named
+/// (`media`); every other file is generated.
+fn manifest_of(
+    files: &BTreeMap<String, Vec<u8>>,
+    notices: &BTreeMap<String, u64>,
+    media: &BTreeMap<String, String>,
+) -> Result<Manifest, RdyError> {
+    let mut entries = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
         let media_type = match media.get(path) {
             Some(m) => without_parameters(m).to_string(),
             None => generated_media_type(path)?.to_string(),
@@ -879,7 +880,17 @@ fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
             notice_offset,
         });
     }
-    let manifest = Manifest { files: entries };
+    Ok(Manifest { files: entries })
+}
+
+/// The artifact of a publication build: its manifest, then the recipe-1 manifest hash.
+fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
+    let BuiltSite {
+        site,
+        notices,
+        media,
+    } = built;
+    let manifest = manifest_of(&site.files, &notices, &media)?;
     let manifest_hash = manifest_hash(&manifest, MANIFEST_RECIPE)?;
     Ok(PublicationArtifact {
         files: site.files,
@@ -1279,19 +1290,49 @@ fn render_threads() -> usize {
         .clamp(1, 8)
 }
 
-/// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
-/// passes the manifest's limits as `budget`, kept while it builds.
-fn build_site_from(
+/// What the shared setup keeps of a prepared source's history for the build that follows: the
+/// change summaries (pages of the site) and the build's warnings.
+struct Extras {
+    changes: Option<changes::Summary>,
+    since: Option<changes::Summary>,
+    warnings: Vec<String>,
+}
+
+// The page contexts built on this thread (see `page_builds`).
+thread_local! {
+    static PAGE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many page contexts [`build_page`] made on this thread so far. A hook for tests that
+/// count the bodies a render builds; nothing else reads it.
+#[doc(hidden)]
+pub fn page_builds() -> u64 {
+    PAGE_BUILDS.get()
+}
+
+/// The page context for `kind`: every build calls `page::build` through here, so a test can
+/// count the bodies a render makes.
+fn build_page(sh: &page::Shared, kind: page::Kind) -> page::PageContext {
+    PAGE_BUILDS.set(PAGE_BUILDS.get().wrapping_add(1));
+    page::build(sh, kind)
+}
+
+/// The setup every build shares, from what [`prepare::source`] or `publication::prepare_resolved`
+/// read: the site of the selected state, the template environment, the header, the authored
+/// local targets and the [`page::Shared`] the pages are built from. `f` builds with them; the
+/// figure blobs the pages did not borrow for good come back with its result, for the build to
+/// copy once the shared state is dropped. A static build refuses two siblings that would be one
+/// file before `f` runs.
+fn with_shared<R>(
     prepared: prepare::Prepared,
     mode: Mode,
-    slots: Slots,
-    budget: Option<&Budget>,
-) -> Result<BuiltSite, RdyError> {
+    f: impl FnOnce(&page::Shared<'_>, &minijinja::Environment<'static>, Extras) -> Result<R, RdyError>,
+) -> Result<(R, prepare::FigureBlobs), RdyError> {
     let prepare::Prepared {
         m,
         g,
         pack,
-        mut blobs,
+        blobs,
         site_name,
         description,
         position,
@@ -1342,13 +1383,6 @@ fn build_site_from(
     let local = profile
         .as_ref()
         .map(|_| publication::LocalTargets::of(&site));
-    let mut summary = RenderSummary {
-        pages: 0,
-        assets: 0,
-        redirects: 0,
-        warnings,
-    };
-
     let sh = page::Shared {
         site: &site,
         m,
@@ -1375,8 +1409,19 @@ fn build_site_from(
         local: local.as_ref(),
         unavailable,
     };
+    let extras = Extras {
+        changes: changes_summary,
+        since: since_summary,
+        warnings,
+    };
+    let out = f(&sh, &env, extras)?;
+    drop(sh);
+    Ok((out, blobs))
+}
 
-    // the pages, in the order a reader meets them: the home page, the tree, the collected pages
+/// The pages of a build, in the order a reader meets them: the home page, the tree, the
+/// collected pages. The page at a path is the last of them that has it.
+fn page_kinds<'a>(site: &'a Site<'_>, m: &Materialized) -> Vec<page::Kind<'a>> {
     let mut kinds = vec![page::Kind::Home];
     kinds.extend(site.tree_pages().map(|id| {
         if m.get(id).is_some_and(|b| b.block_type == tree::FOLDER) {
@@ -1394,9 +1439,154 @@ fn build_site_from(
     if !site.disagreements.is_empty() {
         kinds.push(page::Kind::Disagreements);
     }
+    kinds
+}
+
+/// The site-relative path of the page of a kind [`page_kinds`] lists.
+fn kind_page(site: &Site<'_>, kind: &page::Kind) -> Option<String> {
+    match kind {
+        page::Kind::Home => Some("index.html".into()),
+        page::Kind::Folder(id) | page::Kind::Doc(id) => site.page(id),
+        page::Kind::Glossary => Some("glossary.html".into()),
+        page::Kind::Questions => Some("questions.html".into()),
+        page::Kind::Disagreements => Some("disagreements.html".into()),
+        _ => None,
+    }
+}
+
+/// A context rendered as a page of `slots`' kind, each write admitted by `budget` when there is
+/// one: its path, bytes, label and header ranges, and notice slot offset.
+fn render_ctx(
+    env: &minijinja::Environment<'static>,
+    slots: Slots,
+    budget: Option<&Budget>,
+    ctx: &page::PageContext,
+) -> Result<Page, RdyError> {
+    let r = match slots {
+        Slots::Source => render_page_within(env, template_of(ctx.kind), ctx, budget)?,
+        Slots::Notices => {
+            render_page_within(env, template_of(ctx.kind), with_notice_slot(ctx), budget)?
+        }
+    };
+    let notice = notice_offset(&r.bytes, r.notice.as_ref())?;
+    Ok((ctx.page_url.clone(), r.bytes, r.slots, notice))
+}
+
+/// What the pages of a build leave for its last step: every file but the figures' copies, and
+/// the figure files the pages used, by path.
+struct Staged {
+    files: BTreeMap<String, Vec<u8>>,
+    label_at: BTreeMap<String, Vec<Slot>>,
+    notices: BTreeMap<String, u64>,
+    summary: RenderSummary,
+    label: String,
+    header: String,
+    used: BTreeMap<String, (Hash, String)>,
+}
+
+/// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
+/// passes the manifest's limits as `budget`, kept while it builds.
+fn build_site_from(
+    prepared: prepare::Prepared,
+    mode: Mode,
+    slots: Slots,
+    budget: Option<&Budget>,
+) -> Result<BuiltSite, RdyError> {
+    let (staged, mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
+        stage_site(sh, env, extras, slots, budget)
+    })?;
+    let Staged {
+        mut files,
+        label_at,
+        notices,
+        mut summary,
+        label,
+        header,
+        used,
+    } = staged;
+    let media = used_media(&used);
+    summary.assets = copy_blobs(&mut files, budget, &used, &mut blobs)?;
+    Ok(BuiltSite {
+        site: SiteFiles {
+            files,
+            label,
+            header,
+            label_at,
+            summary,
+        },
+        notices,
+        media,
+    })
+}
+
+/// The media type each used figure file's first block named, by path.
+fn used_media(used: &BTreeMap<String, (Hash, String)>) -> BTreeMap<String, String> {
+    used.iter()
+        .map(|(path, (_, media_type))| (path.clone(), media_type.clone()))
+        .collect()
+}
+
+/// Moves each figure file of `used` into `files` at its path, from `blobs`, and returns how many
+/// it put there. Each blob moves at its last path, so the build never holds two copies of it
+/// (one hash under two paths is copied once). A copy is admitted by `budget` before it is made.
+fn copy_blobs(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    budget: Option<&Budget>,
+    used: &BTreeMap<String, (Hash, String)>,
+    blobs: &mut prepare::FigureBlobs,
+) -> Result<usize, RdyError> {
+    let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
+    for (h, _) in used.values() {
+        *uses.entry(h).or_default() += 1;
+    }
+    let mut copied = 0;
+    for (path, (h, _)) in used {
+        let left = uses.get_mut(h).expect("counted above");
+        *left -= 1;
+        if let Some(b) = budget {
+            let len = blobs.bytes.get(h).map_or(0, Vec::len);
+            b.reserve(files, path, len)?;
+        }
+        let bytes = if *left == 0 {
+            blobs.bytes.remove(h)
+        } else {
+            blobs.bytes.get(h).cloned()
+        };
+        let bytes = bytes.expect("a used blob is held");
+        if let (Some(old), Some(b)) = (files.insert(path.clone(), bytes), budget) {
+            b.release(old.len());
+        }
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// The pages, permalink pages, agent and search files and theme files of a build.
+fn stage_site(
+    sh: &page::Shared<'_>,
+    env: &minijinja::Environment<'static>,
+    extras: Extras,
+    slots: Slots,
+    budget: Option<&Budget>,
+) -> Result<Staged, RdyError> {
+    let (site, m) = (sh.site, sh.m);
+    let (site_name, description) = (sh.site_name, sh.description);
+    let Extras {
+        changes: changes_summary,
+        since: since_summary,
+        warnings,
+    } = extras;
+    let mode = sh.mode;
+    let mut summary = RenderSummary {
+        pages: 0,
+        assets: 0,
+        redirects: 0,
+        warnings,
+    };
+    let kinds = page_kinds(site, m);
     // the search index is held to the bytes one file may take while its entries are collected
     let (index_cap, index_limit) = budget.map_or((u64::MAX, String::new()), Budget::file_cap);
-    let mut index = search::Index::new(&site_name, index_cap);
+    let mut index = search::Index::new(site_name, index_cap);
     let mut has_mermaid = false;
     // a publication has at most as many files as its limit: count its pages (the change
     // summaries included) before making any
@@ -1407,23 +1597,14 @@ fn build_site_from(
     }
     // a page with its notice slot's offset, recorded as it was written (a publication's pages),
     // each write admitted by the budget
-    let page_of = |ctx: &page::PageContext| -> Result<Page, RdyError> {
-        let r = match slots {
-            Slots::Source => render_page_within(&env, template_of(ctx.kind), ctx, budget)?,
-            Slots::Notices => {
-                render_page_within(&env, template_of(ctx.kind), with_notice_slot(ctx), budget)?
-            }
-        };
-        let notice = notice_offset(&r.bytes, r.notice.as_ref())?;
-        Ok((ctx.page_url.clone(), r.bytes, r.slots, notice))
-    };
+    let page_of = |ctx: &page::PageContext| render_ctx(env, slots, budget, ctx);
     // the pages are made one by one and rendered on a few threads
     let (contexts, pages) = build_and_render(
         kinds,
         |kind| {
-            let ctx = page::build(&sh, kind);
+            let ctx = build_page(sh, kind);
             has_mermaid |= ctx.has_mermaid;
-            page::finish(&sh, &ctx, &mut index);
+            page::finish(sh, &ctx, &mut index);
             if let Some(b) = budget {
                 b.index_holds(index.held());
                 if index.over() {
@@ -1442,10 +1623,10 @@ fn build_site_from(
     // the llms files and the permalinks (sr6)
     let mut extra = vec![];
     if let Some(c) = &changes_summary {
-        extra.push(page::build(&sh, page::Kind::Changes(c)));
+        extra.push(build_page(sh, page::Kind::Changes(c)));
     }
     if let Some(c) = &since_summary {
-        extra.push(page::build(&sh, page::Kind::ChangesSince(c)));
+        extra.push(build_page(sh, page::Kind::ChangesSince(c)));
     }
     let mut pages = pages;
     for ctx in &extra {
@@ -1490,7 +1671,7 @@ fn build_site_from(
         let t = match &mut redirect {
             Some(t) => t,
             None => {
-                let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
+                let ctx = build_page(sh, page::Kind::Redirect(id, &url));
                 redirect.insert(RedirectTemplate::new(&env, ctx, slots)?)
             }
         };
@@ -1502,7 +1683,7 @@ fn build_site_from(
         let (html, notice) = t.fill_at(&label, &href);
         #[cfg(debug_assertions)]
         if summary.redirects.is_multiple_of(997) {
-            let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
+            let ctx = build_page(sh, page::Kind::Redirect(id, &url));
             let full = RedirectTemplate::render(&env, &ctx, slots)?;
             debug_assert_eq!(
                 (html.as_bytes(), notice),
@@ -1563,47 +1744,15 @@ fn build_site_from(
     for (path, bytes) in assets::files(has_mermaid) {
         put_file(&mut files, budget, path.into(), bytes)?;
     }
-    // each blob moves into the file map at its last path, so the build never holds two copies
-    // of it (one hash under two paths is copied once)
     let used = sh.used_blobs.take();
-    drop(sh);
-    let media: BTreeMap<String, String> = used
-        .iter()
-        .map(|(path, (_, media_type))| (path.clone(), media_type.clone()))
-        .collect();
-    let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
-    for (h, _) in used.values() {
-        *uses.entry(h).or_default() += 1;
-    }
-    for (path, (h, _)) in &used {
-        let left = uses.get_mut(h).expect("counted above");
-        *left -= 1;
-        // a copy is admitted before it is made
-        if let Some(b) = budget {
-            let len = blobs.bytes.get(h).map_or(0, Vec::len);
-            b.reserve(&files, path, len)?;
-        }
-        let bytes = if *left == 0 {
-            blobs.bytes.remove(h)
-        } else {
-            blobs.bytes.get(h).cloned()
-        };
-        let bytes = bytes.expect("a used blob is held");
-        if let (Some(old), Some(b)) = (files.insert(path.clone(), bytes), budget) {
-            b.release(old.len());
-        }
-        summary.assets += 1;
-    }
-    Ok(BuiltSite {
-        site: SiteFiles {
-            files,
-            label: label.text,
-            header,
-            label_at,
-            summary,
-        },
+    Ok(Staged {
+        files,
+        label_at,
         notices,
-        media,
+        summary,
+        label: label.text,
+        header,
+        used,
     })
 }
 
