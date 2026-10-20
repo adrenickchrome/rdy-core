@@ -222,7 +222,7 @@ fn changing_a() -> (Served, String, String) {
             .expect("propose");
         (
             p.r#ref,
-            format!("suspect {}: update (references {})", spec.b, spec.a),
+            format!("suspect {}: confirm (references {})", spec.b, spec.a),
         )
     });
     (s, pref, line)
@@ -260,7 +260,7 @@ fn di12_rdy_answer_prints_the_consequences_rdy_approve_prints() {
         .collect();
     assert_eq!(
         want,
-        vec!["suspect <id> update (references <id>"],
+        vec!["suspect <id> confirm (references <id>"],
         "{approved}"
     );
     for all in [false, true] {

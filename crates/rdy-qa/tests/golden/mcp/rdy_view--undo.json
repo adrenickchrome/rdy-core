@@ -50,10 +50,14 @@
     {
       "because": {
         "changed": "c-CFPE0",
-        "edge": "references"
+        "edge": "references",
+        "edges": [
+          "references"
+        ],
+        "values": []
       },
       "block": "c-WKHEZ",
-      "follow_up": "update",
+      "follow_up": "confirm",
       "id": "cq-965f682ecf994b81",
       "kind": "dependent"
     }

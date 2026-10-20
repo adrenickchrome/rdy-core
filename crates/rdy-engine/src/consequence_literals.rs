@@ -17,9 +17,8 @@
 //! at its own bytes. A plain reference never reads as its target's value. A target's sources are
 //! read whole; a dependent's are read up to [`EVIDENCE_BYTES`] in all.
 //!
-//! The briefing and supersede replies are this module's callers; until they call it, only its
-//! tests do.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The briefing (`will_go_stale` states) and the consequences (values and matched rows) are
+//! this module's callers.
 
 use crate::lexicon::{Lexicon, count_scan, is_enum_field};
 use crate::search::window;
@@ -74,6 +73,7 @@ struct Literal {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LiteralSet(Vec<Literal>);
 
+#[cfg(test)]
 impl LiteralSet {
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()

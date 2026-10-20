@@ -65,8 +65,12 @@ fn vcq1_including_a_change_lists_the_referrer_of_the_block_it_moves() {
     .unwrap();
     let b = find(&v, &s.b, "suspect");
     let a_id = s.a.to_string();
-    assert_eq!(b["follow_up"], "update");
-    assert_eq!(b["because"], json!({"edge": "references", "changed": a_id}));
+    // D-CFC6V: B states no literal the include removed
+    assert_eq!(b["follow_up"], "confirm");
+    assert_eq!(
+        b["because"],
+        json!({"edge": "references", "changed": a_id, "edges": ["references"], "values": []})
+    );
     assert_eq!(
         b["id"],
         consequence_id(&hash(&v["head"]), "suspect", &s.b),
@@ -99,7 +103,7 @@ fn vcq1_excluding_it_again_lists_the_referrer_as_a_dependent() {
     )
     .unwrap();
     let b = find(&v, &s.b, "dependent");
-    assert_eq!(b["follow_up"], "update");
+    assert_eq!(b["follow_up"], "confirm");
     assert_eq!(
         b["id"],
         consequence_id(&hash(&v["head"]), "dependent", &s.b)
