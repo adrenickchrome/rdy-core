@@ -3724,7 +3724,6 @@ fn publication_costs(
     drop(pages);
     drop(site);
     drop(tagged);
-    drop(source);
     drop(read);
     drop(r);
     std::fs::remove_dir_all(&copy).expect("remove the copy");
