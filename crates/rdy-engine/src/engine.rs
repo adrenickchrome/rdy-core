@@ -61,6 +61,20 @@ pub trait Engine: Send + Sync {
             "drop --no-daemon, or run rdy render --out <path>",
         ))
     }
+    /// Publishes a tag to a publish remote's hub site as a candidate (an output seam like
+    /// [`Engine::render`]): the daemon runs the coordinator off its writer. An engine with no
+    /// daemon refuses.
+    fn publish(
+        &self,
+        _req: crate::hub_publish::PublishRequest,
+        _session: &crate::Session,
+    ) -> Result<serde_json::Value, RdyError> {
+        Err(RdyError::new(
+            crate::E_BAD_INPUT,
+            "rdy_publish runs in the daemon, and this session runs without one",
+            "drop --no-daemon, or run rdy publish <tag> --to <remote> --site <site>",
+        ))
+    }
 }
 
 /// What `rdy_render` asks for, as its parameters give it.

@@ -26,6 +26,7 @@ mod intake;
 mod land;
 mod project;
 mod publication;
+pub(crate) mod publish;
 mod read;
 mod redaction;
 mod remote;

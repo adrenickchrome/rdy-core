@@ -33,6 +33,7 @@ pub mod hub_config;
 pub mod hub_credentials;
 pub mod hub_http;
 pub mod hub_keys;
+pub mod hub_publish;
 pub mod hub_publish_files;
 pub mod hub_publish_stream;
 pub mod hub_publish_wire;

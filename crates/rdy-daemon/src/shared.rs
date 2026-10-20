@@ -9,9 +9,10 @@ use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteLink, WriteFn};
+use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_scope::ScopeRef;
-use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState};
+use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Session};
 use rdy_mcp::notify::NotifyHub;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -257,6 +258,12 @@ impl Engine for DaemonEngine {
             &self.0.root.join(&req.out),
             req.profile.as_deref(),
         )
+    }
+
+    /// `rdy_publish`: the publish helper's candidate upload, from one read state, off the
+    /// writer: no write runs and no lock is held while it sends.
+    fn publish(&self, req: PublishRequest, session: &Session) -> Result<Value, RdyError> {
+        crate::ops::publish::run(self.read(), &self.0.root, session, req)
     }
 }
 
