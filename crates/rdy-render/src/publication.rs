@@ -6,16 +6,19 @@
 //! profiles or local configuration reaches a [`Prepared`] made here.
 use crate::inline;
 use crate::page::lede_of;
-use crate::prepare::{self, FigureBlobs, History, Prepared, ProfilePresentation, Purpose};
+use crate::prepare::{FigureBlobs, History, Prepared, ProfilePresentation, Purpose};
+use crate::render_input::{capture_inputs, disagreements};
 use crate::site::{Site, Url};
 use crate::{disagree, scope_warnings};
-use rdy_engine::publication::{self, Resolved};
+use rdy_engine::publication::{self, PublicationSource, ReadPublicationSource, Resolved};
+use rdy_engine::render_inputs::{RenderInputs, validate_inputs};
 use rdy_engine::{
     E_BAD_INPUT, E_NOT_FOUND, RdyError, ReadState, Scope, VersionPosition, parse_version,
 };
 use rdy_model::Hash;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The refusal of a scope that is not canon, a tag or a landing (Task 4's wording).
@@ -33,7 +36,9 @@ fn bad_scope() -> RdyError {
 /// description, the chosen tag's name and `redacted` mark (RULING F3), the disagreements whose
 /// every side is selected and has a page, and the org warning first among the warnings. A public
 /// profile whose check is blocked refuses before any asset is read or output staged. Both
-/// purposes read the same view.
+/// purposes read the same view, which [`prepare_resolved`] builds from the source's captured
+/// inputs ([`capture_inputs`]); this local output keeps its scope's frozen mark and the project's
+/// `.rdy` directory for its placement guard.
 pub(crate) fn prepare(
     read: &ReadState,
     scope_text: &str,
@@ -55,7 +60,67 @@ pub(crate) fn prepare(
         Some(name) => chosen_tag(read, name)?,
         None => (None, false),
     };
-    let blobs = selected_blobs(read, &resolved)?;
+    let inputs = capture_inputs(read, &scope)?;
+    let source = ReadPublicationSource::with_settings(
+        read,
+        &inputs.pack,
+        &inputs.title,
+        inputs.description.as_deref(),
+    );
+    let mut prepared = prepare_resolved(
+        &source,
+        resolved,
+        tag_name.as_deref().unwrap_or_default(),
+        tag_redacted,
+        &inputs,
+    )?;
+    prepared.position.frozen = matches!(scope, Scope::At(_));
+    prepared.rdy_dir = read.root().join(".rdy");
+    Ok(prepared)
+}
+
+/// `E_BAD_INPUT`: a source whose effective pack is not the one the inputs captured. No other
+/// pack (a holder's built-in one, say) is read in its place.
+fn other_pack() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "the publication source's pack differs from the render inputs' pack",
+        "capture the render inputs from the source again",
+    )
+}
+
+/// Checks `inputs` (`validate_inputs`) and that `source` reads with the inputs' effective pack.
+pub(crate) fn check_inputs(
+    source: &dyn PublicationSource,
+    inputs: &RenderInputs,
+) -> Result<(), RdyError> {
+    validate_inputs(inputs)?;
+    if source.pack() != &inputs.pack {
+        return Err(other_pack());
+    }
+    Ok(())
+}
+
+/// The publication view of `resolved` (D-0VCQ5, D-KDFZ3), read through `source` and the captured
+/// `inputs` alone: no store, scope, canon, tension or project path. A public profile whose check
+/// is blocked is refused first. The selected state with each removed figure read as the notice,
+/// the induced graph, the selected figures' bytes (bounded by the source's limits), the pack of
+/// the inputs, the title and description (an explicit profile's own, the implicit profile's from
+/// the inputs) read through the selection, the captured disagreements whose every side is
+/// selected and has a page, the org warning first and then the scope's warnings. The chosen tag's
+/// name `tag_name` (empty for none) is the only history the output shows: no tag message, version
+/// list, canon label or in-flight link. `rdy_dir` is empty: an in-memory output has no placement.
+pub(crate) fn prepare_resolved(
+    source: &dyn PublicationSource,
+    resolved: Resolved,
+    tag_name: &str,
+    tag_redacted: bool,
+    inputs: &RenderInputs,
+) -> Result<Prepared, RdyError> {
+    crate::probe::hit();
+    check_inputs(source, inputs)?;
+    resolved.require_output()?;
+    let blobs = selected_blobs(source, &resolved)?;
     let warning = resolved.references.warning();
     let Resolved {
         profile: chosen,
@@ -65,22 +130,26 @@ pub(crate) fn prepare(
     } = resolved;
     // a figure whose blob lost content reads as removed from here on, as in source preparation
     let m = blobs.project(Arc::new(m));
-    let pack = read.pack().clone();
-    // the profile's title and description read their references through the selection, as every
-    // other text does: display words kept, else the target's label, else `unavailable reference`
-    // (the profile's own doc need not be selected)
+    let pack = inputs.pack.clone();
+    // the implicit profile shows the captured source title; an explicit one its own
+    let (title, description) = match chosen.id {
+        Some(_) => (chosen.title.as_str(), chosen.description.as_deref()),
+        None => (inputs.title.as_str(), inputs.description.as_deref()),
+    };
+    // the title and description read their references through the selection, as every other
+    // text does: display words kept, else the target's label, else `unavailable reference` (the
+    // profile's own doc need not be selected)
     let (site_name, description) = {
         let words = Site::with_unavailable(&m, &pack, "", Some(inline::UNAVAILABLE));
         (
-            words.as_written(&chosen.title),
-            chosen.description.as_deref().map(|d| words.as_written(d)),
+            words.as_written(title),
+            description.map(|d| words.as_written(d)),
         )
     };
     let site = Site::with_unavailable(&m, &pack, &site_name, Some(inline::UNAVAILABLE));
     // an entry stays only when every side is selected and has a page: an excluded side's text,
-    // count or existence never reaches the page (canon and the head landing; an older landing
-    // has none)
-    let disagreements: Vec<disagree::Disagreement> = disagree::list(read, &scope)?
+    // count or existence never reaches the page
+    let disagreements: Vec<disagree::Disagreement> = disagreements(inputs)?
         .into_iter()
         .filter(|d| {
             d.blocks
@@ -94,11 +163,12 @@ pub(crate) fn prepare(
         .collect();
     warnings.extend(scope_warnings(&m, &site, false, None));
     drop(site);
+    let tag_name = (!tag_name.is_empty()).then(|| tag_name.to_string());
     let position = VersionPosition {
         version: None,
         landings_since: 0,
         view: None,
-        frozen: matches!(scope, Scope::At(_)),
+        frozen: tag_name.is_some(),
         label: tag_name.clone().unwrap_or_default(),
     };
     Ok(Prepared {
@@ -113,7 +183,7 @@ pub(crate) fn prepare(
         landed_ms: BTreeMap::new(),
         disagreements,
         scope_text: String::new(),
-        rdy_dir: read.root().join(".rdy"),
+        rdy_dir: PathBuf::new(),
         history: History {
             warnings,
             ..History::empty()
@@ -143,23 +213,21 @@ fn chosen_tag(read: &ReadState, name: &str) -> Result<(Option<String>, bool), Rd
         })
 }
 
-/// The selected figures' blobs: the bytes of each available one through the bounded asset
-/// reader, and each unavailable one the store holds, by the request that removed its content
-/// (the store refuses it with `E_REDACTED` before it reads a chunk). Any other error refuses.
-fn selected_blobs(read: &ReadState, resolved: &Resolved) -> Result<FigureBlobs, RdyError> {
-    let bytes = publication::load_assets(read, resolved)?;
+/// The selected figures' blobs, read through `source`: the bytes of each available one through
+/// the bounded asset reader, and each unavailable one the source holds, by the request that
+/// removed its content (`PublicationSource::removed_blob`). Any other error refuses.
+fn selected_blobs(
+    source: &dyn PublicationSource,
+    resolved: &Resolved,
+) -> Result<FigureBlobs, RdyError> {
+    let bytes = publication::load_source_assets(source, resolved)?;
     let mut removed: BTreeMap<Hash, Hash> = BTreeMap::new();
     for a in resolved.attachments.iter().filter(|a| !a.available) {
-        if removed.contains_key(&a.blob) || !read.reader().has_blob(&a.blob)? {
+        if removed.contains_key(&a.blob) {
             continue;
         }
-        if let Err(e) = read.reader().get_blob(&a.blob).map_err(RdyError::from) {
-            match prepare::removed_by(&e) {
-                Some(request) => {
-                    removed.insert(a.blob, request);
-                }
-                None => return Err(e),
-            }
+        if let Some(request) = source.removed_blob(&a.blob)? {
+            removed.insert(a.blob, request);
         }
     }
     Ok(FigureBlobs::selected(bytes, removed))

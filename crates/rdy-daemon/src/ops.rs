@@ -26,6 +26,7 @@ mod intake;
 mod land;
 mod project;
 mod publication;
+pub(crate) mod publish;
 mod read;
 mod redaction;
 mod remote;
@@ -140,6 +141,7 @@ pub const OPS: &[&str] = &[
     "key_bind",
     "key_retire",
     "key_revoke",
+    "publish",
 ];
 
 #[derive(Deserialize)]
@@ -537,6 +539,12 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "key_bind" => key_bind(cx, parse(op, args, "{kind, label?, remote?}")?),
         "key_retire" => key_retire(cx, parse(op, args, "{key, remote?}")?),
         "key_revoke" => key_revoke(cx, parse(op, args, "{key, compromised_since?, remote?}")?),
+        // the coordinator's own strict request; every surface reaches the one publish helper,
+        // the direct route (`--no-daemon`) included
+        "publish" => {
+            let req = parse(op, args, "{tag, to, site, keep_latest?}")?;
+            publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
+        }
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

@@ -32,7 +32,7 @@
     </div>
   </aside>
   <div id="scrim"></div>
-  <main class="content" id="main" tabindex="-1">
+  <main class="content" id="main" tabindex="-1">{% if notice_slot is defined %}{{ notice_slot }}{% endif %}
     <nav class="crumbs" aria-label="Breadcrumb">{% for c in crumbs %}{% if not loop.first %}<span class="crumb-sep" aria-hidden="true"></span>{% endif %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}</nav>
     {% block content %}{% endblock %}
     {% if kind == "doc" and (pager.prev or pager.next) %}<nav class="pager" aria-label="Previous and next">{% include "partials/pager.html" %}</nav>{% endif %}

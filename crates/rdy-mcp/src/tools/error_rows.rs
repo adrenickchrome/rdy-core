@@ -276,7 +276,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         E_UPSTREAM_ORIGIN,
         "the request destination is not trusted for {install}",
-        UPSTREAM_ORIGIN_FIX,
+        "use the install origin; for a publish upload, add its destination to the pinned origins of this install (hub.installs.<install>.pinned_origins)",
     ),
     (E_UPSTREAM_TOKEN, UPSTREAM_TOKEN_MESSAGE, UPSTREAM_TOKEN_FIX),
     (
@@ -302,7 +302,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         E_UPSTREAM_UNCERTAIN,
         UPSTREAM_UNCERTAIN_MESSAGE,
-        UPSTREAM_UNCERTAIN_FIX,
+        "check its state on the hub before trying again; for a publish upload, check push {push} on the hub",
     ),
     (
         E_UPSTREAM_CONFIRM_HOST,

@@ -2,7 +2,8 @@
 //! whole docs and folders, their ancestor folders' own records, the selected state and induced
 //! graph, the digests, the attachments and the reference check. Nothing here is stored.
 
-use super::references::{self, ReferenceReport};
+use super::references::{self, CheckStatus, ReferenceReport};
+use super::source::{PublicationSource, ReadPublicationSource};
 use crate::error::*;
 use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
@@ -10,8 +11,7 @@ use rdy_graph::Graph;
 use rdy_model::{Block, BlockId, Hash, StateSnapshot, tree};
 use rdy_schema::publication::{self as schema, Audience};
 use rdy_schema::{Issue, Pack, Severity};
-use rdy_store::StoreReader;
-use rdy_store::kinds::{self, BlobManifest};
+use rdy_store::kinds::BlobManifest;
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,11 +148,14 @@ pub struct SelectionEntry {
 }
 
 /// One selected doc: its path in the selected tree and the digest of it and its descendants.
+/// `redacted` is true when a removal replaced the doc's own name or an ancestor folder's name in
+/// that path with the block's id (D-3M81W).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocEntry {
     pub id: BlockId,
     pub path: String,
     pub digest: Hash,
+    pub redacted: bool,
 }
 
 /// One selected figure's blob: its nearest selected doc, and whether the store can read the
@@ -177,6 +180,11 @@ pub struct PublicationWarning {
 /// One profile resolved in one snapshot. `m` and `graph` hold the selected blocks alone;
 /// `entries` (every retained block), `docs` and `attachments` are sorted, and with
 /// `selection_hash` they identify the selection. None of it is stored or written beside output.
+///
+/// `selection_identity` (D-Z8Q4N, D-075QD) hashes each entry's id and version and nothing else,
+/// so a removal, which keeps a block's recorded version, keeps it, while `selection_hash` moves.
+/// `redactions` lists, sorted and once each, the approved removal requests this resolution
+/// applies: those of the selected blocks and of the selected attachments' manifests and chunks.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub profile: ResolvedProfile,
@@ -187,6 +195,8 @@ pub struct Resolved {
     pub attachments: Vec<AttachmentEntry>,
     pub references: ReferenceReport,
     pub selection_hash: Hash,
+    pub selection_identity: Hash,
+    pub redactions: Vec<Hash>,
 }
 
 impl Resolved {
@@ -195,6 +205,112 @@ impl Resolved {
     pub fn require_output(&self) -> Result<(), RdyError> {
         self.references.require_output()
     }
+}
+
+/// The facts of one resolved profile that every surface shows the same way (D-91DZW): its stable
+/// selector, its metadata, the complete id-sorted selection with its hash and identity, and the
+/// status of its reference check. `selector` is the full profile id, or [`IMPLICIT_ORG`], whose
+/// id, version and key are None.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileFacts {
+    pub selector: String,
+    pub id: Option<BlockId>,
+    pub version: Option<Hash>,
+    pub key: Option<String>,
+    pub title: String,
+    pub audience: Audience,
+    pub trail: bool,
+    pub selection: Vec<SelectionEntry>,
+    pub selection_hash: Hash,
+    pub selection_identity: Hash,
+    pub references: CheckStatus,
+}
+
+/// The [`ProfileFacts`] of `r`, copied from its resolution: no title, selector or hash of its own.
+pub fn profile_facts(r: &Resolved) -> ProfileFacts {
+    ProfileFacts {
+        selector: r
+            .profile
+            .id
+            .as_ref()
+            .map_or_else(|| IMPLICIT_ORG.to_string(), BlockId::to_string),
+        id: r.profile.id.clone(),
+        version: r.profile.version,
+        key: r.profile.key.clone(),
+        title: r.profile.title.clone(),
+        audience: r.profile.audience,
+        trail: r.profile.trail,
+        selection: r.entries.clone(),
+        selection_hash: r.selection_hash,
+        selection_identity: r.selection_identity,
+        references: r.references.status,
+    }
+}
+
+/// The most distinct removal requests one resolution, or one comparison, lists.
+pub(crate) const REDACTION_REQUESTS: usize = 1_000_000;
+
+/// A sorted set of removal requests, bounded by [`REDACTION_REQUESTS`] before each new request
+/// is kept; a request already held costs nothing.
+#[derive(Default)]
+pub(crate) struct RequestSet(BTreeSet<Hash>);
+
+impl RequestSet {
+    pub(crate) fn insert(&mut self, request: Hash) -> Result<(), RdyError> {
+        if self.0.contains(&request) {
+            return Ok(());
+        }
+        if self.0.len() >= REDACTION_REQUESTS {
+            return Err(limit(
+                "redaction request list",
+                REDACTION_REQUESTS,
+                "requests",
+            ));
+        }
+        self.0.insert(request);
+        Ok(())
+    }
+
+    pub(crate) fn into_sorted(self) -> Vec<Hash> {
+        self.0.into_iter().collect()
+    }
+}
+
+/// The selection identity of `entries` (D-075QD), which are in id order: ASCII
+/// `rdy-publication-selection-identity`, one NUL, u32 LE 1, u32 LE entry count, then per entry
+/// its u32 LE id length, its UTF-8 id bytes and its 32 raw version bytes. Nothing else enters:
+/// no attachment row, removal mark, availability, title, path, selector or audience. A transient
+/// read identity, not a stored format.
+fn selection_identity(entries: &[SelectionEntry], l: &Limits) -> Result<Hash, RdyError> {
+    let over = || limit("selection", l.selection, "blocks");
+    let count = u32::try_from(entries.len()).map_err(|_| over())?;
+    let mut h = blake3::Hasher::new();
+    h.update(b"rdy-publication-selection-identity\0");
+    h.update(&1u32.to_le_bytes());
+    h.update(&count.to_le_bytes());
+    for e in entries {
+        let id = e.id.as_str().as_bytes();
+        let len = u32::try_from(id.len()).map_err(|_| over())?;
+        h.update(&len.to_le_bytes());
+        h.update(id);
+        h.update(&e.version.0);
+    }
+    Ok(Hash(*h.finalize().as_bytes()))
+}
+
+/// Whether a removal replaced the name of the doc or folder `id`, or of a folder above it, in
+/// `m`: a removed version's stub names itself by its id (D-3M81W). Iterative and bounded by the
+/// state's size, so a damaged chain cannot loop.
+pub(crate) fn name_replaced(m: &Materialized, id: &BlockId) -> bool {
+    let mut cur = m.get(id);
+    for _ in 0..=m.len() {
+        let Some(b) = cur else { break };
+        if b.is_redacted() {
+            return true;
+        }
+        cur = b.parent.as_ref().and_then(|p| m.get(p));
+    }
+    false
 }
 
 /// `profile` (a full profile id or an existing key) resolved in `scope`, which must be canon or
@@ -218,7 +334,36 @@ pub fn resolve(read: &ReadState, scope: &Scope, profile: &str) -> Result<Resolve
     }
     check_name(profile, &limits())?;
     let m = read.materialized(scope)?;
-    resolve_in(read, &m, profile, &limits())
+    with_read_source(read, |source| resolve_in(source, &m, profile, &limits()))
+}
+
+/// `profile` (a full profile id or an existing key, or [`IMPLICIT_ORG`]) resolved in the
+/// snapshot `m` through `source`, with no store open: the selection [`resolve`] makes, by the
+/// same rules and with the same errors. `m` is checked whole by the snapshot limits a take keeps
+/// before any of it is scanned; the caller owns the scope rule, which `m` alone cannot show.
+pub fn resolve_source(
+    source: &dyn PublicationSource,
+    m: &Materialized,
+    profile: &str,
+) -> Result<Resolved, RdyError> {
+    let l = limits();
+    check_name(profile, &l)?;
+    check_snapshot_limits(m.iter(), |h| source.manifest(h))?;
+    resolve_in(source, m, profile, &l)
+}
+
+/// `f` over the store source of `read`, with the settings `read` captured when it was published.
+fn with_read_source<T>(
+    read: &ReadState,
+    f: impl FnOnce(&dyn PublicationSource) -> Result<T, RdyError>,
+) -> Result<T, RdyError> {
+    let (title, description) = (read.project_name(), read.project_description());
+    f(&ReadPublicationSource::with_settings(
+        read,
+        read.pack(),
+        &title,
+        description.as_deref(),
+    ))
 }
 
 /// Tests only: [`resolve`] over the state `m`, which may be built in memory (for trees and
@@ -230,7 +375,7 @@ pub fn resolve_in_for_tests(
     m: &Materialized,
     profile: &str,
 ) -> Result<Resolved, RdyError> {
-    resolve_in(read, m, profile, &limits())
+    with_read_source(read, |source| resolve_in(source, m, profile, &limits()))
 }
 
 fn check_name(profile: &str, l: &Limits) -> Result<(), RdyError> {
@@ -268,6 +413,32 @@ fn request(name: &str) -> Result<Request, RdyError> {
     }
 }
 
+/// The longest stable selector a take reads, in UTF-8 bytes; a longer one is refused before it
+/// is parsed.
+const STABLE_SELECTOR_BYTES: usize = 128;
+
+/// The selector a publication take names its profile by (D-91DZW): a full profile block id or
+/// [`IMPLICIT_ORG`], never a key, which a later landing may move. The implicit values keep the
+/// request parser's refusals; any other text, or one over 128 bytes, is refused with one text the
+/// render process shares. Only the text is checked: a well-formed id need name no block.
+pub fn check_stable_selector(selector: &str) -> Result<(), RdyError> {
+    let unstable = || {
+        RdyError::new(
+            E_BAD_INPUT,
+            "A publication take names its profile by a full profile id or implicit:org.",
+            "Pass the site's profile id, or implicit:org.",
+        )
+    };
+    if selector.len() > STABLE_SELECTOR_BYTES {
+        return Err(unstable());
+    }
+    match request(selector)? {
+        Request::Implicit(_) => Ok(()),
+        Request::Named if BlockId::parse(selector).is_ok() => Ok(()),
+        Request::Named => Err(unstable()),
+    }
+}
+
 fn not_found(name: &str) -> RdyError {
     RdyError::new(
         E_NOT_FOUND,
@@ -276,7 +447,7 @@ fn not_found(name: &str) -> RdyError {
     )
 }
 
-fn invalid_tree() -> RdyError {
+pub(crate) fn invalid_tree() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         "Publication selection has an invalid document tree.",
@@ -435,27 +606,12 @@ fn check_tree<'m>(
     Ok(())
 }
 
-/// Whether the store can read blob `h`, judged from its manifest and the redaction marks on the
-/// manifest and its chunks; no blob byte is read.
-fn available(reader: &StoreReader, h: &Hash) -> Result<bool, RdyError> {
-    if !reader.has_blob(h)? || reader.redaction_of(kinds::BLOB_MANIFEST, h)?.is_some() {
-        return Ok(false);
-    }
-    let manifest: BlobManifest = reader.get_typed(kinds::BLOB_MANIFEST, h)?;
-    for c in &manifest.chunks {
-        if reader.redaction_of(kinds::BLOB_CHUNK, c)?.is_some() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 /// Step 6: one row per selected figure whose `blob` field is a hash, sorted by (home doc, block,
 /// blob). A removed figure's stub has no fields, so no row. The rows are bounded and sorted
 /// first, then each distinct blob is checked once in that order, so the first damaged manifest
-/// reported is the first row's.
+/// reported is the first row's. Availability is the source's: no blob byte is read.
 fn attachments(
-    reader: &StoreReader,
+    source: &dyn PublicationSource,
     sel: &Materialized,
     l: &Limits,
 ) -> Result<Vec<AttachmentEntry>, RdyError> {
@@ -479,7 +635,7 @@ fn attachments(
         row.available = match seen.get(&row.blob) {
             Some(ok) => *ok,
             None => {
-                let ok = available(reader, &row.blob)?;
+                let ok = source.blob_available(&row.blob)?;
                 seen.insert(row.blob, ok);
                 ok
             }
@@ -587,12 +743,12 @@ fn subtree(sel: &Materialized, id: &BlockId) -> BTreeSet<BlockId> {
 }
 
 fn resolve_in(
-    read: &ReadState,
+    source: &dyn PublicationSource,
     m: &Materialized,
     name: &str,
     l: &Limits,
 ) -> Result<Resolved, RdyError> {
-    let (pack, reader) = (read.pack(), read.reader());
+    let pack = source.pack();
     check_name(name, l)?;
     let (profile, keep) = match request(name)? {
         // the implicit profile reads no profile block and selects every block of the snapshot,
@@ -604,8 +760,8 @@ fn resolve_in(
                 id: None,
                 version: None,
                 key: None,
-                title: read.project_name(),
-                description: read.project_description(),
+                title: source.title().to_string(),
+                description: source.description().map(str::to_string),
                 audience,
                 trail: audience == Audience::Org,
             };
@@ -652,8 +808,19 @@ fn resolve_in(
     check_graph(sel.iter(), l)?;
     let graph = Graph::build_with(sel.iter(), Arc::new(pack.tracking())).induced(&keep);
 
-    // 6. attachments
-    let attachments = attachments(reader, &sel, l)?;
+    // 6. attachments, then the removal requests of the selected blocks and of the selected
+    // attachments' manifests and chunks, each bounded before it is kept; no payload is read
+    let attachments = attachments(source, &sel, l)?;
+    let mut requests = RequestSet::default();
+    for b in sel.iter() {
+        if let Some(request) = b.redaction() {
+            requests.insert(request)?;
+        }
+    }
+    let blobs: BTreeSet<Hash> = attachments.iter().map(|a| a.blob).collect();
+    for blob in &blobs {
+        source.visit_blob_redactions(blob, &mut |request| requests.insert(request))?;
+    }
 
     // 7. entries, paths and digests
     let entries: Vec<SelectionEntry> = sel
@@ -686,6 +853,7 @@ fn resolve_in(
             id: b.id.clone(),
             path,
             digest: Hash::of(&bytes),
+            redacted: name_replaced(&sel, &b.id),
         });
     }
     let mut bytes = b"rdy-publication-selection-1\0".to_vec();
@@ -708,6 +876,7 @@ fn resolve_in(
     for a in &attachments {
         put_attachment(&mut bytes, a);
     }
+    let selection_identity = selection_identity(&entries, l)?;
     Ok(Resolved {
         profile,
         m: sel,
@@ -717,33 +886,53 @@ fn resolve_in(
         attachments,
         references,
         selection_hash: Hash::of(&bytes),
+        selection_identity,
+        redactions: requests.into_sorted(),
     })
 }
 
 /// The bytes of every distinct available attachment blob of `resolved`, by hash, read through
-/// the store's own blob reader. Every manifest length is checked against the per-blob and total
-/// bounds before any blob byte is read; an unavailable blob is skipped.
+/// the store's own blob reader: [`load_source_assets`] over `read`'s store.
 pub fn load_assets(
     read: &ReadState,
     resolved: &Resolved,
 ) -> Result<BTreeMap<Hash, Vec<u8>>, RdyError> {
+    with_read_source(read, |source| load_source_assets(source, resolved))
+}
+
+/// The bytes of every distinct available attachment blob of `resolved`, by hash, read through
+/// `source`. A public profile whose reference check is blocked is refused first
+/// ([`Resolved::require_output`]), before any manifest or byte is read. Then every manifest
+/// length is checked against the per-blob and total bounds before any blob byte is read, and
+/// each blob's bytes against the same bounds once read; an unavailable blob is skipped.
+pub fn load_source_assets(
+    source: &dyn PublicationSource,
+    resolved: &Resolved,
+) -> Result<BTreeMap<Hash, Vec<u8>>, RdyError> {
+    resolved.require_output()?;
     let l = limits();
-    let reader = read.reader();
     let hashes: BTreeSet<Hash> = resolved
         .attachments
         .iter()
         .filter(|a| a.available)
         .map(|a| a.blob)
         .collect();
-    check_assets(
-        &hashes,
-        &mut |h| Ok(Some(reader.get_typed(kinds::BLOB_MANIFEST, h)?)),
-        &l,
-    )?;
+    check_assets(&hashes, &mut |h| source.manifest(h), &l)?;
     let mut out = BTreeMap::new();
+    let mut total = 0u64;
     for h in hashes {
         BLOB_READS.with(|c| c.set(c.get().wrapping_add(1)));
-        out.insert(h, reader.get_blob(&h)?);
+        let bytes = source.blob(&h)?;
+        // a source's bytes keep the bounds its manifest was checked against
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if len > l.blob {
+            return Err(limit("blob", l.blob, "bytes"));
+        }
+        total = total.saturating_add(len);
+        if total > l.assets {
+            return Err(limit("assets", l.assets, "bytes"));
+        }
+        out.insert(h, bytes);
     }
     Ok(out)
 }

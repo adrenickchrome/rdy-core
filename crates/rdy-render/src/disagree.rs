@@ -18,17 +18,11 @@ pub struct Disagreement {
 }
 
 /// The reader sentence of a tension kind (by its wire name). The table is closed: a kind that
-/// does not persist in canon (D-84QSN) has none, and its tensions are skipped.
+/// does not persist in canon (D-84QSN) has none, and its tensions are skipped. The table is the
+/// render inputs' own (`rdy_engine::render_inputs::disagreement_sentence`), so a captured
+/// projection and a page read the same six sentences.
 pub fn sentence(kind: &str) -> Option<&'static str> {
-    Some(match kind {
-        "fork" => "These pages give two versions of one point.",
-        "duplicate_definition" => "These pages define the same thing twice.",
-        "deprecated_reference" => "This page still points to something that was retired.",
-        "value_disagreement" => "These pages state different values for the same thing.",
-        "restatement_drift" => "This page restates a point that has since changed.",
-        "semantic" => "A reviewer found that these statements contradict each other.",
-        _ => return None,
-    })
+    rdy_engine::render_inputs::disagreement_sentence(kind)
 }
 
 /// The disagreements of `scope`, for canon and for a tag at canon's head only. A tag at a past

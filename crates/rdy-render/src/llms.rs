@@ -6,6 +6,7 @@
 use crate::page::PageContext;
 use crate::site::Site;
 use crate::version;
+use std::borrow::Cow;
 use std::ops::Range;
 
 /// The most characters of a page's first prose that `llms.txt` shows beside its link.
@@ -197,30 +198,92 @@ fn head(
     (t, at)
 }
 
-/// The text of `llms.txt`: `pages` are in tree order.
+/// A file's text would take more bytes than it may: how many its buffer held when it stopped.
+#[derive(Debug)]
+pub(crate) struct Over {
+    pub held: usize,
+}
+
+/// A file's text as it is written, held to `cap` bytes: a piece that would take it over is
+/// refused before the text holds it, and the buffer never grows past the cap.
+struct Capped {
+    s: String,
+    cap: usize,
+}
+
+impl Capped {
+    fn new(cap: usize) -> Capped {
+        Capped {
+            s: String::new(),
+            cap,
+        }
+    }
+
+    fn push_str(&mut self, x: &str) -> Result<(), Over> {
+        let end = self
+            .s
+            .len()
+            .checked_add(x.len())
+            .filter(|end| *end <= self.cap)
+            .ok_or(Over {
+                held: self.s.capacity(),
+            })?;
+        if end > self.s.capacity() {
+            let grown = self.s.capacity().saturating_mul(2).max(end).min(self.cap);
+            self.s.reserve_exact(grown - self.s.len());
+        }
+        self.s.push_str(x);
+        Ok(())
+    }
+}
+
+/// [`Capped`] text that never ends in whitespace: what a piece ends with is held back until
+/// words follow it, so the text is the pieces' `trim_end` as it is written.
+struct Trimmed {
+    t: Capped,
+    tail: String,
+}
+
+impl Trimmed {
+    fn push_str(&mut self, x: &str) -> Result<(), Over> {
+        let words = x.trim_end();
+        if !words.is_empty() {
+            self.t.push_str(&self.tail)?;
+            self.tail.clear();
+            self.t.push_str(words)?;
+        }
+        self.tail.push_str(&x[words.len()..]);
+        Ok(())
+    }
+}
+
+/// The text of `llms.txt`, at most `cap` bytes: `pages` are in tree order.
 fn index_text(
     site: &Site,
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> (String, Range<usize>) {
-    let (mut t, at) = head(site_name, description, version);
-    t.push_str("## Pages\n\n");
+    cap: usize,
+) -> Result<(String, Range<usize>), Over> {
+    let (head, at) = head(site_name, description, version);
+    let mut t = Capped::new(cap);
+    t.push_str(&head)?;
+    t.push_str("## Pages\n\n")?;
     for p in pages.iter().filter(|p| matches!(p.kind, "doc" | "folder")) {
         // a folder's page is `<folder>/index.html`, one level above the pages it holds
         let depth = p.page_url.matches('/').count() - usize::from(p.kind == "folder");
-        t.push_str(&"  ".repeat(depth));
+        t.push_str(&"  ".repeat(depth))?;
         t.push_str(&format!(
             "- [{}]({})",
             link_text(&one_line(&p.title)),
             p.page_url
-        ));
+        ))?;
         if let Some(b) = blurb(p, site) {
-            t.push_str(": ");
-            t.push_str(&b);
+            t.push_str(": ")?;
+            t.push_str(&b)?;
         }
-        t.push('\n');
+        t.push_str("\n")?;
     }
     let reference: Vec<String> = pages
         .iter()
@@ -232,10 +295,12 @@ fn index_text(
         })
         .collect();
     if !reference.is_empty() {
-        t.push_str("\n## Reference\n\n");
-        t.extend(reference);
+        t.push_str("\n## Reference\n\n")?;
+        for r in &reference {
+            t.push_str(r)?;
+        }
     }
-    (t, at)
+    Ok((t.s, at))
 }
 
 /// How a line of [`reader_text`] joins the one before it.
@@ -494,63 +559,117 @@ fn reader_text(html: &str) -> String {
     out.text()
 }
 
-/// The text of `llms-full.txt`: every folder's and doc's own words, `pages` in tree order.
+/// The text of `llms-full.txt`, at most `cap` bytes: every folder's and doc's own words,
+/// `pages` in tree order. The text ends in one newline, after its last words.
 fn full_text(
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> (String, Range<usize>) {
-    let (mut t, at) = head(site_name, description, version);
+    cap: usize,
+) -> Result<(String, Range<usize>), Over> {
+    let (head, at) = head(site_name, description, version);
+    // room is kept for the closing newline
+    let mut t = Trimmed {
+        t: Capped::new(cap.saturating_sub(1)),
+        tail: String::new(),
+    };
+    t.push_str(&head)?;
     for p in pages.iter().filter(|p| matches!(p.kind, "doc" | "folder")) {
-        t.push_str(&format!("# {}\n\n", md_text(&one_line(&p.title))));
-        let mut parts: Vec<String> = vec![];
+        t.push_str(&format!("# {}\n\n", md_text(&one_line(&p.title))))?;
+        let mut parts: Vec<Cow<str>> = vec![];
         if let Some(f) = &p.body.folder {
-            parts.extend(f.description_html.as_deref().map(|d| format!("<p>{d}</p>")));
+            parts.extend(
+                f.description_html
+                    .as_deref()
+                    .map(|d| Cow::Owned(format!("<p>{d}</p>"))),
+            );
         }
         if let Some(d) = &p.body.doc {
-            parts.extend(d.lede.as_deref().map(|l| format!("<p>{l}</p>")));
+            parts.extend(d.lede.as_deref().map(|l| Cow::Owned(format!("<p>{l}</p>"))));
         }
-        parts.extend(p.items.iter().map(|i| i.html.clone()));
+        parts.extend(p.items.iter().map(|i| Cow::Borrowed(i.html.as_str())));
         for part in parts {
             let text = reader_text(&part);
             if !text.is_empty() {
-                t.push_str(&text);
-                t.push_str("\n\n");
+                t.push_str(&text)?;
+                t.push_str("\n\n")?;
             }
         }
     }
-    t.truncate(t.trim_end().len());
-    t.push('\n');
-    (t, at)
+    let mut t = t.t;
+    t.cap = cap;
+    t.push_str("\n")?;
+    Ok((t.s, at))
 }
 
-/// The bytes of `llms.txt`, and where the label's text is in them.
-pub fn index_bytes(
+/// The bytes of `llms.txt`, and where the label's text is in them; refused when they would
+/// take more than `cap` bytes.
+pub(crate) fn index_bytes(
     site: &Site,
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> (Vec<u8>, Range<usize>) {
-    let (t, at) = index_text(site, pages, site_name, description, version);
-    (t.into_bytes(), at)
+    cap: usize,
+) -> Result<(Vec<u8>, Range<usize>), Over> {
+    let (t, at) = index_text(site, pages, site_name, description, version, cap)?;
+    Ok((t.into_bytes(), at))
 }
 
-/// The bytes of `llms-full.txt`, and where the label's text is in them.
-pub fn full_bytes(
+/// The bytes of `llms-full.txt`, and where the label's text is in them; refused when they
+/// would take more than `cap` bytes.
+pub(crate) fn full_bytes(
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
     version: &version::Label,
-) -> (Vec<u8>, Range<usize>) {
-    let (t, at) = full_text(pages, site_name, description, version);
-    (t.into_bytes(), at)
+    cap: usize,
+) -> Result<(Vec<u8>, Range<usize>), Over> {
+    let (t, at) = full_text(pages, site_name, description, version, cap)?;
+    Ok((t.into_bytes(), at))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fix round 2: a capped text refuses the piece that would take it over its cap, and its
+    /// buffer never grows past the cap.
+    #[test]
+    fn hpb6_capped_text_refuses_before_it_grows_past_its_cap() {
+        let mut t = Capped::new(10);
+        t.push_str("abcd").unwrap();
+        t.push_str("efghij").unwrap();
+        assert_eq!(t.s, "abcdefghij");
+        assert!(t.s.capacity() <= 10, "{}", t.s.capacity());
+        let o = t.push_str("k").unwrap_err();
+        assert_eq!((t.s.as_str(), o.held), ("abcdefghij", t.s.capacity()));
+        let mut t = Capped::new(5);
+        assert!(t.push_str("abcdef").is_err());
+        assert_eq!(t.s.capacity(), 0);
+    }
+
+    /// Fix round 2: trimmed text is the pieces' `trim_end`, written as it goes: whitespace that
+    /// ends the text never takes room.
+    #[test]
+    fn hpb6_trimmed_text_holds_back_trailing_whitespace() {
+        let pieces = ["# a\n\n", "words", "\n\n", " \t", "# \n\n"];
+        let all: String = pieces.concat();
+        let mut t = Trimmed {
+            t: Capped::new(all.trim_end().len()),
+            tail: String::new(),
+        };
+        for p in pieces {
+            t.push_str(p).unwrap();
+        }
+        assert_eq!(t.t.s, all.trim_end());
+        let mut t = Trimmed {
+            t: Capped::new(all.trim_end().len() - 1),
+            tail: String::new(),
+        };
+        assert!(pieces.iter().try_for_each(|p| t.push_str(p)).is_err());
+    }
 
     #[test]
     fn plain_text_drops_tags_and_decodes_what_escape_wrote() {

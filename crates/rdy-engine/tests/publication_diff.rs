@@ -234,6 +234,7 @@ fn changed_doc(before: &Resolved, after: &Resolved, id: &str) -> ChangedDoc {
         after_path: a.path,
         before_digest: b.digest,
         after_digest: a.digest,
+        redacted: b.redacted || a.redacted,
     }
 }
 
@@ -494,6 +495,7 @@ fn pub7_child_asset_path_and_redaction_changes_are_visible() {
             after_version: renamed.m.version_of(&bid("fd-T0P01")),
             before_path: Some("top".into()),
             after_path: Some("renamed".into()),
+            redacted: false,
         }]
     );
 
@@ -709,6 +711,7 @@ fn pub7_profile_and_ancestor_metadata_changes_are_visible() {
             after_version: after.m.version_of(&bid("fd-T0P01")),
             before_path: Some("top".into()),
             after_path: Some("top".into()),
+            redacted: false,
         }]
     );
     assert_ne!(
@@ -784,6 +787,7 @@ fn pub7_profile_and_ancestor_metadata_changes_are_visible() {
             after_version: grown.m.version_of(&bid("fd-NEW01")),
             before_path: None,
             after_path: Some("top/area/new".into()),
+            redacted: false,
         }]
     );
     assert!(d.added_docs.is_empty());
@@ -883,6 +887,7 @@ fn pub7_removed_docs_and_attachments_are_reported() {
             after_version: None,
             before_path: Some("area/sub".into()),
             after_path: None,
+            redacted: false,
         }]
     );
     assert!(d.new_references.is_empty());

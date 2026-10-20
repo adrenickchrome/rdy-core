@@ -4,11 +4,15 @@
 //! captured read snapshots; no daemon and no second writer service. A record or a rule belongs to
 //! core: this crate adds none. Every type its signatures use is re-exported here, so a consumer
 //! depends on this crate alone. No raw `Local`, `Rdy`, `ReadState` or `StoreReader` escapes it.
+//! `rendering` writes a render request for the host's child process and renders one page of a
+//! captured tag; the renderer itself is core's (`rdy-render`).
 //! No product behaviour is promised stable across pins.
 
 pub mod history;
 pub mod maintenance;
 pub mod publication;
+pub mod publication_take;
+pub mod rendering;
 pub mod signatures;
 mod store;
 pub mod stream;
@@ -16,6 +20,10 @@ pub mod take;
 mod value;
 
 pub use maintenance::ChainEnd;
+pub use publication::{ProfileFacts, profile_facts};
+pub use publication_take::{
+    PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
+};
 pub use rdy_engine::{CarriedTargetIssue, CarriedWarning, RdyError};
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::meta::Origin;

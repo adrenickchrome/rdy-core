@@ -26,8 +26,8 @@ pub(crate) struct ExportArgs {
     /// pdf, html or md.
     #[arg(long, value_parser = ["pdf", "html", "md"])]
     format: String,
-    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. Only with --format md.
-    #[arg(long, value_parser = ["mkdocs"])]
+    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. Only with --format md.
+    #[arg(long, value_parser = ["mkdocs", "techdocs"])]
     layout: Option<String>,
     /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]

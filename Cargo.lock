@@ -1886,6 +1886,7 @@ dependencies = [
  "postcard",
  "rdy-engine",
  "rdy-model",
+ "rdy-render",
  "rdy-schema",
  "rdy-store",
  "serde",
@@ -1936,6 +1937,7 @@ name = "rdy-engine"
 version = "0.11.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "crc32fast",
  "criterion",
  "ed25519-dalek",

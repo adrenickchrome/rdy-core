@@ -9,10 +9,22 @@ pub mod live;
 mod llms;
 pub mod menu;
 mod nav;
+mod one_page;
 mod page;
 mod prepare;
 pub mod print;
+#[cfg(feature = "probe")]
+pub mod probe;
+/// The feature-off probe: private, and `hit()` compiles to nothing.
+#[cfg(not(feature = "probe"))]
+mod probe {
+    #[inline(always)]
+    pub(crate) fn hit() {}
+}
+pub mod process;
 mod publication;
+pub mod publish;
+pub mod render_input;
 pub mod review;
 mod search;
 mod site;
@@ -21,13 +33,21 @@ mod trail;
 mod version;
 
 pub use html::{Link, escape, text_html};
+pub use one_page::{RenderedPage, render_publication_page};
 
-use rdy_engine::{E_IO, Materialized, RdyError, ReadState, Scope};
+use rdy_engine::publication::PublicationSource;
+use rdy_engine::publication_manifest::{
+    MANIFEST_RECIPE, MAX_ARTIFACT_BYTES, MAX_FILE_BYTES, MAX_FILES, Manifest, ManifestEntry,
+    NOTICE_SLOT, manifest_hash,
+};
+use rdy_engine::render_inputs::RenderInputs;
+use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Hash, tree};
 use serde::Serialize;
 use site::Site;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RenderSummary {
@@ -69,6 +89,25 @@ struct HeaderHtml(String);
 
 impl minijinja::value::Object for HeaderHtml {}
 
+/// The empty notice slot of a publication page (hub D-YJ9TA), as a template writes it right after
+/// its opening main element (`{{ notice_slot }}`, which only a publication page's context holds):
+/// the formatter writes the 18 bytes of [`NOTICE_SLOT`] and records where they went in the page.
+/// The hub fills the slot; core writes neither a notice nor its text.
+#[derive(Debug)]
+struct NoticeHtml;
+
+impl minijinja::value::Object for NoticeHtml {}
+
+/// `E_BAD_INPUT`: a publication page whose template wrote no notice slot, or more than one, or
+/// whose recorded slot does not hold the empty slot's bytes.
+fn bad_notice_slot() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "publication page has an invalid notice slot",
+        "use the templates shipped with this rdy version",
+    )
+}
+
 /// What a recorded range of a page holds: the version label's text, or the header's markup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlotKind {
@@ -85,19 +124,43 @@ pub type Slot = (SlotKind, std::ops::Range<usize>);
 struct PageOut {
     bytes: Vec<u8>,
     label_at: Vec<Slot>,
+    /// Where the page wrote its notice slot ([`NoticeHtml`]), when it wrote one.
+    notice: Option<std::ops::Range<usize>>,
+    /// The page tried to write a second notice slot: the render fails.
+    second_notice: bool,
+    /// A write the build's limits refused: the render fails with it.
+    refused: Option<RdyError>,
+}
+
+/// A page [`render_page_out`] rendered: its bytes, its label and header ranges, and its notice
+/// slot's range.
+#[derive(Debug)]
+struct Rendered {
+    bytes: Vec<u8>,
+    slots: Vec<Slot>,
+    notice: Option<std::ops::Range<usize>>,
 }
 
 thread_local! {
     static PAGE_OUT: std::cell::RefCell<Option<PageOut>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`].
-struct PageSink;
+/// The sink [`render_page`] hands minijinja: it appends to this thread's [`PageOut`], each
+/// write admitted first by a publication build's limits when there are some.
+struct PageSink<'b>(Option<&'b Budget>);
 
-impl std::io::Write for PageSink {
+impl std::io::Write for PageSink<'_> {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         PAGE_OUT.with_borrow_mut(|o| match o {
             Some(o) => {
+                if let Some(budget) = self.0 {
+                    let len = u64::try_from(o.bytes.len()).unwrap_or(u64::MAX);
+                    let n = u64::try_from(b.len()).unwrap_or(u64::MAX);
+                    if let Err(e) = budget.admit(len, n) {
+                        o.refused = Some(e);
+                        return Err(std::io::Error::other("over the publication's limits"));
+                    }
+                }
                 o.bytes.extend_from_slice(b);
                 Ok(b.len())
             }
@@ -117,12 +180,67 @@ fn render_page<S: Serialize>(
     name: &str,
     ctx: S,
 ) -> Result<(Vec<u8>, Vec<Slot>), RdyError> {
+    render_page_out(env, name, ctx).map(|r| (r.bytes, r.slots))
+}
+
+/// [`render_page`], with the range of the notice slot the page wrote. A second notice slot is a
+/// render error, refused as an invalid notice slot.
+fn render_page_out<S: Serialize>(
+    env: &minijinja::Environment<'static>,
+    name: &str,
+    ctx: S,
+) -> Result<Rendered, RdyError> {
+    render_page_within(env, name, ctx, None)
+}
+
+/// [`render_page_out`], each write admitted by `budget` first when there is one: a write over
+/// its limits stops the render with the limit's error, before the page holds those bytes.
+fn render_page_within<S: Serialize>(
+    env: &minijinja::Environment<'static>,
+    name: &str,
+    ctx: S,
+    budget: Option<&Budget>,
+) -> Result<Rendered, RdyError> {
     let t = env.get_template(name).map_err(tpl)?;
     PAGE_OUT.set(Some(PageOut::default()));
-    let rendered = t.render_captured_to(ctx, PageSink).map(drop);
+    let rendered = t.render_captured_to(ctx, PageSink(budget)).map(drop);
     let out = PAGE_OUT.take().unwrap_or_default();
+    if let Some(e) = out.refused {
+        return Err(e);
+    }
+    if out.second_notice {
+        return Err(bad_notice_slot());
+    }
     rendered.map_err(tpl)?;
-    Ok((out.bytes, out.label_at))
+    Ok(Rendered {
+        bytes: out.bytes,
+        slots: out.label_at,
+        notice: out.notice,
+    })
+}
+
+/// The context of a publication page: `ctx`, with the notice slot a template writes right after
+/// its opening main element.
+fn with_notice_slot<S: Serialize>(ctx: &S) -> minijinja::Value {
+    minijinja::context! {
+        notice_slot => minijinja::Value::from_object(NoticeHtml),
+        ..minijinja::Value::from_serialize(ctx)
+    }
+}
+
+/// The page's notice slot: its range checked to hold the empty slot's bytes, its start as the
+/// byte offset a manifest records. None when the page wrote no slot.
+fn notice_offset(
+    bytes: &[u8],
+    notice: Option<&std::ops::Range<usize>>,
+) -> Result<Option<u64>, RdyError> {
+    let Some(r) = notice else { return Ok(None) };
+    if bytes.get(r.clone()) != Some(NOTICE_SLOT) {
+        return Err(bad_notice_slot());
+    }
+    u64::try_from(r.start)
+        .map(Some)
+        .map_err(|_| bad_notice_slot())
 }
 
 fn write_failure() -> minijinja::Error {
@@ -166,6 +284,34 @@ fn write_slot(
     }
 }
 
+/// Writes the empty notice slot ([`NoticeHtml`]) straight into the page [`render_page`] is
+/// rendering, and records the bytes it took. A slot in a captured block, outside a page render or
+/// written a second time is an error.
+fn write_notice(out: &mut minijinja::Output) -> Result<(), minijinja::Error> {
+    let slot = std::str::from_utf8(NOTICE_SLOT).expect("the slot is ASCII");
+    let len = || PAGE_OUT.with_borrow(|o| o.as_ref().map(|o| o.bytes.len()));
+    let start = len();
+    out.write_str(slot).map_err(|_| write_failure())?;
+    let refused =
+        |what: &'static str| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, what);
+    match (start, len()) {
+        (Some(start), Some(end)) if end - start == slot.len() => PAGE_OUT.with_borrow_mut(|o| {
+            let Some(o) = o else {
+                return Err(refused("no page is being rendered"));
+            };
+            if o.notice.is_some() {
+                o.second_notice = true;
+                return Err(refused("a page writes one notice slot"));
+            }
+            o.notice = Some(start..end);
+            Ok(())
+        }),
+        _ => Err(refused(
+            "the notice slot is written only straight into a page that render_page renders",
+        )),
+    }
+}
+
 /// Writes the version label (a [`LabelText`]): escaped in an HTML template.
 fn write_label(
     out: &mut minijinja::Output,
@@ -192,6 +338,9 @@ fn format_value(
     }
     if let Some(header) = value.downcast_object_ref::<HeaderHtml>() {
         return write_slot(out, SlotKind::Header, &header.0);
+    }
+    if value.downcast_object_ref::<NoticeHtml>().is_some() {
+        return write_notice(out);
     }
     if matches!(state.auto_escape(), minijinja::AutoEscape::Html)
         && !value.is_safe()
@@ -616,7 +765,13 @@ fn scope_warnings(
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 /// Without a profile it is the full source (RULING F2).
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
-    build_site_from(prepare::source(rdy, scope, prepare::Purpose::Site)?, mode)
+    build_site_from(
+        prepare::source(rdy, scope, prepare::Purpose::Site)?,
+        mode,
+        Slots::Source,
+        None,
+    )
+    .map(|b| b.site)
 }
 
 /// Builds the static site of the publication profile `profile` (an id or key) at `scope_text`
@@ -630,7 +785,129 @@ pub fn build_profile_site(
     profile: &str,
 ) -> Result<SiteFiles, RdyError> {
     let prepared = publication::prepare(read, scope_text, profile, prepare::Purpose::Site)?;
-    build_site_from(prepared, Mode::Static)
+    build_site_from(prepared, Mode::Static, Slots::Source, None).map(|b| b.site)
+}
+
+/// A publication artifact (D-KDFZ3, hub r-50C97): every served file by its site-relative path,
+/// with its bytes, and the manifest that lists them. The manifest is no file of the artifact: it
+/// is kept beside the files and never hashes itself. `warnings` are the build's: an org
+/// profile's reference warning first, then the scope's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationArtifact {
+    pub files: BTreeMap<String, Vec<u8>>,
+    pub manifest: Manifest,
+    pub manifest_hash: Hash,
+    pub warnings: Vec<String>,
+}
+
+/// Builds the publication of `selector` (a profile id or key, or `implicit:org`) in the tagged
+/// snapshot `m` in memory (D-KDFZ3, D-0VCQ5, D-QYCRB): the static site of the profile's
+/// selection, read through `source` and the captured `inputs` alone, so equal inputs give equal
+/// bytes whatever the store's path, canon or tension state. `inputs` must be this renderer's and
+/// `source` must read with their effective pack. The site shows `tag_name` (and its `redacted`
+/// mark when `tag_redacted`) as its only history. Every HTML page holds one empty notice slot
+/// right after its opening main element, at the offset its manifest entry records; no other file
+/// has one. A public profile whose reference check is blocked refuses with
+/// `E_PUBLICATION_REFERENCE`. It writes no output directory.
+pub fn build_publication(
+    source: &dyn PublicationSource,
+    m: &Materialized,
+    tag_name: &str,
+    tag_redacted: bool,
+    selector: &str,
+    inputs: &RenderInputs,
+) -> Result<PublicationArtifact, RdyError> {
+    probe::hit();
+    publication::check_inputs(source, inputs)?;
+    let resolved = rdy_engine::publication::resolve_source(source, m, selector)?;
+    let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
+    // the manifest's limits hold while the site is built, not only once it is
+    let budget = Budget::publication();
+    artifact(build_site_from(
+        prepared,
+        Mode::Static,
+        Slots::Notices,
+        Some(&budget),
+    )?)
+}
+
+/// `E_BAD_INPUT`: a generated file whose media type rdy does not know (the manifest's own
+/// refusal).
+fn bad_manifest() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "publication manifest is invalid",
+        "use unique relative paths and valid file metadata",
+    )
+}
+
+/// The media type of the generated file at `path`, by its extension.
+fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e);
+    Ok(match ext {
+        Some("html") => "text/html",
+        Some("txt") => "text/plain",
+        Some("json") => "application/json",
+        Some("css") => "text/css",
+        Some("js") => "application/javascript",
+        Some("woff2") => "font/woff2",
+        _ => return Err(bad_manifest()),
+    })
+}
+
+/// A media type without its parameters (`image/svg+xml; charset=utf-8` reads `image/svg+xml`).
+fn without_parameters(media_type: &str) -> &str {
+    media_type
+        .split_once(';')
+        .map_or(media_type, |(t, _)| t)
+        .trim()
+}
+
+/// The manifest of `files`: each file in path order with its hash, size and media type, and each
+/// HTML page's recorded notice offset. A figure's file keeps the media type its source named
+/// (`media`); every other file is generated.
+fn manifest_of(
+    files: &BTreeMap<String, Vec<u8>>,
+    notices: &BTreeMap<String, u64>,
+    media: &BTreeMap<String, String>,
+) -> Result<Manifest, RdyError> {
+    let mut entries = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
+        let media_type = match media.get(path) {
+            Some(m) => without_parameters(m).to_string(),
+            None => generated_media_type(path)?.to_string(),
+        };
+        let notice_offset = notices.get(path).copied();
+        let generated_html = !media.contains_key(path) && media_type == "text/html";
+        if generated_html != notice_offset.is_some() {
+            return Err(bad_notice_slot());
+        }
+        entries.push(ManifestEntry {
+            path: path.clone(),
+            hash: Hash::of(bytes),
+            media_type,
+            size: u64::try_from(bytes.len()).map_err(|_| bad_manifest())?,
+            notice_offset,
+        });
+    }
+    Ok(Manifest { files: entries })
+}
+
+/// The artifact of a publication build: its manifest, then the recipe-1 manifest hash.
+fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
+    let BuiltSite {
+        site,
+        notices,
+        media,
+    } = built;
+    let manifest = manifest_of(&site.files, &notices, &media)?;
+    let manifest_hash = manifest_hash(&manifest, MANIFEST_RECIPE)?;
+    Ok(PublicationArtifact {
+        files: site.files,
+        manifest,
+        manifest_hash,
+        warnings: site.summary.warnings,
+    })
 }
 
 /// Renders [`build_profile_site`] at `out`, as [`render_site`] places a site. The whole site is
@@ -646,13 +923,428 @@ pub fn render_profile_site(
     place_site(out, || Ok(files))
 }
 
-/// [`build_site`] from what [`prepare::source`] read: it reads no source.
-fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles, RdyError> {
+/// Whether a build's HTML pages carry the notice slot: a publication's do (hub D-YJ9TA), every
+/// other site's keep their bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slots {
+    Source,
+    Notices,
+}
+
+/// What [`build_site_from`] built: the site, and, for a publication build, the byte offset of
+/// each HTML page's notice slot by path, recorded as the page was written. `media` holds each
+/// figure file's media type as the pages that use it named it, by path.
+struct BuiltSite {
+    site: SiteFiles,
+    notices: BTreeMap<String, u64>,
+    media: BTreeMap<String, String>,
+}
+
+/// The manifest's limits (`publication_manifest`), as a publication build keeps them while it
+/// builds: the number of files, the bytes of one file and the bytes of all files. Each page
+/// write, permalink page and file is admitted before its bytes are kept, so the build refuses
+/// with `E_LIMIT` before it holds more than the limits allow. It also counts the page contexts
+/// the build made, and how many waited to be rendered at once.
+struct Budget {
+    max_files: usize,
+    max_file: u64,
+    max_total: u64,
+    /// The bytes admitted to the artifact's files so far.
+    bytes: AtomicU64,
+    /// A limit was reached: the build makes no further page context.
+    stopped: AtomicBool,
+    /// The page contexts made.
+    built: AtomicUsize,
+    /// The page contexts made and not yet rendered, and the most there were at once.
+    pending: AtomicUsize,
+    peak: AtomicUsize,
+    /// The most bytes the search index's entries held at once.
+    index_held: AtomicUsize,
+    /// The bytes each agent or search file's buffer held, by path: what it held when it was
+    /// refused, else what it held when it was kept.
+    aux: std::sync::Mutex<BTreeMap<String, usize>>,
+}
+
+impl Budget {
+    fn new(max_files: usize, max_file: u64, max_total: u64) -> Budget {
+        Budget {
+            max_files,
+            max_file,
+            max_total,
+            bytes: AtomicU64::new(0),
+            stopped: AtomicBool::new(false),
+            built: AtomicUsize::new(0),
+            pending: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            index_held: AtomicUsize::new(0),
+            aux: Default::default(),
+        }
+    }
+
+    /// The limits of a publication manifest.
+    fn publication() -> Budget {
+        Budget::new(MAX_FILES, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES)
+    }
+
+    /// `E_LIMIT`: the artifact would exceed `limit`, in the manifest's words. The build stops.
+    fn over(&self, limit: String) -> RdyError {
+        self.stopped.store(true, Ordering::SeqCst);
+        RdyError::new(
+            E_LIMIT,
+            format!("publication manifest exceeds {limit}"),
+            "reduce the artifact to the stated limit",
+        )
+    }
+
+    /// Admits `n` more bytes to a file that holds `len` bytes so far.
+    fn admit(&self, len: u64, n: u64) -> Result<(), RdyError> {
+        if len.checked_add(n).is_none_or(|end| end > self.max_file) {
+            return Err(self.over(format!("{} file bytes", self.max_file)));
+        }
+        self.bytes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
+                t.checked_add(n).filter(|t| *t <= self.max_total)
+            })
+            .map(drop)
+            .map_err(|_| self.over(format!("{} artifact bytes", self.max_total)))
+    }
+
+    /// Gives back the bytes of a file the build replaced.
+    fn release(&self, n: usize) {
+        let n = u64::try_from(n).unwrap_or(u64::MAX);
+        let _ = self
+            .bytes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
+                Some(t.saturating_sub(n))
+            });
+    }
+
+    /// Checks that the artifact may hold `files` files.
+    fn count(&self, files: usize) -> Result<(), RdyError> {
+        if files > self.max_files {
+            return Err(self.over(format!("{} files", self.max_files)));
+        }
+        Ok(())
+    }
+
+    /// Admits a file of `len` bytes at `path` to `files`: one more file, unless it replaces the
+    /// one there.
+    fn reserve(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        path: &str,
+        len: usize,
+    ) -> Result<(), RdyError> {
+        if !files.contains_key(path) {
+            self.count(files.len().saturating_add(1))?;
+        }
+        self.admit(0, u64::try_from(len).unwrap_or(u64::MAX))
+    }
+
+    /// The most bytes one file may take, and the limit's words: the per-file limit, or the
+    /// aggregate one when it is lower.
+    fn file_cap(&self) -> (u64, String) {
+        self.capped(self.max_total)
+    }
+
+    /// The room for a file at `path` in `files`: one more file must fit (unless it replaces the
+    /// one there), and its bytes may take no more than the per-file limit nor what the aggregate
+    /// limit leaves. The room's bytes, and the words of the limit that sets them.
+    fn room(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        path: &str,
+    ) -> Result<(u64, String), RdyError> {
+        if !files.contains_key(path) {
+            self.count(files.len().saturating_add(1))?;
+        }
+        let left = self
+            .max_total
+            .saturating_sub(self.bytes.load(Ordering::SeqCst));
+        Ok(self.capped(left))
+    }
+
+    /// The per-file limit, or `total` with the aggregate limit's words when it is lower.
+    fn capped(&self, total: u64) -> (u64, String) {
+        if self.max_file <= total {
+            (self.max_file, format!("{} file bytes", self.max_file))
+        } else {
+            (total, format!("{} artifact bytes", self.max_total))
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// A page context was made.
+    fn made(&self) {
+        self.built.fetch_add(1, Ordering::SeqCst);
+        let now = self.pending.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+    }
+
+    /// A page context was rendered.
+    fn rendered(&self) {
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The search index's entries hold `n` bytes.
+    fn index_holds(&self, n: usize) {
+        self.index_held.fetch_max(n, Ordering::SeqCst);
+    }
+
+    /// The buffer of the file at `path` held `n` bytes.
+    fn aux_holds(&self, path: &str, n: usize) {
+        if let Ok(mut aux) = self.aux.lock() {
+            let held = aux.entry(path.to_string()).or_default();
+            *held = (*held).max(n);
+        }
+    }
+
+    #[cfg(test)]
+    fn index_held(&self) -> usize {
+        self.index_held.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn aux(&self, path: &str) -> usize {
+        self.aux
+            .lock()
+            .map(|a| a.get(path).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn admitted(&self) -> u64 {
+        self.bytes.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn built(&self) -> usize {
+        self.built.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+}
+
+/// Puts `bytes` at `path` in `files`, admitted by `budget` first when there is one; a file it
+/// replaces gives its bytes back.
+fn put_file(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    budget: Option<&Budget>,
+    path: String,
+    bytes: Vec<u8>,
+) -> Result<(), RdyError> {
+    if let Some(b) = budget {
+        b.reserve(files, &path, bytes.len())?;
+    }
+    if let (Some(old), Some(b)) = (files.insert(path, bytes), budget) {
+        b.release(old.len());
+    }
+    Ok(())
+}
+
+/// An agent file at `path`, made by `make` within the room `budget` leaves for it: a file with
+/// no room is refused before it is made, and one that outgrows its room is refused before its
+/// buffer holds more.
+fn aux_file<T>(
+    budget: Option<&Budget>,
+    files: &BTreeMap<String, Vec<u8>>,
+    path: &str,
+    make: impl FnOnce(usize) -> Result<(Vec<u8>, T), llms::Over>,
+) -> Result<(Vec<u8>, T), RdyError> {
+    let Some(b) = budget else {
+        return make(usize::MAX).map_err(|_| {
+            RdyError::new(
+                E_IO,
+                format!("template error: {path} is too large to hold"),
+                "this is a bug in rdy-render",
+            )
+        });
+    };
+    let (room, limit) = b.room(files, path)?;
+    match make(usize::try_from(room).unwrap_or(usize::MAX)) {
+        Ok((bytes, t)) => {
+            b.aux_holds(path, bytes.capacity());
+            Ok((bytes, t))
+        }
+        Err(o) => {
+            b.aux_holds(path, o.held);
+            Err(b.over(limit))
+        }
+    }
+}
+
+/// What a page context keeps once its page is rendered: what `llms.txt` and `llms-full.txt`
+/// read (its kind, title, path, body and items). The parts every page repeats (the navigation,
+/// the crumbs, the pager, the header and the site's name and description) are dropped, so the
+/// contexts the build holds grow with the source, not with the pages times the navigation.
+fn keep_for_llms(ctx: &mut page::PageContext) {
+    ctx.site_name = String::new();
+    ctx.site_description = None;
+    ctx.root = String::new();
+    ctx.header = String::new();
+    ctx.crumbs = vec![];
+    ctx.nav = Default::default();
+    ctx.toc = Default::default();
+    ctx.pager = Default::default();
+    ctx.search_href = String::new();
+    ctx.review_bar = None;
+}
+
+/// A page made by `build` for each of `kinds` and rendered by `render`, in order: the contexts
+/// (as [`keep_for_llms`] keeps them) and the pages. `build` makes the contexts one by one on
+/// this thread while a few threads render them; it waits while a made context waits for a
+/// thread, so few contexts with their navigation are held at once. After a
+/// failure (a limit of `budget` included) no further context is made, and the error of the
+/// context that could not be made, else of the first failed page, is returned.
+fn build_and_render<'k>(
+    kinds: Vec<page::Kind<'k>>,
+    mut build: impl FnMut(page::Kind<'k>) -> Result<page::PageContext, RdyError>,
+    render: impl Fn(&page::PageContext) -> Result<Page, RdyError> + Sync,
+    budget: Option<&Budget>,
+) -> Result<(Vec<page::PageContext>, Vec<Page>), RdyError> {
+    use std::sync::mpsc;
+    type Done = (usize, page::PageContext, Result<Page, RdyError>);
+    let n = kinds.len();
+    let threads = render_threads();
+    let failed = AtomicBool::new(false);
+    // one context waits in the queue: with one being rendered on each thread and one being
+    // made, at most `threads + 2` are held unrendered
+    let (jobs, queue) = mpsc::sync_channel::<(usize, page::PageContext)>(1);
+    // the workers own the queue: should they all stop, a send fails and nothing waits
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+    let (done, results) = mpsc::channel::<Done>();
+    let mut unmade: Option<RdyError> = None;
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            let (queue, done, render, failed) = (queue.clone(), done.clone(), &render, &failed);
+            s.spawn(move || {
+                loop {
+                    let job = queue.lock().map(|q| q.recv());
+                    let Ok(Ok((i, mut ctx))) = job else { break };
+                    let page = render(&ctx);
+                    if page.is_err() {
+                        failed.store(true, Ordering::SeqCst);
+                    }
+                    if let Some(b) = budget {
+                        b.rendered();
+                    }
+                    keep_for_llms(&mut ctx);
+                    if done.send((i, ctx, page)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop((done, queue));
+        for (i, kind) in kinds.into_iter().enumerate() {
+            if failed.load(Ordering::SeqCst) || budget.is_some_and(Budget::stopped) {
+                break;
+            }
+            let ctx = match build(kind) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    unmade = Some(e);
+                    break;
+                }
+            };
+            if let Some(b) = budget {
+                b.made();
+            }
+            if jobs.send((i, ctx)).is_err() {
+                break;
+            }
+        }
+        drop(jobs);
+    });
+    let mut out: Vec<Option<(page::PageContext, Result<Page, RdyError>)>> =
+        (0..n).map(|_| None).collect();
+    for (i, ctx, page) in results {
+        out[i] = Some((ctx, page));
+    }
+    if let Some(e) = unmade {
+        return Err(e);
+    }
+    if let Some(e) = out
+        .iter()
+        .find_map(|o| o.as_ref().and_then(|(_, p)| p.as_ref().err()))
+    {
+        return Err(e.clone());
+    }
+    let mut contexts = Vec::with_capacity(n);
+    let mut pages = Vec::with_capacity(n);
+    for o in out {
+        // every context was made and rendered: no page failed, so none was skipped
+        let (ctx, page) = o.ok_or_else(|| {
+            RdyError::new(
+                E_IO,
+                "template error: a page was not rendered",
+                "this is a bug in rdy-render",
+            )
+        })?;
+        contexts.push(ctx);
+        pages.push(page?);
+    }
+    Ok((contexts, pages))
+}
+
+/// How many threads render pages.
+fn render_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8)
+}
+
+/// What the shared setup keeps of a prepared source's history for the build that follows: the
+/// change summaries (pages of the site) and the build's warnings.
+struct Extras {
+    changes: Option<changes::Summary>,
+    since: Option<changes::Summary>,
+    warnings: Vec<String>,
+}
+
+// The page contexts built on this thread (see `page_builds`); test builds only.
+#[cfg(test)]
+thread_local! {
+    static PAGE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many page contexts [`build_page`] made on this thread so far. Tests count the bodies a
+/// render builds with it.
+#[cfg(test)]
+fn page_builds() -> u64 {
+    PAGE_BUILDS.get()
+}
+
+/// The page context for `kind`: every build calls `page::build` through here, so a test can
+/// count the bodies a render makes.
+fn build_page(sh: &page::Shared, kind: page::Kind) -> page::PageContext {
+    #[cfg(test)]
+    PAGE_BUILDS.set(PAGE_BUILDS.get().wrapping_add(1));
+    page::build(sh, kind)
+}
+
+/// The setup every build shares, from what [`prepare::source`] or `publication::prepare_resolved`
+/// read: the site of the selected state, the template environment, the header, the authored
+/// local targets and the [`page::Shared`] the pages are built from. `f` builds with them; the
+/// figure blobs the pages did not borrow for good come back with its result, for the build to
+/// copy once the shared state is dropped. A static build refuses two siblings that would be one
+/// file before `f` runs.
+fn with_shared<R>(
+    prepared: prepare::Prepared,
+    mode: Mode,
+    f: impl FnOnce(&page::Shared<'_>, &minijinja::Environment<'static>, Extras) -> Result<R, RdyError>,
+) -> Result<(R, prepare::FigureBlobs), RdyError> {
     let prepare::Prepared {
         m,
         g,
         pack,
-        mut blobs,
+        blobs,
         site_name,
         description,
         position,
@@ -703,13 +1395,6 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
     let local = profile
         .as_ref()
         .map(|_| publication::LocalTargets::of(&site));
-    let mut summary = RenderSummary {
-        pages: 0,
-        assets: 0,
-        redirects: 0,
-        warnings,
-    };
-
     let sh = page::Shared {
         site: &site,
         m,
@@ -736,8 +1421,19 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         local: local.as_ref(),
         unavailable,
     };
+    let extras = Extras {
+        changes: changes_summary,
+        since: since_summary,
+        warnings,
+    };
+    let out = f(&sh, &env, extras)?;
+    drop(sh);
+    Ok((out, blobs))
+}
 
-    // the pages, in the order a reader meets them: the home page, the tree, the collected pages
+/// The pages of a build, in the order a reader meets them: the home page, the tree, the
+/// collected pages. The page at a path is the last of them that has it.
+fn page_kinds<'a>(site: &'a Site<'_>, m: &Materialized) -> Vec<page::Kind<'a>> {
     let mut kinds = vec![page::Kind::Home];
     kinds.extend(site.tree_pages().map(|id| {
         if m.get(id).is_some_and(|b| b.block_type == tree::FOLDER) {
@@ -755,42 +1451,222 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
     if !site.disagreements.is_empty() {
         kinds.push(page::Kind::Disagreements);
     }
-    let mut index = search::Index::default();
-    let mut contexts = vec![];
-    let mut has_mermaid = false;
-    for kind in kinds {
-        let ctx = page::build(&sh, kind);
-        has_mermaid |= ctx.has_mermaid;
-        page::finish(&sh, &ctx, &mut index);
-        contexts.push(ctx);
+    kinds
+}
+
+/// The site-relative path of the page of a kind [`page_kinds`] lists.
+fn kind_page(site: &Site<'_>, kind: &page::Kind) -> Option<String> {
+    match kind {
+        page::Kind::Home => Some("index.html".into()),
+        page::Kind::Folder(id) | page::Kind::Doc(id) => site.page(id),
+        page::Kind::Glossary => Some("glossary.html".into()),
+        page::Kind::Questions => Some("questions.html".into()),
+        page::Kind::Disagreements => Some("disagreements.html".into()),
+        _ => None,
     }
-    // the pages are rendered on a few threads
-    let pages = par_map(&contexts, |ctx| {
-        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
-        Ok((ctx.page_url.clone(), html, at))
+}
+
+/// A context rendered as a page of `slots`' kind, each write admitted by `budget` when there is
+/// one: its path, bytes, label and header ranges, and notice slot offset.
+fn render_ctx(
+    env: &minijinja::Environment<'static>,
+    slots: Slots,
+    budget: Option<&Budget>,
+    ctx: &page::PageContext,
+) -> Result<Page, RdyError> {
+    let r = match slots {
+        Slots::Source => render_page_within(env, template_of(ctx.kind), ctx, budget)?,
+        Slots::Notices => {
+            render_page_within(env, template_of(ctx.kind), with_notice_slot(ctx), budget)?
+        }
+    };
+    let notice = notice_offset(&r.bytes, r.notice.as_ref())?;
+    Ok((ctx.page_url.clone(), r.bytes, r.slots, notice))
+}
+
+/// What the pages of a build leave for its last step: every file but the figures' copies, and
+/// the figure files the pages used, by path.
+struct Staged {
+    files: BTreeMap<String, Vec<u8>>,
+    label_at: BTreeMap<String, Vec<Slot>>,
+    notices: BTreeMap<String, u64>,
+    summary: RenderSummary,
+    label: String,
+    header: String,
+    used: BTreeMap<String, (Hash, String)>,
+}
+
+/// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
+/// passes the manifest's limits as `budget`, kept while it builds.
+fn build_site_from(
+    prepared: prepare::Prepared,
+    mode: Mode,
+    slots: Slots,
+    budget: Option<&Budget>,
+) -> Result<BuiltSite, RdyError> {
+    let (staged, mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
+        stage_site(sh, env, extras, slots, budget)
     })?;
+    let Staged {
+        mut files,
+        label_at,
+        notices,
+        mut summary,
+        label,
+        header,
+        used,
+    } = staged;
+    let media = used_media(&used);
+    summary.assets = copy_blobs(&mut files, budget, &used, &mut blobs)?;
+    Ok(BuiltSite {
+        site: SiteFiles {
+            files,
+            label,
+            header,
+            label_at,
+            summary,
+        },
+        notices,
+        media,
+    })
+}
+
+/// The media type each used figure file's first block named, by path.
+fn used_media(used: &BTreeMap<String, (Hash, String)>) -> BTreeMap<String, String> {
+    used.iter()
+        .map(|(path, (_, media_type))| (path.clone(), media_type.clone()))
+        .collect()
+}
+
+/// Moves each figure file of `used` into `files` at its path, from `blobs`, and returns how many
+/// it put there. Each blob moves at its last path, so the build never holds two copies of it
+/// (one hash under two paths is copied once). A copy is admitted by `budget` before it is made.
+fn copy_blobs(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    budget: Option<&Budget>,
+    used: &BTreeMap<String, (Hash, String)>,
+    blobs: &mut prepare::FigureBlobs,
+) -> Result<usize, RdyError> {
+    let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
+    for (h, _) in used.values() {
+        *uses.entry(h).or_default() += 1;
+    }
+    let mut copied = 0;
+    for (path, (h, _)) in used {
+        let left = uses.get_mut(h).expect("counted above");
+        *left -= 1;
+        if let Some(b) = budget {
+            let len = blobs.bytes.get(h).map_or(0, Vec::len);
+            b.reserve(files, path, len)?;
+        }
+        let bytes = if *left == 0 {
+            blobs.bytes.remove(h)
+        } else {
+            blobs.bytes.get(h).cloned()
+        };
+        let bytes = bytes.expect("a used blob is held");
+        if let (Some(old), Some(b)) = (files.insert(path.clone(), bytes), budget) {
+            b.release(old.len());
+        }
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// The pages, permalink pages, agent and search files and theme files of a build.
+fn stage_site(
+    sh: &page::Shared<'_>,
+    env: &minijinja::Environment<'static>,
+    extras: Extras,
+    slots: Slots,
+    budget: Option<&Budget>,
+) -> Result<Staged, RdyError> {
+    let (site, m) = (sh.site, sh.m);
+    let (site_name, description) = (sh.site_name, sh.description);
+    let Extras {
+        changes: changes_summary,
+        since: since_summary,
+        warnings,
+    } = extras;
+    let mode = sh.mode;
+    let mut summary = RenderSummary {
+        pages: 0,
+        assets: 0,
+        redirects: 0,
+        warnings,
+    };
+    let kinds = page_kinds(site, m);
+    // the search index is held to the bytes one file may take while its entries are collected
+    let (index_cap, index_limit) = budget.map_or((u64::MAX, String::new()), Budget::file_cap);
+    let mut index = search::Index::new(site_name, index_cap);
+    let mut has_mermaid = false;
+    // a publication has at most as many files as its limit: count its pages (the change
+    // summaries included) before making any
+    if let Some(b) = budget {
+        let summaries =
+            usize::from(changes_summary.is_some()) + usize::from(since_summary.is_some());
+        b.count(kinds.len().saturating_add(summaries))?;
+    }
+    // a page with its notice slot's offset, recorded as it was written (a publication's pages),
+    // each write admitted by the budget
+    let page_of = |ctx: &page::PageContext| render_ctx(env, slots, budget, ctx);
+    // the pages are made one by one and rendered on a few threads
+    let (contexts, pages) = build_and_render(
+        kinds,
+        |kind| {
+            let ctx = build_page(sh, kind);
+            has_mermaid |= ctx.has_mermaid;
+            page::finish(sh, &ctx, &mut index);
+            if let Some(b) = budget {
+                b.index_holds(index.held());
+                if index.over() {
+                    return Err(b.over(index_limit.clone()));
+                }
+            }
+            Ok(ctx)
+        },
+        page_of,
+        budget,
+    )?;
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut label_at: BTreeMap<String, Vec<Slot>> = BTreeMap::new();
+    let mut notices: BTreeMap<String, u64> = BTreeMap::new();
     // the change summaries: pages of the site, kept out of the navigation, the search index,
     // the llms files and the permalinks (sr6)
     let mut extra = vec![];
     if let Some(c) = &changes_summary {
-        extra.push(page::build(&sh, page::Kind::Changes(c)));
+        extra.push(build_page(sh, page::Kind::Changes(c)));
     }
     if let Some(c) = &since_summary {
-        extra.push(page::build(&sh, page::Kind::ChangesSince(c)));
+        extra.push(build_page(sh, page::Kind::ChangesSince(c)));
     }
     let mut pages = pages;
     for ctx in &extra {
-        let (html, at) = render_page(&env, template_of(ctx.kind), ctx)?;
-        pages.push((ctx.page_url.clone(), html, at));
+        if let Some(b) = budget {
+            b.made();
+        }
+        pages.push(page_of(ctx)?);
+        if let Some(b) = budget {
+            b.rendered();
+        }
     }
     summary.pages = pages.len();
-    for (path, html, at) in pages {
+    for (path, html, at, notice) in pages {
         if !at.is_empty() {
             label_at.insert(path.clone(), at);
         }
-        files.insert(path, html);
+        if let Some(n) = notice {
+            notices.insert(path.clone(), n);
+        }
+        // the page's bytes were admitted as it was written: it counts as a file here
+        if let Some(b) = budget
+            && !files.contains_key(&path)
+        {
+            b.count(files.len() + 1)?;
+        }
+        if let (Some(old), Some(b)) = (files.insert(path, html), budget) {
+            b.release(old.len());
+        }
     }
 
     // a permalink page for every folder, doc and block that has a place on the site: the
@@ -807,27 +1683,36 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         let t = match &mut redirect {
             Some(t) => t,
             None => {
-                let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
-                redirect.insert(RedirectTemplate::new(&env, ctx)?)
+                let ctx = build_page(sh, page::Kind::Redirect(id, &url));
+                redirect.insert(RedirectTemplate::new(env, ctx, slots)?)
             }
         };
-        let (page_url, label, href) = page::redirect_target(&sh, id, &url);
-        let html = t.fill(&label, &href);
+        let (page_url, label, href) = page::redirect_target(sh, id, &url);
+        // the filled page's length is known before it is made
+        if let Some(b) = budget {
+            b.reserve(&files, &page_url, t.filled_len(&label, &href))?;
+        }
+        let (html, notice) = t.fill_at(&label, &href);
         #[cfg(debug_assertions)]
         if summary.redirects.is_multiple_of(997) {
-            let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
-            let full = env
-                .get_template("redirect.html")
-                .map_err(tpl)?
-                .render(&ctx)
-                .map_err(tpl)?;
+            let ctx = build_page(sh, page::Kind::Redirect(id, &url));
+            let full = RedirectTemplate::render(env, &ctx, slots)?;
             debug_assert_eq!(
-                html, full,
+                (html.as_bytes(), notice),
+                (full.bytes.as_slice(), full.notice.map(|r| r.start)),
                 "the prebuilt permalink page differs from the template"
             );
         }
         label_at.remove(&page_url);
-        files.insert(page_url, html.into_bytes());
+        notices.remove(&page_url);
+        let html = html.into_bytes();
+        let notice = notice.map(|n| n..n + NOTICE_SLOT.len());
+        if let Some(n) = notice_offset(&html, notice.as_ref())? {
+            notices.insert(page_url.clone(), n);
+        }
+        if let (Some(old), Some(b)) = (files.insert(page_url, html), budget) {
+            b.release(old.len());
+        }
         summary.redirects += 1;
     }
 
@@ -836,52 +1721,49 @@ fn build_site_from(prepared: prepare::Prepared, mode: Mode) -> Result<SiteFiles,
         Mode::Live { .. } => sh.header_html(""),
         Mode::Static => String::new(),
     };
-    files.insert(
-        "search-index.json".into(),
-        search::bytes(&index, &site_name),
-    );
+    // the agent and search files: each is admitted before its buffer is made, and held to its
+    // room while it is written
+    let (bytes, ()) = aux_file(budget, &files, "search-index.json", |room| {
+        match index.len() <= u64::try_from(room).unwrap_or(u64::MAX) {
+            true => Ok((search::bytes(&index), ())),
+            false => Err(llms::Over { held: 0 }),
+        }
+    })?;
+    drop(index);
+    put_file(&mut files, budget, "search-index.json".into(), bytes)?;
     // a label slot takes bytes: a named profile with no chosen tag writes no label
-    let (llms, at) =
-        llms::index_bytes(&site, &contexts, &site_name, description.as_deref(), &label);
-    files.insert("llms.txt".into(), llms);
+    let (llms, at) = aux_file(budget, &files, "llms.txt", |room| {
+        llms::index_bytes(site, &contexts, site_name, description, &label, room)
+    })?;
+    put_file(&mut files, budget, "llms.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
     }
-    let (llms, at) = llms::full_bytes(&contexts, &site_name, description.as_deref(), &label);
-    files.insert("llms-full.txt".into(), llms);
+    let (llms, at) = aux_file(budget, &files, "llms-full.txt", |room| {
+        llms::full_bytes(&contexts, site_name, description, &label, room)
+    })?;
+    put_file(&mut files, budget, "llms-full.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
     }
     for (path, bytes) in assets::files(has_mermaid) {
-        files.insert(path.into(), bytes);
+        put_file(&mut files, budget, path.into(), bytes)?;
     }
-    // each blob moves into the file map at its last path, so the build never holds two copies
-    // of it (one hash under two paths is copied once)
     let used = sh.used_blobs.take();
-    drop(sh);
-    let mut uses: BTreeMap<&Hash, usize> = BTreeMap::new();
-    for (h, _) in used.values() {
-        *uses.entry(h).or_default() += 1;
-    }
-    for (path, (h, _)) in &used {
-        let left = uses.get_mut(h).expect("counted above");
-        *left -= 1;
-        let bytes = if *left == 0 {
-            blobs.bytes.remove(h)
-        } else {
-            blobs.bytes.get(h).cloned()
-        };
-        files.insert(path.clone(), bytes.expect("a used blob is held"));
-        summary.assets += 1;
-    }
-    Ok(SiteFiles {
+    Ok(Staged {
         files,
+        label_at,
+        notices,
+        summary,
         label: label.text,
         header,
-        label_at,
-        summary,
+        used,
     })
 }
+
+/// One rendered page: its path, its bytes, its label and header ranges, and its notice slot's
+/// offset.
+type Page = (String, Vec<u8>, Vec<Slot>, Option<u64>);
 
 /// Writes every file of a built site under `out`.
 fn write_files(out: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), RdyError> {
@@ -894,33 +1776,63 @@ fn write_files(out: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), RdyE
 }
 
 /// The permalink template rendered once, with a marker where a page's href and label go: the
-/// template reads nothing else that differs from one permalink page to the next.
+/// template reads nothing else that differs from one permalink page to the next. A publication's
+/// prototype records where its notice slot went; each filled page moves it by the bytes the
+/// substitutions before it add.
 struct RedirectTemplate {
     /// The text between the markers, `slots.len() + 1` pieces.
     pieces: Vec<String>,
     /// Which value each marker stands for: true for the href, false for the label.
     slots: Vec<bool>,
+    /// Where the notice slot starts: the piece that holds it, and its byte offset in that piece.
+    notice: Option<(usize, usize)>,
 }
 
 impl RedirectTemplate {
     const HREF: char = '\u{E000}';
     const LABEL: char = '\u{E001}';
 
+    /// The permalink page of `ctx` rendered whole, with the notice slot when `slots` asks.
+    fn render(
+        env: &minijinja::Environment<'static>,
+        ctx: &page::PageContext,
+        slots: Slots,
+    ) -> Result<Rendered, RdyError> {
+        match slots {
+            Slots::Source => render_page_out(env, "redirect.html", ctx),
+            Slots::Notices => render_page_out(env, "redirect.html", with_notice_slot(ctx)),
+        }
+    }
+
     fn new(
         env: &minijinja::Environment<'static>,
         mut ctx: page::PageContext,
+        slots: Slots,
     ) -> Result<RedirectTemplate, RdyError> {
         ctx.body.redirect = Some(page::RedirectBody {
             label: Self::LABEL.to_string(),
             href: Self::HREF.to_string(),
         });
-        let html = env
-            .get_template("redirect.html")
-            .map_err(tpl)?
-            .render(&ctx)
-            .map_err(tpl)?;
+        let r = Self::render(env, &ctx, slots)?;
+        let html = String::from_utf8(r.bytes).map_err(|_| {
+            RdyError::new(
+                E_IO,
+                "template error: the permalink page is not UTF-8",
+                "this is a bug in rdy-render templates",
+            )
+        })?;
+        Self::split(&html, r.notice.map(|n| n.start))
+    }
+
+    /// The prototype `html` cut at its markers, with its notice slot at byte `at` kept as a
+    /// piece and an offset in it. A slot that starts at no character is refused.
+    fn split(html: &str, at: Option<usize>) -> Result<RedirectTemplate, RdyError> {
         let (mut pieces, mut slots, mut cur) = (vec![], vec![], String::new());
-        for c in html.chars() {
+        let mut notice = None;
+        for (i, c) in html.char_indices() {
+            if Some(i) == at {
+                notice = Some((pieces.len(), cur.len()));
+            }
             if c == Self::HREF || c == Self::LABEL {
                 pieces.push(std::mem::take(&mut cur));
                 slots.push(c == Self::HREF);
@@ -929,21 +1841,53 @@ impl RedirectTemplate {
             }
         }
         pieces.push(cur);
-        Ok(RedirectTemplate { pieces, slots })
+        if at.is_some() && notice.is_none() {
+            return Err(bad_notice_slot());
+        }
+        Ok(RedirectTemplate {
+            pieces,
+            slots,
+            notice,
+        })
     }
 
     /// The page for a target, its values escaped as the template escapes them.
+    #[cfg(test)]
     fn fill(&self, label: &str, href: &str) -> String {
+        self.fill_at(label, href).0
+    }
+
+    /// The bytes of the page [`RedirectTemplate::fill_at`] gives for a target, known before it
+    /// is made.
+    fn filled_len(&self, label: &str, href: &str) -> usize {
+        let (label, href) = (escape(label).len(), escape(href).len());
+        self.slots
+            .iter()
+            .map(|h| if *h { href } else { label })
+            .chain(self.pieces.iter().map(String::len))
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// The page for a target, and where its notice slot starts: the prototype's offset moved by
+    /// the UTF-8 bytes of each value written before it, in place of its marker.
+    fn fill_at(&self, label: &str, href: &str) -> (String, Option<usize>) {
         let (label, href) = (escape(label), escape(href));
         let mut out = String::with_capacity(
             self.pieces.iter().map(String::len).sum::<usize>() + 2 * href.len() + label.len(),
         );
-        for (piece, slot) in self.pieces.iter().zip(&self.slots) {
+        let mut notice = None;
+        for (i, piece) in self.pieces.iter().enumerate() {
+            if let Some((p, at)) = self.notice
+                && p == i
+            {
+                notice = Some(out.len() + at);
+            }
             out.push_str(piece);
-            out.push_str(if *slot { &href } else { &label });
+            if let Some(slot) = self.slots.get(i) {
+                out.push_str(if *slot { &href } else { &label });
+            }
         }
-        out.push_str(self.pieces.last().map_or("", String::as_str));
-        out
+        (out, notice)
     }
 }
 
@@ -952,9 +1896,7 @@ fn par_map<T: Sync, R: Send>(
     items: &[T],
     f: impl Fn(&T) -> Result<R, RdyError> + Sync,
 ) -> Result<Vec<R>, RdyError> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 8);
+    let threads = render_threads();
     let chunk = items.len().div_ceil(threads).max(1);
     let f = &f;
     std::thread::scope(|s| {
@@ -1017,6 +1959,7 @@ mod swap_tests {
         let t = RedirectTemplate {
             pieces: vec!["<a href=\"".into(), "\">".into(), "</a>".into()],
             slots: vec![true, false],
+            notice: None,
         };
         assert_eq!(
             t.fill("A & <B>", "../x.html#a\"b"),
@@ -1192,10 +2135,406 @@ mod label_tests {
     }
 
     #[test]
+    fn hpb6_a_page_records_its_notice_slot_in_bytes() {
+        let env = env_with("<p>ä☃{{ a | label }}</p><main>{{ notice_slot }}{{ b }}</main>");
+        let ctx = serde_json::json!({"a": "é", "b": "<!--rdy-notices-->"});
+        let r = render_page_out(&env, "t.html", with_notice_slot(&ctx)).unwrap();
+        let html = String::from_utf8(r.bytes.clone()).unwrap();
+        let at = "<p>ä☃é</p><main>".len();
+        assert_eq!(r.notice, Some(at..at + NOTICE_SLOT.len()));
+        assert_eq!(
+            notice_offset(&r.bytes, r.notice.as_ref()).unwrap(),
+            Some(at as u64)
+        );
+        // the authored marker text is escaped, after the slot
+        assert!(html[at + NOTICE_SLOT.len()..].starts_with("&lt;!--rdy-notices--&gt;"));
+        // a source page's context has no slot, and the template writes nothing for it
+        let env =
+            env_with("<main>{% if notice_slot is defined %}{{ notice_slot }}{% endif %}</main>");
+        let r = render_page_out(&env, "t.html", &ctx).unwrap();
+        assert_eq!((r.bytes, r.notice), (b"<main></main>".to_vec(), None));
+    }
+
+    /// Fix round 1 (finding 4): literal marker bytes in the template, before and after the
+    /// formatter's slot, never move the recorded offset. A first-match or a last-match search for
+    /// the marker would find a decoy, so this test fails for either.
+    #[test]
+    fn hpb6_the_recorded_offset_is_the_formatters_slot_among_literal_markers() {
+        let marker = std::str::from_utf8(NOTICE_SLOT).unwrap();
+        let env = env_with(
+            "<!--rdy-notices-->ä<p>{{ a | label }}</p><main>{{ notice_slot }}</main>☃<!--rdy-notices-->",
+        );
+        let r = render_page_out(
+            &env,
+            "t.html",
+            with_notice_slot(&serde_json::json!({"a": "é"})),
+        )
+        .unwrap();
+        let html = String::from_utf8(r.bytes.clone()).unwrap();
+        let at = "<!--rdy-notices-->ä<p>é</p><main>".len();
+        // guards: three literal markers, and neither the first nor the last is the slot
+        assert_eq!(html.matches(marker).count(), 3, "{html}");
+        assert_ne!(html.find(marker), Some(at));
+        assert_ne!(html.rfind(marker), Some(at));
+        assert_eq!(r.notice, Some(at..at + NOTICE_SLOT.len()));
+        assert_eq!(
+            notice_offset(&r.bytes, r.notice.as_ref()).unwrap(),
+            Some(at as u64)
+        );
+        // the cached permalink path keeps the formatter's slot among the same decoys
+        let mut env = super::env().unwrap();
+        env.add_template(
+            "t.html",
+            "<!--rdy-notices--><a href=\"{{ h }}\">{{ l }}</a><main>{{ notice_slot }}</main>{{ l }}<!--rdy-notices-->",
+        )
+        .unwrap();
+        let render = |h: &str, l: &str| {
+            render_page_out(
+                &env,
+                "t.html",
+                with_notice_slot(&serde_json::json!({"h": h, "l": l})),
+            )
+            .unwrap()
+        };
+        let proto = render(
+            &RedirectTemplate::HREF.to_string(),
+            &RedirectTemplate::LABEL.to_string(),
+        );
+        let html = String::from_utf8(proto.bytes).unwrap();
+        let t = RedirectTemplate::split(&html, proto.notice.map(|n| n.start)).unwrap();
+        let (page, notice) = t.fill_at("Lâbel ☃", "../dïr/x.html");
+        let at = "<!--rdy-notices--><a href=\"../dïr/x.html\">Lâbel ☃</a><main>".len();
+        assert_ne!(page.find(marker), Some(at));
+        assert_ne!(page.rfind(marker), Some(at));
+        assert_eq!(notice, Some(at));
+        let notice = notice.map(|n| n..n + NOTICE_SLOT.len());
+        assert_eq!(
+            notice_offset(page.as_bytes(), notice.as_ref()).unwrap(),
+            Some(at as u64)
+        );
+    }
+
+    #[test]
+    fn hpb6_a_second_or_misplaced_notice_slot_is_refused() {
+        let ctx = with_notice_slot(&serde_json::json!({}));
+        let env = env_with("<main>{{ notice_slot }}{{ notice_slot }}</main>");
+        let e = render_page_out(&env, "t.html", &ctx).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_BAD_INPUT,
+                "publication page has an invalid notice slot",
+                "use the templates shipped with this rdy version"
+            )
+        );
+        let env = env_with("{% set x %}{{ notice_slot }}{% endset %}<main>{{ x }}</main>");
+        let e = render_page_out(&env, "t.html", &ctx).unwrap_err();
+        assert!(e.message.contains("notice slot"), "{e}");
+        let env = env_with("<main>{{ notice_slot }}</main>");
+        let e = env
+            .get_template("t.html")
+            .unwrap()
+            .render(&ctx)
+            .unwrap_err();
+        assert!(e.to_string().contains("notice slot"), "{e}");
+        // a recorded range that does not hold the empty slot's bytes
+        assert_eq!(
+            notice_offset(b"<main><!--rdy-notices--x", Some(&(6..24)))
+                .unwrap_err()
+                .message,
+            "publication page has an invalid notice slot"
+        );
+        assert!(notice_offset(b"<main>", Some(&(6..24))).is_err());
+    }
+
+    #[test]
+    fn hpb6_the_cached_permalink_page_moves_its_slot_by_each_substitution() {
+        let mut env = env().unwrap();
+        env.add_template(
+            "t.html",
+            "<a href=\"{{ h }}\">{{ l }}</a><main>{{ notice_slot }}</main><b>{{ l }}{{ h }}</b>",
+        )
+        .unwrap();
+        let render = |h: &str, l: &str| {
+            render_page_out(
+                &env,
+                "t.html",
+                with_notice_slot(&serde_json::json!({"h": h, "l": l})),
+            )
+            .unwrap()
+        };
+        let proto = render(
+            &RedirectTemplate::HREF.to_string(),
+            &RedirectTemplate::LABEL.to_string(),
+        );
+        let html = String::from_utf8(proto.bytes).unwrap();
+        let t = RedirectTemplate::split(&html, proto.notice.map(|n| n.start)).unwrap();
+        assert!(RedirectTemplate::split(&html, Some(html.len() + 1)).is_err());
+        for (h, l) in [
+            ("", ""),
+            ("a.html", "A"),
+            ("../ff/日本語.html#x", "Bé & <c> ☃☃"),
+            ("../../a/b/c/d.html", "x"),
+        ] {
+            let full = render(h, l);
+            let (page, at) = t.fill_at(l, h);
+            assert_eq!(page.as_bytes(), full.bytes.as_slice(), "{h} {l}");
+            assert_eq!(at, full.notice.map(|n| n.start), "{h} {l}");
+            assert_eq!(
+                &page.as_bytes()[at.unwrap()..][..NOTICE_SLOT.len()],
+                NOTICE_SLOT
+            );
+        }
+    }
+
+    #[test]
+    fn hpb6_generated_media_types_are_closed() {
+        for (path, want) in [
+            ("index.html", "text/html"),
+            ("llms.txt", "text/plain"),
+            ("search-index.json", "application/json"),
+            ("assets/site.css", "text/css"),
+            ("assets/app.js", "application/javascript"),
+            ("assets/fonts/onest.woff2", "font/woff2"),
+        ] {
+            assert_eq!(generated_media_type(path).unwrap(), want);
+        }
+        for path in ["assets/x.bin", "README", "a.htm"] {
+            assert_eq!(
+                generated_media_type(path).unwrap_err().message,
+                "publication manifest is invalid"
+            );
+        }
+        assert_eq!(
+            without_parameters("image/svg+xml; charset=utf-8"),
+            "image/svg+xml"
+        );
+        assert_eq!(without_parameters("image/png"), "image/png");
+    }
+
+    #[test]
     fn the_label_outside_a_page_render_is_refused() {
         let env = env_with("{{ a | label }}");
         let t = env.get_template("t.html").unwrap();
         let e = t.render(serde_json::json!({"a": "v1"})).unwrap_err();
         assert!(e.to_string().contains("version label"), "{e}");
+    }
+}
+
+/// Fix round 1 (finding 1): a publication build keeps the manifest's limits while it builds,
+/// never only after every page context and file has been made.
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use rdy_engine::E_LIMIT;
+    use rdy_engine::publication_manifest::{MAX_ARTIFACT_BYTES, MAX_FILE_BYTES, MAX_FILES};
+
+    /// A generated project of 4 folders of 30 docs with a claim each: every page's navigation
+    /// repeats the folders and the current folder's docs, so the pages' bytes grow faster than
+    /// the source's.
+    fn project() -> (tempfile::TempDir, rdy_engine::Rdy) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 4, 30, 1);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        (dir, r)
+    }
+
+    fn build(r: &rdy_engine::Rdy, budget: Option<&Budget>) -> Result<BuiltSite, RdyError> {
+        let read = r.read();
+        let prepared = prepare::source(&read, &Scope::View("work".into()), prepare::Purpose::Site)?;
+        build_site_from(prepared, Mode::Static, Slots::Notices, budget)
+    }
+
+    /// The number of HTML pages of `b` that are not permalinks, and their bytes.
+    fn pages(b: &BuiltSite) -> (usize, u64) {
+        b.site
+            .files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".html") && !p.starts_with("go/"))
+            .fold((0, 0), |(n, s), (_, f)| (n + 1, s + f.len() as u64))
+    }
+
+    fn total(b: &BuiltSite) -> u64 {
+        b.site.files.values().map(|f| f.len() as u64).sum()
+    }
+
+    #[track_caller]
+    fn over(e: &RdyError, limit: String) {
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                format!("publication manifest exceeds {limit}").as_str(),
+                "reduce the artifact to the stated limit"
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn hpb6_a_publication_build_within_the_limits_is_unchanged() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let b = Budget::publication();
+        let kept = build(&r, Some(&b)).unwrap();
+        assert_eq!(kept.site.files, free.site.files);
+        assert_eq!(kept.notices, free.notices);
+        // every byte of the artifact was counted once, as it was written
+        assert_eq!(b.admitted(), total(&free));
+        assert_eq!(b.built(), pages(&free).0);
+    }
+
+    #[test]
+    fn hpb6_a_publication_build_stops_at_its_artifact_limit_while_it_writes() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let (n, bytes) = pages(&free);
+        assert!(n > 120, "guard: {n} pages");
+        let limit = bytes / 20;
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, limit);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} artifact bytes"));
+        // no write went past the limit
+        assert!(b.admitted() <= limit, "{} > {limit}", b.admitted());
+        // the build stopped making page contexts: the pages that fit and those in flight
+        let in_flight = render_threads() + 2;
+        assert!(b.peak() <= in_flight, "{} contexts in flight", b.peak());
+        assert!(
+            b.built() < n / 2,
+            "{} of {n} page contexts built",
+            b.built()
+        );
+    }
+
+    #[test]
+    fn hpb6_a_publication_build_stops_at_its_file_limits() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let (n, _) = pages(&free);
+        let largest = free.site.files.values().map(Vec::len).max().unwrap() as u64;
+        // one file over the per-file limit
+        let b = Budget::new(MAX_FILES, largest - 1, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} file bytes", largest - 1));
+        assert!(b.admitted() < total(&free));
+        // more pages than files: refused before any page context is made
+        let b = Budget::new(n - 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} files", n - 1));
+        assert_eq!((b.built(), b.admitted()), (0, 0));
+        // the pages fit, the permalinks and assets do not
+        let files = free.site.files.len();
+        let b = Budget::new(files - 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} files", files - 1));
+        assert_eq!(b.built(), n);
+        assert!(b.admitted() < total(&free));
+    }
+
+    /// A project of one doc with a title of `title` bytes and `sections` sections: every search
+    /// entry of the doc repeats its title, so the index grows as the title times the sections.
+    fn titled(title: usize, sections: usize) -> (tempfile::TempDir, rdy_engine::Rdy) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = rdy_engine::Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let s = rdy_engine::Session {
+            actor: "agent:bench".into(),
+            run: None,
+            role: rdy_model::Role::Writer,
+            kind: rdy_engine::SessionKind::Human,
+        };
+        let mut ops = vec![
+            serde_json::json!({"op": "create", "type": "doc", "id": "$d",
+            "fields": {"title": "t".repeat(title), "doc_type": "constraints"}}),
+        ];
+        ops.extend((0..sections).map(|i| {
+            serde_json::json!({"op": "create", "type": "section", "parent": "$d",
+                "fields": {"title": format!("S{i}")}})
+        }));
+        r.write(
+            &s,
+            rdy_engine::WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(serde_json::json!(ops)).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write");
+        (dir, r)
+    }
+
+    /// Fix round 2: the search index is held to the limits while its entries are collected. An
+    /// entry that would take the file over them is never kept, and the file's buffer is never
+    /// made.
+    #[test]
+    fn hpb6_a_search_index_over_the_limits_is_refused_before_its_entries_are_held() {
+        let (_d, r) = titled(16 << 10, 300);
+        let free = build(&r, None).unwrap();
+        let limit: u64 = 1 << 20;
+        let index = free.site.files["search-index.json"].len() as u64;
+        // guard: the repeated title amplifies the index past the limit (the doc's page repeats
+        // it too, and its writes are refused at the limit; its entries are collected first)
+        assert!(index > 4 * limit, "guard: {index} bytes");
+        let b = Budget::new(MAX_FILES, limit, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} file bytes"));
+        // the entries kept never took more bytes than the file may have
+        assert!(
+            b.index_held() as u64 <= limit,
+            "{} entry bytes held",
+            b.index_held()
+        );
+        // the file's buffer was never made
+        assert_eq!(b.aux("search-index.json"), 0);
+        // the aggregate limit holds the entries the same way
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, limit);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} artifact bytes"));
+        assert!(b.index_held() as u64 <= limit, "{}", b.index_held());
+        assert_eq!(b.aux("search-index.json"), 0);
+    }
+
+    /// Fix round 2: `search-index.json`, `llms.txt` and `llms-full.txt` are admitted before their
+    /// buffers are made or grow: a file the artifact has no room for is never made, and a
+    /// buffer never holds more than its room.
+    #[test]
+    fn hpb6_agent_files_over_the_limits_are_refused_before_their_buffers_grow() {
+        let (_d, r) = project();
+        let free = build(&r, None).unwrap();
+        let f = &free.site.files;
+        let assets = f.keys().filter(|p| p.starts_with("assets/")).count();
+        // the pages and permalinks are put first, then the index and the two llms files
+        let before_index = f.len() - assets - 3;
+        let b = Budget::new(before_index, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{before_index} files"));
+        assert_eq!(b.aux("search-index.json"), 0);
+        let b = Budget::new(before_index + 1, MAX_FILE_BYTES, MAX_ARTIFACT_BYTES);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{} files", before_index + 1));
+        assert!(b.aux("search-index.json") > 0);
+        assert_eq!(b.aux("llms.txt"), 0);
+        // room for every byte before `llms-full.txt` and for all but one of its own
+        let full = f["llms-full.txt"].len() as u64;
+        let before: u64 = f
+            .iter()
+            .filter(|(p, _)| *p != "llms-full.txt" && !p.starts_with("assets/"))
+            .map(|(_, f)| f.len() as u64)
+            .sum();
+        let limit = before + full - 1;
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, limit);
+        let e = build(&r, Some(&b)).err().expect("refused");
+        over(&e, format!("{limit} artifact bytes"));
+        assert!(b.aux("llms.txt") > 0);
+        assert!(
+            (b.aux("llms-full.txt") as u64) < full,
+            "{} of {full} bytes held",
+            b.aux("llms-full.txt")
+        );
+        assert!(b.admitted() <= limit);
+        // with room for exactly its bytes the file is kept, as a free build makes it
+        let b = Budget::new(MAX_FILES, MAX_FILE_BYTES, total(&free));
+        let kept = build(&r, Some(&b)).unwrap();
+        assert_eq!(kept.site.files, free.site.files);
     }
 }

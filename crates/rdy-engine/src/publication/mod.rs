@@ -3,19 +3,23 @@
 //! bounded selection: the selected state, its induced graph, the selection and doc digests, the
 //! attachments, and the check of every reference that leaves the selection. It produces no
 //! artifact and authorizes no disclosure; output callers ask [`Resolved::require_output`].
+//! [`resolve_source`] makes the same selection through a [`PublicationSource`], with no store
+//! open.
 
 mod diff;
 mod references;
 mod report;
 mod select;
+mod source;
 
 pub use diff::{ChangedAttachment, ChangedDoc, ChangedFolder, DisclosureDiff, disclosure_diff};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
-pub use report::{REPORT_BYTES, REPORT_ROWS, check};
+pub use report::{REPORT_BYTES, REPORT_ROWS, check, reference_summary};
 pub use select::{
-    AttachmentEntry, DocEntry, IMPLICIT_ORG, Limits, PublicationWarning, Resolved, ResolvedProfile,
-    SelectionEntry, blob_reads_for_tests, limits, load_assets, resolve,
+    AttachmentEntry, DocEntry, IMPLICIT_ORG, Limits, ProfileFacts, PublicationWarning, Resolved,
+    ResolvedProfile, SelectionEntry, blob_reads_for_tests, check_stable_selector, limits,
+    load_assets, load_source_assets, profile_facts, resolve, resolve_source,
 };
 #[cfg(feature = "test-support")]
 pub use select::{
@@ -27,3 +31,4 @@ pub use select::{
 )]
 pub(crate) use select::{SnapshotBudget, check_snapshot_limits};
 pub(crate) use select::{check_block_limits, limit};
+pub use source::{PublicationSource, ReadPublicationSource};
