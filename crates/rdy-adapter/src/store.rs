@@ -112,6 +112,26 @@ impl StoreHandle {
         crate::take::take(&self.local, batches, target)
     }
 
+    /// Takes the batch files `batches` of one upload for the publication `target` into this
+    /// holder, as [`StoreHandle::take`] does, and calls the host's `verdict` once with the
+    /// requested profile's facts in the root tag's snapshot, after core's checks and before
+    /// anything is appended (`crate::publication_take`). A verdict that refuses returns its own
+    /// error unchanged and appends nothing. The verdict runs on the writer and must not call
+    /// this handle's store.
+    pub fn take_publication<E: Send + 'static>(
+        &mut self,
+        batches: &[std::fs::File],
+        target: crate::publication_take::PublicationTarget,
+        verdict: impl FnOnce(&crate::publication_take::PublicationFacts) -> Result<(), E>
+        + Send
+        + 'static,
+    ) -> Result<
+        crate::publication_take::PublicationTaken,
+        crate::publication_take::PublicationRefusal<E>,
+    > {
+        crate::publication_take::take_publication(&self.local, batches, target, verdict)
+    }
+
     /// The engine handle, so a sibling module's tests can write through it.
     #[cfg(test)]
     pub(crate) fn local(&self) -> &Local {

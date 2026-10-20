@@ -187,27 +187,29 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 }
 
 /// The source site digests, captured from the unmodified base (22af149) before the refactor:
-/// (scope, static, live at `/`).
+/// (scope, static, live at `/`). Re-taken in hpb6 for the notice styles added to
+/// `assets/site.css`; every other file, the label, the header, their ranges and the summary
+/// kept their bytes.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "6a611690bbcf762c2ac796649deb6654c95c4f8338e92ebd04824bb0741eb617",
-        "464458bea8464123f8929e12119868e7fe6a3b834be70225e983e93835648922",
+        "b370265d2f5b809a28dba310c2620861d9de2f711128f87ad685c3f90ced1792",
+        "5016cc8714d212a21d225659577d8ae5a286d1e6f46e51b5c7f74c60e2029607",
     ),
     (
         "tag",
-        "921a4f67469525557c34a12c483adb7404a8e09057e9e684e92dc29f585333ba",
-        "9325fe63cacc7c1d7fdef82803c5808a02f6cf1674160d3dc7061f96e13225e9",
+        "53b61e01193be56394a536a1a3df315810f841c95a49935a05b907416c031e64",
+        "190d40d50dff93f390536a48f245ca3b4496b1173745b0eeb2853ad81f0654c4",
     ),
     (
         "view",
-        "26a3af6967b935fea99735211fa1c956b5b7b005d2439f1b2e9899b6f031a381",
-        "36bc766db03b52ba6fe62df7b99179a932dd5d6adaf15062b531f57b038ac579",
+        "17d5987fc65550c4ec1d94cd2d3ce5f9f46ce5a9df6e88602e0684f0f691c0d9",
+        "ab872cb4c0cb7caf47d5a90239f1c89a08b12893f31fc17eb2da8dc6e5e88795",
     ),
     (
         "proposal",
-        "0961346b885b1f8a0038d2e431919de7ae41d6d858b7c74f44744e9ed7a43271",
-        "86f35e940bcafdeae7c45dc9cd8cd86f6ddb0182bd490d09cb7502e7d2bfc25d",
+        "d6f134a9165038eca2608886a8a4d7dc731dba0aaf63650a0760e92c7009513e",
+        "ee28d9a6a15162633d2213bbf6b6415b2c10c9e18928596669125c0c83f035a8",
     ),
 ];
 

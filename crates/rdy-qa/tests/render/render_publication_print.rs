@@ -37,6 +37,19 @@ const FORMATS: [(Format, Option<Layout>, &str, &str); 4] = [
     (Format::Md, Some(Layout::Mkdocs), "out-mkdocs", "mkdocs"),
 ];
 
+/// `FORMATS` and the TechDocs tree, which the blocked-export and path-guard checks cover beside
+/// MkDocs.
+fn with_techdocs() -> Vec<(Format, Option<Layout>, &'static str, &'static str)> {
+    let mut all = FORMATS.to_vec();
+    all.push((
+        Format::Md,
+        Some(Layout::Techdocs),
+        "out-techdocs",
+        "techdocs",
+    ));
+    all
+}
+
 // --- helpers ------------------------------------------------------------------------------------
 
 fn bid(s: &str) -> BlockId {
@@ -956,7 +969,7 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
     std::fs::create_dir(base.join("held-md")).unwrap();
     let before = tree(base);
     let entries_before = entries(base);
-    for (format, layout, name, short) in FORMATS {
+    for (format, layout, name, short) in with_techdocs() {
         for target in [base.join(name), base.join(format!("held{}", &name[3..]))] {
             let e = export(&st, "pubp", &target, format, layout).unwrap_err();
             assert_eq!(e.code, E_PUBLICATION_REFERENCE, "{short}: {e}");
@@ -996,7 +1009,7 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
     let physical = std::fs::canonicalize(&rdy).unwrap();
     let other = w.dir.path().join("other");
     std::fs::create_dir(&other).unwrap();
-    for (format, layout, name, short) in FORMATS {
+    for (format, layout, name, short) in with_techdocs() {
         for out in [
             rdy.join(name),
             physical.join(name),
@@ -1040,7 +1053,7 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
         assert_eq!(e.code, E_ALREADY_EXISTS, "{name}");
     }
     std::fs::write(base.join("held-md").join("x"), b"x").unwrap();
-    for layout in [None, Some(Layout::Mkdocs)] {
+    for layout in [None, Some(Layout::Mkdocs), Some(Layout::Techdocs)] {
         let e = export(&st, "orgp", &base.join("held-md"), Format::Md, layout).unwrap_err();
         assert_eq!(e.code, E_BAD_INPUT);
         assert!(e.message.ends_with("is not empty"), "{}", e.message);
@@ -1060,6 +1073,23 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
         assert_eq!(
             (e.code, e.message.as_str()),
             (E_BAD_INPUT, "--layout mkdocs applies to the md format only")
+        );
+    }
+    for format in [Format::Pdf, Format::Html] {
+        let e = export(
+            &st,
+            "orgp",
+            &base.join("l.out"),
+            format,
+            Some(Layout::Techdocs),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (
+                E_BAD_INPUT,
+                "--layout techdocs applies to the md format only"
+            )
         );
     }
     assert!(!base.join("l.out").exists());

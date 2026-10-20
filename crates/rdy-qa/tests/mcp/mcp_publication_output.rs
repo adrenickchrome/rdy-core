@@ -264,14 +264,17 @@ fn pub10_output_parameters_are_strict_and_scope_defaults_to_canon() {
         "Build a local static docs site at out. Pass profile to select whole docs and folders. A profile uses canon, a tag, or a landing. This creates local files; it does not publish them or control who can read them. Relay each entry of warnings to the person. Read and write through the tools yourself, not the rendered site."
     );
     let export = find("rdy_export")["description"].as_str().unwrap();
-    assert!(export.contains("MkDocs and Backstage TechDocs"), "{export}");
+    assert!(
+        export.contains("layout mkdocs for MkDocs, or techdocs for Backstage TechDocs"),
+        "{export}"
+    );
     assert!(
         export.ends_with("Read and write through the tools yourself, not the export."),
         "{export}"
     );
     assert_eq!(
         export,
-        "Print the docs for a person to read: one PDF file, one HTML file, or a Markdown tree (layout mkdocs for MkDocs and Backstage TechDocs). Pass profile to use its selected view and reference check. This creates local files; it does not publish them or control who can read them. It never overwrites. Relay each entry of warnings to the person. Read and write through the tools yourself, not the export."
+        "Print the docs for a person to read: one PDF file, one HTML file, or a Markdown tree (layout mkdocs for MkDocs, or techdocs for Backstage TechDocs). Pass profile to use its selected view and reference check. This creates local files; it does not publish them or control who can read them. It never overwrites. Relay each entry of warnings to the person. Read and write through the tools yourself, not the export."
     );
     let help = "A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.";
     for tool in ["rdy_render", "rdy_export"] {

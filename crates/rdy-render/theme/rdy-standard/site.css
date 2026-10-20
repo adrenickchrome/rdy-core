@@ -457,3 +457,17 @@ del + ins, ins + del { margin-inline-start: 0.3em; }
   .chg-entry .chg-in-place { display: inline-flex; align-items: center; min-height: 40px; }
 }
 /* == /review == */
+/* == notices (hub D-YJ9TA) == a publication page holds one empty slot right after its main
+   element; the hub writes its notices there. An empty slot is a comment and takes no space */
+.rdy-notices { display: flex; flex-direction: column; gap: 0.5rem; margin: 0 0 1.2rem; }
+.rdy-notices:empty { display: none; }
+.rdy-notice { margin: 0; padding: 0.7rem 1rem; font-size: 0.92rem; color: var(--ink); background: var(--surface); border-left: 3px solid var(--line-strong); border-radius: 0 var(--radius) var(--radius) 0; overflow-wrap: anywhere; }
+.rdy-notice p { margin: 0; }
+.rdy-notice p + p { margin-top: 0.35rem; }
+.rdy-notice a { color: var(--accent); }
+.rdy-notice-yank { background: var(--mark); border-left-color: var(--ink); }
+.rdy-notice-errata { background: var(--note); border-left-color: var(--accent); }
+.rdy-notice-newer { border-left-color: var(--accent); }
+.rdy-versions { margin: 0.4rem 0 0; padding-left: 1.2rem; font-size: 0.88rem; color: var(--ink-soft); }
+.rdy-versions a { display: inline-flex; align-items: center; min-height: 40px; }
+/* == /notices == */

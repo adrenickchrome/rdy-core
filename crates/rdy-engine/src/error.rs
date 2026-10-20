@@ -703,7 +703,8 @@ pub const E_ACTOR_UNBOUND: &str = "E_ACTOR_UNBOUND";
 pub const E_REMOTE_REQUIRED: &str = "E_REMOTE_REQUIRED";
 /// A second share remote would be added.
 pub const E_REMOTE_EXISTS: &str = "E_REMOTE_EXISTS";
-/// A hub request destination outside its install's origin fence. Built by [`upstream_origin`].
+/// A hub request destination outside its install's origin fence. Built by [`upstream_origin`]
+/// and [`upstream_publish_origin`].
 pub const E_UPSTREAM_ORIGIN: &str = "E_UPSTREAM_ORIGIN";
 /// A hub token that fails the token form check.
 pub const E_UPSTREAM_TOKEN: &str = "E_UPSTREAM_TOKEN";
@@ -744,9 +745,15 @@ pub const REMOTE_REQUIRED_FIX: &str = "pass --remote, or configure one share rem
 pub const REMOTE_EXISTS_MESSAGE: &str = "a share remote already exists";
 /// The fix of `E_REMOTE_EXISTS`.
 pub const REMOTE_EXISTS_FIX: &str = "change its mode before adding another share remote";
-/// The fix of `E_UPSTREAM_ORIGIN`.
-pub const UPSTREAM_ORIGIN_FIX: &str =
-    "use the install origin, or add its destination to hub.installs.pinned_origins";
+/// The fix of `E_UPSTREAM_ORIGIN` for sign-in and key requests, which stay on the install even
+/// when it has pinned origins.
+pub const UPSTREAM_ORIGIN_FIX: &str = "use the install origin";
+/// The fix of `E_UPSTREAM_ORIGIN` where a pinned origin is trusted: the origin fence and uploads.
+pub const UPSTREAM_PUBLISH_ORIGIN_FIX: &str = "use the install origin, or add its destination to the pinned origins of this install (hub.installs.<install>.pinned_origins)";
+/// The message of the `E_IO` refusal of an upload body. Built by [`upload_body`].
+pub const UPLOAD_BODY_MESSAGE: &str = "the upload body does not match its declared length";
+/// The fix of the `E_IO` refusal of an upload body.
+pub const UPLOAD_BODY_FIX: &str = "check that the upload source is unchanged, then try again";
 /// The message of `E_UPSTREAM_TOKEN`.
 pub const UPSTREAM_TOKEN_MESSAGE: &str = "the hub token has an invalid form";
 /// The fix of `E_UPSTREAM_TOKEN`.
@@ -815,13 +822,30 @@ pub fn remote_exists() -> RdyError {
     RdyError::new(E_REMOTE_EXISTS, REMOTE_EXISTS_MESSAGE, REMOTE_EXISTS_FIX)
 }
 
-/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin.
+/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin: a sign-in or key request, which only
+/// the install itself may receive. It never names the destination.
 pub fn upstream_origin(install: &str) -> RdyError {
     RdyError::new(
         E_UPSTREAM_ORIGIN,
         format!("the request destination is not trusted for {install}"),
         UPSTREAM_ORIGIN_FIX,
     )
+}
+
+/// `E_UPSTREAM_ORIGIN` for `install`, a canonical origin, where the install's pinned origins are
+/// trusted too: the origin fence's own refusal and an upload's. It never names the destination.
+pub fn upstream_publish_origin(install: &str) -> RdyError {
+    RdyError::new(
+        E_UPSTREAM_ORIGIN,
+        format!("the request destination is not trusted for {install}"),
+        UPSTREAM_PUBLISH_ORIGIN_FIX,
+    )
+}
+
+/// `E_IO`: an upload body that ended before its declared length, ran past it or could not be
+/// read. The request it began is never completed; no reader text is kept.
+pub fn upload_body() -> RdyError {
+    RdyError::new(E_IO, UPLOAD_BODY_MESSAGE, UPLOAD_BODY_FIX)
 }
 
 /// `E_UPSTREAM_TOKEN`. It never names the token.
@@ -927,4 +951,112 @@ pub fn upstream_signout_local() -> Issue {
         message: UPSTREAM_SIGNOUT_LOCAL_MESSAGE.to_string(),
         fix: UPSTREAM_SIGNOUT_LOCAL_FIX.to_string(),
     }
+}
+
+/// Every error code the engine defines: each `E_*` constant of this module and the briefing's
+/// two. It is the engine's whole static error set, not one feature's subset.
+const CORE_ERROR_CODES: [&str; 96] = [
+    E_LOCKED,
+    E_NO_PROJECT,
+    E_CONFIG,
+    E_PERMISSION,
+    E_SELF_REVIEW,
+    E_REVIEW_INVALID,
+    E_REVIEW_STALE,
+    E_VIEW_OWNER,
+    E_BAD_INPUT,
+    E_VALIDATION,
+    E_UNKNOWN_REF,
+    E_UNKNOWN_BLOCK,
+    E_ALREADY_EXISTS,
+    E_STALE_BASE,
+    E_FROZEN,
+    E_HAS_CHILDREN,
+    E_NOT_FOUND,
+    E_IO,
+    E_RESERVED_VIEW,
+    E_TAG_EXISTS,
+    E_BAD_RECORD,
+    E_UNRESOLVED_REF,
+    E_STREAM_TRUNCATED,
+    E_STREAM_PURPOSE,
+    E_REPO_MISMATCH,
+    E_BAD_TAG_NAME,
+    E_VERSION_ORDER,
+    E_BAD_NAME,
+    E_PATH_CLASH,
+    E_FILE_FORMAT,
+    E_ALREADY_LANDED,
+    E_ORDER_DEPTH,
+    E_STORE_FORMAT,
+    E_INTERNAL,
+    E_LIMIT,
+    E_KEY_CLASH,
+    E_VIEW_EXISTS,
+    E_VIEW_CLOSED,
+    E_PROPOSAL_MOVED,
+    E_EXCEPTION_OPEN,
+    E_ITEM_MOVED,
+    E_HAS_DEPENDENTS,
+    E_DEPS_MISSING,
+    E_CONFLICT_UNRESOLVED,
+    E_BLOCKING_TENSION,
+    E_UNDO_BLOCKED,
+    E_UNDO_LANDING,
+    E_NOTHING_TO_UNDO,
+    E_PAGE_STALE,
+    E_ALT_UNCHOSEN,
+    E_ALT_MEMBER,
+    E_ALT_CHOSEN,
+    E_INTENT_EXPIRED,
+    E_REDACTION_TARGET,
+    E_REDACTION_LIMIT,
+    E_REDACTION_REASON,
+    E_REDACTION_STALE,
+    E_REDACTION_HUMAN,
+    E_REDACTION_PENDING,
+    E_REDACTION_CORRUPT,
+    E_REDACTED_STATE,
+    E_REDACTED,
+    E_REDACTION_BUDGET,
+    E_PUBLICATION_REFERENCE,
+    E_SIGNING_KEY_MISSING,
+    E_SIGNING_KEY_TYPE,
+    E_NO_AGENT,
+    E_SIG_INVALID,
+    E_SIG_OBJECT_MISMATCH,
+    E_WC_NOT_BOUND,
+    E_WC_DIRTY,
+    E_WC_OCCUPIED,
+    E_WC_STALE,
+    E_WC_CONFLICT,
+    E_WC_INVALID,
+    E_WC_LOCKED,
+    E_WC_SUPPORTING,
+    E_WC_STORE_ONLY,
+    E_SITE,
+    E_DUMP,
+    E_ACTOR_UNBOUND,
+    E_REMOTE_REQUIRED,
+    E_REMOTE_EXISTS,
+    E_UPSTREAM_ORIGIN,
+    E_UPSTREAM_TOKEN,
+    E_UPSTREAM_AUTH,
+    E_UPSTREAM_PROTOCOL,
+    E_UPSTREAM_TRANSPORT,
+    E_UPSTREAM_REFUSED,
+    E_UPSTREAM_UNCERTAIN,
+    E_UPSTREAM_CONFIRM_HOST,
+    E_UPSTREAM_CA,
+    E_UPSTREAM_KEY_PROOF,
+    E_UPSTREAM_ACTOR_CLAIM,
+    crate::brief::E_BRIEF_REQUIRED,
+    crate::brief::E_BRIEF_STALE,
+];
+
+/// The engine's own static spelling of `code` when it is one of its error codes, else `None`.
+/// A hub reply's core code reaches the caller unchanged through it (hub r-QNT1T); the constants
+/// stay the source of the spelling, and nothing is allocated or leaked.
+pub fn core_error_code(code: &str) -> Option<&'static str> {
+    CORE_ERROR_CODES.iter().copied().find(|c| *c == code)
 }

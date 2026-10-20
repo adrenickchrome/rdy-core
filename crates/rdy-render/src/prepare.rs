@@ -46,6 +46,8 @@ pub(crate) struct Prepared {
     /// `proposal:<hash>`.
     pub scope_text: String,
     /// The project's `.rdy` directory: for output safety only, never written into an output.
+    /// Empty for an in-memory publication (`publication::prepare_resolved`), which is never
+    /// placed by it; a durable local output keeps the project's directory and its guard.
     pub rdy_dir: PathBuf,
     pub history: History,
     /// How a named profile's output presents itself (`publication::prepare`); none for a source

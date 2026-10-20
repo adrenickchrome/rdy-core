@@ -1459,13 +1459,14 @@ mod tests {
                 .any(|t| t.name == "rdy_clone"),
             "the store family precedes the signing family"
         );
-        // hsa9: the remote family is the last, after auth
-        let remote: Vec<String> = families[23]
+        // hsa9: the remote family is the last, after auth; hpb15: it holds rdy_publish too
+        let mut remote: Vec<String> = families[23]
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())
             .collect();
-        assert_eq!(remote, ["rdy_remote"]);
+        remote.sort();
+        assert_eq!(remote, ["rdy_publish", "rdy_remote"]);
         let mut names: Vec<String> = families
             .iter()
             .flat_map(|r| r.list_all().into_iter().map(|t| t.name.to_string()))

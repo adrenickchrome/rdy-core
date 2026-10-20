@@ -28,6 +28,7 @@ pub mod segment;
 pub mod signature;
 mod store;
 pub mod stream_error;
+pub mod stream_source;
 pub mod sync_proof;
 pub mod sync_stream;
 pub mod take_batch;

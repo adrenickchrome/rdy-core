@@ -209,7 +209,14 @@ fn pub9_reports_cap_rows_but_keep_full_counts() {
             assert_eq!(d[name].as_array().unwrap().len(), shown, "{n} {name}");
             assert_eq!(d["omitted"][name], left, "{n} {name}");
         }
-        assert_eq!(keys(&d["omitted"]).len(), 8, "{n}");
+        assert_eq!(keys(&d["omitted"]).len(), 9, "{n}");
+        // no removal applies: an empty request list, none left out
+        assert_eq!(d["redactions"], json!([]), "{n}");
+        assert_eq!(d["omitted"]["redactions"], 0, "{n}");
+        assert_eq!(
+            (publication::REPORT_ROWS, publication::REPORT_BYTES),
+            (200, 8_388_608)
+        );
         assert_eq!(d["new_reference_count"], n, "{n}");
         assert_eq!(d["profile_changed"], false, "{n}");
         for h in ["before_selection_hash", "after_selection_hash"] {
@@ -383,6 +390,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
             "entries",
             "folders",
             "hash",
+            "identity",
             "omitted_entries"
         ]
     );

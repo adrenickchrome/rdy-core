@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 49);
+    assert_eq!(OPS.len(), 50);
     assert_eq!(OPS[0], "session");
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
@@ -62,9 +62,10 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
             "remote",
             "key_bind",
             "key_retire",
-            "key_revoke"
+            "key_revoke",
+            "publish"
         ],
-        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show"
+        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke"
     );
     let export = OPS.iter().position(|o| *o == "export").unwrap();
     assert_eq!(OPS[export + 1], "dump", "dl7: dump follows export");
@@ -78,6 +79,49 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
         err.fix.contains("status") && err.fix.contains("approve"),
         "{err}"
     );
+}
+
+/// hpb15 (D-8QV9G, D-KQ4CA): the `publish` op takes the coordinator's strict request
+/// `{tag, to, site, keep_latest?}`. An unknown key is the shared nearest-key refusal, a missing
+/// field and a `keep_latest` that is not a boolean are the op's argument errors, and no profile
+/// or audience can be passed. Each is refused before the user config or a hub is read.
+#[test]
+fn hpb15_the_publish_op_is_strict() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let err = dispatch(
+        &c,
+        "publish",
+        json!({"tag": "v1.0.0", "to": "pub", "ste": "docs"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT);
+    assert_eq!(err.message, "publish: unknown field \"ste\"");
+    assert!(err.fix.starts_with("did you mean \"site\"?"), "{err}");
+    for key in ["profile", "audience", "token", "ratify"] {
+        let mut args = json!({"tag": "v1.0.0", "to": "pub", "site": "docs"});
+        args[key] = json!("x");
+        let err = dispatch(&c, "publish", args).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{key}");
+        assert_eq!(
+            err.message,
+            format!("publish: unknown field \"{key}\""),
+            "{key}"
+        );
+    }
+    for args in [
+        json!({"to": "pub", "site": "docs"}),
+        json!({"tag": "v1.0.0", "to": "pub", "site": "docs", "keep_latest": "true"}),
+    ] {
+        let err = dispatch(&c, "publish", args.clone()).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{args}");
+        assert!(err.message.starts_with("publish: "), "{args}: {err}");
+        assert_eq!(
+            err.fix, "args for publish: {tag, to, site, keep_latest?}",
+            "{args}"
+        );
+    }
 }
 
 #[test]

@@ -5,6 +5,7 @@
 //! previous publication; which baseline was published is the hub's record (D-WDKWQ).
 
 use super::diff::{DisclosureDiff, disclosure_diff};
+use super::references::ReferenceReport;
 use super::select::{Resolved, resolve};
 use crate::error::*;
 use crate::{ReadState, Scope};
@@ -84,26 +85,37 @@ fn reference_row(r: &super::ReferenceRow) -> Value {
     })
 }
 
+/// The report's `references` object of `r`: its status, counts, its first [`REPORT_ROWS`] rows
+/// and how many rows were left out. Every surface that shows a reference check uses it.
+pub fn reference_summary(r: &ReferenceReport) -> Value {
+    let (rows, omitted_rows) = listed(&r.rows, reference_row);
+    json!({
+        "status": r.status.as_str(),
+        "excluded": r.excluded_count,
+        "missing": r.missing_count,
+        "total": r.blocked_count,
+        "rows": rows,
+        "omitted_rows": omitted_rows,
+    })
+}
+
+fn doc_row(x: &super::DocEntry) -> Value {
+    json!({
+        "id": x.id.to_string(),
+        "path": x.path,
+        "digest": x.digest.to_string(),
+        "redacted": x.redacted,
+    })
+}
+
 fn disclosure_json(d: &DisclosureDiff) -> Value {
     let mut omitted = serde_json::Map::new();
     let mut put = |name: &str, (rows, left): (Value, usize)| {
         omitted.insert(name.to_string(), json!(left));
         rows
     };
-    let added_docs = put(
-        "added_docs",
-        listed(
-            &d.added_docs,
-            |x| json!({"id": x.id.to_string(), "path": x.path, "digest": x.digest.to_string()}),
-        ),
-    );
-    let removed_docs = put(
-        "removed_docs",
-        listed(
-            &d.removed_docs,
-            |x| json!({"id": x.id.to_string(), "path": x.path, "digest": x.digest.to_string()}),
-        ),
-    );
+    let added_docs = put("added_docs", listed(&d.added_docs, doc_row));
+    let removed_docs = put("removed_docs", listed(&d.removed_docs, doc_row));
     let changed_docs = put(
         "changed_docs",
         listed(&d.changed_docs, |x| {
@@ -113,6 +125,7 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
                 "after_path": x.after_path,
                 "before_digest": x.before_digest.to_string(),
                 "after_digest": x.after_digest.to_string(),
+                "redacted": x.redacted,
             })
         }),
     );
@@ -125,6 +138,7 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
                 "after_version": hash_or_null(x.after_version),
                 "before_path": x.before_path,
                 "after_path": x.after_path,
+                "redacted": x.redacted,
             })
         }),
     );
@@ -159,6 +173,10 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
         }),
     );
     let new_references = put("new_references", listed(&d.new_references, reference_row));
+    let redactions = put(
+        "redactions",
+        listed(&d.redactions, |h| json!(h.to_string())),
+    );
     json!({
         "profile_id": d.profile_id.as_ref().map(ToString::to_string),
         "audience": d.audience.as_str(),
@@ -166,6 +184,8 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
         "after_profile_version": hash_or_null(d.after_profile_version),
         "before_selection_hash": d.before_selection_hash.to_string(),
         "after_selection_hash": d.after_selection_hash.to_string(),
+        "before_selection_identity": d.before_selection_identity.to_string(),
+        "after_selection_identity": d.after_selection_identity.to_string(),
         "profile_changed": d.profile_changed,
         "added_docs": added_docs,
         "removed_docs": removed_docs,
@@ -176,6 +196,7 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
         "changed_attachments": changed_attachments,
         "new_references": new_references,
         "new_reference_count": d.new_reference_count,
+        "redactions": redactions,
         "omitted": omitted,
     })
 }
@@ -188,7 +209,6 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
             "redaction": hash_or_null(e.redaction),
         })
     });
-    let (rows, omitted_rows) = listed(&r.references.rows, reference_row);
     let folders = r.m.iter().filter(|b| b.block_type == tree::FOLDER).count();
     let warnings: Vec<Value> = r
         .references
@@ -209,6 +229,7 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
         "against": against.map(|(s, _)| s.json()),
         "selection": {
             "hash": r.selection_hash.to_string(),
+            "identity": r.selection_identity.to_string(),
             "blocks": r.entries.len(),
             "docs": r.docs.len(),
             "folders": folders,
@@ -216,14 +237,7 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
             "entries": entries,
             "omitted_entries": omitted_entries,
         },
-        "references": {
-            "status": r.references.status.as_str(),
-            "excluded": r.references.excluded_count,
-            "missing": r.references.missing_count,
-            "total": r.references.blocked_count,
-            "rows": rows,
-            "omitted_rows": omitted_rows,
-        },
+        "references": reference_summary(&r.references),
         "disclosure": against.map(|(_, d)| disclosure_json(d)),
         "warnings": warnings,
     })

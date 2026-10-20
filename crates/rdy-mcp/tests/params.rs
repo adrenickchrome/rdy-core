@@ -268,7 +268,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 52 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 54 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
     // `RelayParams`, `RecommendedParams`).
     check!(
@@ -302,6 +302,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         PendingParams,
         ProposeParams,
         PublicationCheckParams,
+        PublishParams,
         ReadParams,
         RecommendedParams,
         RedactParams,
@@ -1372,4 +1373,123 @@ fn hsa9_remote_and_key_schemas_are_strict() {
             level: rdy_engine::hub_remotes::RemoteLevel::Project,
         }
     );
+}
+
+/// hpb15 (D-Q0AVZ, D-KQ4CA, D-8QV9G, D-50JXR): `rdy_publish` publishes exactly `{tag, to, site,
+/// keep_latest}`. The first three are required strings; `keep_latest` is an optional boolean
+/// whose absence and null are both "not given". A string for it is the strict-input type
+/// refusal, and an unknown key is the shared nearest-key refusal. No profile, audience, token or
+/// approval argument exists.
+#[test]
+fn hpb15_publish_params_are_closed_and_keep_latest_is_optional() {
+    let schema = rmcp::handler::server::common::schema_for_input::<PublishParams>().unwrap();
+    let schema = Value::Object((*schema).clone());
+    let mut props: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    props.sort();
+    assert_eq!(props, ["keep_latest", "site", "tag", "to"]);
+    let mut required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort();
+    assert_eq!(required, ["site", "tag", "to"]);
+    assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
+    assert_eq!(
+        schema["properties"]["keep_latest"]["description"],
+        "Optional: true or false. rdy sends it to the hub beside the record. Omit it to use the hub's default."
+    );
+    for k in ["tag", "to", "site"] {
+        assert_eq!(schema["properties"][k]["type"], "string", "{k}");
+    }
+
+    let parse = |args: Value| {
+        parse_params::<PublishParams>("rdy_publish", args.as_object().unwrap().clone())
+    };
+    let base = json!({"tag": "v1.0.0", "to": "pub", "site": "docs"});
+    let p = parse(base.clone()).unwrap();
+    assert_eq!(
+        (
+            p.tag.as_str(),
+            p.to.as_str(),
+            p.site.as_str(),
+            p.keep_latest
+        ),
+        ("v1.0.0", "pub", "docs", None)
+    );
+    for (given, want) in [
+        (json!(null), None),
+        (json!(true), Some(true)),
+        (json!(false), Some(false)),
+    ] {
+        let mut args = base.clone();
+        args["keep_latest"] = given.clone();
+        assert_eq!(parse(args).unwrap().keep_latest, want, "{given}");
+    }
+    // a string is the strict-input type refusal, never read as a boolean
+    for given in [json!("true"), json!("false"), json!(1)] {
+        let mut args = base.clone();
+        args["keep_latest"] = given.clone();
+        let e = parse(args).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{given}");
+        assert!(
+            e.message
+                .starts_with("rdy_publish: parameter \"keep_latest\" must be "),
+            "{given}: {}",
+            e.message
+        );
+    }
+    // each required string is named
+    for k in ["tag", "to", "site"] {
+        let mut args = base.clone();
+        args.as_object_mut().unwrap().remove(k);
+        assert_eq!(
+            refusal::<PublishParams>("rdy_publish", args),
+            bad(
+                &format!("rdy_publish: parameter \"{k}\" is required"),
+                &format!("pass \"{k}\" as a string")
+            )
+        );
+    }
+    // the nearest key for a misspelling, and no override of the profile or the audience
+    let mut args = base.clone();
+    args.as_object_mut().unwrap().remove("site");
+    args["ste"] = json!("docs");
+    assert_eq!(
+        refusal::<PublishParams>("rdy_publish", args),
+        bad(
+            "rdy_publish: unknown parameter \"ste\"",
+            "did you mean \"site\"? the parameters here are keep_latest, site, tag, to"
+        )
+    );
+    for key in [
+        "profile",
+        "audience",
+        "ratify",
+        "authorize",
+        "token",
+        "origin",
+        "format",
+        "out",
+        "force",
+        "resume",
+    ] {
+        let mut args = base.clone();
+        args[key] = json!("x");
+        let e = parse(args).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (
+                "E_BAD_INPUT",
+                &*format!("rdy_publish: unknown parameter \"{key}\"")
+            ),
+            "{key}"
+        );
+    }
 }

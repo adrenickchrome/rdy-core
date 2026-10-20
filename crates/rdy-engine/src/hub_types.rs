@@ -6,8 +6,8 @@
 //! Serialize; no error built here formats its input.
 use crate::error::{
     E_BAD_INPUT, E_LIMIT, RdyError, actor_unbound, upstream_actor_claim, upstream_auth,
-    upstream_origin, upstream_protocol, upstream_refused, upstream_token, upstream_transport,
-    upstream_uncertain,
+    upstream_protocol, upstream_publish_origin, upstream_refused, upstream_token,
+    upstream_transport, upstream_uncertain,
 };
 use crate::session::Session;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -464,12 +464,14 @@ impl OriginFence {
 
     /// The origin of `destination` when the fence trusts it: an HTTPS URL with no userinfo or
     /// fragment whose origin is the install or one of its pinned origins. Over 4096 bytes is
-    /// `E_LIMIT`; any other destination is `E_UPSTREAM_ORIGIN`.
+    /// `E_LIMIT`; any other destination is `E_UPSTREAM_ORIGIN` with the pin-aware fix
+    /// ([`upstream_publish_origin`]), which names neither the destination nor any token. A
+    /// caller whose requests stay on the install maps it to `upstream_origin`.
     pub fn check(&self, destination: &str) -> Result<Origin, RdyError> {
         if destination.len() > MAX_URL_BYTES {
             return Err(hub_limit(MAX_URL_BYTES, LimitUnit::Bytes));
         }
-        let refused = || upstream_origin(self.install.as_str());
+        let refused = || upstream_publish_origin(self.install.as_str());
         raw_rest(destination).ok_or_else(refused)?;
         let url = parse_https(destination, true).ok_or_else(refused)?;
         let origin = origin_of(&url);

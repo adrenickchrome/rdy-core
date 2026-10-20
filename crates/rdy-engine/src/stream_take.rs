@@ -30,6 +30,13 @@
 //!    block reads as its stub. No block is checked against a pack, and no approval is judged by
 //!    the current gate: a block of a type no pack knows is taken when these checks pass.
 //!
+//! Steps 2 to 5 are `render_source::check_snapshots`, which a stream render runs too, with
+//! nothing held.
+//!
+//! The take's lifecycle is written once (`take_checked`): a publication take
+//! (`crate::publication_take`) runs it with one more check after these, its profile facts and
+//! the host's verdict, before the receiver caps and the append; [`take`] runs it with none.
+//!
 //! A record that breaks a structural rule is `E_BAD_RECORD` with the holder fsck's own text (a
 //! signature its fsck code), so no take acknowledges an upload that the holder's fsck would then
 //! refuse. An ANSWER's record rules are the batch check's (`sync_stream::check_batch`), which the
@@ -43,32 +50,22 @@
 //! A caller whose reply was lost repairs from the holder's tags and object-key presence: the
 //! take keeps no receipt, transaction id or timer.
 use crate::error::{E_BAD_INPUT, E_REDACTION_STALE, E_REPO_MISMATCH, E_TAG_EXISTS, RdyError};
-use crate::publication::{self, SnapshotBudget, check_snapshot_limits};
-use crate::signature_check::{
-    CheckContext, STATEMENT_FOREIGN_REPO, STATEMENT_MATCH, SignatureSubject, check_signature,
-};
-use crate::stream_error::{Reason, StreamError, to_rdy};
+use crate::publication_take::PublicationRefusal;
+use crate::render_source::check_snapshots;
+use crate::stream_error::to_rdy;
 use crate::version::parse_version;
 use crate::{Delta, Rdy};
-use rdy_model::redaction::{RedactionApply, RedactionResidue};
-use rdy_model::signature::Signature;
-use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
+use rdy_model::{Hash, Tag};
 use rdy_schema::{Issue, Severity};
-use rdy_store::bounded;
-use rdy_store::check_holder;
-use rdy_store::kinds::{self, BlobManifest};
-use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_proof::ObjectSource;
-use rdy_store::sync_stream::StreamRecord;
 use rdy_store::take_batch::{
     BatchTaken, TagChoice, TakeError, UploadFacts, UploadTarget, check_input_bounds,
 };
 use rdy_store::{StoreError, StoreReader};
 use serde::{Serialize, Serializer};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::convert::Infallible;
 use std::fs::File;
-use std::sync::Arc;
 
 /// Where the holder's log ends after a take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -125,15 +122,38 @@ pub fn take(
     batches: &[File],
     target: UploadTarget,
 ) -> Result<TakeOutcome, RdyError> {
-    check_input_bounds(batches.len(), &target).map_err(to_rdy)?;
+    match take_checked::<(), Infallible>(rdy, batches, target, |_, _, _| Ok(())) {
+        Ok((outcome, ())) => Ok(outcome),
+        Err(PublicationRefusal::Core(e)) => Err(e),
+        Err(PublicationRefusal::Verdict(never)) => match never {},
+    }
+}
+
+/// The one take lifecycle ([`take`] is this with nothing to add). `check` runs once inside the
+/// store's validation callback, under the writer, after every check of [`validate`] passed and
+/// before the receiver caps and the append: it gets the checked source (the upload over the
+/// holder, approved removals as their drops), the upload's facts and the tag that survives, and
+/// its value is kept only once it returns `Ok`. A refusal of either is returned as it was given,
+/// before anything is appended; the store's own errors are the engine's ([`take_error`]).
+pub(crate) fn take_checked<T, E>(
+    rdy: &mut Rdy,
+    batches: &[File],
+    target: UploadTarget,
+    check: impl FnOnce(
+        &mut dyn ObjectSource,
+        &UploadFacts,
+        &TagChoice,
+    ) -> Result<T, PublicationRefusal<E>>,
+) -> Result<(TakeOutcome, T), PublicationRefusal<E>> {
+    check_input_bounds(batches.len(), &target).map_err(|e| PublicationRefusal::Core(to_rdy(e)))?;
     // a project is refused before anything of it is sealed (the store refuses it too)
     if !rdy.is_holder() {
         return Err(take_error(TakeError::ModeMismatch));
     }
     // a take is a batch of its own: one a raw write left open is sealed and published first
-    rdy.seal_open()?;
+    rdy.seal_open().map_err(PublicationRefusal::Core)?;
     // the writer is held for the whole call, so the tags read here are the ones the take sees
-    let held = held_tags(&rdy.store)?;
+    let held = held_tags(&rdy.store).map_err(PublicationRefusal::Core)?;
     let damage = if same_version_pair(&held) {
         rdy.check_holder_tags().err()
     } else {
@@ -142,21 +162,32 @@ pub fn take(
     let epoch = rdy.store.redaction_epoch();
     let reader = rdy.store.reader();
     let (held, damage) = (&held, &damage);
+    let mut kept: Option<T> = None;
+    let slot = &mut kept;
     // the writer's held batches are off for the take, which seals its own batch, as for the
     // store's other self-sealing writes
-    rdy.store.set_held(false)?;
+    rdy.store
+        .set_held(false)
+        .map_err(|e| PublicationRefusal::Core(e.into()))?;
     let taken = rdy
         .store
         .take_batches(batches, &target, move |source, facts| {
-            validate(&reader, source, facts, held, damage.as_ref())
+            let choice = validate(&reader, source, facts, held, damage.as_ref())
+                .map_err(PublicationRefusal::Core)?;
+            *slot = Some(check(source, facts, &choice)?);
+            Ok(choice)
         });
-    rdy.store.set_held(true)?;
+    rdy.store
+        .set_held(true)
+        .map_err(|e| PublicationRefusal::Core(e.into()))?;
     match taken {
         Ok(t) => {
             if t.frames > 0 {
-                republish(rdy, epoch)?;
+                republish(rdy, epoch).map_err(PublicationRefusal::Core)?;
             }
-            Ok(outcome(t))
+            // the store calls the check once on every path that returns a take
+            let value = kept.ok_or_else(|| PublicationRefusal::Core(lost_result()))?;
+            Ok((outcome(t), value))
         }
         Err(e) => {
             if matches!(e, TakeError::Store(StoreError::RedactionPending)) {
@@ -167,6 +198,16 @@ pub fn take(
             Err(take_error(e))
         }
     }
+}
+
+/// E_INTERNAL: a take returned without the value of its check (`with_writer_result`'s text for
+/// a lost writer result).
+fn lost_result() -> RdyError {
+    RdyError::new(
+        crate::E_INTERNAL,
+        "a write returned without its result",
+        "report this as a bug in rdy",
+    )
 }
 
 /// Publishes the holder's state again from its store after a take wrote a batch. A take that
@@ -199,20 +240,14 @@ fn outcome(t: BatchTaken) -> TakeOutcome {
 }
 
 /// A take's error as the engine's: the stream conversion for a stream refusal, the existing
-/// mapping for a store error, the validation's own error, and the take's three structured
-/// refusals.
-fn take_error(e: TakeError<RdyError>) -> RdyError {
-    match e {
+/// mapping for a store error, the validation's own refusal unchanged (a core error or the
+/// caller's own), and the take's three structured refusals.
+fn take_error<E>(e: TakeError<PublicationRefusal<E>>) -> PublicationRefusal<E> {
+    PublicationRefusal::Core(match e {
+        TakeError::Validation(refusal) => return refusal,
         TakeError::Store(e) => e.into(),
         TakeError::Stream(e) => to_rdy(e),
-        TakeError::Validation(e) => e,
-        TakeError::UncoveredChange(h) => RdyError::new(
-            E_REDACTION_STALE,
-            format!("the imported removal does not cover receiver change {h}"),
-            format!(
-                "redact this content in the project that made change {h}, upload that removal, then upload again"
-            ),
-        ),
+        TakeError::UncoveredChange(h) => uncovered_change(h),
         TakeError::ModeMismatch => RdyError::new(
             E_BAD_INPUT,
             "this store is a project",
@@ -223,7 +258,19 @@ fn take_error(e: TakeError<RdyError>) -> RdyError {
             format!("stream repo {source} does not match holder repo {target}"),
             "use the holder for the stream's repo",
         ),
-    }
+    })
+}
+
+/// E_REDACTION_STALE: change `h` embeds a block version an imported removal removes, and no
+/// approval covers it (`TakeError::UncoveredChange`; a render refuses the same stream).
+pub(crate) fn uncovered_change(h: Hash) -> RdyError {
+    RdyError::new(
+        E_REDACTION_STALE,
+        format!("the imported removal does not cover receiver change {h}"),
+        format!(
+            "redact this content in the project that made change {h}, upload that removal, then upload again"
+        ),
+    )
 }
 
 /// Every `tag/` ref whose record names a version, read as the holder's fsck reads them. A ref
@@ -254,8 +301,9 @@ fn same_version_pair(held: &[Held]) -> bool {
         .any(|w| w[0].cmp_precedence(w[1]) == Ordering::Equal)
 }
 
-/// The store take's validation callback: the tag rule, each new record's local limits, then
-/// every new landing's snapshot.
+/// The store take's validation callback: the tag rule, then the structural and snapshot checks
+/// of every new record (`render_source::check_snapshots`, which a render runs with nothing
+/// held).
 fn validate(
     reader: &StoreReader,
     source: &mut dyn ObjectSource,
@@ -264,308 +312,9 @@ fn validate(
     damage: Option<&RdyError>,
 ) -> Result<TagChoice, RdyError> {
     let choice = choose_tag(&facts.root, held, damage)?;
-    check_records(reader, source, facts)?;
-    check_landing_rules(reader, source, facts)?;
-    check_signatures(reader, source, facts)?;
-    check_landings(reader, source, facts)?;
+    // steps 2 to 5: the structural and snapshot checks a render runs too
+    check_snapshots(reader, source, facts)?;
     Ok(choice)
-}
-
-/// SIG's check of every signature of the upload that the holder does not hold (module docs,
-/// step 4), as the holder's fsck checks it once the take is sealed: against its subject read
-/// from the union and the holder, and a relayed tag's relay answer as the take names it
-/// (`UploadFacts::relay_answers`, else the one the holder names), with no fork lineage and no
-/// trust file. A valid signature by a key no trust file names is taken (trust is not judged
-/// here), and so is one that names another project (`foreign_repo`, ruling task-13). An invalid
-/// one is E_SIG_INVALID, and a valid one that does not cover its subject E_SIG_OBJECT_MISMATCH,
-/// before anything is appended.
-fn check_signatures(
-    reader: &StoreReader,
-    source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
-) -> Result<(), RdyError> {
-    let in_union = |k: &ObjectKey| facts.objects.binary_search(k).is_ok();
-    let has = |k: &ObjectKey| -> Result<bool, RdyError> {
-        Ok(in_union(k) || reader.has_kind(k.kind, &k.hash)?)
-    };
-    for key in facts.objects.iter().filter(|k| k.kind == kinds::SIGNATURE) {
-        if reader.has_kind(key.kind, &key.hash)? {
-            continue;
-        }
-        let Some(g) = typed::<Signature>(source, *key)? else {
-            continue;
-        };
-        let landing = ObjectKey {
-            kind: kinds::LANDING,
-            hash: g.subject,
-        };
-        let tag = ObjectKey {
-            kind: kinds::TAG,
-            hash: g.subject,
-        };
-        let subject = match () {
-            _ if has(&landing)? => match typed::<LandingRecord>(source, landing)? {
-                Some(record) => SignatureSubject::Landing {
-                    hash: g.subject,
-                    record,
-                },
-                None => SignatureSubject::Missing { hash: g.subject },
-            },
-            _ if has(&tag)? => match typed::<Tag>(source, tag)? {
-                Some(record) => SignatureSubject::Tag {
-                    hash: g.subject,
-                    record,
-                    answer: relay_answer(reader, source, facts, &g.subject)?,
-                },
-                None => SignatureSubject::Missing { hash: g.subject },
-            },
-            _ => SignatureSubject::Missing { hash: g.subject },
-        };
-        let context = CheckContext {
-            subject,
-            current_repo: facts.repo_id,
-            source_repos: vec![],
-            holder: true,
-        };
-        let check = check_signature(&g, &context, None);
-        if check.statement == STATEMENT_MATCH || check.statement == STATEMENT_FOREIGN_REPO {
-            continue;
-        }
-        let hash = key.hash.to_string();
-        let e = if check.code.as_deref() == Some(crate::E_SIG_INVALID) {
-            crate::sig_invalid(&hash)
-        } else {
-            crate::sig_object_mismatch(&hash)
-        };
-        return Err(at_object(e, *key));
-    }
-    Ok(())
-}
-
-/// The relay answer of TAG object `tag` once the take is sealed: the one the upload names for
-/// it, else the one the holder's `answer/tag-object:<tag>` names, if any.
-fn relay_answer(
-    reader: &StoreReader,
-    source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
-    tag: &Hash,
-) -> Result<Option<(Hash, Answer)>, RdyError> {
-    let hash = match facts.relay_answers.get(tag) {
-        Some(h) => *h,
-        None => match reader.get_ref(&rdy_store::holder::answer_tag_object_ref(tag))? {
-            Some(v) => match <[u8; 32]>::try_from(v.as_slice()) {
-                Ok(b) => Hash(b),
-                // a ref that is no hash is the holder fsck's to report: it names no answer
-                Err(_) => return Ok(None),
-            },
-            None => return Ok(None),
-        },
-    };
-    let key = ObjectKey {
-        kind: kinds::ANSWER,
-        hash,
-    };
-    Ok(typed::<Answer>(source, key)?.map(|a| (hash, a)))
-}
-
-/// The local limits of every block and blob manifest of the upload that the holder does not
-/// hold, as the batch check keeps them for each record (`stream_check::check_batch`), so a take
-/// never keeps a record a batch check refuses: a block's own text, reference, depth and graph
-/// limits; a manifest's canonical encoding, its claimed length (the publication blob limit) and
-/// its chunk count. A removed record has no bytes to judge.
-fn check_records(
-    reader: &StoreReader,
-    source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
-) -> Result<(), RdyError> {
-    let wanted = |k: &&ObjectKey| matches!(k.kind, kinds::BLOCK | kinds::BLOB_MANIFEST);
-    for key in facts.objects.iter().filter(wanted) {
-        if reader.has_kind(key.kind, &key.hash)? {
-            continue;
-        }
-        let Some(StreamRecord::Present { payload, .. }) = source.record(*key).map_err(to_rdy)?
-        else {
-            continue;
-        };
-        let at = |e: RdyError| at_object(e, *key);
-        if key.kind == kinds::BLOCK {
-            let b: Block = decode(&payload, *key)?;
-            publication::check_block_limits(&b).map_err(at)?;
-            continue;
-        }
-        let m: BlobManifest = decode(&payload, *key)?;
-        let malformed = || {
-            to_rdy(
-                StreamError::bad_record(0, 0, Reason::RecordDoesNotDecode).with_object(Some(*key)),
-            )
-        };
-        if !m.is_encoding_of(&payload) {
-            return Err(malformed());
-        }
-        let l = publication::limits();
-        if m.len > l.blob {
-            return Err(at(publication::limit("blob", l.blob, "bytes")));
-        }
-        if !m.chunks_fit() {
-            return Err(malformed());
-        }
-        check_chunk_lengths(source, key.hash, &m)?;
-    }
-    Ok(())
-}
-
-/// The chunk lengths of blob `blob` (manifest `m`), as a blob read keeps them
-/// (`rdy_store::check_chunk_len`): each chunk is the bytes still due, at most one chunk's
-/// worth, read over the union and the holder. A blob with a removed chunk is unavailable to
-/// reads, as a removal leaves it, and has no lengths to judge.
-fn check_chunk_lengths(
-    source: &mut dyn ObjectSource,
-    blob: Hash,
-    m: &BlobManifest,
-) -> Result<(), RdyError> {
-    let mut lens = Vec::with_capacity(m.chunks.len());
-    for c in &m.chunks {
-        let key = ObjectKey {
-            kind: kinds::BLOB_CHUNK,
-            hash: *c,
-        };
-        match source.record(key).map_err(to_rdy)? {
-            Some(StreamRecord::Present { payload, .. }) => lens.push(payload.len() as u64),
-            Some(StreamRecord::Dropped { .. }) => return Ok(()),
-            None => return Err(to_rdy(StreamError::unresolved(0, 0, key))),
-        }
-    }
-    let mut left = m.len;
-    for len in lens {
-        left = rdy_store::check_chunk_len(&blob, left, len).map_err(|e| {
-            structural(
-                e,
-                ObjectKey {
-                    kind: kinds::BLOB_MANIFEST,
-                    hash: blob,
-                },
-            )
-        })?;
-    }
-    Ok(())
-}
-
-/// The landing rules of every landing of the upload that the holder does not hold, and the
-/// chain rules of the root tag's chain over the union and the holder (module docs, step 3). A
-/// landing's fields are judged whether or not its snapshot is shared with another; a held
-/// landing was judged when it was taken, so its changes' dependencies are not read again.
-fn check_landing_rules(
-    reader: &StoreReader,
-    source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
-) -> Result<(), RdyError> {
-    let in_union = |k: &ObjectKey| facts.objects.binary_search(k).is_ok();
-    for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
-        if reader.has_kind(kinds::LANDING, &key.hash)? {
-            continue;
-        }
-        let Some(landing) = typed::<LandingRecord>(source, *key)? else {
-            continue;
-        };
-        rdy_store::landing_field_rules(&key.hash, &landing, &mut |kind, h| {
-            let k = ObjectKey { kind, hash: *h };
-            Ok::<_, Rule>(in_union(&k) || reader.has_kind(kind, h)?)
-        })
-        .map_err(|e| e.into_rdy(*key))?;
-    }
-    let root = &facts.root;
-    let head = ObjectKey {
-        kind: kinds::LANDING,
-        hash: root.landing,
-    };
-    let chain = check_holder::tag_chain_with(&root.landing, &mut |h| {
-        let key = ObjectKey {
-            kind: kinds::LANDING,
-            hash: *h,
-        };
-        match typed::<LandingRecord>(source, key) {
-            Ok(Some(l)) => Ok(Arc::new(l)),
-            Ok(None) => Err(Rule::Other(to_rdy(StreamError::unresolved(0, 0, key)))),
-            Err(e) => Err(Rule::Other(e)),
-        }
-    })
-    .map_err(|e| e.into_rdy(head))?;
-    let refname = format!("{}{}", rdy_store::holder::TAG_REF, root.name);
-    check_holder::chain_rules(&refname, &chain, &mut |l, c| {
-        if reader.has_kind(kinds::LANDING, l)? {
-            return Ok(None);
-        }
-        let key = ObjectKey {
-            kind: kinds::CHANGE,
-            hash: *c,
-        };
-        // a removed change has no dependencies to read; its approval's checks cover it
-        typed::<Change>(source, key)
-            .map(|c| c.map(Arc::new))
-            .map_err(Rule::Other)
-    })
-    .map_err(|e| e.into_rdy(head))
-}
-
-/// A structural check's failure: a rule the record breaks (the store's `Decode` text), or any
-/// other error, which passes through.
-enum Rule {
-    Broken(StoreError),
-    Other(RdyError),
-}
-
-impl From<StoreError> for Rule {
-    fn from(e: StoreError) -> Rule {
-        match e {
-            StoreError::Decode(_) => Rule::Broken(e),
-            // a bound of the walk (`holder check exceeds ...`) is the holder's E_LIMIT
-            StoreError::Refused(_) => Rule::Other(crate::holder::holder_error(e)),
-            e => Rule::Other(e.into()),
-        }
-    }
-}
-
-impl Rule {
-    /// The engine error of this failure, a broken rule naming the object `key`.
-    fn into_rdy(self, key: ObjectKey) -> RdyError {
-        match self {
-            Rule::Broken(e) => structural(e, key),
-            Rule::Other(e) => e,
-        }
-    }
-}
-
-/// E_BAD_RECORD for the object `key`, which breaks the structural rule `e` names: the holder
-/// fsck's own text, refused before the take appends anything.
-fn structural(e: StoreError, key: ObjectKey) -> RdyError {
-    let message = match e {
-        StoreError::Decode(m) => m,
-        e => e.to_string(),
-    };
-    to_rdy(StreamError {
-        code: "E_BAD_RECORD",
-        message,
-        fix: STRUCTURE_FIX.into(),
-        record: None,
-        offset: 0,
-        object: Some(key),
-    })
-}
-
-/// The fix of a structural refusal.
-const STRUCTURE_FIX: &str = "upload the history as its source project exported it";
-
-/// `e`, an engine limit error of the record `key`, with the one issue the stream conversion
-/// gives: the same code, message and fix, naming the object.
-fn at_object(e: RdyError, key: ObjectKey) -> RdyError {
-    to_rdy(StreamError {
-        code: e.code,
-        message: e.message,
-        fix: e.fix,
-        record: None,
-        offset: 0,
-        object: Some(key),
-    })
 }
 
 /// The tag rule (module docs, step 1).
@@ -609,151 +358,4 @@ fn tag_exists(name: &str, existing: &Hash) -> RdyError {
         fix: FIX.into(),
     });
     e
-}
-
-/// Checks the snapshot of every landing of the upload that the holder does not hold yet (module
-/// docs, step 5). A snapshot several landings share is checked once. The blocks of the last
-/// snapshot that the next one names are kept for it, so a history whose landings share most
-/// blocks reads each shared version about once; nothing older is kept.
-///
-/// Every block is charged to the snapshot's resource budget (`SnapshotBudget`: selection, text,
-/// references, graph) before it is kept, the kept ones from the last snapshot first, so the
-/// blocks held at any time are within the Publications limits of one snapshot, plus the one
-/// block being read: a snapshot past the limits is refused before it is materialized, and the
-/// memory a take holds follows the limits, not the upload.
-fn check_landings(
-    reader: &StoreReader,
-    source: &mut dyn ObjectSource,
-    facts: &UploadFacts,
-) -> Result<(), RdyError> {
-    let mut checked: HashSet<Hash> = HashSet::new();
-    let mut last: BTreeMap<Hash, Block> = BTreeMap::new();
-    for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
-        if reader.has_kind(kinds::LANDING, &key.hash)? {
-            continue;
-        }
-        let Some(landing) = typed::<LandingRecord>(source, *key)? else {
-            continue;
-        };
-        if !checked.insert(landing.state) {
-            continue;
-        }
-        let snapshot_key = ObjectKey {
-            kind: kinds::SNAPSHOT,
-            hash: landing.state,
-        };
-        let snapshot = typed::<StateSnapshot>(source, snapshot_key)?
-            .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, snapshot_key)))?;
-        // the kept blocks are this snapshot's only, charged before any other is read
-        let named: HashSet<&Hash> = snapshot.blocks.values().collect();
-        last.retain(|v, _| named.contains(v));
-        drop(named);
-        let mut budget = SnapshotBudget::new();
-        for b in last.values() {
-            budget.charge(b)?;
-        }
-        let mut blocks: BTreeMap<Hash, Block> = BTreeMap::new();
-        for (id, version) in &snapshot.blocks {
-            let (block, charged) = match last.remove(version) {
-                Some(b) => (b, true),
-                None => match read_block(source, *version)? {
-                    Some(b) => (b, false),
-                    // a removed version no residue describes reads as nothing
-                    None => continue,
-                },
-            };
-            if block.id != *id {
-                return Err(foreign_version(&landing.state, id, version, &block.id));
-            }
-            if !charged {
-                budget.charge(&block)?;
-            }
-            blocks.insert(*version, block);
-        }
-        check_snapshot_limits(blocks.values(), |h| manifest(source, *h))?;
-        last = blocks;
-    }
-    Ok(())
-}
-
-/// E_BAD_RECORD: snapshot `s` names `version`, a version of another block, for block `id` (the
-/// holder's fsck rule, refused before it is taken).
-fn foreign_version(s: &Hash, id: &BlockId, version: &Hash, other: &BlockId) -> RdyError {
-    structural(
-        StoreError::Decode(format!(
-            "snapshot {s}: block {id} names version {version}, which is a version of {other}"
-        )),
-        ObjectKey {
-            kind: kinds::SNAPSHOT,
-            hash: *s,
-        },
-    )
-}
-
-/// Block version `version` as a read sees it: its record, or for a removed version the stub its
-/// residue gives (None when no residue describes it).
-fn read_block(source: &mut dyn ObjectSource, version: Hash) -> Result<Option<Block>, RdyError> {
-    let key = ObjectKey {
-        kind: kinds::BLOCK,
-        hash: version,
-    };
-    match source.record(key).map_err(to_rdy)? {
-        Some(StreamRecord::Present { payload, .. }) => decode(&payload, key).map(Some),
-        Some(StreamRecord::Dropped {
-            apply,
-            residue: Some(residue),
-            ..
-        }) => {
-            let apply_key = ObjectKey {
-                kind: kinds::REDACTION_APPLY,
-                hash: apply,
-            };
-            let residue_key = ObjectKey {
-                kind: kinds::REDACTION_RESIDUE,
-                hash: residue,
-            };
-            let apply = typed::<RedactionApply>(source, apply_key)?
-                .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, apply_key)))?;
-            match typed::<RedactionResidue>(source, residue_key)? {
-                Some(RedactionResidue::Block(b)) if b.version == version => {
-                    Ok(Some(b.stub(apply.request)))
-                }
-                Some(_) => Err(to_rdy(
-                    StreamError::bad_record(0, 0, Reason::InvalidRemovalProof)
-                        .with_object(Some(key)),
-                )),
-                None => Err(to_rdy(StreamError::unresolved(0, 0, residue_key))),
-            }
-        }
-        Some(StreamRecord::Dropped { residue: None, .. }) => Ok(None),
-        None => Err(to_rdy(StreamError::unresolved(0, 0, key))),
-    }
-}
-
-/// Blob manifest `h`, if the source holds it intact.
-fn manifest(source: &mut dyn ObjectSource, h: Hash) -> Result<Option<BlobManifest>, RdyError> {
-    typed(
-        source,
-        ObjectKey {
-            kind: kinds::BLOB_MANIFEST,
-            hash: h,
-        },
-    )
-}
-
-/// The present record `key` of `source`, decoded within its bounds; None when the source does
-/// not hold it intact.
-fn typed<T: serde::de::DeserializeOwned>(
-    source: &mut dyn ObjectSource,
-    key: ObjectKey,
-) -> Result<Option<T>, RdyError> {
-    match source.record(key).map_err(to_rdy)? {
-        Some(StreamRecord::Present { payload, .. }) => decode(&payload, key).map(Some),
-        _ => Ok(None),
-    }
-}
-
-fn decode<T: serde::de::DeserializeOwned>(payload: &[u8], key: ObjectKey) -> Result<T, RdyError> {
-    bounded::decode(payload)
-        .map_err(|e| to_rdy(StreamError::from_record(0, 0, &e).with_object(Some(key))))
 }

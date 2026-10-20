@@ -557,20 +557,21 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// the print model's refactor (BASE d29bb4c, with ids seeded with 7). The digests were taken
 /// from `build_site` at BASE, twice, before this commit's code existed; they are the oracle. A
 /// change to the site's pages moves them: take them again from the build before that change.
+/// site.css gained the HA2b Task 6 rules; CSS-only (ruling task-6).
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "1665d37856db4fe98d68a6a562895383dee549ee29b69247e0dc9a053b1512e8",
+            "917c4b2d0cc2a0585f05d3d9f8245a39f44c13b739a1373134970b9e28e47bf0",
         ),
         (
             "view:editing",
-            "589c14a5faee35f64ea205d8d515d369313de6763cd8ddaefe33709253e96a6f",
+            "b5fc6cded31b453377f179b7161a8efaee42dd4f25a88597da04d234b3b7263c",
         ),
         (
             "view:reserved",
-            "b0f083548092b39be5621a015cf8ea88101712d92c04f1977a64d1e42dcf2802",
+            "0f163cbba3ccf66ad184fe8348c0cd1005dcea267a275688f48cc3b723ac58a1",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
