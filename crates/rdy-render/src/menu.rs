@@ -21,7 +21,6 @@ use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, key};
 use rdy_schema::publication::PROFILE_TYPE;
 use serde::Serialize;
-use std::cell::Cell;
 use std::collections::BTreeMap;
 
 /// The page's title, its heading and the name of its navigation (O9).
@@ -29,17 +28,6 @@ pub const TITLE: &str = "Versions, proposals, views and profiles";
 
 /// The most stored profiles the Profiles list shows. The others are counted, not listed.
 const PROFILE_ROWS: usize = 100;
-
-thread_local! {
-    static RESOLUTIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Tests only: how many profile selections the menu has resolved on this thread, so a test can
-/// check that the list resolves only the rows it shows and that a key resolves none.
-#[doc(hidden)]
-pub fn resolutions_for_tests() -> u64 {
-    RESOLUTIONS.with(Cell::get)
-}
 
 /// One row of the menu: what it opens and the reader's words beside it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -276,7 +264,6 @@ fn profile_rows(
     }];
     for p in &listing.shown {
         let name = p.id.as_ref().map(BlockId::as_str).unwrap_or_default();
-        RESOLUTIONS.with(|c| c.set(c.get() + 1));
         let docs = publication::resolve_inspection(st, scope, name)?.docs.len();
         let key = p.key.as_deref().map(key::fold).unwrap_or_default();
         rows.push(MenuRow {

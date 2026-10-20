@@ -407,7 +407,9 @@ function setup(opts) {
       served += 1; const n = served; return opts.fail ? Promise.reject(new Error('down')) : Promise.resolve({ ok: true, text: () => Promise.resolve('page ' + n) }); },
     DOMParser: function () { this.parseFromString = (text) => menuPage(text.split(' ')[1]); },
     EventSource: function (url) { const es = this; es.url = url; es.closed = false; es.listeners = {}; es.addEventListener = (t, f) => { (es.listeners[t] = es.listeners[t] || []).push(f); }; es.close = () => { es.closed = true; }; log.streams.push(es); },
-    location: { set href(v) { log.followed = v; }, get href() { return 'http://127.0.0.1/'; } },
+    // the page's own address: the script resolves a pill's href against it (the WHATWG parser)
+    location: { set href(v) { log.followed = v; }, get href() { return 'http://127.0.0.1/'; }, get origin() { return 'http://127.0.0.1'; } },
+    URL: URL,
   };
   new Function('window', 'document', src)(window, document);
   const fire = (target, t, e) => (document.listeners[t] || []).forEach((f) => f(Object.assign({ type: t, target }, e)));

@@ -10,7 +10,6 @@ use rdy_model::{Block, BlockId, Hash};
 use rdy_qa::fixtures::{approver, land, project, raw, raw_commit, write, writer};
 use rdy_render::menu::{
     Menu, MenuRow, build_versions_for, docs_changed, menu, menu_for, menu_key_for,
-    resolutions_for_tests,
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -577,13 +576,13 @@ fn spv5_profiles_list_caps_selection_work() {
     land(&mut r, "bulk").unwrap();
 
     let c = ctx(ScopeRef::Canon, None);
-    let before = resolutions_for_tests();
+    let before = publication::selection_resolutions_for_tests();
     let m = {
         let st = r.read();
         menu_of(&st, &c)
     };
     assert_eq!(
-        resolutions_for_tests() - before,
+        publication::selection_resolutions_for_tests() - before,
         100,
         "only the retained profiles resolve"
     );
@@ -610,9 +609,9 @@ fn spv5_profiles_list_caps_selection_work() {
     make(&mut r, "more", 101, 102);
     land(&mut r, "more").unwrap();
     let st = r.read();
-    let before = resolutions_for_tests();
+    let before = publication::selection_resolutions_for_tests();
     let m2 = menu_of(&st, &c);
-    assert_eq!(resolutions_for_tests() - before, 100);
+    assert_eq!(publication::selection_resolutions_for_tests() - before, 100);
     assert_eq!(m2.profiles_omitted, 2);
     assert_eq!(rows(&m2.profiles), rows(&m.profiles), "stable ordering");
     let html = page(&st, &c);
@@ -681,7 +680,7 @@ fn spv5_menu_key_tracks_profile_and_selection_changes() {
         let st = r.read();
         menu_key_for(&st, c, 0).unwrap()
     };
-    let before = resolutions_for_tests();
+    let before = publication::selection_resolutions_for_tests();
     let k0 = key(&w.r, &kv);
     assert_eq!(k0, key(&w.r, &kv), "a self-read is stable");
 
@@ -740,7 +739,11 @@ fn spv5_menu_key_tracks_profile_and_selection_changes() {
     assert_ne!(key(&w.r, &ctx(ScopeRef::Canon, None)), k4);
 
     // the key reads metadata alone: it resolved no selection in all of this
-    assert_eq!(resolutions_for_tests(), before, "no selection resolved");
+    assert_eq!(
+        publication::selection_resolutions_for_tests(),
+        before,
+        "no selection resolved"
+    );
     let _ = (&w.b, &w.c, &w.agents, &w.zeta);
 }
 
@@ -828,6 +831,22 @@ const PROFILE_CASES: &str = r##"
   const g = setup({ menu: true, href: '/\\elsewhere.example/' });
   out.g_prevented = g.click(g.pill); await tick();
   out.g = g.state();
+  // a tab, a newline or a carriage return inside "//" is dropped by the browser's parser, so
+  // each of these resolves to another host: none is fetched
+  const hostile = {
+    h: '/\t/elsewhere.example/', i: '/\n/elsewhere.example/', j: '/\r/elsewhere.example/',
+    k: '/\t\\elsewhere.example/', l: '\t//elsewhere.example/', m: 'https:\t//elsewhere.example/',
+    n: 'javascript:void(0)', o: 'http://127.0.0.1.elsewhere.example/~versions/',
+  };
+  for (const [k, href] of Object.entries(hostile)) {
+    const x = setup({ menu: true, href });
+    out[k + '_prevented'] = x.click(x.pill); await tick();
+    out[k] = x.state();
+  }
+  // the same origin spelled out is fetched as the path and query the browser resolves it to
+  const q = setup({ menu: true, href: 'http://127.0.0.1/~versions/?scope=tag%3A1.0.0#top' });
+  q.click(q.pill); await tick();
+  out.q = q.state();
   out.leaked = Object.keys(a.window).sort().filter((k) => !before.includes(k));
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -890,11 +909,12 @@ fn spv5_script_fetches_the_pills_context_and_keeps_focus() {
         "{v}"
     );
     // only a same-origin path is fetched; any other href is left to the browser
-    for k in ["e", "f", "g"] {
+    for k in ["e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"] {
         assert_eq!(v[format!("{k}_prevented")], false, "{k}: {v}");
         assert_eq!(v[k]["fetched"], json!([]), "{k}: {v}");
         assert_eq!(v[k]["open"], false, "{k}: {v}");
     }
+    assert_eq!(v["q"]["fetched"], json!([b_url]), "{v}");
     // the script leaves nothing on the window object
     assert_eq!(v["leaked"], json!([]), "{v}");
 }

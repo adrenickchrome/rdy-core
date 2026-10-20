@@ -76,6 +76,7 @@ thread_local! {
 
 thread_local! {
     static BLOB_READS: Cell<u64> = const { Cell::new(0) };
+    static SELECTION_RESOLUTIONS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// The bounds this thread resolves under: the fixed defaults (a build with the `test-support`
@@ -114,6 +115,15 @@ impl Drop for LimitsGuard {
 #[doc(hidden)]
 pub fn blob_reads_for_tests() -> u64 {
     BLOB_READS.with(Cell::get)
+}
+
+/// Tests only: how many selections [`resolve_in`] has expanded on this thread, the one place
+/// every resolution (`resolve`, `resolve_inspection`, `resolve_revision`, `resolve_source`) goes
+/// through. A metadata read ([`profile_at`]) is not one. A test can check that a caller resolves
+/// only the selections it needs.
+#[doc(hidden)]
+pub fn selection_resolutions_for_tests() -> u64 {
+    SELECTION_RESOLUTIONS.with(Cell::get)
 }
 
 /// `E_LIMIT` for one of the closed (part, limit, unit) rows.
@@ -863,6 +873,7 @@ fn resolve_in(
     name: &str,
     l: &Limits,
 ) -> Result<Resolved, RdyError> {
+    SELECTION_RESOLUTIONS.with(|c| c.set(c.get() + 1));
     let pack = source.pack();
     // 1. the profile, in this snapshot only
     let (profile, selectors) = lookup(source, m, name, l)?;

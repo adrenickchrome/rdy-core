@@ -1,4 +1,4 @@
-// The version menu, on the live site only: a click on the pill shows the versions, the open proposals, the open views and the profiles in a popover under it, and keeps it current while it is open. The pill's own href is the menu's URL, with the page's scope and profile in it. A pill without data-menu (a static render), or with an href that leaves the site, stays a plain link. When the menu cannot load, the click follows the link to the full page.
+// The version menu, on the live site only: a click on the pill shows the versions, the open proposals, the open views and the profiles in a popover under it, and keeps it current while it is open. The pill's own href is the menu's URL, with the page's scope and profile in it. A pill without data-menu (a static render), or with an href that resolves to another origin, stays a plain link. When the menu cannot load, the click follows the link to the full page.
 (function () {
   "use strict";
   var LABEL = "Versions, proposals, views and profiles";
@@ -13,16 +13,25 @@
     return document.querySelector(".pill[data-menu]");
   }
 
-  // the URL a pill asks for: its href when that is a path of this site, else none. A scheme, a
-  // host, "//" and "/\\" all leave the site, so they are not fetched.
+  // the URL a pill asks for: its href as the browser resolves it against the page, when that stays
+  // on this origin (http or https), as a path and query; else none. The browser's own parser
+  // decides, so a tab, a newline or a "\\" inside "//" cannot hide another host.
   function menuUrl(p) {
     var h = p.getAttribute("href");
-    return h && /^\/(?![\/\\])/.test(h) ? h : null;
+    if (!h || !window.URL) return null;
+    var u;
+    try {
+      u = new window.URL(h, window.location.href);
+    } catch (e) {
+      return null;
+    }
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.origin !== window.location.origin) return null;
+    return u.pathname + u.search;
   }
 
   // the menu and its stream's URL, from the versions page at `url`; no markup from anywhere else
   function load(url) {
-    return window.fetch(url, { credentials: "same-origin" }).then(function (r) {
+    return window.fetch(url, { credentials: "same-origin", mode: "same-origin" }).then(function (r) {
       if (!r.ok) throw new Error("the menu did not load");
       return r.text();
     }).then(function (text) {
