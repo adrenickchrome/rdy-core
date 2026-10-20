@@ -13,10 +13,15 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("dump_output")
+    .args(["file", "out"]).required(true).multiple(false)))]
 pub(crate) struct DumpArgs {
     /// The dump file to write; it must not exist.
-    #[arg(long)]
-    out: PathBuf,
+    #[arg(value_name = "FILE")]
+    file: Option<PathBuf>,
+    /// The dump file to write; it must not exist.
+    #[arg(long, value_name = "OUT")]
+    out: Option<PathBuf>,
     /// An earlier dump or increment of this store: write only the batches after its end.
     #[arg(long, value_name = "FILE")]
     after: Option<PathBuf>,
@@ -50,7 +55,12 @@ pub(crate) struct CloneArgs {
 /// `rdy dump`: through the daemon, as `rdy export` goes. With `--after` the daemon writes the
 /// increment after that file; when nothing is newer, no file is made.
 pub(crate) fn dump(env: &Env, a: DumpArgs) -> Result<(Value, String), ErrorReply> {
-    let mut args = json!({"out": path_arg(&a.out)?});
+    let out = a
+        .file
+        .as_ref()
+        .or(a.out.as_ref())
+        .expect("clap requires one output");
+    let mut args = json!({"out": path_arg(out)?});
     if let Some(after) = &a.after {
         args["after"] = json!(path_arg(after)?);
     }
@@ -162,4 +172,70 @@ pub(crate) fn clone(
         text(&v["next"])
     );
     Ok((v, t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser};
+
+    #[derive(Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        a: DumpArgs,
+    }
+
+    fn parse(args: &[&str]) -> Result<Wrap, clap::Error> {
+        Wrap::try_parse_from(std::iter::once("dump").chain(args.iter().copied()))
+    }
+
+    fn kind(args: &[&str]) -> ErrorKind {
+        match parse(args) {
+            Ok(_) => panic!("{args:?} parsed"),
+            Err(e) => e.kind(),
+        }
+    }
+
+    #[test]
+    fn sdc4_dump_requires_exactly_one_output() {
+        assert_eq!(kind(&[]), ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            kind(&["a.rdydump", "--out", "a.rdydump"]),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            kind(&["a.rdydump", "--out", "b.rdydump"]),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            kind(&["a.rdydump", "b.rdydump"]),
+            ErrorKind::UnknownArgument
+        );
+        // either single form parses
+        assert!(parse(&["a.rdydump"]).is_ok());
+        assert!(parse(&["--out", "a.rdydump"]).is_ok());
+    }
+
+    #[test]
+    fn sdc4_dump_accepts_a_hyphen_path_after_separator() {
+        let w = parse(&["--", "-copy.rdydump"]).unwrap();
+        assert_eq!(w.a.file, Some(PathBuf::from("-copy.rdydump")));
+        assert_eq!(w.a.out, None);
+    }
+
+    #[test]
+    fn sdc4_dump_help_names_both_output_forms() {
+        let help = Wrap::command().render_long_help().to_string();
+        let one: String = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(one.contains("[FILE]"), "{help}");
+        assert!(one.contains("--out <OUT>"), "{help}");
+        // clap drops the final full stop of a doc comment, as it did for the old `--out`
+        assert_eq!(
+            one.matches("The dump file to write; it must not exist")
+                .count(),
+            2,
+            "{help}"
+        );
+    }
 }

@@ -52,7 +52,9 @@ use crate::Rdy;
 use crate::carried_warning::CarriedWarning;
 use crate::config_levels::{LOCAL_FILE, PROJECT_FILE};
 use crate::dump_stop::DumpStop;
-use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_IO, E_LOCKED, RdyError};
+use crate::error::{
+    E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_HELD_BY_READER, E_IO, E_LOCKED, RdyError,
+};
 use crate::fsck::FsckReport;
 use crate::wc::ignore::IGNORE_FILE;
 use rdy_model::Hash;
@@ -696,7 +698,7 @@ fn check(
     let fails = |e: RdyError| fails_fsck(project, carried, e);
     let mut r = match Rdy::open_locked(project, lock) {
         Ok(r) => r,
-        Err(e) if e.code == E_LOCKED => {
+        Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
             made.keep = true;
             let dir = project.display();
             return Err(RdyError::new(

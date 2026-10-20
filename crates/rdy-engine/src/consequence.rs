@@ -2,11 +2,15 @@
 //! changed, read from the state it published, and the conflicts it recorded. Each entry has a
 //! stable id (`cq-<16 hex>`).
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
+use crate::consequence_literals::{
+    LiteralMatch, LiteralSet, changed as changed_literals, changed_from, changed_many, evidence,
+};
 use crate::coverage::{coverage_change, coverage_error_text};
 use crate::engine::{Engine, write_typed};
 use crate::error::{E_CONFLICT_UNRESOLVED, E_INTERNAL, RdyError};
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
+use crate::lexicon::Lexicon;
 use crate::tensions::delta::on_change;
 use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
@@ -16,10 +20,10 @@ use rdy_graph::{
     DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect, edges_of,
 };
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::{BlockId, Hash, Op};
+use rdy_model::{Block, BlockId, Hash, Op};
 use rdy_store::StoreError;
 use serde::Serialize;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -52,8 +56,34 @@ impl ConsequenceKind {
 /// The edge and the changed block behind a consequence.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Because {
+    /// The representative edge.
     pub edge: String,
     pub changed: String,
+    /// For a dependent, suspect or kept suspect entry: the representative edge and every link
+    /// kind impact follows from the block to `changed`, sorted, each once (D-Q69VB, O13). A
+    /// reference is listed only as the representative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edges: Option<Vec<String>>,
+    /// For a block that is not a decision, on a target that exists: the first eight literals
+    /// the change removed (D-CFC6V), as first written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<String>>,
+    /// How many removed literals past the eight `values` shows were inspected.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub values_omitted: usize,
+}
+
+impl Because {
+    /// A cause with no edge set and no literals (a conflict, a tension).
+    fn bare(edge: impl Into<String>, changed: impl Into<String>) -> Because {
+        Because {
+            edge: edge.into(),
+            changed: changed.into(),
+            edges: None,
+            values: None,
+            values_omitted: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -63,6 +93,13 @@ pub struct Consequence {
     pub kind: ConsequenceKind,
     pub because: Because,
     pub follow_up: FollowUp,
+    /// Where the block states a removed literal: at most eight rows, in (field, line, span)
+    /// order. On an `update` the match causes, and on a reach entry as evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub matched: Vec<LiteralMatch>,
+    /// How many more rows were found.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub matched_omitted: usize,
     /// For a `conflict` entry: the conflict's id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
@@ -78,6 +115,10 @@ pub struct Consequence {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -114,6 +155,25 @@ pub const CONFLICT_FIX: &str = "write the block from the version you want (rdy_c
 
 /// The hint on a `tension` entry.
 pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve";
+
+/// D-CFC6V's fix texts, after the decision and kept-suspect precedence. A full supersede whose
+/// dependent states no removed value.
+pub const SUPERSEDE_CONFIRM_FIX: &str = "this block states no removed value. Check that it still holds, then point each listed link at the decision in force.";
+/// A revoke whose dependent states no value of the decision.
+pub const REVOKE_CONFIRM_FIX: &str = "this block states no value of the decision. Check that it still holds, then remove each listed link or point it elsewhere.";
+/// A full supersede whose dependent states a removed value.
+pub const SUPERSEDE_UPDATE_FIX: &str =
+    "update the block for the removed values. Point each listed link at the decision in force.";
+/// A revoke whose dependent states a removed value.
+pub const REVOKE_UPDATE_FIX: &str =
+    "update the block for the removed values. Remove each listed link or point it elsewhere.";
+/// A full supersede whose dependent was read only in part, with no match.
+pub const SUPERSEDE_CUT_FIX: &str = "rdy checked only the first 16384 bytes. Check the rest, then point each listed link at the decision in force.";
+/// A revoke whose dependent was read only in part, with no match.
+pub const REVOKE_CUT_FIX: &str = "rdy checked only the first 16384 bytes. Check the rest, then remove each listed link or point it elsewhere.";
+/// An ordinary change whose dependent was read only in part, with no match.
+pub const EDIT_CUT_FIX: &str =
+    "rdy checked only the first 16384 bytes. Check the rest of the block and update it if needed.";
 
 /// The hint on an entry for a block that a refined or part-superseded decision governs (FW-LP6).
 /// The governing decision did not change, so the block already pins it: a repin is refused, and
@@ -175,10 +235,11 @@ pub fn consequence_id(batch: &Hash, kind: &str, target: &BlockId) -> String {
     format!("cq-{}", &Hash::of(&bytes).to_string()[..16])
 }
 
-/// The first cause found for a dependent block.
+/// The first cause found for a dependent block, with its edge set ([`edge_set`]).
 struct Cause {
     suspect: bool,
     edge: String,
+    edges: Vec<String>,
     changed: BlockId,
 }
 
@@ -239,6 +300,24 @@ fn creates_cite_outside(ops: &[Op]) -> bool {
     })
 }
 
+/// Whether `ops` create a decision that fully supersedes or revokes a block: then a block they
+/// create can keep a link to a target a pending decision replaces (O9), even when every block
+/// they cite is one they write.
+fn creates_retirement(ops: &[Op]) -> bool {
+    ops.iter().any(|o| match o {
+        Op::Create { block } if block.block_type == DECISION => {
+            block.links.get(REVOKES).is_some_and(|l| !l.is_empty())
+                || block
+                    .links
+                    .get(SUPERSEDES)
+                    .into_iter()
+                    .flatten()
+                    .any(|l| l.part.is_none())
+        }
+        _ => false,
+    })
+}
+
 /// D-W7KAK: the follow-up and the fix of a kept `suspect` entry, by the suspect's reason and
 /// whether the block is a live or partly superseded decision; `None` for any other reason. A
 /// live decision is frozen, so it gets `reaffirm` for every reason, as `follow_up` gives it.
@@ -276,6 +355,408 @@ fn conflict_message(ids: &[String]) -> String {
 /// the conflicts are resolved and it is proposed again (ledger O4).
 fn conflict_error(ids: &[String]) -> String {
     format!("{E_CONFLICT_UNRESOLVED}: {}", conflict_message(ids))
+}
+
+/// A changed target's lineage event in this change (M10): a full supersede or a revoke of the
+/// target (`Retired`), a refine or part supersede of it (`Partial`), or neither.
+#[derive(Clone, Copy, Debug)]
+enum Lineage<'r> {
+    Ordinary,
+    Retired(&'r Retired),
+    Partial,
+}
+
+/// The decisions that fully supersede a target, by id, and whether one revokes it (a revoke
+/// wins: the target's literals are all removed).
+#[derive(Clone, Debug, Default)]
+struct Retired {
+    revoke: bool,
+    by: BTreeSet<BlockId>,
+}
+
+/// The lineage events of decisions: the targets each fully supersedes or revokes, and the
+/// targets each refines or part-supersedes.
+#[derive(Debug, Default)]
+struct Events {
+    retired: BTreeMap<BlockId, Retired>,
+    partial: BTreeMap<BlockId, BTreeSet<BlockId>>,
+}
+
+impl Events {
+    /// The events of decision `b`'s own lineage links (none for another type).
+    fn add_decision(&mut self, b: &Block) {
+        if b.block_type != DECISION {
+            return;
+        }
+        for l in b.links.get(SUPERSEDES).into_iter().flatten() {
+            match l.part {
+                None => {
+                    self.retired
+                        .entry(l.target.clone())
+                        .or_default()
+                        .by
+                        .insert(b.id.clone());
+                }
+                Some(_) => {
+                    self.partial
+                        .entry(l.target.clone())
+                        .or_default()
+                        .insert(b.id.clone());
+                }
+            }
+        }
+        for l in b.links.get(REVOKES).into_iter().flatten() {
+            self.retired.entry(l.target.clone()).or_default().revoke = true;
+        }
+    }
+
+    /// The events of the decisions `ops` create; the refines and part supersedes as `reach`
+    /// lists them (copied refines already dropped).
+    fn of_ops(ops: &[Op], reach: &[(BlockId, BlockId, &'static str)]) -> Events {
+        let mut ev = Events::default();
+        for op in ops {
+            if let Op::Create { block } = op {
+                ev.add_decision(block);
+            }
+        }
+        ev.partial.clear();
+        for (decision, target, _) in reach {
+            ev.partial
+                .entry(target.clone())
+                .or_default()
+                .insert(decision.clone());
+        }
+        ev
+    }
+}
+
+/// One baseline a target's literals are compared with (O8, D-EGXAS): a scope of a state (read
+/// on first use), the empty state (a view on no landing, a first landing), or a write's start.
+enum Baseline<'a> {
+    Scope {
+        st: &'a ReadState,
+        scope: Scope,
+        read: OnceCell<(Arc<Materialized>, Arc<Lexicon>)>,
+    },
+    Empty,
+    /// Each block the changes write and the version its first update or delete replaced (`None`
+    /// for one they create); read on first use into those versions and their lexicon.
+    Start {
+        first: BTreeMap<BlockId, Option<Hash>>,
+        read: OnceCell<(BTreeMap<BlockId, Block>, Arc<Lexicon>)>,
+    },
+}
+
+impl<'a> Baseline<'a> {
+    fn scope(st: &'a ReadState, scope: Scope) -> Baseline<'a> {
+        Baseline::Scope {
+            st,
+            scope,
+            read: OnceCell::new(),
+        }
+    }
+
+    /// The write's start of the blocks `ops` write, in op order: the first op on a block gives
+    /// its start.
+    fn start<'o>(ops: impl IntoIterator<Item = &'o Op>) -> Baseline<'a> {
+        let mut first = BTreeMap::new();
+        for op in ops {
+            first.entry(op.block_id().clone()).or_insert(op.base());
+        }
+        Baseline::Start {
+            first,
+            read: OnceCell::new(),
+        }
+    }
+}
+
+/// The names the state after the change is read with: a lexicon given, or a scope's, read on
+/// first use. Most changes have no dependent to judge, and a lexicon that is not built yet reads
+/// every block of the scope.
+enum Names<'a> {
+    Ready(Arc<Lexicon>),
+    Scope {
+        st: &'a ReadState,
+        scope: Scope,
+        read: OnceCell<Arc<Lexicon>>,
+    },
+}
+
+impl<'a> Names<'a> {
+    fn scope(st: &'a ReadState, scope: Scope) -> Names<'a> {
+        Names::Scope {
+            st,
+            scope,
+            read: OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> Result<&Arc<Lexicon>, RdyError> {
+        match self {
+            Names::Ready(l) => Ok(l),
+            Names::Scope { st, scope, read } => {
+                if read.get().is_none() {
+                    let _ = read.set(st.lexicon(scope)?);
+                }
+                Ok(read.get().expect("set above"))
+            }
+        }
+    }
+}
+
+/// What a consequence compares (O8): the state after the change (`m`, read with `names`), its
+/// ordinary baselines in order, and the lineage events of the change. Nothing is stored; each
+/// target's changed literals are worked out once.
+struct Compare<'a> {
+    st: &'a ReadState,
+    m: &'a Materialized,
+    names: Names<'a>,
+    baselines: Vec<Baseline<'a>>,
+    events: Events,
+    cache: RefCell<BTreeMap<(BlockId, LiteralsKey), LiteralSet>>,
+}
+
+/// What a target's changed literals depend on besides the target: its lineage event and, for
+/// a retirement, whether a revoke is among them and which decisions replace it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LiteralsKey {
+    Ordinary,
+    Retired(bool, BTreeSet<BlockId>),
+    Partial,
+}
+
+/// The follow-up of one entry, its fix and its evidence.
+struct Judged {
+    follow: FollowUp,
+    fix: Option<String>,
+    values: Option<Vec<String>>,
+    values_omitted: usize,
+    matched: Vec<LiteralMatch>,
+    matched_omitted: usize,
+}
+
+impl<'a> Compare<'a> {
+    fn new(
+        st: &'a ReadState,
+        m: &'a Materialized,
+        names: Names<'a>,
+        baselines: Vec<Baseline<'a>>,
+        events: Events,
+    ) -> Compare<'a> {
+        Compare {
+            st,
+            m,
+            names,
+            baselines,
+            events,
+            cache: RefCell::default(),
+        }
+    }
+
+    /// Target `x`'s lineage event in this change: a revoke or full supersede first.
+    fn lineage_of(&self, x: &BlockId) -> Lineage<'_> {
+        match self.events.retired.get(x) {
+            Some(r) => Lineage::Retired(r),
+            None if self.events.partial.contains_key(x) => Lineage::Partial,
+            None => Lineage::Ordinary,
+        }
+    }
+
+    /// Block `x` in baseline `b`, with the names to read it under.
+    fn in_baseline(
+        &self,
+        b: &Baseline<'a>,
+        x: &BlockId,
+    ) -> Result<Option<(Block, Arc<Lexicon>)>, RdyError> {
+        match b {
+            Baseline::Empty => Ok(None),
+            Baseline::Scope { st, scope, read } => {
+                if read.get().is_none() {
+                    let _ = read.set((st.materialized(scope)?, st.lexicon(scope)?));
+                }
+                let (m, names) = read.get().expect("set above");
+                Ok(m.get(x).map(|blk| (blk.clone(), Arc::clone(names))))
+            }
+            Baseline::Start { first, read } => {
+                if read.get().is_none() {
+                    let mut blocks = BTreeMap::new();
+                    for (id, base) in first {
+                        if let Some(h) = base {
+                            blocks.insert(id.clone(), self.st.reader().get_block(h)?);
+                        }
+                    }
+                    // the final lexicon with the written blocks put back as they were
+                    let names = self.names.get()?.with_changes(
+                        first.keys().filter_map(|id| self.m.get(id)),
+                        blocks.values(),
+                    );
+                    let _ = read.set((blocks, Arc::new(names)));
+                }
+                let (blocks, names) = read.get().expect("set above");
+                let blk = match first.get(x) {
+                    Some(_) => blocks.get(x),
+                    None => self.m.get(x),
+                };
+                Ok(blk.map(|b| (b.clone(), Arc::clone(names))))
+            }
+        }
+    }
+
+    /// The literals the change removed from target `x` (D-EGXAS): for a revoke all of the old
+    /// decision's, for a full supersede those that some replacement lacks, for a refine or part
+    /// supersede those the new decisions lack (each a decision's title, then statement); else
+    /// those that a baseline holds and the final text lacks, each once, under one cap.
+    fn literals(&self, x: &BlockId, lineage: Lineage<'_>) -> Result<LiteralSet, RdyError> {
+        // a retired target is compared with the replacements given: the change's own (a normal
+        // entry) and every active one (a retained link) can differ in one reply
+        let key = match lineage {
+            Lineage::Ordinary => LiteralsKey::Ordinary,
+            Lineage::Retired(r) => LiteralsKey::Retired(r.revoke, r.by.clone()),
+            Lineage::Partial => LiteralsKey::Partial,
+        };
+        let key = (x.clone(), key);
+        if let Some(l) = self.cache.borrow().get(&key) {
+            return Ok(l.clone());
+        }
+        let pack = self.st.pack();
+        let names = &**self.names.get()?;
+        let set = match lineage {
+            Lineage::Retired(r) => match self.m.get(x) {
+                None => LiteralSet::default(),
+                Some(old) if r.revoke => changed_literals(pack, old, None, names, names, true),
+                Some(old) => {
+                    let news: Vec<&Block> = r.by.iter().filter_map(|b| self.m.get(b)).collect();
+                    changed_many(pack, old, &news, names, names, true)
+                }
+            },
+            Lineage::Partial => match self.m.get(x) {
+                None => LiteralSet::default(),
+                Some(old) => {
+                    let news: Vec<&Block> = self
+                        .events
+                        .partial
+                        .get(x)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|b| self.m.get(b))
+                        .collect();
+                    changed_many(pack, old, &news, names, names, true)
+                }
+            },
+            Lineage::Ordinary => {
+                // an equal block read under other names can hold other entities (D-CFC6V), so
+                // a baseline is skipped only when both its block and its names are the same;
+                // `changed_from` keeps each identity once
+                let mut olds: Vec<(Block, Arc<Lexicon>)> = vec![];
+                for b in &self.baselines {
+                    if let Some((blk, lex)) = self.in_baseline(b, x)?
+                        && !olds.iter().any(|(o, l)| *o == blk && Arc::ptr_eq(l, &lex))
+                    {
+                        olds.push((blk, lex));
+                    }
+                }
+                let new = self.m.get(x);
+                let pair = new
+                    .or(olds.first().map(|(b, _)| b))
+                    .is_some_and(|b| b.block_type == DECISION);
+                let refs: Vec<(&Block, &Lexicon)> = olds.iter().map(|(b, l)| (b, &**l)).collect();
+                changed_from(pack, &refs, new, names, pair)
+            }
+        };
+        self.cache.borrow_mut().insert(key, set.clone());
+        Ok(set)
+    }
+
+    /// The follow-up of `block` (as `src`) on target `x` (D-CFC6V): a decision's by its status,
+    /// update for a deleted target, else from the literals it states. `None` for a decision
+    /// that asserts nothing live.
+    fn judge(
+        &self,
+        g: &Graph,
+        block: &BlockId,
+        src: &Block,
+        x: &BlockId,
+        lineage: Lineage<'_>,
+    ) -> Result<Option<Judged>, RdyError> {
+        let status = g.status(block);
+        let deleted = self.m.get(x).is_none();
+        if status.is_some() || deleted {
+            let Some(follow) = follow_up(status.as_ref(), deleted, false, false) else {
+                return Ok(None);
+            };
+            return Ok(Some(Judged {
+                follow,
+                fix: (follow == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
+                values: None,
+                values_omitted: 0,
+                matched: vec![],
+                matched_omitted: 0,
+            }));
+        }
+        let lits = self.literals(x, lineage)?;
+        let ev = evidence(self.st.pack(), &lits, src, self.names.get()?);
+        let hit = !ev.matched.is_empty();
+        let (follow, fix) = match lineage {
+            // D-M19GV: a refine or part supersede keeps confirm, whatever it matched
+            Lineage::Partial => (FollowUp::Confirm, Some(LINEAGE_FIX)),
+            _ => {
+                let follow = if hit || ev.cut {
+                    FollowUp::Update
+                } else {
+                    FollowUp::Confirm
+                };
+                let fix = match (lineage, follow, hit) {
+                    (Lineage::Retired(r), FollowUp::Confirm, _) => Some(if r.revoke {
+                        REVOKE_CONFIRM_FIX
+                    } else {
+                        SUPERSEDE_CONFIRM_FIX
+                    }),
+                    (Lineage::Retired(r), _, true) => Some(if r.revoke {
+                        REVOKE_UPDATE_FIX
+                    } else {
+                        SUPERSEDE_UPDATE_FIX
+                    }),
+                    (Lineage::Retired(r), _, false) => Some(if r.revoke {
+                        REVOKE_CUT_FIX
+                    } else {
+                        SUPERSEDE_CUT_FIX
+                    }),
+                    (_, FollowUp::Update, false) => Some(EDIT_CUT_FIX),
+                    _ => None,
+                };
+                (follow, fix)
+            }
+        };
+        let (matched, matched_omitted) = if hit {
+            (ev.matched, ev.matched_omitted)
+        } else {
+            (vec![], 0)
+        };
+        Ok(Some(Judged {
+            follow,
+            fix: fix.map(str::to_string),
+            values: Some(ev.values),
+            values_omitted: ev.values_omitted,
+            matched,
+            matched_omitted,
+        }))
+    }
+}
+
+/// The edge set of a cause (O13): the representative `rep` and every link kind impact follows
+/// among `edges`, sorted, each once. A reference is in it only as `rep`; `contains` never.
+fn edge_set<'e>(rep: &str, edges: impl IntoIterator<Item = &'e Edge>) -> Vec<String> {
+    let mut out: Vec<String> = edges
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EdgeKind::Link(n) if IMPACT_LINKS.contains(&n.as_str()) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    out.push(rep.to_string());
+    out.sort();
+    out.dedup();
+    out
 }
 
 impl ReadState {
@@ -335,7 +816,8 @@ impl ReadState {
             Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
         };
         // nothing can point at a block that did not exist, and a new block that cites nothing
-        // outside the write cannot be suspect: no graph to read
+        // outside the write cannot be suspect: no graph to read, unless the write also retires
+        // a block it creates (a retained link to it is reported, O9)
         let only_creates = chs
             .iter()
             .flat_map(|ch| &ch.ops)
@@ -344,6 +826,7 @@ impl ReadState {
             && changed == touched
             && reach.is_empty()
             && !chs.iter().any(|ch| creates_cite_outside(&ch.ops))
+            && !chs.iter().any(|ch| creates_retirement(&ch.ops))
         {
             return Ok(Consequences {
                 tensions_error,
@@ -359,11 +842,25 @@ impl ReadState {
             Scope::Canon | Scope::At(_) | Scope::Inflight | Scope::Proposal(_) => None,
         };
         let written = self.written_in(view);
+        // O8 (D-EGXAS): in a view, the view's base, then the write's start; else the start only
+        let mut baselines = vec![];
+        if let Some(v) = view {
+            baselines.push(self.view_base(v));
+        }
+        baselines.push(Baseline::start(chs.iter().flat_map(|ch| &ch.ops)));
+        let ops: Vec<Op> = chs.iter().flat_map(|ch| ch.ops.iter().cloned()).collect();
+        let cmp = Compare::new(
+            self,
+            &m,
+            Names::scope(self, scope.clone()),
+            baselines,
+            Events::of_ops(&ops, &reach),
+        );
         Ok(Consequences {
             tensions_error,
             ..self.consequences_in(
                 &g,
-                &m,
+                &cmp,
                 change,
                 &touched,
                 &rewritten,
@@ -373,8 +870,18 @@ impl ReadState {
                 tensions,
                 &reach,
                 max_tokens,
-            )
+            )?
         })
+    }
+
+    /// The baseline of view `v`'s base landing: canon's head read as canon, an earlier landing
+    /// as of that landing, and no landing as the empty state (never current canon).
+    fn view_base(&self, v: &str) -> Baseline<'_> {
+        match self.effective_base(v) {
+            None => Baseline::Empty,
+            Some(h) if Some(h) == self.canon_head() => Baseline::scope(self, Scope::Canon),
+            Some(h) => Baseline::scope(self, Scope::At(h)),
+        }
     }
 
     /// Whether `view`'s own included changes wrote a block (always false for no view), read
@@ -446,11 +953,10 @@ impl ReadState {
                 id: consequence_id(batch, ConsequenceKind::Conflict.as_str(), &c.block),
                 block: c.block.to_string(),
                 kind: ConsequenceKind::Conflict,
-                because: Because {
-                    edge: "conflict".into(),
-                    changed: c.block.to_string(),
-                },
+                because: Because::bare("conflict", c.block.to_string()),
                 follow_up: FollowUp::Resolve,
+                matched: vec![],
+                matched_omitted: 0,
                 conflict: Some(c.id.to_string()),
                 tension: None,
                 fix: Some(CONFLICT_FIX.to_string()),
@@ -478,9 +984,32 @@ impl ReadState {
         }
         let g = self.graph(&scope)?;
         let written = self.written_in(Some(view));
-        Ok(self.consequences_in(
-            &g,
+        // the op's actual transition: the view before it is the one baseline; the lineage links
+        // the touched decisions have after it are the events (one found only before compares
+        // as an ordinary transition)
+        let mut events = Events::default();
+        for id in &touched {
+            if let Some(b) = m.get(id) {
+                events.add_decision(b);
+                for l in b.links.get(REFINES).into_iter().flatten() {
+                    events
+                        .partial
+                        .entry(l.target.clone())
+                        .or_default()
+                        .insert(b.id.clone());
+                }
+            }
+        }
+        let cmp = Compare::new(
+            self,
             &m,
+            Names::scope(self, scope.clone()),
+            vec![Baseline::scope(before, scope.clone())],
+            events,
+        );
+        self.consequences_in(
+            &g,
+            &cmp,
             batch,
             &touched,
             &BTreeSet::new(),
@@ -490,7 +1019,7 @@ impl ReadState {
             tensions,
             &[],
             max_tokens,
-        ))
+        )
     }
 
     /// The consequences of landing proposal version `version` on canon (Q2b): what would turn
@@ -510,17 +1039,34 @@ impl ReadState {
         let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
         let (touched, changed) = changed_by_ops(&ops);
         let only_creates = ops.iter().all(|o| matches!(o, Op::Create { .. }));
-        if only_creates && changed == touched && !creates_cite_outside(&ops) {
+        if only_creates
+            && changed == touched
+            && !creates_cite_outside(&ops)
+            && !creates_retirement(&ops)
+        {
             return Ok(Consequences::default());
         }
-        // build canon's graph first, so that `after` carries it instead of building another
-        self.graph(&Scope::Canon)?;
-        let (m, g) = if landed_as(self, &p)?.is_some() {
+        // O8: a landed version compares its landing's prev with the state it recorded, and reads
+        // the graph, the dependents and their names as of that landing (a later landing changes
+        // none of them); an unlanded one compares canon with canon and its changes
+        let (m, g, names, before) = if let Some(landing) = landed_as(self, &p)? {
+            let at = Scope::At(landing);
+            let prev = self.reader().landing(&landing)?.prev;
+            let before = match prev {
+                Some(prev) => Baseline::scope(self, Scope::At(prev)),
+                None => Baseline::Empty,
+            };
             (
-                self.materialized(&Scope::Canon)?,
-                self.graph(&Scope::Canon)?,
+                self.materialized(&at)?,
+                self.graph(&at)?,
+                Names::scope(self, at),
+                before,
             )
         } else {
+            // build canon's graph and lexicon first, so that `after` carries them instead of
+            // building others
+            self.graph(&Scope::Canon)?;
+            self.lexicon(&Scope::Canon)?;
             let reader = self.reader();
             // a conflict the version carries: it has no consequences until it is resolved
             let (_, applied) =
@@ -544,11 +1090,23 @@ impl ReadState {
                     Arc::clone(reader.tracking()),
                 ))
             }));
-            (Arc::clone(&next.m), g)
+            let names = Arc::clone(
+                next.lexicon
+                    .get_or_init(|| Arc::new(Lexicon::build(self.pack(), next.m.iter()))),
+            );
+            (
+                Arc::clone(&next.m),
+                g,
+                Names::Ready(names),
+                Baseline::scope(self, Scope::Canon),
+            )
         };
-        Ok(self.consequences_in(
+        let mut reach = reached_targets(&ops);
+        reach.retain(|(new, _, via)| *via != REFINES || !refines_copied(&g, new));
+        let cmp = Compare::new(self, &m, names, vec![before], Events::of_ops(&ops, &reach));
+        self.consequences_in(
             &g,
-            &m,
+            &cmp,
             version,
             &touched,
             &rewritten_by(&ops),
@@ -558,25 +1116,27 @@ impl ReadState {
             vec![],
             &[],
             max_tokens,
-        ))
+        )
     }
 
-    /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
-    /// outside `touched` that points at it, and the kept suspects of `rewritten` (see
-    /// `kept_suspects`). `conflicts` (by block id) come first, then
-    /// `tensions` (as given), then suspect entries, then dependent ones, each by block id, then
-    /// the FW-LP6 entries of `reach` (a `dependent` entry for each block a reached target
-    /// governs, in the order of `reach`, never a block `touched` holds, the new decision itself,
-    /// or a block the list already holds; none for a target that is rejected, superseded or
-    /// revoked; follow-up `confirm` for a block that is not a decision, and for a decision what
-    /// `follow_up` gives it, none for one that asserts nothing live); `written` marks
-    /// `already_written`. The list is cut from the end to `max_tokens` (default
-    /// `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
+    /// The entries for `changed` in graph `g` over `cmp`'s state: for each changed block, each
+    /// block outside `touched` that points at it, the kept suspects of `rewritten` (see
+    /// `kept_suspects`) and their retained links to a target a pending decision replaces (see
+    /// `pending_replacements`). `conflicts` (by block id) come first, then `tensions` (as
+    /// given), then suspect entries, then dependent ones, each by block id, then the pending
+    /// entries (by block, then target), then the FW-LP6 entries of `reach` (a `dependent` entry
+    /// for each block a reached target governs, in the order of `reach`, never a block
+    /// `touched` holds, the new decision itself, or a block the list already holds; none for a
+    /// target that is rejected, superseded or revoked; follow-up `confirm` for a block that is
+    /// not a decision, and for a decision what `follow_up` gives it, none for one that asserts
+    /// nothing live); `written` marks `already_written`. Each entry's follow-up, fix and
+    /// evidence are `Compare::judge`'s, worked out before the cut. The list is cut from the end
+    /// to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn consequences_in(
+    fn consequences_in(
         &self,
         g: &Graph,
-        m: &Materialized,
+        cmp: &Compare<'_>,
         batch: &Hash,
         touched: &BTreeSet<BlockId>,
         rewritten: &BTreeSet<BlockId>,
@@ -586,7 +1146,8 @@ impl ReadState {
         tensions: Vec<Consequence>,
         reach: &[(BlockId, BlockId, &'static str)],
         max_tokens: Option<usize>,
-    ) -> Consequences {
+    ) -> Result<Consequences, RdyError> {
+        let m = cmp.m;
         let mut suspects_of: BTreeMap<BlockId, Vec<Suspect>> = BTreeMap::new();
         let mut causes: BTreeMap<BlockId, Cause> = BTreeMap::new();
         for x in changed {
@@ -615,11 +1176,13 @@ impl ReadState {
                 let Some(e) = pick else { continue };
                 let better = causes.get(from).is_none_or(|c| suspect && !c.suspect);
                 if better {
+                    let edge = e.kind.name();
                     causes.insert(
                         from.clone(),
                         Cause {
                             suspect,
-                            edge: e.kind.name(),
+                            edges: edge_set(&edge, edges.iter().copied()),
+                            edge,
                             changed: x.clone(),
                         },
                     );
@@ -631,18 +1194,9 @@ impl ReadState {
         let mut dependent_items = vec![];
         for (block, cause) in causes {
             let Some(src) = m.get(&block) else { continue };
-            let deleted = m.get(&cause.changed).is_none();
             // no entry for a decision that asserts nothing live
-            let value_reference = cause.edge == "references"
-                && m.get(&cause.changed)
-                    .is_some_and(|b| b.block_type == rdy_model::entity::VALUE);
-            let Some(follow) = follow_up(
-                self.pack(),
-                src,
-                g.status(&block).as_ref(),
-                deleted,
-                value_reference,
-            ) else {
+            let lineage = cmp.lineage_of(&cause.changed);
+            let Some(j) = cmp.judge(g, &block, src, &cause.changed, lineage)? else {
                 continue;
             };
             let kind = if cause.suspect {
@@ -657,11 +1211,16 @@ impl ReadState {
                 because: Because {
                     edge: cause.edge,
                     changed: cause.changed.to_string(),
+                    edges: Some(cause.edges),
+                    values: j.values,
+                    values_omitted: j.values_omitted,
                 },
-                follow_up: follow,
+                follow_up: j.follow,
+                matched: j.matched,
+                matched_omitted: j.matched_omitted,
                 conflict: None,
                 tension: None,
-                fix: (follow == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
+                fix: j.fix,
                 already_written: written(&block),
             };
             match kind {
@@ -671,12 +1230,15 @@ impl ReadState {
         }
         // D-W7KAK: with the other suspect entries, by block id (a kept entry never names a block
         // an outside entry names: those are outside `touched`)
-        suspect_items.extend(self.kept_suspects(g, m, batch, rewritten));
+        let kept = self.kept_suspects(g, m, batch, rewritten);
+        let pending = self.pending_replacements(g, cmp, batch, rewritten, &kept)?;
+        suspect_items.extend(kept);
         suspect_items.sort_by(|a, b| a.block.cmp(&b.block));
         conflicts.sort_by(|a, b| a.block.cmp(&b.block));
         conflicts.extend(tensions);
         conflicts.extend(suspect_items);
         conflicts.extend(dependent_items);
+        conflicts.extend(pending);
         // FW-LP6: what a refined or part-superseded target governs, once per block, never a
         // block this change touched or one the list already holds
         let mut listed: BTreeSet<String> = conflicts.iter().map(|c| c.block.clone()).collect();
@@ -702,18 +1264,11 @@ impl ReadState {
                     continue;
                 }
                 // the walk's rule for a governed decision: none for one that asserts nothing
-                // live, reaffirm for an accepted one, update for a proposed one
+                // live, reaffirm for an accepted one, update for a proposed one; a block that is
+                // not a decision gets confirm, with what it states of the change as evidence
                 let Some(src) = m.get(&block) else { continue };
-                let status = g.status(&block);
-                let Some(walk) = follow_up(self.pack(), src, status.as_ref(), false, false) else {
+                let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial)? else {
                     continue;
-                };
-                let (follow, fix) = match status {
-                    Some(_) => (
-                        walk,
-                        (walk == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
-                    ),
-                    None => (FollowUp::Confirm, Some(LINEAGE_FIX.to_string())),
                 };
                 listed.insert(block.to_string());
                 conflicts.push(Consequence {
@@ -723,24 +1278,30 @@ impl ReadState {
                     because: Because {
                         edge: (*via).to_string(),
                         changed: target.to_string(),
+                        edges: None,
+                        values: j.values,
+                        values_omitted: j.values_omitted,
                     },
-                    follow_up: follow,
+                    follow_up: j.follow,
+                    matched: j.matched,
+                    matched_omitted: j.matched_omitted,
                     conflict: None,
                     tension: None,
-                    fix,
+                    fix: j.fix,
                     already_written: written(&block),
                 });
             }
         }
-        cut(conflicts, max_tokens)
+        Ok(cut(conflicts, max_tokens))
     }
 
     /// D-W7KAK: a `suspect` entry for each block of `rewritten` that is suspect in `g`, once per
     /// target, marked `already_written`: the write kept its pin, so the agent answers it before it
     /// proposes. `because.edge` is the edge to the target that makes the block suspect (a premise
-    /// edge first, the least by name; else the least link by name); the id covers the target too.
-    /// Follow-up and fix by [`kept_follow_up`]. None for a block that is gone, a decision that
-    /// asserts nothing live, or a presentational source. By block, then target.
+    /// edge first, the least by name; else the least link by name), `because.edges` it and the
+    /// impact links to the same target; the id covers the target too. Follow-up and fix by
+    /// [`kept_follow_up`]. None for a block that is gone, a decision that asserts nothing live,
+    /// or a presentational source. By block, then target.
     fn kept_suspects(
         &self,
         g: &Graph,
@@ -781,6 +1342,7 @@ impl ReadState {
                     .map(|e| (!premise(e), e.kind.name()))
                     .min();
                 let Some((_, edge)) = edge else { continue };
+                let edges = edge_set(&edge, g.outgoing(block).iter().filter(|e| e.to == s.target));
                 out.push(Consequence {
                     // one id per (block, target), as a tension entry names its tension
                     id: consequence_id(batch, &format!("suspect {}", s.target), block),
@@ -789,8 +1351,13 @@ impl ReadState {
                     because: Because {
                         edge,
                         changed: s.target.to_string(),
+                        edges: Some(edges),
+                        values: None,
+                        values_omitted: 0,
                     },
                     follow_up: follow,
+                    matched: vec![],
+                    matched_omitted: 0,
                     conflict: None,
                     tension: None,
                     fix: Some(fix),
@@ -799,6 +1366,104 @@ impl ReadState {
             }
         }
         out
+    }
+
+    /// O9: the links a rewritten block keeps to a target that a pending decision replaces. For
+    /// each block of `rewritten` and each target of its remaining impact links, the target's
+    /// incoming full `supersedes` and `revokes` links in this scope; a proposed, live or partly
+    /// superseded replacer (never the block itself) makes the link reportable before the target
+    /// turns suspect. One `dependent` entry per (block, target), marked `already_written`, with
+    /// the id `consequence_id(batch, "dependent <target>", block)`; none where `kept` names the
+    /// same block and target. Representative edge, edge set and follow-up as a normal entry's,
+    /// the literals compared with every active replacement (a revoke removes them all). By
+    /// block, then target.
+    fn pending_replacements(
+        &self,
+        g: &Graph,
+        cmp: &Compare<'_>,
+        batch: &Hash,
+        rewritten: &BTreeSet<BlockId>,
+        kept: &[Consequence],
+    ) -> Result<Vec<Consequence>, RdyError> {
+        let kept: BTreeSet<(&str, &str)> = kept
+            .iter()
+            .map(|c| (c.block.as_str(), c.because.changed.as_str()))
+            .collect();
+        let mut out = vec![];
+        for block in rewritten {
+            let Some(src) = cmp.m.get(block) else {
+                continue;
+            };
+            let mut by_target: BTreeMap<&BlockId, Vec<&Edge>> = BTreeMap::new();
+            for e in g.outgoing(block) {
+                if impact(e) {
+                    by_target.entry(&e.to).or_default().push(e);
+                }
+            }
+            for (target, mut edges) in by_target {
+                let (b, t) = (block.to_string(), target.to_string());
+                if kept.contains(&(b.as_str(), t.as_str())) {
+                    continue;
+                }
+                let mut retired = Retired::default();
+                for e in g.incoming(target) {
+                    let (supersedes, revokes) = match &e.kind {
+                        EdgeKind::Link(n) => (n == SUPERSEDES && e.part.is_none(), n == REVOKES),
+                        _ => (false, false),
+                    };
+                    let active = matches!(
+                        g.status(&e.from),
+                        Some(
+                            DerivedStatus::Proposed
+                                | DerivedStatus::Live
+                                | DerivedStatus::PartiallySuperseded { .. }
+                        )
+                    );
+                    if !(supersedes || revokes) || !active || e.from == *block {
+                        continue;
+                    }
+                    if revokes {
+                        retired.revoke = true;
+                    } else {
+                        retired.by.insert(e.from.clone());
+                    }
+                }
+                if !retired.revoke && retired.by.is_empty() {
+                    continue;
+                }
+                edges.sort_by_key(|e| e.kind.name());
+                let rep = edges
+                    .iter()
+                    .find(|e| premise(e))
+                    .or_else(|| edges.first())
+                    .expect("a target has an edge")
+                    .kind
+                    .name();
+                let Some(j) = cmp.judge(g, block, src, target, Lineage::Retired(&retired))? else {
+                    continue;
+                };
+                out.push(Consequence {
+                    id: consequence_id(batch, &format!("dependent {target}"), block),
+                    block: b,
+                    kind: ConsequenceKind::Dependent,
+                    because: Because {
+                        edges: Some(edge_set(&rep, edges.iter().copied())),
+                        edge: rep,
+                        changed: t,
+                        values: j.values,
+                        values_omitted: j.values_omitted,
+                    },
+                    follow_up: j.follow,
+                    matched: j.matched,
+                    matched_omitted: j.matched_omitted,
+                    conflict: None,
+                    tension: None,
+                    fix: j.fix,
+                    already_written: true,
+                });
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -846,11 +1511,10 @@ fn tension_entry(batch: &Hash, t: &Tension, mine: &dyn Fn(&SideRef) -> bool) -> 
         id: consequence_id(batch, &format!("tension {}", t.id), &block),
         block: block.to_string(),
         kind: ConsequenceKind::Tension,
-        because: Because {
-            edge: t.kind.name().to_string(),
-            changed: changed.to_string(),
-        },
+        because: Because::bare(t.kind.name(), changed.to_string()),
         follow_up: FollowUp::Resolve,
+        matched: vec![],
+        matched_omitted: 0,
         conflict: None,
         tension: Some(tension_label(&t.id)),
         fix: Some(TENSION_FIX.to_string()),
@@ -986,7 +1650,10 @@ fn report<T: Serialize + 'static>(
         return Ok(v);
     }
     let st = engine.read();
-    let c = st.consequences_of(&scope, &changes, max_tokens);
+    // the state the write published, not a later one: a write that lands before this read
+    // changes nothing in this reply (O8); the view base is that state's too
+    let published = states.as_ref().map_or(&st, |s| &s.1);
+    let c = published.consequences_of(&scope, &changes, max_tokens);
     attach(&mut v, c);
     if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
         && !notes.is_empty()

@@ -143,7 +143,12 @@ fn sg10_schema_has_brief_and_consequences_topics() {
         ),
         "{CONSEQUENCES_DOC}"
     );
-    assert!(!CONSEQUENCES_DOC.contains("view op"), "{CONSEQUENCES_DOC}");
+    // Task 5's exact text compares "a view operation" (include, exclude or undo) with its
+    // before and after states; it still never says every view op carries consequences
+    assert!(
+        !CONSEQUENCES_DOC.contains("view ops") && !CONSEQUENCES_DOC.contains("every view op"),
+        "{CONSEQUENCES_DOC}"
+    );
     assert!(EDIT_LOOP_DOC.contains("rdy_view include, exclude and undo return consequences"));
 }
 

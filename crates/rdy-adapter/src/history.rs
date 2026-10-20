@@ -4,10 +4,11 @@
 //! Records and rules belong to core (`rdy_engine::history_facts`); this module pins them to the
 //! refs the snapshot captured and shapes nothing else. A landing is readable only when the
 //! snapshot's captured canon head or one of its captured tags reaches it, so a landing made after
-//! the snapshot is refused. The chains are newest first and bounded at 100000 landings. No trust
-//! verdict is computed, and no current gate policy or assurance is recomputed.
+//! the snapshot is refused. The chains are newest first and bounded at 100000 landings. Many
+//! landings by hash are read in one walk of one snapshot (`landings`), never one call per hash.
+//! No trust verdict is computed, and no current gate policy or assurance is recomputed.
 
-use crate::store::Snapshot;
+use crate::store::{Snapshot, StoreHandle};
 use rdy_engine::RdyError;
 use rdy_engine::history_facts;
 use rdy_model::Hash;
@@ -40,6 +41,16 @@ impl Snapshot {
             return Err(history_facts::not_reachable(hash));
         }
         history_facts::landing(read, hash)
+    }
+
+    /// The recorded facts of each landing of `hashes`: one per distinct hash, in the order each
+    /// first occurs, each equal to [`Snapshot::landing_facts`] of it. Every landing must lie in
+    /// the captured canon history or in a captured tag's history (canon first, then the tags in
+    /// name order); one that does not fails the whole call with `E_NOT_FOUND`, naming the first
+    /// such hash of the input. The input counts before its repeats collapse: at most 100000
+    /// hashes. All the hashes are found in one walk of the captured histories.
+    pub fn landings(&self, hashes: &[Hash]) -> Result<Vec<LandingFacts>, RdyError> {
+        history_facts::landings(self.read_state(), &self.history_heads(), hashes)
     }
 
     /// The captured canon history, newest landing first. Empty before the first landing, and
@@ -78,6 +89,37 @@ impl Snapshot {
     }
 }
 
+impl StoreHandle {
+    /// [`Snapshot::landings`] of one snapshot this call captures: a write that lands meanwhile
+    /// is not in the answer.
+    pub fn landings(&self, hashes: &[Hash]) -> Result<Vec<LandingFacts>, RdyError> {
+        let snapshot = self.snapshot()?;
+        after_capture();
+        snapshot.landings(hashes)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What runs once on this thread just after the next handle read captures its snapshot.
+    static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Sets what runs once on this thread just after the next handle read captures its snapshot.
+#[cfg(test)]
+fn set_after_capture(hook: Box<dyn FnOnce()>) {
+    AFTER_CAPTURE.with(|h| *h.borrow_mut() = Some(hook));
+}
+
+/// Runs the hook a test set, if any; nothing in any other build.
+fn after_capture() {
+    #[cfg(test)]
+    if let Some(hook) = AFTER_CAPTURE.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +131,7 @@ mod tests {
     use rdy_store::LandRequest;
     use rdy_store::kinds;
     use serde_json::{Value, json};
+    use std::sync::{Arc, Barrier};
 
     fn session(role: Role) -> Session {
         Session {
@@ -364,6 +407,123 @@ mod tests {
         // repeated keys are one key: 100000 copies are within the limit
         let at = vec![key(kinds::LANDING); 100_000];
         assert_eq!(snap.has_objects(&at).unwrap().len(), 1);
+        handle.close().unwrap();
+    }
+
+    /// An error as its code, message and fix.
+    fn parts(e: RdyError) -> (String, String, String) {
+        (e.code.to_string(), e.message, e.fix)
+    }
+
+    #[test]
+    fn sdc2_handle_batch_captures_one_snapshot() {
+        let _clock = rdy_engine::pin_clock(1_000_000);
+        let (dir, _, l1) = tagged();
+        let handle = StoreHandle::open(dir.path()).unwrap();
+        let captured = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let (l2, got) = std::thread::scope(|s| {
+            let batch = s.spawn(|| {
+                let (captured, resume) = (captured.clone(), resume.clone());
+                // the batch waits after its capture until the write below has landed
+                set_after_capture(Box::new(move || {
+                    captured.wait();
+                    resume.wait();
+                }));
+                handle.landings(&[l1])
+            });
+            captured.wait();
+            // a later landing and a signature of L1, both after the capture
+            let l2 = handle
+                .local()
+                .write(Box::new(move |r| {
+                    write(
+                        r,
+                        json!([{"op": "create", "type": "doc", "fields": {"title": "later", "doc_type": "page"}}]),
+                    );
+                    let p = r.propose(&session(Role::Writer), "work", "later", None)?;
+                    let l = r.land(&session(Role::Approver), &p.id)?;
+                    r.store_mut().put_signature(&Signature {
+                        subject: l1,
+                        namespace: "rdy-approval-v1".into(),
+                        statement: b"x".to_vec(),
+                        sig: b"not checked here".to_vec(),
+                        signed_by: Provenance {
+                            actor: "agent:s".into(),
+                            run: None,
+                            role: Role::Approver,
+                            at_ms: 1,
+                        },
+                    })?;
+                    r.seal_open()?;
+                    Ok(Value::String(l))
+                }))
+                .unwrap();
+            resume.wait();
+            let l2: Hash = l2.as_str().unwrap().parse().unwrap();
+            (l2, batch.join().unwrap().unwrap())
+        });
+        // the batch read the captured state only: L1 without the later signature
+        assert_eq!(hashes(&got), [l1]);
+        assert!(got[0].signatures.is_empty());
+        // a new capture sees the later landing and the signature
+        let now = handle.landings(&[l1, l2]).unwrap();
+        assert_eq!(hashes(&now), [l1, l2]);
+        assert_eq!(now[0].signatures.len(), 1);
+        assert_eq!(now[0].record, got[0].record);
+        handle.close().unwrap();
+    }
+
+    #[test]
+    fn sdc2_batch_unreachable_fails_the_whole_call() {
+        let _clock = rdy_engine::pin_clock(1_000_000);
+        let (dir, _, l1) = tagged();
+        // a stored landing that neither canon nor a tag reaches
+        let orphan = {
+            let mut r = Rdy::open(dir.path()).unwrap();
+            let mut record = r.store().reader().landing(&l1).unwrap();
+            record.proposal = Hash([7; 32]);
+            record.prev = Some(l1);
+            let orphan = r.store_mut().put(kinds::LANDING, &record).unwrap();
+            r.seal_open().unwrap();
+            r.close().unwrap();
+            orphan
+        };
+        let handle = StoreHandle::open(dir.path()).unwrap();
+        let snap = handle.snapshot().unwrap();
+        let future = land_more(&handle, "second", Some("v2.0.0"));
+        let (missing, missing2) = (Hash([9; 32]), Hash([8; 32]));
+        assert_eq!(hashes(&snap.landings(&[l1, l1]).unwrap()), [l1]);
+        for (input, named) in [
+            (vec![l1, missing], missing),
+            (vec![future, l1], future),
+            (vec![l1, orphan, l1], orphan),
+            (vec![missing2, missing, missing2], missing2),
+            (vec![l1, missing, future, orphan], missing),
+            (vec![orphan, future], orphan),
+        ] {
+            let e = snap.landings(&input).unwrap_err();
+            let want = parts(history_facts::not_reachable(named));
+            assert_eq!(parts(e), want, "{input:?}");
+            assert_eq!(parts(snap.landing_facts(named).unwrap_err()), want);
+        }
+        assert_eq!(
+            parts(history_facts::not_reachable(missing)),
+            (
+                E_NOT_FOUND.to_string(),
+                format!("no landing {missing} in the captured history"),
+                "read landings from canon_chain or tag_history".to_string()
+            )
+        );
+        // a new capture reaches the later landing; the orphan still fails
+        assert_eq!(
+            hashes(&handle.landings(&[future, l1]).unwrap()),
+            [future, l1]
+        );
+        assert_eq!(
+            parts(handle.landings(&[future, orphan]).unwrap_err()),
+            parts(history_facts::not_reachable(orphan))
+        );
         handle.close().unwrap();
     }
 }

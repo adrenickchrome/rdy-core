@@ -562,12 +562,11 @@ fn ha10_history_depth_is_bounded() {
 
 /// One request-wide budget: the distinct landings met across all heads, and a matched target,
 /// count against [`MAX_LANDINGS`] together.
-#[test]
-fn ha10_history_budget_is_one_for_all_heads() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = Rdy::create_holder(dir.path(), RepoId([1; 16])).unwrap();
-    let half = MAX_LANDINGS / 2 + 1; // 50001
-    // two disjoint histories of 50001 landings each, oldest first
+/// A holder at `dir` with two disjoint histories of [`MAX_LANDINGS`] / 2 + 1 (50001) landings
+/// each, oldest first.
+fn two_histories(dir: &Path) -> (Rdy, Vec<Hash>, Vec<Hash>) {
+    let mut h = Rdy::create_holder(dir, RepoId([1; 16])).unwrap();
+    let half = MAX_LANDINGS / 2 + 1;
     let mut chain = |base: u32| {
         let mut ids = Vec::with_capacity(half);
         let mut prev = None;
@@ -585,7 +584,15 @@ fn ha10_history_budget_is_one_for_all_heads() {
     let b = chain(1_000_000);
     h.seal_open().unwrap();
     h.close().unwrap();
-    let h = Rdy::open_holder(dir.path()).unwrap();
+    (Rdy::open_holder(dir).unwrap(), a, b)
+}
+
+#[test]
+fn ha10_history_budget_is_one_for_all_heads() {
+    let dir = tempfile::tempdir().unwrap();
+    let half = MAX_LANDINGS / 2 + 1; // 50001
+    // two disjoint histories of 50001 landings each, oldest first
+    let (h, a, b) = two_histories(dir.path());
     let read = h.read();
     let unknown = hs(9);
     let (a_head, a_second) = (a[half - 1], a[half - 2]);
@@ -845,4 +852,239 @@ fn ha10_presence_is_exact_sorted_and_bounded() {
             "request at most 100000 object keys"
         )
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// landing facts by hash, in one batch (sdc2)
+
+/// An error as its code, message and fix.
+fn parts(e: RdyError) -> (String, String, String) {
+    (e.code.to_string(), e.message, e.fix)
+}
+
+/// The landings the holder's tags name, in tag-name order.
+fn tag_heads(h: &Rdy) -> Vec<Hash> {
+    let mut tags = h.store().tags().unwrap();
+    tags.sort_by(|a, b| a.0.cmp(&b.0));
+    tags.into_iter().map(|(_, _, t)| t.landing).collect()
+}
+
+#[test]
+fn sdc2_batch_reaches_divergent_tags_without_canon() {
+    let d = divergent();
+    let mut h = d.holder();
+    // a stored landing that no captured history reaches
+    let orphan = h
+        .store_mut()
+        .put(kinds::LANDING, &link(7, Some(d.l1)))
+        .unwrap();
+    h.seal_open().unwrap();
+    let read = h.read();
+    assert!(read.canon_head().is_none());
+    assert!(
+        read.reader().landing(&orphan).is_ok(),
+        "the orphan is stored"
+    );
+    let heads = tag_heads(&h);
+    assert_eq!(heads.len(), 3);
+
+    // both divergent histories and their shared first landing, in first-occurrence order
+    let got =
+        history_facts::landings(&read, &heads, &[d.l_right, d.l_left, d.l1, d.l_right]).unwrap();
+    assert_eq!(hashes(&got), [d.l_right, d.l_left, d.l1]);
+    for f in &got {
+        assert_eq!(f, &history_facts::landing(&read, f.hash).unwrap());
+    }
+    // one tag's history does not reach the other branch
+    let right = [heads[2]];
+    assert_eq!(
+        hashes(&history_facts::landings(&read, &right, &[d.l1]).unwrap()),
+        [d.l1]
+    );
+    assert_eq!(
+        parts(history_facts::landings(&read, &right, &[d.l_right, d.l_left]).unwrap_err()),
+        parts(history_facts::not_reachable(d.l_left))
+    );
+    // the unreferenced landing fails the whole call
+    assert_eq!(
+        parts(history_facts::landings(&read, &heads, &[d.l1, orphan, d.l_left]).unwrap_err()),
+        parts(history_facts::not_reachable(orphan))
+    );
+}
+
+#[test]
+fn sdc2_batch_counts_inputs_before_dedup() {
+    let _clock = pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = project(dir.path());
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+        ]),
+    );
+    let l = land(&mut r, "first");
+    let read = r.read();
+    let heads = [l];
+    // 100000 copies of one reachable hash are one fact
+    let at = vec![l; MAX_KEYS];
+    assert_eq!(
+        history_facts::landings(&read, &heads, &at).unwrap(),
+        [history_facts::landing(&read, l).unwrap()]
+    );
+    // 100001 copies are over the limit, counted before the repeats collapse
+    let limit = (
+        E_LIMIT.to_string(),
+        "landing facts query exceeds 100000 hashes".to_string(),
+        "request at most 100000 landing hashes".to_string(),
+    );
+    let over = vec![l; MAX_KEYS + 1];
+    assert_eq!(
+        parts(history_facts::landings(&read, &heads, &over).unwrap_err()),
+        limit
+    );
+    // the count comes before any walk: a head that is no stored landing is never read
+    assert_eq!(
+        parts(history_facts::landings(&read, &[hs(9)], &over).unwrap_err()),
+        limit
+    );
+    assert_eq!(
+        history_facts::landings(&read, &[hs(9)], &[l])
+            .unwrap_err()
+            .message,
+        format!("object {} not found", hs(9).short())
+    );
+    // an empty request is empty, and a stale state answers nothing
+    assert!(
+        history_facts::landings(&read, &heads, &[])
+            .unwrap()
+            .is_empty()
+    );
+    let stale = r.read();
+    remove(&mut r, w.created["$p"].clone());
+    let e = history_facts::landings(&stale, &heads, &[]).unwrap_err();
+    assert_eq!(
+        (e.code, e.fix.as_str()),
+        (E_REDACTED_STATE, REDACTED_STATE_FIX)
+    );
+    assert!(
+        history_facts::landings(&r.read(), &heads, &[])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn sdc2_batch_walk_has_one_distinct_landing_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let half = MAX_LANDINGS / 2 + 1; // 50001
+    let (h, a, b) = two_histories(dir.path());
+    let read = h.read();
+    let (a_head, a_second) = (a[half - 1], a[half - 2]);
+    let (b_head, b_second) = (b[half - 1], b[half - 2]);
+    let over = |r: Result<Vec<history_facts::LandingFacts>, RdyError>| {
+        let e = r.unwrap_err();
+        (e.code, e.message)
+    };
+    let limit = (E_LIMIT, "history exceeds 100000 landings".to_string());
+    // 50001 + 50001 distinct landings are over the one budget
+    assert_eq!(
+        over(history_facts::landings(&read, &[b_head, a_head], &[a[0]])),
+        limit
+    );
+    // 50000 + 50000 is exactly the budget: both oldest landings are found, in input order
+    let got = history_facts::landings(&read, &[b_second, a_second], &[a[0], b[0], a[0]]).unwrap();
+    assert_eq!(hashes(&got), [a[0], b[0]]);
+    // a requested hash that is the 100001st distinct visit is over the budget, not a match
+    assert_eq!(
+        over(history_facts::landings(&read, &[b_second, a_head], &[a[0]])),
+        limit
+    );
+    // shared ancestors count once: 50000 + 1 (a_head, whose past was met) + 49999 = 100000
+    let got =
+        history_facts::landings(&read, &[a_second, a_head, b[half - 3]], &[b[0], a_head]).unwrap();
+    assert_eq!(hashes(&got), [b[0], a_head]);
+    // the walk stops once every requested hash is found: two visits here
+    let got = history_facts::landings(&read, &[b_head, a_head], &[b_second, b_head]).unwrap();
+    assert_eq!(hashes(&got), [b_second, b_head]);
+    // a hash still missing keeps the walk going to the budget
+    assert_eq!(
+        over(history_facts::landings(
+            &read,
+            &[b_head, a_head],
+            &[b_head, hs(9)]
+        )),
+        limit
+    );
+}
+
+#[test]
+fn sdc2_batch_uses_captured_signatures_and_removal_facts() {
+    let _clock = pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = project(dir.path());
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+        ]),
+    );
+    let (d, secret) = (w.created["$d"].clone(), w.created["$p"].clone());
+    let l1 = land(&mut r, "first");
+    write(
+        &mut r,
+        json!([{"op": "update", "id": d, "fields": {"title": "A2"}}]),
+    );
+    let l2 = land(&mut r, "second");
+    let before = r.read();
+    let heads = [before.canon_head().unwrap()];
+    let g = put(&mut r, &sig(l1, "rdy-approval-v1", b"x".to_vec(), 1));
+
+    // the state read before the signature holds none; each fact equals the single read
+    let old = history_facts::landings(&before, &heads, &[l2, l1]).unwrap();
+    assert_eq!(hashes(&old), [l2, l1]);
+    for f in &old {
+        assert!(f.signatures.is_empty());
+        assert_eq!(f, &history_facts::landing(&before, f.hash).unwrap());
+    }
+    let now = r.read();
+    let cur = history_facts::landings(&now, &heads, &[l1, l2]).unwrap();
+    assert_eq!(
+        cur[0].signatures.iter().map(|s| s.hash).collect::<Vec<_>>(),
+        [g]
+    );
+    for f in &cur {
+        assert_eq!(f, &history_facts::landing(&now, f.hash).unwrap());
+    }
+
+    // after a removal, states read before it fail
+    remove(&mut r, secret.clone());
+    for st in [&before, &now] {
+        let e = history_facts::landings(st, &heads, &[l1]).unwrap_err();
+        assert_eq!(
+            (e.code, e.fix.as_str()),
+            (E_REDACTED_STATE, REDACTED_STATE_FIX)
+        );
+    }
+    // a current state reads the removal projection: the same identities, flagged as removed
+    let after = r.read();
+    let got = history_facts::landings(&after, &[after.canon_head().unwrap()], &[l1, l2]).unwrap();
+    for f in &got {
+        assert_eq!(f, &history_facts::landing(&after, f.hash).unwrap());
+    }
+    assert_eq!(got[0].record, cur[0].record);
+    assert_eq!(got[0].signatures, cur[0].signatures);
+    assert_eq!(got[0].blocks.len(), cur[0].blocks.len());
+    for (a, b) in got[0].blocks.iter().zip(&cur[0].blocks) {
+        assert_eq!(
+            (&a.change, &a.id, a.op, a.base, a.version),
+            (&b.change, &b.id, b.op, b.base, b.version)
+        );
+        assert_eq!(a.redacted, a.id.to_string() == secret);
+        assert!(!b.redacted);
+    }
+    assert!(got[0].blocks.iter().any(|b| b.redacted));
+    assert_eq!(got[1], cur[1]);
 }

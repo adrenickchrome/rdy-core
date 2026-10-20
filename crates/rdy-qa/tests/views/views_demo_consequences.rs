@@ -41,7 +41,10 @@ fn df4_rewriting_a_suspect_block_names_the_suspect() {
     })
     .unwrap();
     let k = kept(&w1, &b).unwrap_or_else(|| panic!("write 1 names no kept suspect: {w1:#}"));
-    assert_eq!(k["because"], json!({"edge": "references", "changed": a}));
+    assert_eq!(
+        k["because"],
+        json!({"edge": "references", "changed": a, "edges": ["references"]})
+    );
     assert_eq!(k["follow_up"], "confirm");
     assert_eq!(k["fix"], KEPT_CHANGED_FIX);
     let w2 = write_and_report(&e, "w", None, {
@@ -148,7 +151,10 @@ fn df4_a_created_block_citing_a_superseded_decision_names_the_suspect() {
     }).unwrap();
     let n = v["created"]["$n"].as_str().unwrap().to_string();
     let k = kept(&v, &n).unwrap_or_else(|| panic!("the write names no kept suspect: {v:#}"));
-    assert_eq!(k["because"], json!({"edge": "references", "changed": old}));
+    assert_eq!(
+        k["because"],
+        json!({"edge": "references", "changed": old, "edges": ["references"]})
+    );
     assert_eq!(k["follow_up"], "update");
     assert_eq!(k["fix"], rdy_engine::consequence::KEPT_REPLACED_FIX);
 }
@@ -231,7 +237,10 @@ fn df4_a_tracking_edit_on_a_live_decision_keeps_its_suspect_as_reaffirm() {
     })
     .unwrap();
     let k = kept(&v, &d1).unwrap_or_else(|| panic!("the write names no kept suspect: {v:#}"));
-    assert_eq!(k["because"], json!({"edge": "depends_on", "changed": d0}));
+    assert_eq!(
+        k["because"],
+        json!({"edge": "depends_on", "changed": d0, "edges": ["depends_on"]})
+    );
     assert_eq!(k["follow_up"], "reaffirm", "{v:#}");
     assert_eq!(k["fix"], rdy_engine::consequence::REAFFIRM_FIX);
     // the fix's first branch: supersede it
@@ -295,7 +304,10 @@ fn df4_a_new_decision_refining_a_superseded_one_is_listed_in_every_reply() {
     .unwrap();
     let n = v["created"]["$decision"].as_str().unwrap().to_string();
     let k = kept(&v, &n).unwrap_or_else(|| panic!("the write names no kept suspect: {v:#}"));
-    assert_eq!(k["because"], json!({"edge": "refines", "changed": old}));
+    assert_eq!(
+        k["because"],
+        json!({"edge": "refines", "changed": old, "edges": ["refines"]})
+    );
     assert_eq!(k["follow_up"], "update");
     assert_eq!(k["fix"], rdy_engine::consequence::KEPT_REPLACED_FIX);
     let p = propose_and_report(&e, None, |r| {
@@ -303,7 +315,10 @@ fn df4_a_new_decision_refining_a_superseded_one_is_listed_in_every_reply() {
     })
     .unwrap();
     let k = kept(&p, &n).unwrap_or_else(|| panic!("the propose names no kept suspect: {p:#}"));
-    assert_eq!(k["because"], json!({"edge": "refines", "changed": old}));
+    assert_eq!(
+        k["because"],
+        json!({"edge": "refines", "changed": old, "edges": ["refines"]})
+    );
     assert!(p["blocking"].as_array().unwrap().is_empty(), "{p:#}");
     let pref = p["ref"].as_str().unwrap().to_string();
     confirm_exceptions_in(&e, &approver(), &pref);
@@ -312,7 +327,10 @@ fn df4_a_new_decision_refining_a_superseded_one_is_listed_in_every_reply() {
     })
     .unwrap();
     let k = kept(&l, &n).unwrap_or_else(|| panic!("the approval names no kept suspect: {l:#}"));
-    assert_eq!(k["because"], json!({"edge": "refines", "changed": old}));
+    assert_eq!(
+        k["because"],
+        json!({"edge": "refines", "changed": old, "edges": ["refines"]})
+    );
 }
 
 /// df4 fix round 1 (ruling 3, p-RVR9H): a rewritten block that stays suspect on two targets gets

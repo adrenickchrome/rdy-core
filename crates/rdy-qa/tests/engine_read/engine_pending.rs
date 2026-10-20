@@ -4,7 +4,7 @@
 //! its own (D-562QR); a snooze hides an item in its chat session only, and ends with the item's
 //! version (F4). Nothing of the queue reaches the site (D-X61DT).
 use rdy_engine::coverage::IssueCode;
-use rdy_engine::pending::{CARD_MAX_TOKENS, Item, ItemKind, Pending, PendingQuery};
+use rdy_engine::pending::{CARD_MAX_TOKENS, Item, ItemKind, Pending, PendingQuery, Recommended};
 use rdy_engine::{DecisionInput, Rdy, Scope, Session};
 use rdy_model::{ActorRun, Answer, AnswerAct, BlockId, EvidenceKind, RelayEvidence, Role};
 use rdy_qa::edit_loop::{Spec, spec_doc};
@@ -111,7 +111,10 @@ fn di6_a_question_with_options_is_an_answer_item() {
     let opts: Vec<(&str, &str, Option<&str>)> = i
         .options
         .iter()
-        .map(|o| (o.id.as_str(), o.label.as_str(), o.recommended.as_deref()))
+        .map(|o| {
+            let reason = o.recommended.as_ref().map(Recommended::reason);
+            (o.id.as_str(), o.label.as_str(), reason)
+        })
         .collect();
     assert_eq!(
         opts,

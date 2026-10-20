@@ -12,7 +12,7 @@ use crate::site::{self, LanOverride, SiteServer};
 use crate::sys;
 use crate::writer::panic_text;
 use rdy_engine::signing_crypto::SigningAgent;
-use rdy_engine::{E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
+use rdy_engine::{E_HELD_BY_READER, E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
 use rdy_engine::{classify, human_actor_for_env};
 use rdy_model::Role;
 use serde::Deserialize;
@@ -138,7 +138,7 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
     log("opening store");
     let rdy = match open_store(&opts.project) {
         Ok(r) => r,
-        Err(e) if e.code == E_LOCKED => {
+        Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
             let err = ServeError::AlreadyRunning(store_dir(&opts.project));
             log(&err.to_string());
             return Err(err);
@@ -229,7 +229,10 @@ fn open_store(project: &Path) -> Result<Rdy, RdyError> {
     let deadline = Instant::now() + LOCKED_RETRY;
     loop {
         match Rdy::open(project) {
-            Err(e) if e.code == E_LOCKED && Instant::now() < deadline => {
+            Err(e)
+                if (e.code == E_LOCKED || e.code == E_HELD_BY_READER)
+                    && Instant::now() < deadline =>
+            {
                 std::thread::sleep(LOCKED_RETRY_EVERY);
             }
             out => return out,
