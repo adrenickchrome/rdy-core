@@ -1465,3 +1465,131 @@ fn hc3_held_spans_are_indexed_and_never_mask() {
     );
     assert_eq!(r.carried_counts(&rec).unwrap(), (0, 2));
 }
+
+#[test]
+fn hc3_visit_carried_reads_only_the_carried_frames() {
+    // the visit finds carried records through the index's own rows of their places and reads
+    // each record's frame there: never a walk of the log's frames
+    let src = source();
+    let s = Store::open(&src.path).unwrap();
+    let r = s.reader();
+    assert!(carried_of(&r).is_empty());
+    assert_eq!(
+        r.carried_frames_read(),
+        0,
+        "no carried record, no frame read"
+    );
+    drop(r);
+    drop(s);
+    let rec = src.record(false);
+    let to = src.loaded("to", std::slice::from_ref(&rec));
+    let s = Store::open(&to).unwrap();
+    let frames = framed(&s.reader(), s.log_end()).len();
+    assert!(frames > 10, "{frames} frames");
+    let r = s.reader();
+    let before = r.carried_frames_read();
+    assert_eq!(carried_of(&r).len(), 1);
+    assert_eq!(
+        r.carried_frames_read() - before,
+        1,
+        "one frame per carried record"
+    );
+    drop(r);
+    drop(s);
+    // lost place rows are derived again at the next open
+    {
+        let mut s = Store::open(&to).unwrap();
+        s.clear_redaction_rows_for_tests().unwrap();
+        assert!(
+            s.index_dump_for_tests()
+                .unwrap()
+                .redaction_carried_at
+                .is_empty()
+        );
+    }
+    let s = Store::open(&to).unwrap();
+    let got = carried_of(&s.reader());
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].record, rec);
+}
+
+#[test]
+fn hc3_in_place_check_refuses_exactly_what_the_decoder_refuses() {
+    use rdy_model::redaction::{CarriedSpan, FramePlace, ReasonClass};
+    use rdy_store::bounded;
+    use rdy_store::redaction_carried::check_record;
+    let same = |b: &[u8], what: &str| {
+        assert_eq!(
+            check_record(b),
+            bounded::decode::<RedactionCarried>(b).map(|_| ()),
+            "{what}"
+        );
+    };
+    let src = source();
+    let id = BlockId::parse("b-00001").unwrap();
+    let mut forms = vec![src.record(false), src.record(true)];
+    let mut other = src.record(false);
+    other.approved_by.run = None;
+    other.reason_class = ReasonClass::Retraction;
+    other.targets = vec![
+        RedactTarget::AllVersions(id.clone()),
+        RedactTarget::Version {
+            id,
+            version: Hash::of(b"v"),
+        },
+        RedactTarget::Blob(Hash::of(b"m")),
+    ];
+    other.spans.push(CarriedSpan {
+        place: FramePlace {
+            segment: 9,
+            offset: 1 << 40,
+        },
+        kind: kinds::BLOB_CHUNK,
+        hash: Hash::of(b"c"),
+        len: u32::MAX,
+        residue: None,
+        held: true,
+    });
+    forms.push(other);
+    for (n, r) in forms.iter().enumerate() {
+        let bytes = postcard::to_allocvec(r).unwrap();
+        assert_eq!(check_record(&bytes), Ok(()), "form {n}");
+        let mut extra = bytes.clone();
+        extra.push(0);
+        same(&extra, "a byte after the record");
+        for cut in 0..bytes.len() {
+            same(&bytes[..cut], &format!("form {n} cut at {cut}"));
+        }
+        for at in 0..bytes.len() {
+            for flip in [0x01, 0x80, 0xFF] {
+                let mut b = bytes.clone();
+                b[at] ^= flip;
+                same(&b, &format!("form {n} byte {at} ^ {flip:#x}"));
+            }
+        }
+    }
+    // each limit, refused with the decoder's own text
+    let mut long = src.record(false);
+    long.approved_by.actor = "a".repeat(bounded::MAX_TEXT_BYTES + 1);
+    let mut many = src.record(false);
+    many.spans = vec![many.spans[0].clone(); bounded::MAX_ELEMENTS + 1];
+    let mut bad_id = src.record(false);
+    bad_id.targets = vec![RedactTarget::AllVersions(
+        BlockId::parse("b-00001").unwrap(),
+    )];
+    let mut bad_id = postcard::to_allocvec(&bad_id).unwrap();
+    let at = bad_id
+        .windows(7)
+        .position(|w| w == b"b-00001")
+        .expect("the id's text");
+    bad_id[at + 1] = b'_';
+    for (what, bytes) in [
+        ("long text", postcard::to_allocvec(&long).unwrap()),
+        ("many spans", postcard::to_allocvec(&many).unwrap()),
+        ("a bad block id", bad_id),
+        ("too many bytes", vec![0; bounded::MAX_RECORD_BYTES + 1]),
+    ] {
+        assert!(check_record(&bytes).is_err(), "{what}");
+        same(&bytes, what);
+    }
+}

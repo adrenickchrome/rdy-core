@@ -440,6 +440,13 @@ impl SegmentReader {
         Ok((kind, hash, payload))
     }
 
+    /// The header of the frame at `loc` (payload length, kind, hash), read alone; None when the
+    /// header or the payload it claims does not fit its file.
+    pub(crate) fn header(&self, loc: Location) -> io::Result<Option<(u32, u8, Hash)>> {
+        let f = self.file(loc.segment)?;
+        header_at(&f, loc.offset, f.metadata()?.len())
+    }
+
     pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
         let (kind, _, payload) = self.read_hashed(loc)?;
         Ok((kind, payload))

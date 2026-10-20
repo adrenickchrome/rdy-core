@@ -466,6 +466,7 @@ pub struct ScanPlan {
     residues: Vec<RedactionResidue>,
     carried: Vec<RedactionCarried>,
     planned: HashMap<(u32, u64), Planned>,
+    store_format: u32,
 }
 
 impl ScanPlan {
@@ -487,6 +488,14 @@ impl ScanPlan {
     /// The selected end: the stop's batch end, or the chain's end without a stop.
     pub fn end(&self) -> Location {
         self.end
+    }
+
+    /// The store format the retained prefix holds at the selected end: the value of its last
+    /// `meta/store_format` update before the end, or the chain's header format when the prefix
+    /// sets none. A prefix that stops before a source upgrade batch holds the older format, and
+    /// the load's own upgrade starts from it.
+    pub fn store_format(&self) -> u32 {
+        self.store_format
     }
 
     /// Whether a stop selected the end (a stop at the chain's own end included).
@@ -1269,6 +1278,9 @@ struct Scan<'p> {
     /// The meta refs the log set so far: the repo id and the store format.
     repo_ref: Option<Vec<u8>>,
     format_ref: Option<Vec<u8>>,
+    /// Each `meta/store_format` update of the log: its record's place, its decoded value, and
+    /// its input and offset there.
+    format_updates: Vec<(Location, Option<u32>, usize, u64)>,
     /// Removal proofs.
     collected: Collected,
     recs: HashMap<(u32, u64), Rec>,
@@ -1337,6 +1349,7 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         tag: Candidate::None,
         repo_ref: None,
         format_ref: None,
+        format_updates: Vec::new(),
         collected: Collected::default(),
         recs: HashMap::new(),
         batch_landings: Vec::new(),
@@ -1390,6 +1403,7 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         };
     }
     let (planned, carried, residues) = s.plan(end)?;
+    let store_format = s.format_at(end)?;
     let (landing, tag) = match (&stop, &s.landing, &s.tag) {
         (Some(StopMatch::LandingPrefix(_)), Candidate::One { hash, .. }, _) => (Some(*hash), None),
         (Some(StopMatch::TagName(n)), _, Candidate::One { landing, .. }) => {
@@ -1408,6 +1422,7 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         residues,
         carried,
         planned,
+        store_format,
     })
 }
 
@@ -1423,6 +1438,19 @@ fn verify_whole(paths: &[PathBuf], i: usize) -> Result<(), ScanError> {
 impl<'p> Scan<'p> {
     fn fail(&self, file: usize, source: StoreError) -> ScanError {
         ScanError::Input { file, source }
+    }
+
+    /// The store format in force at `end` (a batch end): the last update of a record before it,
+    /// or the chain's header format without one. An update in force that does not decode is
+    /// damage at its record.
+    fn format_at(&self, end: Location) -> Result<u32, ScanError> {
+        match self.format_updates.iter().rev().find(|u| u.0 < end) {
+            None => Ok(self.envs[0].header.store_format),
+            Some((_, Some(v), _, _)) => Ok(*v),
+            Some((_, None, file, offset)) => {
+                Err(self.fail(*file, damaged(*offset, METADATA_MISMATCH)))
+            }
+        }
     }
 
     /// Records the first proof failure; later proof work stops.
@@ -1851,6 +1879,12 @@ impl<'p> Scan<'p> {
                     if u.name == REF_REPO_ID {
                         self.repo_ref = Some(u.value);
                     } else if u.name == REF_STORE_FORMAT {
+                        push(
+                            &mut self.format_updates,
+                            (at, decode_u32(&u.value), i, fh.at),
+                            i,
+                            fh.at,
+                        )?;
                         self.format_ref = Some(u.value);
                     }
                 }

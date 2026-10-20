@@ -536,6 +536,17 @@ impl Ingest {
     /// Returns whether it appended the batch. Call it once, after the last `batch` (and after
     /// `append_carried`, if it runs).
     pub fn upgrade(&mut self, from: u32) -> Result<bool, StoreError> {
+        self.upgrade_with(from, None)
+    }
+
+    /// [`Ingest::upgrade`] of a chain prefix: when no ingested frame set `meta/repo_id`, the
+    /// upgrade batch sets `repo`, the id the chain's headers name, not a new one. A prefix
+    /// that stops before the source's own upgrade batch is the same repo as the chain.
+    pub fn upgrade_in_repo(&mut self, from: u32, repo: RepoId) -> Result<bool, StoreError> {
+        self.upgrade_with(from, Some(repo))
+    }
+
+    fn upgrade_with(&mut self, from: u32, repo: Option<RepoId>) -> Result<bool, StoreError> {
         self.upgraded = true;
         let current = Format::CURRENT.store_format;
         if from > current {
@@ -549,7 +560,10 @@ impl Ingest {
         let start = self.log.end();
         let mut refs = vec![(format::REF_STORE_FORMAT, format::encode_u32(current))];
         if !self.has_repo_id {
-            refs.push((REF_REPO_ID, encode_repo_id(&RepoId::new())));
+            refs.push((
+                REF_REPO_ID,
+                encode_repo_id(&repo.unwrap_or_else(RepoId::new)),
+            ));
         }
         // the i-th ref of the batch is salted with the log end plus i, as the store salts
         let frames: Vec<(u8, Vec<u8>)> = refs

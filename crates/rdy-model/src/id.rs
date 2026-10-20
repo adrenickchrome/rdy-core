@@ -96,10 +96,16 @@ impl BlockId {
         if !valid_prefix(prefix) {
             return Err(IdError::BadPrefix(s.to_string()));
         }
-        if body.len() != 5 || !body.bytes().all(|b| CROCKFORD.contains(&b)) {
+        if !valid_body(body) {
             return Err(IdError::BadBody(s.to_string()));
         }
         Ok(BlockId(s.to_string()))
+    }
+
+    /// Whether `s` is a block id [`BlockId::parse`] accepts, checked without allocating.
+    pub fn is_valid(s: &str) -> bool {
+        s.split_once('-')
+            .is_some_and(|(prefix, body)| valid_prefix(prefix) && valid_body(body))
     }
 
     pub fn prefix(&self) -> &str {
@@ -121,6 +127,10 @@ impl std::str::FromStr for BlockId {
 
 fn valid_prefix(p: &str) -> bool {
     (1..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
+fn valid_body(body: &str) -> bool {
+    body.len() == 5 && body.bytes().all(|b| CROCKFORD.contains(&b))
 }
 
 impl fmt::Display for BlockId {

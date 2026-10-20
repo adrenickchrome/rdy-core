@@ -94,6 +94,57 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RecordError> {
     run(&gate, bytes)
 }
 
+/// A record's in-place shape: a type with the record's encoding whose decode borrows its texts
+/// from the input and keeps no collection, so decoding it allocates nothing.
+pub trait InPlace {
+    /// Decodes one value of the shape from `d` and drops it.
+    fn check<'de, D: Deserializer<'de>>(d: D) -> Result<(), D::Error>;
+}
+
+/// Checks that `bytes` decode as exactly one value of the shape `T`, within the limits above,
+/// and returns the refusal [`decode`] gives the record `T` is the shape of. The check
+/// allocates nothing, so a hostile record cannot make it abort on a failed allocation.
+pub fn check<T: InPlace>(bytes: &[u8]) -> Result<(), RecordError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
+    }
+    let gate = Gate::default();
+    let mut postcard = postcard::Deserializer::from_flavor(Source {
+        rest: bytes,
+        gate: &gate,
+    });
+    let value = T::check(Bounded {
+        inner: &mut postcard,
+        gate: &gate,
+    });
+    let left = postcard.finalize().map(|rest| rest.len());
+    match (value, left) {
+        (Ok(_), Ok(0)) => Ok(()),
+        _ => Err(gate.limit.get().unwrap_or(RecordError::Decode)),
+    }
+}
+
+/// A sequence decoded in place: each element decodes and is dropped, so the shape of a
+/// `Vec<T>` keeps nothing. It decodes exactly as the `Vec<T>` does.
+pub struct Each<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Each<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T>(std::marker::PhantomData<T>);
+        impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for V<T> {
+            type Value = Each<T>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a sequence")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Each<T>, A::Error> {
+                while seq.next_element::<T>()?.is_some() {}
+                Ok(Each(std::marker::PhantomData))
+            }
+        }
+        d.deserialize_seq(V(std::marker::PhantomData))
+    }
+}
+
 /// Decodes with `gate` counting. Separate from [`decode`] so the deserializer's lifetime is the
 /// borrow of `gate` (`T` is owned, so any lifetime serves).
 fn run<'g, T: DeserializeOwned>(gate: &'g Gate, bytes: &'g [u8]) -> Result<T, RecordError> {

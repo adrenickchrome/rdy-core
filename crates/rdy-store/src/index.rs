@@ -65,6 +65,11 @@ const REDACTION_ACTIVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("re
 /// carried row. An apply's row and a `held: false` row mask the frame; a `held: true` row is
 /// provenance only, and masks nothing.
 const REDACTION_SPANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_spans");
+/// The places of the validated carried records (kind REDACTION_CARRIED): a record frame's
+/// location (`loc_key`) -> its hash. One row per physical record, so a reader finds every
+/// carried record in physical order without a walk of the log.
+const REDACTION_CARRIED_AT: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("redaction_carried_at");
 /// A signature's subject (32 bytes), then the signature's hash (32 bytes) -> empty: every
 /// signature of every subject (kind SIGNATURE, D-1Z951), derived from the frames alone.
 const SIGNATURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("signatures");
@@ -216,6 +221,7 @@ pub struct IndexDump {
     pub redaction_applied: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_active: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_spans: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_carried_at: BTreeMap<Vec<u8>, Vec<u8>>,
     pub signatures: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
@@ -476,10 +482,11 @@ fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
     }
 }
 
-/// The raw rows of the six redaction tables: carriers, items, objects, applied, active, spans.
-pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 6];
+/// The raw rows of the seven redaction tables: carriers, items, objects, applied, active, spans,
+/// carried places.
+pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 7];
 
-/// The six redaction tables of one write transaction.
+/// The seven redaction tables of one write transaction.
 struct RedactionTables<'t> {
     carriers: redb::Table<'t, &'static [u8], &'static [u8]>,
     items: redb::Table<'t, &'static [u8], &'static [u8]>,
@@ -487,6 +494,7 @@ struct RedactionTables<'t> {
     applied: redb::Table<'t, &'static [u8], &'static [u8]>,
     active: redb::Table<'t, &'static [u8], &'static [u8]>,
     spans: redb::Table<'t, &'static [u8], &'static [u8]>,
+    carried_at: redb::Table<'t, &'static [u8], &'static [u8]>,
 }
 
 impl<'t> RedactionTables<'t> {
@@ -498,6 +506,7 @@ impl<'t> RedactionTables<'t> {
             applied: w.open_table(REDACTION_APPLIED).map_err(db)?,
             active: w.open_table(REDACTION_ACTIVE).map_err(db)?,
             spans: w.open_table(REDACTION_SPANS).map_err(db)?,
+            carried_at: w.open_table(REDACTION_CARRIED_AT).map_err(db)?,
         })
     }
 
@@ -652,6 +661,9 @@ impl<'t> RedactionTables<'t> {
         loc: &Location,
         spans: &[(RedactedSpan, bool)],
     ) -> Result<(), StoreError> {
+        self.carried_at
+            .insert(&loc_key(loc)[..], &carried.0[..])
+            .map_err(db)?;
         for (span, held) in spans {
             let key = loc_key(&span.loc);
             let row = self
@@ -749,6 +761,7 @@ impl Index {
             w.open_table(REDACTION_APPLIED).map_err(db)?;
             w.open_table(REDACTION_ACTIVE).map_err(db)?;
             w.open_table(REDACTION_SPANS).map_err(db)?;
+            w.open_table(REDACTION_CARRIED_AT).map_err(db)?;
             w.open_table(SIGNATURES).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
@@ -1124,6 +1137,7 @@ impl Index {
             redaction_applied: dump_table(&r, REDACTION_APPLIED)?,
             redaction_active: dump_table(&r, REDACTION_ACTIVE)?,
             redaction_spans: dump_table(&r, REDACTION_SPANS)?,
+            redaction_carried_at: dump_table(&r, REDACTION_CARRIED_AT)?,
             signatures: dump_table(&r, SIGNATURES)?,
         })
     }
@@ -1286,8 +1300,8 @@ impl Index {
         Index::with_tables(database)
     }
 
-    /// The rows of the six redaction tables, from one read transaction: carriers, items,
-    /// objects, applied, active, spans.
+    /// The rows of the seven redaction tables, from one read transaction: carriers, items,
+    /// objects, applied, active, spans, carried places.
     pub(crate) fn redaction_rows(&self) -> Result<RedactionRows, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         Ok([
@@ -1297,6 +1311,7 @@ impl Index {
             dump_table(&r, REDACTION_APPLIED)?,
             dump_table(&r, REDACTION_ACTIVE)?,
             dump_table(&r, REDACTION_SPANS)?,
+            dump_table(&r, REDACTION_CARRIED_AT)?,
         ])
     }
 
@@ -1332,12 +1347,17 @@ impl Index {
         Ok(())
     }
 
-    /// Empties the applied, active and span tables in a durable commit. No store path calls it:
-    /// it is the test hook of an index that forgot the log's authorization.
+    /// Empties the applied, active, span and carried-place tables in a durable commit. No store
+    /// path calls it: it is the test hook of an index that forgot the log's authorization.
     #[doc(hidden)]
     pub fn clear_redaction_rows_for_tests(&self) -> Result<(), StoreError> {
         let w = self.db.begin_write().map_err(db)?;
-        for def in [REDACTION_APPLIED, REDACTION_ACTIVE, REDACTION_SPANS] {
+        for def in [
+            REDACTION_APPLIED,
+            REDACTION_ACTIVE,
+            REDACTION_SPANS,
+            REDACTION_CARRIED_AT,
+        ] {
             w.delete_table(def).map_err(db)?;
             w.open_table(def).map_err(db)?;
         }
@@ -1431,6 +1451,23 @@ impl Index {
             .redaction_span_row_at(loc)?
             .filter(SpanRow::masks)
             .map(|r| r.active))
+    }
+
+    /// Calls `f` with the place and hash of every carried record frame that starts before
+    /// `before`, in physical order: one range read of the carried-place rows, no log walk.
+    pub(crate) fn for_each_carried_place(
+        &self,
+        before: Location,
+        mut f: impl FnMut(Location, Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_CARRIED_AT).map_err(db)?;
+        for item in t.range(..&loc_key(&before)[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let loc = loc_from(k.value(), "carried place entry")?;
+            f(loc, hash_from(v.value(), "carried place entry")?)?;
+        }
+        Ok(())
     }
 
     /// The `redaction_spans` row of the frame at `loc`, masking or not.

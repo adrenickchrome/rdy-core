@@ -93,6 +93,8 @@ struct ReaderShared {
     frames_read: AtomicU64,
     /// Ref entries read by `refs_with_prefix` and `open_proposal_refs` (a test hook).
     refs_read: AtomicU64,
+    /// Log frames read by `visit_carried` (a test hook).
+    carried_frames_read: AtomicU64,
     /// The redaction epoch of this store family: zero at open; it advances once per newly synced
     /// apply batch, before any payload is erased. A reader whose captured epoch is older reads a
     /// state that predates content removal.
@@ -803,6 +805,7 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
+                carried_frames_read: AtomicU64::new(0),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
@@ -2122,6 +2125,19 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
     }
 
+    /// Log frames read so far by `visit_carried`.
+    #[doc(hidden)]
+    pub fn carried_frames_read(&self) -> u64 {
+        self.shared.carried_frames_read.load(Ordering::Relaxed)
+    }
+
+    /// Counts one log frame read by `visit_carried`.
+    pub(crate) fn note_carried_frame_read(&self) {
+        self.shared
+            .carried_frames_read
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Object frames read so far by `get_raw` and `get_kind`.
     #[doc(hidden)]
     pub fn frames_read(&self) -> u64 {
@@ -2749,7 +2765,7 @@ impl Store {
         }
     }
 
-    /// Whether the index's six redaction tables hold exactly the rows the log's validated records
+    /// Whether the index's seven redaction tables hold exactly the rows the log's validated records
     /// before `upto` (the index's `indexed_upto`) give. They are derived again, in an index in
     /// memory, from the requests, the validated applies and the validated carried records;
     /// nothing in the index is trusted. Only a log with none of these and an index with no row

@@ -1002,26 +1002,7 @@ fn hc7_failures_at_each_placement_step_restore_only_owned_paths() {
     assert_eq!(e.code, E_IO, "{e:?}");
     assert_eq!(tree(&to), before);
 
-    // the ingest's sync of the segments directory fails (the directory moved under the open
-    // log): its error is the target's, and store.loading with all it holds goes. (A directory
-    // that holds an open file cannot move on Windows.)
-    #[cfg(unix)]
-    {
-        let (to, before) = kept_target(d, "sync");
-        let loading = to.join(".rdy/store.loading");
-        let at = loading.clone();
-        let g = at_first_write(move || {
-            std::fs::rename(at.join("segments"), at.join("moved")).unwrap();
-        });
-        let e = chain_err(&files, &to, None);
-        drop(g);
-        assert_eq!(e.code, E_IO, "{e:?}");
-        assert!(
-            e.message.starts_with(&loading.display().to_string()),
-            "{e:?}"
-        );
-        assert_eq!(tree(&to), before);
-    }
+    // (the ingest's failed sync of the segments directory is in `load_chain_unix.rs`)
 
     // the ingest cannot write FORMAT (a directory has its name): the same
     let (to, before) = kept_target(d, "format");
@@ -1386,5 +1367,143 @@ fn hc7_legacy_loads_keep_hashes_and_one_upgrade() {
                 "{name}"
             );
         }
+    }
+}
+
+/// Opens the store under `dir` in its own mode.
+fn open_any(dir: &Path) -> Rdy {
+    if dir.join(".rdy.yaml").exists() {
+        Rdy::open(dir).unwrap()
+    } else {
+        Rdy::open_holder(dir).unwrap()
+    }
+}
+
+#[test]
+fn hc7_stop_before_a_migration_upgrade_keeps_the_prefix_format() {
+    // a released store moved by this rdy holds an upgrade batch at the end of its source log;
+    // its format-3 dump can still stop at any batch before that upgrade: the stopped prefix
+    // holds the old store format, so the load appends its own upgrade batch last, and keeps
+    // the chain's repo id when the prefix set none
+    let d = tempfile::tempdir().unwrap();
+    for name in ["v1-s10", "v2-s15", "v2-s15-holder"] {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../rdy-qa/fixtures/dump/{name}.rdydump"));
+        let (migrated_at, _) = dump_batches(&file);
+        let moved = d.path().join(format!("{name}-moved"));
+        load(&file, &moved).unwrap();
+        let src = open_any(&moved);
+        let repo = src.store().repo_id().unwrap().unwrap();
+        let f0 = d.path().join(format!("{name}-3.rdydump"));
+        src.read().dump(&f0).unwrap();
+        src.close().unwrap();
+        let landings = batches(&moved, ORIGIN, Some(migrated_at))
+            .iter()
+            .filter(|b| b.frames.iter().any(|f| f.kind() == kinds::LANDING))
+            .count();
+        assert!(landings > 0, "{name}: the fixture lands");
+        for (n, at) in [
+            pos(migrated_at),
+            stop(&format!("landing:{}", last_landing(&moved, migrated_at))),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let to = d.path().join(format!("{name}-stop{n}"));
+            let s = chain_load(std::slice::from_ref(&f0), &to, Some(at.clone()));
+            let end = s.stopped_at.unwrap().position;
+            assert!(
+                end <= migrated_at,
+                "{name} {at:?}: stopped before the upgrade"
+            );
+            assert_eq!(
+                batches(&to, ORIGIN, Some(end)),
+                batches(&moved, ORIGIN, Some(end)),
+                "{name} {at:?}: the source prefix"
+            );
+            let tail = batches(&to, end, None);
+            let last = tail.last().expect("an upgrade batch");
+            assert!(
+                last.frames.iter().all(|f| f.kind() == kinds::REF_UPDATE),
+                "{name} {at:?}: the upgrade batch is last: {tail:?}"
+            );
+            let got = open_any(&to);
+            assert_eq!(got.store().repo_id().unwrap(), Some(repo), "{name} {at:?}");
+            got.fsck().unwrap();
+            got.close().unwrap();
+        }
+    }
+}
+
+/// The hash of the last landing of the store under `dir` before `end`.
+fn last_landing(dir: &Path, end: Location) -> Hash {
+    batches(dir, ORIGIN, Some(end))
+        .iter()
+        .flat_map(|b| b.frames.iter())
+        .filter(|f| f.kind() == kinds::LANDING)
+        .map(|f| *f.hash())
+        .last()
+        .unwrap()
+}
+
+#[test]
+fn hc7_damaged_released_dump_keeps_the_released_refusals() {
+    // a single file of dump format 1 or 2 with no stop is the released load: decided from its
+    // prelude alone, so a cut file or one with bytes after its trailer gets the released texts
+    // and positions, not a reading of its last bytes as a trailer
+    let d = tempfile::tempdir().unwrap();
+    for name in ["v1-s10", "v2-s13", "v2-s15"] {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../rdy-qa/fixtures/dump/{name}.rdydump"));
+        let bytes = std::fs::read(&file).unwrap();
+        let mut extra = bytes.clone();
+        extra.push(0);
+        let half = bytes[..bytes.len() / 2].to_vec();
+        let ten = bytes[..bytes.len() - 10].to_vec();
+        let mut flipped = bytes.clone();
+        let mid = flipped.len() / 2;
+        flipped[mid] ^= 1;
+        for (how, b) in [
+            ("extra", extra),
+            ("half", half),
+            ("ten", ten),
+            ("flip", flipped),
+        ] {
+            let p = d.path().join(format!("{name}-{how}.rdydump"));
+            std::fs::write(&p, &b).unwrap();
+            // the released reader's refusal of these bytes, read in order
+            let (at, what) = released_refusal(&b);
+            let want = format!("{} is damaged at byte {at}: {what}", p.display());
+            for to in [
+                d.path().join(format!("{name}-{how}-a")),
+                d.path().join(format!("{name}-{how}-b")),
+            ] {
+                let got = if to.ends_with(format!("{name}-{how}-a")) {
+                    load(&p, &to).unwrap_err()
+                } else {
+                    chain_err(std::slice::from_ref(&p), &to, None)
+                };
+                assert_eq!(
+                    (got.code, got.message.as_str(), got.fix.as_str()),
+                    ("E_DUMP", want.as_str(), DAMAGED_FIX),
+                    "{name} {how}"
+                );
+                assert!(!to.exists(), "{name} {how}");
+            }
+        }
+    }
+}
+
+/// Where and why the dump reader refuses `bytes`, read in order through their end.
+fn released_refusal(bytes: &[u8]) -> (u64, String) {
+    let e = (|| {
+        let (mut r, _, _) = DumpReader::open(BufReader::new(bytes))?;
+        while r.next()?.is_some() {}
+        Ok::<_, rdy_store::StoreError>(())
+    })()
+    .expect_err("the damaged bytes are refused");
+    match e {
+        rdy_store::StoreError::Dump { at, what } => (at, what),
+        e => panic!("not a damaged dump: {e:?}"),
     }
 }

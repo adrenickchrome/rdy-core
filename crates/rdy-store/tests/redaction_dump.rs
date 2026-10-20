@@ -1660,3 +1660,77 @@ fn hc1_a_request_over_100000_physical_copies_keeps_its_removal_facts() {
     while rd.next().unwrap().is_some() {}
     assert_eq!(rd.trailer().unwrap().first_removed, lowest);
 }
+
+/// A carried removal record (kind 23) with `n` targets and spans.
+fn carried_record(n: usize) -> rdy_model::redaction::RedactionCarried {
+    use rdy_model::redaction::{CarriedSpan, FramePlace, ReasonClass, RedactionCarried};
+    RedactionCarried {
+        request: Hash::of(b"request"),
+        apply: Hash::of(b"apply"),
+        landing: Hash::of(b"landing"),
+        approved_by: Provenance {
+            actor: "human:approver".into(),
+            run: Some("r1".into()),
+            role: Role::Approver,
+            at_ms: 7,
+        },
+        reason_class: ReasonClass::Secret,
+        targets: (0..n)
+            .map(|i| RedactTarget::AllVersions(BlockId::parse(&format!("b-0000{i}")).unwrap()))
+            .collect(),
+        spans: (0..n)
+            .map(|i| CarriedSpan {
+                place: FramePlace {
+                    segment: 0,
+                    offset: 100 * i as u64,
+                },
+                kind: BLOCK,
+                hash: Hash::of(&[i as u8]),
+                len: 9,
+                residue: Some(Hash::of(b"residue")),
+                held: i % 2 == 0,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn rdx9_reader_allocation_failure_with_a_carried_record_is_a_refusal() {
+    // the reader's check of a carried record decodes it in place: each allocation of the read
+    // in turn fails, and each is the dump refusal, never an abort
+    let src = source();
+    let mut batches = src.batches.clone();
+    let payload = postcard::to_allocvec(&carried_record(3)).unwrap();
+    let hash = Hash::of(&payload);
+    batches.push(DumpBatch {
+        start: batch_end(batches.last().unwrap()).unwrap(),
+        digest: batch_digest([&hash]),
+        frames: vec![Frame::Present {
+            kind: kinds::REDACTION_CARRIED,
+            hash,
+            payload,
+        }],
+    });
+    let bytes = write_dump(&batches);
+    let read_all = |bytes: &[u8]| -> Result<u64, StoreError> {
+        let (mut r, _, _) = DumpReader::open(bytes)?;
+        let mut items = 0u64;
+        while r.next()?.is_some() {
+            items += 1;
+        }
+        Ok(items)
+    };
+    let items = read_all(&bytes).unwrap();
+    let mut refused = 0;
+    for nth in 1u64.. {
+        failing_alloc::arm(nth);
+        let got = read_all(&bytes);
+        if !failing_alloc::disarm() {
+            assert_eq!(got.unwrap(), items, "the read past its last allocation");
+            break;
+        }
+        assert_eq!(what(got.unwrap_err()), ALLOCATION, "allocation {nth}");
+        refused += 1;
+    }
+    assert!(refused > 0);
+}

@@ -3261,6 +3261,21 @@ fn predecessor_check_bytes(prev: &std::path::Path, base: rdy_store::segment::Loc
     envelope_read_bytes(prev) + base.offset
 }
 
+/// The bytes an increment export `sum` of the project `proj` after the file `prev` reads beside
+/// its project files: the new batches ([`log_span_bytes`]), the predecessor checks
+/// ([`predecessor_check_bytes`]), and the walk that finds the marker of the increment's own end
+/// batch, which reads the segment of the end from offset zero up to the end (no earlier
+/// segment). Like the predecessor walk, it is read volume that repeats on every export.
+fn increment_log_bytes(
+    proj: &std::path::Path,
+    prev: &std::path::Path,
+    sum: &rdy_engine::dump::DumpSummary,
+) -> u64 {
+    log_span_bytes(proj, sum.base, sum.end)
+        + predecessor_check_bytes(prev, sum.base)
+        + sum.end.offset
+}
+
 /// One approved removal of `target`, through its durable completion: the request, its proposal
 /// and the person's approval.
 fn approved_removal(r: &mut Rdy, target: &BlockId) {
@@ -3378,9 +3393,7 @@ fn tier_dump_chain(
         let took = s.elapsed();
         assert_eq!(sum.batches, CHAIN_INCREMENT_BATCHES as u64);
         if i == 0 {
-            let read = project_file_bytes() - read0
-                + log_span_bytes(&work, sum.base, sum.end)
-                + predecessor_check_bytes(&full, sum.base);
+            let read = project_file_bytes() - read0 + increment_log_bytes(&work, &full, &sum);
             facts = Some(ChainFacts {
                 read,
                 written: sum.bytes,
@@ -6029,6 +6042,38 @@ mod tests {
             offset: 0,
         };
         assert_eq!(predecessor_check_bytes(&full, at_start), envelope);
+    }
+
+    /// An increment's read cost also holds the walk that finds the marker of its own end: the
+    /// segment of the end, read from offset zero up to the end.
+    #[test]
+    fn hc10_increment_reads_count_the_end_marker_walk() {
+        rdy_model::seed_ids_for_tests(0x6863_3132);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let full = dir.path().join("full.rdydump");
+        r.read().dump(&full).expect("full dump");
+        write(
+            &mut r,
+            "work",
+            json!([{"op": "create", "type": "doc", "fields": {"name": "more", "title": "More", "doc_type": "page"}}]),
+        )
+        .expect("a write after the full file");
+        let inc = dir.path().join("inc.rdydump");
+        let sum = r.read().dump_after_file(&full, &inc).expect("increment");
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
+        assert!(sum.end.offset > 0, "the increment ends after a batch");
+        assert_eq!(
+            increment_log_bytes(&proj, &full, &sum),
+            log_span_bytes(&proj, sum.base, sum.end)
+                + predecessor_check_bytes(&full, sum.base)
+                + sum.end.offset
+        );
     }
 
     /// Task 10: both runners register the chain operations, after the dump operations.

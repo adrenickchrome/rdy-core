@@ -1203,14 +1203,14 @@ pub(crate) fn cannot_stand(kind: u8) -> String {
 }
 
 /// The bounded decode of a carried removal record (kind 23), the only kind of a dump frame that
-/// is decoded on the way: the decoder's own error when it refuses one. Other kinds pass.
+/// is decoded on the way: the decoder's own error when it refuses one. Other kinds pass. The
+/// check decodes the record in place (`redaction_carried::check_record`), so it allocates
+/// nothing, as the reader's other checks allocate only by fallible growth.
 pub(crate) fn check_carried(kind: u8, payload: &[u8]) -> Result<(), String> {
     if kind != kinds::REDACTION_CARRIED {
         return Ok(());
     }
-    crate::bounded::decode::<rdy_model::RedactionCarried>(payload)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    crate::redaction_carried::check_record(payload).map_err(|e| e.to_string())
 }
 
 fn not_carried(path: &str) -> String {
@@ -1750,6 +1750,12 @@ pub(crate) fn read_prelude(r: &mut impl Read) -> Result<u32, StoreError> {
         return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
     }
     Ok(format)
+}
+
+/// The dump format the prelude at the start of `r` names, read alone (the magic and the format,
+/// as the reader checks them): which reader a file needs, before any other byte is read.
+pub fn dump_format_of(r: &mut impl Read) -> Result<u32, StoreError> {
+    read_prelude(r)
 }
 
 /// Fills `buf` from `r`, or fails with a dump that ends before its trailer (blamed on `at`).

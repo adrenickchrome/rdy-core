@@ -38,17 +38,14 @@ use crate::redaction::{
     MAX_TARGET_BYTES, MAX_TARGETS, is_removable, limit, residue_matches, residue_names,
     selector_len,
 };
-use crate::redaction_io::{
-    Authorization, Collected, FrameLog, SpanAuth, for_each_seen, out_of_memory,
-};
-use crate::segment::{HEADER, Hole, Holes, Location, seg_path};
+use crate::redaction_io::{Authorization, Collected, FrameLog, SpanAuth, out_of_memory};
+use crate::segment::{HEADER, Hole, Holes, Location};
 use crate::store::{StoreReader, decode, encode};
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, RedactionCarried, RedactionResidue,
 };
 use rdy_model::{Hash, Role};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
 
 /// The fix of a Project's carried warning and export refusal: a fresh removal needs a person's
 /// approval here.
@@ -100,6 +97,82 @@ pub(crate) fn decode_record(payload: &[u8]) -> Option<RedactionCarried> {
     }
     let record = crate::bounded::decode::<RedactionCarried>(payload).ok()?;
     (encode(&record) == payload).then_some(record)
+}
+
+/// The bounded decoder's check of a carried record `payload`, in place: the refusal
+/// `bounded::decode::<RedactionCarried>` gives, or none, with no allocation (`shape`).
+pub fn check_record(payload: &[u8]) -> Result<(), crate::bounded::RecordError> {
+    crate::bounded::check::<shape::Record>(payload)
+}
+
+/// The in-place shapes of a carried record: the fields of `RedactionCarried` and its parts in
+/// their declared order and encoding, with each text borrowed from the payload and each list
+/// decoded element by element and dropped. A record decodes as its shape exactly when it
+/// decodes as `RedactionCarried`, with the same refusal (a test holds them equal on records of
+/// every target form, on each damaged copy of them, and at each limit).
+mod shape {
+    use crate::bounded::{Each, InPlace};
+    use rdy_model::redaction::{CarriedSpan, ReasonClass};
+    use rdy_model::{BlockId, Hash, Role};
+    use serde::{Deserialize, Deserializer};
+
+    /// The shape of `RedactionCarried`.
+    pub(super) struct Record;
+
+    impl InPlace for Record {
+        fn check<'de, D: Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+            Carried::deserialize(d).map(|_| ())
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct Carried<'a> {
+        request: Hash,
+        apply: Hash,
+        landing: Hash,
+        #[serde(borrow)]
+        approved_by: Provenance<'a>,
+        reason_class: ReasonClass,
+        #[serde(borrow)]
+        targets: Each<Target<'a>>,
+        spans: Each<CarriedSpan>,
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct Provenance<'a> {
+        actor: &'a str,
+        #[serde(borrow)]
+        run: Option<&'a str>,
+        role: Role,
+        at_ms: i64,
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    enum Target<'a> {
+        AllVersions(#[serde(borrow)] Id<'a>),
+        Version {
+            #[serde(borrow)]
+            id: Id<'a>,
+            version: Hash,
+        },
+        Blob(Hash),
+    }
+
+    /// A block id as `BlockId` decodes it: a text that `BlockId::parse` accepts.
+    struct Id<'a>(#[allow(dead_code)] &'a str);
+
+    impl<'de: 'a, 'a> Deserialize<'de> for Id<'a> {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let s = <&'a str>::deserialize(d)?;
+            if !BlockId::is_valid(s) {
+                return Err(serde::de::Error::custom("bad block id"));
+            }
+            Ok(Id(s))
+        }
+    }
 }
 
 /// Whether a carried record's own fields keep their bounds: 1 to 100,000 spans, at most 256
@@ -468,50 +541,47 @@ fn spans_of(r: &RedactionCarried) -> Vec<(RedactedSpan, bool)> {
 
 impl StoreReader {
     /// Calls `f` with every carried record frame (kind REDACTION_CARRIED) of the sealed log that
-    /// lies wholly before `end`, in physical order: the walk reads the frame headers of the
-    /// segment files up to the index's acknowledged end, never a table of hashes, so a frame of
-    /// another kind with the same bytes is never taken for one, and each physical copy of an
-    /// identical record is visited at its own place (a warning deduplicates by source apply
-    /// itself). Every such frame was validated by the open (`overlay`); a payload that no longer
-    /// matches its hash or decodes to no carried record is `RedactionCorrupt` at its frame. Keeps
-    /// no table of its own; a store whose typed index holds no carried record walks nothing.
+    /// lies wholly before `end`, in physical order. The records are found through the index's
+    /// rows of their places (one per physical record, derived from the validated records and
+    /// checked against the log at every open), and each is read by its place, so the cost is
+    /// that of the carried records alone: no walk of the log's frames and no scan of every
+    /// stored object. Each physical copy of an identical record is visited at its own place (a
+    /// warning deduplicates by source apply itself). Every such frame was validated by the open
+    /// (`overlay`); a frame whose header, kind or hash no longer matches its row, a payload that
+    /// no longer matches its hash, or one that decodes to no carried record is
+    /// `RedactionCorrupt` at its frame.
     pub fn visit_carried(
         &self,
         end: Location,
         f: &mut dyn FnMut(CarriedAt) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         self.refuse_pending()?;
-        let mut any = false;
-        self.index()
-            .for_each_object_of(kinds::REDACTION_CARRIED, |_| {
-                any = true;
-                Ok(())
-            })?;
-        if !any {
-            return Ok(());
-        }
         let upto = end.min(self.index().indexed_upto()?);
-        let dir = self.dir().join("segments");
-        let mut files: Vec<File> = vec![];
-        for seg in 0..=upto.segment {
-            if seg == upto.segment && upto.offset == 0 {
-                break;
-            }
-            files.push(File::open(seg_path(&dir, seg))?);
-        }
-        for_each_seen(&files, upto, &BTreeMap::new(), |seen| {
-            if seen.kind != kinds::REDACTION_CARRIED {
-                return Ok(());
-            }
-            let bad = || StoreError::corrupt_at(seen.loc);
-            if seen.len as usize > MAX_RECORD_BYTES {
+        self.index().for_each_carried_place(upto, |loc, hash| {
+            let bad = || StoreError::corrupt_at(loc);
+            let corrupt = |e: std::io::Error| match e.kind() {
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => bad(),
+                _ => StoreError::Io(e),
+            };
+            self.note_carried_frame_read();
+            let (len, kind, h) = self
+                .segments()
+                .header(loc)
+                .map_err(corrupt)?
+                .ok_or_else(bad)?;
+            if kind != kinds::REDACTION_CARRIED || h != hash || len as usize > MAX_RECORD_BYTES {
                 return Err(bad());
             }
-            let payload = seen.intact()?.ok_or_else(bad)?;
+            // a frame that crosses `end` lies after it
+            let frame_end = loc.offset + HEADER + u64::from(len);
+            if loc.segment == upto.segment && frame_end > upto.offset {
+                return Ok(());
+            }
+            let (_, _, payload) = self.segments().read_hashed(loc).map_err(corrupt)?;
             let record = decode_record(&payload).ok_or_else(bad)?;
             f(CarriedAt {
-                at: seen.loc,
-                hash: seen.hash,
+                at: loc,
+                hash,
                 record,
             })
         })

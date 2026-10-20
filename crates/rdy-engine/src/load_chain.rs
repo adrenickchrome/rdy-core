@@ -17,6 +17,7 @@ use crate::load::{
     LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target, create_store, damaged,
     holder_files, incomplete, next_step, open_dump, place, read_error, target_error,
 };
+use rdy_model::RepoId;
 use rdy_store::StoreError;
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, TRAILER_LEN, read_envelope};
 use rdy_store::dump_chain::DumpKind;
@@ -111,15 +112,18 @@ fn check_count(files: &[PathBuf]) -> Result<(), RdyError> {
 /// verified plan.
 pub(crate) fn inspect(files: &[PathBuf], stop: Option<&DumpStop>) -> Result<ChainPlan, RdyError> {
     check_count(files)?;
-    let mut src = ChainSource::open(files).map_err(|e| scan_error(files, e))?;
-    if let Some(format) = src.legacy()
-        && stop.is_none()
+    // a single file of a released dump format with no stop is the released load, decided from
+    // its prelude alone: its own reader gives the released refusals of a damaged file, whose
+    // last bytes need not be a trailer
+    if let ([file], None) = (files, stop)
+        && let Some(format) = released_format(file)
     {
         return Ok(ChainPlan {
             files: files.to_vec(),
             inner: Inner::Legacy { format },
         });
     }
+    let mut src = ChainSource::open(files).map_err(|e| scan_error(files, e))?;
     // inputs whose verified trailers count no batch hold no log: the released refusal, not the
     // metadata check that such a log cannot pass (every store holds its format batch)
     let empty = src.envelopes().iter().all(|e| e.trailer.batches == 0);
@@ -138,6 +142,15 @@ pub(crate) fn inspect(files: &[PathBuf], stop: Option<&DumpStop>) -> Result<Chai
         files: files.to_vec(),
         inner: Inner::Chain(Box::new(plan)),
     })
+}
+
+/// The dump format of `file` when its prelude names dump format 1 or 2; None for any other
+/// format and for a file whose prelude does not read (the chain checks refuse it).
+fn released_format(file: &Path) -> Option<u32> {
+    let mut f = std::fs::File::open(file).ok()?;
+    rdy_store::dump::dump_format_of(&mut f)
+        .ok()
+        .filter(|format| *format < 3)
 }
 
 /// Loads the verified chain `plan` into `project` (`crate::load::load_chain`), in one
@@ -433,12 +446,21 @@ fn ingest_tail(
         .append_carried(scan.residues(), scan.carried())
         .map_err(|e| target_error(loading, e))?;
     ingest
-        .upgrade(scan.envelopes()[0].header.store_format)
+        .upgrade_in_repo(scan.store_format(), chain_repo(scan))
         .map_err(|e| target_error(loading, e))?;
     ingest.finish().map_err(|e| match e {
         StoreError::Dump { what, .. } => damaged(file, at, &what),
         e => target_error(loading, e),
     })
+}
+
+/// The repo id every header of the scanned chain names (the scanner refused any other).
+fn chain_repo(scan: &ScanPlan) -> RepoId {
+    scan.envelopes()[0]
+        .header
+        .chain
+        .expect("a scanned chain file has chain links")
+        .repo_id
 }
 
 /// The scanner's form of a parsed stop.
