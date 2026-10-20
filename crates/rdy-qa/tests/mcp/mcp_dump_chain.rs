@@ -91,7 +91,7 @@ fn chain() -> Chain {
     s.stop();
     let r = Rdy::open(s.dir.path()).unwrap();
     let i2 = scratch.path().join("i2.rdydump");
-    let c = r.read().dump_after(&b.chain_end(), &i2).unwrap();
+    r.read().dump_after(&b.chain_end(), &i2).unwrap();
     r.close().unwrap();
     Chain {
         s,
