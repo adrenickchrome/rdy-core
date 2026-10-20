@@ -700,7 +700,7 @@ impl ArtifactSource for Mem {
 }
 
 fn page_artifact(profile: &str) -> Mem {
-    let head = format!("<html><main>");
+    let head = "<html><main>".to_string();
     let page = format!(
         "{head}{}<h1>{profile}</h1></main></html>",
         std::str::from_utf8(NOTICE_SLOT).unwrap()
@@ -999,7 +999,14 @@ fn hpb14_wrong_remote_project_or_public_reference_stops_before_upload() {
     };
     type Setup = Box<dyn FnOnce(&mut PublishState)>;
     let none: fn() -> Setup = || Box::new(|_| {});
-    let cases: Vec<(&str, PublishRequest, Setup, (String, String, String), Vec<&str>)> = vec![
+    type Case<'s> = (
+        &'s str,
+        PublishRequest,
+        Setup,
+        (String, String, String),
+        Vec<&'s str>,
+    );
+    let cases: Vec<Case> = vec![
         (
             "missing remote",
             request("v1.0.0", "nowhere", SITE),
