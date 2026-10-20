@@ -1,3 +1,5 @@
+//! Test-only instrumentation for hpb13 (ruling task-13-round1); compiled out unless the probe feature is on.
+//!
 //! A count of the renderer's entry points, for a test that must show a caller renders nothing.
 //!
 //! With the `probe` feature, [`renders`] returns how many times this thread has entered a render:
