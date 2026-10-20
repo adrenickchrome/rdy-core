@@ -12,6 +12,7 @@ mod nav;
 mod page;
 mod prepare;
 pub mod print;
+pub mod process;
 mod publication;
 pub mod render_input;
 pub mod review;

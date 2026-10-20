@@ -27,6 +27,7 @@ mod publication_cmd;
 mod read_cmd;
 mod redact_cmd;
 mod remote_cmd;
+mod render_stream_cmd;
 mod search_cmd;
 mod serve_cmd;
 mod signing_cmd;
@@ -169,6 +170,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: signing_cmd::KeyCmd,
     },
+    /// Internal: render one site or Markdown artifact from a render request on standard input
+    /// (a JSON prelude, then one tag history stream) to standard output, with no project.
+    #[command(hide = true)]
+    RenderStream,
     /// Check upload batches without a store.
     Stream {
         #[command(subcommand)]
@@ -196,7 +201,9 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
     let as_json = cli.json;
     match cli.cmd {
         Cmd::Config(a) => config_cmd::run(&env.project, a.show_origin),
-        Cmd::Stream { .. } => unreachable!("handled before the project is found"),
+        Cmd::Stream { .. } | Cmd::RenderStream => {
+            unreachable!("handled before the project is found")
+        }
         Cmd::Wc(c) => wc::run(c, env),
         Cmd::Init(a) => project_cmd::init(env, a, cli.project),
         Cmd::Mcp => serve_cmd::mcp(env),
@@ -253,6 +260,13 @@ fn main() -> ExitCode {
     // `rdy load` refuses a target a live daemon still serves; the engine asks this probe
     rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
     let cli = Cli::parse();
+    // hpb9: the render process reads its standard input alone: before the hub sign-in, the
+    // working directory, the project lookup, a config, a store or a daemon
+    if let Cmd::RenderStream = cli.cmd {
+        return render_stream_cmd::render_stream(
+            cli.json || cli.project.is_some() || cli.no_daemon,
+        );
+    }
     // hub sign-in reads the user config only: before the working directory, the project
     // lookup, a store or a daemon
     let cli = match cli {
