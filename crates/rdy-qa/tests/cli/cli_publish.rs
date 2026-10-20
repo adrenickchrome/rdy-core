@@ -695,8 +695,13 @@ fn normal(v: &Value) -> Value {
 
 /// An error's code, message, fix and issues, with `push` named as `{push}`.
 fn error_parts(v: &Value, push: Option<&str>) -> Value {
+    // the CLI's JSON error leaves out an empty issue list; MCP's has it
+    let issues = match &v["issues"] {
+        Value::Null => json!([]),
+        i => i.clone(),
+    };
     let text = json!({"code": v["code"], "message": v["message"], "fix": v["fix"],
-        "issues": v["issues"]})
+        "issues": issues})
     .to_string();
     let text = match push {
         Some(p) => text.replace(p, "{push}"),
@@ -1308,43 +1313,53 @@ fn hpb15_no_keep_latest_sends_no_field() {
 
 /// A failed or uncertain upload changes nothing here: the store's log, the project, local and
 /// user config and the credentials keep their bytes, on the CLI (through the daemon and with no
-/// daemon) and over MCP.
+/// daemon) and over MCP. Each phase's baseline is taken once its sessions are open, so only the
+/// publishes run between the two readings.
 #[test]
 fn hpb15_failed_upload_leaves_source_log_and_config_unchanged() {
     let k = kit();
-    let before = fixed(&k);
     let refused = json!({"code": "E_HUB_SITE_AUDIENCE", "message": "the site audience differs",
         "fix": "choose another site", "request_id": REQUEST_ID, "issues": []});
-    let mut c = chat(&k, Some("writer"));
-    for fault in [
+    let faults = [
         Fault::RefusePublish(409, refused.to_string()),
         Fault::LosePublish,
-    ] {
+    ];
+    let unchanged = |before: &BTreeMap<String, Vec<u8>>, phase: &str| {
+        let after = fixed(&k);
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>(),
+            "{phase}"
+        );
+        for (name, bytes) in before {
+            assert!(after[name] == *bytes, "{phase}: {name} changed");
+        }
+    };
+    // through the daemon: the person's CLI session and an agent's MCP session
+    let mut c = chat(&k, Some("writer"));
+    let o = run(&k, &[], &["status"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let before = fixed(&k);
+    for fault in &faults {
         k.hub.fault(fault.clone());
         let e = cli_err(&k, false);
         assert!(e["code"].is_string(), "{e}");
         let e = mcp_err(&mut c, base_args());
         assert!(e["code"].is_string(), "{e}");
     }
+    unchanged(&before, "through the daemon");
     drop(c);
     k.proj.stop_daemon(&k.home);
-    for fault in [
-        Fault::RefusePublish(409, refused.to_string()),
-        Fault::LosePublish,
-    ] {
+    // with no daemon: the CLI's own process
+    let o = run(&k, &[], &["--no-daemon", "status"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let before = fixed(&k);
+    for fault in faults {
         k.hub.fault(fault);
         let e = cli_err(&k, true);
         assert!(e["code"].is_string(), "{e}");
     }
-    k.proj.stop_daemon(&k.home);
+    unchanged(&before, "with no daemon");
     assert_eq!(k.hub.publishes().len(), 6, "every run reached publish");
-    let after = fixed(&k);
-    assert_eq!(
-        after.keys().collect::<Vec<_>>(),
-        before.keys().collect::<Vec<_>>()
-    );
-    for (name, bytes) in &before {
-        assert!(after[name] == *bytes, "{name} changed");
-    }
     k.hub.finish();
 }
