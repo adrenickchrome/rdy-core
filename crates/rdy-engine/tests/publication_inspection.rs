@@ -1043,6 +1043,10 @@ fn spv1_inspection_is_bounded_and_read_only() {
                 let ok = publication::resolve_inspection(&st, scope, "site")
                     .unwrap_or_else(|e| panic!("{part} at {n}: {e}"));
                 assert_eq!(ok.selection_hash, res.selection_hash, "{part}");
+                let rev = publication::resolve_revision(&st, scope, &bid(&pf))
+                    .unwrap_or_else(|e| panic!("{part} at {n} by revision: {e}"))
+                    .unwrap_or_else(|| panic!("{part} at {n}: no revision"));
+                assert_eq!(rev.selection_hash, res.selection_hash, "{part} by revision");
             }
             set(&mut l, n - 1);
             let _g = publication::override_limits_for_tests(l);
