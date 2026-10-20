@@ -106,8 +106,15 @@ pub(crate) mod ids {
 #[doc(hidden)]
 pub type BatchHook = Box<dyn FnMut(u64)>;
 
+/// A test hook a dump calls with each project file's path, after the file's length passed the
+/// limit and before its first byte is read.
+#[doc(hidden)]
+pub type FileHook = Box<dyn FnMut(&Path)>;
+
 thread_local! {
     static FILE_READS: Cell<u64> = const { Cell::new(0) };
+    static FILE_BYTES: Cell<u64> = const { Cell::new(0) };
+    static FILE_HOOK: RefCell<Option<FileHook>> = const { RefCell::new(None) };
     static BATCH_HOOK: RefCell<Option<BatchHook>> = const { RefCell::new(None) };
 }
 
@@ -115,6 +122,31 @@ thread_local! {
 #[doc(hidden)]
 pub fn project_file_reads() -> u64 {
     FILE_READS.with(Cell::get)
+}
+
+/// Test hook: this thread's count of project-file bytes a dump has read from the files.
+#[doc(hidden)]
+pub fn project_file_bytes() -> u64 {
+    FILE_BYTES.with(Cell::get)
+}
+
+/// Test hook: a dump on this thread calls `hook` with each project file's path, after its
+/// length is checked and before its first byte is read (a test can grow the file there). None
+/// removes the hook.
+#[doc(hidden)]
+pub fn on_project_file(hook: Option<FileHook>) {
+    FILE_HOOK.with(|h| *h.borrow_mut() = hook);
+}
+
+/// A project file's reader that counts the bytes it hands out ([`project_file_bytes`]).
+struct Counted(File);
+
+impl Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(buf)?;
+        FILE_BYTES.with(|c| c.set(c.get() + n as u64));
+        Ok(n)
+    }
 }
 
 /// Test hook: a dump on this thread calls `hook` with the count of batches written so far,
@@ -189,8 +221,9 @@ impl ReadState {
     /// after `prev`, the end of an earlier dump or increment of this store, up to `seq()`. The
     /// predecessor is checked first, in this order: its repo, its store format, an end at or
     /// before this state's, an end that closes a batch of this store, and that batch's marker.
-    /// Its errors name it `previous dump`. When this state ends at `prev`, nothing is written,
-    /// no project file is read, and the summary has no `out` and names `prev`'s end.
+    /// Its errors name it `previous dump`. A removal that lands while the marker is looked up is
+    /// `E_REDACTED_STATE`, never a predecessor error. When this state ends at `prev`, nothing is
+    /// written, no project file is read, and the summary has no `out` and names `prev`'s end.
     pub fn dump_after(&self, prev: &ChainEnd, out: &Path) -> Result<DumpSummary, RdyError> {
         self.dump_following(None, prev, out)
     }
@@ -235,7 +268,13 @@ impl ReadState {
                 file, at.segment, at.offset,
             ));
         }
-        let Some(marker) = self.marker_at(at)? else {
+        let found = self.marker_at(at);
+        if !matches!(found, Ok(Some(marker)) if marker == prev.end_batch) {
+            // a removal that lands during the walk breaks it, or bends what it reads: that
+            // answer is no one epoch's, so the epoch's error comes first
+            self.ensure_current_epoch()?;
+        }
+        let Some(marker) = found? else {
             return Err(dump_error::export_end_inside_batch(
                 file, at.segment, at.offset,
             ));
@@ -363,8 +402,8 @@ impl ReadState {
     /// before the trailer (so before a dump file is placed, and before a clone's loader can read
     /// a whole stream): the batches read the live removal spans, and a removal past this state's
     /// log end would leave a dropped frame that no record of the dump authorizes. A walk that
-    /// fails is checked too, so a removal that broke it is `E_REDACTED_STATE`. The caller
-    /// removes its partial output on any error.
+    /// fails is checked too, the marker lookup at the log end included, so a removal that broke
+    /// it is `E_REDACTED_STATE`. The caller removes its partial output on any error.
     fn write_chain<W: Write>(
         &self,
         w: W,
@@ -374,10 +413,15 @@ impl ReadState {
         self.ensure_current_epoch()?;
         let reader = self.reader();
         let repo_id = repo_id_of(self)?;
-        // the marker of the batch that ends at this state's log end
-        let end_batch = reader
-            .batch_marker_at(self.seq())?
-            .unwrap_or(BatchMarker::ZERO);
+        // the marker of the batch that ends at this state's log end; a removal that breaks this
+        // walk is the epoch's error, as for the batches below
+        let end_batch = match reader.batch_marker_at(self.seq()) {
+            Ok(marker) => marker.unwrap_or(BatchMarker::ZERO),
+            Err(e) => {
+                self.ensure_current_epoch()?;
+                return Err(e.into());
+            }
+        };
         let (chain, base) = match prev {
             None => (
                 DumpChainHeader::full(repo_id, end_batch),
@@ -630,8 +674,14 @@ fn read_bounded(path: &Path, name: &str) -> Result<Option<Vec<u8>>, RdyError> {
     if f.metadata().map_err(|e| io_at(path, e))?.len() > limit {
         return Err(too_large(name));
     }
+    FILE_HOOK.with(|h| {
+        if let Some(hook) = h.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
     let mut bytes = Vec::new();
-    f.take(limit + 1)
+    Counted(f)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| io_at(path, e))?;
     if bytes.len() > MAX_FILE_BYTES {

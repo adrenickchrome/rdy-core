@@ -130,6 +130,23 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+/// A test hook a batch walk calls with the location of each record it has read.
+#[doc(hidden)]
+pub type RecordHook = Box<dyn FnMut(Location)>;
+
+thread_local! {
+    static RECORD_HOOK: std::cell::RefCell<Option<RecordHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: a batch walk on this thread (a dump's, and a batch-marker lookup's) calls `hook`
+/// with each record's location, after the walk has read the removal spans and that record and
+/// before it reads the next one (a read barrier for race tests). None removes the hook.
+#[doc(hidden)]
+pub fn on_batch_walk_record(hook: Option<RecordHook>) {
+    RECORD_HOOK.with(|h| *h.borrow_mut() = hook);
+}
+
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
 /// The dump format this rdy writes: 3, of store format 16 (the pair (3, 16)).
@@ -2285,6 +2302,11 @@ impl StoreReader {
         let mut hashes: Vec<Hash> = Vec::new();
         let mut first: Option<Location> = None;
         self.for_each_record_from(from, upto, |loc, frame, _next| {
+            RECORD_HOOK.with(|h| {
+                if let Some(hook) = h.borrow_mut().as_mut() {
+                    hook(loc);
+                }
+            });
             let (kind, payload) = match frame {
                 StoredFrame::Present { kind, payload, .. } => (kind, payload),
                 StoredFrame::Dropped {

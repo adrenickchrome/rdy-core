@@ -4,12 +4,16 @@
 //! envelope alone. An empty suffix writes nothing. Every export belongs to one redaction epoch: a
 //! stale state, or a removal that lands during the export, is `E_REDACTED_STATE`, and no file or
 //! partial file is left.
-use rdy_engine::dump::{chain_end_of, on_dump_batch, project_file_reads};
+use rdy_engine::dump::{
+    chain_end_of, on_dump_batch, on_project_file, project_file_bytes, project_file_reads,
+};
 use rdy_engine::formats::inspect_dump;
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::*;
 use rdy_model::{Hash, RepoId, Role};
-use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpTrailer};
+use rdy_store::dump::{
+    DumpBatch, DumpHeader, DumpItem, DumpReader, DumpTrailer, on_batch_walk_record,
+};
 use rdy_store::dump_chain::{DumpChainHeader, batch_end};
 use serde_json::{Value, json};
 use std::fs::File;
@@ -867,6 +871,82 @@ fn hc4_removal_during_export_refuses_and_cleans_partial() {
     }
 }
 
+/// The three exports whose first store read is a batch-marker walk: a full dump (the marker at
+/// its own end), an increment with batches and an empty increment (the predecessor's marker).
+#[derive(Clone, Copy, Debug)]
+enum Lookup {
+    Full,
+    Increment,
+    Empty,
+}
+
+#[test]
+fn hc4_removal_during_a_marker_lookup_is_redacted_state() {
+    let _clock = pin_clock(1_000_000);
+    let mut got = Vec::new();
+    for case in [Lookup::Full, Lookup::Increment, Lookup::Empty] {
+        let d = tempfile::tempdir().unwrap();
+        let (mut r, prop, _) = removable(&d.path().join("p"));
+        // a predecessor whose end lies past the secret's frame, so its marker walk reads it
+        let held_state = r.read();
+        let held = held_state.dump(&d.path().join("held.rdydump")).unwrap();
+        let st = match case {
+            Lookup::Empty => held_state,
+            Lookup::Full | Lookup::Increment => {
+                add(&mut r, 9, "after the predecessor");
+                r.read()
+            }
+        };
+        let out = d.path().join("out.rdydump");
+        let (paused, wait) = channel::<()>();
+        let (go, released) = channel::<()>();
+        let prev = held.chain_end();
+        let target = out.clone();
+        let export = std::thread::spawn(move || {
+            // the first marker walk has read the removal spans and its first record, and no
+            // later frame: it waits there
+            let mut first = true;
+            on_batch_walk_record(Some(Box::new(move |_| {
+                if std::mem::take(&mut first) {
+                    paused.send(()).unwrap();
+                    released.recv().unwrap();
+                }
+            })));
+            let got = match case {
+                Lookup::Full => st.dump(&target),
+                Lookup::Increment | Lookup::Empty => st.dump_after(&prev, &target),
+            };
+            on_batch_walk_record(None);
+            got
+        });
+        wait.recv().unwrap();
+        r.land(&approver(), &prop.id).unwrap();
+        go.send(()).unwrap();
+        let e = expect_err(export.join().unwrap());
+        got.push((
+            format!("{case:?}"),
+            e.code.to_string(),
+            e.fix.clone(),
+            out.exists(),
+            no_partial(d.path()),
+        ));
+    }
+    let stale = |case: &str| {
+        (
+            case.to_string(),
+            E_REDACTED_STATE.to_string(),
+            "Read the project again, or run the dump again.".to_string(),
+            false,
+            true,
+        )
+    };
+    assert_eq!(
+        got,
+        vec![stale("Full"), stale("Increment"), stale("Empty")],
+        "(case, code, fix, out exists, no partial)"
+    );
+}
+
 #[test]
 fn hc4_fresh_dump_after_removal_loads() {
     let _clock = pin_clock(1_000_000);
@@ -912,28 +992,109 @@ fn hc4_fresh_dump_after_removal_loads() {
     assert!(first < after_held.base, "{after_held:?}");
 }
 
+/// The project files a dump on this thread reached through its reader (after their length
+/// check, before their first byte), shared with the test that set the hook.
+fn watch_files() -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = seen.clone();
+    on_project_file(Some(Box::new(move |path: &Path| {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        log.borrow_mut().push(name);
+    })));
+    seen
+}
+
 #[test]
 fn hc4_a_project_file_over_16_mib_is_refused_before_it_is_read_whole() {
     let d = tempfile::tempdir().unwrap();
-    let mut r = project(&d.path().join("p"));
+    let root = d.path().join("p");
+    let mut r = project(&root);
     let full = r.read().dump(&d.path().join("full.rdydump")).unwrap();
     add(&mut r, 7, "more");
-    let ignore = d.path().join("p/.rdyignore");
+    let ignore = root.join(".rdyignore");
+    let config_len = std::fs::metadata(root.join(".rdy.yaml")).unwrap().len();
     let st = r.read();
     let out = d.path().join("inc.rdydump");
+    let seen = watch_files();
     for len in [16 << 20, (16 << 20) + 1] {
         std::fs::write(&ignore, vec![b'#'; len]).unwrap();
-        let got = st.dump_after(&full.chain_end(), &out);
-        if len == 16 << 20 {
-            assert!(got.unwrap().files.contains(&".rdyignore".to_string()));
-            std::fs::remove_file(&out).unwrap();
-        } else {
-            let e = expect_err(got);
-            assert_eq!(e.code, E_BAD_INPUT);
-            assert_eq!(e.message, ".rdyignore is larger than 16 MiB");
-            assert_eq!(e.fix, "make the file 16 MiB or smaller");
-            assert!(!out.exists());
-            assert_eq!(expect_err(st.dump(&out)).message, e.message);
+        for full_dump in [false, true] {
+            seen.borrow_mut().clear();
+            let before = project_file_bytes();
+            let got = if full_dump {
+                st.dump(&out)
+            } else {
+                st.dump_after(&full.chain_end(), &out)
+            };
+            let read = project_file_bytes() - before;
+            if len == 16 << 20 {
+                // the reader is the path the bytes take: every carried byte, once
+                let files = got.unwrap().files;
+                assert!(files.contains(&".rdyignore".to_string()));
+                let carried: u64 = files
+                    .iter()
+                    .map(|f| std::fs::metadata(root.join(f)).unwrap().len())
+                    .sum();
+                assert_eq!(read, carried, "full {full_dump}");
+                assert!(seen.borrow().contains(&".rdyignore".to_string()));
+                std::fs::remove_file(&out).unwrap();
+            } else {
+                let e = expect_err(got);
+                assert_eq!(e.code, E_BAD_INPUT);
+                assert_eq!(e.message, ".rdyignore is larger than 16 MiB");
+                assert_eq!(e.fix, "make the file 16 MiB or smaller");
+                assert!(!out.exists());
+                assert!(no_partial(d.path()));
+                // refused by its length: its reader never started, and no byte of it was read
+                assert_eq!(
+                    *seen.borrow(),
+                    vec![".rdy.yaml".to_string()],
+                    "full {full_dump}"
+                );
+                assert_eq!(read, config_len, "full {full_dump}");
+            }
         }
+    }
+    on_project_file(None);
+}
+
+#[test]
+fn hc4_a_project_file_that_grows_is_read_to_one_byte_past_the_limit() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("p");
+    let mut r = project(&root);
+    let full = r.read().dump(&d.path().join("full.rdydump")).unwrap();
+    add(&mut r, 7, "more");
+    let ignore = root.join(".rdyignore");
+    let config_len = std::fs::metadata(root.join(".rdy.yaml")).unwrap().len();
+    let st = r.read();
+    let out = d.path().join("inc.rdydump");
+    for full_dump in [false, true] {
+        // small when its length is checked; it grows past the limit before its first byte is read
+        std::fs::write(&ignore, b"# small\n").unwrap();
+        let grown = (16 << 20) + (1 << 20);
+        let path = ignore.clone();
+        on_project_file(Some(Box::new(move |p: &Path| {
+            if p == path {
+                let f = std::fs::OpenOptions::new().append(true).open(p).unwrap();
+                f.set_len(grown).unwrap();
+            }
+        })));
+        let before = project_file_bytes();
+        let got = if full_dump {
+            st.dump(&out)
+        } else {
+            st.dump_after(&full.chain_end(), &out)
+        };
+        let read = project_file_bytes() - before;
+        on_project_file(None);
+        assert_eq!(std::fs::metadata(&ignore).unwrap().len(), grown);
+        let e = expect_err(got);
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(e.message, ".rdyignore is larger than 16 MiB");
+        assert!(!out.exists());
+        assert!(no_partial(d.path()));
+        // the config file whole, then the grown file up to one byte past the limit
+        assert_eq!(read, config_len + 16_777_217, "full {full_dump}");
     }
 }
