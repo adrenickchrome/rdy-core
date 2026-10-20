@@ -197,13 +197,7 @@ fn take_error(e: TakeError<RdyError>) -> RdyError {
         TakeError::Store(e) => e.into(),
         TakeError::Stream(e) => to_rdy(e),
         TakeError::Validation(e) => e,
-        TakeError::UncoveredChange(h) => RdyError::new(
-            E_REDACTION_STALE,
-            format!("the imported removal does not cover receiver change {h}"),
-            format!(
-                "redact this content in the project that made change {h}, upload that removal, then upload again"
-            ),
-        ),
+        TakeError::UncoveredChange(h) => uncovered_change(h),
         TakeError::ModeMismatch => RdyError::new(
             E_BAD_INPUT,
             "this store is a project",
@@ -215,6 +209,18 @@ fn take_error(e: TakeError<RdyError>) -> RdyError {
             "use the holder for the stream's repo",
         ),
     }
+}
+
+/// E_REDACTION_STALE: change `h` embeds a block version an imported removal removes, and no
+/// approval covers it (`TakeError::UncoveredChange`; a render refuses the same stream).
+pub(crate) fn uncovered_change(h: Hash) -> RdyError {
+    RdyError::new(
+        E_REDACTION_STALE,
+        format!("the imported removal does not cover receiver change {h}"),
+        format!(
+            "redact this content in the project that made change {h}, upload that removal, then upload again"
+        ),
+    )
 }
 
 /// Every `tag/` ref whose record names a version, read as the holder's fsck reads them. A ref

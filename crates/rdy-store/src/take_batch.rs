@@ -780,11 +780,7 @@ pub(crate) fn prepare<E>(
     ) {
         one_tuple(key, union.get(key))?;
     }
-    let block_versions: HashSet<Hash> = approved
-        .keys()
-        .filter(|k| k.kind == kinds::BLOCK)
-        .map(|k| k.hash)
-        .collect();
+    let block_versions: HashSet<Hash> = stream_source::approved_block_versions(&approved);
     let mut writes: BTreeMap<ObjectKey, (Write, Vec<ObjectKey>)> = BTreeMap::new();
     let mut redacted: BTreeSet<ObjectKey> = BTreeSet::new();
     let mut new_payload_bytes = 0u64;
@@ -839,12 +835,11 @@ pub(crate) fn prepare<E>(
             );
         } else {
             let at = e.present.expect("an uncovered key is present");
-            // 7. a new change that embeds an approved version needs its own approval
+            // 7. a new change that embeds an approved version needs its own approval (the rule
+            // a checked stream applies with nothing held: `stream_source::uncovered_change`)
             if key.kind == kinds::CHANGE && !block_versions.is_empty() {
                 let payload = source.union_payload(key)?.expect("a present record");
-                if let Ok(c) = crate::store::decode::<Change>(&payload)
-                    && embeds(&c, &block_versions)
-                {
+                if stream_source::embeds_approved(key, &payload, &block_versions) {
                     return Err(TakeError::UncoveredChange(key.hash));
                 }
             }

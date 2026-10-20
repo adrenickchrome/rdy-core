@@ -17,7 +17,9 @@
 //!    bounded records, record rules, trailer, end of file, order, the 1,000,000 records and
 //!    edges and the 100,000 history depth), then the take's completeness checks with nothing
 //!    held: no prerequisite (a valid nonempty list is E_UNRESOLVED_REF for its first key), every
-//!    record in the root's closure, every removal proof valid and every dropped record proved.
+//!    record in the root's closure, every removal proof valid and every dropped record proved;
+//!    and the take's step 7: a present change that embeds an approved block version and that
+//!    no approval covers is the take's own E_REDACTION_STALE.
 //! 4. The root's name: the take's 1,048,576-byte bound, then the version parser.
 //! 5. The take's structural and snapshot checks ([`check_snapshots`]): each record's local
 //!    limits and chunk lengths, the landing and chain rules, every signature, and every
@@ -82,6 +84,12 @@ fn from_stream(e: StreamError) -> RdyError {
     to_rdy(e)
 }
 
+/// An engine error of a check that read the scratch file: an I/O failure (the only I/O a
+/// render does after the copy is a scratch read) is the scratch error.
+fn scratch_io(e: RdyError) -> RdyError {
+    if e.code == E_IO { scratch_error() } else { e }
+}
+
 /// One checked tag history stream, read from its scratch file, with the render inputs the
 /// caller supplied: the tagged state, its redaction marker and the publication reads.
 pub struct RenderSource {
@@ -122,6 +130,10 @@ impl RenderSource {
         let mut file = scratch().map_err(|_| scratch_error())?;
         copy(&mut input, &mut *file)?;
         let stream = CheckedStream::open(file).map_err(from_stream)?;
+        // the take's step 7: a change that keeps removed content readable needs its approval
+        if let Some(h) = stream.uncovered_change() {
+            return Err(crate::stream_take::uncovered_change(h));
+        }
         let facts = stream.facts();
         // the root's name: the take's bound, then the version parser
         check_input_bounds(
@@ -133,7 +145,8 @@ impl RenderSource {
         )
         .map_err(to_rdy)?;
         parse_version(&facts.root.name)?;
-        check_snapshots(&NothingHeld, &mut &stream, facts)?;
+        // a record read again from the scratch file that fails is the scratch error
+        check_snapshots(&NothingHeld, &mut &stream, facts).map_err(scratch_io)?;
         let (snapshot, blocks) = stream.materialize_tag().map_err(from_stream)?;
         let landing = facts.root.landing;
         let tag_redacted = tag_is_redacted(&mut StreamHistory(&stream), landing, &inputs.pack)?;

@@ -28,7 +28,7 @@ use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const CANARY: &str = "ZEBRA-7731";
 
@@ -338,14 +338,18 @@ fn render(bytes: &[u8], inputs: RenderInputs) -> Result<RenderSource, RdyError> 
 // ---------------------------------------------------------------------------------------------
 // scratch files the tests own
 
-/// What the scratch files a test made did: how many were made and closed, and the bytes read
-/// back from them.
+/// What the scratch files a test made did: how many were made and closed, the bytes read back
+/// from them and their seeks. A test fails every later read with `fail_reads`, or from the
+/// `fail_at_seek`th seek on (0: never).
 #[derive(Default)]
 struct Seen {
     opened: AtomicU64,
     closed: AtomicU64,
     read: AtomicU64,
     written: AtomicU64,
+    seeks: AtomicU64,
+    fail_reads: AtomicBool,
+    fail_at_seek: AtomicU64,
 }
 
 impl Seen {
@@ -375,6 +379,9 @@ impl Drop for TestScratch {
 
 impl Read for TestScratch {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.seen.fail_reads.load(Ordering::SeqCst) {
+            return Err(io::Error::other("bad sector"));
+        }
         let n = self.data.read(buf)?;
         Seen::add(&self.seen.read, n as u64);
         Ok(n)
@@ -400,6 +407,11 @@ impl Write for TestScratch {
 
 impl Seek for TestScratch {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let n = self.seen.seeks.fetch_add(1, Ordering::SeqCst) + 1;
+        let at = Seen::get(&self.seen.fail_at_seek);
+        if at != 0 && n >= at {
+            self.seen.fail_reads.store(true, Ordering::SeqCst);
+        }
         self.data.seek(pos)
     }
 }
@@ -676,6 +688,83 @@ fn hpb5_full_validation_reuses_take_checks() {
         rebatch(repo, renamed_key.hash, &retagged),
         retarget,
     ));
+    // take step 7: a present change that embeds the removed canary version, which no approval
+    // covers, attached to the closure by an ordinary answer to the tag's landing
+    let (_, before) = records_of(&s.v1_before);
+    let canary = before
+        .iter()
+        .find_map(|r| match r {
+            StreamRecord::Present { key, payload }
+                if key.kind == kinds::BLOCK && key.hash == s.canary_version =>
+            {
+                Some(rdy_store::bounded::decode::<Block>(payload).unwrap())
+            }
+            _ => None,
+        })
+        .expect("the canary block before its removal");
+    assert!(canary.body.contains(CANARY));
+    let embedding = Change {
+        view: "work".into(),
+        ops: vec![Op::Create { block: canary }],
+        deps: vec![],
+        provenance: prov(),
+        justification: None,
+        message: String::new(),
+        links: ChangeLinks::default(),
+        read_identity: None,
+    };
+    let embedding_bytes = enc(&embedding);
+    let embedding_key = ObjectKey {
+        kind: kinds::CHANGE,
+        hash: Hash::of(&embedding_bytes),
+    };
+    let attach = Answer {
+        item: "D-x@1".into(),
+        act: AnswerAct::Confirm,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: None,
+        targets: vec![target.landing, embedding_key.hash],
+        person: prov(),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    };
+    let attach_bytes = enc(&attach);
+    let mut embedded = records.clone();
+    embedded.push(StreamRecord::Present {
+        key: embedding_key,
+        payload: embedding_bytes,
+    });
+    embedded.push(StreamRecord::Present {
+        key: ObjectKey {
+            kind: kinds::ANSWER,
+            hash: Hash::of(&attach_bytes),
+        },
+        payload: attach_bytes,
+    });
+    let uncovered = rebatch(repo, s.v1, &embedded);
+    let e = refused(take_into_holder(
+        dir.path(),
+        "uncovered-take",
+        repo,
+        &uncovered,
+        &target,
+    ));
+    assert_eq!(
+        (e.code, e.message.clone()),
+        (
+            E_REDACTION_STALE,
+            format!(
+                "the imported removal does not cover receiver change {}",
+                embedding_key.hash
+            )
+        ),
+        "{e}"
+    );
+    corpus.push(("uncovered".into(), uncovered, target.clone()));
     for (name, bytes, t) in &corpus {
         let by_take = refused(take_into_holder(dir.path(), name, repo, bytes, t));
         let by_render = render(bytes, inputs(&s.r)).unwrap_err();
@@ -1391,4 +1480,47 @@ fn hpb5_scratch_closes_on_every_exit() {
     // the default scratch is an anonymous file: the source reads the same through it
     let rs = render(&stream, inputs(&s.r)).unwrap();
     assert_eq!(rs.blob(&s.kept).unwrap(), b"kept figure bytes");
+}
+
+#[test]
+fn hpb5_scratch_read_failure_is_the_scratch_error() {
+    let s = seeded();
+    let stream = export(&s.r, s.v1);
+    let scratch_error = (
+        E_IO,
+        "the render scratch file could not be used",
+        "check the temporary directory and available disk space",
+    );
+    // a scratch file whose reads fail once the source is made: a lazy blob read is E_IO
+    let seen = Arc::new(Seen::default());
+    let rs = RenderSource::read_with(
+        Cursor::new(stream.clone()),
+        inputs(&s.r),
+        &mut scratch(&seen, false, false),
+    )
+    .unwrap();
+    let seeks = Seen::get(&seen.seeks);
+    seen.fail_reads.store(true, Ordering::SeqCst);
+    let e = rs.blob(&s.kept).expect_err("refused");
+    assert_eq!((e.code, e.message.as_str(), e.fix.as_str()), scratch_error);
+    assert!(e.issues.is_empty());
+    drop(rs);
+    assert_eq!((Seen::get(&seen.opened), Seen::get(&seen.closed)), (1, 1));
+    // reads that fail from any seek of the read on, whichever check is reading: E_IO
+    for at in 1..=seeks {
+        let seen = Arc::new(Seen::default());
+        seen.fail_at_seek.store(at, Ordering::SeqCst);
+        let e = RenderSource::read_with(
+            Cursor::new(stream.clone()),
+            inputs(&s.r),
+            &mut scratch(&seen, false, false),
+        )
+        .expect_err("refused");
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            scratch_error,
+            "failing from seek {at} of {seeks}"
+        );
+        assert_eq!((Seen::get(&seen.opened), Seen::get(&seen.closed)), (1, 1));
+    }
 }

@@ -9,6 +9,10 @@
 //! attachments), every new apply passes its portable proof (`sync_proof::check`), every dropped
 //! record names a validated apply that approves its exact tuple, and each approved or dropped
 //! key has one tuple. [`check_complete`] runs them over any [`ObjectSource`] with nothing held.
+//! The take's step 7 (a present change that embeds an approved block version and that no
+//! approval covers) reads only incoming records too: [`CheckedStream`] finds it with the same
+//! rule as the take ([`CheckedStream::uncovered_change`]), and its caller refuses it with the
+//! take's own error.
 //! The receiver's own checks stay in the take: the repo and mode, the upload target, SIG's
 //! subject rule over the holder, the scan of the holder's local copies, the tag collision policy
 //! and the append.
@@ -437,6 +441,55 @@ pub(crate) fn relay_answers(
     Ok(out)
 }
 
+/// The block versions the approvals `approved` cover.
+pub(crate) fn approved_block_versions(
+    approved: &BTreeMap<ObjectKey, Vec<(Hash, RemovalObject)>>,
+) -> HashSet<Hash> {
+    approved
+        .keys()
+        .filter(|k| k.kind == kinds::BLOCK)
+        .map(|k| k.hash)
+        .collect()
+}
+
+/// The take's step 7 for one present record that no approval covers: whether `key` is a CHANGE
+/// whose payload embeds one of the approved block versions `versions` (a Create or Update that
+/// writes it). Such a change needs its own approval (`TakeError::UncoveredChange`). A payload
+/// that does not decode as a change embeds nothing.
+pub(crate) fn embeds_approved(key: &ObjectKey, payload: &[u8], versions: &HashSet<Hash>) -> bool {
+    key.kind == kinds::CHANGE
+        && !versions.is_empty()
+        && crate::store::decode::<rdy_model::Change>(payload)
+            .is_ok_and(|c| crate::redaction_import::embeds(&c, versions))
+}
+
+/// The take's step 7 over the incoming records with nothing held: the first key of `input_keys`
+/// (in key order) that is a present CHANGE no approval of `approved` covers and that embeds an
+/// approved block version ([`embeds_approved`]). None when there is none.
+pub(crate) fn uncovered_change(
+    rec: &mut dyn Records,
+    approved: &BTreeMap<ObjectKey, Vec<(Hash, RemovalObject)>>,
+    input_keys: &[ObjectKey],
+) -> Result<Option<Hash>, StreamError> {
+    let versions = approved_block_versions(approved);
+    if versions.is_empty() {
+        return Ok(None);
+    }
+    let mut keys: Vec<&ObjectKey> = input_keys
+        .iter()
+        .filter(|k| k.kind == kinds::CHANGE && !approved.contains_key(k))
+        .collect();
+    keys.sort_unstable();
+    for key in keys {
+        if let Some(StreamRecord::Present { payload, .. }) = rec.object_source().record(*key)?
+            && embeds_approved(key, &payload, &versions)
+        {
+            return Ok(Some(key.hash));
+        }
+    }
+    Ok(None)
+}
+
 /// What the checks of a complete upload with nothing held found: its facts, every apply's
 /// validated removal and the approved tuples of each key.
 pub(crate) struct Complete {
@@ -641,8 +694,16 @@ impl<R: Read + Seek> Indexed<R> {
             |e: std::io::Error| StreamError::io(Some(record), offset, &e).with_object(Some(key));
         let mut input = self.input.borrow_mut();
         input.seek(SeekFrom::Start(offset)).map_err(io)?;
+        // a short read is input that changed; any other read failure stays an I/O failure
+        let read = |e: std::io::Error| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                changed()
+            } else {
+                io(e)
+            }
+        };
         let mut head = [0u8; HEADER as usize];
-        input.read_exact(&mut head).map_err(|_| changed())?;
+        input.read_exact(&mut head).map_err(read)?;
         let got = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes"));
         if got != len || head[4] != key.kind || head[5..37] != key.hash.0 {
             return Err(changed());
@@ -652,7 +713,7 @@ impl<R: Read + Seek> Indexed<R> {
             .try_reserve_exact(len as usize)
             .map_err(|_| StreamError::allocation(Some(record), offset).with_object(Some(key)))?;
         payload.resize(len as usize, 0);
-        input.read_exact(&mut payload).map_err(|_| changed())?;
+        input.read_exact(&mut payload).map_err(read)?;
         if Hash::of(&payload) != key.hash {
             return Err(changed());
         }
@@ -694,6 +755,9 @@ impl<R: Read + Seek> Records for Indexed<R> {
 pub struct CheckedStream<R: Read + Seek> {
     records: Indexed<R>,
     facts: UploadFacts,
+    /// The first present change that embeds an approved block version and that no approval
+    /// covers (the take's step 7).
+    uncovered: Option<Hash>,
 }
 
 impl<R: Read + Seek> CheckedStream<R> {
@@ -702,6 +766,9 @@ impl<R: Read + Seek> CheckedStream<R> {
     /// end of file, order and exact prerequisites), then [`check_complete`] with nothing held,
     /// its records as the incoming ones. A batch with prerequisites is E_UNRESOLVED_REF for its
     /// first one. Each record approved removals cover then reads as its dropped identity.
+    ///
+    /// The take's step 7 is not a stream error: `open` records it, and a caller that reads the
+    /// stream must refuse it as a take does ([`CheckedStream::uncovered_change`]).
     pub fn open(mut input: R) -> Result<CheckedStream<R>, StreamError> {
         input
             .seek(SeekFrom::Start(0))
@@ -757,11 +824,14 @@ impl<R: Read + Seek> CheckedStream<R> {
             &keys,
             &mut from_index,
         )?;
+        // the take's step 7 over the incoming records; it reads no key an approval covers
+        let uncovered = uncovered_change(&mut records, &done.approved, &keys)?;
         drop(keys);
         records.mask(&done)?;
         Ok(CheckedStream {
             records,
             facts: done.facts,
+            uncovered,
         })
     }
 
@@ -769,6 +839,15 @@ impl<R: Read + Seek> CheckedStream<R> {
     /// relay answers.
     pub fn facts(&self) -> &UploadFacts {
         &self.facts
+    }
+
+    /// The take's step 7 with nothing held: the first CHANGE of the stream, in key order, that
+    /// is present, that no approval covers, and that embeds a block version an approval of the
+    /// stream removes. A take refuses such a stream (`TakeError::UncoveredChange` with this
+    /// hash), so a reader must too: the change would keep the removed content readable. None
+    /// when there is none.
+    pub fn uncovered_change(&self) -> Option<Hash> {
+        self.uncovered
     }
 
     /// Whether the stream holds a record of `key`, present or dropped.
