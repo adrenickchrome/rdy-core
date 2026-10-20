@@ -170,8 +170,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let real = d.path().join("real");
         std::fs::create_dir(&real).unwrap();
-        let link = d.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // a second spelling of the same directory, with no OS-specific call
+        let link = real.join(".");
         let canonical = RunDir::of_project(&real).root();
         let bytes = crate::sys::path_bytes(&canonical).to_vec();
         for key in ["docs", "a.b-c_d", "implicit:org", "x"] {
@@ -181,7 +181,7 @@ mod tests {
             assert_eq!(
                 profile_candidates(&link, key),
                 want,
-                "{key}: a symlink spelling"
+                "{key}: a second spelling of the root"
             );
         }
         // the key and the root both feed the hash, and the domain keeps it apart from the source's
