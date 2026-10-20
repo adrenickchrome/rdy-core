@@ -6,7 +6,8 @@
 //! recorded remove their items (O23).
 use rdy_engine::coverage::confidence_of;
 use rdy_engine::pending::{
-    CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, Pending, card_hash, render,
+    APPROVE_REASON_BESIDE, CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, Pending, Recommended,
+    card_hash, render,
 };
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::{
@@ -140,7 +141,11 @@ fn di5_a_ready_proposal_is_one_batch_card() {
             ("later", "Later")
         ]
     );
-    assert_eq!(i.options[0].recommended.as_deref(), Some(BATCH_SUMMARY));
+    // D-D8FAB: the approve reason is computed (decisions stand beside this batch), never the summary
+    assert_eq!(
+        i.options[0].recommended.as_ref().map(Recommended::reason),
+        Some(APPROVE_REASON_BESIDE)
+    );
     assert!(i.options[1..].iter().all(|o| o.recommended.is_none()));
     let said: Vec<String> = i.options.iter().map(|o| o.consequences.join(" ")).collect();
     assert_eq!(
@@ -330,7 +335,10 @@ fn di5_each_exception_kind_stands_beside_the_batch() {
     assert_eq!(seen.len(), 6);
     let rejected = confirm_of(&q, &b.not_recommended);
     assert_eq!(
-        rejected.options[1].recommended.as_deref(),
+        rejected.options[1]
+            .recommended
+            .as_ref()
+            .map(Recommended::reason),
         Some("guests should not edit")
     );
     // a one-word yes never sweeps them in: the approve option names only the members

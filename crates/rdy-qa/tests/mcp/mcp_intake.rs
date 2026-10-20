@@ -458,9 +458,9 @@ fn di12_every_tool_is_in_one_family() {
 }
 
 #[test]
-fn sdc3_pending_describes_recommended_as_a_reason() {
-    // pins the tool text: options[].recommended is the reason and its presence marks the
-    // option; rdy_question's input recommended names an option label instead
+fn sdc3_pending_describes_the_recommended_flag_and_reason() {
+    // D-D8FAB: pins the tool text. The recommended option carries recommended: true and a
+    // reason; a question block's own recommended field is the exact text of one option.
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = McpClient::start(d.path());
@@ -471,8 +471,241 @@ fn sdc3_pending_describes_recommended_as_a_reason() {
         .expect("rdy_pending is listed");
     assert_eq!(
         tool["description"].as_str().unwrap(),
-        "Read what waits for the person: {items, not_ready, snoozed, omitted}. Each item has a ref, kind (approve, confirm, answer, resolve), options, card and card_hash. Each option's label holds its exact words. options[].recommended, when present, marks the recommended option and holds its reason; an empty reason still marks it. rdy_question's input recommended instead names an option label.\n\nShow the card to the person word for word. Keep its options, recommendation and consequences unchanged. A batch (approve) stands first, its exceptions (confirm) beside it. Pass session_ref (the chat session) so Later hides a card only there; max_tokens cuts each card. not_ready lists the versions that need work from you first."
+        "Read what waits for the person: {items, not_ready, snoozed, omitted}. Each item has a ref, kind (approve, confirm, answer, resolve), options, card and card_hash. Each option has an id, a label and its consequences. The recommended option carries recommended: true and a reason of at most 200 characters; no other option carries either. A question block's own recommended field is different: it is the exact text of one option.\n\nShow the card to the person word for word. Keep its options, recommendation and consequences unchanged. A batch (approve) stands first, its exceptions (confirm) beside it. Pass session_ref (the chat session) so Later hides a card only there; max_tokens cuts each card. not_ready lists the versions that need work from you first."
     );
+}
+
+/// A reason of 300 characters: longer than a card reason may be (D-D8FAB).
+fn long_reason() -> String {
+    "Finance owns the ledger. ".repeat(12)
+}
+
+/// The batch project (an approve card, its confirm cards and the advice resolve card), then an
+/// open question in canon that recommends "Finance" with [`long_reason`]: the project, with its
+/// person, an agent state on it, and the question's id.
+fn every_kind() -> (tempfile::TempDir, McpState, Batch, String) {
+    let (d, mut r, b) = batch_project();
+    let w = put(
+        &mut r,
+        "qs",
+        json!([{"op": "create", "type": "question", "id": "$q", "parent": b.spec.section.to_string(),
+        "fields": {
+            "prompt": "Who approves refunds?",
+            "title": "Who approves refunds?",
+            "why": "Support waits on this",
+            "options": ["Finance", "Support lead"],
+            "recommended": "Finance",
+            "recommend_reason": long_reason(),
+        }}]),
+    );
+    let q = rdy_qa::tensions::created(&w, "$q").to_string();
+    land(&mut r, "qs").expect("land the question");
+    person_is_qa(d.path());
+    (d, agent_state(r), b, q)
+}
+
+/// The items of kind `kind` in a `rdy_pending` reply.
+fn of_kind(v: &Value, kind: &str) -> Vec<Value> {
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == kind)
+        .cloned()
+        .collect()
+}
+
+/// D-D8FAB: the options of item `i` that carry `recommended: true`, at most one. Each carries a
+/// `reason` of at most 200 characters; every other option carries neither field.
+fn recommended_of(i: &Value) -> Vec<Value> {
+    let options = i["options"].as_array().unwrap();
+    for o in options {
+        match o.get("recommended") {
+            Some(flag) => {
+                assert_eq!(flag, &json!(true), "{o}");
+                let reason = o["reason"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a reason: {o}"));
+                assert!(reason.chars().count() <= 200, "{o}");
+            }
+            None => assert!(o.get("reason").is_none(), "{o}"),
+        }
+    }
+    let marked: Vec<Value> = options
+        .iter()
+        .filter(|o| o.get("recommended").is_some())
+        .cloned()
+        .collect();
+    assert!(marked.len() <= 1, "{i}");
+    marked
+}
+
+/// The ids of the recommended options of each item of `kind`, in queue order.
+fn recommended_ids(v: &Value, kind: &str) -> Vec<Vec<String>> {
+    let items = of_kind(v, kind);
+    assert!(!items.is_empty(), "a {kind} item in {v}");
+    items
+        .iter()
+        .map(|i| {
+            recommended_of(i)
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn sdc3_an_approve_card_marks_one_option_with_a_reason() {
+    let (_d, mut st, _b, _q) = every_kind();
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    assert_eq!(recommended_ids(&v, "approve"), vec![vec!["approve"]], "{v}");
+}
+
+#[test]
+fn sdc3_a_confirm_card_marks_one_option_with_a_reason() {
+    let (_d, mut st, b, _q) = every_kind();
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    let ids = recommended_ids(&v, "confirm");
+    assert_eq!(ids.len(), 4, "{v}");
+    for (i, rec) in of_kind(&v, "confirm").iter().zip(&ids) {
+        let want = if i["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with(&b.not_recommended.to_string())
+        {
+            "reject"
+        } else {
+            "confirm"
+        };
+        assert_eq!(rec, &vec![want.to_string()], "{i}");
+    }
+    let rejected = of_kind(&v, "confirm")
+        .into_iter()
+        .find(|i| i["exception"] == "not_recommended")
+        .unwrap();
+    assert_eq!(
+        recommended_of(&rejected)[0]["reason"],
+        "guests should not edit"
+    );
+}
+
+#[test]
+fn sdc3_an_answer_card_marks_one_option_with_a_reason() {
+    let (_d, mut st, _b, _q) = every_kind();
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    assert_eq!(recommended_ids(&v, "answer"), vec![vec!["o1"]], "{v}");
+    // a reason longer than 200 characters is cut to 200, ending with an ellipsis
+    let answer = &of_kind(&v, "answer")[0];
+    let reason = recommended_of(answer)[0]["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(reason.chars().count(), 200, "{reason}");
+    assert!(reason.ends_with('…'), "{reason}");
+    assert!(long_reason().starts_with(reason.trim_end_matches('…')));
+}
+
+#[test]
+fn sdc3_a_resolve_card_marks_one_option_with_a_reason() {
+    let (_d, mut st, b, _q) = every_kind();
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    let advice = item_of(&v, &format!("advice:{}", b.r#ref));
+    let rec = recommended_of(&advice);
+    assert_eq!(rec.len(), 1, "{advice}");
+    assert_eq!(
+        (&rec[0]["id"], &rec[0]["reason"]),
+        (&json!("accept"), &json!("the reviewer advised it"))
+    );
+    // every resolve item keeps the shape; a blocking tension's card recommends nothing
+    recommended_ids(&v, "resolve");
+}
+
+#[test]
+fn sdc3_a_question_block_keeps_recommended_as_option_text() {
+    let (_d, mut st, _b, q) = every_kind();
+    // the stored field is the exact text of one option, not a flag
+    let block = st
+        .engine
+        .read()
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .get(&q.parse().unwrap())
+        .cloned()
+        .expect("the question in canon");
+    assert_eq!(block.field_str("recommended"), Some("Finance"));
+    // the card's option with that label carries the flag
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    let answer = &of_kind(&v, "answer")[0];
+    let rec = recommended_of(answer);
+    assert_eq!(
+        (&rec[0]["label"], &rec[0]["recommended"]),
+        (&json!("Finance"), &json!(true))
+    );
+}
+
+#[test]
+fn sdc3_the_approve_reason_is_computed_never_the_summary() {
+    // decisions stand beside this batch: it lands after each has a confirm answer
+    let (_d, mut st, b, _q) = every_kind();
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    let batch = item_of(&v, &b.r#ref);
+    assert_eq!(
+        recommended_of(&batch)[0]["reason"],
+        "its checks pass, and it lands after you confirm each decision beside it"
+    );
+    assert_ne!(recommended_of(&batch)[0]["reason"], BATCH_SUMMARY);
+    // nothing stands beside this one
+    let (d, r, made) = ready_and_not_ready();
+    person_is_qa(d.path());
+    let mut st = agent_state(r);
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    let ready = item_of(&v, &made.ready.r#ref);
+    let rec = recommended_of(&ready);
+    assert_eq!(
+        (&rec[0]["id"], &rec[0]["reason"]),
+        (
+            &json!("approve"),
+            &json!("its checks pass and nothing blocks it")
+        )
+    );
+}
+
+#[test]
+fn sdc3_the_card_prints_recommended_and_the_reason() {
+    let (_d, mut st, b, _q) = every_kind();
+    let v = pending_json(&mut st, json!({"max_tokens": 20000}));
+    let card = |i: &Value| i["card"].as_str().unwrap().to_string();
+    // the approve card: the word beside the option, the computed reason under it
+    let batch = card(&item_of(&v, &b.r#ref));
+    let label = format!("Approve {} and confirm {}", b.r#ref, b.member);
+    let pad = " ".repeat(47usize.saturating_sub(label.chars().count()).max(2));
+    let want = format!(
+        "  1. {label}{pad}recommended\n     Lands the proposal in canon.\n     Why recommended: its checks pass, and it lands after you\n     confirm each decision beside it\n  2. Reject\n"
+    );
+    assert!(batch.contains(&want), "{batch}");
+    // a confirm card that recommends reject
+    let rejected = of_kind(&v, "confirm")
+        .into_iter()
+        .find(|i| i["exception"] == "not_recommended")
+        .unwrap();
+    let want = format!(
+        "  2. Reject{}recommended\n     The batch waits until its author drops or revises this\n     decision.\n     Why recommended: guests should not edit\n  3. Later",
+        " ".repeat(41)
+    );
+    assert!(card(&rejected).contains(&want), "{}", card(&rejected));
+    // the question card: the cut reason, wrapped under the option
+    let answer = card(&of_kind(&v, "answer")[0]);
+    assert!(
+        answer.contains(&format!("  1. Finance{}recommended\n", " ".repeat(40))),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("     Why recommended: Finance owns the ledger. Finance owns the"),
+        "{answer}"
+    );
+    // the other option has no mark
+    assert!(answer.contains("  2. Support lead\n"), "{answer}");
 }
 
 /// The spec doc in canon, then `n` open questions with authored options landed under its

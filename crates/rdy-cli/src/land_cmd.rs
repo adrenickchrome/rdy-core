@@ -463,7 +463,8 @@ mod tests {
     use super::*;
     use rdy_engine::is_proposal_ref;
     use rdy_engine::pending::{
-        CARD_MAX_TOKENS, Item, ItemKind, ItemOption, RemovalCard, card_hash, render_checked,
+        APPROVE_REASON, CARD_MAX_TOKENS, Item, ItemKind, ItemOption, Recommended, RemovalCard,
+        card_hash, render_checked,
     };
     use rdy_model::Hash;
     use rdy_model::redaction::ReasonClass;
@@ -500,7 +501,7 @@ mod tests {
                     "Lands the proposal in canon.".into(),
                     "Approved content removal cannot be undone.".into(),
                 ],
-                recommended: Some("Removes the leaked code.".into()),
+                recommended: Some(Recommended::new(APPROVE_REASON)),
             }],
             raised_by: "agent:a".into(),
             raised_at: "2026-10-17T00:00:00Z".into(),
