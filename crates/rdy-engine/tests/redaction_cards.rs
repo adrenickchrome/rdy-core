@@ -7,8 +7,8 @@
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::pending::{
-    CARD_MAX_TOKENS, Item, ItemKind, ItemOption, PendingQuery, RemovalCard, card_hash, render,
-    render_checked,
+    APPROVE_REASON, CARD_MAX_TOKENS, Item, ItemKind, ItemOption, PendingQuery, Recommended,
+    RemovalCard, card_hash, render, render_checked,
 };
 use rdy_engine::redaction::{RedactInput, RedactResult};
 use rdy_engine::{
@@ -792,7 +792,7 @@ fn fixed_item() -> Item {
     };
     let mut approve = option("approve", "Approve", "Lands the proposal in canon.");
     approve.consequences.push(IRREVERSIBLE.into());
-    approve.recommended = Some("Removes a name.".into());
+    approve.recommended = Some(Recommended::new(APPROVE_REASON));
     Item {
         r#ref: "P-0123456789ab@1".into(),
         kind: ItemKind::Approve,
@@ -838,9 +838,10 @@ fn rdx8_the_card_encoding_is_fixed() {
     // the v1 card hash of a fixed item: the domain, its full card, then those bytes
     let item = fixed_item();
     assert_eq!(card_hash(&item), digest(&item));
+    // D-D8FAB: the card now prints the approve option's computed reason, so the pinned hash moved
     assert_eq!(
         card_hash(&item).to_string(),
-        "b9ef383518dfbd8e4e1e031b6b104f8d8dfb5d5cc7c6ad568ae8babeba252271"
+        "6452ea46e005311191d38febe4dba15a6677d057fd87c50bf62246c840e10061"
     );
     // a card with exactly the nine fields deserializes; a tenth field is refused
     let nine = json!({

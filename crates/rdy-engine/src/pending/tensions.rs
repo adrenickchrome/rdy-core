@@ -98,7 +98,7 @@ fn advice_item(st: &ReadState, batch: &Item, p: &Proposal) -> Result<Option<Item
             "accept",
             "Accept the advice: they block",
             "The advised tensions block until a side changes.",
-            Some("the reviewer advised it".to_string()),
+            Some("the reviewer advised it"),
         ),
         option(
             "dismiss",

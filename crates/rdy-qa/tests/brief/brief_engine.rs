@@ -188,7 +188,8 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
         a.will_go_stale.iter().any(|x| x.block == sb
             && x.via == "references"
             && x.on == sa
-            && x.follow_up == FollowUp::Update),
+            && x.follow_up == FollowUp::Confirm
+            && x.states == Some(vec![])),
         "{:?}",
         a.will_go_stale
     );

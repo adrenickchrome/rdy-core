@@ -35,7 +35,7 @@ fn pcq1_propose_reports_what_landing_would_make_suspect_in_canon() {
     let b = entry(&v, &s.b);
     assert_eq!(
         (b["kind"].as_str(), b["follow_up"].as_str()),
-        (Some("suspect"), Some("update"))
+        (Some("suspect"), Some("confirm"))
     );
     let version: Hash = v["id"].as_str().unwrap().parse().unwrap();
     assert_eq!(b["id"], consequence_id(&version, "suspect", &s.b));
@@ -88,7 +88,7 @@ fn pcq1_the_cli_prints_consequences_at_propose_and_after_the_landing_line() {
         r.close().unwrap();
         sp
     };
-    let line = format!("suspect {}: update (references {})", sp.b, sp.a);
+    let line = format!("suspect {}: confirm (references {})", sp.b, sp.a);
     let out = s.rdy(&["propose", "--title", "Change A", "--view", "w"]);
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(

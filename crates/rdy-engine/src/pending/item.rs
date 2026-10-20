@@ -1,5 +1,6 @@
 //! The queue item (D-JV6Z8): one shape on every surface.
 
+use crate::card_words::REASON_MAX;
 use crate::error::{E_BAD_INPUT, RdyError};
 use rdy_model::Hash;
 use rdy_model::redaction::ReasonClass;
@@ -102,9 +103,47 @@ pub struct ItemOption {
     pub label: String,
     /// What this answer does, one sentence a line.
     pub consequences: Vec<String>,
-    /// The reason, when this option is the recommended one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recommended: Option<String>,
+    /// The recommendation, on the recommended option only (D-D8FAB). It serializes as two
+    /// fields, `recommended: true` and `reason`. An option without it has neither field.
+    #[serde(flatten)]
+    pub recommended: Option<Recommended>,
+}
+
+/// The mark of the recommended option and its reason (D-D8FAB). On the wire it is
+/// `recommended: true` and `reason`. The reason is trimmed and holds at most [`REASON_MAX`]
+/// characters: a longer one is cut and ends with `…`. It can be empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recommended {
+    reason: String,
+}
+
+impl Recommended {
+    /// The mark with `reason`, trimmed and cut to [`REASON_MAX`] characters.
+    pub fn new(reason: &str) -> Self {
+        let reason = reason.trim();
+        let reason = if reason.chars().count() <= REASON_MAX {
+            reason.to_string()
+        } else {
+            let kept: String = reason.chars().take(REASON_MAX - 1).collect();
+            format!("{}…", kept.trim_end())
+        };
+        Recommended { reason }
+    }
+
+    /// Why the option is recommended.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl Serialize for Recommended {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("Recommended", 2)?;
+        st.serialize_field("recommended", &true)?;
+        st.serialize_field("reason", &self.reason)?;
+        st.end()
+    }
 }
 
 /// One computed fact, shown as a named line on the card.

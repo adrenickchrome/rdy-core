@@ -356,6 +356,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "use the holder for the stream's repo",
     ),
     (
+        E_HELD_BY_READER,
+        "the project store is still open in this process through a read state of an earlier open",
+        HELD_BY_READER_FIX,
+    ),
+    (
         E_PUBLICATION_REFERENCE,
         "a public profile refers to blocks outside its selection",
         "Include the target docs or remove these references. Run the publication check again.",

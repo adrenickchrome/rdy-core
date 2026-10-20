@@ -73,21 +73,25 @@ fn supersede_in_w(r: &mut Rdy, s: &Spec, old: &BlockId) -> WriteResult {
 }
 
 #[test]
-fn csq1_updating_a_referenced_block_asks_its_normative_referrer_to_update() {
+fn csq1_updating_a_referenced_block_asks_its_normative_referrer_to_confirm() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let res = update_a(&mut r, &s);
     let c = after(&r, &res.change);
     let b = entry(&c, &s.b);
+    // D-CFC6V: B states no literal the change removed
     assert_eq!(
         (b.kind, b.follow_up),
-        (ConsequenceKind::Suspect, FollowUp::Update)
+        (ConsequenceKind::Suspect, FollowUp::Confirm)
     );
     assert_eq!(
         b.because,
         Because {
             edge: "references".into(),
-            changed: s.a.to_string()
+            changed: s.a.to_string(),
+            edges: Some(vec!["references".into()]),
+            values: Some(vec![]),
+            values_omitted: 0,
         }
     );
     assert!(
@@ -162,7 +166,7 @@ fn csq1_a_dependent_that_cannot_turn_suspect_is_dependent() {
 }
 
 #[test]
-fn csq1_superseding_a_decision_asks_what_it_decided_to_update() {
+fn csq1_superseding_a_decision_asks_what_it_decided_to_confirm() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let res = supersede_in_w(&mut r, &s, &s.decision);
@@ -171,15 +175,19 @@ fn csq1_superseding_a_decision_asks_what_it_decided_to_update() {
     // the superseding decision is proposed: D stays live in the view, so A is not suspect yet
     assert_eq!(
         (a.kind, a.follow_up),
-        (ConsequenceKind::Dependent, FollowUp::Update)
+        (ConsequenceKind::Dependent, FollowUp::Confirm)
     );
     assert_eq!(
         a.because,
         Because {
             edge: "decided_by".into(),
-            changed: s.decision.to_string()
+            changed: s.decision.to_string(),
+            edges: Some(vec!["decided_by".into()]),
+            values: Some(vec![]),
+            values_omitted: 0,
         }
     );
+    assert_eq!(a.fix.as_deref(), Some(SUPERSEDE_CONFIRM_FIX));
 }
 
 #[test]
@@ -309,7 +317,7 @@ fn csq1_a_structural_dependent_is_asked_to_confirm() {
 }
 
 #[test]
-fn csq1_a_defining_dependent_is_asked_to_update() {
+fn csq1_a_defining_dependent_is_asked_to_confirm() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let t = write(
@@ -324,7 +332,7 @@ fn csq1_a_defining_dependent_is_asked_to_update() {
     let c = after(&r, &res.change);
     assert_eq!(
         (entry(&c, &t).kind, entry(&c, &t).follow_up),
-        (ConsequenceKind::Suspect, FollowUp::Update)
+        (ConsequenceKind::Suspect, FollowUp::Confirm)
     );
 }
 
@@ -368,7 +376,7 @@ fn csq1_a_decision_depending_on_a_superseded_decision_is_reaffirm() {
 }
 
 #[test]
-fn csq1_a_requirement_depending_on_a_superseded_decision_is_update() {
+fn csq1_a_requirement_depending_on_a_superseded_decision_is_confirm() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let q = write(
@@ -383,8 +391,8 @@ fn csq1_a_requirement_depending_on_a_superseded_decision_is_update() {
     let res = supersede_in_w(&mut r, &s, &s.decision);
     let c = after(&r, &res.change);
     let e = entry(&c, &q);
-    assert_eq!(e.follow_up, FollowUp::Update);
-    assert_eq!(e.fix, None);
+    assert_eq!(e.follow_up, FollowUp::Confirm);
+    assert_eq!(e.fix.as_deref(), Some(SUPERSEDE_CONFIRM_FIX));
 }
 
 #[test]

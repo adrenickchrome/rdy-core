@@ -194,13 +194,17 @@ pub fn header(briefing: &Value) -> String {
         &mut out,
         "will go stale if this changes",
         list("will_go_stale").map(|w| {
-            format!(
+            let mut line = format!(
                 "{} via {} on {}: {}",
                 s(w, "block"),
                 s(w, "via"),
                 s(w, "on"),
                 s(w, "follow_up")
-            )
+            );
+            if let Some(states) = w.get("states").filter(|v| v.is_array()) {
+                line.push_str(&format!("; states: {states}"));
+            }
+            line
         }),
     );
     section(
@@ -534,6 +538,7 @@ fn consequences_part(reply: &Value) -> String {
         if let Some(tn) = c["tension"].as_str() {
             t.push_str(&format!(" {tn}"));
         }
+        t.push_str(&evidence_lines(c));
         if let Some(fix) = c["fix"].as_str() {
             t.push_str(&format!("\n    fix: {fix}"));
         }
@@ -545,6 +550,44 @@ fn consequences_part(reply: &Value) -> String {
         let n: u64 = m.values().filter_map(Value::as_u64).sum();
         let kinds: Vec<String> = m.iter().map(|(k, v)| format!("{k} {v}")).collect();
         t.push_str(&format!("\n  and {n} more ({})", kinds.join(", ")));
+    }
+    t
+}
+
+/// The evidence lines of consequence `c`, each on its own indented line, only for the fields it
+/// has: its edge set, the removed literals it inspected (compact JSON) and how many more, one
+/// line per match (value and text JSON-encoded, so no line break or quote leaks) and how many
+/// more matches there were.
+fn evidence_lines(c: &Value) -> String {
+    let mut t = String::new();
+    let because = &c["because"];
+    if let Some(edges) = because["edges"].as_array() {
+        let names: Vec<String> = edges
+            .iter()
+            .filter_map(Value::as_str)
+            .map(one_line)
+            .collect();
+        t.push_str(&format!("\n    edges: {}", names.join(", ")));
+    }
+    if let Some(values) = because.get("values").filter(|v| v.is_array()) {
+        t.push_str(&format!("\n    values: {values}"));
+    }
+    if let Some(n) = because["values_omitted"].as_u64().filter(|n| *n > 0) {
+        t.push_str(&format!("\n    values omitted: {n}"));
+    }
+    for m in c["matched"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\n    match {} at {}:{} bytes {}..{}: {}",
+            m["value"],
+            one_line(s(m, "field")),
+            m["line"],
+            m["span"][0],
+            m["span"][1],
+            m["text"]
+        ));
+    }
+    if let Some(n) = c["matched_omitted"].as_u64().filter(|n| *n > 0) {
+        t.push_str(&format!("\n    matches omitted: {n}"));
     }
     t
 }
@@ -680,6 +723,74 @@ mod tests {
         assert_eq!(
             consequences_text(&v),
             "\nconsequences:\n  suspect c-B: confirm (references c-A)\n  suspect D-2: reaffirm (depends_on c-A)\n    fix: supersede it, or leave it suspect; re-affirmation arrives with FW-R6\n  and 3 more (dependent 3)"
+        );
+    }
+
+    /// sdc5: the evidence lines, in order, after the summary line and before the fix; JSON
+    /// strings keep Unicode as written and escape quotes and line breaks.
+    #[test]
+    fn sdc5_consequences_print_edges_values_matches_and_counts() {
+        let v = json!({"consequences": [
+            {"id": "cq-1", "block": "f-B", "kind": "dependent", "follow_up": "update",
+             "because": {"edge": "decided_by", "changed": "D-1", "edges": ["decided_by", "implements"],
+                         "values": ["30 days", "Größe \"x\""], "values_omitted": 3},
+             "matched": [
+                {"value": "30 days", "field": "steps[1]", "line": 1, "span": [55, 62], "text": "It deletes… 30 days ago"},
+                {"value": "Größe \"x\"", "field": "body", "line": 2, "span": [0, 12], "text": "a\nb"}
+             ],
+             "matched_omitted": 4,
+             "fix": "update the block for the removed values. Point each listed link at the decision in force."},
+            {"id": "cq-2", "block": "r-A", "kind": "dependent", "follow_up": "confirm",
+             "because": {"edge": "decided_by", "changed": "D-1", "edges": ["decided_by"], "values": []}},
+            {"id": "cq-3", "block": "c-C", "kind": "suspect", "follow_up": "update",
+             "because": {"edge": "references", "changed": "c-A"}}
+        ]});
+        assert_eq!(
+            consequences_text(&v),
+            concat!(
+                "\nconsequences:",
+                "\n  dependent f-B: update (decided_by D-1)",
+                "\n    edges: decided_by, implements",
+                "\n    values: [\"30 days\",\"Größe \\\"x\\\"\"]",
+                "\n    values omitted: 3",
+                "\n    match \"30 days\" at steps[1]:1 bytes 55..62: \"It deletes… 30 days ago\"",
+                "\n    match \"Größe \\\"x\\\"\" at body:2 bytes 0..12: \"a\\nb\"",
+                "\n    matches omitted: 4",
+                "\n    fix: update the block for the removed values. Point each listed link at the decision in force.",
+                "\n  dependent r-A: confirm (decided_by D-1)",
+                "\n    edges: decided_by",
+                "\n    values: []",
+                "\n  suspect c-C: update (references c-A)"
+            )
+        );
+    }
+
+    /// sdc5: a will-go-stale row prints its states when it has them, and nothing more when not.
+    #[test]
+    fn sdc5_the_edit_header_prints_will_go_stale_states() {
+        let b = json!({
+            "governs": [], "dependents": [], "suspects": [],
+            "will_go_stale": [
+                {"block": "r-A", "via": "decided_by", "on": "D-1", "follow_up": "update", "states": ["Raw error event", "30 days"]},
+                {"block": "r-B", "via": "implements", "on": "D-1", "follow_up": "update", "states": []},
+                {"block": "D-2", "via": "depends_on", "on": "D-1", "follow_up": "reaffirm"}
+            ],
+            "base": {"token": "t", "blocks": []}
+        });
+        let h = header(&b);
+        assert!(
+            h.contains(
+                "#   r-A via decided_by on D-1: update; states: [\"Raw error event\",\"30 days\"]\n"
+            ),
+            "{h}"
+        );
+        assert!(
+            h.contains("#   r-B via implements on D-1: update; states: []\n"),
+            "{h}"
+        );
+        assert!(
+            h.contains("#   D-2 via depends_on on D-1: reaffirm\n"),
+            "{h}"
         );
     }
 

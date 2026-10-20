@@ -12,6 +12,7 @@ mod config;
 pub mod config_edit;
 pub mod config_levels;
 pub mod consequence;
+pub mod consequence_literals;
 pub mod coord_graph;
 pub mod coverage;
 mod decide;
