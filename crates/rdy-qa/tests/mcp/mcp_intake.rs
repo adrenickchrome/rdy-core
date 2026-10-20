@@ -842,3 +842,110 @@ fn di12_the_session_counts_every_blocking_item_past_the_cap() {
     .unwrap();
     assert_eq!(v["pending"], json!({"items": 52, "blocking": 52}), "{v}");
 }
+
+/// A project whose view `work` holds a prose block with a secret, one recorded removal request
+/// for it, and `work` proposed with `summary`: the project, an agent state on it, and the
+/// version's ref.
+fn removal_version(summary: Option<&str>) -> (tempfile::TempDir, McpState, String) {
+    use rdy_engine::redaction::RedactInput;
+    use rdy_engine::{Session, WriteRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let human = Session::human(PERSON.into(), rdy_model::Role::Writer);
+    let w = r
+        .write(
+            &human,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+                    {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
+                    {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}},
+                    {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": "The launch code is ZEBRA-7731."}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    let res = r
+        .redact(
+            &human,
+            RedactInput {
+                targets: vec![w.created["$p"].to_string()],
+                reason_class: "secret".into(),
+                reason: "a leaked code".into(),
+                dry_run: false,
+            },
+        )
+        .unwrap();
+    assert!(res.redaction.is_some(), "the request is recorded");
+    let p = r
+        .propose(&human, "work", "Remove the code", summary)
+        .unwrap();
+    person_is_qa(dir.path());
+    (dir, agent_state(r), p.r#ref)
+}
+
+/// Every object key in `v`, at any depth, with the path of objects above it.
+fn keys_in(v: &Value, path: &str, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                let at = format!("{path}.{k}");
+                out.push(at.clone());
+                keys_in(x, &at, out);
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| keys_in(x, &format!("{path}[]"), out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn sdc3_a_not_ready_removal_card_recommends_nothing() {
+    // D-D8FAB: the approve reason says its checks pass, so a removal card that proposal show
+    // gives for a version that is not ready (here: no summary) has no recommended option
+    let read = |st: &mut McpState, pref: &str| {
+        rdy_mcp::tools::rdy_read(st, p(json!({"id": pref}))).unwrap()["proposal"].clone()
+    };
+    let (_d, mut st, pref) = removal_version(None);
+    let show = read(&mut st, &pref);
+    let card = show["removal_card"]["card"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{show}"));
+    assert!(card.contains("not ready to land"), "{card}");
+    assert!(card.contains("  1. Approve "), "{card}");
+    assert!(!card.lines().any(|l| l.ends_with("recommended")), "{card}");
+    assert!(!card.contains("Why recommended"), "{card}");
+    // no recommended flag anywhere; the only reason is the removal request's own
+    let mut keys = vec![];
+    keys_in(&show, "", &mut keys);
+    assert!(
+        !keys.iter().any(|k| k.ends_with(".recommended")),
+        "{keys:?}"
+    );
+    let reasons: Vec<&String> = keys.iter().filter(|k| k.ends_with(".reason")).collect();
+    assert_eq!(reasons, vec![".removal_card.removal[].reason"], "{show}");
+    assert_eq!(
+        show["removal_card"]["removal"][0]["reason"],
+        "a leaked code"
+    );
+    // the same version, ready, recommends approve with the computed reason
+    let (_d, mut st, pref) = removal_version(Some("Removes the leaked code."));
+    let card = read(&mut st, &pref)["removal_card"]["card"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!card.contains("not ready to land"), "{card}");
+    assert!(
+        card.lines()
+            .any(|l| l.starts_with("  1. Approve ") && l.ends_with("recommended")),
+        "{card}"
+    );
+    assert!(
+        card.contains("     Why recommended: its checks pass and nothing blocks it\n"),
+        "{card}"
+    );
+}
