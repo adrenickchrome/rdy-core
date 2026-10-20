@@ -62,8 +62,8 @@ pub const MAX_STREAMS: usize = 32;
 /// The events a stream holds before it is dropped.
 pub const STREAM_QUEUE: usize = 8;
 /// The targets that keep a build while no page of theirs is open. A target with an open page
-/// keeps its build as long as the page is open (the next build is diffed against it), so at most
-/// [`MAX_STREAMS`] builds stay, one per open page at worst: [`MAX_STREAMS`] bounds the memory.
+/// keeps its build as long as the page is open (the next build is diffed against it), outside
+/// this count, so at most [`MAX_STREAMS`] such builds stay beside the inactive ones.
 /// Each profile target's slot also keeps its history memo, so at most `MAX_STREAMS + MAX_SCOPES`
 /// memos stay, each of at most `history_facts::MAX_LANDINGS` results.
 pub const MAX_SCOPES: usize = 8;
@@ -243,16 +243,19 @@ impl Inner {
         }
     }
 
-    /// Drops scopes past [`MAX_SCOPES`] builds, least recently used first, among those with no
-    /// open stream; a scope with neither a build nor a stream goes too.
+    /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], least recently
+    /// used first, with their memos; a target with neither a build nor a stream goes too. A
+    /// target with an open stream keeps its build outside that count ([`MAX_STREAMS`] bounds
+    /// those), so open pages never push an inactive build out of its slot.
     fn evict(&mut self) {
         self.scopes
             .retain(|_, s| s.build.is_some() || !s.streams.is_empty());
-        while self.scopes.values().filter(|s| s.build.is_some()).count() > MAX_SCOPES {
+        let inactive = |s: &ScopeState| s.build.is_some() && s.streams.is_empty();
+        while self.scopes.values().filter(|s| inactive(s)).count() > MAX_SCOPES {
             let Some(oldest) = self
                 .scopes
                 .iter()
-                .filter(|(_, s)| s.streams.is_empty())
+                .filter(|(_, s)| inactive(s))
                 .min_by_key(|(_, s)| s.used)
                 .map(|(k, _)| k.clone())
             else {

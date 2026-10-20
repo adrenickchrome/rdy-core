@@ -881,6 +881,72 @@ fn spv6_profile_history_reuses_memo_and_warns_once() {
     sh.site.set_log_hook(None);
 }
 
+/// Fix round 1: eight targets with open pages hold their builds outside the eight inactive
+/// slots, so a ninth profile target keeps its build, its memo and its warning state.
+#[test]
+fn spv6_open_targets_leave_inactive_slots_for_profile_memo() {
+    let w = world();
+    let sh = shared(&w.h);
+    let active = [
+        SiteTarget::Source(ScopeRef::Canon),
+        SiteTarget::Source(view("work")),
+        SiteTarget::Source(ScopeRef::Proposal(w.prop_v1.clone())),
+        SiteTarget::Source(ScopeRef::Tag("v1.0.0".into())),
+        profile(ScopeRef::Canon, "other"),
+        profile(ScopeRef::Canon, "pubfig"),
+        menu(ScopeRef::Canon, None),
+        menu(view("work"), Some("guide")),
+    ];
+    let mut subs = Vec::new();
+    for t in &active {
+        let b = sh.site.refresh(&sh, t).unwrap();
+        let page = b.live.revs.keys().next().expect("a page").clone();
+        subs.push(sub(&sh, t, &page, &b));
+    }
+    assert_eq!(sh.site.streams(), active.len());
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    {
+        let lines = Arc::clone(&lines);
+        sh.site.set_log_hook(Some(Box::new(move |l: &str| {
+            lines.lock().unwrap().push(l.to_string())
+        })));
+    }
+    let logged = || {
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| **l == format!("site: /~profile/guide/: warning: {HISTORY_WARNING}"))
+            .count()
+    };
+    sh.site.set_history_ceiling(Some(0));
+    let guide = profile(ScopeRef::Canon, "guide");
+    let first = sh.site.refresh(&sh, &guide).unwrap();
+    assert_eq!(first.live.warnings, vec![HISTORY_WARNING.to_string()]);
+    assert!(
+        sh.site.history_evaluations(&guide).is_some(),
+        "the ninth target keeps its slot and memo"
+    );
+    let builds = sh.site.builds();
+    for _ in 0..3 {
+        let again = sh.site.refresh(&sh, &guide).unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "the build is reused");
+        let page = get(&w, "~profile/guide/");
+        assert_eq!(page.status, 200, "{}", page.head);
+    }
+    assert_eq!(sh.site.builds(), builds, "no cold rebuild");
+    assert!(sh.site.history_evaluations(&guide).is_some());
+    assert_eq!(logged(), 1, "logged once while the condition persists");
+    // the open targets keep theirs too
+    for t in &active {
+        let b = sh.site.refresh(&sh, t).unwrap();
+        assert!(!b.live.files.is_empty());
+    }
+    assert_eq!(sh.site.builds(), builds, "no open target rebuilt");
+    sh.site.set_log_hook(None);
+    drop(subs);
+}
+
 // --- 5. redaction races -------------------------------------------------------------------------
 
 #[test]
