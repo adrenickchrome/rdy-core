@@ -408,8 +408,15 @@ fn hc8_error_rows_are_published_before_the_publication_rows() {
     let n = ERROR_ROWS.len();
     assert_eq!(ERROR_ROWS[n - 2].0, "E_PUBLICATION_REFERENCE");
     assert_eq!(ERROR_ROWS[n - 1].0, "W_PUBLICATION_REFERENCE");
+    // Main's E_HELD_BY_READER row merged first and stays directly before the publication rows
+    // (rdy-mcp tests/lock_causes.rs); these three rows sit together before both.
+    let at = ERROR_ROWS
+        .iter()
+        .position(|(c, _, _)| *c == "E_DUMP_CHAIN")
+        .expect("an E_DUMP_CHAIN row");
+    assert!(at + 3 <= n - 2, "before the two publication rows");
     assert_eq!(
-        ERROR_ROWS[n - 5..n - 2],
+        ERROR_ROWS[at..at + 3],
         [
             (
                 "E_DUMP_CHAIN",
