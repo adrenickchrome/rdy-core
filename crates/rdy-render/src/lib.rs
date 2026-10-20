@@ -1298,21 +1298,23 @@ struct Extras {
     warnings: Vec<String>,
 }
 
-// The page contexts built on this thread (see `page_builds`).
+// The page contexts built on this thread (see `page_builds`); test builds only.
+#[cfg(test)]
 thread_local! {
     static PAGE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// How many page contexts [`build_page`] made on this thread so far. A hook for tests that
-/// count the bodies a render builds; nothing else reads it.
-#[doc(hidden)]
-pub fn page_builds() -> u64 {
+/// How many page contexts [`build_page`] made on this thread so far. Tests count the bodies a
+/// render builds with it.
+#[cfg(test)]
+fn page_builds() -> u64 {
     PAGE_BUILDS.get()
 }
 
 /// The page context for `kind`: every build calls `page::build` through here, so a test can
 /// count the bodies a render makes.
 fn build_page(sh: &page::Shared, kind: page::Kind) -> page::PageContext {
+    #[cfg(test)]
     PAGE_BUILDS.set(PAGE_BUILDS.get().wrapping_add(1));
     page::build(sh, kind)
 }

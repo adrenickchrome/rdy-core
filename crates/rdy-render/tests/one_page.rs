@@ -7,9 +7,7 @@ use rdy_engine::render_inputs::{DISAGREEMENT_SENTENCES, DisagreementInput, Rende
 use rdy_engine::*;
 use rdy_model::*;
 use rdy_render::render_input::capture_inputs;
-use rdy_render::{
-    PublicationArtifact, RenderedPage, build_publication, page_builds, render_publication_page,
-};
+use rdy_render::{PublicationArtifact, RenderedPage, build_publication, render_publication_page};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -340,33 +338,6 @@ fn hpb10_one_page_matches_the_same_full_site_page() {
     let org = p.one(&p.id("$orgp"), "guide/intro.html");
     assert!(org.html == p.full(&p.id("$orgp"), &inputs).files["guide/intro.html"]);
     assert!(text(&org.html).contains("INTROCANARY"));
-}
-
-#[test]
-fn hpb10_one_page_builds_only_one_body() {
-    let p = project();
-    let inputs = p.inputs();
-    let before = page_builds();
-    let full = p.full(IMPLICIT_ORG, &inputs);
-    let pages = page_builds() - before;
-    assert!(pages > 7, "the full site builds every page: {pages}");
-    assert!(full.files.len() as u64 > pages);
-    for path in [
-        "index.html",
-        "guide/intro.html",
-        "glossary.html",
-        &format!("go/{}.html", p.id("$a")),
-    ] {
-        let before = page_builds();
-        p.render(IMPLICIT_ORG, &inputs, TAG, path).unwrap();
-        assert_eq!(page_builds() - before, 1, "{path}");
-    }
-    // a refused request builds no body at all
-    let before = page_builds();
-    for path in ["nope.html", "../x", ""] {
-        assert!(p.render(IMPLICIT_ORG, &inputs, TAG, path).is_err());
-    }
-    assert_eq!(page_builds() - before, 0);
 }
 
 #[test]

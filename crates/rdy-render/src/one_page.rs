@@ -173,3 +173,61 @@ struct Built {
     used: BTreeMap<String, (Hash, String)>,
     warnings: Vec<String>,
 }
+
+/// hpb10: one page costs one page context. The counter behind it exists in test builds only, so
+/// this test sits in the crate.
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+    use crate::{build_publication, page_builds};
+    use rdy_engine::publication::{IMPLICIT_ORG, ReadPublicationSource};
+    use rdy_engine::render_inputs::RenderInputs;
+    use rdy_engine::{Rdy, Scope};
+
+    #[test]
+    fn hpb10_one_page_builds_only_one_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docs = rdy_engine::testkit::generate_tree(dir.path(), 2, 3, 1);
+        let r = Rdy::open(dir.path()).expect("open");
+        let read = r.read();
+        let scope = Scope::View("work".into());
+        let inputs: RenderInputs = crate::render_input::capture_inputs(&read, &scope).unwrap();
+        let source = ReadPublicationSource::with_settings(
+            &read,
+            &inputs.pack,
+            &inputs.title,
+            inputs.description.as_deref(),
+        );
+        let m = read.materialized(&scope).unwrap();
+        let before = page_builds();
+        let full = build_publication(&source, &m, "v1.0.0", false, IMPLICIT_ORG, &inputs).unwrap();
+        let pages = page_builds() - before;
+        assert!(pages > 4, "the full site builds every page: {pages}");
+        assert!(full.files.len() as u64 > pages);
+        let doc = docs.first().expect("a doc");
+        let doc_page = format!("{}.html", doc.trim_end_matches(".md"));
+        let mut paths = vec!["index.html".to_string()];
+        paths.extend(
+            full.files
+                .keys()
+                .filter(|f| f.ends_with("/index.html") || **f == doc_page)
+                .take(3)
+                .cloned(),
+        );
+        assert!(paths.len() > 2, "{paths:?} from {:?}", full.files.keys());
+        let one = |path: &str| {
+            render_publication_page(&source, &m, "v1.0.0", false, IMPLICIT_ORG, &inputs, path)
+        };
+        for path in &paths {
+            let before = page_builds();
+            one(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!(page_builds() - before, 1, "{path}");
+        }
+        // a refused request builds no body at all
+        let before = page_builds();
+        for path in ["nope.html", "../x", ""] {
+            assert!(one(path).is_err());
+        }
+        assert_eq!(page_builds() - before, 0);
+    }
+}
