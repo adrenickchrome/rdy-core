@@ -104,8 +104,8 @@
 //! `first_removed` against the lowest span the file's own records resolve for those applies. An
 //! increment after the origin does not hold the log's first batch, so either resolution may be
 //! its log's; it may also name a span before its base, which an earlier file holds, and an
-//! apply whose request an earlier file holds is resolved by the loader of the chain. Every place is checked
-//! arithmetic: one past `u64::MAX` is `dump position overflows`. The chain links between files
+//! apply whose request an earlier file holds is resolved by the loader of the chain. Every
+//! place is checked arithmetic: one past `u64::MAX` is `dump position overflows`. The chain links between files
 //! are checked by the loader of a chain.
 //!
 //! A record payload holds at most `MAX_BLOB_BYTES` (64 MiB): a longer one is refused by its
