@@ -1,8 +1,8 @@
 //! The store handle and its captured read snapshot.
 
 use rdy_engine::{
-    ChainEnd, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy, RdyError,
-    ReadState, parse_version,
+    CarriedWarning, ChainEnd, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy,
+    RdyError, ReadState, parse_version,
 };
 use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::meta::Origin;
@@ -74,6 +74,15 @@ impl StoreHandle {
     /// history). It reads under the lock and emits no batch.
     pub fn fsck(&self) -> Result<FsckReport, RdyError> {
         self.local.inspect(|rdy| rdy.fsck())
+    }
+
+    /// The carried-removal warnings (`W_STOP_BEFORE_REDACTION`) of the store now, in the log's
+    /// order: one per carried record while a span of it still holds its payload (D-QF2HQ). It
+    /// captures one state under the lock and derives them from the log and the current mask,
+    /// with no full check (D-0VG72); a holder's warning ends when its takes have removed every
+    /// held payload of the record. The fix text follows the store's mode.
+    pub fn redaction_warnings(&self) -> Result<Vec<CarriedWarning>, RdyError> {
+        self.local.inspect(|rdy| rdy.read().carried_warnings())
     }
 
     /// A read snapshot: the published state, the identity, the canon head and every `tag/*` ref,

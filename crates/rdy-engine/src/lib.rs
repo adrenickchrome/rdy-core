@@ -5,6 +5,7 @@ pub mod answer;
 mod areas;
 pub mod brief;
 pub mod card_words;
+pub mod carried_warning;
 pub mod clone;
 pub mod code_brief;
 pub mod code_index;
@@ -93,6 +94,7 @@ pub use areas::by_area;
 pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
+pub use carried_warning::{CarriedTargetIssue, CarriedWarning};
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
 pub use diff::{Diff, DiffChange, DiffEntry};
