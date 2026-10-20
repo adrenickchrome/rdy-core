@@ -8,14 +8,14 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = store_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "Write this whole project to one dump file: every object with its hash, the landings, tags, views, proposals, reviews and inboxes. rdy_load rebuilds the project from it. It never overwrites a file."
+        description = "Write this whole project to one dump file: every object with its hash, the landings, tags, views, proposals, reviews and inboxes. rdy_load rebuilds the project from it. It never overwrites a file. Give after, an earlier dump of this project, to write only the batches since its end; when nothing is newer, no file is written and out is null."
     )]
     async fn rdy_dump(&self, Parameters(p): Parameters<DumpParams>) -> CallToolResult {
         self.run("rdy_dump", p, tools::rdy_dump).await
     }
 
     #[tool(
-        description = "Rebuild a project from a dump file in dir, a directory with no rdy store. Every hash, landing, tag and view is kept; the load builds the index and runs fsck. To move this project across a store format change, give the person these steps, in this order: close every session on this project; with rdy 0.3.0 or a later rdy that reads store format <n>, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy."
+        description = "Rebuild a project from a dump file in dir, a directory with no rdy store. Give then, the increments of the dump in chain order, to load the whole chain, and stop_at (landing:<hash>, tag:<name> or pos:<segment>.<offset>) to stop at the end of one batch; a stop before a content removal returns W_STOP_BEFORE_REDACTION warnings. Every hash, landing, tag and view is kept; the load builds the index and runs fsck. To move this project across a store format change, give the person these steps, in this order: close every session on this project; with rdy 0.3.0 or a later rdy that reads store format <n>, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy."
     )]
     async fn rdy_load(&self, Parameters(p): Parameters<LoadParams>) -> CallToolResult {
         self.run("rdy_load", p, tools::rdy_load).await

@@ -11,6 +11,7 @@ mod cli_config_file;
 mod cli_coverage;
 mod cli_daemon;
 mod cli_dump;
+mod cli_dump_chain;
 mod cli_entities;
 mod cli_export;
 mod cli_hub_auth;

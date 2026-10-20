@@ -5,6 +5,7 @@ mod io;
 mod io_authors;
 mod io_clone;
 mod io_dump;
+mod io_dump_chain_surfaces;
 mod io_dump_fixture;
 mod io_dump_fixture_s11;
 mod io_dump_fixture_s12;

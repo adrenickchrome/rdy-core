@@ -1,7 +1,9 @@
 //! dl7: `rdy_dump` and `rdy_load` (D-FR0C4 F4, F6 and F7); ec12: `rdy_clone` (D-9QV85, D-D2NPN;
-//! O6). Any session may call them. Relative paths resolve against the project directory.
+//! O6); chained dumps and stopped loads (D-2FMRR, D-QF2HQ). Any session may call them. Relative paths resolve against the project directory.
 use super::*;
 use rdy_engine::clone::{CloneSource, SourceKind, clone, source_kind};
+use rdy_engine::dump_error;
+use rdy_engine::dump_stop::{DumpStop, MAX_CHAIN_FILES};
 use rdy_engine::stream_check::check_batch;
 use rdy_engine::{E_BAD_INPUT, E_IO, RdyError};
 use rdy_model::RepoId;
@@ -15,6 +17,8 @@ use std::path::Path;
 pub struct DumpParams {
     /// The dump file to write: absolute, or relative to the project directory. It must not exist.
     pub out: String,
+    /// An earlier dump or increment of this project: absolute, or relative to the project directory. Give it to write only the batches after its end (an increment). When nothing is newer, no file is written and out is null.
+    pub after: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -24,6 +28,10 @@ pub struct LoadParams {
     pub file: String,
     /// The directory to load into: absolute, or relative to the project directory. It must have no rdy store.
     pub dir: String,
+    /// Increments of the dump in file, in chain order: each absolute, or relative to the project directory. Leave it out, or pass [], to load file alone.
+    pub then: Option<Vec<String>>,
+    /// Stop the load at the end of one batch of the chain: landing:<hash or prefix>, tag:<name> or pos:<segment>.<offset>. Leave it out to load the whole chain.
+    pub stop_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -52,19 +60,35 @@ fn under(root: &Path, p: &str) -> std::path::PathBuf {
     root.join(p)
 }
 
-/// `rdy_dump`: writes the whole project to `out`. A session is required, as for `rdy_site`.
+/// `rdy_dump`: writes the whole project to `out`, or with `after` the batches since that dump's
+/// end. A session is required, as for `rdy_site`.
 pub fn rdy_dump(st: &mut McpState, p: DumpParams) -> Result<Value, RdyError> {
     session(st)?;
-    let summary = st.engine.read().dump(&under(&st.engine.root(), &p.out))?;
+    let root = st.engine.root();
+    let out = under(&root, &p.out);
+    let state = st.engine.read();
+    let summary = match &p.after {
+        Some(after) => state.dump_after_file(&under(&root, after), &out)?,
+        None => state.dump(&out)?,
+    };
     Ok(serde_json::to_value(summary).expect("a reply serializes"))
 }
 
-/// `rdy_load`: rebuilds a project from `file` in `dir`, a directory with no store. It runs in
+/// `rdy_load`: rebuilds a project from `file` and its `then` increments in `dir`, a directory
+/// with no store, up to `stop_at` when given. The increment count is checked before any path is
+/// opened, then the stop is parsed. It runs in
 /// the daemon's process and opens and closes the new project itself.
 pub fn rdy_load(st: &mut McpState, p: LoadParams) -> Result<Value, RdyError> {
     session(st)?;
     let root = st.engine.root();
-    let summary = rdy_engine::load::load(&under(&root, &p.file), &under(&root, &p.dir))?;
+    let then = p.then.unwrap_or_default();
+    if then.len() > MAX_CHAIN_FILES {
+        return Err(dump_error::chain_too_long());
+    }
+    let stop = p.stop_at.as_deref().map(DumpStop::parse).transpose()?;
+    let mut files = vec![under(&root, &p.file)];
+    files.extend(then.iter().map(|f| under(&root, f)));
+    let summary = rdy_engine::load::load_chain(&files, &under(&root, &p.dir), stop.as_ref())?;
     Ok(serde_json::to_value(summary).expect("a reply serializes"))
 }
 
