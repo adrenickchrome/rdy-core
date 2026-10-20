@@ -174,6 +174,11 @@ impl HttpHubTransport {
             native: Arc::new(native),
         })
     }
+
+    /// The origin fence of this transport's install.
+    pub fn fence(&self) -> &OriginFence {
+        &self.fence
+    }
 }
 
 /// The fixed URL of `op` on `install`: the metadata route and the account and key routes.
@@ -1408,15 +1413,19 @@ const DEVICE_ERRORS: [(&str, u16); 3] = [
 /// The revocation endpoint's OAuth errors.
 const REVOCATION_ERRORS: [(&str, u16); 2] = [("invalid_request", 400), ("invalid_client", 401)];
 
-#[derive(Clone, Copy)]
-enum ApiOutcome {
+/// How a recognized hub API error code is classified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApiOutcome {
     ActorClaim,
     AuthRequired,
     Refused,
 }
 
-/// The hub's API error codes the client recognizes, with their status.
-const API_ERRORS: [(&str, u16, ApiOutcome); 17] = [
+/// The hub's API error codes the client recognizes, each with one HTTP status it is sent with:
+/// the one hub-code table. A code may have more than one row (`E_HUB_BAD_INPUT`). The first 17
+/// rows are HA2a's; the rest are the publication upload's (hub tb-1V67R, tb-NZXSA, tb-WDA9Q,
+/// tb-K416A, tb-4FYKZ, tb-CVS65 and tb-SVP3W).
+const API_ERRORS: [(&str, u16, ApiOutcome); 52] = [
     ("E_HUB_ACTOR_CLAIM", 403, ApiOutcome::ActorClaim),
     ("E_HUB_NO_CREDENTIAL", 401, ApiOutcome::AuthRequired),
     ("E_HUB_CREDENTIAL_UNKNOWN", 401, ApiOutcome::AuthRequired),
@@ -1434,7 +1443,72 @@ const API_ERRORS: [(&str, u16, ApiOutcome); 17] = [
     ("E_HUB_KEY_ACTOR", 403, ApiOutcome::Refused),
     ("E_HUB_OUT_OF_REACH", 403, ApiOutcome::Refused),
     ("E_HUB_BAD_INPUT", 400, ApiOutcome::Refused),
+    // tb-1V67R
+    ("E_HUB_BAD_INPUT", 408, ApiOutcome::Refused),
+    ("E_HUB_BAD_INPUT", 431, ApiOutcome::Refused),
+    ("E_HUB_API_VERSION", 404, ApiOutcome::Refused),
+    ("E_HUB_INTERNAL", 500, ApiOutcome::Refused),
+    // tb-NZXSA
+    ("E_HUB_TWO_CREDENTIALS", 400, ApiOutcome::Refused),
+    ("E_HUB_ACCESS_LEVEL", 403, ApiOutcome::Refused),
+    ("E_HUB_CLIENT_UNVERIFIED", 403, ApiOutcome::Refused),
+    ("E_HUB_SIGN_IN_SOURCE", 403, ApiOutcome::Refused),
+    ("E_HUB_REPO_ARCHIVED", 403, ApiOutcome::Refused),
+    // tb-WDA9Q
+    ("E_HUB_EMAIL_UNVERIFIED", 403, ApiOutcome::Refused),
+    // tb-K416A
+    ("E_HUB_STREAM_INVALID", 422, ApiOutcome::Refused),
+    ("E_HUB_QUARANTINE_FULL", 422, ApiOutcome::Refused),
+    ("E_HUB_STORE_LIMIT", 422, ApiOutcome::Refused),
+    ("E_HUB_CORE_CHECK_FAILED", 422, ApiOutcome::Refused),
+    ("E_HUB_OTHER_PROJECT", 409, ApiOutcome::Refused),
+    // tb-4FYKZ
+    ("E_HUB_STREAM_FORMAT", 422, ApiOutcome::Refused),
+    ("E_HUB_RDY_TOO_OLD", 422, ApiOutcome::Refused),
+    ("E_HUB_INSTALL_TOO_OLD", 422, ApiOutcome::Refused),
+    // tb-CVS65
+    ("E_HUB_OVER_BUDGET", 429, ApiOutcome::Refused),
+    ("E_HUB_BUSY", 503, ApiOutcome::Refused),
+    ("E_HUB_REPO_MOVING", 503, ApiOutcome::Refused),
+    ("E_HUB_READ_ONLY", 503, ApiOutcome::Refused),
+    // tb-SVP3W
+    ("E_HUB_MANIFEST_PATH", 422, ApiOutcome::Refused),
+    ("E_HUB_ARTIFACT_LIMIT", 422, ApiOutcome::Refused),
+    ("E_HUB_PROFILE_MISSING", 422, ApiOutcome::Refused),
+    ("E_HUB_PROFILE_MISMATCH", 422, ApiOutcome::Refused),
+    ("E_HUB_FILE_HASH", 422, ApiOutcome::Refused),
+    ("E_HUB_MANIFEST_FILES", 422, ApiOutcome::Refused),
+    ("E_HUB_RENDER_FAILED", 422, ApiOutcome::Refused),
+    ("E_HUB_CANDIDATE_LIMIT", 422, ApiOutcome::Refused),
+    ("E_HUB_TAG_PUBLISHED", 409, ApiOutcome::Refused),
+    ("E_HUB_TAG_TAKEN", 409, ApiOutcome::Refused),
+    ("E_HUB_REMOVAL_UNCOVERED", 409, ApiOutcome::Refused),
+    ("E_HUB_SITE_AUDIENCE", 409, ApiOutcome::Refused),
+    ("E_HUB_PUBLIC_SITES_OFF", 403, ApiOutcome::Refused),
 ];
+
+/// The [`API_ERRORS`] row of `code`: its static spelling and classification. With
+/// `Some(status)`, the code and status must form a row; a known code at no row's status is
+/// [`HubFailure::Protocol`]. The pair is matched before the code alone, so every row of a code
+/// with several statuses is reachable. `None` skips the status check (an issue has no status).
+/// An unknown code is `Ok(None)`.
+pub(crate) fn api_error_entry(
+    code: &str,
+    status: Option<u16>,
+) -> Result<Option<(&'static str, ApiOutcome)>, HubFailure> {
+    match status {
+        Some(s) => {
+            if let Some(row) = API_ERRORS.iter().find(|r| r.0 == code && r.1 == s) {
+                return Ok(Some((row.0, row.2)));
+            }
+            if API_ERRORS.iter().any(|r| r.0 == code) {
+                return Err(HubFailure::Protocol);
+            }
+            Ok(None)
+        }
+        None => Ok(API_ERRORS.iter().find(|r| r.0 == code).map(|r| (r.0, r.2))),
+    }
+}
 
 /// The OAuth error of a failed reply, checked against the endpoint's `listed` errors: a listed
 /// code at its status is `Ok(code)`; at another status it is a contract mismatch; an unlisted
@@ -1455,14 +1529,11 @@ fn api_error(status: u16, body: &[u8]) -> HubFailure {
         Ok(d) => d,
         Err(f) => return f,
     };
-    match API_ERRORS.iter().find(|(code, _, _)| *code == dto.code) {
-        Some((_, s, outcome)) if *s == status => match outcome {
-            ApiOutcome::ActorClaim => HubFailure::ActorClaim,
-            ApiOutcome::AuthRequired => HubFailure::AuthRequired,
-            ApiOutcome::Refused => HubFailure::Refused,
-        },
-        Some(_) => HubFailure::Protocol,
-        None => HubFailure::Refused,
+    match api_error_entry(&dto.code, Some(status)) {
+        Ok(Some((_, ApiOutcome::ActorClaim))) => HubFailure::ActorClaim,
+        Ok(Some((_, ApiOutcome::AuthRequired))) => HubFailure::AuthRequired,
+        Ok(Some((_, ApiOutcome::Refused))) | Ok(None) => HubFailure::Refused,
+        Err(f) => f,
     }
 }
 
