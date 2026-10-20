@@ -39,7 +39,7 @@ use crate::redaction::{
     selector_len,
 };
 use crate::redaction_io::{Authorization, Collected, SpanAuth, for_each_seen, read_record};
-use crate::segment::{HEADER, Hole, Holes, Location, header_at, payload_is_zero};
+use crate::segment::{HEADER, Hole, Holes, Location, header_at, payload_is_zero, seg_path};
 use crate::store::{StoreReader, decode, encode};
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, RedactionCarried, RedactionResidue,
@@ -69,6 +69,18 @@ pub struct CarriedAt {
     pub at: Location,
     pub hash: Hash,
     pub record: RedactionCarried,
+}
+
+/// The row of the derived span index for a frame a carried record names, while no validated
+/// apply covers it: the span, the carried record that is its provenance, that record's source
+/// request, and the span's `held` flag. A `held: false` row masks the frame; a `held: true` row
+/// masks nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CarriedSpanRow {
+    pub span: RedactedSpan,
+    pub carried: Hash,
+    pub request: Hash,
+    pub held: bool,
 }
 
 fn location(p: FramePlace) -> Location {
@@ -402,31 +414,67 @@ fn spans_of(r: &RedactionCarried) -> Vec<(RedactedSpan, bool)> {
 }
 
 impl StoreReader {
-    /// Calls `f` with every carried record whose frame lies before `end`, in physical order. An
-    /// identical duplicate record is one record, at its first frame. Reads the typed index and
-    /// each record's frame; keeps no table of its own.
+    /// Calls `f` with every carried record frame (kind REDACTION_CARRIED) of the sealed log that
+    /// lies wholly before `end`, in physical order: the walk reads the frame headers of the
+    /// segment files up to the index's acknowledged end, never a table of hashes, so a frame of
+    /// another kind with the same bytes is never taken for one, and each physical copy of an
+    /// identical record is visited at its own place (a warning deduplicates by source apply
+    /// itself). Every such frame was validated by the open (`overlay`); a payload that no longer
+    /// matches its hash or decodes to no carried record is `RedactionCorrupt` at its frame. Keeps
+    /// no table of its own; a store whose typed index holds no carried record walks nothing.
     pub fn visit_carried(
         &self,
         end: Location,
         f: &mut dyn FnMut(CarriedAt) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        let mut found: Vec<(Location, Hash)> = vec![];
+        self.refuse_pending()?;
+        let mut any = false;
         self.index()
-            .for_each_object_of(kinds::REDACTION_CARRIED, |h| {
-                if let Some(at) = self.index().object(&h)?
-                    && at < end
-                {
-                    found.push((at, h));
-                }
+            .for_each_object_of(kinds::REDACTION_CARRIED, |_| {
+                any = true;
                 Ok(())
             })?;
-        found.sort();
-        for (at, hash) in found {
-            let payload = self.get_kind(kinds::REDACTION_CARRIED, &hash)?;
-            let record = decode_record(&payload).ok_or_else(|| StoreError::corrupt_at(at))?;
-            f(CarriedAt { at, hash, record })?;
+        if !any {
+            return Ok(());
         }
-        Ok(())
+        let upto = end.min(self.index().indexed_upto()?);
+        let dir = self.dir().join("segments");
+        let mut files: Vec<File> = vec![];
+        for seg in 0..=upto.segment {
+            if seg == upto.segment && upto.offset == 0 {
+                break;
+            }
+            files.push(File::open(seg_path(&dir, seg))?);
+        }
+        for_each_seen(&files, upto, &BTreeMap::new(), |seen| {
+            if seen.kind != kinds::REDACTION_CARRIED {
+                return Ok(());
+            }
+            let bad = || StoreError::corrupt_at(seen.loc);
+            if seen.len as usize > MAX_RECORD_BYTES {
+                return Err(bad());
+            }
+            let payload = seen.intact()?.ok_or_else(bad)?;
+            let record = decode_record(&payload).ok_or_else(bad)?;
+            f(CarriedAt {
+                at: seen.loc,
+                hash: seen.hash,
+                record,
+            })
+        })
+    }
+
+    /// The carried row of the derived span index at `loc`, if a carried record is the proof or
+    /// the provenance of that frame (no validated apply covers it).
+    pub fn carried_span_at(&self, loc: Location) -> Result<Option<CarriedSpanRow>, StoreError> {
+        Ok(self.index().redaction_span_row_at(&loc)?.and_then(|row| {
+            row.held.map(|held| CarriedSpanRow {
+                span: row.active.span,
+                carried: row.active.apply,
+                request: row.active.request,
+                held,
+            })
+        }))
     }
 
     /// Of `record`'s physical spans: how many the store still holds, and how many are removed

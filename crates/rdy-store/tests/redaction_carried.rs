@@ -25,15 +25,18 @@ use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, DumpWriter, Frame, RemovalTally};
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
+use rdy_store::index::RedactedSpan;
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, batch_digest};
 use rdy_store::object_refs::{ObjectKey, refs_of};
 use rdy_store::redaction::limit;
-use rdy_store::redaction_carried::{CarriedAt, HOLDER_FIX, PROJECT_FIX};
+use rdy_store::redaction_carried::{CarriedAt, CarriedSpanRow, HOLDER_FIX, PROJECT_FIX};
 use rdy_store::segment::Location;
 use rdy_store::sync_stream::{StreamHeader, StreamReader, StreamRecord};
 use rdy_store::{Store, StoreError, StoreReader};
-use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fixture};
+use redaction_fixture::{
+    FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, build_request,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -716,7 +719,8 @@ fn hc3_carried_corruption_table() {
     copy_store(&src.path, &dir);
     carry_raw(&src, &dir, &[src.record(false), src.record(false)], true);
     let s = Store::open(&dir).unwrap();
-    assert_eq!(carried_of(&s.reader()).len(), 1);
+    // each physical record is visited
+    assert_eq!(carried_of(&s.reader()).len(), 2);
 }
 
 /// The full dump header of `batches`.
@@ -1084,4 +1088,380 @@ fn hc3_nested_carried_recognition_keeps_earlier_bytes() {
         src.change_frame().loc
     );
     assert_eq!(log_bytes(&bad), damaged);
+}
+
+/// Whether a segment file of the store at `dir` holds `needle`.
+fn on_disk(dir: &Path, needle: &[u8]) -> bool {
+    log_bytes(dir)
+        .values()
+        .any(|b| b.windows(needle.len()).any(|w| w == needle))
+}
+
+/// The refusals of a new write that would bring the removed secret back, alone or embedded in a
+/// change. Nothing is appended.
+fn assert_secret_refused(s: &mut Store, src: &Src, request: Hash) {
+    let end = s.log_end();
+    let block_bytes = postcard::to_allocvec(&src.secret).unwrap();
+    let got = s.write(vec![(kinds::BLOCK, block_bytes)]);
+    assert!(
+        matches!(got, Err(StoreError::Redacted { request: r }) if r == request),
+        "{got:?}"
+    );
+    let again = change(
+        "other",
+        vec![Op::Create {
+            block: src.secret.clone(),
+        }],
+    );
+    let got = s.write(vec![(
+        kinds::CHANGE,
+        postcard::to_allocvec(&again).unwrap(),
+    )]);
+    assert!(
+        matches!(got, Err(StoreError::Redacted { request: r }) if r == request),
+        "{got:?}"
+    );
+    assert_eq!(s.log_end(), end);
+}
+
+/// Clears the derived redaction rows of the closed store at `dir` (the corrupt-index hook),
+/// reopens it and checks that the carried masks came back before any read or write: the secret
+/// reads as removed, and no new write brings it back, before or after another reopen.
+fn assert_rows_rebuilt(dir: &Path, src: &Src, rec: &RedactionCarried) {
+    let index = {
+        let mut s = Store::open(dir).unwrap();
+        let index = s.index_dump_for_tests().unwrap();
+        s.clear_redaction_rows_for_tests().unwrap();
+        assert!(s.index_dump_for_tests().unwrap().redaction_spans.is_empty());
+        index
+    };
+    {
+        let mut s = Store::open(dir).unwrap();
+        assert_eq!(
+            s.index_dump_for_tests().unwrap(),
+            index,
+            "the rows are derived again"
+        );
+        let r = s.reader();
+        assert_eq!(
+            r.get_block(&src.secret.version_hash()).unwrap().body,
+            CONTENT_REMOVED
+        );
+        assert_eq!(
+            r.redaction_of(kinds::BLOCK, &src.secret.version_hash())
+                .unwrap(),
+            Some(source_request())
+        );
+        assert_eq!(r.carried_counts(rec).unwrap(), (0, 2));
+        assert_secret_refused(&mut s, src, source_request());
+    }
+    let s = Store::open(dir).unwrap();
+    assert_eq!(
+        s.reader()
+            .get_block(&src.secret.version_hash())
+            .unwrap()
+            .body,
+        CONTENT_REMOVED
+    );
+    drop(s);
+    assert!(
+        !on_disk(dir, src.secret.body.as_bytes()),
+        "no copy came back"
+    );
+}
+
+#[test]
+fn hc3_lost_carried_rows_are_rebuilt_before_reads_and_writes() {
+    let src = source();
+    let rec = src.record(false);
+    let to = src.loaded("to", std::slice::from_ref(&rec));
+    assert_rows_rebuilt(&to, &src, &rec);
+}
+
+#[test]
+fn hc3_holder_lost_carried_rows_are_rebuilt_before_reads_and_writes() {
+    let src = source();
+    let holder = src.at("holder");
+    take_into(&src, &holder, src.v1);
+    let frames = framed_at(&holder);
+    let mut spans = vec![
+        span(
+            &find(&frames, kinds::BLOCK, src.secret.version_hash()),
+            Some(&block_residue(&src.secret)),
+            false,
+        ),
+        span(
+            &find(&frames, kinds::CHANGE, src.change_id),
+            Some(&change_residue(&src.change)),
+            false,
+        ),
+    ];
+    spans.sort_by_key(|s| s.place);
+    let rec = record(src.targets(), spans);
+    let to = src.at("holder-carried");
+    load(&holder, &to, &src.residues(), std::slice::from_ref(&rec)).unwrap();
+    assert_eq!(
+        Store::open(&to).unwrap().reader().mode().unwrap(),
+        rdy_store::holder::StoreMode::Holder
+    );
+    assert_rows_rebuilt(&to, &src, &rec);
+}
+
+/// The source after an approved removal of its own: the other block, so the residue of the
+/// change that wrote the secret and the other block keeps the secret by reference. Returns the
+/// apply's hash.
+fn remove_other(src: &mut Src) -> Hash {
+    let fixture = authorized_batch_fixture(
+        &src.path,
+        &[RequestSpec::new(
+            "work",
+            vec![RedactTarget::Version {
+                id: src.other.id.clone(),
+                version: src.other.version_hash(),
+            }],
+        )
+        .at(60)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    // the open finishes the removal
+    drop(Store::open(&src.path).unwrap());
+    src.frames = framed_at(&src.path);
+    fixture.applies[0].0
+}
+
+/// The carried record of the secret's block frame alone, `held: false`.
+fn secret_only(src: &Src) -> RedactionCarried {
+    record(
+        src.targets(),
+        vec![span(
+            &src.secret_frame(),
+            Some(&block_residue(&src.secret)),
+            false,
+        )],
+    )
+}
+
+/// The reads of a log whose earlier apply removed the other block and whose carried record
+/// explains the secret's zeros.
+fn assert_mixed_reads(s: &Store, src: &Src, apply: Hash, rec: &RedactionCarried) {
+    let r = s.reader();
+    assert_eq!(
+        r.get_block(&src.secret.version_hash()).unwrap().body,
+        CONTENT_REMOVED
+    );
+    assert_eq!(
+        r.get_block(&src.other.version_hash()).unwrap().body,
+        CONTENT_REMOVED
+    );
+    let c = r.change(&src.change_id).unwrap();
+    assert_eq!(c.id(), src.change_id);
+    assert_eq!(proof_at(s, src.other_frame().loc), Some(apply));
+    assert_eq!(proof_at(s, src.change_frame().loc), Some(apply));
+    assert_eq!(proof_at(s, src.secret_frame().loc), Some(carried_hash(rec)));
+    assert_eq!(r.get_block(&src.kept.version_hash()).unwrap(), src.kept);
+    r.check_objects().unwrap();
+}
+
+#[test]
+fn hc3_an_earlier_apply_keeps_a_reference_a_carried_record_explains() {
+    let mut src = source();
+    let apply = remove_other(&mut src);
+    let rec = secret_only(&src);
+    let residues = vec![block_residue(&src.secret)];
+
+    // the open: the carried batch is in the log, and the secret's frame is zero
+    let raw = src.at("raw");
+    copy_store(&src.path, &raw);
+    append_raw(
+        &raw,
+        &carried_frames(&residues, std::slice::from_ref(&rec)),
+        true,
+    );
+    zero(&raw, &src.secret_frame());
+    let s = Store::open(&raw).unwrap();
+    assert_mixed_reads(&s, &src, apply, &rec);
+    drop(s);
+
+    // the sealed ingest of a stopped load, then its open
+    let to = src.at("to");
+    load(&src.path, &to, &residues, std::slice::from_ref(&rec)).unwrap();
+    let mut s = Store::open(&to).unwrap();
+    assert_mixed_reads(&s, &src, apply, &rec);
+
+    // a new apply checks the whole log before its batch is written: the earlier apply's kept
+    // reference still resolves through the carried residue
+    let d = build_request(
+        &s,
+        &RequestSpec::new(
+            "redact",
+            vec![RedactTarget::Version {
+                id: src.kept.id.clone(),
+                version: src.kept.version_hash(),
+            }],
+        )
+        .at(70),
+    );
+    let p = s
+        .prepare_redaction(&d.carrier, &d.request, &d.residues)
+        .unwrap();
+    s.commit_redaction(p).unwrap();
+    let p = s
+        .propose("redact", "Remove content", prov("agent:w", Role::Writer))
+        .unwrap();
+    s.land(&p, prov("human:alice", Role::Approver)).unwrap();
+    assert_eq!(
+        s.reader().get_block(&src.kept.version_hash()).unwrap().body,
+        CONTENT_REMOVED
+    );
+    drop(s);
+    let s = Store::open(&to).unwrap();
+    assert_mixed_reads_after(&s, &src, apply, &rec);
+}
+
+/// [`assert_mixed_reads`] once the kept block is removed too.
+fn assert_mixed_reads_after(s: &Store, src: &Src, apply: Hash, rec: &RedactionCarried) {
+    let r = s.reader();
+    for v in [&src.secret, &src.other, &src.kept] {
+        assert_eq!(
+            r.get_block(&v.version_hash()).unwrap().body,
+            CONTENT_REMOVED
+        );
+    }
+    assert_eq!(proof_at(s, src.other_frame().loc), Some(apply));
+    assert_eq!(proof_at(s, src.secret_frame().loc), Some(carried_hash(rec)));
+}
+
+#[test]
+fn hc3_visit_carried_reads_sealed_frames_in_physical_order() {
+    let src = source();
+    let rec = src.record(false);
+    let c = carried_hash(&rec);
+    let bytes = postcard::to_allocvec(&rec).unwrap();
+    // a chunk whose payload is the record's exact bytes, before the carried batch
+    {
+        let mut s = Store::open(&src.path).unwrap();
+        s.put_blob(&bytes).unwrap();
+    }
+    let to = src.loaded("to", std::slice::from_ref(&rec));
+    let s = Store::open(&to).unwrap();
+    let all = framed(&s.reader(), s.log_end());
+    let chunk = find(&all, kinds::BLOB_CHUNK, c);
+    let frame = find(&all, kinds::REDACTION_CARRIED, c);
+    assert!(chunk.loc < frame.loc);
+    let r = s.reader();
+    let seen = carried_of(&r);
+    assert_eq!(seen.len(), 1);
+    assert_eq!((seen[0].at, seen[0].hash), (frame.loc, c));
+    // the end is checked against the record's own frame
+    let mut before = vec![];
+    r.visit_carried(frame.loc, &mut |x| {
+        before.push(x);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(before, vec![]);
+    let mut upto = vec![];
+    r.visit_carried(frame.end(), &mut |x| {
+        upto.push(x.at);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(upto, vec![frame.loc]);
+    drop(r);
+    drop(s);
+
+    // two identical sealed records are two physical records, in log order
+    let src = source();
+    let dir = src.at("twice");
+    copy_store(&src.path, &dir);
+    let at = carry_raw(&src, &dir, &[rec.clone(), rec.clone()], true);
+    let s = Store::open(&dir).unwrap();
+    let seen = carried_of(&s.reader());
+    assert_eq!(
+        seen.iter().map(|x| (x.at, x.hash)).collect::<Vec<_>>(),
+        vec![(at[0], c), (at[1], c)]
+    );
+    assert!(seen.iter().all(|x| x.record == rec));
+}
+
+#[test]
+fn hc3_held_spans_are_indexed_and_never_mask() {
+    let src = source();
+    let rec = src.record(true);
+    let c = carried_hash(&rec);
+    let to = src.loaded("to", std::slice::from_ref(&rec));
+    let row = |f: &Framed, residue: &RedactionResidue, held: bool| CarriedSpanRow {
+        span: RedactedSpan {
+            loc: f.loc,
+            kind: f.kind,
+            hash: f.hash,
+            len: f.len,
+            residue: Some(residue_hash(residue)),
+        },
+        carried: c,
+        request: source_request(),
+        held,
+    };
+    let residues = src.residues();
+    let index = {
+        let mut s = Store::open(&to).unwrap();
+        let r = s.reader();
+        // every carried span has its row, with its record, its source request and held
+        assert_eq!(
+            r.carried_span_at(src.secret_frame().loc).unwrap(),
+            Some(row(&src.secret_frame(), &residues[0], true))
+        );
+        assert_eq!(
+            r.carried_span_at(src.change_frame().loc).unwrap(),
+            Some(row(&src.change_frame(), &residues[1], true))
+        );
+        assert_eq!(s.index_dump_for_tests().unwrap().redaction_spans.len(), 2);
+        // and none masks
+        assert_eq!(r.get_block(&src.secret.version_hash()).unwrap(), src.secret);
+        assert_eq!(
+            r.redaction_of(kinds::BLOCK, &src.secret.version_hash())
+                .unwrap(),
+            None
+        );
+        assert_eq!(r.redaction_of(kinds::CHANGE, &src.change_id).unwrap(), None);
+        assert_eq!(proof_at(&s, src.secret_frame().loc), None);
+        assert_eq!(r.carried_counts(&rec).unwrap(), (2, 0));
+        // fsck finds every held row
+        r.check_objects().unwrap();
+        drop(r);
+        // a reindex and a lost index derive the same rows
+        let index = s.index_dump_for_tests().unwrap();
+        s.reindex().unwrap();
+        assert_eq!(s.index_dump_for_tests().unwrap(), index);
+        index
+    };
+    std::fs::remove_file(to.join("index.redb")).unwrap();
+    assert_eq!(
+        Store::open(&to).unwrap().index_dump_for_tests().unwrap(),
+        index
+    );
+    // lost rows are derived again
+    {
+        let mut s = Store::open(&to).unwrap();
+        s.clear_redaction_rows_for_tests().unwrap();
+    }
+    assert_eq!(
+        Store::open(&to).unwrap().index_dump_for_tests().unwrap(),
+        index
+    );
+    // a later local apply covers the spans: it masks them, and is their proof
+    let fixture = authorized_batch_fixture(
+        &to,
+        &[RequestSpec::new("work", src.targets()).at(60)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let s = Store::open(&to).unwrap();
+    let r = s.reader();
+    assert_eq!(r.carried_span_at(src.secret_frame().loc).unwrap(), None);
+    assert_eq!(r.carried_span_at(src.change_frame().loc).unwrap(), None);
+    assert_eq!(
+        proof_at(&s, src.secret_frame().loc),
+        Some(fixture.applies[0].0)
+    );
+    assert_eq!(r.carried_counts(&rec).unwrap(), (0, 2));
 }

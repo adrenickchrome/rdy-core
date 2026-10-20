@@ -55,12 +55,15 @@ const REDACTION_APPLIED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("r
 /// keeps an object. A carried record's `held: false` span's object is a row too, with the carried
 /// record and its location in the apply's place, until an apply holds the object.
 const REDACTION_ACTIVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_active");
-/// The active mask by frame: a frame location (`loc_key`) -> the apply record, the request, the
-/// kind byte, the object's hash, the payload length (u32 little-endian) and the residue's hash (or
-/// nothing). The earliest apply in log order keeps a frame. A carried record's `held: false` span
-/// is a row too, with the carried record in the apply's place and its source request, while no
-/// apply covers the frame: a row whose apply is not the one `redaction_applied` holds for its
-/// request is a carried one, and an apply that covers the frame replaces it.
+/// The span index, and the active mask by frame: a frame location (`loc_key`) -> the apply record,
+/// the request, the kind byte, the object's hash, the payload length (u32 little-endian) and the
+/// residue's hash (or nothing). The earliest apply in log order keeps a frame. While no apply
+/// covers a frame that a carried record names, its row is the carried record's: the carried
+/// record in the apply's place, its source request, the span, then one more byte, the span's
+/// `held` flag (0 or 1). The first carried record in log order keeps the frame, except that a
+/// `held: false` span takes over a `held: true` row; an apply that covers the frame replaces any
+/// carried row. An apply's row and a `held: false` row mask the frame; a `held: true` row is
+/// provenance only, and masks nothing.
 const REDACTION_SPANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_spans");
 /// A signature's subject (32 bytes), then the signature's hash (32 bytes) -> empty: every
 /// signature of every subject (kind SIGNATURE, D-1Z951), derived from the frames alone.
@@ -136,9 +139,10 @@ pub enum IndexEntry {
         signature: Hash,
     },
     /// Carried record `carried` (kind REDACTION_CARRIED), at `loc`, of source request `request`:
-    /// each span it accounts for, with its `held` flag. Only its `held: false` spans join the
-    /// active mask, with the record as their proof, and only where no apply holds the place or
-    /// the object; a later apply that covers one takes it over.
+    /// each span it names, with its `held` flag. Every span gets a `redaction_spans` row with
+    /// the record, its source request and its flag where no apply holds the frame; only its
+    /// `held: false` spans (and their objects) mask, with the record as their proof. A later
+    /// apply that covers a span takes its row over.
     RedactionCarried {
         carried: Hash,
         request: Hash,
@@ -370,15 +374,50 @@ fn active_object_from(v: &[u8]) -> Result<ActiveObject, StoreError> {
     })
 }
 
-fn active_span_from(loc: Location, v: &[u8]) -> Result<ActiveSpan, StoreError> {
-    let what = "redaction span entry";
-    if v.len() < 64 {
-        return Err(StoreError::Decode(format!("{what} is {} bytes", v.len())));
+/// The `held` byte that ends a carried record's row in `redaction_spans`.
+fn held_byte(held: bool) -> u8 {
+    u8::from(held)
+}
+
+/// One row of `redaction_spans`: the span with its proof, and for a carried record's row its
+/// `held` flag (None for an apply's row).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpanRow {
+    pub(crate) active: ActiveSpan,
+    pub(crate) held: Option<bool>,
+}
+
+impl SpanRow {
+    /// Whether the row masks its frame: an apply's row, or a carried `held: false` one.
+    pub(crate) fn masks(&self) -> bool {
+        self.held != Some(true)
     }
-    Ok(ActiveSpan {
-        apply: hash_from(&v[..32], what)?,
-        request: hash_from(&v[32..64], what)?,
-        span: span_from(loc, &v[64..], what)?,
+}
+
+/// A row of `redaction_spans`: an apply's is 101 or 133 bytes (with no residue, or with one); a
+/// carried record's has one more, its `held` byte.
+fn span_row_from(loc: Location, v: &[u8]) -> Result<SpanRow, StoreError> {
+    let what = "redaction span entry";
+    let (body, held) = match v.len() {
+        101 | 133 => (v, None),
+        102 | 134 => {
+            let (body, last) = v.split_at(v.len() - 1);
+            let held = match last[0] {
+                0 => false,
+                1 => true,
+                b => return Err(StoreError::Decode(format!("{what} has held byte {b}"))),
+            };
+            (body, Some(held))
+        }
+        n => return Err(StoreError::Decode(format!("{what} is {n} bytes"))),
+    };
+    Ok(SpanRow {
+        active: ActiveSpan {
+            apply: hash_from(&body[..32], what)?,
+            request: hash_from(&body[32..64], what)?,
+            span: span_from(loc, &body[64..], what)?,
+        },
+        held,
     })
 }
 
@@ -570,11 +609,11 @@ impl<'t> RedactionTables<'t> {
                 .get(&key[..])
                 .map_err(db)?
                 .map(|v| v.value().to_vec());
-            if let Some(v) = held {
-                let row = active_span_from(span.loc, &v)?;
-                if self.is_apply_row(&row.request, &row.apply)? {
-                    continue;
-                }
+            if let Some(v) = held
+                && span_row_from(span.loc, &v)?.held.is_none()
+            {
+                // an earlier apply keeps the frame
+                continue;
             }
             let mut v = Vec::with_capacity(64 + 69);
             v.extend_from_slice(&apply.0);
@@ -595,9 +634,11 @@ impl<'t> RedactionTables<'t> {
             .is_some_and(|v| v.value().get(..32) == Some(&apply.0[..])))
     }
 
-    /// A carried record's rows: each `held: false` span, and its object, enters the active mask
-    /// with the record as its proof where no row holds it yet (an apply's, or an earlier carried
-    /// record's). Its `held: true` spans enter no table.
+    /// A carried record's rows. Every span gets a `redaction_spans` row with the record, its
+    /// source request and its `held` flag where no row holds the frame yet; a `held: false` span
+    /// also takes over a `held: true` row (it accounts for the zeros the earlier record holds).
+    /// An apply's row, and an earlier `held: false` row, keep the frame. Only a `held: false`
+    /// span's object enters the active mask, where no row holds it yet.
     fn carried(
         &mut self,
         flag: &AtomicBool,
@@ -606,7 +647,29 @@ impl<'t> RedactionTables<'t> {
         loc: &Location,
         spans: &[(RedactedSpan, bool)],
     ) -> Result<(), StoreError> {
-        for (span, _) in spans.iter().filter(|(_, held)| !*held) {
+        for (span, held) in spans {
+            let key = loc_key(&span.loc);
+            let row = self
+                .spans
+                .get(&key[..])
+                .map_err(db)?
+                .map(|v| span_row_from(span.loc, v.value()))
+                .transpose()?;
+            let take = match row {
+                None => true,
+                Some(r) => !*held && r.held == Some(true),
+            };
+            if take {
+                let mut v = Vec::with_capacity(64 + 69 + 1);
+                v.extend_from_slice(&carried.0);
+                v.extend_from_slice(&request.0);
+                v.extend_from_slice(&span_value(span));
+                v.push(held_byte(*held));
+                self.spans.insert(&key[..], &v[..]).map_err(db)?;
+            }
+            if *held {
+                continue;
+            }
             flag.store(true, Ordering::Release);
             let key = typed_key(span.kind, &span.hash);
             if self.active.get(&key[..]).map_err(db)?.is_none() {
@@ -616,14 +679,6 @@ impl<'t> RedactionTables<'t> {
                 v.extend_from_slice(&loc_key(loc));
                 v.extend_from_slice(residue_bytes(&span.residue));
                 self.active.insert(&key[..], &v[..]).map_err(db)?;
-            }
-            let key = loc_key(&span.loc);
-            if self.spans.get(&key[..]).map_err(db)?.is_none() {
-                let mut v = Vec::with_capacity(64 + 69);
-                v.extend_from_slice(&carried.0);
-                v.extend_from_slice(&request.0);
-                v.extend_from_slice(&span_value(span));
-                self.spans.insert(&key[..], &v[..]).map_err(db)?;
             }
         }
         Ok(())
@@ -1353,20 +1408,35 @@ impl Index {
         for item in t.range(&lo[..]..&hi[..]).map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let at = loc_from(k.value(), "redaction span entry")?;
-            out.insert(at, active_span_from(at, v.value())?);
+            let row = span_row_from(at, v.value())?;
+            if row.masks() {
+                out.insert(at, row.active);
+            }
         }
         Ok(out)
     }
 
-    /// The active span of the frame at `loc`, if the mask holds it.
+    /// The active span of the frame at `loc`, if the mask holds it (a `held: true` carried row
+    /// masks nothing).
     pub fn redaction_span_at(&self, loc: &Location) -> Result<Option<ActiveSpan>, StoreError> {
         if !self.any_redaction_active() {
             return Ok(None);
         }
+        Ok(self
+            .redaction_span_row_at(loc)?
+            .filter(SpanRow::masks)
+            .map(|r| r.active))
+    }
+
+    /// The `redaction_spans` row of the frame at `loc`, masking or not.
+    pub(crate) fn redaction_span_row_at(
+        &self,
+        loc: &Location,
+    ) -> Result<Option<SpanRow>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(REDACTION_SPANS).map_err(db)?;
         match t.get(&loc_key(loc)[..]).map_err(db)? {
-            Some(v) => Ok(Some(active_span_from(*loc, v.value())?)),
+            Some(v) => Ok(Some(span_row_from(*loc, v.value())?)),
             None => Ok(None),
         }
     }

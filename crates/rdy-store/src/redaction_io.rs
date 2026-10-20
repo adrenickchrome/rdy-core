@@ -22,9 +22,11 @@
 //! a residue replays.
 //!
 //! A carried record (kind REDACTION_CARRIED, `crate::redaction_carried`) is laid over the
-//! validated applies last: its `held: false` spans whose payload is all zero join the holes, and
-//! a validated apply that covers a span stays its proof. Recognition is not erasure: only a span
-//! a validated apply covers is ever erased ([`Authorization::erasable`]).
+//! validated applies before their check against the log: its `held: false` spans whose payload
+//! is all zero join the holes, and a validated apply that covers a span stays its proof. The
+//! check resolves a change residue's kept reference through a carried block residue, and
+//! nothing else of it. Recognition is not erasure: only a span a validated apply covers is ever
+//! erased ([`Authorization::erasable`]).
 //!
 //! The scope is the active store files. File-system snapshots, backups, responses already sent,
 //! old dumps and media remnants are outside it (`W_REDACTION_COPIES`); quarantine files are
@@ -1004,12 +1006,18 @@ pub(crate) fn for_each_seen(
 ///    - every intact payload of a span is exactly what its residue records: a block's identity,
 ///      a change's id, audit fields, dependencies and every op in order;
 ///    - every `(id, version)` a change residue keeps by reference is a stored block of that id
-///      before its apply: an intact block frame whose payload has that id, or a span an apply
-///      authorized whose block residue has it;
+///      before its apply: an intact block frame whose payload has that id, a span an apply
+///      authorized whose block residue has it, or a zero block frame that a validated carried
+///      record explains, whose block residue has it;
 ///    - no intact frame outside the authorized spans holds selected content: a block of a
 ///      selected version, a change that embeds one, or a chunk of a selected blob (each
 ///      physical copy is a span);
 ///    - every chunk of a selected blob has a frame.
+///
+/// The holes of `auth` are the applies' spans; the carried records' spans (`SpanAuth::carried`,
+/// laid over by `redaction_carried::overlay` before this check) take part only in the
+/// resolution of a kept reference: they never count as a span of an apply, as a selected
+/// version found, or as a copy the selection covers.
 ///
 /// A failure is `RedactionCorrupt`: at the frame or span for a frame failure, else at the apply.
 fn check_log(
@@ -1028,7 +1036,7 @@ fn check_log(
     let mut chunks_of: HashMap<Hash, Vec<Hash>> = HashMap::new();
     let mut at_frame: BTreeSet<Location> = BTreeSet::new();
     for_each_seen(readers, last_request.min(upto), &BTreeMap::new(), |f| {
-        if auth.holes.contains_key(&f.loc) {
+        if auth.erasable(&f.loc) {
             at_frame.insert(f.loc);
         }
         if f.kind == kinds::BLOB_MANIFEST
@@ -1041,7 +1049,11 @@ fn check_log(
         }
         Ok(())
     })?;
-    if let Some(loc) = auth.holes.keys().find(|l| !at_frame.contains(l)) {
+    if let Some(loc) = auth
+        .holes
+        .keys()
+        .find(|l| auth.erasable(l) && !at_frame.contains(l))
+    {
         return Err(StoreError::corrupt_at(*loc));
     }
     let mut sel_chunks: Vec<HashSet<Hash>> = Vec::with_capacity(sel.len());
@@ -1102,8 +1114,16 @@ fn check_log(
     let mut kept_found: HashSet<(BlockId, Hash)> = HashSet::new();
     let mut seen_chunks: HashSet<Hash> = HashSet::new();
     let residue_of = |loc: &Location| auth.spans[loc].residue.and_then(|r| auth.residues.get(&r));
+    // the id a carried record's block residue gives a zero frame it explains
+    let carried_id = |loc: &Location| match auth.spans.get(loc) {
+        Some(s) if s.carried => match s.residue.and_then(|r| auth.residues.get(&r)) {
+            Some(RedactionResidue::Block(b)) => Some(b.id.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
     for_each_seen(readers, upto, memory, |f| {
-        let hole = auth.holes.contains_key(&f.loc);
+        let hole = auth.erasable(&f.loc);
         match f.kind {
             kinds::BLOCK => {
                 if !selected_versions.contains(&f.hash)
@@ -1136,9 +1156,19 @@ fn check_log(
                             Err(_) => return Ok(()),
                         }
                     }
-                    // a damaged payload outside the holes: the payload scan refuses it, and it
-                    // keeps no reference
-                    (false, None) => return Ok(()),
+                    // zeros a carried record explains: its block residue names the version a
+                    // change residue may keep, and nothing else (no selection, no copy)
+                    (false, None) => {
+                        if let Some(id) = carried_id(&f.loc) {
+                            let key = (id, f.hash);
+                            if kept.get(&key).is_some_and(|need| f.loc < *need) {
+                                kept_found.insert(key);
+                            }
+                        }
+                        // otherwise a damaged payload outside the holes: the payload scan
+                        // refuses it, and it keeps no reference
+                        return Ok(());
+                    }
                 };
                 if kept_versions.contains(&f.hash) {
                     let key = (id.clone(), f.hash);
@@ -1203,10 +1233,10 @@ fn check_log(
 /// the acknowledged log holds. Which applies that is depends on the holes they authorize (the
 /// marker rule's scan reads them as frames), so the scan's end is found with the applies'
 /// unchecked holes (with the carried records' `held: false` spans) and applies and carried
-/// records past it are left out until it is stable; the applies left are validated and checked
-/// against the log (`check_log`, both its passes, whatever the erasure has done), the carried
-/// records left are laid over them (`redaction_carried::overlay`), and any failure refuses the
-/// open. The index plays no part. A load checks a complete ingested log with it before it
+/// records past it are left out until it is stable; the applies left are validated, the carried
+/// records left are laid over them (`redaction_carried::overlay`), and the applies are checked
+/// against the log (`check_log`, both its passes, whatever the erasure has done; a kept reference
+/// may resolve through a carried residue), and any failure refuses the open. The index plays no part. A load checks a complete ingested log with it before it
 /// finishes the store.
 pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
@@ -1230,6 +1260,7 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
         }
     };
     let (mut auth, sel) = validate(&c, readers, &applies, None)?;
+    crate::redaction_carried::overlay(&c, readers, &mut auth, end)?;
     check_log(readers, &c.memory, &auth, &sel, end)?;
     auth.requests = c
         .requests
@@ -1237,7 +1268,6 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
         .filter(|(l, _)| *l < end)
         .copied()
         .collect();
-    crate::redaction_carried::overlay(&c, readers, &mut auth, end)?;
     Ok(auth)
 }
 
@@ -1262,8 +1292,8 @@ pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreE
 }
 
 /// The authorization of the sealed batches `c` collected, as [`bootstrap_sealed`] has it: the
-/// validated applies checked against the sealed log on disk, then the carried records before
-/// `carried_upto` over them (a batch of `c.memory` included).
+/// validated applies, the carried records before `carried_upto` over them (a batch of
+/// `c.memory` included), then the applies checked against the sealed log on disk.
 pub(crate) fn sealed_of(
     c: &Collected,
     readers: &[File],
@@ -1274,12 +1304,12 @@ pub(crate) fn sealed_of(
     }
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(c, readers, &applies, None)?;
+    crate::redaction_carried::overlay(c, readers, &mut auth, carried_upto)?;
     let upto = c.sealed_end.unwrap_or(Location {
         segment: 0,
         offset: 0,
     });
     check_log(readers, &BTreeMap::new(), &auth, &sel, upto)?;
-    crate::redaction_carried::overlay(c, readers, &mut auth, carried_upto)?;
     Ok(auth)
 }
 
@@ -1298,9 +1328,9 @@ pub(crate) fn bootstrap_pending(
     c.push_batch(start, batch);
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
+    crate::redaction_carried::overlay(&c, readers, &mut auth, start)?;
     check_log(readers, &c.memory, &auth, &sel, start)?;
     auth.requests = c.requests.clone();
-    crate::redaction_carried::overlay(&c, readers, &mut auth, start)?;
     Ok(auth)
 }
 

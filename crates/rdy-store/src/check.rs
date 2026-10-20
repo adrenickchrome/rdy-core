@@ -173,28 +173,33 @@ impl StoreReader {
         })
     }
 
-    /// Every carried record's `held: false` span is in the active mask with the span's own kind,
-    /// hash, length and residue: the zeros it explains read as removed. Otherwise `carried
-    /// record {hash}: the index does not remove the span at {segment}:{offset}; run rdy reindex`.
+    /// Every span of every carried record has its row in the span index with the span's own
+    /// kind, hash, length and residue, and every `held: false` span's row masks its frame: the
+    /// zeros it explains read as removed. Otherwise `carried record {hash}: the index does not
+    /// remove the span at {segment}:{offset}; run rdy reindex` (a `held: false` span), or `...
+    /// does not hold the span ...` (a `held: true` one).
     pub(crate) fn check_carried(&self) -> Result<(), StoreError> {
         let end = Location {
             segment: u32::MAX,
             offset: u64::MAX,
         };
         self.visit_carried(end, &mut |c| {
-            for s in c.record.spans.iter().filter(|s| !s.held) {
+            for s in &c.record.spans {
                 let loc = Location {
                     segment: s.place.segment,
                     offset: s.place.offset,
                 };
-                let row = self.index().redaction_span_at(&loc)?;
+                let row = self.index().redaction_span_row_at(&loc)?;
                 let fits = row.is_some_and(|r| {
-                    (r.span.kind, r.span.hash, r.span.len, r.span.residue)
+                    let span = r.active.span;
+                    (span.kind, span.hash, span.len, span.residue)
                         == (s.kind, s.hash, s.len, s.residue)
+                        && (s.held || r.masks())
                 });
                 if !fits {
+                    let what = if s.held { "hold" } else { "remove" };
                     return Err(bad(format!(
-                        "carried record {}: the index does not remove the span at {}:{}; run rdy reindex",
+                        "carried record {}: the index does not {what} the span at {}:{}; run rdy reindex",
                         c.hash, loc.segment, loc.offset
                     )));
                 }

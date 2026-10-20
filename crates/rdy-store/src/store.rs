@@ -2751,11 +2751,16 @@ impl Store {
 
     /// Whether the index's six redaction tables hold exactly the rows the log's validated records
     /// before `upto` (the index's `indexed_upto`) give. They are derived again, in an index in
-    /// memory, from the requests and the validated applies; nothing in the index is trusted.
+    /// memory, from the requests, the validated applies and the validated carried records;
+    /// nothing in the index is trusted. Only a log with none of these and an index with no row
+    /// skips the derivation.
     fn redaction_index_matches(&self, upto: Location) -> Result<bool, StoreError> {
         let auth = Arc::clone(self.log.authorization());
         let have = self.index().redaction_rows()?;
-        if auth.requests.is_empty() && auth.applies.is_empty() && have.iter().all(|t| t.is_empty())
+        if auth.requests.is_empty()
+            && auth.applies.is_empty()
+            && auth.carried.is_empty()
+            && have.iter().all(|t| t.is_empty())
         {
             return Ok(true);
         }
@@ -2783,8 +2788,9 @@ impl Store {
     }
 
     /// The refusal of redaction rows a rebuilt index still holds and the log's authorization
-    /// does not give: `RedactionCorrupt` at the first redaction request or apply frame of the log
-    /// that the authorization does not hold (else at its first record, or the log's start).
+    /// does not give: `RedactionCorrupt` at the first redaction request, apply or carried record
+    /// frame of the log that the authorization does not hold (else at its first record, or the
+    /// log's start).
     fn unexplained_redaction_rows(&self) -> StoreError {
         let auth = Arc::clone(self.log.authorization());
         let walked = self.log.for_each_view(ORIGIN, |loc, v, _| {
@@ -2794,6 +2800,7 @@ impl Store {
                     .binary_search_by_key(&loc, |(l, _)| *l)
                     .is_ok(),
                 kinds::REDACTION_APPLY => auth.holds_apply(loc),
+                kinds::REDACTION_CARRIED => auth.holds_carried(loc),
                 _ => true,
             };
             if held {
@@ -2811,6 +2818,7 @@ impl Store {
                     .map(|(l, _)| *l)
                     .into_iter()
                     .chain(auth.applies.first().map(|a| a.loc))
+                    .chain(auth.carried.first().map(|c| c.at))
                     .min()
                     .unwrap_or(ORIGIN);
                 StoreError::corrupt_at(first)
