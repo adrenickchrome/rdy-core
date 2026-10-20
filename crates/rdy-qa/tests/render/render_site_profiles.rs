@@ -5,6 +5,8 @@
 //! review. A review compares the profile's selected state in each side's own revision. The live
 //! site warns of a blocked public profile while every durable output still refuses it. The
 //! neutral chip counts the landings since the tag that change what the profile shows.
+// the render binary includes the shared redaction fixture from several files
+#[allow(clippy::duplicate_mod)]
 #[path = "../../../rdy-store/tests/support/redaction.rs"]
 mod redaction_fixture;
 

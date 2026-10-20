@@ -178,8 +178,10 @@ pub(crate) fn build_within(
     let mut over = false;
     if route && !matches!(scope, Scope::At(_)) {
         let at_canon = st.version_position(&Scope::Canon)?;
-        if let (Some(v), Some(tip)) = (at_canon.version, st.canon_head()) {
-            let tag_landing: Hash = v.landing.parse().map_err(|_| bad_landing())?;
+        // a version's landing is the store's own hash text (as `prepare::since_of` reads it)
+        if let (Some(v), Some(tip)) = (at_canon.version, st.canon_head())
+            && let Ok(tag_landing) = v.landing.parse::<Hash>()
+        {
             history.begin(Identity {
                 profile: profile.id.clone(),
                 epoch: st.redaction_epoch(),
@@ -319,15 +321,6 @@ fn read_scope(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyError> {
         ScopeRef::Tag(name) => st.resolve_scope(&format!("tag:{name}")),
         ScopeRef::Versions => Err(invalid_target()),
     }
-}
-
-/// `E_INTERNAL`-free refusal of a version whose landing does not parse (a damaged store).
-fn bad_landing() -> RdyError {
-    RdyError::new(
-        E_BAD_INPUT,
-        "a version's landing is not a hash",
-        "check the store with rdy check",
-    )
 }
 
 /// `profile` resolved in `scope`: the same profile id in that state's own revision (None when the
