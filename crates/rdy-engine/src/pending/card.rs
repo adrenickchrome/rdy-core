@@ -15,8 +15,8 @@
 //!    them. The queue fills them in the closed order of the plan: Changes, Decisions, Supersedes,
 //!    Reversibility, Consequences, Tensions, Coverage, Confidence, Base, Exceptions.
 //! 6. **Options.** `Options`, then each option numbered, its label, `recommended` at the right
-//!    of the recommended one, and what choosing it does. The reason of a recommendation stands
-//!    below it unless it is the summary, which the card already shows.
+//!    of the recommended one, and what choosing it does. Below the recommended one stands
+//!    `Why recommended: <reason>`, unless the reason is empty (D-D8FAB).
 //!
 //! The card never shows `raised_by`, `raised_at`, `age`, `blocking`, `card` or `card_hash`.
 //!
@@ -296,7 +296,6 @@ fn exception_words(kind: ExceptionKind) -> &'static str {
 }
 
 fn options(item: &Item) -> Vec<String> {
-    let summary = item.summary.as_deref().map(str::trim);
     let mut lines = vec!["Options".to_string()];
     for (i, o) in item.options.iter().enumerate() {
         let label = one_line(&o.label);
@@ -311,9 +310,9 @@ fn options(item: &Item) -> Vec<String> {
         for c in &o.consequences {
             lines.extend(wrap(c, "     ", OPTION_WIDTH));
         }
-        if let Some(reason) = o.recommended.as_deref() {
-            let reason = reason.trim();
-            if !reason.is_empty() && Some(reason) != summary {
+        if let Some(rec) = &o.recommended {
+            let reason = rec.reason();
+            if !reason.is_empty() {
                 lines.extend(wrap(
                     &format!("Why recommended: {reason}"),
                     "     ",
@@ -358,7 +357,7 @@ fn wrap(text: &str, indent: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::item::{ExceptionKind, Fact, ItemKind, ItemOption, age};
+    use super::super::item::{ExceptionKind, Fact, ItemKind, ItemOption, Recommended, age};
     use super::*;
     use crate::error::E_BAD_INPUT;
     use std::collections::BTreeMap;
@@ -371,7 +370,7 @@ mod tests {
             id: id.to_string(),
             label: label.to_string(),
             consequences: consequences.iter().map(|c| c.to_string()).collect(),
-            recommended: rec.map(str::to_string),
+            recommended: rec.map(Recommended::new),
         }
     }
 
@@ -436,7 +435,7 @@ mod tests {
                 "approve",
                 "Approve P-7f3a@2 and confirm D-0931",
                 &["Lands the proposal in canon."],
-                Some(SUMMARY),
+                Some(crate::pending::APPROVE_REASON),
             ),
             option(
                 "reject",
@@ -519,6 +518,7 @@ Facts (computed)
 Options
   1. Approve P-7f3a@2 and confirm D-0931            recommended
      Lands the proposal in canon.
+     Why recommended: its checks pass and nothing blocks it
   2. Reject
      Returns the proposal to its view. Canon does not change.
   3. Later
@@ -526,6 +526,7 @@ Options
 
     #[test]
     fn di4_an_approve_card_matches_the_documented_layout() {
+        // D-D8FAB: the approve option's computed reason now stands under it as Why recommended.
         assert_eq!(render(&guest_mode(), CARD_DEFAULT_TOKENS), GUEST_MODE_CARD);
     }
 

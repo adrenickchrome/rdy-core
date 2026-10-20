@@ -7,7 +7,7 @@
 //! one space, so case and spacing never matter.
 
 use crate::{Block, FieldValue, RefMode, RefSpan, ref_spans};
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
 pub const VALUE: &str = "value";
 pub const ENTITY: &str = "entity";
@@ -103,8 +103,21 @@ pub fn phrase(text: &str) -> String {
 /// shorter than [`MIN_MENTION_CHARS`] characters is skipped. Matches never overlap. A `'\0'`
 /// between two words (a blanked reference) ends a window: no phrase spans it.
 pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Range<usize>)> {
-    let ws = words(text);
     let mut out = vec![];
+    visit_phrases(text, known, &mut |p, range| {
+        out.push((p.to_string(), range))
+    });
+    out
+}
+
+/// Calls `visit` with each phrase [`find_phrases`] gives, in the same order, as it is found:
+/// nothing is collected.
+pub fn visit_phrases(
+    text: &str,
+    known: &dyn Fn(&str) -> bool,
+    visit: &mut dyn FnMut(&str, Range<usize>),
+) {
+    let ws = words(text);
     // the window of n words is the first n words of the longest window: one join per word,
     // and each shorter window is a prefix of it (`ends[n - 1]` bytes, `chars[n - 1]` chars)
     let mut joined = String::new();
@@ -135,16 +148,12 @@ pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Ra
             .find(|&n| chars[n - 1] >= MIN_MENTION_CHARS && known(&joined[..ends[n - 1]]));
         match hit {
             Some(n) => {
-                out.push((
-                    joined[..ends[n - 1]].to_string(),
-                    ws[i].start..ws[i + n - 1].end,
-                ));
+                visit(&joined[..ends[n - 1]], ws[i].start..ws[i + n - 1].end);
                 i += n;
             }
             None => i += 1,
         }
     }
-    out
 }
 
 /// The `aliases` of `b`: its string items, trimmed, non-empty, without case-insensitive
@@ -193,26 +202,48 @@ pub fn value_text(b: &Block) -> Option<String> {
 /// no `'\0'` (a reference that [`text_sources`] blanked).
 /// An unmatched backtick is ignored. Repeats are kept.
 pub fn code_literals(text: &str) -> Vec<String> {
+    code_literal_spans(text)
+        .into_iter()
+        .map(|r| text[r].to_string())
+        .collect()
+}
+
+/// The byte ranges in `text` of its [`code_literals`], in the same order: each covers the
+/// trimmed inner text of a pair of backticks on one line.
+pub fn code_literal_spans(text: &str) -> Vec<Range<usize>> {
     let mut out = vec![];
-    for line in text.lines() {
-        // Split on backticks: the odd-numbered parts lie between a pair, when a closing
-        // backtick follows them.
-        let parts: Vec<&str> = line.split('`').collect();
-        for (i, inner) in parts.iter().enumerate() {
-            if i % 2 == 0 || i + 1 >= parts.len() {
-                continue;
-            }
+    for (at, line) in lines_at(text) {
+        // backticks pair up in order on a line: the first with the second, the third with the
+        // fourth; a last unpaired one is ignored
+        let ticks: Vec<usize> = line.match_indices('`').map(|(i, _)| i).collect();
+        for &[open, close] in ticks.as_chunks::<2>().0 {
+            let inner = &line[open + 1..close];
             let lit = inner.trim();
             let n = lit.chars().count();
             if (LITERAL_MIN_CHARS..=LITERAL_MAX_CHARS).contains(&n)
                 && !lit.contains("{{")
                 && !lit.contains('\0')
             {
-                out.push(lit.to_string());
+                let start = at + open + 1 + (inner.len() - inner.trim_start().len());
+                out.push(start..start + lit.len());
             }
         }
     }
     out
+}
+
+/// The lines of `text` as [`str::lines`] gives them, each with its byte offset in `text`.
+pub fn lines_at(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut at = 0;
+    text.split_inclusive('\n').map(move |raw| {
+        let start = at;
+        at += raw.len();
+        let line = match raw.strip_suffix('\n') {
+            Some(l) => l.strip_suffix('\r').unwrap_or(l),
+            None => raw,
+        };
+        (start, line)
+    })
 }
 
 /// `text` with every reference under `mode` replaced by `'\0'`s of the same byte length, so a
@@ -232,25 +263,6 @@ fn blank_refs(text: &str, mode: RefMode) -> String {
 /// How a text source's references are written: `render(text, mode)` is the text with every
 /// reference under `mode` replaced.
 type RenderRefs<'a> = &'a dyn Fn(&str, RefMode) -> String;
-
-fn leaves(name: &str, v: &FieldValue, render: RenderRefs<'_>, out: &mut Vec<(String, String)>) {
-    match v {
-        FieldValue::Str(s) if !s.is_empty() => {
-            out.push((name.to_string(), render(s, RefMode::Strict)))
-        }
-        FieldValue::List(items) => {
-            for (i, item) in items.iter().enumerate() {
-                leaves(&format!("{name}[{i}]"), item, render, out);
-            }
-        }
-        FieldValue::Map(m) => {
-            for (k, item) in m {
-                leaves(&format!("{name}.{k}"), item, render, out);
-            }
-        }
-        _ => {}
-    }
-}
 
 /// The text a mention scan reads in `b`, as (field name, text) pairs: the body first (unless
 /// its mode is not strict: code and diagram bodies are skipped), then every string leaf of the
@@ -290,15 +302,57 @@ pub fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&RefSpan) -> Stri
 
 fn sources_with(b: &Block, render: RenderRefs<'_>) -> Vec<(String, String)> {
     let mut out = vec![];
-    if RefMode::for_body(&b.block_type) == RefMode::Strict && !b.body.is_empty() {
-        out.push(("body".to_string(), render(&b.body, RefMode::Strict)));
+    visit_text_sources(b, &mut |name, text, mode| {
+        out.push((name.to_string(), render(text, mode)));
+        ControlFlow::Continue(())
+    });
+    out
+}
+
+/// Calls `visit` with each text source of `b`, borrowed, as (source name, stored text, mode),
+/// in the order of [`text_sources`]: the body first when its mode is strict (code and diagram
+/// bodies are skipped), then each non-empty string leaf of the fields except the
+/// [`METADATA_FIELDS`], by field name, a list item as `name[i]` and a map entry as `name.key`.
+/// The text is as stored: references are not blanked. A `Break` stops before the next source.
+pub fn visit_text_sources(
+    b: &Block,
+    visit: &mut dyn FnMut(&str, &str, RefMode) -> ControlFlow<()>,
+) {
+    let mode = RefMode::for_body(&b.block_type);
+    if mode == RefMode::Strict && !b.body.is_empty() && visit("body", &b.body, mode).is_break() {
+        return;
     }
     for (name, v) in &b.fields {
-        if !METADATA_FIELDS.contains(&name.as_str()) {
-            leaves(name, v, render, &mut out);
+        if !METADATA_FIELDS.contains(&name.as_str()) && visit_leaves(name, v, visit).is_break() {
+            return;
         }
     }
-    out
+}
+
+/// Calls `visit` with each non-empty string leaf of `v`, labelled `name`, `name[i]` or
+/// `name.key`, in order; every field text is [`RefMode::Strict`]. A `Break` stops the walk and
+/// is returned.
+pub fn visit_leaves(
+    name: &str,
+    v: &FieldValue,
+    visit: &mut dyn FnMut(&str, &str, RefMode) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    match v {
+        FieldValue::Str(s) if !s.is_empty() => visit(name, s, RefMode::Strict),
+        FieldValue::List(items) => {
+            for (i, item) in items.iter().enumerate() {
+                visit_leaves(&format!("{name}[{i}]"), item, visit)?;
+            }
+            ControlFlow::Continue(())
+        }
+        FieldValue::Map(m) => {
+            for (k, item) in m {
+                visit_leaves(&format!("{name}.{k}"), item, visit)?;
+            }
+            ControlFlow::Continue(())
+        }
+        _ => ControlFlow::Continue(()),
+    }
 }
 
 /// The field a text source's name comes from: `steps[0]` and `cells.a` are `steps` and `cells`.

@@ -12,9 +12,10 @@
 //! The ref is `<Q-id>@<version short>` (O3), so a new version of the question is a new item
 //! and ends a snooze. `title` and `why` are the authored words (the title falls back to the
 //! prompt). The options are the authored labels as `o1` to `o4`, then `later` (O4). The question's
-//! `recommended` label, when it is one of the options, is the recommendation, with
-//! `recommend_reason` as its reason. Whoever last wrote the question raised it.
-use super::item::{Item, ItemKind, ItemOption};
+//! `recommended` field is the exact text of one option (D-D8FAB): that option carries
+//! `recommended: true`, with `recommend_reason` as its `reason`. Whoever last wrote the question
+//! raised it.
+use super::item::{Item, ItemKind, ItemOption, Recommended};
 use super::queue::{PendingQuery, item, later, text};
 use crate::error::RdyError;
 use crate::session::{now_ms, rfc3339};
@@ -95,7 +96,7 @@ fn options(b: &Block, labels: &[String]) -> Vec<ItemOption> {
             id: format!("o{}", i + 1),
             label: label.clone(),
             consequences: vec!["Records a decision with this answer.".to_string()],
-            recommended: (recommended == Some(label.as_str())).then(|| reason.to_string()),
+            recommended: (recommended == Some(label.as_str())).then(|| Recommended::new(reason)),
         })
         .collect();
     out.push(later());

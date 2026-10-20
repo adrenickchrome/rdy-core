@@ -3,6 +3,7 @@
 //! or every block under a doc or folder path); its token changes when, and only when, a covered
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
+use crate::consequence_literals::{self, LiteralSet};
 use crate::coverage::{
     Confidence, CoverageIssue, Dimension, PAGES_CAP, PageScore, confidence_in, coverage_error_text,
     page_blocks, rollup, sort_issue_refs,
@@ -10,6 +11,7 @@ use crate::coverage::{
 use crate::error::*;
 use crate::inflight::Inflight;
 use crate::keys;
+use crate::lexicon::Lexicon;
 use crate::query::summary_in;
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
@@ -19,7 +21,7 @@ use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
-use rdy_schema::{Issue, Pack, Severity, Trait};
+use rdy_schema::{Issue, Pack, Severity};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -263,11 +265,11 @@ pub enum FollowUp {
     Resolve,
 }
 
-/// The follow-up a dependent block owes when a block it depends on changed. `status` is the
-/// dependent's derived decision status (`None` for a block that is not a decision);
-/// `target_deleted` says the changed block no longer exists; `value_reference` says the dependent
-/// reaches the changed block through a reference and that block is a value. `None` means no
-/// follow-up at all.
+/// The follow-up a dependent block owes when a block it depends on changed (D-CFC6V). `status`
+/// is the dependent's derived decision status (`None` for a block that is not a decision);
+/// `target_deleted` says the changed block no longer exists; `states_changed_literal` says the
+/// dependent states a literal the change removed (`consequence_literals`); `dependent_cut` says
+/// the scan of the dependent stopped at its byte budget. `None` means no follow-up at all.
 ///
 /// Exact, in order:
 /// 1. a decision that asserts nothing live (rejected, revoked or fully superseded): `None`;
@@ -275,16 +277,14 @@ pub enum FollowUp {
 /// 3. a proposed decision (mutable): `Update`;
 /// 4. any other block while the target is deleted (a repin cannot pin to a block that is gone):
 ///    `Update`;
-/// 5. a reference to a changed value (`value_reference`): `Confirm`, since the reference's text
-///    updates by itself and only the advice around it may need a look (FW-EN2);
-/// 6. a `normative` or `defines` type, or a `table` marked `normative: true`: `Update`;
-/// 7. anything else (informative, structural, no classifying trait, asset): `Confirm`.
+/// 5. a block that states a removed literal: `Update`;
+/// 6. a block whose scan was cut with no match (rdy cannot say the rest is clean): `Update`;
+/// 7. anything else, after a complete scan with no match: `Confirm`.
 pub fn follow_up(
-    pack: &Pack,
-    dependent: &Block,
     status: Option<&DerivedStatus>,
     target_deleted: bool,
-    value_reference: bool,
+    states_changed_literal: bool,
+    dependent_cut: bool,
 ) -> Option<FollowUp> {
     match status {
         Some(
@@ -298,25 +298,13 @@ pub fn follow_up(
         Some(DerivedStatus::Proposed) => return Some(FollowUp::Update),
         None => {}
     }
-    if target_deleted {
-        return Some(FollowUp::Update);
-    }
-    if value_reference {
-        return Some(FollowUp::Confirm);
-    }
-    let classifying = pack
-        .block_types
-        .get(&dependent.block_type)
-        .is_some_and(|t| {
-            t.traits.contains(&Trait::Normative) || t.traits.contains(&Trait::Defines)
-        });
-    let normative_table = dependent.block_type == "table"
-        && dependent.fields.get("normative") == Some(&FieldValue::Bool(true));
-    Some(if classifying || normative_table {
-        FollowUp::Update
-    } else {
-        FollowUp::Confirm
-    })
+    Some(
+        if target_deleted || states_changed_literal || dependent_cut {
+            FollowUp::Update
+        } else {
+            FollowUp::Confirm
+        },
+    )
 }
 
 /// A live decision governing covered blocks.
@@ -373,7 +361,15 @@ pub struct WillGoStale {
     pub via: String,
     pub on: String,
     pub follow_up: FollowUp,
+    /// For a block that is not a decision, while `on` exists: up to eight of the literals `on`
+    /// states that `block` states too (O3). Empty after a complete scan means `confirm`; a cut
+    /// scan with no match keeps it empty and asks `update`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub states: Option<Vec<String>>,
 }
+
+/// A will-go-stale row's follow-up and states, keyed by (on, block, via) in `assemble`.
+type StaleRow = (FollowUp, Option<Vec<String>>);
 
 /// The token and the versions it vouches for.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1291,7 +1287,12 @@ impl ReadState {
 
         // keyed by (on, block, kind): deduplicated and in order
         let mut dependents: BTreeMap<(BlockId, BlockId, String), ()> = BTreeMap::new();
-        let mut stale: BTreeMap<(BlockId, BlockId, String), FollowUp> = BTreeMap::new();
+        let mut stale: BTreeMap<(BlockId, BlockId, String), StaleRow> = BTreeMap::new();
+        // O3: what a nondecision dependent states of the covered block's literals, once per
+        // (block, dependent) whatever the number of edges; the lexicon only when one is read
+        let mut names: Option<Arc<Lexicon>> = None;
+        let mut covered: BTreeMap<BlockId, LiteralSet> = BTreeMap::new();
+        let mut stated: BTreeMap<(BlockId, BlockId), (Vec<String>, bool)> = BTreeMap::new();
         for id in ids {
             for e in g.incoming(id) {
                 if ids.contains(&e.from) {
@@ -1301,20 +1302,34 @@ impl ReadState {
                 if edge_in(&e.kind, &IMPACT_LINKS) || link_in(&e.kind, &IMPACT_SHOWN) {
                     dependents.insert(key.clone(), ());
                 }
-                if edge_in(&e.kind, &SUSPECT_LINKS)
-                    && e.pin.is_some()
-                    && let Some(from) = m.get(&e.from)
-                    && let Some(f) = follow_up(
-                        pack,
-                        from,
-                        g.status(&e.from).as_ref(),
-                        m.get(id).is_none(),
-                        matches!(e.kind, EdgeKind::References)
-                            && m.get(id)
-                                .is_some_and(|b| b.block_type == rdy_model::entity::VALUE),
-                    )
-                {
-                    stale.insert(key, f);
+                if !edge_in(&e.kind, &SUSPECT_LINKS) || e.pin.is_none() {
+                    continue;
+                }
+                let Some(from) = m.get(&e.from) else { continue };
+                let status = g.status(&e.from);
+                let target = m.get(id);
+                let states = match (&status, target) {
+                    (None, Some(target)) => {
+                        if names.is_none() {
+                            names = Some(self.lexicon(scope)?);
+                        }
+                        let names = names.as_deref().expect("set above");
+                        let pair = (id.clone(), e.from.clone());
+                        let found = stated.entry(pair).or_insert_with(|| {
+                            let lits = covered.entry(id.clone()).or_insert_with(|| {
+                                consequence_literals::covered(pack, target, names)
+                            });
+                            consequence_literals::states(pack, lits, from, names)
+                        });
+                        Some(found.clone())
+                    }
+                    _ => None,
+                };
+                let (said, cut) = states
+                    .as_ref()
+                    .map_or((false, false), |(s, cut)| (!s.is_empty(), *cut));
+                if let Some(f) = follow_up(status.as_ref(), target.is_none(), said, cut) {
+                    stale.insert(key, (f, states.map(|(s, _)| s)));
                 }
             }
         }
@@ -1373,9 +1388,8 @@ impl ReadState {
                     // asserts nothing live
                     .filter(|b| {
                         !ids.contains(b)
-                            && m.get(b).is_some_and(|src| {
-                                follow_up(pack, src, g.status(b).as_ref(), false, false).is_some()
-                            })
+                            && m.get(b).is_some()
+                            && follow_up(g.status(b).as_ref(), false, false, false).is_some()
                     })
                     .map(|b| b.to_string())
                     .collect();
@@ -1418,11 +1432,12 @@ impl ReadState {
             .collect();
         let will_go_stale: Vec<WillGoStale> = stale
             .into_iter()
-            .map(|((on, block, via), follow_up)| WillGoStale {
+            .map(|((on, block, via), (follow_up, states))| WillGoStale {
                 block: block.to_string(),
                 via,
                 on: on.to_string(),
                 follow_up,
+                states,
             })
             .collect();
 

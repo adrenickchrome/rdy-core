@@ -66,12 +66,71 @@ fn digits_end(cs: &[char], mut i: usize) -> usize {
 /// one space, then the unit text exactly (case-sensitive), then the end of the text or a
 /// character that is not a letter or a digit.
 pub fn stated_numbers(text: &str, unit: &str) -> Vec<String> {
-    let cs: Vec<char> = text.chars().collect();
+    stated_number_spans(text, unit)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// [`stated_numbers`] with the byte range of each: from the number's first character to the
+/// end of its unit.
+pub fn stated_number_spans(text: &str, unit: &str) -> Vec<(String, std::ops::Range<usize>)> {
     let unit: Vec<char> = unit.chars().collect();
-    let mut out = vec![];
     if unit.is_empty() {
-        return out;
+        return vec![];
     }
+    let unit_end = |cs: &[char], q: usize| {
+        let u_end = q + unit.len();
+        cs.get(q..u_end)
+            .is_some_and(|w| w == &unit[..])
+            .then_some(u_end)
+    };
+    number_spans(text, &unit_end)
+        .into_iter()
+        .map(|n| (n.number, n.span))
+        .collect()
+}
+
+/// The most characters a unit read from text has (D-SES4J): a longer run of letters is no unit.
+pub(crate) const MAX_UNIT_CHARS: usize = 24;
+
+/// A number stated with a unit in text: the normalized number, the unit's byte range and the
+/// byte range from the number's first character to the end of the unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NumberSpan {
+    pub number: String,
+    pub unit: std::ops::Range<usize>,
+    pub span: std::ops::Range<usize>,
+}
+
+/// Every number `text` states with some unit, in text order: the grammar and boundaries of
+/// [`stated_numbers`], with the unit a maximal run of 1 to [`MAX_UNIT_CHARS`] Unicode letters
+/// or one `%`. A bare number gives nothing.
+pub(crate) fn number_literal_spans(text: &str) -> Vec<NumberSpan> {
+    let unit_end = |cs: &[char], q: usize| {
+        if cs.get(q) == Some(&'%') {
+            return Some(q + 1);
+        }
+        let run = cs
+            .get(q..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|c| c.is_alphabetic())
+            .count();
+        (1..=MAX_UNIT_CHARS).contains(&run).then_some(q + run)
+    };
+    number_spans(text, &unit_end)
+}
+
+/// The numbers of `text` that a unit follows: a number is `-?[0-9]+(\.[0-9]+)?`, not preceded by
+/// a letter, a digit or `.`; then nothing or one space; then a unit, where `unit_end` gives the
+/// end of a unit that starts at character `q`; then the end of the text or a character that is
+/// not a letter or a digit. The longest number is tried first, then the one without its
+/// fraction.
+fn number_spans(text: &str, unit_end: &dyn Fn(&[char], usize) -> Option<usize>) -> Vec<NumberSpan> {
+    let (bytes, cs): (Vec<usize>, Vec<char>) = text.char_indices().unzip();
+    let byte = |i: usize| bytes.get(i).copied().unwrap_or(text.len());
+    let mut out = vec![];
     let mut i = 0;
     while i < cs.len() {
         if i > 0 && (cs[i - 1].is_alphanumeric() || cs[i - 1] == '.') {
@@ -102,16 +161,19 @@ pub fn stated_numbers(text: &str, unit: &str) -> Vec<String> {
             if cs.get(q) == Some(&' ') {
                 q += 1;
             }
-            let u_end = q + unit.len();
-            let unit_here = cs.get(q..u_end).is_some_and(|w| w == &unit[..]);
+            let u_end = unit_end(&cs, q)?;
             let bounded = cs.get(u_end).is_none_or(|c| !c.is_alphanumeric());
-            (unit_here && bounded).then_some((end, u_end))
+            bounded.then_some((end, q, u_end))
         });
         match hit {
-            Some((end, u_end)) => {
+            Some((end, q, u_end)) => {
                 let n: String = cs[start..end].iter().collect();
-                if let Some(n) = normalize_decimal(&n) {
-                    out.push(n);
+                if let Some(number) = normalize_decimal(&n) {
+                    out.push(NumberSpan {
+                        number,
+                        unit: byte(q)..byte(u_end),
+                        span: byte(start)..byte(u_end),
+                    });
                 }
                 i = u_end;
             }
@@ -119,6 +181,13 @@ pub fn stated_numbers(text: &str, unit: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// A value's number and unit when it takes part in the comparison: its `value` field
+/// normalized and its trimmed unit (`None` for any other block, an empty unit or a `value`
+/// that is not a decimal).
+pub(crate) fn value_number(b: &Block) -> Option<(String, String)> {
+    participant(b).map(|p| (p.number, p.unit))
 }
 
 /// The normal form of a value's `value` field: the trimmed field must be exactly

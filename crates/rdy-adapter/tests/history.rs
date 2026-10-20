@@ -248,3 +248,52 @@ fn ha10_same_hash_with_another_kind_is_absent() {
     }
     handle.close().unwrap();
 }
+
+/// A closed project with three landings, oldest first; the first is tagged v1.0.0.
+fn three_landings() -> (tempfile::TempDir, [Hash; 3]) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut out = [Hash([0; 32]); 3];
+    for (i, title) in ["one", "two", "three"].into_iter().enumerate() {
+        write(
+            &mut r,
+            json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}]),
+        );
+        let p = r
+            .propose(&session(Role::Writer), "work", title, None)
+            .unwrap();
+        out[i] = r
+            .land(&session(Role::Approver), &p.id)
+            .unwrap()
+            .parse()
+            .unwrap();
+        if i == 0 {
+            r.tag(&session(Role::Approver), "v1.0.0", None, None)
+                .unwrap();
+        }
+    }
+    r.close().unwrap();
+    (dir, out)
+}
+
+#[test]
+fn sdc2_batch_equals_per_hash_results() {
+    let (dir, [a, b, c]) = three_landings();
+    let handle = StoreHandle::open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let hashes = |got: &[LandingFacts]| got.iter().map(|f| f.hash).collect::<Vec<_>>();
+    // repeats collapse to the first occurrence; neither order is a sort by hash
+    assert_eq!(hashes(&snap.landings(&[b, a, b]).unwrap()), [b, a]);
+    assert_eq!(hashes(&snap.landings(&[a, b, a]).unwrap()), [a, b]);
+    // unsorted with repeats: one fact per distinct hash, each equal to the single read
+    let input = [c, a, b, a, c, b];
+    let got = snap.landings(&input).unwrap();
+    assert_eq!(hashes(&got), [c, a, b]);
+    for f in &got {
+        assert_eq!(f, &snap.landing_facts(f.hash).unwrap());
+    }
+    // the handle captures its own snapshot and answers the same
+    assert_eq!(handle.landings(&input).unwrap(), got);
+    assert!(snap.landings(&[]).unwrap().is_empty());
+    handle.close().unwrap();
+}

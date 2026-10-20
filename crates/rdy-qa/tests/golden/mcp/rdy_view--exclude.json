@@ -8,10 +8,14 @@
     {
       "because": {
         "changed": "c-CFPE0",
-        "edge": "references"
+        "edge": "references",
+        "edges": [
+          "references"
+        ],
+        "values": []
       },
       "block": "c-WKHEZ",
-      "follow_up": "update",
+      "follow_up": "confirm",
       "id": "cq-d1d2f5d461d0efed",
       "kind": "suspect"
     }

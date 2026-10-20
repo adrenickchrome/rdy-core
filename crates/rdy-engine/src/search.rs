@@ -1224,7 +1224,7 @@ fn strings(label: String, value: &FieldValue, out: &mut impl FnMut(&str, &str)) 
 
 /// `line` whole when it has at most `LINE_CHARS` characters; else `LINE_CHARS` characters from
 /// `LEAD_CHARS` before the match at byte `at`, with `…` where text is cut.
-fn window(line: &str, at: usize) -> String {
+pub(crate) fn window(line: &str, at: usize) -> String {
     let len = line.chars().count();
     if len <= LINE_CHARS {
         return line.to_string();

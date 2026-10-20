@@ -123,8 +123,8 @@ fn mfb2_a_part_supersede_reaches_the_affects_of_its_target() {
 fn mfb2_a_block_already_listed_keeps_its_entry() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
-    // a part supersede of D lists A already, through decided_by (dependent, update); the reach
-    // pass adds no second entry for A
+    // a part supersede of D lists A already, through decided_by (dependent, confirm: D-M19GV);
+    // the reach pass adds no second entry for A
     let res = r
         .supersede(
             &writer(),
@@ -142,7 +142,7 @@ fn mfb2_a_block_already_listed_keeps_its_entry() {
     let a = entries(&c, &s.a);
     assert_eq!(a.len(), 1, "{c:?}");
     assert_eq!(a[0].because.edge, "decided_by");
-    assert_eq!(a[0].follow_up, FollowUp::Update);
+    assert_eq!(a[0].follow_up, FollowUp::Confirm);
 }
 
 #[test]

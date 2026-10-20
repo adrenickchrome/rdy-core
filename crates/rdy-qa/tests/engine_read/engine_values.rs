@@ -51,7 +51,8 @@ fn vfu1_a_changed_value_asks_its_references_to_confirm() {
         follow(&r, &w, &req),
         (ConsequenceKind::Suspect, FollowUp::Confirm)
     );
-    // guard: a changed term still asks a normative block to update
+    // guard: a changed term whose removed text the block does not state asks it to confirm
+    // (D-CFC6V: the follow-up comes from changed literals, not the type)
     let w = write(
         &mut r,
         "work",
@@ -60,7 +61,7 @@ fn vfu1_a_changed_value_asks_its_references_to_confirm() {
     .unwrap();
     assert_eq!(
         follow(&r, &w, &req),
-        (ConsequenceKind::Suspect, FollowUp::Update)
+        (ConsequenceKind::Suspect, FollowUp::Confirm)
     );
 }
 

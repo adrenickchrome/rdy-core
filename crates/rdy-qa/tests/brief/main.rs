@@ -14,5 +14,6 @@ mod brief_paging;
 mod brief_reach;
 mod brief_rebase;
 mod brief_section;
+mod brief_supersede_literals;
 mod brief_tensions;
 mod brief_write;

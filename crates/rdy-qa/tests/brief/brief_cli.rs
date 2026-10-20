@@ -163,7 +163,7 @@ fn cbrf1_rdy_edit_prints_consequences_after_saving() {
     assert!(text.contains("consequences:"), "{text}");
     assert!(
         text.contains(&format!(
-            "suspect {}: update (references {})",
+            "suspect {}: confirm (references {})",
             spec.b, spec.a
         )),
         "{text}"

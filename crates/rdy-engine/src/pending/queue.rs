@@ -72,7 +72,7 @@
 use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
-use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, RemovalCard, age};
+use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
 use super::questions::question_items;
 use super::snooze::hide_snoozed;
 use super::tensions::tension_items;
@@ -334,6 +334,11 @@ pub(crate) fn removal_item(
     if !issues.is_empty() {
         let why: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
         item.why = format!("not ready to land: {}", why.join("; "));
+        // D-D8FAB: the approve reason says its checks pass; a version that is not ready has no
+        // recommended option.
+        for o in &mut item.options {
+            o.recommended = None;
+        }
     }
     finish(item, CARD_MAX_TOKENS).map(Some)
 }
@@ -614,7 +619,7 @@ impl Version {
         };
         let mut it = item(ItemKind::Approve, &r, &self.p.title);
         it.why = format!("ready to land: {} changes", self.p.changes.len());
-        it.summary.clone_from(&summary);
+        it.summary = summary;
         it.summary_by = Some(self.p.provenance.actor.clone());
         it.facts = self.facts(st);
         it.members = members
@@ -625,7 +630,7 @@ impl Version {
             "approve",
             &approve,
             "Lands the proposal in canon.",
-            Some(summary.unwrap_or_default()),
+            Some(approve_reason(self.exception_count())),
         );
         if self.removal.is_some() {
             approve.consequences.push(REMOVAL_IRREVERSIBLE.to_string());
@@ -691,11 +696,7 @@ impl Version {
         if advisory > 0 {
             tensions.push_str(", answers not recorded yet");
         }
-        let exceptions = self
-            .decisions
-            .iter()
-            .filter(|d| !d.kinds.is_empty())
-            .count();
+        let exceptions = self.exception_count();
         let base = match self.p.canon_at {
             Some(h) => h.short(),
             None => "the start".to_string(),
@@ -738,6 +739,14 @@ impl Version {
                 },
             ),
         ]
+    }
+
+    /// How many decisions of the version stand beside its batch as exceptions.
+    fn exception_count(&self) -> usize {
+        self.decisions
+            .iter()
+            .filter(|d| !d.kinds.is_empty())
+            .count()
     }
 
     /// The reversibility each decision declares: one value for all, or `mixed` with each.
@@ -842,13 +851,13 @@ impl Version {
                         "confirm",
                         "Confirm",
                         "Lets the batch land with this decision.",
-                        (!reject).then(|| reason.clone()),
+                        (!reject).then_some(reason.as_str()),
                     ),
                     option(
                         "reject",
                         "Reject",
                         "The batch waits until its author drops or revises this decision.",
-                        reject.then_some(reason),
+                        reject.then_some(reason.as_str()),
                     ),
                     later(),
                 ];
@@ -972,18 +981,32 @@ pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
     }
 }
 
-/// One option with one consequence line (O25).
-pub(super) fn option(
-    id: &str,
-    label: &str,
-    consequence: &str,
-    recommended: Option<String>,
-) -> ItemOption {
+/// One option with one consequence line (O25), recommended with its reason when `reason` is
+/// given (D-D8FAB).
+pub(super) fn option(id: &str, label: &str, consequence: &str, reason: Option<&str>) -> ItemOption {
     ItemOption {
         id: id.to_string(),
         label: label.to_string(),
         consequences: vec![consequence.to_string()],
-        recommended,
+        recommended: reason.map(Recommended::new),
+    }
+}
+
+/// The approve option's reason when no decision stands beside the batch (D-D8FAB).
+pub const APPROVE_REASON: &str = "its checks pass and nothing blocks it";
+/// The approve option's reason when decisions stand beside the batch on their own cards: the
+/// landing waits for a confirm answer to each (D-D8FAB).
+pub const APPROVE_REASON_BESIDE: &str =
+    "its checks pass, and it lands after you confirm each decision beside it";
+
+/// The approve option's reason: computed from the batch card's own state, never the summary
+/// (D-D8FAB). The set is closed: [`APPROVE_REASON`] or [`APPROVE_REASON_BESIDE`]. It reads no
+/// answer, so an answer beside the batch never moves the batch card.
+fn approve_reason(exceptions: usize) -> &'static str {
+    if exceptions == 0 {
+        APPROVE_REASON
+    } else {
+        APPROVE_REASON_BESIDE
     }
 }
 

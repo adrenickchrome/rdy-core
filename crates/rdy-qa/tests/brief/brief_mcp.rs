@@ -55,7 +55,7 @@ fn mbrf1_rdy_brief_then_a_stable_write_citing_its_token_lands_with_consequences(
     assert!(
         cons.iter().any(|x| x["block"] == sp.b.to_string()
             && x["kind"] == "suspect"
-            && x["follow_up"] == "update"
+            && x["follow_up"] == "confirm"
             && x["id"].as_str().unwrap().starts_with("cq-")),
         "{w}"
     );
@@ -131,7 +131,7 @@ fn mbrf1_decide_supersede_and_revoke_take_brief_and_report_consequences() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|x| x["block"] == sp.a.to_string() && x["follow_up"] == "update"),
+            .any(|x| x["block"] == sp.a.to_string() && x["follow_up"] == "confirm"),
         "{sup}"
     );
     let rv = c

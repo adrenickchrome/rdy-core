@@ -265,7 +265,7 @@ fn snap1_a_reopen_refused_by_a_held_state_names_this_process_not_another() {
     let e = Rdy::open(dir.path())
         .err()
         .expect("a held state keeps the index");
-    assert_eq!(e.code, rdy_engine::E_LOCKED, "{e}");
+    assert_eq!(e.code, rdy_engine::E_HELD_BY_READER, "{e}");
     assert!(
         e.message.contains("this process") && !e.message.contains("another"),
         "{e}"

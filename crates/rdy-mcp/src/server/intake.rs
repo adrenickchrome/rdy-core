@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = intake_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "Read what waits for the person: {items, not_ready, snoozed, omitted}. Each item has a ref, its kind (approve, confirm, answer, resolve), its options, its card and card_hash. Show the card to the person word for word; never change its options, recommendation or consequences. A batch (approve) stands first, its exceptions (confirm) beside it. Pass session_ref (the chat session) so Later hides a card only there; max_tokens cuts each card. not_ready lists the versions that need work from you first."
+        description = "Read what waits for the person: {items, not_ready, snoozed, omitted}. Each item has a ref, kind (approve, confirm, answer, resolve), options, card and card_hash. Each option has an id, a label and its consequences. The recommended option carries recommended: true and a reason of at most 200 characters; no other option carries either. A question block's own recommended field is different: it is the exact text of one option.\n\nShow the card to the person word for word. Keep its options, recommendation and consequences unchanged. A batch (approve) stands first, its exceptions (confirm) beside it. Pass session_ref (the chat session) so Later hides a card only there; max_tokens cuts each card. not_ready lists the versions that need work from you first."
     )]
     async fn rdy_pending(&self, Parameters(p): Parameters<PendingParams>) -> CallToolResult {
         self.run("rdy_pending", p, tools::rdy_pending).await
