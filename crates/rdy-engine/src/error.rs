@@ -960,7 +960,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 96] = [
+const CORE_ERROR_CODES: [&str; 98] = [
     E_LOCKED,
     E_NO_PROJECT,
     E_CONFIG,
@@ -1041,6 +1041,8 @@ const CORE_ERROR_CODES: [&str; 96] = [
     E_WC_STORE_ONLY,
     E_SITE,
     E_DUMP,
+    E_DUMP_CHAIN,
+    E_LOAD_STOP,
     E_ACTOR_UNBOUND,
     E_REMOTE_REQUIRED,
     E_REMOTE_EXISTS,
