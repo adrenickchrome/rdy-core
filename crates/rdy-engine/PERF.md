@@ -1418,7 +1418,7 @@ load finds the removed claim's payload in its retained part.
 
 | op | what it times | runs | target |
 |---|---|---|---|
-| `dump_increment` | `ReadState::dump_after_file` of the full file: the predecessor's envelope, the project files, the 100 batches after it, and the write, the sync and the placement of the new file. The files of runs after the first are removed outside the timer; the first is kept as the first increment | 5 (3 at 50k) | no spec target: export 100 sealed batches after a full dump (reported) |
+| `dump_increment` | `ReadState::dump_after_file` of the full file: the predecessor's envelope and the walk that checks the marker of its end, the project files, the 100 batches after it, and the write, the sync and the placement of the new file. The files of runs after the first are removed outside the timer; the first is kept as the first increment | 5 (3 at 50k) | no spec target: export 100 sealed batches after a full dump (reported) |
 | `load_chain` | `rdy_engine::load::load_chain` of the full file and the two increments into a new directory, no stop: the pre-pass over every file, the ingest checks, the index build and `fsck`. The loaded directory is removed outside the timer | 5 (3 at 50k) | no spec target: validate and load a full dump and two increments (reported) |
 | `load_chain_stop` | the same load with the stop above: the part after the stop is checked by the pre-pass and not written; the retained part is written with the carried records of the removal | 5 (3 at 50k) | no spec target: load a chain before removal with carried records (reported) |
 
@@ -1426,9 +1426,15 @@ Beside each op's timing, the run prints one line to stderr (from the first run o
 
 `<op>: bytes read N, bytes written N, source batches N, source frames N, carried spans N (N held)`
 
-- Bytes read: for `dump_increment`, the project-file bytes the export read plus the bytes of
-  the source log between the predecessor's end and the increment's end (segment files, framing
-  included). For a load, the sum of the lengths of the three input files.
+- Bytes read: for `dump_increment`, the bytes the export actually reads, in three parts: the
+  project-file bytes; the bytes of the source log between the predecessor's end and the
+  increment's end (segment files, framing included); and the predecessor checks. The checks are
+  the predecessor's envelope (the prelude and header, read twice, and the trailer; the body is
+  not read) and the walk that finds the marker of its end, which reads the segment of that end
+  from offset zero up to the end, checking each frame and batch marker on the way. This is read
+  volume, not source volume: the source volume of the increment is the log between the two ends,
+  and the walk repeats on every export. For a load, the sum of the lengths of the three input
+  files.
 - Bytes written: for `dump_increment`, the length of the new file. For a load, the bytes of the
   segment files of the loaded store.
 - Source batches and frames: what the new file holds, or what the load wrote into the store
@@ -1439,8 +1445,10 @@ Beside each op's timing, the run prints one line to stderr (from the first run o
 
 What each cost grows with:
 
-- `dump_increment` grows with the batches after the predecessor and with the project files, not
-  with the length of the whole log. Compare with `dump`.
+- `dump_increment` grows with the batches after the predecessor and with the project files. It
+  also pays one walk over the predecessor's segment, from its start to the predecessor's end, so
+  its read cost grows with the offset of that end inside its segment (at most one segment, never
+  the whole log). Compare with `dump`.
 - `load_chain` grows as `load` does, plus one pre-pass over each file before the first write.
 - `load_chain_stop` pays the same pre-pass over every file; it writes only the part up to the
   stop, plus the carried records. Compare it with `load_chain` for the cost of the files after

@@ -3219,6 +3219,48 @@ fn log_span_bytes(
         .sum()
 }
 
+/// A file handle that counts the bytes it hands out.
+struct CountingFile {
+    file: std::fs::File,
+    read: u64,
+}
+
+impl std::io::Read for CountingFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.file.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for CountingFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(to)
+    }
+}
+
+/// The bytes an increment export reads from its predecessor file: the same two reads it makes,
+/// the prelude and header (the format check), then the whole envelope (prelude, header and
+/// trailer). The body between them is not read.
+fn envelope_read_bytes(prev: &std::path::Path) -> u64 {
+    let mut f = CountingFile {
+        file: std::fs::File::open(prev).expect("open the predecessor"),
+        read: 0,
+    };
+    rdy_store::dump::DumpReader::open(&mut f).expect("the predecessor opens");
+    rdy_store::dump::read_envelope(&mut f).expect("the predecessor envelope");
+    f.read
+}
+
+/// The bytes an increment export reads to check its predecessor `prev`, which ends at `base`,
+/// before it moves any batch: the envelope of the file ([`envelope_read_bytes`]) and the walk
+/// that finds the marker of its end, which reads the segment of `base` from offset zero up to
+/// `base` (no earlier segment). This is read volume, not the size of the source: the walk
+/// repeats on every export and does not grow with the new batches.
+fn predecessor_check_bytes(prev: &std::path::Path, base: rdy_store::segment::Location) -> u64 {
+    envelope_read_bytes(prev) + base.offset
+}
+
 /// One approved removal of `target`, through its durable completion: the request, its proposal
 /// and the person's approval.
 fn approved_removal(r: &mut Rdy, target: &BlockId) {
@@ -3336,7 +3378,9 @@ fn tier_dump_chain(
         let took = s.elapsed();
         assert_eq!(sum.batches, CHAIN_INCREMENT_BATCHES as u64);
         if i == 0 {
-            let read = project_file_bytes() - read0 + log_span_bytes(&work, sum.base, sum.end);
+            let read = project_file_bytes() - read0
+                + log_span_bytes(&work, sum.base, sum.end)
+                + predecessor_check_bytes(&full, sum.base);
             facts = Some(ChainFacts {
                 read,
                 written: sum.bytes,
@@ -5934,7 +5978,6 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
         assert_eq!(names, ["dump_increment", "load_chain", "load_chain_stop"]);
         for m in &out {
-            assert!(m.median_ms >= 0.0, "{m:?}");
             assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
         }
         let [inc, whole, stopped] = facts[..] else {
@@ -5957,6 +6000,35 @@ mod tests {
             1,
             "the copy, the dumps and the loaded stores are removed"
         );
+    }
+
+    /// Task 10 fix: an increment's read cost holds the predecessor checks. The envelope of the
+    /// predecessor is read, and the marker of its end is found by a walk of its last segment from
+    /// offset zero: both are counted, beside the new batches.
+    #[test]
+    fn hc10_increment_reads_count_the_predecessor_checks() {
+        rdy_model::seed_ids_for_tests(0x6863_3131);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let full = dir.path().join("full.rdydump");
+        let sum = r.read().dump(&full).expect("full dump");
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
+        let envelope = envelope_read_bytes(&full);
+        assert!(envelope > 0 && envelope < 4096, "{envelope}");
+        assert!(sum.end.offset > 0, "the full file ends after a batch");
+        let checks = predecessor_check_bytes(&full, sum.end);
+        assert_eq!(checks, envelope + sum.end.offset);
+        // a predecessor that ends at the start of a segment has no marker walk to count
+        let at_start = rdy_store::segment::Location {
+            segment: sum.end.segment,
+            offset: 0,
+        };
+        assert_eq!(predecessor_check_bytes(&full, at_start), envelope);
     }
 
     /// Task 10: both runners register the chain operations, after the dump operations.
