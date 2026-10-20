@@ -1513,19 +1513,13 @@ fn hc3_visit_carried_reads_only_the_carried_frames() {
     assert_eq!(got[0].record, rec);
 }
 
-#[test]
-fn hc3_in_place_check_refuses_exactly_what_the_decoder_refuses() {
+/// Carried record bytes of every target form (`run: None`, a chunk span without residue), each
+/// damaged copy of them (every cut, three flips of every byte, one extra byte), and one record
+/// over each limit: a 1 MiB + 1 text, 100,001 spans, a bad block id, and 16 MiB + 1 bytes. Each
+/// with what it is; the first three are whole records.
+fn carried_cases(src: &Src) -> Vec<(String, Vec<u8>)> {
     use rdy_model::redaction::{CarriedSpan, FramePlace, ReasonClass};
     use rdy_store::bounded;
-    use rdy_store::redaction_carried::check_record;
-    let same = |b: &[u8], what: &str| {
-        assert_eq!(
-            check_record(b),
-            bounded::decode::<RedactionCarried>(b).map(|_| ()),
-            "{what}"
-        );
-    };
-    let src = source();
     let id = BlockId::parse("b-00001").unwrap();
     let mut forms = vec![src.record(false), src.record(true)];
     let mut other = src.record(false);
@@ -1551,24 +1545,26 @@ fn hc3_in_place_check_refuses_exactly_what_the_decoder_refuses() {
         held: true,
     });
     forms.push(other);
+    let mut out = vec![];
+    for (n, r) in forms.iter().enumerate() {
+        out.push((format!("form {n}"), postcard::to_allocvec(r).unwrap()));
+    }
     for (n, r) in forms.iter().enumerate() {
         let bytes = postcard::to_allocvec(r).unwrap();
-        assert_eq!(check_record(&bytes), Ok(()), "form {n}");
         let mut extra = bytes.clone();
         extra.push(0);
-        same(&extra, "a byte after the record");
+        out.push((format!("form {n} with a byte after the record"), extra));
         for cut in 0..bytes.len() {
-            same(&bytes[..cut], &format!("form {n} cut at {cut}"));
+            out.push((format!("form {n} cut at {cut}"), bytes[..cut].to_vec()));
         }
         for at in 0..bytes.len() {
             for flip in [0x01, 0x80, 0xFF] {
                 let mut b = bytes.clone();
                 b[at] ^= flip;
-                same(&b, &format!("form {n} byte {at} ^ {flip:#x}"));
+                out.push((format!("form {n} byte {at} ^ {flip:#x}"), b));
             }
         }
     }
-    // each limit, refused with the decoder's own text
     let mut long = src.record(false);
     long.approved_by.actor = "a".repeat(bounded::MAX_TEXT_BYTES + 1);
     let mut many = src.record(false);
@@ -1583,13 +1579,57 @@ fn hc3_in_place_check_refuses_exactly_what_the_decoder_refuses() {
         .position(|w| w == b"b-00001")
         .expect("the id's text");
     bad_id[at + 1] = b'_';
-    for (what, bytes) in [
-        ("long text", postcard::to_allocvec(&long).unwrap()),
-        ("many spans", postcard::to_allocvec(&many).unwrap()),
-        ("a bad block id", bad_id),
-        ("too many bytes", vec![0; bounded::MAX_RECORD_BYTES + 1]),
-    ] {
-        assert!(check_record(&bytes).is_err(), "{what}");
-        same(&bytes, what);
+    out.push(("long text".into(), postcard::to_allocvec(&long).unwrap()));
+    out.push(("many spans".into(), postcard::to_allocvec(&many).unwrap()));
+    out.push(("a bad block id".into(), bad_id));
+    out.push((
+        "too many bytes".into(),
+        vec![0; bounded::MAX_RECORD_BYTES + 1],
+    ));
+    out
+}
+
+#[test]
+fn hc3_in_place_check_refuses_exactly_what_the_decoder_refuses() {
+    use rdy_store::bounded;
+    use rdy_store::redaction_carried::check_record;
+    let cases = carried_cases(&source());
+    for (what, b) in &cases[..3] {
+        assert_eq!(check_record(b), Ok(()), "{what}");
+    }
+    for (what, b) in &cases[cases.len() - 4..] {
+        // each limit, refused with the decoder's own text
+        assert!(check_record(b).is_err(), "{what}");
+    }
+    for (what, b) in &cases {
+        assert_eq!(
+            check_record(b),
+            bounded::decode::<RedactionCarried>(b).map(|_| ()),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn hc3_fallible_decode_gives_exactly_what_the_decoder_gives() {
+    // the owned decode every carried read uses grows fallibly, and gives what HA1's decoder
+    // gives with the canonical-encoding check: the same record, or the same refusal
+    use rdy_store::bounded::{self, RecordError, TryDecodeError};
+    use rdy_store::redaction_carried::decode_carried;
+    let cases = carried_cases(&source());
+    let mut decoded = 0;
+    for (what, b) in &cases {
+        let want = bounded::decode::<RedactionCarried>(b)
+            .map_err(TryDecodeError::Record)
+            .and_then(|r| match postcard::to_allocvec(&r).unwrap() == *b {
+                true => Ok(r),
+                false => Err(TryDecodeError::Record(RecordError::Decode)),
+            });
+        decoded += usize::from(want.is_ok());
+        assert_eq!(decode_carried(b), want, "{what}");
+    }
+    assert!(decoded >= 3, "the whole records decode");
+    for (what, b) in &cases[cases.len() - 4..] {
+        assert!(decode_carried(b).is_err(), "{what}");
     }
 }

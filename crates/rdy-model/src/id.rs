@@ -108,6 +108,11 @@ impl BlockId {
             .is_some_and(|(prefix, body)| valid_prefix(prefix) && valid_body(body))
     }
 
+    /// The id `s` holds when [`BlockId::parse`] accepts it. It takes `s` and allocates nothing.
+    pub fn from_string(s: String) -> Option<BlockId> {
+        BlockId::is_valid(&s).then_some(BlockId(s))
+    }
+
     pub fn prefix(&self) -> &str {
         self.0.split_once('-').map(|(p, _)| p).unwrap_or("")
     }

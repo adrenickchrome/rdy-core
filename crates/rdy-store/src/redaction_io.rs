@@ -543,7 +543,15 @@ impl Collected {
     /// Notes one data frame of the current batch: its kind decides what is kept. An apply's or
     /// carried record's payload is given when it is hash-checked; one noted without it (over the
     /// record bound, or not matching its hash) is a broken record.
-    fn note(&self, p: &mut Pending, loc: Location, kind: u8, hash: Hash, payload: Option<&[u8]>) {
+    /// A refused growth of a carried record's decode is `out_of_memory`.
+    fn note(
+        &self,
+        p: &mut Pending,
+        loc: Location,
+        kind: u8,
+        hash: Hash,
+        payload: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
         p.since.push((loc.offset, hash));
         let start = *p.start.get_or_insert(loc);
         match kind {
@@ -557,7 +565,12 @@ impl Collected {
             kinds::REDACTION_CARRIED => p.carried.push(CarriedFrame {
                 loc,
                 hash,
-                record: payload.and_then(crate::redaction_carried::decode_record),
+                record: match payload {
+                    Some(b) => {
+                        crate::redaction_carried::decode_record(b).map_err(|_| out_of_memory())?
+                    }
+                    None => None,
+                },
                 batch_start: start,
             }),
             kinds::LANDING => p.landings.push((loc, hash)),
@@ -565,6 +578,7 @@ impl Collected {
             kinds::REDACTION_RESIDUE => p.residues.push((loc, hash)),
             _ => {}
         }
+        Ok(())
     }
 }
 
@@ -708,9 +722,9 @@ pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                     Some(read_payload(f, payload_start, len)?)
                 };
                 let checked = payload.filter(|b| Hash::of(b) == hash);
-                c.note(&mut p, loc, kind, hash, checked.as_deref());
+                c.note(&mut p, loc, kind, hash, checked.as_deref())?;
             } else {
-                c.note(&mut p, loc, kind, hash, None);
+                c.note(&mut p, loc, kind, hash, None)?;
             }
             offset = end;
         }
@@ -1651,7 +1665,7 @@ pub(crate) fn bootstrap_pending(
     batch: &[(u8, Vec<u8>)],
 ) -> Result<Authorization, StoreError> {
     let mut c = collect(readers)?;
-    c.push_batch(start, batch);
+    c.push_batch(start, batch)?;
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
     let mut log = LogAccess {
@@ -1668,17 +1682,21 @@ impl Collected {
     /// Notes `batch` as one sealed batch not yet written, whose first frame goes at `start`: its
     /// frames are kept in `memory`, and the end of the sealed log moves past it (its marker is
     /// not counted). Returns the place after its last data frame.
-    pub(crate) fn push_batch(&mut self, start: Location, batch: &[(u8, Vec<u8>)]) -> Location {
+    pub(crate) fn push_batch(
+        &mut self,
+        start: Location,
+        batch: &[(u8, Vec<u8>)],
+    ) -> Result<Location, StoreError> {
         let mut p = Pending::default();
         let mut at = start;
         for (kind, payload) in batch {
             let hash = Hash::of(payload);
-            self.note(&mut p, at, *kind, hash, Some(payload));
+            self.note(&mut p, at, *kind, hash, Some(payload))?;
             self.memory.insert(at, (*kind, payload.clone()));
             at.offset += HEADER + payload.len() as u64;
         }
         self.seal(p);
-        at
+        Ok(at)
     }
 }
 

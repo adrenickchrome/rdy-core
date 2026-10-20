@@ -28,9 +28,10 @@ use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
     Redaction, RedactionCarried, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
 };
-use rdy_store::bounded;
+use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
+use rdy_store::redaction_carried::decode_carried;
 use rdy_store::segment::Location;
 use rdy_store::transition::Transitions;
 use rdy_store::{StoreError, StoreReader, ViewOp, ViewOpKind};
@@ -1041,10 +1042,15 @@ pub(crate) fn compute_excluding(
             kinds::REDACTION_CARRIED => {
                 // the approver's and the selectors' text; it holds no reason text. A carried
                 // record is decoded within the bounded record decoder's limits, and refused with
-                // its error
+                // its error; a refused growth of its decode is this module's allocation refusal
                 let bytes = reader.get_kind(kinds::REDACTION_CARRIED, &h)?;
-                let c: RedactionCarried = bounded::decode(&bytes)
-                    .map_err(|e| StoreError::Decode(format!("{h} (object kind 23): {e}")))?;
+                let c: RedactionCarried = match decode_carried(&bytes) {
+                    Ok(c) => c,
+                    Err(TryDecodeError::Allocation) => return Err(over(limit::RECORD)),
+                    Err(TryDecodeError::Record(e)) => {
+                        return Err(StoreError::Decode(format!("{h} (object kind 23): {e}")).into());
+                    }
+                };
                 quotes.scan(audit, &rec, false, &c)?;
             }
             kinds::REF_UPDATE => {

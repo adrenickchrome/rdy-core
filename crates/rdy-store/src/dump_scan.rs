@@ -1031,10 +1031,14 @@ impl FrameLog for ChainAccess<'_, '_> {
         f: &'f CarriedFrame,
     ) -> Result<Option<Cow<'f, RedactionCarried>>, StoreError> {
         // the chain keeps no record: it reads this one again by its place
-        Ok(self
-            .record(f.loc, kinds::REDACTION_CARRIED, &f.hash)?
-            .and_then(|p| decode_record(&p))
-            .map(Cow::Owned))
+        let Some(r) = self.find(f.loc).copied() else {
+            return Ok(None);
+        };
+        let Some(p) = self.record(f.loc, kinds::REDACTION_CARRIED, &f.hash)? else {
+            return Ok(None);
+        };
+        let record = decode_record(&p).map_err(|_| damaged(r.offset, drop_text::ALLOCATION))?;
+        Ok(record.map(Cow::Owned))
     }
 
     fn keeps_carried(&self) -> bool {
@@ -2408,8 +2412,9 @@ impl<'p> Scan<'p> {
         end: Location,
     ) -> Result<(), StoreError> {
         let payload = self.lookups.read(&rec_)?;
-        let record =
-            decode_record(&payload).ok_or_else(|| damaged(offset, drop_text::NO_AUTHORIZATION))?;
+        let record = decode_record(&payload)
+            .map_err(|_| damaged(offset, drop_text::ALLOCATION))?
+            .ok_or_else(|| damaged(offset, drop_text::NO_AUTHORIZATION))?;
         drop(payload);
         // one record per source apply: another record of the same source apply conflicts
         match self.carried_by_apply.get(&record.apply) {
@@ -2738,10 +2743,13 @@ impl<'p> Scan<'p> {
                 file: rec_.file,
                 source,
             })?;
-        decode_record(&p).ok_or_else(|| ScanError::Input {
+        let input = |what| ScanError::Input {
             file: rec_.file,
-            source: damaged(offset, drop_text::NO_AUTHORIZATION),
-        })
+            source: damaged(offset, what),
+        };
+        decode_record(&p)
+            .map_err(|_| input(drop_text::ALLOCATION))?
+            .ok_or_else(|| input(drop_text::NO_AUTHORIZATION))
     }
 
     /// The plan of a load that ends at `end` (module docs): the retained frames' actions, the

@@ -40,7 +40,7 @@ use crate::redaction::{
 };
 use crate::redaction_io::{Authorization, Collected, FrameLog, SpanAuth, out_of_memory};
 use crate::segment::{HEADER, Hole, Holes, Location};
-use crate::store::{StoreReader, decode, encode};
+use crate::store::{StoreReader, decode};
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, RedactionCarried, RedactionResidue,
 };
@@ -89,14 +89,116 @@ fn location(p: FramePlace) -> Location {
     }
 }
 
-/// The carried record `payload` holds: at most `MAX_RECORD_BYTES` bytes, decoded by the bounded
-/// decoder, and exactly the canonical encoding of the record it decodes to. None otherwise.
-pub(crate) fn decode_record(payload: &[u8]) -> Option<RedactionCarried> {
-    if payload.len() > MAX_RECORD_BYTES {
-        return None;
+/// A refused growth while a carried record decoded (`bounded::TryDecodeError::Allocation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GrowthRefused;
+
+/// The carried record `payload` holds ([`decode_carried`]); None when it holds none, and
+/// `GrowthRefused` when a growth of the decode was refused.
+pub(crate) fn decode_record(payload: &[u8]) -> Result<Option<RedactionCarried>, GrowthRefused> {
+    match decode_carried(payload) {
+        Ok(r) => Ok(Some(r)),
+        Err(crate::bounded::TryDecodeError::Allocation) => Err(GrowthRefused),
+        Err(crate::bounded::TryDecodeError::Record(_)) => Ok(None),
     }
-    let record = crate::bounded::decode::<RedactionCarried>(payload).ok()?;
-    (encode(&record) == payload).then_some(record)
+}
+
+/// The carried record `payload` holds: at most `MAX_RECORD_BYTES` bytes, decoded by the bounded
+/// decoder (HA1's limits and refusals), and exactly the canonical encoding of the record it
+/// decodes to (`Record(Decode)` otherwise). Every growth of the decode is a fallible reservation
+/// (`owned`), and the encoding check compares as it encodes (`bounded::encodes_as`), so a
+/// refused allocation is `Allocation`, never an abort.
+pub fn decode_carried(payload: &[u8]) -> Result<RedactionCarried, crate::bounded::TryDecodeError> {
+    let record = crate::bounded::try_decode::<owned::Record>(payload)?.into_record()?;
+    if !crate::bounded::encodes_as(&record, payload) {
+        return Err(crate::bounded::RecordError::Decode.into());
+    }
+    Ok(record)
+}
+
+/// The fallible owned shape of a carried record: the fields of `RedactionCarried` and its parts
+/// in their declared order and encoding, with each text and list grown by fallible reservation
+/// (`bounded::TryString`, `bounded::TryVec`). It decodes exactly as `RedactionCarried` does (a
+/// test holds them equal on records of every target form, on each damaged copy, and at each
+/// limit), and moves into one.
+mod owned {
+    use crate::bounded::{Fallible, TryDecodeError, TryString, TryVec};
+    use rdy_model::redaction::{CarriedSpan, ReasonClass, RedactTarget, RedactionCarried};
+    use rdy_model::{BlockId, Hash, Provenance, Role};
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Deserialize)]
+    pub(super) struct Record {
+        request: Hash,
+        apply: Hash,
+        landing: Hash,
+        approved_by: Approver,
+        reason_class: ReasonClass,
+        targets: TryVec<Target>,
+        spans: TryVec<CarriedSpan>,
+    }
+
+    impl Fallible for Record {}
+
+    #[derive(Deserialize)]
+    struct Approver {
+        actor: TryString,
+        run: Option<TryString>,
+        role: Role,
+        at_ms: i64,
+    }
+
+    #[derive(Deserialize)]
+    enum Target {
+        AllVersions(Id),
+        Version { id: Id, version: Hash },
+        Blob(Hash),
+    }
+
+    /// A block id as `BlockId` decodes it: a text that `BlockId::parse` accepts.
+    struct Id(BlockId);
+
+    impl<'de> Deserialize<'de> for Id {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let s = TryString::deserialize(d)?;
+            BlockId::from_string(s.0)
+                .map(Id)
+                .ok_or_else(|| serde::de::Error::custom("bad block id"))
+        }
+    }
+
+    impl Record {
+        /// The record, by moves; its target list is built again by fallible reservation.
+        pub(super) fn into_record(self) -> Result<RedactionCarried, TryDecodeError> {
+            let mut targets = Vec::new();
+            targets
+                .try_reserve_exact(self.targets.0.len())
+                .map_err(|_| TryDecodeError::Allocation)?;
+            targets.extend(self.targets.0.into_iter().map(|t| match t {
+                Target::AllVersions(Id(id)) => RedactTarget::AllVersions(id),
+                Target::Version {
+                    id: Id(id),
+                    version,
+                } => RedactTarget::Version { id, version },
+                Target::Blob(h) => RedactTarget::Blob(h),
+            }));
+            let a = self.approved_by;
+            Ok(RedactionCarried {
+                request: self.request,
+                apply: self.apply,
+                landing: self.landing,
+                approved_by: Provenance {
+                    actor: a.actor.0,
+                    run: a.run.map(|r| r.0),
+                    role: a.role,
+                    at_ms: a.at_ms,
+                },
+                reason_class: self.reason_class,
+                targets,
+                spans: self.spans.0,
+            })
+        }
+    }
 }
 
 /// The bounded decoder's check of a carried record `payload`, in place: the refusal
@@ -578,7 +680,9 @@ impl StoreReader {
                 return Ok(());
             }
             let (_, _, payload) = self.segments().read_hashed(loc).map_err(corrupt)?;
-            let record = decode_record(&payload).ok_or_else(bad)?;
+            let record = decode_record(&payload)
+                .map_err(|_| out_of_memory())?
+                .ok_or_else(bad)?;
             f(CarriedAt {
                 at: loc,
                 hash,

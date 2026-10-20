@@ -1734,3 +1734,47 @@ fn rdx9_reader_allocation_failure_with_a_carried_record_is_a_refusal() {
     }
     assert!(refused > 0);
 }
+
+#[test]
+fn rdx9_carried_decode_allocation_failure_is_a_refusal() {
+    // the owned decode of a carried record, which the chain scan, the tail plan, the store's
+    // carried visit and the engine's report use, and its canonical-encoding check grow by
+    // fallible reservation: each allocation in turn fails, and each is `record allocation
+    // failed`, never an abort
+    use rdy_store::bounded::TryDecodeError;
+    use rdy_store::redaction_carried::decode_carried;
+    let mut no_run = carried_record(2);
+    no_run.approved_by.run = None;
+    no_run.targets.push(RedactTarget::Version {
+        id: BlockId::parse("b-00009").unwrap(),
+        version: Hash::of(b"v"),
+    });
+    no_run.targets.push(RedactTarget::Blob(Hash::of(b"m")));
+    for (n, record) in [carried_record(3), carried_record(1), no_run]
+        .into_iter()
+        .enumerate()
+    {
+        let payload = postcard::to_allocvec(&record).unwrap();
+        assert_eq!(decode_carried(&payload).as_ref(), Ok(&record), "form {n}");
+        let mut refused = 0;
+        for nth in 1u64.. {
+            failing_alloc::arm(nth);
+            let got = decode_carried(&payload);
+            if !failing_alloc::disarm() {
+                assert_eq!(
+                    got.as_ref(),
+                    Ok(&record),
+                    "form {n}: past its last allocation"
+                );
+                break;
+            }
+            assert_eq!(
+                got.as_ref().err(),
+                Some(&TryDecodeError::Allocation),
+                "form {n}: allocation {nth}"
+            );
+            refused += 1;
+        }
+        assert!(refused > 0, "form {n}");
+    }
+}

@@ -648,7 +648,7 @@ impl Ingest {
             .collect();
         frames.extend(encoded.into_iter().map(|b| (kinds::REDACTION_CARRIED, b)));
         let start = self.log.end();
-        let after = c.push_batch(start, &frames);
+        let after = c.push_batch(start, &frames)?;
         match self.mode {
             StoreMode::Holder => {
                 crate::redaction_import::holder_of(&c, self.log.readers(), start, after)?;
