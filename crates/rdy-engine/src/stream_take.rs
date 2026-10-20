@@ -33,6 +33,10 @@
 //! Steps 2 to 5 are `render_source::check_snapshots`, which a stream render runs too, with
 //! nothing held.
 //!
+//! The take's lifecycle is written once (`take_checked`): a publication take
+//! (`crate::publication_take`) runs it with one more check after these, its profile facts and
+//! the host's verdict, before the receiver caps and the append; [`take`] runs it with none.
+//!
 //! A record that breaks a structural rule is `E_BAD_RECORD` with the holder fsck's own text (a
 //! signature its fsck code), so no take acknowledges an upload that the holder's fsck would then
 //! refuse. An ANSWER's record rules are the batch check's (`sync_stream::check_batch`), which the
@@ -46,6 +50,7 @@
 //! A caller whose reply was lost repairs from the holder's tags and object-key presence: the
 //! take keeps no receipt, transaction id or timer.
 use crate::error::{E_BAD_INPUT, E_REDACTION_STALE, E_REPO_MISMATCH, E_TAG_EXISTS, RdyError};
+use crate::publication_take::PublicationRefusal;
 use crate::render_source::check_snapshots;
 use crate::stream_error::to_rdy;
 use crate::version::parse_version;
@@ -59,6 +64,7 @@ use rdy_store::take_batch::{
 use rdy_store::{StoreError, StoreReader};
 use serde::{Serialize, Serializer};
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::fs::File;
 
 /// Where the holder's log ends after a take.
@@ -116,15 +122,38 @@ pub fn take(
     batches: &[File],
     target: UploadTarget,
 ) -> Result<TakeOutcome, RdyError> {
-    check_input_bounds(batches.len(), &target).map_err(to_rdy)?;
+    match take_checked::<(), Infallible>(rdy, batches, target, |_, _, _| Ok(())) {
+        Ok((outcome, ())) => Ok(outcome),
+        Err(PublicationRefusal::Core(e)) => Err(e),
+        Err(PublicationRefusal::Verdict(never)) => match never {},
+    }
+}
+
+/// The one take lifecycle ([`take`] is this with nothing to add). `check` runs once inside the
+/// store's validation callback, under the writer, after every check of [`validate`] passed and
+/// before the receiver caps and the append: it gets the checked source (the upload over the
+/// holder, approved removals as their drops), the upload's facts and the tag that survives, and
+/// its value is kept only once it returns `Ok`. A refusal of either is returned as it was given,
+/// before anything is appended; the store's own errors are the engine's ([`take_error`]).
+pub(crate) fn take_checked<T, E>(
+    rdy: &mut Rdy,
+    batches: &[File],
+    target: UploadTarget,
+    check: impl FnOnce(
+        &mut dyn ObjectSource,
+        &UploadFacts,
+        &TagChoice,
+    ) -> Result<T, PublicationRefusal<E>>,
+) -> Result<(TakeOutcome, T), PublicationRefusal<E>> {
+    check_input_bounds(batches.len(), &target).map_err(|e| PublicationRefusal::Core(to_rdy(e)))?;
     // a project is refused before anything of it is sealed (the store refuses it too)
     if !rdy.is_holder() {
         return Err(take_error(TakeError::ModeMismatch));
     }
     // a take is a batch of its own: one a raw write left open is sealed and published first
-    rdy.seal_open()?;
+    rdy.seal_open().map_err(PublicationRefusal::Core)?;
     // the writer is held for the whole call, so the tags read here are the ones the take sees
-    let held = held_tags(&rdy.store)?;
+    let held = held_tags(&rdy.store).map_err(PublicationRefusal::Core)?;
     let damage = if same_version_pair(&held) {
         rdy.check_holder_tags().err()
     } else {
@@ -133,21 +162,32 @@ pub fn take(
     let epoch = rdy.store.redaction_epoch();
     let reader = rdy.store.reader();
     let (held, damage) = (&held, &damage);
+    let mut kept: Option<T> = None;
+    let slot = &mut kept;
     // the writer's held batches are off for the take, which seals its own batch, as for the
     // store's other self-sealing writes
-    rdy.store.set_held(false)?;
+    rdy.store
+        .set_held(false)
+        .map_err(|e| PublicationRefusal::Core(e.into()))?;
     let taken = rdy
         .store
         .take_batches(batches, &target, move |source, facts| {
-            validate(&reader, source, facts, held, damage.as_ref())
+            let choice = validate(&reader, source, facts, held, damage.as_ref())
+                .map_err(PublicationRefusal::Core)?;
+            *slot = Some(check(source, facts, &choice)?);
+            Ok(choice)
         });
-    rdy.store.set_held(true)?;
+    rdy.store
+        .set_held(true)
+        .map_err(|e| PublicationRefusal::Core(e.into()))?;
     match taken {
         Ok(t) => {
             if t.frames > 0 {
-                republish(rdy, epoch)?;
+                republish(rdy, epoch).map_err(PublicationRefusal::Core)?;
             }
-            Ok(outcome(t))
+            // the store calls the check once on every path that returns a take
+            let value = kept.ok_or_else(|| PublicationRefusal::Core(lost_result()))?;
+            Ok((outcome(t), value))
         }
         Err(e) => {
             if matches!(e, TakeError::Store(StoreError::RedactionPending)) {
@@ -158,6 +198,16 @@ pub fn take(
             Err(take_error(e))
         }
     }
+}
+
+/// E_INTERNAL: a take returned without the value of its check (`with_writer_result`'s text for
+/// a lost writer result).
+fn lost_result() -> RdyError {
+    RdyError::new(
+        crate::E_INTERNAL,
+        "a write returned without its result",
+        "report this as a bug in rdy",
+    )
 }
 
 /// Publishes the holder's state again from its store after a take wrote a batch. A take that
@@ -190,13 +240,13 @@ fn outcome(t: BatchTaken) -> TakeOutcome {
 }
 
 /// A take's error as the engine's: the stream conversion for a stream refusal, the existing
-/// mapping for a store error, the validation's own error, and the take's three structured
-/// refusals.
-fn take_error(e: TakeError<RdyError>) -> RdyError {
-    match e {
+/// mapping for a store error, the validation's own refusal unchanged (a core error or the
+/// caller's own), and the take's three structured refusals.
+fn take_error<E>(e: TakeError<PublicationRefusal<E>>) -> PublicationRefusal<E> {
+    PublicationRefusal::Core(match e {
+        TakeError::Validation(refusal) => return refusal,
         TakeError::Store(e) => e.into(),
         TakeError::Stream(e) => to_rdy(e),
-        TakeError::Validation(e) => e,
         TakeError::UncoveredChange(h) => uncovered_change(h),
         TakeError::ModeMismatch => RdyError::new(
             E_BAD_INPUT,
@@ -208,7 +258,7 @@ fn take_error(e: TakeError<RdyError>) -> RdyError {
             format!("stream repo {source} does not match holder repo {target}"),
             "use the holder for the stream's repo",
         ),
-    }
+    })
 }
 
 /// E_REDACTION_STALE: change `h` embeds a block version an imported removal removes, and no

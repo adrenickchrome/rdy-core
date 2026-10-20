@@ -9,6 +9,7 @@
 pub mod history;
 pub mod maintenance;
 pub mod publication;
+pub mod publication_take;
 pub mod signatures;
 mod store;
 pub mod stream;
@@ -16,6 +17,9 @@ pub mod take;
 mod value;
 
 pub use publication::{ProfileFacts, profile_facts};
+pub use publication_take::{
+    PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
+};
 pub use rdy_engine::RdyError;
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::meta::Origin;

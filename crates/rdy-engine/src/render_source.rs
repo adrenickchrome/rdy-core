@@ -53,6 +53,7 @@ use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::{MAX_STREAM_BYTES, StreamRecord};
 use rdy_store::take_batch::{UploadFacts, UploadTarget, check_input_bounds};
 use rdy_store::{StoreError, StoreReader, bounded};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
@@ -513,6 +514,9 @@ pub(crate) trait Held {
     fn holds(&self, key: &ObjectKey) -> Result<bool, StoreError>;
     /// The value of the receiver's `answer/tag-object:<tag>` ref, if any.
     fn tag_answer(&self, tag: &Hash) -> Result<Option<Vec<u8>>, StoreError>;
+    /// The approved removal request of the receiver that removes or names the object `key`
+    /// (`StoreReader::redaction_of`), if any.
+    fn redaction_of(&self, key: &ObjectKey) -> Result<Option<Hash>, StoreError>;
 }
 
 impl Held for StoreReader {
@@ -522,6 +526,10 @@ impl Held for StoreReader {
 
     fn tag_answer(&self, tag: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.get_ref(&rdy_store::holder::answer_tag_object_ref(tag))
+    }
+
+    fn redaction_of(&self, key: &ObjectKey) -> Result<Option<Hash>, StoreError> {
+        StoreReader::redaction_of(self, key.kind, &key.hash)
     }
 }
 
@@ -534,6 +542,10 @@ impl Held for NothingHeld {
     }
 
     fn tag_answer(&self, _: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(None)
+    }
+
+    fn redaction_of(&self, _: &ObjectKey) -> Result<Option<Hash>, StoreError> {
         Ok(None)
     }
 }
@@ -880,42 +892,288 @@ fn check_landings(
         if !checked.insert(landing.state) {
             continue;
         }
-        let snapshot_key = ObjectKey {
-            kind: kinds::SNAPSHOT,
-            hash: landing.state,
-        };
-        let snapshot = typed::<StateSnapshot>(source, snapshot_key)?
-            .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, snapshot_key)))?;
-        // the kept blocks are this snapshot's only, charged before any other is read
-        let named: HashSet<&Hash> = snapshot.blocks.values().collect();
-        last.retain(|v, _| named.contains(v));
-        drop(named);
-        let mut budget = SnapshotBudget::new();
-        for b in last.values() {
-            budget.charge(b)?;
-        }
-        let mut blocks: BTreeMap<Hash, Block> = BTreeMap::new();
-        for (id, version) in &snapshot.blocks {
-            let (block, charged) = match last.remove(version) {
-                Some(b) => (b, true),
-                None => match read_block(source, *version)? {
-                    Some(b) => (b, false),
-                    // a removed version no residue describes reads as nothing
-                    None => continue,
-                },
-            };
-            if block.id != *id {
-                return Err(foreign_version(&landing.state, id, version, &block.id));
-            }
-            if !charged {
-                budget.charge(&block)?;
-            }
-            blocks.insert(*version, block);
-        }
-        check_snapshot_limits(blocks.values(), |h| manifest(source, *h))?;
+        let (_, blocks) = snapshot_blocks(source, landing.state, &mut last)?;
         last = blocks;
     }
     Ok(())
+}
+
+/// The blocks of snapshot `state`, by version, read through `source` within the Publications
+/// limits of one snapshot (see [`check_landings`]): each entry must name a version of its own
+/// block, a removed version reads as its approved residue's stub (and as nothing when no residue
+/// describes it), every block is charged to the snapshot's budget before it is kept, and the
+/// whole snapshot then keeps [`check_snapshot_limits`]. The blocks of `last` that the snapshot
+/// names are reused, charged first; `last` is left empty. Returns the snapshot record too.
+fn snapshot_blocks(
+    source: &mut dyn ObjectSource,
+    state: Hash,
+    last: &mut BTreeMap<Hash, Block>,
+) -> Result<(StateSnapshot, BTreeMap<Hash, Block>), RdyError> {
+    let snapshot_key = ObjectKey {
+        kind: kinds::SNAPSHOT,
+        hash: state,
+    };
+    let snapshot = typed::<StateSnapshot>(source, snapshot_key)?
+        .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, snapshot_key)))?;
+    // the kept blocks are this snapshot's only, charged before any other is read
+    let named: HashSet<&Hash> = snapshot.blocks.values().collect();
+    last.retain(|v, _| named.contains(v));
+    drop(named);
+    let mut budget = SnapshotBudget::new();
+    for b in last.values() {
+        budget.charge(b)?;
+    }
+    let mut blocks: BTreeMap<Hash, Block> = BTreeMap::new();
+    for (id, version) in &snapshot.blocks {
+        let (block, charged) = match last.remove(version) {
+            Some(b) => (b, true),
+            None => match read_block(source, *version)? {
+                Some(b) => (b, false),
+                // a removed version no residue describes reads as nothing
+                None => continue,
+            },
+        };
+        if block.id != *id {
+            return Err(foreign_version(&state, id, version, &block.id));
+        }
+        if !charged {
+            budget.charge(&block)?;
+        }
+        blocks.insert(*version, block);
+    }
+    last.clear();
+    check_snapshot_limits(blocks.values(), |h| manifest(source, *h))?;
+    Ok((snapshot, blocks))
+}
+
+/// The state of landing `landing`, read through `source` (a take's upload over its holder, with
+/// approved removals as their drops) and materialized within the Publications limits of one
+/// snapshot: the bounded read [`check_landings`] makes of each new landing, with the same
+/// errors. A removed block reads as its approved residue's stub, with its original version
+/// hash; one no residue describes reads as nothing.
+pub(crate) fn materialize_landing(
+    source: &mut dyn ObjectSource,
+    landing: Hash,
+) -> Result<Materialized, RdyError> {
+    let key = ObjectKey {
+        kind: kinds::LANDING,
+        hash: landing,
+    };
+    let record = typed::<LandingRecord>(source, key)?
+        .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, key)))?;
+    let (snapshot, blocks) = snapshot_blocks(source, record.state, &mut BTreeMap::new())?;
+    let by_id = blocks.into_values().map(|b| (b.id.clone(), b)).collect();
+    Ok(Materialized::build(snapshot, by_id))
+}
+
+// ---------------------------------------------------------------------------------------------
+// the publication reads of a take's checked source
+
+/// The settings a publication take resolves its profile with: the holder's pack and the title
+/// and description its published state captured.
+pub(crate) struct SourceSettings<'a> {
+    pub(crate) pack: &'a Pack,
+    pub(crate) title: &'a str,
+    pub(crate) description: Option<&'a str>,
+}
+
+/// A [`PublicationSource`] over a take's checked source (the upload over the holder, approved
+/// removals as their drops), borrowed for one resolution, with the holder's captured settings.
+/// Nothing of the upload is collected: each read goes to the source, through a `RefCell` that
+/// lends its cursor to the trait's shared reads. A blob is masked as the holder will mask it once
+/// the take is sealed: by a removal that names its manifest (the holder's own, then one of the
+/// upload's applies) or by a dropped chunk.
+pub(crate) struct ObjectPublicationSource<'a, 's> {
+    source: RefCell<&'a mut (dyn ObjectSource + 's)>,
+    held: &'a dyn Held,
+    facts: &'a UploadFacts,
+    settings: SourceSettings<'a>,
+    /// The manifests the upload's own applies name, to their requests; read once, when a blob
+    /// is first asked about.
+    marks: RefCell<Option<BTreeMap<Hash, Hash>>>,
+}
+
+impl<'a, 's> ObjectPublicationSource<'a, 's> {
+    pub(crate) fn new(
+        source: &'a mut (dyn ObjectSource + 's),
+        held: &'a dyn Held,
+        facts: &'a UploadFacts,
+        settings: SourceSettings<'a>,
+    ) -> ObjectPublicationSource<'a, 's> {
+        ObjectPublicationSource {
+            source: RefCell::new(source),
+            held,
+            facts,
+            settings,
+            marks: RefCell::new(None),
+        }
+    }
+
+    /// The present record `key`, decoded within its bounds; None when the source does not hold
+    /// it intact.
+    fn typed<T: serde::de::DeserializeOwned>(&self, key: ObjectKey) -> Result<Option<T>, RdyError> {
+        typed(&mut **self.source.borrow_mut(), key)
+    }
+
+    /// The record `key` as the source gives it.
+    fn record(&self, key: ObjectKey) -> Result<Option<StreamRecord>, RdyError> {
+        self.source.borrow_mut().record(key).map_err(to_rdy)
+    }
+
+    /// The request of the approved apply `apply`.
+    fn request_of(&self, apply: Hash) -> Result<Hash, RdyError> {
+        let key = ObjectKey {
+            kind: kinds::REDACTION_APPLY,
+            hash: apply,
+        };
+        self.typed::<RedactionApply>(key)?
+            .map(|a| a.request)
+            .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, key)))
+    }
+
+    /// The request that names blob manifest `h`: the holder's, else the first of the upload's
+    /// new applies (in key order, as the take masks) whose request names it.
+    fn manifest_mark(&self, h: &Hash) -> Result<Option<Hash>, RdyError> {
+        let key = ObjectKey {
+            kind: kinds::BLOB_MANIFEST,
+            hash: *h,
+        };
+        if let Some(request) = self.held.redaction_of(&key)? {
+            return Ok(Some(request));
+        }
+        if self.marks.borrow().is_none() {
+            let mut marks = BTreeMap::new();
+            let applies = self
+                .facts
+                .objects
+                .iter()
+                .filter(|k| k.kind == kinds::REDACTION_APPLY);
+            for apply in applies {
+                if self.held.holds(apply)? {
+                    continue;
+                }
+                let request = self.request_of(apply.hash)?;
+                let request_key = ObjectKey {
+                    kind: kinds::REDACTION,
+                    hash: request,
+                };
+                let Some(r) = self.typed::<rdy_model::redaction::Redaction>(request_key)? else {
+                    continue;
+                };
+                for b in &r.manifest.blobs {
+                    marks.entry(*b).or_insert(request);
+                }
+            }
+            *self.marks.borrow_mut() = Some(marks);
+        }
+        Ok(self.marks.borrow().as_ref().and_then(|m| m.get(h).copied()))
+    }
+
+    /// The one removal walk of blob `h`: the manifest's mark, then each chunk's drop. `step`
+    /// answers each request and may break the walk. A blob the source lacks has none.
+    fn walk(
+        &self,
+        h: &Hash,
+        step: &mut dyn FnMut(Hash) -> Result<ControlFlow<()>, RdyError>,
+    ) -> Result<(), RdyError> {
+        let Some(manifest) = PublicationSource::manifest(self, h)? else {
+            return Ok(());
+        };
+        if let Some(request) = self.manifest_mark(h)?
+            && step(request)?.is_break()
+        {
+            return Ok(());
+        }
+        for c in &manifest.chunks {
+            let key = ObjectKey {
+                kind: kinds::BLOB_CHUNK,
+                hash: *c,
+            };
+            if let Some(StreamRecord::Dropped { apply, .. }) = self.record(key)?
+                && step(self.request_of(apply)?)?.is_break()
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PublicationSource for ObjectPublicationSource<'_, '_> {
+    fn pack(&self) -> &Pack {
+        self.settings.pack
+    }
+
+    fn title(&self) -> &str {
+        self.settings.title
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.settings.description
+    }
+
+    fn manifest(&self, blob: &Hash) -> Result<Option<BlobManifest>, RdyError> {
+        self.typed(ObjectKey {
+            kind: kinds::BLOB_MANIFEST,
+            hash: *blob,
+        })
+    }
+
+    fn blob_available(&self, blob: &Hash) -> Result<bool, RdyError> {
+        if PublicationSource::manifest(self, blob)?.is_none() {
+            return Ok(false);
+        }
+        Ok(self.removed_blob(blob)?.is_none())
+    }
+
+    fn blob(&self, blob: &Hash) -> Result<Vec<u8>, RdyError> {
+        crate::publication_take::count_blob_payload_read();
+        if let Some(request) = self.removed_blob(blob)? {
+            return Err(StoreError::Redacted { request }.into());
+        }
+        let m = PublicationSource::manifest(self, blob)?.ok_or(StoreError::NotFound(*blob))?;
+        let l = publication::limits();
+        if m.len > l.blob {
+            return Err(publication::limit("blob", l.blob, "bytes"));
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(m.len as usize)
+            .map_err(|_| to_rdy(StreamError::allocation(None, 0)))?;
+        let mut left = m.len;
+        for c in &m.chunks {
+            let key = ObjectKey {
+                kind: kinds::BLOB_CHUNK,
+                hash: *c,
+            };
+            let bytes = match self.record(key)? {
+                Some(StreamRecord::Present { payload, .. }) => payload,
+                _ => return Err(StoreError::NotFound(*c).into()),
+            };
+            left = rdy_store::check_chunk_len(blob, left, bytes.len() as u64)?;
+            out.extend_from_slice(&bytes);
+        }
+        Ok(out)
+    }
+
+    fn removed_blob(&self, blob: &Hash) -> Result<Option<Hash>, RdyError> {
+        let mut first = None;
+        self.walk(blob, &mut |request| {
+            first = Some(request);
+            Ok(ControlFlow::Break(()))
+        })?;
+        Ok(first)
+    }
+
+    fn visit_blob_redactions(
+        &self,
+        blob: &Hash,
+        visit: &mut dyn FnMut(Hash) -> Result<(), RdyError>,
+    ) -> Result<(), RdyError> {
+        self.walk(blob, &mut |request| {
+            visit(request)?;
+            Ok(ControlFlow::Continue(()))
+        })
+    }
 }
 
 /// E_BAD_RECORD: snapshot `s` names `version`, a version of another block, for block `id` (the

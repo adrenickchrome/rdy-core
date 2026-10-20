@@ -54,6 +54,7 @@ pub mod pending;
 pub mod proposal_show;
 pub mod publication;
 pub mod publication_manifest;
+pub mod publication_take;
 mod publish;
 pub mod quarantine;
 mod query;
