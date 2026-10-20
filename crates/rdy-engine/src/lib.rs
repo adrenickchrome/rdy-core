@@ -75,6 +75,7 @@ pub mod signing_config;
 pub mod signing_crypto;
 pub mod signing_read;
 pub mod site_scope;
+pub mod site_target;
 pub mod stream_check;
 pub mod stream_error;
 pub mod stream_export;
