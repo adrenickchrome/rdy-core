@@ -93,6 +93,40 @@ pub fn set_daemon_probe(probe: DaemonProbe) {
     let _ = DAEMON_PROBE.set(probe);
 }
 
+/// A step of a load's placement that a test can make fail (test hook): the rename of
+/// `.rdy/store.loading` to `.rdy/store`, or the sync of `.rdy` right after it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceFault {
+    Rename,
+    SyncAfterRename,
+}
+
+thread_local! {
+    static PLACE_FAULT: std::cell::Cell<Option<PlaceFault>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests only: the next load on this thread fails at placement step `fault` with an injected
+/// i/o error, before the step runs. None disarms it.
+#[doc(hidden)]
+pub fn fail_next_placement_for_tests(fault: Option<PlaceFault>) {
+    PLACE_FAULT.with(|c| c.set(fault));
+}
+
+/// The injected failure of placement step `step`, if one is armed on this thread (it disarms).
+fn place_fault(step: PlaceFault) -> std::io::Result<()> {
+    PLACE_FAULT.with(|c| match c.get() {
+        Some(f) if f == step => {
+            c.set(None);
+            Err(std::io::Error::other(match step {
+                PlaceFault::Rename => "injected rename failure",
+                PlaceFault::SyncAfterRename => "injected sync failure",
+            }))
+        }
+        _ => Ok(()),
+    })
+}
+
 /// What `rdy load` did: the project, the dump's formats, what it held, the project files it
 /// wrote and kept, the counts of landings, tags and views, and the `fsck` report.
 #[derive(Clone, Debug, Serialize)]
@@ -346,9 +380,13 @@ pub(crate) fn place(
     }
     let lock = StoreLock::take(&loading).map_err(|e| target_error(&loading, e))?;
     made.lock = Some(lock.clone());
-    std::fs::rename(&loading, &store).map_err(|e| io_at(&loading, e))?;
+    place_fault(PlaceFault::Rename)
+        .and_then(|()| std::fs::rename(&loading, &store))
+        .map_err(|e| io_at(&loading, e))?;
     made.store = Some(store);
-    sync_dir(&dot).map_err(|e| io_at(&dot, e))?;
+    place_fault(PlaceFault::SyncAfterRename)
+        .and_then(|()| sync_dir(&dot))
+        .map_err(|e| io_at(&dot, e))?;
     // step 7: the index build, fsck and the counts
     let (fsck, tags, views) = check(project, &carried, &lock, made, after_open)?;
     Ok(Placed {

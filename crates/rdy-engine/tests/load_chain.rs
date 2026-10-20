@@ -6,7 +6,7 @@
 //! written, even for a moment. Each file's trailer must be the one the pre-pass read, and no
 //! store takes its place before every file passed; a failure restores the target.
 use rdy_engine::dump_stop::DumpStop;
-use rdy_engine::load::{LoadSummary, load, load_chain};
+use rdy_engine::load::{LoadSummary, PlaceFault, fail_next_placement_for_tests, load, load_chain};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::*;
 use rdy_model::redaction::{RedactionApply, RedactionCarried};
@@ -265,6 +265,7 @@ fn watch(needle: &'static str) -> Watch {
         if contains(b, needle) {
             s.set(true);
         }
+        Ok(())
     })));
     Watch { seen, writes }
 }
@@ -277,9 +278,31 @@ fn at_first_write(step: impl FnOnce() + 'static) -> Watch {
         if let Some(f) = step.borrow_mut().take() {
             f();
         }
+        Ok(())
     })));
     Watch {
         seen: Rc::new(Cell::new(false)),
+        writes: Rc::new(Cell::new(0)),
+    }
+}
+
+/// Refuses one segment write of this thread with an injected i/o error: the first one whose
+/// bytes `pick` chooses, given the length of the write before it. Nothing of that write reaches
+/// the segment; the writes before it do. The guard's `seen` tells whether the fault fired.
+fn fail_write(mut pick: impl FnMut(&[u8], usize) -> bool + 'static) -> Watch {
+    let seen = Rc::new(Cell::new(false));
+    let s = seen.clone();
+    let mut last = 0;
+    on_segment_write(Some(Box::new(move |b: &[u8]| {
+        let before = std::mem::replace(&mut last, b.len());
+        if !s.get() && pick(b, before) {
+            s.set(true);
+            return Err(std::io::Error::other("injected segment write failure"));
+        }
+        Ok(())
+    })));
+    Watch {
+        seen,
         writes: Rc::new(Cell::new(0)),
     }
 }
@@ -442,7 +465,10 @@ fn hc7_stopped_load_has_exact_prefix_residues_carried_upgrade_order() {
         first(&segs(&alone))[..]
     );
     // then one batch: the missing residues by hash, then the carried record; no upgrade batch
-    // follows, as the pair (3, 16) is this rdy's
+    // follows, as the pair (3, 16) is this rdy's. Both spans are held, yet both residues are
+    // here: a carried BLOCK or CHANGE span keeps its residue record, held or not (D-QF2HQ's span
+    // carries a residue, and the carried check needs it; a residue holds no removed content).
+    // Zeros are written only for a span with held: false (ruling task-7)
     let tail = batches(&to, c.f0_end, None);
     assert_eq!(tail.len(), 1, "{tail:?}");
     let kinds_of: Vec<u8> = tail[0].frames.iter().map(|f| f.kind()).collect();
@@ -951,6 +977,84 @@ fn hc7_failures_at_each_placement_step_restore_only_owned_paths() {
     want.insert(".rdy".into(), None);
     want.insert(".rdy/store".into(), None);
     assert_eq!(tree(&to), want);
+
+    // the ingest's first segment write fails: nothing of the load stays
+    let (to, before) = kept_target(d, "write");
+    let g = fail_write(|_, _| true);
+    let e = chain_err(&files, &to, None);
+    assert!(g.seen.get(), "the fault fired");
+    drop(g);
+    assert_eq!(e.code, E_IO, "{e:?}");
+    assert!(
+        e.message.contains("injected segment write failure"),
+        "{e:?}"
+    );
+    assert_eq!(tree(&to), before);
+
+    // a write that fails half way through a frame: the removed frame's header is in the
+    // segment, its zeros are refused; the torn store.loading goes, and the target is as it was
+    let c = removed();
+    let (to, before) = kept_target(c.dir.path(), "torn");
+    let g = fail_write(|b, before| before == HEAD && b.iter().all(|x| *x == 0));
+    let e = chain_err(&c.files(), &to, None);
+    assert!(g.seen.get(), "the fault fired after a frame header");
+    drop(g);
+    assert_eq!(e.code, E_IO, "{e:?}");
+    assert_eq!(tree(&to), before);
+
+    // the ingest's sync of the segments directory fails (the directory moved under the open
+    // log): its error is the target's, and store.loading with all it holds goes. (A directory
+    // that holds an open file cannot move on Windows.)
+    #[cfg(unix)]
+    {
+        let (to, before) = kept_target(d, "sync");
+        let loading = to.join(".rdy/store.loading");
+        let at = loading.clone();
+        let g = at_first_write(move || {
+            std::fs::rename(at.join("segments"), at.join("moved")).unwrap();
+        });
+        let e = chain_err(&files, &to, None);
+        drop(g);
+        assert_eq!(e.code, E_IO, "{e:?}");
+        assert!(
+            e.message.starts_with(&loading.display().to_string()),
+            "{e:?}"
+        );
+        assert_eq!(tree(&to), before);
+    }
+
+    // the ingest cannot write FORMAT (a directory has its name): the same
+    let (to, before) = kept_target(d, "format");
+    let at = to.join(".rdy/store.loading/FORMAT");
+    let g = at_first_write(move || std::fs::create_dir(&at).unwrap());
+    let e = chain_err(&files, &to, None);
+    drop(g);
+    assert_eq!(e.code, E_IO, "{e:?}");
+    assert_eq!(tree(&to), before);
+
+    // the rename of store.loading to store fails: the store, the project files and the
+    // directories the load made are gone, in a target that existed and in one that did not
+    let (to, before) = kept_target(d, "rename");
+    fail_next_placement_for_tests(Some(PlaceFault::Rename));
+    let e = chain_err(&files, &to, None);
+    assert_eq!(e.code, E_IO, "{e:?}");
+    assert!(e.message.contains("injected rename failure"), "{e:?}");
+    assert_eq!(tree(&to), before);
+    let new = d.join("new-rename").join("deeper");
+    fail_next_placement_for_tests(Some(PlaceFault::Rename));
+    chain_err(&files, &new, None);
+    assert!(!d.join("new-rename").exists());
+
+    // the sync of `.rdy` after the rename fails: the placed store goes back to its loading
+    // name and is removed with everything else the load made
+    let (to, before) = kept_target(d, "placed");
+    fail_next_placement_for_tests(Some(PlaceFault::SyncAfterRename));
+    let e = chain_err(&files, &to, None);
+    assert_eq!(e.code, E_IO, "{e:?}");
+    assert!(e.message.contains("injected sync failure"), "{e:?}");
+    assert_eq!(tree(&to), before);
+    // a disarmed fault does nothing: the next load passes
+    chain_load(&files, &d.join("after-faults"), None);
 
     // a load that fails its fsck after the rename: the store, the files and the directories
     // it made are gone, and a target that did not exist does not exist

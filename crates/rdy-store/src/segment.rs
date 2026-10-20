@@ -188,9 +188,10 @@ fn count_hashed(n: usize) {
 }
 
 /// A test observer of segment writes: it sees each byte slice a log append is about to write,
-/// before the write, and keeps nothing of it unless it chooses to.
+/// before the write, and keeps nothing of it unless it chooses to. An error it returns is the
+/// write's (a test fault): nothing of that slice is written.
 #[doc(hidden)]
-pub type WriteObserver = Box<dyn FnMut(&[u8])>;
+pub type WriteObserver = Box<dyn FnMut(&[u8]) -> io::Result<()>>;
 
 thread_local! {
     static WRITE_OBSERVER: std::cell::RefCell<Option<WriteObserver>> =
@@ -202,7 +203,8 @@ thread_local! {
 static OBSERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Test hook: every log append on this thread (frames, markers, a dropped frame's header and
-/// zeros) calls `observer` with each byte slice right before it is written. None removes it.
+/// zeros) calls `observer` with each byte slice right before it is written; an error it returns
+/// fails that write before any of its bytes is written. None removes it.
 #[doc(hidden)]
 pub fn on_segment_write(observer: Option<WriteObserver>) {
     if observer.is_some() {
@@ -211,20 +213,21 @@ pub fn on_segment_write(observer: Option<WriteObserver>) {
     WRITE_OBSERVER.with(|o| *o.borrow_mut() = observer);
 }
 
-/// Shows `bytes`, about to be written to a segment, to this thread's write observer.
-fn observe(bytes: &[u8]) {
+/// Shows `bytes`, about to be written to a segment, to this thread's write observer, and
+/// returns its verdict.
+fn observe(bytes: &[u8]) -> io::Result<()> {
     if OBSERVED.load(std::sync::atomic::Ordering::Relaxed) {
-        WRITE_OBSERVER.with(|o| {
-            if let Some(f) = o.borrow_mut().as_mut() {
-                f(bytes);
-            }
+        return WRITE_OBSERVER.with(|o| match o.borrow_mut().as_mut() {
+            Some(f) => f(bytes),
+            None => Ok(()),
         });
     }
+    Ok(())
 }
 
 /// A positioned write of segment bytes, shown first to the write observer.
 fn write_observed(f: &File, bytes: &[u8], at: u64) -> io::Result<()> {
-    observe(bytes);
+    observe(bytes)?;
     pio::write_all_at(f, bytes, at)
 }
 

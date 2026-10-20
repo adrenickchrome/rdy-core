@@ -479,7 +479,8 @@ fn rdx9_a_forged_drop_preserves_the_target() {
         let e = load(&forged, &to).unwrap_err();
         assert_eq!(e.code, E_DUMP, "{name}: {e:?}");
         // a load's pre-pass checks the batch order before it frames a batch's drops; the clone's
-        // stream reader still meets the overflow first
+        // stream reader still meets the overflow first. Both refuse before any write (D-2FMRR;
+        // ruling task-7 allows this load reason)
         let load_want = match name {
             "offset" => "a batch does not follow the batch before it",
             _ => want,
