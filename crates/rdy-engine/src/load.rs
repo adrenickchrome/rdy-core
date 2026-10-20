@@ -4,7 +4,8 @@
 //! the log (the same replay as a reindex), then the load runs `fsck`.
 //!
 //! The steps (closed):
-//! 1. Read the dump's prelude and header.
+//! 1. Read the dump's prelude and header. A dump of format 3 must be a full dump: an increment
+//!    alone is refused before anything is read past its header.
 //! 2. Read its project files, and check the target before anything is written: not in a
 //!    project's `.rdy` directory, no `.rdy/store`, no `.rdy/store.loading`, no live daemon that
 //!    the target's socket record ties to its `.rdy` (final ruling 1: a daemon that still serves
@@ -43,6 +44,7 @@ use crate::error::{E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_IO, E_LOCKED, RdyErr
 use crate::fsck::FsckReport;
 use crate::wc::ignore::IGNORE_FILE;
 use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal, Frame};
+use rdy_store::dump_chain::DumpKind;
 use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
@@ -132,6 +134,13 @@ pub(crate) struct Opened<R: Read> {
 /// name, as in [`load_from`].
 pub(crate) fn open_stream<R: Read>(source: &Path, r: R) -> Result<Opened<R>, RdyError> {
     let (reader, dump_format, header) = DumpReader::open(r).map_err(|e| read_error(source, e))?;
+    if header.chain.is_some_and(|c| c.kind == DumpKind::Increment) {
+        return Err(RdyError::new(
+            E_DUMP,
+            format!("{}: a full dump is required", source.display()),
+            "load the full dump that rdy dump wrote",
+        ));
+    }
     Ok(Opened {
         reader,
         dump_format,

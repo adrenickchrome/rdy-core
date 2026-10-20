@@ -72,27 +72,66 @@
 //! reader checks only the record's own rules; the ingest checks the authorization against the
 //! complete stream before it finishes the store (`crate::ingest`).
 //!
+//! # Dump format 3
+//!
+//! Dump format 3 carries store format 16 (the pair (3, 16); its frame kinds are those of (2, 15)
+//! and 23, the carried removal). It keeps the magic, the container framing and the `FILE`,
+//! `BATCH` and `DROPPED` layouts of format 2. Its `HEADER` and `TRAILER` add the chain facts
+//! (`crate::dump_chain`): a dump is either full, the whole log from its origin, or an increment,
+//! the sealed batches after the end of the file before it.
+//!
+//! - **`HEADER` payload:** `kind: u8` (0 full, 1 increment; 2 to 255 do not parse),
+//!   `store_format: u32`, `repo_id: [u8; 16]`, `base.segment: u32`, `base.offset: u64`,
+//!   `base_batch: marker`, `prev: [u8; 32]`, `end.segment: u32`, `end.offset: u64`,
+//!   `end_batch: marker`, `rdy_len: u16`, `rdy: [u8; rdy_len]` (UTF-8, at most 256 bytes). A
+//!   marker is `start.segment: u32`, `start.offset: u64`, `frames: u32`, `digest: [u8; 32]` (48
+//!   bytes). The fixed part is 175 bytes.
+//! - **`TRAILER` payload (69 bytes):** `batches: u64`, `frames: u64`, `files: u32`,
+//!   `removals: u32`, `has_first_removed: u8`, `first_removed.segment: u32`,
+//!   `first_removed.offset: u64`, `digest: [u8; 32]` (the digest of format 1). The flag is 0 or
+//!   1; with 0 the position is zero. `removals` counts the dump's `REDACTION_APPLY` frames;
+//!   `first_removed` is the lowest local span those applies removed, absent when none has one.
+//!
+//! A full dump has base `0.0`, a zero base marker and a zero `prev`. An increment holds at least
+//! one batch. The first batch starts at `base`, or at offset zero of the next segment. The last
+//! batch ends at the header's end (its start, plus `37 + original_len` per frame, plus the marker
+//! frame), and its marker is `end_batch`; a dump of no batches ends at its base with its base
+//! marker. The reader also checks `removals` against the dump's applies, and a full dump's
+//! `first_removed` against its first dropped frame. The chain links between files are checked by
+//! the loader of a chain.
+//!
 //! The reader allocates only by fallible growth: a payload in chunks of at most `ERASE_BUFFER`
 //! bytes, each frame slot, the trailer chain, both batch digests and each project file. A refused
 //! allocation is the dump refusal `record allocation failed`, never an abort.
+use crate::dump_chain::{
+    self, BatchMarker, DumpChainHeader, DumpKind, chain_text, first_dropped, follows,
+};
 use crate::error::StoreError;
-use crate::kinds::{self, BatchCommit, batch_digest};
+use crate::kinds::{self, BatchCommit};
 use crate::redaction::StoredFrame;
 use crate::redaction_io::ERASE_BUFFER;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{MAX_BLOB_BYTES, StoreReader};
-use rdy_model::Hash;
+use rdy_model::{Hash, RepoId};
 use std::borrow::Cow;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
-/// The dump format this rdy writes: 2, of store format 15 (the pair (2, 15)).
-pub const DUMP_FORMAT: u32 = 2;
+/// The dump format this rdy writes: 3, of store format 16 (the pair (3, 16)).
+pub const DUMP_FORMAT: u32 = 3;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
 /// this list (D-69AY3). No (1, 13) pair exists: store formats 13 to 15 travel only in dump
-/// format 2.
-pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)];
+/// format 2, and store format 16 only in dump format 3.
+pub const READS: &[(u32, u32)] = &[
+    (1, 10),
+    (1, 11),
+    (1, 12),
+    (2, 13),
+    (2, 14),
+    (2, 15),
+    (3, 16),
+];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -111,7 +150,16 @@ pub mod rec {
 }
 
 const BATCH_LEN: usize = 4 + 8 + 4 + 32 + 32;
-const TRAILER_LEN: usize = 8 + 8 + 4 + 32;
+/// The length of a format-1 or format-2 `TRAILER` payload.
+const LEGACY_TRAILER_LEN: usize = 8 + 8 + 4 + 32;
+/// The length of a format-3 `TRAILER` payload.
+pub const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 1 + 4 + 8 + 32;
+/// The length of one marker in a format-3 `HEADER`.
+const MARKER_LEN: usize = 4 + 8 + 4 + 32;
+/// The length of a format-3 `HEADER` payload before its `rdy` text.
+pub const HEADER_FIXED: usize = 1 + 4 + 16 + 4 + 8 + MARKER_LEN + 32 + 4 + 8 + MARKER_LEN + 2;
+/// The length of a format-1 or format-2 `HEADER` payload before its `rdy` text.
+const LEGACY_HEADER_FIXED: usize = 4 + 4 + 8 + 2;
 /// The length of a `DROPPED` record's payload.
 pub const DROPPED_LEN: usize = 1 + 32 + 4 + 32 + 1 + 32;
 
@@ -280,13 +328,15 @@ fn batch_end(start: u64, frames: &[Frame]) -> Option<u64> {
     })
 }
 
-/// The dump's header: the store format of its frames, the source log's end, and the writing
-/// rdy's version (for people only).
+/// The dump's header: the store format of its frames, the source log's end, the writing rdy's
+/// version (for people only), and the chain facts of dump format 3 (None for formats 1 and 2,
+/// which have none). A writer needs them: it writes dump format 3 only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DumpHeader {
     pub store_format: u32,
     pub log_end: Location,
     pub rdy: String,
+    pub chain: Option<DumpChainHeader>,
 }
 
 /// One sealed batch of the source log: its marker's start and digest, and its data frames.
@@ -305,12 +355,74 @@ pub enum DumpItem {
 }
 
 /// What a dump holds so far: batches, store frames, project files, and bytes of the stream.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// After the trailer (the writer's `finish`, or the reader's verified end of file) it also holds
+/// the trailer's removal facts and digest; before, they are zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DumpTotals {
     pub batches: u64,
     pub frames: u64,
     pub files: u32,
     pub bytes: u64,
+    pub removals: u32,
+    pub first_removed: Option<Location>,
+    pub digest: Hash,
+}
+
+impl Default for DumpTotals {
+    fn default() -> Self {
+        DumpTotals {
+            batches: 0,
+            frames: 0,
+            files: 0,
+            bytes: 0,
+            removals: 0,
+            first_removed: None,
+            digest: Hash([0u8; 32]),
+        }
+    }
+}
+
+/// A dump's trailer: its counts, its removal facts and the digest over every record before it.
+/// A trailer of dump format 1 or 2 records no removal facts: zero and none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DumpTrailer {
+    pub batches: u64,
+    pub frames: u64,
+    pub files: u32,
+    pub removals: u32,
+    pub first_removed: Option<Location>,
+    pub digest: Hash,
+}
+
+/// The removal facts a format-3 trailer records: how many `REDACTION_APPLY` frames the dump
+/// holds (each physical one counts), and the lowest local span those applies removed, or none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RemovalFacts {
+    pub removals: u32,
+    pub first_removed: Option<Location>,
+}
+
+impl RemovalFacts {
+    /// Adds batch `b` of a full dump, as the checked source walker hands it out: each of its
+    /// applies, and its first dropped frame when no earlier batch had one. In a full dump every
+    /// dropped frame is a span of an apply the dump holds, so the first is the lowest. Refuses
+    /// more than `u32::MAX` applies and a place past `u64::MAX` (`dump position overflows`).
+    pub fn observe_full(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
+        let overflow = || StoreError::Refused(chain_text::OVERFLOW.into());
+        let applies = b
+            .frames
+            .iter()
+            .filter(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY))
+            .count();
+        self.removals = u32::try_from(applies)
+            .ok()
+            .and_then(|n| self.removals.checked_add(n))
+            .ok_or_else(overflow)?;
+        if self.first_removed.is_none() {
+            self.first_removed = first_dropped(b).ok_or_else(overflow)?;
+        }
+        Ok(())
+    }
 }
 
 /// True if `path` is one of the project files a dump carries (the closed set): `.rdy.yaml`,
@@ -474,6 +586,33 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
             kinds::REDACTION_APPLY,
         ],
     ),
+    // store format 16 adds the carried removal; dump format 3 adds the chain facts
+    (
+        (3, 16),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::SIGNATURE,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+            kinds::REDACTION,
+            kinds::REDACTION_RESIDUE,
+            kinds::REDACTION_APPLY,
+            kinds::REDACTION_CARRIED,
+        ],
+    ),
 ];
 
 /// The store kinds a batch's frames may have in a dump of `dump_format` whose frames are of
@@ -552,38 +691,120 @@ fn too_large(path: &str) -> String {
     format!("the project file {path:?} is larger than 16 MiB")
 }
 
-fn header_payload(h: &DumpHeader) -> Vec<u8> {
-    let mut p = Vec::with_capacity(4 + 4 + 8 + 2 + h.rdy.len());
+fn put_location(p: &mut Vec<u8>, l: &Location) {
+    p.extend_from_slice(&l.segment.to_le_bytes());
+    p.extend_from_slice(&l.offset.to_le_bytes());
+}
+
+fn put_marker(p: &mut Vec<u8>, m: &BatchMarker) {
+    put_location(p, &m.start);
+    p.extend_from_slice(&m.frames.to_le_bytes());
+    p.extend_from_slice(&m.digest.0);
+}
+
+/// The format-3 header payload of `h` with its chain facts `c`.
+fn header_payload(h: &DumpHeader, c: &DumpChainHeader) -> Vec<u8> {
+    let mut p = Vec::with_capacity(HEADER_FIXED + h.rdy.len());
+    p.push(c.kind.byte());
     p.extend_from_slice(&h.store_format.to_le_bytes());
-    p.extend_from_slice(&h.log_end.segment.to_le_bytes());
-    p.extend_from_slice(&h.log_end.offset.to_le_bytes());
+    p.extend_from_slice(&c.repo_id.0);
+    put_location(&mut p, &c.base);
+    put_marker(&mut p, &c.base_batch);
+    p.extend_from_slice(&c.prev.0);
+    put_location(&mut p, &h.log_end);
+    put_marker(&mut p, &c.end_batch);
     p.extend_from_slice(&(h.rdy.len() as u16).to_le_bytes());
     p.extend_from_slice(h.rdy.as_bytes());
     p
 }
 
-/// Parses the header payload. Err: the refusal (it does not parse, or its text cannot be
-/// allocated).
-fn parse_header(p: &[u8]) -> Result<DumpHeader, &'static str> {
-    const NO_PARSE: &str = "the header does not parse";
+/// Parses the header payload of a dump of `format`. Err: the refusal (it does not parse, its
+/// text cannot be allocated, or a full dump's base facts are not the origin's).
+fn parse_header(format: u32, p: &[u8]) -> Result<DumpHeader, &'static str> {
     let mut c = Cursor(p);
     let fields = (|| {
-        let store_format = c.u32()?;
-        let segment = c.u32()?;
-        let offset = c.u64()?;
+        let (kind, store_format) = if format >= 3 {
+            (Some(DumpKind::of_byte(c.u8()?)?), c.u32()?)
+        } else {
+            (None, c.u32()?)
+        };
+        let mut chain = match kind {
+            Some(kind) => Some(DumpChainHeader {
+                kind,
+                repo_id: RepoId(c.take(16)?.try_into().ok()?),
+                base: c.location()?,
+                base_batch: c.marker()?,
+                prev: c.hash()?,
+                // read after the end, below
+                end_batch: BatchMarker::ZERO,
+            }),
+            None => None,
+        };
+        let log_end = c.location()?;
+        if let Some(chain) = chain.as_mut() {
+            chain.end_batch = c.marker()?;
+        }
         let rdy_len = c.u16()? as usize;
         if rdy_len > MAX_RDY_BYTES {
             return None;
         }
         let rdy = std::str::from_utf8(c.take(rdy_len)?).ok()?;
         c.0.is_empty()
-            .then_some((store_format, segment, offset, rdy))
+            .then_some((store_format, log_end, rdy, chain))
     })();
-    let (store_format, segment, offset, rdy) = fields.ok_or(NO_PARSE)?;
+    let (store_format, log_end, rdy, chain) = fields.ok_or(chain_text::HEADER)?;
+    if chain.is_some_and(|c| c.kind == DumpKind::Full && !c.has_origin_base()) {
+        return Err(chain_text::FULL_BASE);
+    }
     Ok(DumpHeader {
         store_format,
-        log_end: Location { segment, offset },
+        log_end,
         rdy: try_string(rdy).ok_or(drop_text::ALLOCATION)?,
+        chain,
+    })
+}
+
+/// The format-3 trailer payload: the counts, the removal facts and the digest.
+fn trailer_payload(t: &DumpTrailer) -> Vec<u8> {
+    let mut p = Vec::with_capacity(TRAILER_LEN);
+    p.extend_from_slice(&t.batches.to_le_bytes());
+    p.extend_from_slice(&t.frames.to_le_bytes());
+    p.extend_from_slice(&t.files.to_le_bytes());
+    p.extend_from_slice(&t.removals.to_le_bytes());
+    p.push(u8::from(t.first_removed.is_some()));
+    put_location(&mut p, &t.first_removed.unwrap_or(BatchMarker::ZERO.start));
+    p.extend_from_slice(&t.digest.0);
+    p
+}
+
+/// Parses a trailer payload of a dump of `format`: exactly its length, and in format 3 a flag
+/// of 0 (with a zero position) or 1. None when it does not parse.
+fn parse_trailer(format: u32, p: &[u8]) -> Option<DumpTrailer> {
+    let mut c = Cursor(p);
+    let batches = c.u64()?;
+    let frames = c.u64()?;
+    let files = c.u32()?;
+    let (removals, first_removed) = if format >= 3 {
+        let removals = c.u32()?;
+        let flag = c.u8()?;
+        let at = c.location()?;
+        let first = match flag {
+            0 if at == BatchMarker::ZERO.start => None,
+            1 => Some(at),
+            _ => return None,
+        };
+        (removals, first)
+    } else {
+        (0, None)
+    };
+    let digest = c.hash()?;
+    c.0.is_empty().then_some(DumpTrailer {
+        batches,
+        frames,
+        files,
+        removals,
+        first_removed,
+        digest,
     })
 }
 
@@ -599,6 +820,9 @@ impl<'a> Cursor<'a> {
         self.0 = rest;
         Some(head)
     }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
     }
@@ -610,6 +834,19 @@ impl<'a> Cursor<'a> {
     }
     fn hash(&mut self) -> Option<Hash> {
         Some(Hash(self.take(32)?.try_into().ok()?))
+    }
+    fn location(&mut self) -> Option<Location> {
+        Some(Location {
+            segment: self.u32()?,
+            offset: self.u64()?,
+        })
+    }
+    fn marker(&mut self) -> Option<BatchMarker> {
+        Some(BatchMarker {
+            start: self.location()?,
+            frames: self.u32()?,
+            digest: self.hash()?,
+        })
     }
 }
 
@@ -634,12 +871,19 @@ pub struct DumpWriter<W: Write> {
 }
 
 impl<W: Write> DumpWriter<W> {
-    /// Writes the prelude and the header. Refuses a header whose store format is not one this
-    /// rdy reads in a dump of `DUMP_FORMAT` (`READS`): its reader would refuse the dump.
+    /// Writes the prelude and the header, always of `DUMP_FORMAT` (there is no writer of an
+    /// older format). Refuses a header with no chain facts or an `rdy` text over 256 bytes (the
+    /// header does not parse), and a header whose store format is not one this rdy reads in a
+    /// dump of `DUMP_FORMAT` (`READS`): its reader would refuse the dump. The chain facts are
+    /// the caller's: the reader checks them against the batches.
     pub fn new(w: W, header: &DumpHeader) -> Result<Self, StoreError> {
-        if header.rdy.len() > MAX_RDY_BYTES {
-            return Err(StoreError::Refused("the header does not parse".into()));
-        }
+        let Some(chain) = header
+            .chain
+            .as_ref()
+            .filter(|_| header.rdy.len() <= MAX_RDY_BYTES)
+        else {
+            return Err(StoreError::Refused(chain_text::HEADER.into()));
+        };
         let Some(kinds) = READS
             .contains(&(DUMP_FORMAT, header.store_format))
             .then(|| frame_kinds(DUMP_FORMAT, header.store_format))
@@ -661,7 +905,7 @@ impl<W: Write> DumpWriter<W> {
         me.w.write_all(MAGIC)?;
         me.w.write_all(&DUMP_FORMAT.to_le_bytes())?;
         me.totals.bytes = (MAGIC.len() + 4) as u64;
-        me.record(rec::HEADER, &header_payload(header))?;
+        me.record(rec::HEADER, &header_payload(header, chain))?;
         Ok(me)
     }
 
@@ -784,15 +1028,24 @@ impl<W: Write> DumpWriter<W> {
         Ok(())
     }
 
-    /// Writes the trailer and returns the writer and what the dump holds.
-    pub fn finish(mut self) -> Result<(W, DumpTotals), StoreError> {
-        let mut p = Vec::with_capacity(TRAILER_LEN);
-        p.extend_from_slice(&self.totals.batches.to_le_bytes());
-        p.extend_from_slice(&self.totals.frames.to_le_bytes());
-        p.extend_from_slice(&self.totals.files.to_le_bytes());
-        p.extend_from_slice(&Hash::of(&self.chain).0);
+    /// Writes the trailer with the removal facts `facts`, which the checked source walker
+    /// supplies (the reader checks them against the batches), and returns the writer and what
+    /// the dump holds.
+    pub fn finish(mut self, facts: RemovalFacts) -> Result<(W, DumpTotals), StoreError> {
+        let digest = Hash::of(&self.chain);
+        let p = trailer_payload(&DumpTrailer {
+            batches: self.totals.batches,
+            frames: self.totals.frames,
+            files: self.totals.files,
+            removals: facts.removals,
+            first_removed: facts.first_removed,
+            digest,
+        });
         self.record(rec::TRAILER, &p)?;
         self.w.flush()?;
+        self.totals.removals = facts.removals;
+        self.totals.first_removed = facts.first_removed;
+        self.totals.digest = digest;
         Ok((self.w, self.totals))
     }
 
@@ -835,6 +1088,18 @@ pub struct DumpReader<R: Read> {
     /// `kind || len || hash` of every record read so far, the trailer's excepted.
     chain: Vec<u8>,
     totals: DumpTotals,
+    /// The dump format, the header's end and its chain facts (format 3).
+    format: u32,
+    log_end: Location,
+    links: Option<DumpChainHeader>,
+    /// The physical end and the marker of the last batch read (format 3).
+    last: Option<(Location, BatchMarker)>,
+    /// The `REDACTION_APPLY` frames read (format 3).
+    applies: u64,
+    /// The place of the first dropped frame read (format 3).
+    first_drop: Option<Location>,
+    /// The trailer, once it and the end of the file are verified.
+    trailer: Option<DumpTrailer>,
 }
 
 /// Where the reader is in the closed order.
@@ -923,6 +1188,118 @@ fn store_format_not_read(store_format: u32, format: u32) -> String {
     format!("{STORE_FORMAT_WORDS}{store_format} in a dump of format {format}{NOT_READ}")
 }
 
+/// The length of the prelude: the magic and the dump format.
+const PRELUDE_LEN: u64 = MAGIC.len() as u64 + 4;
+
+/// Reads the prelude off `r`: the magic, then a dump format this rdy reads (some pair of
+/// `READS`). A file that does not start with the magic is not a dump.
+fn read_prelude(r: &mut impl Read) -> Result<u32, StoreError> {
+    // the magic, or as much of it as the file holds: a shorter file is not a dump
+    let mut magic = [0u8; MAGIC.len()];
+    let mut got = 0;
+    while got < magic.len() {
+        match r.read(&mut magic[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if got < magic.len() || &magic != MAGIC {
+        return Err(damaged(0, NOT_A_DUMP));
+    }
+    let mut format = [0u8; 4];
+    read_exact_at(r, &mut format, MAGIC.len() as u64)?;
+    let format = u32::from_le_bytes(format);
+    if !READS.iter().any(|(d, _)| *d == format) {
+        return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
+    }
+    Ok(format)
+}
+
+/// Fills `buf` from `r`, or fails with a dump that ends before its trailer (blamed on `at`).
+fn read_exact_at(r: &mut impl Read, buf: &mut [u8], at: u64) -> Result<(), StoreError> {
+    match r.read_exact(buf) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(damaged(at, ENDS_EARLY)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The header of a dump of `format` from the `HEADER` payload `p` read at `at`, and the store
+/// kinds its batches may hold. Refuses a payload that does not parse and a pair outside `READS`.
+fn header_of(format: u32, at: u64, p: &[u8]) -> Result<(DumpHeader, &'static [u8]), StoreError> {
+    let header = parse_header(format, p).map_err(|what| damaged(at, what))?;
+    let Some(kinds) = READS
+        .contains(&(format, header.store_format))
+        .then(|| frame_kinds(format, header.store_format))
+        .flatten()
+    else {
+        return Err(damaged(
+            at,
+            store_format_not_read(header.store_format, format),
+        ));
+    };
+    Ok((header, kinds))
+}
+
+/// Reads only a dump's envelope from `r`: the prelude, the `HEADER` record and the fixed-length
+/// final `TRAILER` record, each record's own hash checked. Returns the dump format, the header,
+/// the trailer and the file's length. The body between them is neither read nor checked, so its
+/// digest is not verified here: only a whole read (`DumpReader`) verifies a dump.
+pub fn read_envelope<R: Read + Seek>(
+    r: &mut R,
+) -> Result<(u32, DumpHeader, DumpTrailer, u64), StoreError> {
+    r.seek(SeekFrom::Start(0))?;
+    let format = read_prelude(r)?;
+    let at = PRELUDE_LEN;
+    let mut head = [0u8; FRAME_HEADER as usize];
+    read_exact_at(r, &mut head, at)?;
+    let len = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes")) as usize;
+    if head[4] != rec::HEADER {
+        return Err(damaged(at, cannot_stand(head[4])));
+    }
+    let fixed = if format >= 3 {
+        HEADER_FIXED
+    } else {
+        LEGACY_HEADER_FIXED
+    };
+    if len > fixed + MAX_RDY_BYTES {
+        return Err(damaged(at, chain_text::HEADER));
+    }
+    let mut payload = vec![0u8; len];
+    read_exact_at(r, &mut payload, at)?;
+    if Hash::of(&payload).0 != head[5..37] {
+        return Err(damaged(at, "a record's hash does not match its bytes"));
+    }
+    let (header, _) = header_of(format, at, &payload)?;
+    let body = at + FRAME_HEADER + len as u64;
+    let trailer_len = if format >= 3 {
+        TRAILER_LEN
+    } else {
+        LEGACY_TRAILER_LEN
+    };
+    let framed = FRAME_HEADER + trailer_len as u64;
+    let file_len = r.seek(SeekFrom::End(0))?;
+    let Some(at) = file_len.checked_sub(framed).filter(|t| *t >= body) else {
+        return Err(damaged(body, ENDS_EARLY));
+    };
+    r.seek(SeekFrom::Start(at))?;
+    let mut rec_bytes = [0u8; FRAME_HEADER as usize + TRAILER_LEN];
+    let rec_bytes = &mut rec_bytes[..framed as usize];
+    read_exact_at(r, rec_bytes, at)?;
+    let (head, payload) = rec_bytes.split_at(FRAME_HEADER as usize);
+    let len = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes")) as usize;
+    if head[4] != rec::TRAILER || len != trailer_len {
+        return Err(damaged(at, chain_text::TRAILER));
+    }
+    if Hash::of(payload).0 != head[5..37] {
+        return Err(damaged(at, "a record's hash does not match its bytes"));
+    }
+    let trailer = parse_trailer(format, payload).ok_or_else(|| damaged(at, chain_text::TRAILER))?;
+    Ok((format, header, trailer, file_len))
+}
+
 impl<R: Read> DumpReader<R> {
     /// Reads the prelude and the header. Refuses a file that does not start with the magic, and
     /// a `(dump_format, store_format)` pair outside `READS`. Returns the reader, the dump format
@@ -937,48 +1314,34 @@ impl<R: Read> DumpReader<R> {
             drops: false,
             chain: Vec::new(),
             totals: DumpTotals::default(),
+            format: 0,
+            log_end: BatchMarker::ZERO.start,
+            links: None,
+            last: None,
+            applies: 0,
+            first_drop: None,
+            trailer: None,
         };
-        // the magic, or as much of it as the file holds: a shorter file is not a dump
-        let mut magic = [0u8; MAGIC.len()];
-        let mut got = 0;
-        while got < magic.len() {
-            match me.r.read(&mut magic[got..]) {
-                Ok(0) => break,
-                Ok(n) => got += n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-        if got < magic.len() || &magic != MAGIC {
-            return Err(damaged(0, NOT_A_DUMP));
-        }
-        me.totals.bytes = MAGIC.len() as u64;
-        let mut format = [0u8; 4];
-        me.exact(&mut format, me.totals.bytes)?;
-        me.totals.bytes += 4;
-        let format = u32::from_le_bytes(format);
-        if !READS.iter().any(|(d, _)| *d == format) {
-            return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
-        }
+        let format = read_prelude(&mut me.r)?;
+        me.totals.bytes = PRELUDE_LEN;
         me.drops = drops_allowed(format);
         let first = me.record(false)?;
         if first.kind != rec::HEADER {
             return Err(damaged(first.at, cannot_stand(first.kind)));
         }
-        let header = parse_header(&first.payload).map_err(|what| damaged(first.at, what))?;
-        let Some(kinds) = READS
-            .contains(&(format, header.store_format))
-            .then(|| frame_kinds(format, header.store_format))
-            .flatten()
-        else {
-            return Err(damaged(
-                first.at,
-                store_format_not_read(header.store_format, format),
-            ));
-        };
+        let (header, kinds) = header_of(format, first.at, &first.payload)?;
         me.kinds = kinds;
+        me.format = format;
+        me.log_end = header.log_end;
+        me.links = header.chain;
         me.link(&first)?;
         Ok((me, format, header))
+    }
+
+    /// The trailer, once the reader has verified it and the end of the file (`next` returned
+    /// `None`); None before.
+    pub fn trailer(&self) -> Option<&DumpTrailer> {
+        self.trailer.as_ref()
     }
 
     /// The next project file or batch; `None` after a verified trailer at the end of the file.
@@ -1013,7 +1376,7 @@ impl<R: Read> DumpReader<R> {
                 self.batch(&record).map(|b| Some(DumpItem::Batch(b)))
             }
             rec::TRAILER => {
-                self.trailer(&record)?;
+                self.read_trailer(&record)?;
                 Ok(None)
             }
             k => Err(damaged(record.at, cannot_stand(k))),
@@ -1133,34 +1496,64 @@ impl<R: Read> DumpReader<R> {
                 format!("batch {n} does not match its digest"),
             ));
         }
-        self.totals.batches += 1;
-        self.totals.frames += frames.len() as u64;
-        Ok(DumpBatch {
+        let batch = DumpBatch {
             start,
             digest,
             frames,
-        })
+        };
+        if let Some(links) = self.links {
+            self.follow(record.at, &links, &batch)?;
+        }
+        self.totals.batches += 1;
+        self.totals.frames += batch.frames.len() as u64;
+        Ok(batch)
     }
 
-    fn trailer(&mut self, record: &Record) -> Result<(), StoreError> {
+    /// The format-3 checks of one batch read at `at`: the first follows the header's base; each
+    /// one's physical end, marker, applies and first dropped frame are kept for the trailer.
+    fn follow(
+        &mut self,
+        at: u64,
+        links: &DumpChainHeader,
+        b: &DumpBatch,
+    ) -> Result<(), StoreError> {
+        if self.last.is_none() && !follows(links.base, b.start) {
+            return Err(damaged(at, chain_text::FIRST_BATCH));
+        }
+        let end = dump_chain::batch_end(b).ok_or_else(|| damaged(at, chain_text::OVERFLOW))?;
+        self.last = Some((end, BatchMarker::of(b)));
+        self.applies += b
+            .frames
+            .iter()
+            .filter(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY))
+            .count() as u64;
+        if self.first_drop.is_none() {
+            self.first_drop = first_dropped(b).ok_or_else(|| damaged(at, chain_text::OVERFLOW))?;
+        }
+        Ok(())
+    }
+
+    fn read_trailer(&mut self, record: &Record) -> Result<(), StoreError> {
         let mismatch = || {
             damaged(
                 record.at,
                 "the trailer's counts or digest do not match the dump",
             )
         };
-        let mut c = Cursor(&record.payload);
-        let batches = c.u64().ok_or_else(mismatch)?;
-        let frames = c.u64().ok_or_else(mismatch)?;
-        let files = c.u32().ok_or_else(mismatch)?;
-        let digest = c.hash().ok_or_else(mismatch)?;
-        if !c.0.is_empty()
-            || batches != self.totals.batches
-            || frames != self.totals.frames
-            || files != self.totals.files
-            || digest != Hash::of(&self.chain)
+        let t = match parse_trailer(self.format, &record.payload) {
+            Some(t) => t,
+            None if self.format >= 3 => return Err(damaged(record.at, chain_text::TRAILER)),
+            None => return Err(mismatch()),
+        };
+        if t.batches != self.totals.batches
+            || t.frames != self.totals.frames
+            || t.files != self.totals.files
+            || t.digest != Hash::of(&self.chain)
         {
             return Err(mismatch());
+        }
+        if let Some(links) = self.links {
+            self.check_ends(record.at, &links, &t)?;
         }
         let mut extra = [0u8; 1];
         let at = self.totals.bytes;
@@ -1173,6 +1566,42 @@ impl<R: Read> DumpReader<R> {
             }
         }
         self.phase = ReadPhase::Done;
+        self.totals.removals = t.removals;
+        self.totals.first_removed = t.first_removed;
+        self.totals.digest = t.digest;
+        self.trailer = Some(t);
+        Ok(())
+    }
+
+    /// The format-3 checks at trailer `t` (read at `at`): an increment holds a batch; the last
+    /// batch (or, with none, the base) ends at the header's end with the header's end marker; the
+    /// trailer counts the dump's applies; a full dump's first removed span is its first dropped
+    /// frame, and an increment with no apply names none.
+    fn check_ends(
+        &self,
+        at: u64,
+        links: &DumpChainHeader,
+        t: &DumpTrailer,
+    ) -> Result<(), StoreError> {
+        let (end, marker) = match self.last {
+            Some(last) => last,
+            None if links.kind == DumpKind::Increment => {
+                return Err(damaged(at, chain_text::EMPTY_INCREMENT));
+            }
+            None => (links.base, links.base_batch),
+        };
+        if end != self.log_end || marker != links.end_batch {
+            return Err(damaged(at, chain_text::LAST_BATCH));
+        }
+        // a full dump holds every apply of its log: its first removed span is its first
+        // dropped frame (a dropped frame no apply authorizes is the ingest's refusal)
+        let first_ok = match links.kind {
+            DumpKind::Full => t.first_removed == self.first_drop,
+            DumpKind::Increment => t.removals > 0 || t.first_removed.is_none(),
+        };
+        if u64::from(t.removals) != self.applies || !first_ok {
+            return Err(damaged(at, chain_text::REMOVALS));
+        }
         Ok(())
     }
 
@@ -1230,11 +1659,7 @@ impl<R: Read> DumpReader<R> {
 
     /// Fills `buf`, or fails with a dump that ends before its trailer (blamed on `at`).
     fn exact(&mut self, buf: &mut [u8], at: u64) -> Result<(), StoreError> {
-        match self.r.read_exact(buf) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(damaged(at, ENDS_EARLY)),
-            Err(e) => Err(e.into()),
-        }
+        read_exact_at(&mut self.r, buf, at)
     }
 }
 
@@ -1250,13 +1675,72 @@ impl StoreReader {
         upto: Location,
         mut f: impl FnMut(DumpBatch) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        let origin = Location {
-            segment: 0,
+        self.for_each_batch_after(BatchMarker::ZERO.start, upto, &mut f)
+    }
+
+    /// [`StoreReader::for_each_batch`] of the sealed batches of `[base, end)`: the suffix of the
+    /// log after the batch that ends at `base`. The first batch starts at `base`, or at offset
+    /// zero of the next segment when the log rolled there; a `base` that is not a batch end (a
+    /// place inside a frame, or a frame inside a batch) does not match its marker. `end` must be
+    /// a batch end too.
+    pub fn for_each_batch_after(
+        &self,
+        base: Location,
+        end: Location,
+        visit: &mut dyn FnMut(DumpBatch) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut first = true;
+        self.walk_batches(base, end, true, &mut |marker, frames| {
+            if std::mem::take(&mut first) && !follows(base, marker.start) {
+                return Err(StoreError::Decode(format!(
+                    "batch at segment {} offset {} does not follow segment {} offset {}; run rdy fsck",
+                    marker.start.segment, marker.start.offset, base.segment, base.offset
+                )));
+            }
+            visit(DumpBatch {
+                start: marker.start,
+                digest: marker.digest,
+                frames,
+            })
+        })
+    }
+
+    /// The marker of the batch that ends exactly at `end`: None for offset zero of a segment
+    /// (no batch of that segment ends there; the origin is `0.0`). The walk reads `end`'s
+    /// segment from offset zero to `end` by the record walker, checking each frame boundary and
+    /// each batch marker on the way, and no earlier segment. An `end` inside a frame, or after
+    /// frames that no marker closes, is `StoreError::Decode`.
+    pub fn batch_marker_at(&self, end: Location) -> Result<Option<BatchMarker>, StoreError> {
+        if end.offset == 0 {
+            return Ok(None);
+        }
+        let from = Location {
+            segment: end.segment,
             offset: 0,
         };
+        let mut last = None;
+        self.walk_batches(from, end, false, &mut |marker, _| {
+            last = Some(marker);
+            Ok(())
+        })?;
+        Ok(last)
+    }
+
+    /// Walks the records of `[from, upto)` and calls `visit` with each batch's checked marker
+    /// and, with `keep`, its frames (without, an empty list: only the hashes are kept for the
+    /// digest). A marker that does not match the frames it closes, or frames after the last
+    /// marker, is `StoreError::Decode`.
+    fn walk_batches(
+        &self,
+        from: Location,
+        upto: Location,
+        keep: bool,
+        visit: &mut dyn FnMut(BatchMarker, Vec<Frame>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let mut pending: Vec<Frame> = Vec::new();
+        let mut hashes: Vec<Hash> = Vec::new();
         let mut first: Option<Location> = None;
-        self.for_each_record_from(origin, upto, |loc, frame, _next| {
+        self.for_each_record_from(from, upto, |loc, frame, _next| {
             let (kind, payload) = match frame {
                 StoredFrame::Present { kind, payload, .. } => (kind, payload),
                 StoredFrame::Dropped {
@@ -1267,13 +1751,16 @@ impl StoreReader {
                     residue,
                 } => {
                     first.get_or_insert(loc);
-                    pending.push(Frame::Dropped {
-                        kind,
-                        hash,
-                        len,
-                        apply,
-                        residue,
-                    });
+                    hashes.push(hash);
+                    if keep {
+                        pending.push(Frame::Dropped {
+                            kind,
+                            hash,
+                            len,
+                            apply,
+                            residue,
+                        });
+                    }
                     return Ok(());
                 }
             };
@@ -1282,11 +1769,14 @@ impl StoreReader {
                     unreachable!("a present frame")
                 };
                 first.get_or_insert(loc);
-                pending.push(Frame::Present {
-                    kind,
-                    hash,
-                    payload: payload.to_vec(),
-                });
+                hashes.push(hash);
+                if keep {
+                    pending.push(Frame::Present {
+                        kind,
+                        hash,
+                        payload: payload.to_vec(),
+                    });
+                }
                 return Ok(());
             }
             let start = first.take().unwrap_or(loc);
@@ -1298,21 +1788,19 @@ impl StoreReader {
             };
             let marker = BatchCommit::decode(payload).ok_or_else(mismatch)?;
             let frames = std::mem::take(&mut pending);
+            let digest = kinds::batch_digest(hashes.iter());
+            let count = std::mem::take(&mut hashes).len();
             // a marker of no frames closes no batch (a store's open treats one as torn)
-            if frames.is_empty()
+            if count == 0
                 || marker.start != start
-                || marker.frames as usize != frames.len()
-                || batch_digest(frames.iter().map(|f| f.hash())) != marker.digest
+                || marker.frames as usize != count
+                || digest != marker.digest
             {
                 return Err(mismatch());
             }
-            f(DumpBatch {
-                start: marker.start,
-                digest: marker.digest,
-                frames,
-            })
+            visit(BatchMarker::of_commit(&marker), frames)
         })?;
-        if !pending.is_empty() {
+        if !hashes.is_empty() {
             return Err(StoreError::Decode(format!(
                 "the log does not end at a batch marker at segment {} offset {}; run rdy fsck",
                 upto.segment, upto.offset

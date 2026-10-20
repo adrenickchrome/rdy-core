@@ -250,14 +250,14 @@ fn ha4_project_mode_is_the_absent_ref() {
     let (_d, path, s) = project();
     assert_eq!(s.mode().unwrap(), StoreMode::Project);
     assert_eq!(s.get_ref(REF_STORE_MODE).unwrap(), None);
-    // the first batch keeps its shape: the format (now 15) and the repo id, nothing more
+    // the first batch keeps its shape: the format (now 16) and the repo id, nothing more
     let b = batches(&s);
     assert_eq!(b.len(), 1);
     let refs: Vec<RefUpdate> = b[0].1.iter().map(|(_, p)| ref_update(p)).collect();
     let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, [REF_STORE_FORMAT, REF_REPO_ID]);
-    assert_eq!(refs[0].value, b"15");
-    assert_eq!(STORE_FORMAT, 15);
+    assert_eq!(refs[0].value, b"16");
+    assert_eq!(STORE_FORMAT, 16);
     s.check_meta().unwrap();
     drop(s);
     let s = Store::open(&path).unwrap();

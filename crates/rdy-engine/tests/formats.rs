@@ -20,7 +20,15 @@ fn ha8_formats_match_current_constants_and_released_pairs() {
     let pairs: Vec<(u32, u32)> = f.reads.iter().map(|p| (p.dump, p.store)).collect();
     assert_eq!(
         pairs,
-        [(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)]
+        [
+            (1, 10),
+            (1, 11),
+            (1, 12),
+            (2, 13),
+            (2, 14),
+            (2, 15),
+            (3, 16)
+        ]
     );
     assert_eq!(pairs, rdy_store::dump::READS);
     assert_eq!(f.reads[0], DumpPair { dump: 1, store: 10 });

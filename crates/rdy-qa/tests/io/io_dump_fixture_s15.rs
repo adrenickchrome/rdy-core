@@ -846,10 +846,14 @@ fn ha17_all_released_dump_pairs_still_load() {
         pairs,
         BTreeSet::from([(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)])
     );
+    // the current output pair has no released fixture yet
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 16));
+    let mut with_current = pairs.clone();
+    with_current.insert((DUMP_FORMAT, STORE_FORMAT));
     assert_eq!(
         READS.iter().copied().collect::<BTreeSet<_>>(),
-        pairs,
-        "each pair this rdy reads has a fixture"
+        with_current,
+        "each released pair this rdy reads has a fixture"
     );
     for f in &RELEASED {
         // the checksum guards of each fixture are unchanged

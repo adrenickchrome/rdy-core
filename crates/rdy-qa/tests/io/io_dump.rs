@@ -321,7 +321,7 @@ fn dl5_the_header_names_the_rdy_that_wrote_it() {
     let (header, _) = read_back(&out);
     assert_eq!(header.rdy, env!("CARGO_PKG_VERSION"));
     assert_eq!(header.store_format, STORE_FORMAT);
-    assert_eq!(summary.dump_format, 2);
+    assert_eq!(summary.dump_format, 3);
     assert_eq!(summary.store_format, STORE_FORMAT);
 }
 

@@ -911,8 +911,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 22; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=22).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 23; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=23).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -937,6 +937,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::REDACTION,
             kinds::REDACTION_RESIDUE,
             kinds::REDACTION_APPLY,
+            kinds::REDACTION_CARRIED,
         ],
         ASSIGNED_KINDS
     );
@@ -954,7 +955,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
         assert_eq!(text_policy(k), Some(want), "kind {k}");
     }
     assert_eq!(text_policy(kinds::SIGNATURE), Some(TextPolicy::Strings));
-    for k in [0, 12, 23, 255] {
+    // the carried removal: its approver's and selectors' text (it holds no reason text)
+    assert_eq!(kinds::REDACTION_CARRIED, 23);
+    assert_eq!(text_policy(23), Some(TextPolicy::Strings));
+    for k in [0, 12, 24, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1799,9 +1803,9 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
     // the base registry holds no assessment kind: every assigned kind has a policy, and a new
     // content-bearing kind without a visitor is refused, never read as absent
     require_text_policies(&ASSIGNED_KINDS).unwrap();
-    let e = require_text_policies(&[kinds::REDACTION_APPLY + 1]).unwrap_err();
+    let e = require_text_policies(&[kinds::REDACTION_CARRIED + 1]).unwrap_err();
     assert!(
-        e.message.contains("no text policy for object kind 23"),
+        e.message.contains("no text policy for object kind 24"),
         "{e}"
     );
     assert!(require_text_policies(&[12]).is_err());

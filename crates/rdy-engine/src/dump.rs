@@ -1,5 +1,7 @@
 //! `rdy dump` (plan Dump and load; D-69AY3, D-D2NPN, D-FR0C4): the whole project as one
-//! stream of the current dump format, 2 (`rdy_store::dump`). It holds the published log's
+//! stream of the current dump format, 3 (`rdy_store::dump`), a full dump: its header names the
+//! repo, the origin as its base and the marker of the last batch, and its trailer the removal
+//! facts of its applies. It holds the published log's
 //! sealed batches, byte for byte, and the closed set of project files (F5): `.rdy.yaml`,
 //! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A holder's dump
 //! (D-BPYN8) holds no project file: it reads neither `.rdy.yaml` nor `.rdy/packs`, and its
@@ -19,8 +21,10 @@ use crate::read_state::ReadState;
 use crate::wc::ignore::IGNORE_FILE;
 use rdy_store::StoreError;
 use rdy_store::dump::{
-    DUMP_FORMAT, DumpHeader, DumpTotals, DumpWriter, MAX_FILE_BYTES, MAX_FILES, is_project_file,
+    DUMP_FORMAT, DumpHeader, DumpTotals, DumpWriter, MAX_FILE_BYTES, MAX_FILES, RemovalFacts,
+    is_project_file,
 };
+use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::fsutil::sync_dir;
 use rdy_store::holder::StoreMode;
@@ -140,11 +144,20 @@ impl ReadState {
         files: &[(String, Vec<u8>)],
     ) -> Result<(W, DumpTotals), RdyError> {
         self.ensure_current_epoch()?;
+        let reader = self.reader();
+        let repo_id = reader.repo_id()?.ok_or_else(|| {
+            StoreError::Decode("the store has no meta/repo_id; run rdy fsck".into())
+        })?;
+        // the marker of the batch that ends at this state's log end
+        let end_batch = reader
+            .batch_marker_at(self.seq())?
+            .unwrap_or(BatchMarker::ZERO);
         let header = DumpHeader {
             store_format: STORE_FORMAT,
             log_end: self.seq(),
             // the workspace version: the header names the rdy that wrote the dump (O17)
             rdy: env!("CARGO_PKG_VERSION").to_string(),
+            chain: Some(DumpChainHeader::full(repo_id, end_batch)),
         };
         check_limits(files)?;
         // the writer's i/o errors are the destination's (disk full, say), never the store's
@@ -153,7 +166,10 @@ impl ReadState {
             w.file(path, bytes).map_err(dest)?;
         }
         let mut failed = None;
+        let mut facts = RemovalFacts::default();
         let read = self.reader().for_each_batch(self.seq(), |b| {
+            // the source walker's facts: its applies and its first dropped frame
+            facts.observe_full(&b)?;
             w.batch(&b).map_err(|e| {
                 let stop = StoreError::Refused(e.to_string());
                 failed = Some(dest(e));
@@ -166,7 +182,7 @@ impl ReadState {
         // a removal that landed during the batches: what they read is no one epoch's
         self.ensure_current_epoch()?;
         read?;
-        w.finish().map_err(dest)
+        w.finish(facts).map_err(dest)
     }
 }
 

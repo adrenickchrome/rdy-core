@@ -5,8 +5,10 @@
 use rdy_model::signature::{Signature, StatementSource, statement};
 use rdy_model::*;
 use rdy_store::dump::{
-    DUMP_FORMAT, DumpBatch, DumpHeader, DumpItem, DumpReader, DumpWriter, Frame, READS, frame_kinds,
+    DUMP_FORMAT, DumpBatch, DumpHeader, DumpItem, DumpReader, DumpWriter, Frame, READS,
+    RemovalFacts, frame_kinds,
 };
+use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds::{self, batch_digest};
 use rdy_store::segment::Location;
@@ -383,10 +385,15 @@ fn sig4_failed_write_leaves_no_subject_or_signature() {
 
 /// A dump of `s` whose header names `store_format`: the writer's verdict on its batches.
 fn dump_as(s: &Store, store_format: u32) -> Result<Vec<u8>, StoreError> {
+    let r = s.reader();
     let header = DumpHeader {
         store_format,
         log_end: s.log_end(),
         rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(
+            r.repo_id()?.expect("a repo id"),
+            r.batch_marker_at(s.log_end())?.expect("a batch"),
+        )),
     };
     let mut w = DumpWriter::new(Vec::new(), &header)?;
     let mut failed = None;
@@ -401,12 +408,12 @@ fn dump_as(s: &Store, store_format: u32) -> Result<Vec<u8>, StoreError> {
     if let Some(e) = failed {
         return Err(e);
     }
-    Ok(w.finish()?.0)
+    Ok(w.finish(RemovalFacts::default())?.0)
 }
 
 #[test]
 fn sig4_dump_pairs_keep_their_own_kind_sets() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (2, 15));
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 16));
     assert!(READS.contains(&(2, 14)));
     assert!(frame_kinds(2, 14).unwrap().contains(&kinds::SIGNATURE));
     for pair in [(1, 10), (1, 11), (1, 12), (2, 13)] {
@@ -425,14 +432,16 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
     want.push(11);
     want.sort();
     assert_eq!(frame_kinds(2, 14).unwrap(), &want[..]);
-    // a store with a signature dumps as (2, 15) and reads back with its frame
+    // (3, 16) keeps the signature: the kinds of (2, 15) and 23
+    assert!(frame_kinds(3, 16).unwrap().contains(&kinds::SIGNATURE));
+    // a store with a signature dumps as (3, 16) and reads back with its frame
     let (_d, _p, mut s) = store();
     let t = s.put_tag(&tag("v1.0.0", Hash([3; 32]))).unwrap();
     let g = sig(t, "rdy-tag-v1", b"tag", &[1]);
     let id = s.put_signature(&g).unwrap();
     let bytes = dump_as(&s, STORE_FORMAT).unwrap();
     let (mut r, format, h) = DumpReader::open(&bytes[..]).unwrap();
-    assert_eq!((format, h.store_format), (2, 15));
+    assert_eq!((format, h.store_format), (3, 16));
     let mut found = false;
     while let Some(item) = r.next().unwrap() {
         if let DumpItem::Batch(b) = item {
@@ -443,9 +452,13 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
         }
     }
     assert!(found, "the dump carries the SIGNATURE frame");
-    // the same batch under the (2, 13) set is refused, before a byte of it is written
-    refused(dump_as(&s, 13), "a record of kind 11 cannot stand here");
-    // a hand-made (2, 13) batch with kind 11 is refused by the writer too
+    // no writer of the (2, 13) set exists any more: its header is refused before a byte is
+    // written, and the reader's (2, 13) set above still refuses kind 11
+    refused(
+        dump_as(&s, 13),
+        "store format 13 in a dump of format 3 is not one this rdy reads",
+    );
+    // a hand-made batch with kind 11 under an old header is refused by the writer too
     let payload = signature::frames(std::slice::from_ref(&g))
         .unwrap()
         .remove(0)
@@ -467,9 +480,21 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
         store_format: 13,
         log_end: s.log_end(),
         rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(RepoId([1; 16]), BatchMarker::of(&b))),
     };
-    let mut w = DumpWriter::new(Vec::new(), &old).unwrap();
-    refused(w.batch(&b), "a record of kind 11 cannot stand here");
+    refused(
+        DumpWriter::new(Vec::new(), &old).map(|_| ()),
+        "store format 13 in a dump of format 3 is not one this rdy reads",
+    );
+    // the current writer takes the same batch: (3, 16) assigns kind 11
+    let current = DumpHeader {
+        store_format: STORE_FORMAT,
+        ..old
+    };
+    DumpWriter::new(Vec::new(), &current)
+        .unwrap()
+        .batch(&b)
+        .unwrap();
 }
 
 /// The log end and frame count of `s`, which a refused write leaves as they were.

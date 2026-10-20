@@ -235,7 +235,7 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     // load: the log byte for byte, the repo id kept, no origin
     let loaded = scratch.path().join("loaded");
     let s = load(&file, &loaded).unwrap();
-    assert_eq!((s.dump_format, s.store_format), (2, STORE_FORMAT));
+    assert_eq!((s.dump_format, s.store_format), (3, STORE_FORMAT));
     assert_eq!(segments(&loaded), segments(src.dir.path()));
     keeps_the_source(src.dir.path(), &src_recs, &loaded, "load");
     let l = Rdy::open(&loaded).unwrap();
@@ -336,7 +336,8 @@ fn dump_records(good: &[u8]) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
-/// A dump of format 2 of hash-valid `recs`, its trailer made true again.
+/// A dump of the current format (3) of hash-valid `recs`, its trailer made true again: its
+/// counts and digest recomputed, its removal facts kept.
 fn forge(recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let n = recs.len() - 1;
     let mut chain = vec![];
@@ -349,9 +350,10 @@ fn forge(recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let mut trailer = count(&|k| k == rec::BATCH).to_le_bytes().to_vec();
     trailer.extend_from_slice(&count(&|k| k < rec::HEADER || k == rec::DROPPED).to_le_bytes());
     trailer.extend_from_slice(&(count(&|k| k == rec::FILE) as u32).to_le_bytes());
+    trailer.extend_from_slice(&recs[n].1[20..37]);
     trailer.extend_from_slice(&Hash::of(&chain).0);
     let mut out = MAGIC.to_vec();
-    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&DUMP_FORMAT.to_le_bytes());
     for (k, p) in recs[..n].iter().chain([&(rec::TRAILER, trailer)]) {
         out.extend_from_slice(&(p.len() as u32).to_le_bytes());
         out.push(*k);

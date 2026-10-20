@@ -25,9 +25,11 @@ use std::path::Path;
 /// 15 = ref `meta/store_mode` (a holder, D-BPYN8) and a holder's `answer/tag-object:<hash>`
 /// refs, one per relayed TAG object (O11 as amended by ruling task-13); no kind and no record
 /// encoding changes. It moves in dump format 2 as the pair (2, 15).
-pub const STORE_FORMAT: u32 = 15;
+/// 16 = kind REDACTION_CARRIED (a removal carried into a store that does not hold its proof); no
+/// existing kind or record encoding changes. It moves in dump format 3 as the pair (3, 16).
+pub const STORE_FORMAT: u32 = 16;
 /// The first store format that a dump carries (dl2, D-69AY3): dump format 1 carries 10 to 12,
-/// dump format 2 carries 13 to 15. A store of this format or a later one can move to a newer rdy
+/// dump format 2 carries 13 to 15, dump format 3 carries 16. A store of this format or a later one can move to a newer rdy
 /// with dump and load; an earlier one cannot.
 pub const FIRST_DUMP_STORE_FORMAT: u32 = 10;
 /// The mirror file in the store directory.

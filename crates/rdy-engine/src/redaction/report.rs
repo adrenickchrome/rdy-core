@@ -26,7 +26,7 @@ use rdy_model::redaction::{
 };
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
+    Redaction, RedactionCarried, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
 };
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
@@ -1026,6 +1026,11 @@ pub(crate) fn compute_excluding(
             kinds::REDACTION => {
                 let r: Redaction = reader.get_typed(kinds::REDACTION, &h)?;
                 quotes.scan(audit, &rec, false, &r)?;
+            }
+            kinds::REDACTION_CARRIED => {
+                // the approver's and the selectors' text; it holds no reason text
+                let c: RedactionCarried = reader.get_typed(kinds::REDACTION_CARRIED, &h)?;
+                quotes.scan(audit, &rec, false, &c)?;
             }
             kinds::REF_UPDATE => {
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
