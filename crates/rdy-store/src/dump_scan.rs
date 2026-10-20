@@ -12,23 +12,31 @@
 //!    it), but it takes no stop.
 //! 2. [`scan`]: one forward framing pass per file, in argument order, with the dump reader's own
 //!    checks (`crate::dump`: framing, lengths, order, counts, positions, both batch digests, the
-//!    trailer's counts and digest, the batch ends, the end of the file). Retained data payloads
-//!    are not read: the pass seeks over them, so their hashes are checked by the ingest, which
-//!    reads them once. The pass reads and hashes the removal records (kinds 20 to 23), every
-//!    `DROPPED` record, the `REF_UPDATE` records it needs (the mode, the repo id, the store
-//!    format), and the `TAG` records a tag stop needs; it keeps the `FILE` records' names,
-//!    lengths, hashes and offsets.
+//!    trailer's counts and digest, the batch ends, the end of the file). Every batch must start
+//!    where the batch before it ends (or at offset 0 of the next segment; a file's first batch
+//!    where the file before it ends), so each place of the chain is one frame's. Retained data
+//!    payloads are not read: the pass seeks over them, so their hashes are checked by the
+//!    ingest, which reads them once. The pass reads and hashes the removal records (kinds 20 to
+//!    23), every `DROPPED` record, every `REF_UPDATE` record whose name is one it needs (the
+//!    mode, the repo id, the store format; it reads the name of each), and the `TAG` records a
+//!    tag stop needs; it keeps the `FILE` records' names, lengths, hashes and offsets, and each
+//!    batch's place and offsets (for the frame checks).
 //! 3. The removal proofs, in physical source order: each apply by the store's own validator
-//!    (`crate::redaction_io::Validator` for a project; HA1's logical proof, `sync_proof::check`,
-//!    for a holder), reading its records by the offsets the forward pass noted, each distinct
-//!    one at most once per proof. Every `DROPPED` record must name the valid apply that first
-//!    covers its span, or a carried record of the same file that names that exact span with
-//!    `held: false`. Each file's trailer removal facts must be what its applies resolve, and its
-//!    header's repo and store format what the log's meta refs say. Proof failures are reported
-//!    after the framing of every file.
-//! 4. The stop: an exact batch end (`pos:`, never `0.0`), the first batch that holds the one
+//!    (`crate::redaction_io::Validator` for a project, whose span headers are read by a seek to
+//!    their batch and a walk of its frame heads; HA1's logical proof, `sync_proof::check`, for a
+//!    holder), reading its records by the offsets the forward pass noted, each distinct one at
+//!    most once per proof. Every `DROPPED` record must name the valid apply that first covers
+//!    its span, or a carried record of the same file that names that exact span with
+//!    `held: false` (an earlier proof: a later apply that covers the span leaves the drop as it
+//!    is). Each file's trailer removal facts must be what its applies resolve, and its header's
+//!    repo and store format what the log's meta refs say. Proof failures are reported after the
+//!    framing of every file.
+//! 4. The meaning checks of the whole chain, as a log's bootstrap runs them (`Scan::meaning`):
+//!    the carried records' own rules, and the applies' meaning against every frame (a project's
+//!    `check_log`; a holder's copy and embedding rules), over walks of the chain's frames.
+//! 5. The stop: an exact batch end (`pos:`, never `0.0`), the first batch that holds the one
 //!    landing a prefix names, or the batch of the TAG record of a name.
-//! 5. Each file wholly after the stop is read whole, through its end, by the dump reader: it adds
+//! 6. Each file wholly after the stop is read whole, through its end, by the dump reader: it adds
 //!    no batch to the load, so nothing else would hash it.
 //!
 //! # What it decides ([`ScanPlan`])
@@ -46,28 +54,29 @@
 //! [`MAX_INPUTS`]) and no vector sized from a declared count. Its maps grow by fallible
 //! reservation from the records it reads; a refused growth is `record allocation failed`.
 use crate::dump::{
-    self, BYTES_AFTER, DumpHeader, DumpReader, DumpTrailer, Frame, PRELUDE_LEN, RecordHead,
-    check_file_head, check_frame_head, check_last, check_trailer, damaged, drop_text, header_of,
-    link, parse_batch_record, parse_dropped, read_body, read_envelope, read_head, read_prelude,
-    rec, try_batch_digest, try_kinds_digest,
+    self, BYTES_AFTER, DROPPED_LEN, DumpHeader, DumpReader, DumpTrailer, Frame, PRELUDE_LEN,
+    RecordHead, check_file_head, check_frame_head, check_last, check_trailer, damaged, drop_text,
+    header_of, link, parse_batch_record, parse_dropped, read_body, read_envelope, read_head,
+    read_prelude, rec, try_batch_digest, try_kinds_digest,
 };
 use crate::dump_chain::{BatchMarker, DumpKind, chain_text, follows};
 use crate::error::StoreError;
 use crate::format::{REF_STORE_FORMAT, decode_u32};
-use crate::holder::{FirstBatch, StoreMode};
-use crate::kinds;
+use crate::holder::{FirstBatch, REF_STORE_MODE, StoreMode};
+use crate::kinds::{self, BatchCommit};
 use crate::meta::{REF_REPO_ID, decode_repo_id};
 use crate::object_refs::ObjectKey;
 use crate::redaction::is_removable;
 use crate::redaction_carried::{check_bounds, decode_record};
 use crate::redaction_import::{PROOF_KINDS, ReceiverCaps, Scanned, copy_fits, proof_error};
 use crate::redaction_io::{
-    ApplyFrame, Collected, ERASE_BUFFER, RecordAccess, Validator, apply_record,
+    ApplyFrame, CarriedFrame, Collected, ERASE_BUFFER, FrameLog, RecordAccess, Seen, Validator,
+    apply_record,
 };
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::decode;
 use crate::stream_error::StreamError;
-use crate::sync_proof::{self, ObjectSource, RemovalObject};
+use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
 use crate::sync_stream::StreamRecord;
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, Redaction, RedactionCarried, RedactionResidue,
@@ -86,10 +95,18 @@ pub const MAX_INPUTS: usize = 4097;
 pub const PROVENANCE_CONFLICT: &str = "carried removal provenance conflicts";
 /// The refusal of a header whose repo or store format the log's meta refs contradict.
 pub const METADATA_MISMATCH: &str = "dump metadata does not match its header";
+/// The refusal of a batch that does not start where the batch before it ends (or at offset 0 of
+/// the next segment): every place of a chain is held by one frame only.
+pub const BATCH_GAP: &str = "a batch does not follow the batch before it";
 
-/// The most bytes of a `REF_UPDATE` payload the forward pass reads: the meta refs it needs are a
-/// few bytes, and a longer record is none of them.
-const REF_READ_MAX: u64 = ERASE_BUFFER as u64;
+/// The bytes of a `REF_UPDATE` payload the forward pass reads first: enough for its name's
+/// length and the longest name it needs (the mode, the repo id, the store format). A ref of one
+/// of those names is then read whole, whatever its length, and decoded as the store decodes it
+/// (postcard ignores trailing bytes).
+const REF_NAME_READ: u64 = 128;
+
+/// The names of the refs the forward pass reads whole.
+const SCANNED_REFS: [&str; 3] = [REF_STORE_MODE, REF_REPO_ID, REF_STORE_FORMAT];
 
 /// Where a load stops, as the scanner matches it against the physical batches of a chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +185,9 @@ pub enum ScanPass {
     Forward,
     /// A proof lookup by a recorded offset.
     Lookup,
+    /// A frame check by its batch: a span's frame header, and the walks of the meaning checks
+    /// (the applies against every frame, the carried records' spans, a holder's copies).
+    Check,
     /// The whole read of a file after the stop.
     Verify,
 }
@@ -619,26 +639,32 @@ struct Holder {
     spans: u64,
 }
 
-/// The input reads of proof lookups: at most one file open at a time.
+/// The input reads of proof lookups and frame checks: at most one file open at a time.
 struct Lookups<'a> {
     paths: &'a [PathBuf],
     open: Option<Input>,
 }
 
 impl Lookups<'_> {
-    /// Reads and hash-checks the record `r` by its offset.
-    fn read(&mut self, r: &Rec) -> Result<Vec<u8>, StoreError> {
-        if self.open.as_ref().is_none_or(|i| i.file != r.file) {
+    /// The open input `file`, opened when another one is open (or none).
+    fn file(&mut self, file: usize) -> Result<&mut Input, StoreError> {
+        if self.open.as_ref().is_none_or(|i| i.file != file) {
             self.open = None;
-            let f = File::open(&self.paths[r.file])?;
+            let f = File::open(&self.paths[file])?;
             self.open = Some(Input {
                 f,
-                file: r.file,
+                file,
                 pos: 0,
                 pass: ScanPass::Lookup,
             });
         }
-        let i = self.open.as_mut().expect("an open input");
+        Ok(self.open.as_mut().expect("an open input"))
+    }
+
+    /// Reads and hash-checks the record `r` by its offset.
+    fn read(&mut self, r: &Rec) -> Result<Vec<u8>, StoreError> {
+        let i = self.file(r.file)?;
+        i.pass = ScanPass::Lookup;
         i.seek(SeekFrom::Start(r.offset))?;
         let mut head = [0u8; FRAME_HEADER as usize];
         dump::read_exact_at(i, &mut head, r.offset)?;
@@ -656,28 +682,262 @@ impl Lookups<'_> {
             },
         )
     }
+
+    /// Fills `buf` from input `file` at byte `offset`, for a frame check.
+    fn read_at(&mut self, file: usize, buf: &mut [u8], offset: u64) -> Result<(), StoreError> {
+        let i = self.file(file)?;
+        read_checked(&i.f, file, buf, offset)
+    }
 }
 
-/// The chain's records as the apply validator's source (`RecordAccess`): records by the places
-/// the forward pass noted, read again by their offsets. A span's header that the pass did not
-/// keep (a retained data frame) is taken on trust here: the plan names that frame with the
-/// span's identity, the ingest checks it when it meets the frame (`ScanPlan::frame_action`), and
-/// the loaded store's own bootstrap checks the whole log.
+/// Fills `buf` from `f`, input `file`, at byte `offset`, and reports the read (a frame check).
+/// The file ending first is a dump that ends early.
+fn read_checked(f: &File, file: usize, buf: &mut [u8], offset: u64) -> Result<(), StoreError> {
+    crate::pio::read_exact_at(f, buf, offset).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => damaged(offset, dump::ENDS_EARLY),
+        _ => StoreError::Io(e),
+    })?;
+    report(ScanRead {
+        file,
+        offset,
+        len: buf.len() as u64,
+        pass: ScanPass::Check,
+    });
+    Ok(())
+}
+
+/// One batch of the chain, as the frame checks find it: where it starts in the log, its input,
+/// the byte offsets of its `BATCH` record and of its first frame's head, and its marker.
+#[derive(Clone, Copy, Debug)]
+struct BatchAt {
+    start: Location,
+    file: usize,
+    record: u64,
+    first: u64,
+    marker: BatchMarker,
+}
+
+/// The chain's batches in log order (their starts strictly ascend: each batch follows the one
+/// before it), grown by fallible reservation, and where the last frame check stopped.
+#[derive(Default)]
+struct Batches {
+    at: Vec<BatchAt>,
+    /// The batch, the frame's index in it, the place and the head offset of the last frame a
+    /// check reached.
+    cursor: Option<(usize, u32, u64, u64)>,
+}
+
+/// One frame of the chain as a frame check reads it: its original kind, hash and payload length,
+/// whether a `DROPPED` record stands for it (its payload then reads as zeros), and its record's
+/// input and offset. The batch marker after a batch's frames is a frame too (`marker`), as the
+/// log holds one there.
+#[derive(Clone, Debug)]
+struct FrameAt {
+    kind: u8,
+    hash: Hash,
+    len: u32,
+    dropped: bool,
+    file: usize,
+    head: u64,
+    marker: Option<Vec<u8>>,
+}
+
+/// The log encoding of batch `b`'s marker.
+fn marker_bytes(m: &BatchMarker) -> Vec<u8> {
+    crate::store::encode(&BatchCommit {
+        start: m.start,
+        frames: m.frames,
+        digest: m.digest,
+    })
+}
+
+impl Batches {
+    /// The batch that holds `loc`: the last one that starts at or before it, in its segment.
+    fn of(&self, loc: Location) -> Option<usize> {
+        let i = self.at.partition_point(|b| b.start <= loc).checked_sub(1)?;
+        (self.at[i].start.segment == loc.segment).then_some(i)
+    }
+
+    /// The frame of batch `b` whose head is at byte `head` of its input and whose place is
+    /// `place`: its record's head, and a `DROPPED` record's descriptor.
+    fn frame(
+        &self,
+        lookups: &mut Lookups<'_>,
+        b: usize,
+        place: u64,
+        head: u64,
+    ) -> Result<(FrameAt, u64, u64), StoreError> {
+        let batch = &self.at[b];
+        let mut h = [0u8; FRAME_HEADER as usize];
+        lookups.read_at(batch.file, &mut h, head)?;
+        frame_of(&h, batch, place, head, |buf, at| {
+            lookups.read_at(batch.file, buf, at)
+        })
+    }
+}
+
+/// The frame of `batch` whose record head `h` was read at byte `head`, at log offset `place`;
+/// `read` reads more of the input (a `DROPPED` record's descriptor). Returns it, the next
+/// frame's place and the next record's offset.
+fn frame_of(
+    h: &[u8; FRAME_HEADER as usize],
+    batch: &BatchAt,
+    place: u64,
+    head: u64,
+    mut read: impl FnMut(&mut [u8], u64) -> Result<(), StoreError>,
+) -> Result<(FrameAt, u64, u64), StoreError> {
+    let rlen = u32::from_le_bytes(h[0..4].try_into().expect("4 bytes"));
+    let (kind, hash, len, dropped) = if h[4] == rec::DROPPED {
+        let mut d = [0u8; DROPPED_LEN];
+        if rlen as usize != DROPPED_LEN {
+            return Err(damaged(head, drop_text::WRONG_LENGTH));
+        }
+        read(&mut d, head + FRAME_HEADER)?;
+        let f = parse_dropped(&d).map_err(|what| damaged(head, what))?;
+        (f.kind(), *f.hash(), f.original_len(), true)
+    } else {
+        (
+            h[4],
+            Hash(h[5..37].try_into().expect("32 bytes")),
+            rlen,
+            false,
+        )
+    };
+    let next_place = place
+        .checked_add(FRAME_HEADER)
+        .and_then(|p| p.checked_add(u64::from(len)))
+        .ok_or_else(|| damaged(head, chain_text::OVERFLOW))?;
+    let next_head = head + FRAME_HEADER + u64::from(rlen);
+    Ok((
+        FrameAt {
+            kind,
+            hash,
+            len,
+            dropped,
+            file: batch.file,
+            head,
+            marker: None,
+        },
+        next_place,
+        next_head,
+    ))
+}
+
+/// The marker frame of `batch` (its place is just past the batch's last frame).
+fn marker_of(batch: &BatchAt) -> FrameAt {
+    let bytes = marker_bytes(&batch.marker);
+    FrameAt {
+        kind: kinds::BATCH_COMMIT,
+        hash: Hash::of(&bytes),
+        len: bytes.len() as u32,
+        dropped: false,
+        file: batch.file,
+        head: batch.record,
+        marker: Some(bytes),
+    }
+}
+
+/// The chain's records as the proof validators' source (`RecordAccess`, `FrameLog`): records by
+/// the places the forward pass noted, read again by their offsets; a frame's header, and its
+/// payload, by a seek to its batch and a walk of that batch's frame heads; and every frame of the
+/// chain in log order for the meaning checks. A dropped frame reads as its original header and
+/// zeros, as an erased frame of a log does.
 struct ChainAccess<'a, 'p> {
     lookups: &'a mut Lookups<'p>,
+    batches: &'a mut Batches,
     recs: &'a HashMap<(u32, u64), Rec>,
+    /// The current batch's LANDING frames, by ascending place.
     batch: &'a [(Location, Rec)],
     drops: &'a HashMap<(u32, u64), DropRec>,
+    /// Each input's length.
+    lens: &'a [u64],
 }
 
 impl ChainAccess<'_, '_> {
     fn find(&self, loc: Location) -> Option<&Rec> {
         self.batch
-            .iter()
-            .find(|(l, _)| *l == loc)
-            .map(|(_, r)| r)
+            .binary_search_by_key(&loc, |(l, _)| *l)
+            .ok()
+            .map(|i| &self.batch[i].1)
             .or_else(|| self.recs.get(&key(loc)))
     }
+
+    /// The frame that starts at `loc`, if one does: a seek to its batch, then a walk of the
+    /// batch's frame heads (from the last check's place when it lies before `loc` in the same
+    /// batch).
+    fn frame_at(&mut self, loc: Location) -> Result<Option<FrameAt>, StoreError> {
+        Ok(self
+            .frame_holding(loc)?
+            .filter(|(start, _)| *start == loc.offset)
+            .map(|(_, f)| f))
+    }
+
+    /// The frame whose bytes hold `loc` (a frame or a marker of a batch), and its place.
+    fn frame_holding(&mut self, loc: Location) -> Result<Option<(u64, FrameAt)>, StoreError> {
+        let Some(b) = self.batches.of(loc) else {
+            return Ok(None);
+        };
+        let batch = self.batches.at[b];
+        let (mut n, mut place, mut head) = (0u32, batch.start.offset, batch.first);
+        if let Some((cb, cn, cplace, chead)) = self.batches.cursor
+            && cb == b
+            && cplace <= loc.offset
+        {
+            // resume where the last check stopped
+            (n, place, head) = (cn, cplace, chead);
+        }
+        while n < batch.marker.frames {
+            let (f, next_place, next_head) = self.batches.frame(self.lookups, b, place, head)?;
+            if loc.offset < next_place {
+                self.batches.cursor = Some((b, n, place, head));
+                return Ok(Some((place, f)));
+            }
+            (n, place, head) = (n + 1, next_place, next_head);
+        }
+        let m = marker_of(&batch);
+        let end = place + FRAME_HEADER + u64::from(m.len);
+        Ok((loc.offset < end).then_some((place, m)))
+    }
+
+    /// The input and record offset to blame for a refusal at `loc`: the record of the frame
+    /// that holds it, else its batch's `BATCH` record, else the first input's first record.
+    fn blame(&mut self, loc: Location) -> (usize, u64) {
+        if let Ok(Some((_, f))) = self.frame_holding(loc) {
+            return (f.file, f.head);
+        }
+        match self.batches.of(loc) {
+            Some(b) => (self.batches.at[b].file, self.batches.at[b].record),
+            None => (0, PRELUDE_LEN),
+        }
+    }
+
+    /// The payload of frame `f` (at `loc`) of `len` bytes: zeros for a dropped frame.
+    fn payload_of(&mut self, f: &FrameAt, len: u32) -> Result<Vec<u8>, StoreError> {
+        if f.len != len {
+            return Err(StoreError::corrupt_at(Location {
+                segment: 0,
+                offset: f.head,
+            }));
+        }
+        if let Some(m) = &f.marker {
+            return Ok(m.clone());
+        }
+        let mut buf = zeros(len, f.head)?;
+        if !f.dropped {
+            self.lookups
+                .read_at(f.file, &mut buf, f.head + FRAME_HEADER)?;
+        }
+        Ok(buf)
+    }
+}
+
+/// `len` zero bytes through a fallibly allocated buffer (`record allocation failed` at `at`).
+fn zeros(len: u32, at: u64) -> Result<Vec<u8>, StoreError> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len as usize)
+        .map_err(|_| damaged(at, drop_text::ALLOCATION))?;
+    buf.resize(len as usize, 0);
+    Ok(buf)
 }
 
 impl RecordAccess for ChainAccess<'_, '_> {
@@ -691,10 +951,12 @@ impl RecordAccess for ChainAccess<'_, '_> {
         if let Some(d) = self.drops.get(&key(loc)) {
             return Ok((d.len, d.kind, d.hash) == (len, kind, *hash));
         }
-        Ok(match self.find(loc) {
-            Some(r) => (r.len, r.kind, r.hash) == (len, kind, *hash),
-            None => true,
-        })
+        if let Some(r) = self.find(loc) {
+            return Ok((r.len, r.kind, r.hash) == (len, kind, *hash));
+        }
+        Ok(self
+            .frame_at(loc)?
+            .is_some_and(|f| (f.len, f.kind, f.hash) == (len, kind, *hash)))
     }
 
     fn record(
@@ -710,6 +972,151 @@ impl RecordAccess for ChainAccess<'_, '_> {
             return Ok(None);
         }
         self.lookups.read(&r).map(Some)
+    }
+}
+
+impl FrameLog for ChainAccess<'_, '_> {
+    fn header_at(&mut self, loc: Location) -> Result<Option<(u32, u8, Hash)>, StoreError> {
+        Ok(self.frame_at(loc)?.map(|f| (f.len, f.kind, f.hash)))
+    }
+
+    fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError> {
+        let f = self
+            .frame_at(loc)?
+            .ok_or_else(|| StoreError::corrupt_at(loc))?;
+        self.payload_of(&f, len).map_err(|e| match e {
+            StoreError::RedactionCorrupt { .. } => StoreError::corrupt_at(loc),
+            e => e,
+        })
+    }
+
+    fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError> {
+        let f = self
+            .frame_at(loc)?
+            .ok_or_else(|| StoreError::corrupt_at(loc))?;
+        if f.dropped {
+            return Ok(true);
+        }
+        if f.len != len || f.marker.is_some() {
+            return Err(StoreError::corrupt_at(loc));
+        }
+        let mut buf = vec![0u8; ERASE_BUFFER];
+        let (mut at, end) = (
+            f.head + FRAME_HEADER,
+            f.head + FRAME_HEADER + u64::from(len),
+        );
+        while at < end {
+            let n = (end - at).min(ERASE_BUFFER as u64) as usize;
+            self.lookups.read_at(f.file, &mut buf[..n], at)?;
+            if buf[..n].iter().any(|b| *b != 0) {
+                return Ok(false);
+            }
+            at += n as u64;
+        }
+        Ok(true)
+    }
+
+    fn walk(
+        &mut self,
+        upto: Location,
+        memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+        f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        // a frame counts when it ends at or before `upto`, as a segment log's walk has it
+        let inside = |loc: Location, end: u64| {
+            loc.segment < upto.segment || (loc.segment == upto.segment && end <= upto.offset)
+        };
+        for b in 0..self.batches.at.len() {
+            let batch = self.batches.at[b];
+            if batch.start.segment > upto.segment {
+                break;
+            }
+            let input = self.lookups.file(batch.file)?;
+            let file: &File = &input.f;
+            let mut w = Window::new(file, batch.file, self.lens[batch.file]);
+            let (mut place, mut head) = (batch.start.offset, batch.first);
+            for _ in 0..batch.marker.frames {
+                let mut h = [0u8; FRAME_HEADER as usize];
+                h.copy_from_slice(w.get(head, FRAME_HEADER as usize)?);
+                let (fr, next_place, next_head) = frame_of(&h, &batch, place, head, |buf, at| {
+                    buf.copy_from_slice(w.get(at, buf.len())?);
+                    Ok(())
+                })?;
+                let loc = Location {
+                    segment: batch.start.segment,
+                    offset: place,
+                };
+                if !inside(loc, next_place) {
+                    return Ok(());
+                }
+                let read = || -> Result<Vec<u8>, StoreError> {
+                    let mut buf = zeros(fr.len, fr.head)?;
+                    if !fr.dropped {
+                        read_checked(file, fr.file, &mut buf, fr.head + FRAME_HEADER)?;
+                    }
+                    Ok(buf)
+                };
+                f(&Seen::read_by(loc, fr.kind, fr.hash, fr.len, &read))?;
+                (place, head) = (next_place, next_head);
+            }
+            let m = marker_of(&batch);
+            let loc = Location {
+                segment: batch.start.segment,
+                offset: place,
+            };
+            if !inside(loc, place + FRAME_HEADER + u64::from(m.len)) {
+                return Ok(());
+            }
+            let bytes = m.marker.as_deref().expect("a marker's bytes");
+            f(&Seen::in_memory(loc, m.kind, m.hash, bytes))?;
+        }
+        for (loc, (kind, payload)) in memory {
+            f(&Seen::in_memory(*loc, *kind, Hash::of(payload), payload))?;
+        }
+        Ok(())
+    }
+}
+
+/// A read window over one input for the frame walks: heads of a sequential walk cost one read
+/// per `ERASE_BUFFER` bytes.
+struct Window<'f> {
+    f: &'f File,
+    file: usize,
+    len: u64,
+    buf: Vec<u8>,
+    start: u64,
+    filled: usize,
+}
+
+impl<'f> Window<'f> {
+    fn new(f: &'f File, file: usize, len: u64) -> Window<'f> {
+        Window {
+            f,
+            file,
+            len,
+            buf: Vec::new(),
+            start: 0,
+            filled: 0,
+        }
+    }
+
+    /// The `n` bytes at `at` (`n` at most `ERASE_BUFFER`).
+    fn get(&mut self, at: u64, n: usize) -> Result<&[u8], StoreError> {
+        let inside = at >= self.start && at + n as u64 <= self.start + self.filled as u64;
+        if !inside {
+            if at.checked_add(n as u64).is_none_or(|e| e > self.len) {
+                return Err(damaged(at, dump::ENDS_EARLY));
+            }
+            if self.buf.is_empty() {
+                self.buf = zeros(ERASE_BUFFER as u32, at)?;
+            }
+            let want = (self.len - at).min(ERASE_BUFFER as u64) as usize;
+            read_checked(self.f, self.file, &mut self.buf[..want], at)?;
+            self.start = at;
+            self.filled = want;
+        }
+        let from = (at - self.start) as usize;
+        Ok(&self.buf[from..from + n])
     }
 }
 
@@ -744,6 +1151,9 @@ impl ObjectSource for ChainObjects<'_, '_> {
 }
 
 /// One proof event of a batch, handled in physical order once the batch's framing is checked.
+/// An event holds no payload: an apply its decoded record (96 bytes) and how many of the batch's
+/// landings come before it, a carried record its decoded record (which the meaning checks keep
+/// for the chain, as a log's bootstrap keeps its carried records).
 enum Event {
     Drop {
         at: Location,
@@ -754,15 +1164,15 @@ enum Event {
         at: Location,
         offset: u64,
         hash: Hash,
-        payload: Vec<u8>,
-        landings: Vec<(Location, Hash)>,
+        record: Option<rdy_model::redaction::RedactionApply>,
+        landings: usize,
     },
     Carried {
         at: Location,
         offset: u64,
         hash: Hash,
         rec: Rec,
-        payload: Vec<u8>,
+        record: Option<Box<RedactionCarried>>,
     },
     Copy {
         at: Location,
@@ -847,7 +1257,14 @@ struct Scan<'p> {
     /// Removal proofs.
     collected: Collected,
     recs: HashMap<(u32, u64), Rec>,
+    /// The current batch's LANDING frames, by ascending place, and their hashes.
     batch_landings: Vec<(Location, Rec)>,
+    landing_hashes: Vec<(Location, Hash)>,
+    /// The chain's batches, for the frame checks; each input's length.
+    batches: Batches,
+    lens: Vec<u64>,
+    /// The record hash of each carried record's source apply: one record per source apply.
+    carried_by_apply: HashMap<Hash, Hash>,
     validator: Validator,
     applies: Vec<ApplyFact>,
     carried: Vec<CarriedFact>,
@@ -876,7 +1293,7 @@ fn push<T>(out: &mut Vec<T>, v: T, file: usize, at: u64) -> Result<(), ScanError
     Ok(())
 }
 
-/// Scans `src` with `stop` (module docs, steps 2 to 5) and returns the verified plan. No target
+/// Scans `src` with `stop` (module docs, steps 2 to 6) and returns the verified plan. No target
 /// exists while it runs, and it writes nothing.
 pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, ScanError> {
     if let Some(format) = src.legacy() {
@@ -908,6 +1325,10 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         collected: Collected::default(),
         recs: HashMap::new(),
         batch_landings: Vec::new(),
+        landing_hashes: Vec::new(),
+        batches: Batches::default(),
+        lens: src.envelopes.iter().map(|e| e.len).collect(),
+        carried_by_apply: HashMap::new(),
         validator: Validator::default(),
         applies: Vec::new(),
         carried: Vec::new(),
@@ -933,6 +1354,7 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
             source: e,
         });
     }
+    s.meaning()?;
     let (end, stop_file, stop_index) = s.resolve()?;
     // the files wholly after the end are read whole now: no batch of theirs reaches the ingest
     for i in stop_file + 1..s.envs.len() {
@@ -1148,12 +1570,38 @@ impl<'p> Scan<'p> {
         let Some((start, count, digest, kinds_digest)) = parse_batch_record(&payload) else {
             return Err(self.fail(i, damaged(head.at, dump::cannot_stand(head.kind))));
         };
+        // every batch follows the one before it (the base for a file's first): one frame holds
+        // each place of the chain, before any frame of this batch is read
+        match f.last {
+            None if !follows(links.base, start) => {
+                return Err(self.fail(i, damaged(head.at, chain_text::FIRST_BATCH)));
+            }
+            Some((prev_end, _)) if !follows(prev_end, start) => {
+                return Err(self.fail(i, damaged(head.at, BATCH_GAP)));
+            }
+            _ => {}
+        }
+        self.batches
+            .at
+            .try_reserve(1)
+            .map_err(|_| alloc(i, head.at))?;
+        self.batches.at.push(BatchAt {
+            start,
+            file: i,
+            record: head.at,
+            first: head.end(),
+            marker: BatchMarker {
+                start,
+                frames: count,
+                digest,
+            },
+        });
         let allowed = dump::frame_kinds(f.format, self.envs[i].header.store_format).unwrap_or(&[]);
         let first_of_log = self.mode.is_none();
         self.batch_landings.clear();
+        self.landing_hashes.clear();
         let mut pairs: Vec<(u8, Hash)> = Vec::new();
         let mut events: Vec<Event> = Vec::new();
-        let mut landings: Vec<(Location, Hash)> = Vec::new();
         let mut place = start.offset;
         let mut overflow = false;
         let mut matched_landing = false;
@@ -1201,20 +1649,11 @@ impl<'p> Scan<'p> {
                     kind: fh.kind,
                     hash: fh.hash,
                 };
-                self.present(
-                    r,
-                    f,
-                    &fh,
-                    at,
-                    rec_,
-                    &mut events,
-                    &mut landings,
-                    first_of_log,
-                )
-                .map(|(l, t)| {
-                    matched_landing |= l;
-                    matched_tag |= t;
-                })?;
+                self.present(r, f, &fh, at, rec_, &mut events, first_of_log)
+                    .map(|(l, t)| {
+                        matched_landing |= l;
+                        matched_tag |= t;
+                    })?;
                 (fh.kind, fh.hash, len)
             };
             if !allowed.contains(&kind) {
@@ -1242,15 +1681,12 @@ impl<'p> Scan<'p> {
                 damaged(head.at, format!("batch {n} does not match its digest")),
             ));
         }
-        // the batch's physical end and marker, and the base it follows
+        // the batch's physical end and marker
         let marker = BatchMarker {
             start,
             frames: count,
             digest,
         };
-        if f.last.is_none() && !follows(links.base, start) {
-            return Err(self.fail(i, damaged(head.at, chain_text::FIRST_BATCH)));
-        }
         let end = place
             .checked_add(FRAME_HEADER)
             .and_then(|p| p.checked_add(marker.encoded_len()?))
@@ -1284,7 +1720,7 @@ impl<'p> Scan<'p> {
             if !self.proving() {
                 break;
             }
-            if let Err(source) = self.event(f, e, end) {
+            if let Err(source) = self.event(f, e, start, end) {
                 let file = self.blame.take().unwrap_or(i);
                 self.proof_failed(file, source);
             }
@@ -1304,14 +1740,9 @@ impl<'p> Scan<'p> {
         at: Location,
         rec_: Rec,
         events: &mut Vec<Event>,
-        landings: &mut Vec<(Location, Hash)>,
         first_of_log: bool,
     ) -> Result<(bool, bool), ScanError> {
         let i = f.file;
-        let next = Location {
-            segment: at.segment,
-            offset: at.offset + FRAME_HEADER + fh.len,
-        };
         let holder = self.mode == Some(StoreMode::Holder);
         if holder || first_of_log {
             self.holder_count(rec_, false)?;
@@ -1338,11 +1769,15 @@ impl<'p> Scan<'p> {
                     .map_err(|what| self.fail(i, damaged(fh.at, what)))?;
                 match fh.kind {
                     kinds::REDACTION => {
-                        self.collected.note_request(at, fh.hash);
+                        self.collected
+                            .note_request(at, fh.hash)
+                            .map_err(|_| alloc(i, fh.at))?;
                         self.note(at, rec_, i, fh.at)?;
                     }
                     kinds::REDACTION_RESIDUE => {
-                        self.collected.note_residue(at, fh.hash);
+                        self.collected
+                            .note_residue(at, fh.hash)
+                            .map_err(|_| alloc(i, fh.at))?;
                         self.note(at, rec_, i, fh.at)?;
                     }
                     kinds::REDACTION_APPLY => {
@@ -1353,8 +1788,8 @@ impl<'p> Scan<'p> {
                                 at,
                                 offset: fh.at,
                                 hash: fh.hash,
-                                payload: p,
-                                landings: landings.clone(),
+                                record: apply_record(&p),
+                                landings: self.landing_hashes.len(),
                             },
                             i,
                             fh.at,
@@ -1367,16 +1802,29 @@ impl<'p> Scan<'p> {
                             offset: fh.at,
                             hash: fh.hash,
                             rec: rec_,
-                            payload: p,
+                            record: decode_record(&p).map(Box::new),
                         },
                         i,
                         fh.at,
                     )?,
                 }
             }
-            kinds::REF_UPDATE if fh.len <= REF_READ_MAX => {
-                let p = read_body(r, fh).map_err(|e| self.fail(i, e))?;
+            kinds::REF_UPDATE => {
+                // the name first; a ref of a name the scan needs is read whole, hashed, and
+                // decoded as the store decodes it, whatever its length
+                let Some(p) = self.ref_payload(r, f, fh)? else {
+                    return Ok(matched);
+                };
                 if first_of_log {
+                    let next = at
+                        .offset
+                        .checked_add(FRAME_HEADER)
+                        .and_then(|o| o.checked_add(fh.len))
+                        .map(|offset| Location {
+                            segment: at.segment,
+                            offset,
+                        })
+                        .ok_or_else(|| self.fail(i, damaged(fh.at, chain_text::OVERFLOW)))?;
                     self.first_batch
                         .frame(fh.kind, Some(&p), next)
                         .map_err(|e| self.fail(i, e))?;
@@ -1400,7 +1848,7 @@ impl<'p> Scan<'p> {
             }
             _ => {
                 if fh.kind == kinds::LANDING {
-                    push(landings, (at, fh.hash), i, fh.at)?;
+                    push(&mut self.landing_hashes, (at, fh.hash), i, fh.at)?;
                     push(&mut self.batch_landings, (at, rec_), i, fh.at)?;
                     if let Some(StopMatch::LandingPrefix(prefix)) = self.stop
                         && fh.hash.to_string().starts_with(prefix.as_str())
@@ -1416,6 +1864,47 @@ impl<'p> Scan<'p> {
             }
         }
         Ok(matched)
+    }
+
+    /// The payload of the `REF_UPDATE` record `fh` when its name is one the scan needs (the
+    /// mode, the repo id, the store format), read whole and checked against its hash; None for
+    /// any other ref, whose rest is skipped.
+    fn ref_payload(
+        &self,
+        r: &mut BufReader<Input>,
+        f: &FileScan,
+        fh: &RecordHead,
+    ) -> Result<Option<Vec<u8>>, ScanError> {
+        let i = f.file;
+        if fh.end() > f.len {
+            return Err(self.fail(i, damaged(fh.at, dump::ENDS_EARLY)));
+        }
+        let mut p: Vec<u8> = Vec::new();
+        let first = fh.len.min(REF_NAME_READ) as usize;
+        p.try_reserve_exact(first).map_err(|_| alloc(i, fh.at))?;
+        p.resize(first, 0);
+        dump::read_exact_at(r, &mut p, fh.at).map_err(|e| self.fail(i, e))?;
+        let wanted = dump::ref_name(&p)
+            .is_some_and(|name| SCANNED_REFS.iter().any(|n| n.as_bytes() == name));
+        if !wanted {
+            let n = i64::try_from(fh.len - first as u64).map_err(|_| alloc(i, fh.at))?;
+            r.seek_relative(n)
+                .map_err(|e| self.fail(i, StoreError::Io(e)))?;
+            return Ok(None);
+        }
+        let mut left = fh.len - first as u64;
+        while left > 0 {
+            let n = left.min(ERASE_BUFFER as u64) as usize;
+            p.try_reserve(n).map_err(|_| alloc(i, fh.at))?;
+            let from = p.len();
+            p.resize(from + n, 0);
+            dump::read_exact_at(r, &mut p[from..], fh.at).map_err(|e| self.fail(i, e))?;
+            left -= n as u64;
+        }
+        if Hash::of(&p) != fh.hash {
+            return Err(self.fail(i, damaged(fh.at, dump::HASH_MISMATCH)));
+        }
+        Ok(Some(p))
     }
 
     /// Notes a record a proof may read again.
@@ -1459,20 +1948,26 @@ impl<'p> Scan<'p> {
         self.mode == Some(StoreMode::Holder) && !self.applies.is_empty()
     }
 
-    /// One proof event, in physical order, of a batch that ends at `end`.
-    fn event(&mut self, f: &mut FileScan, e: Event, end: Location) -> Result<(), StoreError> {
+    /// One proof event, in physical order, of a batch that starts at `start` and ends at `end`.
+    fn event(
+        &mut self,
+        f: &mut FileScan,
+        e: Event,
+        start: Location,
+        end: Location,
+    ) -> Result<(), StoreError> {
         match e {
             Event::Drop { at, offset, frame } => self.on_drop(f.file, at, offset, frame),
             Event::Apply {
                 at,
                 offset,
                 hash,
-                payload,
+                record,
                 landings,
             } => {
                 let idx = match self.mode {
                     Some(StoreMode::Holder) => self.holder_apply(f.file, at, offset, hash, end)?,
-                    _ => self.native_apply(f.file, at, offset, hash, &payload, landings, end)?,
+                    _ => self.native_apply(f.file, at, offset, hash, record, landings, end)?,
                 };
                 f.validated.push(idx);
                 Ok(())
@@ -1482,8 +1977,8 @@ impl<'p> Scan<'p> {
                 offset,
                 hash,
                 rec,
-                payload,
-            } => self.on_carried(f.file, at, offset, hash, rec, &payload, end),
+                record,
+            } => self.on_carried(f.file, at, offset, hash, rec, record, start, end),
             Event::Copy { at, rec } => self.on_copy(at, rec, false),
         }
     }
@@ -1507,6 +2002,10 @@ impl<'p> Scan<'p> {
         else {
             return Ok(());
         };
+        // one frame holds each place: a second dropped record of a place is no frame of it
+        if self.drops.contains_key(&key(at)) {
+            return Err(damaged(offset, drop_text::SPAN));
+        }
         if self.drops.len() >= crate::ingest::MAX_PENDING_DROPS
             || self.drops.try_reserve(1).is_err()
         {
@@ -1602,25 +2101,31 @@ impl<'p> Scan<'p> {
         at: Location,
         offset: u64,
         hash: Hash,
-        payload: &[u8],
-        landings: Vec<(Location, Hash)>,
+        record: Option<rdy_model::redaction::RedactionApply>,
+        landings: usize,
         end: Location,
     ) -> Result<usize, StoreError> {
-        let record = apply_record(payload);
-        let frame = ApplyFrame::new(at, hash, record.clone(), self.batch_no, landings);
+        let frame = ApplyFrame::new(at, hash, record.clone(), self.batch_no, Vec::new());
         let checked = {
             let mut access = ChainAccess {
                 lookups: &mut self.lookups,
+                batches: &mut self.batches,
                 recs: &self.recs,
                 batch: &self.batch_landings,
                 drops: &self.drops,
+                lens: &self.lens,
             };
-            self.validator
-                .apply(&self.collected, &mut access, &frame, None)
+            self.validator.apply_after(
+                &self.collected,
+                &mut access,
+                &frame,
+                &self.landing_hashes[..landings],
+                None,
+            )
         };
         checked.map_err(|e| self.proof_refusal(e, offset))?;
         let record = record.expect("a validated apply decodes");
-        let spans = self.validator.take_last_spans();
+        let spans = self.validator.last_spans();
         // the drops this apply is the first to cover
         for loc in &spans {
             let auth = self.validator.auth.spans[loc];
@@ -1639,8 +2144,7 @@ impl<'p> Scan<'p> {
             .collected
             .request_place(&record.request)
             .and_then(|l| self.recs.get(&key(l)).copied());
-        let landing = self
-            .batch_landings
+        let landing = self.batch_landings[..landings]
             .iter()
             .find(|(_, r)| r.hash == record.landing)
             .map(|(_, r)| *r);
@@ -1833,9 +2337,13 @@ impl<'p> Scan<'p> {
         Ok(())
     }
 
-    /// A carried record of the chain: it must decode in its bounded canonical form; it releases
-    /// the dropped frames of its own input that it names with `held: false`, with their exact
-    /// identity.
+    /// A carried record of the chain: it must decode in its bounded canonical form, and be the
+    /// only record of its source apply (an identical copy aside: `carried removal provenance
+    /// conflicts`); it releases the dropped frames that name it and that it names with
+    /// `held: false`, each of its own input and with its exact identity. A dropped frame that
+    /// names another proof is left to that proof (an apply that covers a span after a carried
+    /// record recognized it becomes its proof: D-0VG72), and an unreleased one is refused at the
+    /// end. The record is kept for the meaning checks.
     #[allow(clippy::too_many_arguments)]
     fn on_carried(
         &mut self,
@@ -1844,18 +2352,29 @@ impl<'p> Scan<'p> {
         offset: u64,
         hash: Hash,
         rec_: Rec,
-        payload: &[u8],
+        record: Option<Box<RedactionCarried>>,
+        start: Location,
         end: Location,
     ) -> Result<(), StoreError> {
-        let record =
-            decode_record(payload).ok_or_else(|| damaged(offset, drop_text::NO_AUTHORIZATION))?;
+        let record = record.ok_or_else(|| damaged(offset, drop_text::NO_AUTHORIZATION))?;
+        // one record per source apply: another record of the same source apply conflicts
+        match self.carried_by_apply.get(&record.apply) {
+            Some(h) if *h != hash => return Err(damaged(offset, PROVENANCE_CONFLICT)),
+            Some(_) => {}
+            None => {
+                self.carried_by_apply
+                    .try_reserve(1)
+                    .map_err(|_| damaged(offset, drop_text::ALLOCATION))?;
+                self.carried_by_apply.insert(record.apply, hash);
+            }
+        }
+        // the dropped frames that name this record: each must be of its own input, with the
+        // span's exact identity; a drop that names another proof waits for that proof
         for s in record.spans.iter().filter(|s| !s.held) {
-            self.release(
-                place_of(s.place),
-                hash,
-                (s.kind, s.hash, s.len, s.residue),
-                Some(file),
-            )?;
+            let place = place_of(s.place);
+            if self.drops.get(&key(place)).is_some_and(|d| d.apply == hash) {
+                self.release(place, hash, (s.kind, s.hash, s.len, s.residue), Some(file))?;
+            }
         }
         self.carried
             .try_reserve(1)
@@ -1868,6 +2387,17 @@ impl<'p> Scan<'p> {
             rec: rec_,
             batch_end: end,
             apply: record.apply,
+        });
+        // kept for the meaning checks, as a log's bootstrap keeps its carried records
+        self.collected
+            .carried
+            .try_reserve(1)
+            .map_err(|_| damaged(offset, drop_text::ALLOCATION))?;
+        self.collected.carried.push(CarriedFrame {
+            loc: at,
+            hash,
+            record: Some(*record),
+            batch_start: start,
         });
         Ok(())
     }
@@ -1949,6 +2479,104 @@ impl<'p> Scan<'p> {
         if first != env.trailer.first_removed {
             let at = env.len - (FRAME_HEADER + dump::TRAILER_LEN as u64);
             self.proof_failed(f.file, damaged(at, chain_text::REMOVALS));
+        }
+    }
+
+    /// The meaning checks of the whole chain, before any target exists, as the store's bootstrap
+    /// runs them on a log (the applies are already proved, in physical order, by the forward
+    /// pass): for a project, the carried records laid over the validated applies
+    /// (`redaction_carried::overlay`: each record's own bounds, one record per source apply,
+    /// ascending spans before its batch, each span against its frame and residue) and the
+    /// applies' meaning against every frame (`check_log`: every copy covered, all-versions
+    /// coverage, the residue of every intact span); for a holder, HA1's rules 2 and 3 over every
+    /// frame (each copy of an approved tuple, and no uncovered embedding) and the carried
+    /// overlay. Every file is checked, those wholly after any stop too. A failure is blamed on
+    /// the record of the frame it names.
+    fn meaning(&mut self) -> Result<(), ScanError> {
+        if self.applies.is_empty() && self.collected.carried.is_empty() {
+            return Ok(());
+        }
+        let upto = self.envs[self.envs.len() - 1].header.log_end;
+        let checked = {
+            let mut access = ChainAccess {
+                lookups: &mut self.lookups,
+                batches: &mut self.batches,
+                recs: &self.recs,
+                batch: &[],
+                drops: &self.drops,
+                lens: &self.lens,
+            };
+            match self.mode {
+                Some(StoreMode::Holder) => {
+                    let applies: Vec<(Location, Hash)> =
+                        self.applies.iter().map(|a| (a.at, a.hash)).collect();
+                    let removals: BTreeMap<Hash, PortableRemoval> = self
+                        .applies
+                        .iter()
+                        .map(|a| {
+                            (
+                                a.hash,
+                                PortableRemoval {
+                                    request: a.named.0,
+                                    apply: a.hash,
+                                    landing: a.named.1,
+                                    objects: a.objects.clone(),
+                                },
+                            )
+                        })
+                        .collect();
+                    crate::redaction_import::check_proved(
+                        &self.collected,
+                        &mut access,
+                        upto,
+                        &applies,
+                        removals,
+                        self.holder.residues.clone(),
+                    )
+                }
+                _ => self
+                    .validator
+                    .check_meaning(&self.collected, &mut access, upto),
+            }
+        };
+        match checked {
+            Ok(()) => Ok(()),
+            Err(StoreError::RedactionCorrupt { segment, offset }) => {
+                let loc = Location { segment, offset };
+                let what = if self.drops.contains_key(&key(loc)) {
+                    drop_text::SPAN
+                } else {
+                    drop_text::NO_AUTHORIZATION
+                };
+                let (file, at) = ChainAccess {
+                    lookups: &mut self.lookups,
+                    batches: &mut self.batches,
+                    recs: &self.recs,
+                    batch: &[],
+                    drops: &self.drops,
+                    lens: &self.lens,
+                }
+                .blame(loc);
+                Err(ScanError::Input {
+                    file,
+                    source: damaged(at, what),
+                })
+            }
+            Err(e) => {
+                let file = self
+                    .applies
+                    .first()
+                    .map(|a| a.file)
+                    .or_else(|| self.carried.first().map(|c| c.file))
+                    .unwrap_or(0);
+                let source = match e {
+                    StoreError::RedactionHuman | StoreError::Decode(_) => {
+                        damaged(PRELUDE_LEN, drop_text::NO_AUTHORIZATION)
+                    }
+                    e => e,
+                };
+                Err(ScanError::Input { file, source })
+            }
         }
     }
 
@@ -2158,8 +2786,12 @@ impl<'p> Scan<'p> {
                 source: damaged(offset, PROVENANCE_CONFLICT),
             };
             let identity = prov.apply;
-            // already retained: a carried record of this source apply, or the apply itself
+            // already retained: a carried record of this source apply (a later carried record
+            // must be that very record), or the apply itself
             if let Some(k) = kept.get(&identity).copied() {
+                if !is_apply && self.carried[idx].hash != self.carried[k].hash {
+                    return Err(conflict());
+                }
                 let r = self.carried_record(k)?;
                 if !prov.same_as_carried(&r) {
                     return Err(conflict());
@@ -2282,7 +2914,33 @@ impl<'p> Scan<'p> {
                 segment: k.0,
                 offset: k.1,
             };
-            let action = if pre.contains(&d.apply) || kept_hashes.contains(&d.apply) {
+            // the first apply that covers the place: when it is retained, the place is its
+            // hole whatever else the dropped record names
+            let first_cover = if holder {
+                self.holder
+                    .approved
+                    .get(&ObjectKey {
+                        kind: d.kind,
+                        hash: d.hash,
+                    })
+                    .map(|(t, a)| (*a, t.residue))
+            } else {
+                self.validator
+                    .auth
+                    .spans
+                    .get(&at)
+                    .filter(|s| !s.carried)
+                    .map(|s| (s.apply, s.residue))
+            };
+            let action = if let Some((apply, residue)) = first_cover
+                && pre.contains(&apply)
+                && d.apply != apply
+            {
+                FrameAction::Zero {
+                    authority: apply,
+                    residue,
+                }
+            } else if pre.contains(&d.apply) || kept_hashes.contains(&d.apply) {
                 FrameAction::Keep
             } else {
                 let carried_apply = self

@@ -38,8 +38,8 @@ use crate::redaction::{
     MAX_TARGET_BYTES, MAX_TARGETS, is_removable, limit, residue_matches, residue_names,
     selector_len,
 };
-use crate::redaction_io::{Authorization, Collected, SpanAuth, for_each_seen, read_record};
-use crate::segment::{HEADER, Hole, Holes, Location, header_at, payload_is_zero, seg_path};
+use crate::redaction_io::{Authorization, Collected, FrameLog, SpanAuth, for_each_seen};
+use crate::segment::{HEADER, Hole, Holes, Location, seg_path};
 use crate::store::{StoreReader, decode, encode};
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, RedactionCarried, RedactionResidue,
@@ -161,7 +161,7 @@ struct Identity {
 /// `RedactionCorrupt`: at the record for a malformed record, at the span for a span.
 pub(crate) fn overlay(
     c: &Collected,
-    readers: &[File],
+    log: &mut dyn FrameLog,
     auth: &mut Authorization,
     upto: Location,
 ) -> Result<(), StoreError> {
@@ -223,7 +223,7 @@ pub(crate) fn overlay(
     }
     // 2. every span is a frame start of the log
     let mut found: BTreeSet<Location> = BTreeSet::new();
-    for_each_seen(readers, walk_to, &BTreeMap::new(), |seen| {
+    log.walk(walk_to, &BTreeMap::new(), &mut |seen| {
         if wanted.contains(&seen.loc) {
             found.insert(seen.loc);
         }
@@ -253,7 +253,7 @@ pub(crate) fn overlay(
     for f in &frames {
         let r = f.record.as_ref().expect("a checked record");
         for s in &r.spans {
-            check_span(c, readers, auth, &mut identity, &mut held_zero, f, r, s)?;
+            check_span(c, log, auth, &mut identity, &mut held_zero, f, r, s)?;
         }
         kept.push(CarriedAt {
             at: f.loc,
@@ -275,7 +275,7 @@ pub(crate) fn overlay(
 #[allow(clippy::too_many_arguments)]
 fn check_span(
     c: &Collected,
-    readers: &[File],
+    log: &mut dyn FrameLog,
     auth: &mut Authorization,
     identity: &mut BTreeMap<Location, Identity>,
     held_zero: &mut Vec<Location>,
@@ -285,8 +285,7 @@ fn check_span(
 ) -> Result<(), StoreError> {
     let loc = location(s.place);
     let bad = || StoreError::corrupt_at(loc);
-    let file = readers.get(loc.segment as usize).ok_or_else(bad)?;
-    if header_at(file, loc.offset, file.metadata()?.len())? != Some((s.len, s.kind, s.hash)) {
+    if log.header_at(loc)? != Some((s.len, s.kind, s.hash)) {
         return Err(bad());
     }
     // the residue: one of this object, sealed before the record
@@ -300,9 +299,9 @@ fn check_span(
                         .get(&h)
                         .filter(|l| **l < f.loc)
                         .ok_or_else(bad)?;
-                    let payload =
-                        read_record(readers, &c.memory, *rloc, kinds::REDACTION_RESIDUE, &h)?
-                            .ok_or_else(bad)?;
+                    let payload = log
+                        .record(*rloc, kinds::REDACTION_RESIDUE, &h)?
+                        .ok_or_else(bad)?;
                     decode::<RedactionResidue>(&payload).map_err(|_| bad())?
                 }
             };
@@ -336,8 +335,7 @@ fn check_span(
         // a validated apply covers it, and is its proof
         return Ok(());
     }
-    let start = loc.offset + HEADER;
-    let zero = payload_is_zero(file, start, u64::from(s.len))?;
+    let zero = log.payload_is_zero(loc, s.len)?;
     if !s.held {
         if !zero {
             return Err(bad());
@@ -364,7 +362,7 @@ fn check_span(
         }
         return Ok(());
     }
-    let payload = crate::redaction_io::read_payload(file, start, s.len)?;
+    let payload = log.payload(loc, s.len)?;
     if Hash::of(&payload) == s.hash {
         // intact: what its residue records
         if let Some((_, res)) = &residue

@@ -115,6 +115,26 @@ pub struct IngestReport {
     pub end: Location,
 }
 
+/// Whether `named`, the record a dropped frame at `loc` names, is a validated carried record of
+/// `auth` whose `held: false` span at `loc` has exactly the frame's `identity` (kind, hash,
+/// length, residue). Such a record was the span's proof when the dump that holds the frame was
+/// written; a later apply that covers the span is its proof now (D-0VG72: "an apply that covers
+/// a held:false span becomes that span's proof"), and the record stays as history.
+fn names_carried(
+    auth: &redaction_io::Authorization,
+    named: &Hash,
+    loc: Location,
+    identity: (u8, Hash, u32, Option<Hash>),
+) -> bool {
+    auth.carried.iter().filter(|c| c.hash == *named).any(|c| {
+        c.record.spans.iter().any(|s| {
+            !s.held
+                && (s.place.segment, s.place.offset) == (loc.segment, loc.offset)
+                && (s.kind, s.hash, s.len, s.residue) == identity
+        })
+    })
+}
+
 fn dump_error(what: String) -> StoreError {
     StoreError::Dump { at: 0, what }
 }
@@ -348,7 +368,8 @@ impl Ingest {
                 continue;
             };
             if (hole.kind, hole.hash, hole.len) == (kind, hash, len)
-                && span.apply == apply
+                && (span.apply == apply
+                    || names_carried(&auth, &apply, p.loc, (kind, hash, len, residue)))
                 && span.residue == residue
             {
                 p.released = true;
@@ -365,7 +386,9 @@ impl Ingest {
     /// physical copy of selected content is a span, and every intact span is what its residue
     /// records) must accept the log, and must hold each dropped frame's location as an
     /// authorized span with its original kind, hash and length, from the first valid apply that
-    /// authorizes it, which the record names, and with the residue the record names. Refusals
+    /// authorizes it, which the record names (or a validated carried record that names that
+    /// exact span `held: false`, the span's proof when its dump was written: `names_carried`),
+    /// and with the residue the record names. Refusals
     /// (`StoreError::Dump`): a span the log's applies place elsewhere or with another header is
     /// `dropped frame does not match its authorized span`; no valid apply for it, or another
     /// apply than the record names, is `dropped frame has no valid authorization`; another
@@ -405,7 +428,9 @@ impl Ingest {
             if (hole.kind, hole.hash, hole.len) != (kind, hash, len) {
                 return refuse(drop_text::SPAN);
             }
-            if span.apply != apply {
+            if span.apply != apply
+                && !names_carried(&auth, &apply, p.loc, (kind, hash, len, residue))
+            {
                 return refuse(drop_text::NO_AUTHORIZATION);
             }
             if span.residue != residue {

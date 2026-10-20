@@ -1538,3 +1538,676 @@ fn hc5_pending_drops_keep_the_ingest_bounds() {
     let (_, _, what) = damage(run(&[forged_drops(dir.path(), n + 1, 1)], None).unwrap_err());
     assert_eq!(what, "record allocation failed");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1: hostile batch places, padded refs, memory, carried releases and the meaning pass.
+
+/// What a format-3 dump holds: its header, its project files, its batches and its trailer.
+struct Items {
+    header: DumpHeader,
+    files: Vec<(String, Vec<u8>)>,
+    batches: Vec<DumpBatch>,
+    trailer: DumpTrailer,
+}
+
+fn items(bytes: &[u8]) -> Items {
+    let (mut rd, _, header) = DumpReader::open(bytes).unwrap();
+    let mut files = vec![];
+    let mut batches = vec![];
+    while let Some(item) = rd.next().unwrap() {
+        match item {
+            DumpItem::File { path, bytes } => files.push((path, bytes)),
+            DumpItem::Batch(b) => batches.push(b),
+        }
+    }
+    let trailer = *rd.trailer().unwrap();
+    Items {
+        header,
+        files,
+        batches,
+        trailer,
+    }
+}
+
+impl Items {
+    /// The dump of these items, written again; its header's end and end marker follow its last
+    /// batch when `follow_end`.
+    fn write(&self, follow_end: bool) -> Vec<u8> {
+        let mut header = self.header.clone();
+        if follow_end {
+            let last = self.batches.last().unwrap();
+            header.log_end = batch_end(last).unwrap_or(last.start);
+            let mut chain = header.chain.unwrap();
+            chain.end_batch = BatchMarker::of(last);
+            header.chain = Some(chain);
+        }
+        let mut w = DumpWriter::new(Vec::new(), &header).unwrap();
+        for (p, b) in &self.files {
+            w.file(p, b).unwrap();
+        }
+        for b in &self.batches {
+            w.batch(b).unwrap();
+        }
+        w.finish(RemovalFacts {
+            removals: self.trailer.removals,
+            first_removed: self.trailer.first_removed,
+        })
+        .unwrap()
+        .0
+    }
+}
+
+fn present(kind: u8, payload: Vec<u8>) -> Frame {
+    Frame::Present {
+        kind,
+        hash: Hash::of(&payload),
+        payload,
+    }
+}
+
+fn batch_of(start: Location, frames: Vec<Frame>) -> DumpBatch {
+    DumpBatch {
+        start,
+        digest: kinds::batch_digest(frames.iter().map(|f| f.hash())),
+        frames,
+    }
+}
+
+/// An increment after the dump `prev` that holds `batches` (the first at `prev`'s end) and no
+/// removal facts.
+fn increment(prev: &[u8], batches: Vec<DumpBatch>) -> Vec<u8> {
+    let last = batches.last().unwrap();
+    let header = DumpHeader {
+        store_format: STORE_FORMAT,
+        log_end: batch_end(last).unwrap(),
+        rdy: "test".into(),
+        chain: Some(DumpChainHeader::after(&end_of(prev), BatchMarker::of(last))),
+    };
+    let mut w = DumpWriter::new(Vec::new(), &header).unwrap();
+    for b in &batches {
+        w.batch(b).unwrap();
+    }
+    w.finish(RemovalFacts::default()).unwrap().0
+}
+
+/// `next`, an increment, written again after `prev` (whose trailer digest changed).
+fn relink(next: &[u8], prev: &[u8]) -> Vec<u8> {
+    let mut it = items(next);
+    let mut chain = it.header.chain.unwrap();
+    chain.prev = end_of(prev).digest;
+    it.header.chain = Some(chain);
+    it.write(false)
+}
+
+/// The offset of the `n`-th BATCH record (from 0) of the dump `bytes`.
+fn batch_record(bytes: &[u8], n: usize) -> u64 {
+    records(bytes)
+        .into_iter()
+        .filter(|r| r.kind == rec::BATCH)
+        .nth(n)
+        .unwrap()
+        .offset
+}
+
+/// The offset of the first record of `kind` and `hash` in the dump `bytes`.
+fn record_of(bytes: &[u8], kind: u8, hash: Hash) -> u64 {
+    records(bytes)
+        .into_iter()
+        .find(|r| r.kind == kind && r.hash == hash)
+        .unwrap()
+        .offset
+}
+
+/// The present payload of the frame of `kind` and `hash` in `items`.
+fn payload_of(it: &Items, kind: u8, hash: Hash) -> Vec<u8> {
+    it.batches
+        .iter()
+        .flat_map(|b| b.frames.iter())
+        .find(|f| f.kind() == kind && *f.hash() == hash)
+        .and_then(|f| f.present_payload())
+        .unwrap()
+        .to_vec()
+}
+
+fn secret_target(b: &Block) -> Vec<RedactTarget> {
+    vec![RedactTarget::Version {
+        id: b.id.clone(),
+        version: b.version_hash(),
+    }]
+}
+
+/// A batch at `start` that claims the secret's block place of `h`: a dropped frame of the
+/// secret's identity, named by a carried record of that span (`held: false`) in the same batch.
+fn claiming_batch(h: &History, start: Location) -> DumpBatch {
+    let s0 = h.secret_frames[0];
+    let residue = block_residue(&h.secret);
+    let c = carried_fixture::record(
+        secret_target(&h.secret),
+        vec![span(&s0, Some(&residue), false)],
+    );
+    batch_of(
+        start,
+        vec![
+            Frame::Dropped {
+                kind: s0.kind,
+                hash: s0.hash,
+                len: s0.len,
+                apply: carried_hash(&c),
+                residue: Some(carried_fixture::residue_hash(&residue)),
+            },
+            present(kinds::REDACTION_CARRIED, postcard::to_allocvec(&c).unwrap()),
+        ],
+    )
+}
+
+#[test]
+fn hc5_batches_follow_each_other_in_every_file() {
+    let h = history();
+    let s0 = h.secret_frames[0];
+    let i1_end = end_of(&h.bytes(&h.i1)).end;
+    // a later file: i2's batches, then one that starts back at the secret's place in f0
+    let mut it = items(&h.bytes(&h.i2));
+    let n = it.batches.len();
+    it.batches.push(claiming_batch(&h, s0.loc));
+    let i2x = it.write(true);
+    let files = vec![h.f0.clone(), h.i1.clone(), h.write("i2x", &i2x)];
+    for stop in [None, Some(StopMatch::Position(i1_end))] {
+        let (file, at_, what) = damage(run(&files, stop).unwrap_err());
+        assert_eq!(
+            (file, at_, what.as_str()),
+            (2, batch_record(&i2x, n), BATCH_GAP)
+        );
+    }
+    // the same batch in the middle of i1, with no stop
+    let mut it = items(&h.bytes(&h.i1));
+    it.batches.insert(1, claiming_batch(&h, s0.loc));
+    let i1x = it.write(false);
+    let files = vec![h.f0.clone(), h.write("i1x", &i1x)];
+    let (file, at_, what) = damage(run(&files, None).unwrap_err());
+    assert_eq!(
+        (file, at_, what.as_str()),
+        (1, batch_record(&i1x, 1), BATCH_GAP)
+    );
+    // and a batch that starts past the end of the batch before it
+    let mut it = items(&h.bytes(&h.i2));
+    let gap = it.batches.last().map(|b| batch_end(b).unwrap()).unwrap();
+    it.batches.push(batch_of(
+        at(gap.segment, gap.offset + 1),
+        vec![present(
+            kinds::BLOCK,
+            postcard::to_allocvec(&block("b-00007", "x")).unwrap(),
+        )],
+    ));
+    let i2g = it.write(true);
+    let (file, at_, what) =
+        damage(run(&[h.f0.clone(), h.i1.clone(), h.write("i2g", &i2g)], None).unwrap_err());
+    assert_eq!(
+        (file, at_, what.as_str()),
+        (2, batch_record(&i2g, n), BATCH_GAP)
+    );
+}
+
+#[test]
+fn hc5_batch_start_near_the_end_of_the_position_space_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    land(&mut s, "work", creates(&[&block("b-00001", "a block")]));
+    let f = dump(&s, None, &[]);
+    drop(s);
+    let mut it = items(&f);
+    let n = it.batches.len();
+    it.batches.push(batch_of(
+        at(0, u64::MAX - 40),
+        vec![present(
+            kinds::BLOCK,
+            postcard::to_allocvec(&block("b-00002", "far")).unwrap(),
+        )],
+    ));
+    let bytes = it.write(true);
+    let p = put(dir.path(), "far.rdydump", &bytes);
+    let (file, at_, what) = damage(run(&[p], None).unwrap_err());
+    assert_eq!(
+        (file, at_, what.as_str()),
+        (0, batch_record(&bytes, n), BATCH_GAP)
+    );
+}
+
+#[test]
+fn hc5_every_ref_update_counts_for_mode_and_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let pad = |p: &mut Vec<u8>| p.extend(std::iter::repeat_n(0u8, 70_000));
+    // a project's last batch sets another repo id, padded past 64 KiB: postcard reads the ref
+    // as the store does, so the header's repo is contradicted
+    let mut s = Store::create(&dir.path().join("p")).unwrap();
+    land(&mut s, "work", creates(&[&block("b-00001", "a block")]));
+    let f = dump(&s, None, &[]);
+    drop(s);
+    let mut it = items(&f);
+    let start = batch_end(it.batches.last().unwrap()).unwrap();
+    let mut p = postcard::to_allocvec(&kinds::RefUpdate {
+        name: "meta/repo_id".into(),
+        value: vec![7u8; 16],
+        at: start,
+    })
+    .unwrap();
+    pad(&mut p);
+    it.batches
+        .push(batch_of(start, vec![present(kinds::REF_UPDATE, p)]));
+    let bytes = it.write(true);
+    let (file, _, what) =
+        damage(run(&[put(dir.path(), "repo.rdydump", &bytes)], None).unwrap_err());
+    assert_eq!((file, what.as_str()), (0, METADATA_MISMATCH));
+    // a holder's first-batch mode ref, padded past 64 KiB: the scan reads the holder's mode
+    let repo = RepoId([0x31; 16]);
+    drop(Store::create_holder(&dir.path().join("h"), repo).unwrap());
+    let h = Store::open(&dir.path().join("h")).unwrap();
+    let hf = dump(&h, None, &[]);
+    drop(h);
+    let plain = ok(&[put(dir.path(), "h.rdydump", &hf)], None);
+    assert_eq!(plain.mode(), StoreMode::Holder);
+    let mut it = items(&hf);
+    let mut padded = false;
+    for f in it.batches[0].frames.iter_mut() {
+        if let Frame::Present {
+            kind: kinds::REF_UPDATE,
+            payload,
+            ..
+        } = f
+            && rdy_store::holder::names_store_mode(payload)
+        {
+            let mut p = payload.clone();
+            pad(&mut p);
+            assert!(rdy_store::holder::names_store_mode(&p));
+            *f = present(kinds::REF_UPDATE, p);
+            padded = true;
+        }
+    }
+    assert!(padded);
+    // every later batch moves by the padding
+    let mut start = it.batches[0].start;
+    for b in it.batches.iter_mut() {
+        *b = batch_of(start, std::mem::take(&mut b.frames));
+        start = batch_end(b).unwrap();
+    }
+    let bytes = it.write(true);
+    let plan = ok(&[put(dir.path(), "hpad.rdydump", &bytes)], None);
+    assert_eq!(plan.mode(), StoreMode::Holder);
+}
+
+/// The memory a scan of this thread holds at its peak, in bytes (the counting allocator).
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Counting;
+
+    thread_local! {
+        static NOW: Cell<usize> = const { Cell::new(0) };
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    // SAFETY: every call goes to `System` with the caller's arguments unchanged; the counters
+    // are this thread's own cells. The default `realloc` and `alloc_zeroed` come back here.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            let _ = NOW.try_with(|n| {
+                n.set(n.get() + l.size());
+                let _ = PEAK.try_with(|p| p.set(p.get().max(n.get())));
+            });
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(l) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, l: Layout) {
+            let _ = NOW.try_with(|n| n.set(n.get().saturating_sub(l.size())));
+            // SAFETY: `ptr` came from `System` with `l` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, l) }
+        }
+    }
+
+    /// The peak of this thread's live allocations during `f`, above what was live before it.
+    pub fn peak_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        let base = NOW.with(|n| n.get());
+        PEAK.with(|p| p.set(base));
+        let out = f();
+        (out, PEAK.with(|p| p.get()) - base)
+    }
+}
+
+#[global_allocator]
+static COUNTING: counting::Counting = counting::Counting;
+
+/// A full dump of a fresh store, then one batch of `n` LANDING frames and `n` REDACTION_APPLY
+/// frames of eight bytes each.
+fn landing_flood(dir: &Path, n: usize) -> PathBuf {
+    let mut s = Store::create(&dir.join(format!("flood-{n}"))).unwrap();
+    land(&mut s, "work", creates(&[&block("b-00001", "a block")]));
+    let f = dump(&s, None, &[]);
+    drop(s);
+    let mut it = items(&f);
+    let start = batch_end(it.batches.last().unwrap()).unwrap();
+    let mut frames = vec![];
+    for i in 0..n {
+        frames.push(present(kinds::LANDING, (i as u64).to_le_bytes().repeat(4)));
+    }
+    for i in 0..n {
+        frames.push(present(
+            kinds::REDACTION_APPLY,
+            (i as u64).to_le_bytes().to_vec(),
+        ));
+    }
+    it.batches.push(batch_of(start, frames));
+    // the trailer counts the apply frames
+    it.trailer.removals = n as u32;
+    put(dir, &format!("flood-{n}.rdydump"), &it.write(true))
+}
+
+#[test]
+fn hc5_landing_flood_holds_linear_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let small = landing_flood(dir.path(), 1000);
+    let large = landing_flood(dir.path(), 2000);
+    let (e, at_small) = counting::peak_during(|| run(std::slice::from_ref(&small), None));
+    assert_eq!(
+        damage(e.unwrap_err()).2,
+        "dropped frame has no valid authorization"
+    );
+    let (e, at_large) = counting::peak_during(|| run(std::slice::from_ref(&large), None));
+    assert_eq!(
+        damage(e.unwrap_err()).2,
+        "dropped frame has no valid authorization"
+    );
+    // twice the input holds at most about twice the memory, never four times
+    assert!(
+        at_large < 3 * at_small,
+        "{at_small} bytes at 1000 landings, {at_large} bytes at 2000"
+    );
+}
+
+/// The proof the store gives the frame at `loc`: the record a dropped frame there names.
+fn proof_at(s: &Store, loc: Location) -> Option<Hash> {
+    let mut out = None;
+    s.reader()
+        .for_each_record_from(loc, s.log_end(), |at, f, _| {
+            if at == loc
+                && let rdy_store::redaction::StoredFrame::Dropped { apply, .. } = f
+            {
+                out = Some(apply);
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// A holder loaded with a stop before its take of `v2`: its secret copy `p` is zero, and the
+/// carried record `record` (of the taken apply) names it `held: false`.
+struct LoadedHolder {
+    b: HolderBase,
+    loaded: PathBuf,
+    record: RedactionCarried,
+    p: Framed,
+    apply: Hash,
+}
+
+fn loaded_holder() -> LoadedHolder {
+    let b = holder_base();
+    let pre = b.dir.path().join("pre");
+    carried_fixture::copy_store(&b.holder, &pre);
+    let mut h = Store::open(&b.holder).unwrap();
+    let hf0_end = h.log_end();
+    let p = *framed(&h.reader(), h.log_end())
+        .iter()
+        .find(|f| f.kind == kinds::BLOCK && f.hash == b.secret.version_hash())
+        .unwrap();
+    let files = upload(&b.src, b.v2.0, &b.dir.path().join("v2-a.rdysync"));
+    take(&mut h, &files, "v2", b.v2.1).unwrap();
+    let hf2 = put(b.dir.path(), "hf2.rdydump", &dump(&h, None, &[]));
+    drop(h);
+    let plan = ok(&[hf2], Some(StopMatch::Position(hf0_end)));
+    assert_eq!(plan.carried().len(), 1);
+    let record = plan.carried()[0].clone();
+    assert!(record.spans.iter().all(|s| !s.held));
+    let loaded = b.dir.path().join("loaded");
+    carried_fixture::load(&pre, &loaded, plan.residues(), plan.carried()).unwrap();
+    let apply = b.fixture.applies[0].0;
+    LoadedHolder {
+        b,
+        loaded,
+        record,
+        p,
+        apply,
+    }
+}
+
+impl LoadedHolder {
+    /// The loaded holder takes `v2`, whose apply now covers the copy.
+    fn take_v2(&self, s: &mut Store, name: &str) {
+        let files = upload(&self.b.src, self.b.v2.0, &self.b.dir.path().join(name));
+        take(s, &files, "v2", self.b.v2.1).unwrap();
+    }
+}
+
+#[test]
+fn hc5_carried_record_releases_only_drops_it_names() {
+    // a stopped load, then a take of the matching apply, then a dump: the copy's dropped frame
+    // names the apply, and the carried record before it leaves that drop to the apply
+    let l = loaded_holder();
+    let mut s = Store::open(&l.loaded).unwrap();
+    assert_eq!(proof_at(&s, l.p.loc), Some(carried_hash(&l.record)));
+    l.take_v2(&mut s, "v2-b.rdysync");
+    assert_eq!(proof_at(&s, l.p.loc), Some(l.apply));
+    let whole = put(l.b.dir.path(), "whole.rdydump", &dump(&s, None, &[]));
+    drop(s);
+    let plan = ok(&[whole], None);
+    assert_eq!(plan.mode(), StoreMode::Holder);
+    assert_eq!(
+        plan.frame_action(l.p.loc, l.p.kind, l.p.hash, l.p.len)
+            .unwrap(),
+        FrameAction::Keep
+    );
+}
+
+#[test]
+fn hc5_drop_named_by_its_earlier_carried_proof_loads() {
+    // f0 before the take (the copy's dropped frame names the carried record), i1 after it (the
+    // taken apply covers the copy)
+    let l = loaded_holder();
+    let c = carried_hash(&l.record);
+    let mut s = Store::open(&l.loaded).unwrap();
+    let f0 = dump(&s, None, &[]);
+    l.take_v2(&mut s, "v2-c.rdysync");
+    let i1 = dump(&s, Some(&end_of(&f0)), &[]);
+    drop(s);
+    let files = vec![
+        put(l.b.dir.path(), "lf0.rdydump", &f0),
+        put(l.b.dir.path(), "li1.rdydump", &i1),
+    ];
+    ok(&files, None);
+    // the whole load of the same batches finishes
+    let to = l.b.dir.path().join("whole-load");
+    let mut ingest = rdy_store::ingest::Ingest::create(&to).unwrap();
+    let mut n = 0;
+    for bytes in [&f0, &i1] {
+        for b in items(bytes).batches {
+            n += 1;
+            ingest.batch(n, &b).unwrap();
+        }
+    }
+    ingest.upgrade(carried_fixture::store_format()).unwrap();
+    ingest.finish().unwrap();
+    // the loaded store names the apply as the copy's proof, and keeps the carried record
+    let s = Store::open(&to).unwrap();
+    assert_eq!(proof_at(&s, l.p.loc), Some(l.apply));
+    let mut kept = vec![];
+    s.reader()
+        .visit_carried(END_OF_LOG, &mut |x| {
+            kept.push(x.hash);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(kept, vec![c]);
+}
+
+#[test]
+fn hc5_span_header_is_checked_against_its_frame() {
+    // (a) f0's secret block frame holds other bytes of the same length: the apply's span names
+    // a frame whose header is not the span's
+    let h = history();
+    let s0 = h.secret_frames[0];
+    let mut it = items(&h.bytes(&h.f0));
+    for b in it.batches.iter_mut() {
+        let mut changed = false;
+        for f in b.frames.iter_mut() {
+            if f.kind() == kinds::BLOCK && *f.hash() == s0.hash {
+                let mut p = f.present_payload().unwrap().to_vec();
+                let i = p.windows(6).position(|w| w == b"canary").unwrap();
+                p[i] = b'C';
+                *f = present(kinds::BLOCK, p);
+                changed = true;
+            }
+        }
+        if changed {
+            *b = batch_of(b.start, std::mem::take(&mut b.frames));
+        }
+    }
+    let f0x = it.write(false);
+    let i1 = h.bytes(&h.i1);
+    let i1x = relink(&i1, &f0x);
+    let files = vec![h.write("f0x", &f0x), h.write("i1x", &i1x)];
+    let apply_at = record_of(&i1x, kinds::REDACTION_APPLY, h.apply);
+    // the apply in a file wholly after the stop is checked too
+    for stop in [None, Some(StopMatch::Position(h.f0_end()))] {
+        let (file, at_, what) = damage(run(&files, stop).unwrap_err());
+        assert_eq!(
+            (file, at_, what.as_str()),
+            (1, apply_at, "dropped frame has no valid authorization")
+        );
+    }
+}
+
+#[test]
+fn hc5_meaning_of_applies_is_checked_before_target_writes() {
+    // (b) an intact copy of the removed version after the removal: the apply no longer covers
+    // every copy
+    let h = history();
+    let s0 = h.secret_frames[0];
+    let raw = payload_of(&items(&h.bytes(&h.f0)), kinds::BLOCK, s0.hash);
+    let i1 = h.bytes(&h.i1);
+    let start = end_of(&i1).end;
+    let i2x = increment(&i1, vec![batch_of(start, vec![present(kinds::BLOCK, raw)])]);
+    let files = vec![h.f0.clone(), h.i1.clone(), h.write("i2-copy", &i2x)];
+    let copy_at = record_of(&i2x, kinds::BLOCK, s0.hash);
+    for stop in [None, Some(StopMatch::Position(h.f0_end()))] {
+        let (file, at_, what) = damage(run(&files, stop).unwrap_err());
+        assert_eq!(
+            (file, at_, what.as_str()),
+            (2, copy_at, "dropped frame has no valid authorization")
+        );
+    }
+}
+
+#[test]
+fn hc5_holder_uncovered_embedding_is_refused() {
+    // (c) a holder's intact change outside the approved tuples that embeds the removed version
+    let b = holder_base();
+    let mut h = Store::open(&b.holder).unwrap();
+    let hf0 = dump(&h, None, &[]);
+    let hf0_end = h.log_end();
+    let files = upload(&b.src, b.v2.0, &b.dir.path().join("v2.rdysync"));
+    take(&mut h, &files, "v2", b.v2.1).unwrap();
+    let hi1 = dump(&h, Some(&end_of(&hf0)), &[]);
+    drop(h);
+    let mut c = change("work", creates(&[&b.secret]));
+    c.message = "another copy".into();
+    let raw = postcard::to_allocvec(&c).unwrap();
+    let hash = Hash::of(&raw);
+    let hix = increment(
+        &hi1,
+        vec![batch_of(
+            end_of(&hi1).end,
+            vec![present(kinds::CHANGE, raw)],
+        )],
+    );
+    let chain = vec![
+        put(b.dir.path(), "hf0.rdydump", &hf0),
+        put(b.dir.path(), "hi1.rdydump", &hi1),
+        put(b.dir.path(), "hix.rdydump", &hix),
+    ];
+    let change_at = record_of(&hix, kinds::CHANGE, hash);
+    for stop in [None, Some(StopMatch::Position(hf0_end))] {
+        let (file, at_, what) = damage(run(&chain, stop).unwrap_err());
+        assert_eq!(
+            (file, at_, what.as_str()),
+            (2, change_at, "dropped frame has no valid authorization")
+        );
+    }
+}
+
+#[test]
+fn hc5_carried_records_keep_their_store_rules() {
+    // (d) a carried record (held, over f0's intact secret frames) whose approver is no Approver
+    let h = history();
+    let f0 = h.bytes(&h.f0);
+    let it = items(&f0);
+    let c1 = h.secret_frames[1].hash;
+    let stored: Change = postcard::from_bytes(&payload_of(&it, kinds::CHANGE, c1)).unwrap();
+    let residues = vec![block_residue(&h.secret), change_residue(&stored)];
+    let spans = vec![
+        span(&h.secret_frames[0], Some(&residues[0]), true),
+        span(&h.secret_frames[1], Some(&residues[1]), true),
+    ];
+    let with = |role: Role, name: &str| {
+        let mut r = carried_fixture::record(secret_target(&h.secret), spans.clone());
+        r.approved_by.role = role;
+        let frames: Vec<Frame> = carried_fixture::carried_frames(&residues, &[r.clone()])
+            .into_iter()
+            .map(|(k, p)| present(k, p))
+            .collect();
+        let ix = increment(&f0, vec![batch_of(end_of(&f0).end, frames)]);
+        let at_ = record_of(&ix, kinds::REDACTION_CARRIED, carried_hash(&r));
+        (vec![h.f0.clone(), h.write(name, &ix)], at_)
+    };
+    let (good, _) = with(Role::Approver, "carried-approver");
+    ok(&good, None);
+    let (bad, at_) = with(Role::Writer, "carried-writer");
+    for stop in [None, Some(StopMatch::Position(h.v1_end))] {
+        let (file, got, what) = damage(run(&bad, stop).unwrap_err());
+        assert_eq!(
+            (file, got, what.as_str()),
+            (1, at_, "dropped frame has no valid authorization")
+        );
+    }
+}
+
+#[test]
+fn hc5_distinct_carried_records_of_one_source_apply_conflict() {
+    // (e) a later carried record of the retained record's source apply, with other spans
+    let l = loaded(true);
+    let s = Store::open(&l.to).unwrap();
+    let f0 = dump(&s, None, &[]);
+    drop(s);
+    let mut other = l.record.clone();
+    other.spans.truncate(1);
+    assert_ne!(carried_hash(&other), carried_hash(&l.record));
+    let ix = increment(
+        &f0,
+        vec![batch_of(
+            end_of(&f0).end,
+            vec![present(
+                kinds::REDACTION_CARRIED,
+                postcard::to_allocvec(&other).unwrap(),
+            )],
+        )],
+    );
+    let files = vec![
+        put(l.dir.path(), "lf0.rdydump", &f0),
+        put(l.dir.path(), "lix.rdydump", &ix),
+    ];
+    let at_ = record_of(&ix, kinds::REDACTION_CARRIED, carried_hash(&other));
+    for stop in [None, Some(StopMatch::Position(end_of(&f0).end))] {
+        let (file, got, what) = damage(run(&files, stop).unwrap_err());
+        assert_eq!((file, got, what.as_str()), (1, at_, PROVENANCE_CONFLICT));
+    }
+}

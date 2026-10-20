@@ -487,14 +487,31 @@ pub(crate) struct Collected {
 
 impl Collected {
     /// Notes the sealed request frame `hash` at `loc` by its first place (a source that is not a
-    /// segment log, `crate::dump_scan`).
-    pub(crate) fn note_request(&mut self, loc: Location, hash: Hash) {
-        self.request_at.entry(hash).or_insert(loc);
+    /// segment log, `crate::dump_scan`). The map grows by fallible reservation.
+    pub(crate) fn note_request(
+        &mut self,
+        loc: Location,
+        hash: Hash,
+    ) -> Result<(), std::collections::TryReserveError> {
+        if !self.request_at.contains_key(&hash) {
+            self.request_at.try_reserve(1)?;
+            self.request_at.insert(hash, loc);
+        }
+        Ok(())
     }
 
-    /// Notes the sealed residue frame `hash` at `loc` by its first place.
-    pub(crate) fn note_residue(&mut self, loc: Location, hash: Hash) {
-        self.residue_at.entry(hash).or_insert(loc);
+    /// Notes the sealed residue frame `hash` at `loc` by its first place, growing the map by
+    /// fallible reservation.
+    pub(crate) fn note_residue(
+        &mut self,
+        loc: Location,
+        hash: Hash,
+    ) -> Result<(), std::collections::TryReserveError> {
+        if !self.residue_at.contains_key(&hash) {
+            self.residue_at.try_reserve(1)?;
+            self.residue_at.insert(hash, loc);
+        }
+        Ok(())
     }
 
     /// The first place of the request `hash`, if a sealed batch holds one.
@@ -746,6 +763,32 @@ pub(crate) trait RecordAccess {
     ) -> Result<Option<Vec<u8>>, StoreError>;
 }
 
+/// A log's frames as the meaning checks read them ([`check_log`], the carried overlay and the
+/// holder's derivation): a frame's header and payload by its place, and every frame in log
+/// order. The log's segment files are one source ([`LogAccess`]); the files of a dump chain are
+/// another (`crate::dump_scan`), where a dropped frame reads as its original header and zeros, as
+/// an erased frame of a log does. The checks' rules are the same over both.
+pub(crate) trait FrameLog: RecordAccess {
+    /// The header of the whole frame at `loc`: its payload length, kind and hash. None when no
+    /// whole frame starts there. A batch not yet written is not read.
+    fn header_at(&mut self, loc: Location) -> Result<Option<(u32, u8, Hash)>, StoreError>;
+
+    /// The `len` payload bytes of the frame at `loc`, through a fallibly allocated buffer.
+    fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError>;
+
+    /// Whether the `len` payload bytes of the frame at `loc` are all zero.
+    fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError>;
+
+    /// Calls `f` with every frame of the log before `upto`, then with every frame of `memory`,
+    /// in log order ([`for_each_seen`]).
+    fn walk(
+        &mut self,
+        upto: Location,
+        memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+        f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError>;
+}
+
 /// The log's segment files, and the frames of a batch not yet written, as a [`RecordAccess`].
 pub(crate) struct LogAccess<'a> {
     pub(crate) readers: &'a [File],
@@ -773,6 +816,44 @@ impl RecordAccess for LogAccess<'_> {
         hash: &Hash,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         read_record(self.readers, self.memory, loc, kind, hash)
+    }
+}
+
+impl LogAccess<'_> {
+    fn file(&self, loc: Location) -> Result<&File, StoreError> {
+        self.readers
+            .get(loc.segment as usize)
+            .ok_or_else(|| StoreError::corrupt_at(loc))
+    }
+}
+
+impl FrameLog for LogAccess<'_> {
+    fn header_at(&mut self, loc: Location) -> Result<Option<(u32, u8, Hash)>, StoreError> {
+        let Some(f) = self.readers.get(loc.segment as usize) else {
+            return Ok(None);
+        };
+        Ok(header_at(f, loc.offset, f.metadata()?.len())?)
+    }
+
+    fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError> {
+        read_payload(self.file(loc)?, loc.offset + HEADER, len)
+    }
+
+    fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError> {
+        Ok(segment::payload_is_zero(
+            self.file(loc)?,
+            loc.offset + HEADER,
+            u64::from(len),
+        )?)
+    }
+
+    fn walk(
+        &mut self,
+        upto: Location,
+        memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+        f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        for_each_seen(self.readers, upto, memory, f)
     }
 }
 
@@ -898,6 +979,20 @@ impl Validator {
         a: &ApplyFrame,
         pending_from: Option<Location>,
     ) -> Result<(), StoreError> {
+        self.apply_after(c, access, a, &a.landings, pending_from)
+    }
+
+    /// [`Validator::apply`] with the LANDING frames of `a`'s batch before it given apart from
+    /// it: a source that keeps its batch's landings once (`crate::dump_scan`) hands each apply
+    /// the part of them before it.
+    pub(crate) fn apply_after(
+        &mut self,
+        c: &Collected,
+        access: &mut dyn RecordAccess,
+        a: &ApplyFrame,
+        landings: &[(Location, Hash)],
+        pending_from: Option<Location>,
+    ) -> Result<(), StoreError> {
         let auth = &mut self.auth;
         let at = || StoreError::corrupt_at(a.loc);
         let record = a.record.as_ref().ok_or_else(at)?;
@@ -909,8 +1004,7 @@ impl Validator {
         }
         self.prev_in_batch = Some((a.batch, record.request));
         // the same-batch human landing
-        let (lloc, _) = a
-            .landings
+        let (lloc, _) = landings
             .iter()
             .find(|(_, h)| *h == record.landing)
             .ok_or_else(at)?;
@@ -1038,14 +1132,27 @@ impl Validator {
         Ok(())
     }
 
-    /// Takes the span places of the last validated apply's request, in manifest order, and
-    /// forgets the rest of what it selects: a source that runs no log pass ([`check_log`]) keeps
-    /// one apply's selection at a time.
-    pub(crate) fn take_last_spans(&mut self) -> Vec<Location> {
+    /// The span places of the last validated apply's request, in manifest order.
+    pub(crate) fn last_spans(&self) -> Vec<Location> {
         self.selected
-            .pop()
-            .map(|s| s.spans.into_iter().map(|(l, _, _)| l).collect())
+            .last()
+            .map(|s| s.spans.iter().map(|(l, _, _)| *l).collect())
             .unwrap_or_default()
+    }
+
+    /// The meaning of the applies validated so far against `log` before `upto`, with the
+    /// carried records of `c` before `upto` laid over them, as the bootstrap checks a log
+    /// (`redaction_carried::overlay`, then [`check_log`], both its passes). What the validated
+    /// applies authorize is left as it is.
+    pub(crate) fn check_meaning(
+        &self,
+        c: &Collected,
+        log: &mut dyn FrameLog,
+        upto: Location,
+    ) -> Result<(), StoreError> {
+        let mut auth = self.auth.clone();
+        crate::redaction_carried::overlay(c, log, &mut auth, upto)?;
+        check_log(log, &BTreeMap::new(), &auth, &self.selected, upto)
     }
 }
 
@@ -1058,10 +1165,42 @@ pub(crate) struct Seen<'a> {
     source: Source<'a>,
 }
 
-/// Where a frame's payload is: in a segment file, or in a batch not yet written.
+/// Where a frame's payload is: in a segment file, in a batch not yet written, or behind a reader
+/// of another source (a dump chain's frame, or its dropped frame's zeros).
 enum Source<'a> {
     File(&'a File),
     Memory(&'a [u8]),
+    Read(&'a dyn Fn() -> Result<Vec<u8>, StoreError>),
+}
+
+impl<'a> Seen<'a> {
+    /// A frame whose payload `read` reads (a source that is not a segment log).
+    pub(crate) fn read_by(
+        loc: Location,
+        kind: u8,
+        hash: Hash,
+        len: u32,
+        read: &'a dyn Fn() -> Result<Vec<u8>, StoreError>,
+    ) -> Seen<'a> {
+        Seen {
+            loc,
+            kind,
+            hash,
+            len,
+            source: Source::Read(read),
+        }
+    }
+
+    /// A frame whose payload is `payload`, in memory.
+    pub(crate) fn in_memory(loc: Location, kind: u8, hash: Hash, payload: &'a [u8]) -> Seen<'a> {
+        Seen {
+            loc,
+            kind,
+            hash,
+            len: payload.len() as u32,
+            source: Source::Memory(payload),
+        }
+    }
 }
 
 impl Seen<'_> {
@@ -1070,6 +1209,7 @@ impl Seen<'_> {
         match self.source {
             Source::File(f) => read_payload(f, self.loc.offset + HEADER, self.len),
             Source::Memory(p) => Ok(p.to_vec()),
+            Source::Read(read) => read(),
         }
     }
 
@@ -1171,7 +1311,7 @@ pub(crate) fn for_each_seen(
 ///
 /// A failure is `RedactionCorrupt`: at the frame or span for a frame failure, else at the apply.
 fn check_log(
-    readers: &[File],
+    log: &mut dyn FrameLog,
     memory: &BTreeMap<Location, (u8, Vec<u8>)>,
     auth: &Authorization,
     sel: &[Selected],
@@ -1185,7 +1325,7 @@ fn check_log(
     let blobs: HashSet<Hash> = sel.iter().flat_map(|s| s.blobs.iter().copied()).collect();
     let mut chunks_of: HashMap<Hash, Vec<Hash>> = HashMap::new();
     let mut at_frame: BTreeSet<Location> = BTreeSet::new();
-    for_each_seen(readers, last_request.min(upto), &BTreeMap::new(), |f| {
+    log.walk(last_request.min(upto), &BTreeMap::new(), &mut |f| {
         if auth.erasable(&f.loc) {
             at_frame.insert(f.loc);
         }
@@ -1272,7 +1412,7 @@ fn check_log(
         },
         _ => None,
     };
-    for_each_seen(readers, upto, memory, |f| {
+    log.walk(upto, memory, &mut |f| {
         let hole = auth.erasable(&f.loc);
         match f.kind {
             kinds::BLOCK => {
@@ -1410,8 +1550,12 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
         }
     };
     let (mut auth, sel) = validate(&c, readers, &applies, None)?;
-    crate::redaction_carried::overlay(&c, readers, &mut auth, end)?;
-    check_log(readers, &c.memory, &auth, &sel, end)?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(&c, &mut log, &mut auth, end)?;
+    check_log(&mut log, &c.memory, &auth, &sel, end)?;
     auth.requests = c
         .requests
         .iter()
@@ -1454,12 +1598,16 @@ pub(crate) fn sealed_of(
     }
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(c, readers, &applies, None)?;
-    crate::redaction_carried::overlay(c, readers, &mut auth, carried_upto)?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(c, &mut log, &mut auth, carried_upto)?;
     let upto = c.sealed_end.unwrap_or(Location {
         segment: 0,
         offset: 0,
     });
-    check_log(readers, &BTreeMap::new(), &auth, &sel, upto)?;
+    check_log(&mut log, &BTreeMap::new(), &auth, &sel, upto)?;
     Ok(auth)
 }
 
@@ -1478,8 +1626,12 @@ pub(crate) fn bootstrap_pending(
     c.push_batch(start, batch);
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
-    crate::redaction_carried::overlay(&c, readers, &mut auth, start)?;
-    check_log(readers, &c.memory, &auth, &sel, start)?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(&c, &mut log, &mut auth, start)?;
+    check_log(&mut log, &c.memory, &auth, &sel, start)?;
     auth.requests = c.requests.clone();
     Ok(auth)
 }

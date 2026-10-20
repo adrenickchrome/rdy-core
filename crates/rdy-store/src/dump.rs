@@ -1166,6 +1166,12 @@ pub(crate) fn try_batch_digest<'a>(
 /// `crate::sync_stream`).
 pub(crate) const LINK_LEN: usize = 1 + 8 + 32;
 
+/// The name a `REF_UPDATE` payload starts with (its first field), when `payload` holds all of
+/// it: the chain scanner reads this much of every ref before it decides to read the rest.
+pub(crate) fn ref_name(payload: &[u8]) -> Option<&[u8]> {
+    wire::ref_name(payload)
+}
+
 /// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its
 /// growth is fallible: None when it cannot be allocated.
 pub(crate) fn link(chain: &mut Vec<u8>, kind: u8, len: u64, hash: &Hash) -> Option<()> {
