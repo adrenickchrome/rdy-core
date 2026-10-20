@@ -440,25 +440,41 @@ fn settled_before(scan: &str, names: &Lexicon) -> usize {
                 .map(|w| w.folded.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            if last_whole {
+            let open = if last_whole {
                 p.push(' ');
+                names.extends_known(&p)
             } else {
-                // what the cut word begins with, less its last character: folding can change
-                // at a word's end (a final sigma)
-                let part = &ws[n - 1].folded;
-                let keep = part.char_indices().last().map_or(0, |(at, _)| at);
+                // what the cut word begins with: each form its folding can take
                 if i < k {
                     p.push(' ');
                 }
-                p.push_str(&part[..keep]);
-            }
-            if names.extends_known(&p) {
+                let cut = &ws[n - 1];
+                cut_word_folds(&scan[cut.start..cut.end], &cut.folded)
+                    .iter()
+                    .any(|f| names.extends_known(&format!("{p}{f}")))
+            };
+            if open {
                 return ws[i].start;
             }
         }
         i += len.unwrap_or(1);
     }
     scan.len()
+}
+
+/// The folded forms that cut word `raw` (folded as `folded` where it ends the word) can begin
+/// with once the rest of the text joins it. Folding is per character except at a final sigma:
+/// a `Σ` followed in the word only by case-ignorable characters folds to `ς` where the word
+/// ends and to `σ` where a cased letter follows. One next character decides every such `Σ`, so
+/// no continuation gives a third form. A continuation folds after these forms.
+fn cut_word_folds(raw: &str, folded: &str) -> Vec<String> {
+    let mut joined = format!("{raw}a").to_lowercase();
+    joined.pop();
+    if joined == folded {
+        vec![joined]
+    } else {
+        vec![folded.to_string(), joined]
+    }
 }
 
 /// Whether text can state `unit` under the number grammar: one `%`, or 1 to
@@ -1716,6 +1732,67 @@ mod tests {
         let ev = at_cut("pay Ledg", "er now");
         assert!(ev.matched.is_empty());
         assert!(ev.cut);
+    }
+
+    #[test]
+    fn sdc1_fix2_stable_cut_word_characters_keep_settled_names() {
+        let p = pack();
+        let names = lex(
+            &p,
+            &[
+                named("m-0000E", "Ledger", &[]),
+                named("m-0000F", "Ledger Service", &[]),
+            ],
+        );
+        let lits = covered(&p, &req("r-00001", "the Ledger posts"), &names);
+        let at_cut = |tail: &str, rest: &str| {
+            let body = format!(
+                "{} {tail}{rest}",
+                "x".repeat(EVIDENCE_BYTES - tail.len() - 1)
+            );
+            assert_eq!(body.len() - rest.len(), EVIDENCE_BYTES);
+            req("r-00002", &body)
+        };
+        // no continuation of `n` gives `Service`: Ledger is the full text's match
+        let dep = at_cut("pay Ledger n", "ow");
+        let ev = evidence(&p, &lits, &dep, &names);
+        assert_eq!(rows(&ev), [row("body", 1, [16376, 16382], "Ledger")]);
+        assert_eq!(ev.matched_omitted, 0);
+        assert!(ev.cut);
+        assert_eq!(
+            states(&p, &lits, &dep, &names),
+            (vec!["Ledger".to_string()], true)
+        );
+        // a cut word that a known name can still continue keeps refusing
+        let dep = at_cut("pay Ledger S", "ervice");
+        let ev = evidence(&p, &lits, &dep, &names);
+        assert!(ev.matched.is_empty(), "{:?}", rows(&ev));
+        assert!(ev.cut);
+        assert_eq!(states(&p, &lits, &dep, &names), (vec![], true));
+        // a final sigma folds as `ς` in the prefix and as `σ` once a cased letter follows it,
+        // even across a case-ignorable mark: both forms are checked
+        for (name, tail) in [
+            ("Ledger ΑΣΒ", "pay Ledger ΑΣ"),
+            ("Ledger ΑΣ\u{0345}Β", "pay Ledger ΑΣ\u{0345}"),
+        ] {
+            let names = lex(
+                &p,
+                &[named("m-0000E", "Ledger", &[]), named("m-0000F", name, &[])],
+            );
+            let lits = covered(&p, &req("r-00001", "the Ledger posts"), &names);
+            let dep = at_cut(tail, "Β now");
+            let ev = evidence(&p, &lits, &dep, &names);
+            assert!(ev.matched.is_empty(), "{name:?}: {:?}", rows(&ev));
+            assert!(ev.cut);
+            assert_eq!(states(&p, &lits, &dep, &names), (vec![], true), "{name:?}");
+            // the full text does take the longer name there
+            let full = covered(&p, &dep, &names);
+            assert!(
+                spell(&full).contains(&name.to_string()),
+                "{:?}",
+                spell(&full)
+            );
+        }
     }
 
     #[test]
