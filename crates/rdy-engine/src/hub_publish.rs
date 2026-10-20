@@ -21,7 +21,9 @@
 //!   ([`HubCredentials::refresh_handle`]) and returns the original refusal; nothing is resent.
 //! - **No writer.** Nothing runs on the project's writer and no lock is held across a request.
 //!   A stale epoch stops the run before its next phase; bytes already sent stay in the hub's
-//!   quarantine under its expiry policy.
+//!   quarantine under its expiry policy. The epoch is checked again after the publish reply: a
+//!   redaction that landed while publish was in flight returns no success, and its refusal
+//!   keeps the push id with the publish phase, since the candidate may exist.
 //! - **Uncertainty.** A write whose reply was lost, or a publish reply that breaks the candidate
 //!   contract, is `E_UPSTREAM_UNCERTAIN` naming the push id and the phase: the upload may have
 //!   completed. Reads that fail stay `E_UPSTREAM_TRANSPORT`. Nothing is retried and nothing is
@@ -401,6 +403,13 @@ fn uncertain(push: &PushId, phase: Phase) -> RdyError {
     e
 }
 
+/// `e`, the stale epoch found after the publish request was answered: it keeps its code and
+/// gains the push-bearing issue of the publish phase, since the candidate may exist.
+fn stale_after_publish(mut e: RdyError, push: &PushId) -> RdyError {
+    e.issues.extend(uncertain(push, Phase::Publish).issues);
+    e
+}
+
 /// `e` of a write step: a lost or invalid reply becomes the push-bearing uncertainty of `phase`;
 /// any other error is unchanged.
 fn in_phase(e: RdyError, push: &PushId, phase: Phase) -> RdyError {
@@ -734,6 +743,10 @@ impl<'a> PublishService<'a> {
             cx,
         )
         .map_err(|e| in_phase(e, &push, Phase::Publish))?;
+        // a redaction that landed while publish was in flight: no success, and the push id is
+        // kept because the candidate may exist; nothing is sent again
+        read.ensure_current_epoch()
+            .map_err(|e| stale_after_publish(e, &push))?;
         let Candidate { id, state, url } = candidate;
         if state != "candidate" || !candidate_url_ok(&t.install, &url) {
             return Err(uncertain(&push, Phase::Publish));

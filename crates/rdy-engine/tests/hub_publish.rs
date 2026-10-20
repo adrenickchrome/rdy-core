@@ -1250,10 +1250,13 @@ fn hpb14_each_request_uses_current_access_and_the_same_claim() {
 }
 
 /// A redaction applied while the upload runs stops it before its next phase: no later request
-/// and no publish is sent, and no success is returned.
+/// and no publish is sent, and no success is returned. A redaction that lands while the publish
+/// request is in flight returns no success either, though the hub answered with a valid
+/// candidate: the refusal keeps the push id, since the candidate may exist, and nothing is
+/// sent again.
 #[test]
 fn hpb14_redaction_between_phases_aborts_before_publish() {
-    for during in ["objects", "file"] {
+    for during in ["objects", "file", "publish"] {
         let mut e = env();
         let read = e.r.read();
         let reached = Arc::new(Barrier::new(2));
@@ -1292,6 +1295,30 @@ fn hpb14_redaction_between_phases_aborts_before_publish() {
         assert_eq!(err.code, E_REDACTED_STATE, "{during}: {err:?}");
         let steps = wire.steps();
         let at = steps.iter().position(|s| *s == during).unwrap();
+        if during == "publish" {
+            let push = wire
+                .calls()
+                .iter()
+                .find_map(|c| c.push.clone())
+                .expect("a push id was sent");
+            assert_eq!(
+                err.issues,
+                vec![Issue {
+                    severity: Severity::Error,
+                    code: E_UPSTREAM_UNCERTAIN,
+                    block: None,
+                    message: "upload phase publish".into(),
+                    fix: format!("check push {push} on the hub before publishing again"),
+                }],
+                "the refusal keeps the push id"
+            );
+            assert_eq!(
+                &steps[at..],
+                ["publish"],
+                "publish is sent once and nothing after it: {steps:?}"
+            );
+            continue;
+        }
         assert!(
             !steps.contains(&"publish"),
             "{during}: no publish after a redaction: {steps:?}"
