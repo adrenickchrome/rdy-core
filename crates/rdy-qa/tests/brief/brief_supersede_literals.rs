@@ -1002,7 +1002,7 @@ fn set_t(e: &Local, view: &str, t: &BlockId, days: &str) -> Value {
 
 #[test]
 fn sdc5_write_compares_its_starting_version() {
-    let (_d, r, t, [x, y, z]) = days_fixture();
+    let (dir, r, t, [x, y, z]) = days_fixture();
     let e = Local::new(r);
     let first = set_t(&e, "w", &t, "14 days");
     assert_eq!(entry(&first, &x)["because"]["values"], json!(["30 days"]));
@@ -1058,6 +1058,21 @@ fn sdc5_write_compares_its_starting_version() {
     assert_eq!(c["because"]["values"], json!(["14 days"]), "{c}");
     assert_eq!(c["follow_up"], "update", "{c}");
     assert_eq!(entry(&back, &x)["follow_up"], "confirm", "{back:#}");
+    // a fresh open with a rebuilt index gives the same evidence and ids (w2's edit of T has
+    // opened a tension with w since the reply, so the read just before the close is the
+    // reference)
+    let now = e
+        .read()
+        .consequences(&view("w"), &change_of(&second), None)
+        .unwrap();
+    e.close().unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    r.reindex().unwrap();
+    let again = r
+        .read()
+        .consequences(&view("w"), &change_of(&second), None)
+        .unwrap();
+    assert_eq!(again, now);
 }
 
 #[test]

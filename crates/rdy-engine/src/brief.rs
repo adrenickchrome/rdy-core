@@ -368,6 +368,9 @@ pub struct WillGoStale {
     pub states: Option<Vec<String>>,
 }
 
+/// A will-go-stale row's follow-up and states, keyed by (on, block, via) in `assemble`.
+type StaleRow = (FollowUp, Option<Vec<String>>);
+
 /// The token and the versions it vouches for.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Base {
@@ -1284,8 +1287,7 @@ impl ReadState {
 
         // keyed by (on, block, kind): deduplicated and in order
         let mut dependents: BTreeMap<(BlockId, BlockId, String), ()> = BTreeMap::new();
-        let mut stale: BTreeMap<(BlockId, BlockId, String), (FollowUp, Option<Vec<String>>)> =
-            BTreeMap::new();
+        let mut stale: BTreeMap<(BlockId, BlockId, String), StaleRow> = BTreeMap::new();
         // O3: what a nondecision dependent states of the covered block's literals, once per
         // (block, dependent) whatever the number of edges; the lexicon only when one is read
         let mut names: Option<Arc<Lexicon>> = None;
