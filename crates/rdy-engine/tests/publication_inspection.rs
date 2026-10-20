@@ -821,47 +821,46 @@ fn spv1_live_warning_keeps_blocked_policy() {
     );
     // the same profiles in a view, unlanded
     let st = r.read();
-    for scope in [Scope::View("work".into())] {
-        let open = publication::resolve_inspection(&st, &scope, "open").unwrap();
-        assert_eq!(open.references.status, CheckStatus::Blocked);
-        assert_eq!(
-            open.references.live_warning(),
-            Some(PublicationWarning {
-                code: "W_PUBLICATION_REFERENCE",
-                message: "Public profile has 2 references outside its selection.".into(),
-                fix: PUBLIC_FIX.into(),
-            })
-        );
-        // the warning changes no status and opens no output
-        assert_eq!(open.references.status, CheckStatus::Blocked);
-        assert_eq!(open.references.warning(), None);
-        assert_err(
-            &open.require_output().unwrap_err(),
-            E_PUBLICATION_REFERENCE,
-            "Public profile has 2 references outside its selection.",
-            PUBLIC_FIX,
-        );
-        assert_err(
-            &open.references.require_output().unwrap_err(),
-            E_PUBLICATION_REFERENCE,
-            "Public profile has 2 references outside its selection.",
-            PUBLIC_FIX,
-        );
-        let org = publication::resolve_inspection(&st, &scope, "site").unwrap();
-        assert_eq!(org.references.status, CheckStatus::Warning);
-        let warned = Some(PublicationWarning {
+    let scope = Scope::View("work".into());
+    let open = publication::resolve_inspection(&st, &scope, "open").unwrap();
+    assert_eq!(open.references.status, CheckStatus::Blocked);
+    assert_eq!(
+        open.references.live_warning(),
+        Some(PublicationWarning {
             code: "W_PUBLICATION_REFERENCE",
-            message: "Org profile has 2 references outside its selection.".into(),
-            fix: ORG_FIX.into(),
-        });
-        assert_eq!(org.references.live_warning(), warned);
-        assert_eq!(org.references.warning(), warned);
-        assert!(org.require_output().is_ok());
-        let clear = publication::resolve_inspection(&st, &scope, "tidy").unwrap();
-        assert_eq!(clear.references.status, CheckStatus::Clear);
-        assert_eq!(clear.references.live_warning(), None);
-        assert!(clear.require_output().is_ok());
-    }
+            message: "Public profile has 2 references outside its selection.".into(),
+            fix: PUBLIC_FIX.into(),
+        })
+    );
+    // the warning changes no status and opens no output
+    assert_eq!(open.references.status, CheckStatus::Blocked);
+    assert_eq!(open.references.warning(), None);
+    assert_err(
+        &open.require_output().unwrap_err(),
+        E_PUBLICATION_REFERENCE,
+        "Public profile has 2 references outside its selection.",
+        PUBLIC_FIX,
+    );
+    assert_err(
+        &open.references.require_output().unwrap_err(),
+        E_PUBLICATION_REFERENCE,
+        "Public profile has 2 references outside its selection.",
+        PUBLIC_FIX,
+    );
+    let org = publication::resolve_inspection(&st, &scope, "site").unwrap();
+    assert_eq!(org.references.status, CheckStatus::Warning);
+    let warned = Some(PublicationWarning {
+        code: "W_PUBLICATION_REFERENCE",
+        message: "Org profile has 2 references outside its selection.".into(),
+        fix: ORG_FIX.into(),
+    });
+    assert_eq!(org.references.live_warning(), warned);
+    assert_eq!(org.references.warning(), warned);
+    assert!(org.require_output().is_ok());
+    let clear = publication::resolve_inspection(&st, &scope, "tidy").unwrap();
+    assert_eq!(clear.references.status, CheckStatus::Clear);
+    assert_eq!(clear.references.live_warning(), None);
+    assert!(clear.require_output().is_ok());
     // the check report keeps its own warnings: a blocked result carries none
     let v = publication::check(&st, "open", Some("work"), None).unwrap();
     assert_eq!(v["references"]["status"], "blocked");
