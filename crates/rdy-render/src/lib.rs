@@ -1672,10 +1672,10 @@ fn stage_site(
             Some(t) => t,
             None => {
                 let ctx = build_page(sh, page::Kind::Redirect(id, &url));
-                redirect.insert(RedirectTemplate::new(&env, ctx, slots)?)
+                redirect.insert(RedirectTemplate::new(env, ctx, slots)?)
             }
         };
-        let (page_url, label, href) = page::redirect_target(&sh, id, &url);
+        let (page_url, label, href) = page::redirect_target(sh, id, &url);
         // the filled page's length is known before it is made
         if let Some(b) = budget {
             b.reserve(&files, &page_url, t.filled_len(&label, &href))?;
@@ -1684,7 +1684,7 @@ fn stage_site(
         #[cfg(debug_assertions)]
         if summary.redirects.is_multiple_of(997) {
             let ctx = build_page(sh, page::Kind::Redirect(id, &url));
-            let full = RedirectTemplate::render(&env, &ctx, slots)?;
+            let full = RedirectTemplate::render(env, &ctx, slots)?;
             debug_assert_eq!(
                 (html.as_bytes(), notice),
                 (full.bytes.as_slice(), full.notice.map(|r| r.start)),
@@ -1721,21 +1721,14 @@ fn stage_site(
     put_file(&mut files, budget, "search-index.json".into(), bytes)?;
     // a label slot takes bytes: a named profile with no chosen tag writes no label
     let (llms, at) = aux_file(budget, &files, "llms.txt", |room| {
-        llms::index_bytes(
-            &site,
-            &contexts,
-            &site_name,
-            description.as_deref(),
-            &label,
-            room,
-        )
+        llms::index_bytes(site, &contexts, site_name, description, &label, room)
     })?;
     put_file(&mut files, budget, "llms.txt".into(), llms)?;
     if !at.is_empty() {
         label_at.insert("llms.txt".into(), vec![(SlotKind::Label, at)]);
     }
     let (llms, at) = aux_file(budget, &files, "llms-full.txt", |room| {
-        llms::full_bytes(&contexts, &site_name, description.as_deref(), &label, room)
+        llms::full_bytes(&contexts, site_name, description, &label, room)
     })?;
     put_file(&mut files, budget, "llms-full.txt".into(), llms)?;
     if !at.is_empty() {
