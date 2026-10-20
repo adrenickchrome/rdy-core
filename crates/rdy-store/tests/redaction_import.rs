@@ -401,6 +401,73 @@ fn ha11_source_offsets_are_never_receiver_offsets() {
     }
 }
 
+/// hc1: a holder's dump names the lowest local span of its applies, which HA1's logical rule
+/// resolves from the holder's own log (every local copy of an approved key), never a place of
+/// the source's manifest. The writer's facts (from the store's authorization) and the reader's
+/// (from the file) agree, and the dump reads back with them.
+#[test]
+fn hc1_a_holder_dump_names_its_lowest_local_span() {
+    use rdy_store::dump::{DumpHeader, DumpReader, DumpWriter, RemovalFacts, RemovalTally};
+    use rdy_store::dump_chain::DumpChainHeader;
+    let b = base(8192);
+    let mut h = Store::open(&b.holder).unwrap();
+    b.take_v2(&mut h).unwrap();
+    let end = h.log_end();
+    let r = h.reader();
+    let mut tally = RemovalTally::default();
+    let mut batches = vec![];
+    r.for_each_batch(end, |bt| {
+        tally.observe(&bt)?;
+        batches.push(bt);
+        Ok(())
+    })
+    .unwrap();
+    let local = [b.secret_key(), b.change_key()]
+        .iter()
+        .flat_map(|k| copies(&h, *k))
+        .map(|(l, dropped)| {
+            assert!(dropped);
+            l
+        })
+        .min();
+    let source = b.fixture.requests[0]
+        .draft
+        .request
+        .manifest
+        .spans
+        .iter()
+        .map(|s| Location {
+            segment: s.place.segment,
+            offset: s.place.offset,
+        })
+        .min();
+    assert!(local.is_some());
+    assert_ne!(local, source, "the source's places are not the holder's");
+    let want = RemovalFacts {
+        removals: 1,
+        first_removed: local,
+    };
+    assert_eq!(tally.resolved(&r, end).unwrap(), want, "the writer's facts");
+    assert_eq!(tally.facts().unwrap(), want, "the file's facts");
+    let header = DumpHeader {
+        store_format: rdy_store::format::STORE_FORMAT,
+        log_end: end,
+        rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(
+            r.repo_id().unwrap().unwrap(),
+            r.batch_marker_at(end).unwrap().unwrap(),
+        )),
+    };
+    let mut w = DumpWriter::new(Vec::new(), &header).unwrap();
+    for bt in &batches {
+        w.batch(bt).unwrap();
+    }
+    let (bytes, _) = w.finish(want).unwrap();
+    let (mut rd, _, _) = DumpReader::open(&bytes[..]).unwrap();
+    while rd.next().unwrap().is_some() {}
+    assert_eq!(rd.trailer().unwrap().first_removed, local);
+}
+
 /// Where a base source padded with 8192 bytes holds its secret block's frame: the same
 /// history built again in a scratch project.
 fn secret_place_of_padded_source() -> Location {

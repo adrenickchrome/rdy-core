@@ -91,16 +91,20 @@
 //!   `first_removed.offset: u64`, `digest: [u8; 32]` (the digest of format 1). The flag is 0 or
 //!   1; with 0 the position is zero. `removals` counts the dump's `REDACTION_APPLY` frames;
 //!   `first_removed` is the lowest local span those applies removed, absent when none has one.
-//!   A dropped frame names its authority in its `DROPPED` record: a span of an apply of this
-//!   file counts, a hole only a carried record explains does not ([`RemovalTally`]).
+//!   An apply's spans are its request's, resolved as the store resolves them: a project's
+//!   manifest places, a holder's local copies of the manifest's keys (HA1's logical rule). The
+//!   authority a `DROPPED` record names is not the rule, and a hole only a carried record
+//!   explains is no span ([`RemovalTally`]).
 //!
 //! A full dump has base `0.0`, a zero base marker and a zero `prev`. An increment holds at least
 //! one batch. The first batch starts at `base`, or at offset zero of the next segment. The last
 //! batch ends at the header's end (its start, plus `37 + original_len` per frame, plus the marker
 //! frame), and its marker is `end_batch`; a dump of no batches ends at its base with its base
-//! marker. The reader also checks `removals` against the dump's applies, and `first_removed`
-//! against the lowest dropped frame whose authority is one of those applies; an increment may
-//! instead name a span before its base, which an earlier file holds. Every place is checked
+//! marker. The reader also checks `removals` against the dump's applies, and, in a full dump,
+//! `first_removed` against the lowest span the file's own records resolve for those applies. An
+//! increment after the origin does not hold the log's first batch, so either resolution may be
+//! its log's; it may also name a span before its base, which an earlier file holds, and an
+//! apply whose request an earlier file holds is resolved by the loader of the chain. Every place is checked
 //! arithmetic: one past `u64::MAX` is `dump position overflows`. The chain links between files
 //! are checked by the loader of a chain.
 //!
@@ -115,11 +119,13 @@
 //! abort.
 use crate::dump_chain::{self, BatchMarker, DumpChainHeader, DumpKind, chain_text, follows};
 use crate::error::StoreError;
+use crate::holder::{FirstBatch, StoreMode};
 use crate::kinds::{self, BatchCommit};
 use crate::redaction::StoredFrame;
 use crate::redaction_io::ERASE_BUFFER;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{MAX_BLOB_BYTES, StoreReader};
+use rdy_model::redaction::{Redaction, RedactionApply};
 use rdy_model::{Hash, RepoId};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -412,19 +418,37 @@ pub struct RemovalFacts {
 }
 
 /// The removal facts of a dump, gathered batch by batch, in file order, from the frames the
-/// checked source walker hands the writer or the reader reads: every `REDACTION_APPLY` frame
-/// counts (each physical one), and the first removed span is the lowest place of a dropped frame
-/// whose `DROPPED` record names one of those applies as its authority. A dropped frame that names
-/// anything else, a carried record or an apply of no frame here, is not a span of the dump's
-/// applies. Only the frames are read: no manifest position is trusted. Growth is fallible.
+/// checked source walker hands the writer or the reader reads. Every `REDACTION_APPLY` frame
+/// counts (each physical one). The first removed span is the lowest resolved local span of those
+/// applies: each apply names its request, and the request's spans are resolved as the store
+/// resolves them (`crate::redaction_io`, `crate::redaction_import`):
+///
+/// - in a project, the request's manifest places, which are places of this log;
+/// - in a holder (its first batch sets `meta/store_mode`), every dropped frame of a key the
+///   manifest lists (HA1's logical rule): a source place is never read, and a span covered by
+///   an apply counts for every request that approves its key, whichever proof its `DROPPED`
+///   record names (the earliest).
+///
+/// So a hole that only a carried record explains is no span, and the authority a `DROPPED`
+/// record names is not the rule. [`RemovalTally::facts`] resolves from the batches alone (the
+/// reader's view of a file); [`RemovalTally::resolved`] asks the store's own authorization (the
+/// writer's). Growth is fallible.
 #[derive(Clone, Debug, Default)]
 pub struct RemovalTally {
     /// The `REDACTION_APPLY` frames seen.
     applies: u64,
-    /// The hashes of those frames.
-    apply_hashes: HashSet<Hash>,
-    /// The lowest dropped place seen for each authority a `DROPPED` record names.
-    lowest: HashMap<Hash, Location>,
+    /// The requests those applies name, once each (an apply that does not decode names none).
+    requests: HashSet<Hash>,
+    /// Whether an apply frame did not decode.
+    undecoded: bool,
+    /// The manifest spans of each `REDACTION` frame seen that decodes: place, kind and hash.
+    manifests: HashMap<Hash, Vec<(Location, u8, Hash)>>,
+    /// The lowest place of each key (kind, hash) of a dropped frame.
+    dropped: HashMap<(u8, Hash), Location>,
+    /// The mode the first batch sets, when the first batch seen starts at the origin.
+    mode: Option<StoreMode>,
+    /// Whether a batch was seen.
+    seen: bool,
 }
 
 impl RemovalTally {
@@ -434,14 +458,48 @@ impl RemovalTally {
         self.add(b).map_err(|what| StoreError::Refused(what.into()))
     }
 
-    /// The facts of the batches added so far. Refuses more than `u32::MAX` applies (`dump
-    /// position overflows`).
+    /// The facts of the batches added so far, resolved from them alone: in a holder by HA1's
+    /// logical rule, otherwise by the manifest places. Refuses more than `u32::MAX` applies
+    /// (`dump position overflows`).
     pub fn facts(&self) -> Result<RemovalFacts, StoreError> {
+        self.with_first(self.first_removed())
+    }
+
+    /// The first removed span the batches alone resolve.
+    fn first_removed(&self) -> Option<Location> {
+        match self.mode {
+            Some(StoreMode::Holder) => self.holder_first(),
+            _ => self.project_first(),
+        }
+    }
+
+    /// The facts of the batches added so far, with each apply's spans resolved by the store
+    /// `reader` reads, before `upto`: the request's spans in the store's redaction rows, which
+    /// the open checks against the log's validated authorization. A project's are its manifest
+    /// places; a holder's are the local copies HA1's logical rule derives
+    /// (`crate::redaction_import`), never the source's places. This is the writer's view;
+    /// [`RemovalTally::facts`] reads the same facts back from a file.
+    pub fn resolved(
+        &self,
+        reader: &StoreReader,
+        upto: Location,
+    ) -> Result<RemovalFacts, StoreError> {
+        let mut first: Option<Location> = None;
+        for request in &self.requests {
+            let (_, spans) = reader.index().redaction_request_items(request)?;
+            for p in spans.iter().map(|s| s.loc).filter(|p| *p < upto) {
+                first = Some(first.map_or(p, |f| f.min(p)));
+            }
+        }
+        self.with_first(first)
+    }
+
+    fn with_first(&self, first_removed: Option<Location>) -> Result<RemovalFacts, StoreError> {
         let removals = u32::try_from(self.applies)
             .map_err(|_| StoreError::Refused(chain_text::OVERFLOW.into()))?;
         Ok(RemovalFacts {
             removals,
-            first_removed: self.first_removed(),
+            first_removed,
         })
     }
 
@@ -450,48 +508,123 @@ impl RemovalTally {
         self.applies
     }
 
-    /// The lowest place of a dropped frame whose authority is an apply added so far.
-    fn first_removed(&self) -> Option<Location> {
-        self.lowest
+    /// The mode the batches set, when they start at the origin.
+    fn mode(&self) -> Option<StoreMode> {
+        self.mode
+    }
+
+    /// Whether every apply added so far names a request whose record was added too: only then
+    /// do the batches alone resolve its spans.
+    fn resolves_all(&self) -> bool {
+        !self.undecoded && self.requests.iter().all(|r| self.manifests.contains_key(r))
+    }
+
+    /// The spans of the applies' requests that the batches hold.
+    fn manifest_spans(&self) -> impl Iterator<Item = &(Location, u8, Hash)> {
+        self.requests
             .iter()
-            .filter(|(authority, _)| self.apply_hashes.contains(*authority))
-            .map(|(_, at)| *at)
+            .filter_map(|r| self.manifests.get(r))
+            .flatten()
+    }
+
+    /// The lowest manifest place of the applies' requests (a project's resolution).
+    fn project_first(&self) -> Option<Location> {
+        self.manifest_spans().map(|(at, _, _)| *at).min()
+    }
+
+    /// The lowest dropped frame of a key the applies' requests list (a holder's resolution).
+    fn holder_first(&self) -> Option<Location> {
+        self.manifest_spans()
+            .filter_map(|(_, kind, hash)| self.dropped.get(&(*kind, *hash)).copied())
             .min()
     }
 
     /// [`RemovalTally::observe`], with the refusal's text only.
     fn add(&mut self, b: &DumpBatch) -> Result<(), &'static str> {
+        let first = !self.seen;
+        self.seen = true;
+        let origin = b.start.segment == 0 && b.start.offset == 0;
+        let mut creation = (first && origin).then(FirstBatch::default);
         let mut at = b.start.offset;
         for f in &b.frames {
-            match f {
-                Frame::Present { kind, hash, .. } if *kind == kinds::REDACTION_APPLY => {
-                    self.applies = self.applies.saturating_add(1);
-                    self.apply_hashes
-                        .try_reserve(1)
-                        .map_err(|_| drop_text::ALLOCATION)?;
-                    self.apply_hashes.insert(*hash);
-                }
-                Frame::Present { .. } => {}
-                Frame::Dropped { apply, .. } => {
-                    let place = Location {
-                        segment: b.start.segment,
-                        offset: at,
-                    };
-                    match self.lowest.get_mut(apply) {
-                        Some(low) => *low = (*low).min(place),
-                        None => {
-                            self.lowest
-                                .try_reserve(1)
-                                .map_err(|_| drop_text::ALLOCATION)?;
-                            self.lowest.insert(*apply, place);
-                        }
-                    }
-                }
-            }
-            at = at
+            let next = at
                 .checked_add(FRAME_HEADER)
                 .and_then(|a| a.checked_add(u64::from(f.original_len())))
                 .ok_or(chain_text::OVERFLOW)?;
+            let place = Location {
+                segment: b.start.segment,
+                offset: at,
+            };
+            if let Some(c) = creation.as_mut() {
+                let payload = match f {
+                    Frame::Present { payload, .. } => Some(&payload[..]),
+                    Frame::Dropped { .. } => None,
+                };
+                let next = Location {
+                    segment: b.start.segment,
+                    offset: next,
+                };
+                // a mode value that is not `holder` is damage the load refuses; here the mode
+                // stays unknown
+                if c.frame(f.kind(), payload, next).is_err() {
+                    creation = None;
+                    self.mode = None;
+                }
+            }
+            match f {
+                Frame::Present { kind, payload, .. } if *kind == kinds::REDACTION_APPLY => {
+                    self.applies = self.applies.saturating_add(1);
+                    match crate::bounded::decode::<RedactionApply>(payload) {
+                        Ok(a) => {
+                            self.requests
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.requests.insert(a.request);
+                        }
+                        Err(_) => self.undecoded = true,
+                    }
+                }
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } if *kind == kinds::REDACTION && !self.manifests.contains_key(hash) => {
+                    if let Ok(r) = crate::bounded::decode::<Redaction>(payload) {
+                        let mut spans = Vec::new();
+                        spans
+                            .try_reserve_exact(r.manifest.spans.len())
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        spans.extend(r.manifest.spans.iter().map(|s| {
+                            (
+                                Location {
+                                    segment: s.place.segment,
+                                    offset: s.place.offset,
+                                },
+                                s.kind,
+                                s.hash,
+                            )
+                        }));
+                        self.manifests
+                            .try_reserve(1)
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        self.manifests.insert(*hash, spans);
+                    }
+                }
+                Frame::Present { .. } => {}
+                Frame::Dropped { kind, hash, .. } => match self.dropped.get_mut(&(*kind, *hash)) {
+                    Some(low) => *low = (*low).min(place),
+                    None => {
+                        self.dropped
+                            .try_reserve(1)
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        self.dropped.insert((*kind, *hash), place);
+                    }
+                },
+            }
+            at = next;
+        }
+        if let Some(c) = creation {
+            self.mode = Some(c.creation(b.start).mode);
         }
         Ok(())
     }
@@ -1686,10 +1819,22 @@ impl<R: Read> DumpReader<R> {
         if end != self.log_end || marker != links.end_batch {
             return Err(damaged(at, chain_text::LAST_BATCH));
         }
-        // a hole that names no apply of this file (a carried record's, say) is no span of its
-        // applies; whether every hole is authorized is the ingest's check
-        let earlier = t.removals > 0 && t.first_removed.is_some_and(|q| q < links.base);
-        let first_ok = t.first_removed == self.tally.first_removed() || earlier;
+        // the lowest resolved span of the file's applies; a hole only a carried record
+        // explains is none. Whether every hole is authorized is the ingest's check.
+        let first_ok = if links.kind == DumpKind::Full || self.tally.mode().is_some() {
+            // the file holds the whole log: its mode, requests and spans
+            t.first_removed == self.tally.first_removed()
+        } else {
+            // an increment after the origin: its first batch is not the log's, so either
+            // resolution may be the log's; a span before its base is in an earlier file; and an
+            // apply whose request an earlier file holds is resolved by the loader of the chain
+            {
+                !self.tally.resolves_all()
+                    || t.first_removed == self.tally.project_first()
+                    || t.first_removed == self.tally.holder_first()
+                    || (t.removals > 0 && t.first_removed.is_some_and(|q| q < links.base))
+            }
+        };
         if u64::from(t.removals) != self.tally.applies() || !first_ok {
             return Err(damaged(at, chain_text::REMOVALS));
         }

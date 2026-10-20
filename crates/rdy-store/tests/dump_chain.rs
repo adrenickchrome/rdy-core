@@ -3,7 +3,9 @@
 //! re-encoded). The header and trailer layouts, the frozen kind sets of the released pairs, the
 //! physical boundaries of full dumps and increments, the envelope reader, the bounds, and the
 //! new record's encoding.
-use rdy_model::redaction::{DropSpan, RedactTarget, RedactionApply};
+use rdy_model::redaction::{
+    AssessmentSupport, DropSpan, RedactTarget, Redaction, RedactionApply, RedactionManifest,
+};
 use rdy_model::*;
 use rdy_store::bounded::{self, RecordError};
 use rdy_store::dump::*;
@@ -674,7 +676,8 @@ fn hc1_large_lengths_flags_and_offsets_refuse() {
     .unwrap_err();
     assert_eq!(damaged(e), "dump position overflows");
     // the tally: a dropped place near u64::MAX is a place, one past it overflows
-    let apply = b"an apply".to_vec();
+    let request = request_bytes(vec![chunk_span(at(0, u64::MAX - 42), 1)]);
+    let apply = apply_bytes(&request);
     let near = |offset: u64, len: u32| DumpBatch {
         start: at(0, offset),
         digest: kinds::batch_digest([Hash([1; 32])].iter()),
@@ -689,7 +692,10 @@ fn hc1_large_lengths_flags_and_offsets_refuse() {
     let mut f = RemovalTally::default();
     f.observe(&batch_of(
         at(0, 0),
-        vec![present(kinds::REDACTION_APPLY, &apply)],
+        vec![
+            present(kinds::REDACTION, &request),
+            present(kinds::REDACTION_APPLY, &apply),
+        ],
     ))
     .unwrap();
     f.observe(&near(u64::MAX - 42, 5)).unwrap();
@@ -1073,20 +1079,93 @@ fn forge_one(kind: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-#[test]
-fn hc1_removal_facts_count_only_the_applies_in_the_file() {
-    let removals = "the removal facts do not match the batches";
-    let carried = carried_bytes("person:ann".into());
-    let apply = postcard::to_allocvec(&RedactionApply {
-        request: Hash([1; 32]),
+/// A request's bytes whose manifest lists `spans` (it removes a blob's chunks).
+fn request_bytes(spans: Vec<DropSpan>) -> Vec<u8> {
+    postcard::to_allocvec(&Redaction {
+        carrier: Hash([6; 32]),
+        actor: Provenance {
+            actor: "agent:w".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 0,
+        },
+        targets: vec![RedactTarget::Blob(Hash([5; 32]))],
+        reason_class: ReasonClass::Secret,
+        reason: "a test".into(),
+        manifest: RedactionManifest {
+            versions: vec![],
+            blobs: vec![Hash([5; 32])],
+            shared_blobs: vec![],
+            spans,
+            inside: vec![],
+            outside: vec![],
+            quarantine: vec![],
+            assessment: AssessmentSupport::NotImplemented,
+        },
+    })
+    .unwrap()
+}
+
+/// The bytes of an apply of the request whose bytes are `request`.
+fn apply_bytes(request: &[u8]) -> Vec<u8> {
+    postcard::to_allocvec(&RedactionApply {
+        request: Hash::of(request),
         landing: Hash([2; 32]),
         report_hash: Hash([3; 32]),
     })
-    .unwrap();
+    .unwrap()
+}
+
+/// A manifest span at `place` of the 10-byte chunk `[n; 32]` (as [`hole`] drops it).
+fn chunk_span(place: Location, n: u8) -> DropSpan {
+    DropSpan {
+        place: FramePlace {
+            segment: place.segment,
+            offset: place.offset,
+        },
+        kind: kinds::BLOB_CHUNK,
+        hash: Hash([n; 32]),
+        len: 10,
+        residue: None,
+    }
+}
+
+/// The ref frame that makes a log a holder (in its first batch).
+fn holder_ref() -> Frame {
+    present(
+        kinds::REF_UPDATE,
+        &postcard::to_allocvec(&kinds::RefUpdate {
+            name: "meta/store_mode".into(),
+            value: b"holder".to_vec(),
+            at: at(0, 0),
+        })
+        .unwrap(),
+    )
+}
+
+/// The place of frame `i` of `b`.
+fn place_of(b: &DumpBatch, i: usize) -> Location {
+    let off = b.frames[..i].iter().fold(b.start.offset, |a, f| {
+        a + HEAD as u64 + u64::from(f.original_len())
+    });
+    at(b.start.segment, off)
+}
+
+#[test]
+fn hc1_removal_facts_come_from_the_resolved_spans_of_the_files_applies() {
+    let removals = "the removal facts do not match the batches";
     let facts = |removals, first_removed| RemovalFacts {
         removals,
         first_removed,
     };
+    let tally = |batches: &[DumpBatch]| {
+        let mut t = RemovalTally::default();
+        for b in batches {
+            t.observe(b).unwrap();
+        }
+        t.facts().unwrap()
+    };
+    let carried = carried_bytes("person:ann".into());
     // a hole that only a carried record explains, then that record: no apply, so no span
     let b1 = batch_of(at(0, 0), vec![hole(1, Hash::of(&carried))]);
     let b2 = batch_of(
@@ -1095,64 +1174,130 @@ fn hc1_removal_facts_count_only_the_applies_in_the_file() {
     );
     let carried_only = [b1.clone(), b2.clone()];
     let h = full_of(&carried_only);
+    assert_eq!(tally(&carried_only), facts(0, None));
     let (_, read, t) = read_all(&write(&h, &carried_only, facts(0, None))).unwrap();
     assert_eq!(read, carried_only);
     assert_eq!((t.removals, t.first_removed), (0, None));
     let e = read_all(&write(&h, &carried_only, facts(0, Some(b1.start)))).unwrap_err();
     assert_eq!(damaged(e), removals, "a carried hole is no removal");
 
-    // mixed authority: the carried hole first, then a hole of the apply the dump holds
-    let b3 = batch_of(
-        batch_end(&b2).unwrap(),
-        vec![hole(2, Hash::of(&apply)), hole(3, Hash([9; 32]))],
-    );
+    // a project: hole 2 names another proof (an apply of no file here) and the request of the
+    // file's apply lists it; hole 3 names the file's apply, which does not list it. The
+    // request's resolved span counts; the DROPPED record's authority is not the rule.
+    let s3 = batch_end(&b2).unwrap();
+    let h2 = at(s3.segment, s3.offset);
+    let h3 = at(s3.segment, s3.offset + HEAD as u64 + 10);
+    let request = request_bytes(vec![chunk_span(h2, 2)]);
+    let apply = apply_bytes(&request);
+    let b3 = batch_of(s3, vec![hole(2, Hash([9; 32])), hole(3, Hash::of(&apply))]);
+    assert_eq!((place_of(&b3, 0), place_of(&b3, 1)), (h2, h3));
     let b4 = batch_of(
         batch_end(&b3).unwrap(),
-        vec![present(kinds::REDACTION_APPLY, &apply)],
+        vec![present(kinds::REDACTION, &request)],
     );
-    let mixed = [b1.clone(), b2.clone(), b3.clone(), b4.clone()];
-    let h = full_of(&mixed);
-    let (_, _, t) = read_all(&write(&h, &mixed, facts(1, Some(b3.start)))).unwrap();
-    assert_eq!((t.removals, t.first_removed), (1, Some(b3.start)));
-    for bad in [
-        facts(1, Some(b1.start)),
-        facts(1, None),
-        facts(0, Some(b3.start)),
-        facts(2, Some(b3.start)),
-    ] {
-        let e = read_all(&write(&h, &mixed, bad)).unwrap_err();
-        assert_eq!(damaged(e), removals, "{bad:?}");
-    }
-    // a hole that names an apply of no file here is no span of the dump's applies
-    let b3x = batch_of(batch_end(&b2).unwrap(), vec![hole(2, Hash([9; 32]))]);
-    let b4x = batch_of(
-        batch_end(&b3x).unwrap(),
-        vec![present(kinds::REDACTION_APPLY, &apply)],
-    );
-    let foreign = [b1.clone(), b2.clone(), b3x, b4x];
-    read_all(&write(&full_of(&foreign), &foreign, facts(1, None))).unwrap();
-    // each physical apply counts; the lowest span of either names the first removed
     let b5 = batch_of(
         batch_end(&b4).unwrap(),
         vec![present(kinds::REDACTION_APPLY, &apply)],
     );
-    let twice = [b1.clone(), b2.clone(), b3.clone(), b4.clone(), b5];
-    read_all(&write(&full_of(&twice), &twice, facts(2, Some(b3.start)))).unwrap();
+    let project = [b1.clone(), b2.clone(), b3.clone(), b4.clone(), b5.clone()];
+    let h = full_of(&project);
+    assert_eq!(tally(&project), facts(1, Some(h2)));
+    let (_, _, t) = read_all(&write(&h, &project, facts(1, Some(h2)))).unwrap();
+    assert_eq!((t.removals, t.first_removed), (1, Some(h2)));
+    for bad in [
+        facts(1, Some(h3)),
+        facts(1, Some(b1.start)),
+        facts(1, None),
+        facts(0, Some(h2)),
+        facts(2, Some(h2)),
+    ] {
+        let e = read_all(&write(&h, &project, bad)).unwrap_err();
+        assert_eq!(damaged(e), removals, "{bad:?}");
+    }
+    // each physical apply counts; the lowest resolved span is still the first removed
+    let b6 = batch_of(
+        batch_end(&b5).unwrap(),
+        vec![present(kinds::REDACTION_APPLY, &apply)],
+    );
+    let twice = [
+        b1.clone(),
+        b2.clone(),
+        b3.clone(),
+        b4.clone(),
+        b5.clone(),
+        b6,
+    ];
+    assert_eq!(tally(&twice), facts(2, Some(h2)));
+    read_all(&write(&full_of(&twice), &twice, facts(2, Some(h2)))).unwrap();
+    // an apply whose request no file here holds resolves no span in a full dump
+    let other = apply_bytes(&request_bytes(vec![chunk_span(h3, 3)]));
+    let b5x = batch_of(
+        batch_end(&b4).unwrap(),
+        vec![present(kinds::REDACTION_APPLY, &other)],
+    );
+    let unknown = [b1.clone(), b2.clone(), b3.clone(), b4.clone(), b5x];
+    assert_eq!(tally(&unknown), facts(1, None));
+    read_all(&write(&full_of(&unknown), &unknown, facts(1, None))).unwrap();
 
-    // an increment after b2: its own hole, or a span before its base that an earlier file holds
-    let tail = [b3.clone(), b4.clone()];
+    // a holder with overlapping authorities: its request lists the key of hole 4 at a source
+    // place, which means nothing here; every local copy of that key is the apply's span (HA1's
+    // logical rule), whatever proof each DROPPED record names. The carried hole stays out.
+    let source_place = at(7, 99);
+    let hrequest = request_bytes(vec![chunk_span(source_place, 4), chunk_span(at(7, 200), 8)]);
+    let happly = apply_bytes(&hrequest);
+    let hb0 = batch_of(at(0, 0), vec![holder_ref(), hole(1, Hash::of(&carried))]);
+    let hb1 = batch_of(
+        batch_end(&hb0).unwrap(),
+        vec![present(kinds::REDACTION_CARRIED, &carried)],
+    );
+    // the first copy names another proof, an earlier apply of no file here; a later copy names
+    // the file's apply; hole 5 names the file's apply, which does not approve it
+    let hb2 = batch_of(
+        batch_end(&hb1).unwrap(),
+        vec![hole(5, Hash::of(&happly)), hole(4, Hash([9; 32]))],
+    );
+    let first_copy = place_of(&hb2, 1);
+    let hb3 = batch_of(batch_end(&hb2).unwrap(), vec![hole(4, Hash::of(&happly))]);
+    let hb4 = batch_of(
+        batch_end(&hb3).unwrap(),
+        vec![present(kinds::REDACTION, &hrequest)],
+    );
+    let hb5 = batch_of(
+        batch_end(&hb4).unwrap(),
+        vec![present(kinds::REDACTION_APPLY, &happly)],
+    );
+    let holder = [hb0.clone(), hb1, hb2.clone(), hb3, hb4, hb5];
+    let h = full_of(&holder);
+    assert_eq!(tally(&holder), facts(1, Some(first_copy)));
+    read_all(&write(&h, &holder, facts(1, Some(first_copy)))).unwrap();
+    for bad in [
+        facts(1, Some(source_place)),
+        facts(1, Some(place_of(&hb2, 0))),
+        facts(1, Some(place_of(&hb0, 1))),
+        facts(1, None),
+    ] {
+        let e = read_all(&write(&h, &holder, bad)).unwrap_err();
+        assert_eq!(damaged(e), removals, "{bad:?}");
+    }
+
+    // an increment after b2: the resolved span, or a span before its base that an earlier file
+    // holds
+    let tail = [b3.clone(), b4.clone(), b5.clone()];
     let inc = increment_of(batch_end(&b2).unwrap(), BatchMarker::of(&b2), &tail);
-    for ok in [facts(1, Some(b3.start)), facts(1, Some(b1.start))] {
+    for ok in [facts(1, Some(h2)), facts(1, Some(b1.start))] {
         read_all(&write(&inc, &tail, ok)).unwrap();
     }
-    for bad in [
-        facts(1, Some(b4.start)),
-        facts(1, None),
-        facts(0, Some(b1.start)),
-    ] {
+    for bad in [facts(1, Some(h3)), facts(1, None), facts(0, Some(b1.start))] {
         let e = read_all(&write(&inc, &tail, bad)).unwrap_err();
         assert_eq!(damaged(e), removals, "{bad:?}");
     }
+    // an increment whose apply's request an earlier file holds: the chain resolves its spans,
+    // this file checks its count
+    let tail = [b5.clone()];
+    let inc = increment_of(batch_end(&b4).unwrap(), BatchMarker::of(&b4), &tail);
+    read_all(&write(&inc, &tail, facts(1, Some(h2)))).unwrap();
+    let e = read_all(&write(&inc, &tail, facts(0, None))).unwrap_err();
+    assert_eq!(damaged(e), removals);
 }
 
 #[test]

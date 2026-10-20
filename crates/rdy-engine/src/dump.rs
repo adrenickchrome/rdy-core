@@ -168,7 +168,7 @@ impl ReadState {
         let mut failed = None;
         let mut facts = RemovalTally::default();
         let read = self.reader().for_each_batch(self.seq(), |b| {
-            // the source walker's facts: its applies and the lowest span of one of them
+            // the source walker's applies; their spans are resolved by the store below
             facts.observe(&b)?;
             w.batch(&b).map_err(|e| {
                 let stop = StoreError::Refused(e.to_string());
@@ -182,7 +182,9 @@ impl ReadState {
         // a removal that landed during the batches: what they read is no one epoch's
         self.ensure_current_epoch()?;
         read?;
-        w.finish(facts.facts()?).map_err(dest)
+        // each apply's resolved local spans, as the store's authorization has them
+        let facts = facts.resolved(&reader, self.seq())?;
+        w.finish(facts).map_err(dest)
     }
 }
 
