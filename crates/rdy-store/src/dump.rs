@@ -119,13 +119,12 @@
 //! abort.
 use crate::dump_chain::{self, BatchMarker, DumpChainHeader, DumpKind, chain_text, follows};
 use crate::error::StoreError;
-use crate::holder::{FirstBatch, StoreMode};
+use crate::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode};
 use crate::kinds::{self, BatchCommit};
 use crate::redaction::StoredFrame;
 use crate::redaction_io::ERASE_BUFFER;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{MAX_BLOB_BYTES, StoreReader};
-use rdy_model::redaction::{Redaction, RedactionApply};
 use rdy_model::{Hash, RepoId};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -539,49 +538,43 @@ impl RemovalTally {
             .min()
     }
 
-    /// [`RemovalTally::observe`], with the refusal's text only.
+    /// [`RemovalTally::observe`], with the refusal's text only. Every allocation is fallible
+    /// (the reader's rule): the records it needs are read in place ([`wire`]), never decoded
+    /// into owned values.
     fn add(&mut self, b: &DumpBatch) -> Result<(), &'static str> {
         let first = !self.seen;
         self.seen = true;
         let origin = b.start.segment == 0 && b.start.offset == 0;
-        let mut creation = (first && origin).then(FirstBatch::default);
+        // the first batch of the log sets its mode (as `crate::holder::FirstBatch` reads it)
+        let mut mode = (first && origin).then_some(StoreMode::Project);
         let mut at = b.start.offset;
         for f in &b.frames {
-            let next = at
-                .checked_add(FRAME_HEADER)
-                .and_then(|a| a.checked_add(u64::from(f.original_len())))
-                .ok_or(chain_text::OVERFLOW)?;
             let place = Location {
                 segment: b.start.segment,
                 offset: at,
             };
-            if let Some(c) = creation.as_mut() {
-                let payload = match f {
-                    Frame::Present { payload, .. } => Some(&payload[..]),
-                    Frame::Dropped { .. } => None,
-                };
-                let next = Location {
-                    segment: b.start.segment,
-                    offset: next,
-                };
-                // a mode value that is not `holder` is damage the load refuses; here the mode
-                // stays unknown
-                if c.frame(f.kind(), payload, next).is_err() {
-                    creation = None;
-                    self.mode = None;
-                }
-            }
             match f {
+                Frame::Present { kind, payload, .. } if *kind == kinds::REF_UPDATE => {
+                    if mode.is_some() && wire::ref_name(payload) == Some(REF_STORE_MODE.as_bytes())
+                    {
+                        // a mode value other than `holder` is damage the load refuses; here the
+                        // mode stays unknown
+                        mode = match wire::ref_value(payload) {
+                            Some(v) if v == HOLDER_MODE => Some(StoreMode::Holder),
+                            _ => None,
+                        };
+                    }
+                }
                 Frame::Present { kind, payload, .. } if *kind == kinds::REDACTION_APPLY => {
                     self.applies = self.applies.saturating_add(1);
-                    match crate::bounded::decode::<RedactionApply>(payload) {
-                        Ok(a) => {
+                    match wire::apply_request(payload) {
+                        Some(request) => {
                             self.requests
                                 .try_reserve(1)
                                 .map_err(|_| drop_text::ALLOCATION)?;
-                            self.requests.insert(a.request);
+                            self.requests.insert(request);
                         }
-                        Err(_) => self.undecoded = true,
+                        None => self.undecoded = true,
                     }
                 }
                 Frame::Present {
@@ -589,21 +582,8 @@ impl RemovalTally {
                     hash,
                     payload,
                 } if *kind == kinds::REDACTION && !self.manifests.contains_key(hash) => {
-                    if let Ok(r) = crate::bounded::decode::<Redaction>(payload) {
-                        let mut spans = Vec::new();
-                        spans
-                            .try_reserve_exact(r.manifest.spans.len())
-                            .map_err(|_| drop_text::ALLOCATION)?;
-                        spans.extend(r.manifest.spans.iter().map(|s| {
-                            (
-                                Location {
-                                    segment: s.place.segment,
-                                    offset: s.place.offset,
-                                },
-                                s.kind,
-                                s.hash,
-                            )
-                        }));
+                    let mut spans = Vec::new();
+                    if wire::request_spans(payload, &mut spans)? {
                         self.manifests
                             .try_reserve(1)
                             .map_err(|_| drop_text::ALLOCATION)?;
@@ -621,12 +601,297 @@ impl RemovalTally {
                     }
                 },
             }
-            at = next;
+            at = at
+                .checked_add(FRAME_HEADER)
+                .and_then(|a| a.checked_add(u64::from(f.original_len())))
+                .ok_or(chain_text::OVERFLOW)?;
         }
-        if let Some(c) = creation {
-            self.mode = Some(c.creation(b.start).mode);
+        if first && origin {
+            self.mode = mode;
         }
         Ok(())
+    }
+}
+
+/// The few fields the removal tally reads from records, read in place from their postcard
+/// bytes (D-F0904: no existing kind is ever re-encoded, so these layouts are frozen), with no
+/// allocation: a dump reader's every allocation is fallible. A record these readers cannot
+/// read names nothing; whether it is a valid record is the load's check.
+mod wire {
+    use super::drop_text;
+    use crate::bounded::MAX_ELEMENTS;
+    use crate::segment::Location;
+    use rdy_model::Hash;
+
+    /// A cursor over postcard bytes.
+    struct Cur<'a>(&'a [u8]);
+
+    impl<'a> Cur<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            if self.0.len() < n {
+                return None;
+            }
+            let (head, rest) = self.0.split_at(n);
+            self.0 = rest;
+            Some(head)
+        }
+
+        fn byte(&mut self) -> Option<u8> {
+            self.take(1).map(|b| b[0])
+        }
+
+        /// An unsigned LEB128 varint of at most `max` bytes.
+        fn varint(&mut self, max: usize) -> Option<u64> {
+            let mut v = 0u64;
+            for i in 0..max {
+                let b = self.byte()?;
+                v |= u64::from(b & 0x7f) << (7 * i);
+                if b & 0x80 == 0 {
+                    return Some(v);
+                }
+            }
+            None
+        }
+
+        fn u32(&mut self) -> Option<u32> {
+            u32::try_from(self.varint(5)?).ok()
+        }
+
+        fn u64(&mut self) -> Option<u64> {
+            self.varint(10)
+        }
+
+        fn len(&mut self) -> Option<usize> {
+            usize::try_from(self.varint(10)?).ok()
+        }
+
+        fn hash(&mut self) -> Option<Hash> {
+            Some(Hash(self.take(32)?.try_into().ok()?))
+        }
+
+        /// A string or byte string: its length, then its bytes.
+        fn bytes(&mut self) -> Option<&'a [u8]> {
+            let n = self.len()?;
+            self.take(n)
+        }
+
+        fn option<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<Option<T>> {
+            match self.byte()? {
+                0 => Some(None),
+                1 => f(self).map(Some),
+                _ => None,
+            }
+        }
+
+        /// A sequence of at most `MAX_ELEMENTS` elements, each read by `f`.
+        fn seq(&mut self, mut f: impl FnMut(&mut Self) -> Option<()>) -> Option<usize> {
+            let n = self.len()?;
+            if n > MAX_ELEMENTS {
+                return None;
+            }
+            for _ in 0..n {
+                f(self)?;
+            }
+            Some(n)
+        }
+    }
+
+    /// The request a `REDACTION_APPLY` record names: its first field of three hashes.
+    pub(super) fn apply_request(payload: &[u8]) -> Option<Hash> {
+        if payload.len() != 96 {
+            return None;
+        }
+        Cur(payload).hash()
+    }
+
+    /// The name of a `REF_UPDATE` record (`name`, `value`, `at`).
+    pub(super) fn ref_name(payload: &[u8]) -> Option<&[u8]> {
+        Cur(payload).bytes()
+    }
+
+    /// The value of a `REF_UPDATE` record.
+    pub(super) fn ref_value(payload: &[u8]) -> Option<&[u8]> {
+        let mut c = Cur(payload);
+        c.bytes()?;
+        c.bytes()
+    }
+
+    /// The manifest spans of a `REDACTION` record, as place, kind and hash, into `out`
+    /// (fallibly grown). Ok(false) when the record cannot be read; a refused growth is
+    /// `record allocation failed`. The layout: `carrier`, `actor` (`actor`, `run`, `role`,
+    /// `at_ms`), `targets`, `reason_class`, `reason`, then the manifest's `versions`, `blobs`,
+    /// `shared_blobs` and `spans` (each `place`, `kind`, `hash`, `len`, `residue`); the fields
+    /// after `spans` are not read.
+    pub(super) fn request_spans(
+        payload: &[u8],
+        out: &mut Vec<(Location, u8, Hash)>,
+    ) -> Result<bool, &'static str> {
+        let mut c = Cur(payload);
+        let Some(()) = head(&mut c) else {
+            return Ok(false);
+        };
+        let Some(n) = c.len().filter(|n| *n <= MAX_ELEMENTS) else {
+            return Ok(false);
+        };
+        out.try_reserve_exact(n)
+            .map_err(|_| drop_text::ALLOCATION)?;
+        for _ in 0..n {
+            let span = (|| {
+                let place = Location {
+                    segment: c.u32()?,
+                    offset: c.u64()?,
+                };
+                let kind = c.byte()?;
+                let hash = c.hash()?;
+                c.u32()?;
+                c.option(|c| c.hash())?;
+                Some((place, kind, hash))
+            })();
+            match span {
+                Some(s) => out.push(s),
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Reads a request's fields before its manifest's spans.
+    fn head(c: &mut Cur) -> Option<()> {
+        c.hash()?; // carrier
+        c.bytes()?; // actor.actor
+        c.option(|c| c.bytes())?; // actor.run
+        if c.u32()? > 3 {
+            return None; // actor.role
+        }
+        c.u64()?; // actor.at_ms (zigzag)
+        c.seq(|c| match c.u32()? {
+            0 => c.bytes().map(|_| ()),
+            1 => {
+                c.bytes()?;
+                c.hash().map(|_| ())
+            }
+            2 => c.hash().map(|_| ()),
+            _ => None,
+        })?; // targets
+        if c.u32()? > 3 {
+            return None; // reason_class
+        }
+        c.bytes()?; // reason
+        c.seq(|c| {
+            c.bytes()?;
+            c.hash().map(|_| ())
+        })?; // manifest.versions
+        c.seq(|c| c.hash().map(|_| ()))?; // manifest.blobs
+        c.seq(|c| c.hash().map(|_| ()))?; // manifest.shared_blobs
+        Some(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rdy_model::redaction::{
+            AssessmentSupport, DropSpan, FramePlace, ReasonClass, RedactTarget, Redaction,
+            RedactionApply, RedactionManifest,
+        };
+        use rdy_model::{BlockId, Provenance, Role};
+
+        /// hc1: the in-place reads agree with the records' own decoding, for every variant and
+        /// option the read layout walks, and a cut record reads as nothing.
+        #[test]
+        fn hc1_in_place_reads_match_the_decoded_records() {
+            let id = BlockId::parse("b-00001").unwrap();
+            let spans = vec![
+                DropSpan {
+                    place: FramePlace {
+                        segment: 3,
+                        offset: u64::MAX - 1,
+                    },
+                    kind: 1,
+                    hash: Hash([7; 32]),
+                    len: u32::MAX,
+                    residue: Some(Hash([8; 32])),
+                },
+                DropSpan {
+                    place: FramePlace {
+                        segment: u32::MAX,
+                        offset: 0,
+                    },
+                    kind: 6,
+                    hash: Hash([9; 32]),
+                    len: 300,
+                    residue: None,
+                },
+            ];
+            let r = Redaction {
+                carrier: Hash([1; 32]),
+                actor: Provenance {
+                    actor: "agent:w".repeat(40),
+                    run: Some("run-1".into()),
+                    role: Role::Approver,
+                    at_ms: -1_234_567_890_123,
+                },
+                targets: vec![
+                    RedactTarget::AllVersions(id.clone()),
+                    RedactTarget::Version {
+                        id: id.clone(),
+                        version: Hash([2; 32]),
+                    },
+                    RedactTarget::Blob(Hash([3; 32])),
+                ],
+                reason_class: ReasonClass::Retraction,
+                reason: "why ".repeat(100),
+                manifest: RedactionManifest {
+                    versions: vec![(id.clone(), Hash([2; 32]))],
+                    blobs: vec![Hash([3; 32])],
+                    shared_blobs: vec![Hash([4; 32]), Hash([5; 32])],
+                    spans: spans.clone(),
+                    inside: vec![],
+                    outside: vec![],
+                    quarantine: vec!["q".into()],
+                    assessment: AssessmentSupport::NotImplemented,
+                },
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let mut out = vec![];
+            assert_eq!(request_spans(&bytes, &mut out), Ok(true));
+            let want: Vec<(Location, u8, Hash)> = spans
+                .iter()
+                .map(|s| {
+                    (
+                        Location {
+                            segment: s.place.segment,
+                            offset: s.place.offset,
+                        },
+                        s.kind,
+                        s.hash,
+                    )
+                })
+                .collect();
+            assert_eq!(out, want);
+            // a record cut inside its spans reads as nothing
+            let spans_at = bytes.len() - 6;
+            let mut out = vec![];
+            assert_eq!(request_spans(&bytes[..spans_at / 2], &mut out), Ok(false));
+            let apply = RedactionApply {
+                request: Hash([6; 32]),
+                landing: Hash([2; 32]),
+                report_hash: Hash([3; 32]),
+            };
+            let a = postcard::to_allocvec(&apply).unwrap();
+            assert_eq!(apply_request(&a), Some(Hash([6; 32])));
+            assert_eq!(apply_request(&a[..95]), None);
+            let u = postcard::to_allocvec(&crate::kinds::RefUpdate {
+                name: "meta/store_mode".into(),
+                value: b"holder".to_vec(),
+                at: Location {
+                    segment: 0,
+                    offset: 0,
+                },
+            })
+            .unwrap();
+            assert_eq!(ref_name(&u), Some(&b"meta/store_mode"[..]));
+            assert_eq!(ref_value(&u), Some(&b"holder"[..]));
+        }
     }
 }
 
