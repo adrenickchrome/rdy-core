@@ -167,7 +167,8 @@ fn hpb9_process_has_no_project_or_cwd_dependency() {
     // a config that does not parse in the user config: a command that reads config would say so
     std::fs::create_dir_all(home.path().join("rdy")).unwrap();
     std::fs::write(home.path().join("rdy/config.yaml"), b"human: [unclosed\n").unwrap();
-    // one directory that looks like a project with a malformed config, one named otherwise
+    // one directory that looks like a project with a malformed project config and a malformed
+    // local config, one named otherwise
     let base = tempfile::tempdir().unwrap();
     let broken = base.path().join("Broken project dir");
     std::fs::create_dir_all(broken.join(".rdy")).unwrap();
@@ -175,12 +176,18 @@ fn hpb9_process_has_no_project_or_cwd_dependency() {
     std::fs::write(broken.join(".rdy/FORMAT"), b"not a store").unwrap();
     let plain = base.path().join("zz other place");
     std::fs::create_dir_all(&plain).unwrap();
-    let probe = rdy_in(&broken, home.path(), &["config"], b"");
-    assert!(
-        err_text(&probe).contains("E_CONFIG"),
-        "the config is invalid, as the test needs: {}",
-        err_text(&probe)
-    );
+    // control: `rdy config` there fails on the project file; once the local file is planted it
+    // fails on that file, which rdy reads first, so each project level is invalid
+    for (planted, file) in [(false, " in .rdy.yaml"), (true, " in .rdy/local.yaml")] {
+        if planted {
+            std::fs::write(broken.join(".rdy/local.yaml"), b"serve: [unclosed\n  - {\n").unwrap();
+        }
+        let probe = err_text(&rdy_in(&broken, home.path(), &["config"], b""));
+        assert!(
+            probe.contains("E_CONFIG") && probe.contains(file),
+            "the config is invalid, as the test needs: {probe}"
+        );
+    }
     let listing = |d: &Path| {
         let mut v: Vec<String> = std::fs::read_dir(d)
             .unwrap()
@@ -189,7 +196,8 @@ fn hpb9_process_has_no_project_or_cwd_dependency() {
         v.sort();
         v
     };
-    let before = (listing(&broken), listing(&plain));
+    let dot = broken.join(".rdy");
+    let before = (listing(&broken), listing(&dot), listing(&plain));
     for format in [
         RenderFormat::Site,
         RenderFormat::Markdown,
@@ -223,7 +231,7 @@ fn hpb9_process_has_no_project_or_cwd_dependency() {
         }
     }
     assert_eq!(
-        (listing(&broken), listing(&plain)),
+        (listing(&broken), listing(&dot), listing(&plain)),
         before,
         "no file written"
     );

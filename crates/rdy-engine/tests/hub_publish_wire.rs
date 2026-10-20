@@ -1778,6 +1778,126 @@ fn hpb7_escaped_tokens_in_corrected_discard_the_body() {
     assert_eq!(s.finish(), 0);
 }
 
+/// The spellings of a token a hostile success reply can carry: as given, with its first `r` or
+/// its first `_` as a JSON `\u` escape (the raw body then never holds the token or a prefix).
+fn json_spellings(token: &str) -> [String; 3] {
+    let u = |c: char| format!("\\u{:04x}", u32::from(c));
+    [
+        token.to_string(),
+        token.replacen('r', &u('r'), 1),
+        token.replacen('_', &u('_'), 1),
+    ]
+}
+
+/// The 40 secret characters of a hub token: no output may hold them in any spelling.
+fn secret_of(token: &str) -> &str {
+    &token[7..47]
+}
+
+/// A successful discovery or state reply that holds the bearer or a token prefix in any string,
+/// JSON-escaped or percent-encoded, is refused like a refusal that echoes one: the reply's text
+/// never reaches the caller.
+#[test]
+fn hpb7_successful_replies_that_echo_a_token_are_refused() {
+    let mut a = Server::start();
+    let hub = Hub::new(&a, &[], &[]);
+    let fresh = hub.cx_with(None, Some("r7"));
+    let cx = hub.cx();
+    let remote = format!("{}{REMOTE}", a.origin());
+    for token in [ACCESS, REFRESH, REFRESH_X] {
+        let percent = token.replacen('_', "%5F", 1);
+        let mut bases: Vec<String> = Vec::new();
+        for t in json_spellings(token).iter().chain([&percent]) {
+            bases.push(format!("/sync/{t}"));
+            bases.push(format!("{}/sync/{t}", a.origin()));
+        }
+        for base in &bases {
+            let reply = format!(r#"{{"sync_base":"{base}","protocols":[1]}}"#);
+            let (r, _) = served(&mut a, Reply::json(200, &reply), || {
+                hub.wire.discovery(&fresh, &remote)
+            });
+            assert!(!format!("{r:?}").contains(secret_of(token)), "{base}");
+            protocol(r);
+        }
+        for t in json_spellings(token) {
+            let features = format!(r#"[{{"name":"{t}","class":"compatible"}}]"#);
+            let (r, _) = served(
+                &mut a,
+                Reply::json(200, &state_reply(&features, "null")),
+                || hub.wire.state(&cx, &state_request()),
+            );
+            assert!(!format!("{r:?}").contains(secret_of(token)), "{t}");
+            protocol(r);
+        }
+    }
+    // The same replies without a token or a prefix are taken.
+    let reply = r#"{"sync_base":"/sync/rdy_h_plain%5Fname","protocols":[1]}"#;
+    let (r, _) = served(&mut a, Reply::json(200, reply), || {
+        hub.wire.discovery(&fresh, &remote)
+    });
+    r.unwrap();
+    let features = r#"[{"name":"rdyh-a_plain","class":"compatible"}]"#;
+    let (r, _) = served(
+        &mut a,
+        Reply::json(200, &state_reply(features, "null")),
+        || hub.wire.state(&cx, &state_request()),
+    );
+    r.unwrap();
+    assert_eq!(a.finish(), 0);
+}
+
+/// Debug prints a sync base only as its origin and a feature only by its class, so a base or a
+/// feature name that holds a token (in any spelling) is never printed: not by Discovery, not by
+/// an UploadContext that copied the base, not by PublishState.
+#[test]
+fn hpb7_debug_never_prints_untrusted_reply_text() {
+    let install = Origin::parse("https://hub.invalid").unwrap();
+    for token in [ACCESS, REFRESH, REFRESH_X] {
+        let secret = secret_of(token);
+        let percent = token.replacen('_', "%5F", 1);
+        for t in [token, percent.as_str()] {
+            let base = format!("https://hub.invalid/sync/{t}");
+            let d = Discovery {
+                sync_base: base.clone(),
+                protocols: vec![1],
+            };
+            let cx = UploadContext {
+                install: install.clone(),
+                sync_base: Some(base),
+                ca_file: None,
+                claim: claim(Some("r7")),
+                bearer: Secret::new(REFRESH),
+            };
+            for text in [format!("{d:?}"), format!("{cx:?}")] {
+                assert!(!text.contains(secret), "{text}");
+                assert!(text.contains("https://hub.invalid"), "{text}");
+            }
+        }
+        let st = PublishState {
+            canon: None,
+            repo_id: None,
+            rdy: "0.10.0".into(),
+            stream_read: vec![1],
+            stream_write: vec![1],
+            features: vec![FeatureUse {
+                name: token.into(),
+                class: FeatureClass::Compatible,
+            }],
+            min_rdy: None,
+            batch_bytes: 1,
+            batch_records: 1,
+            quarantine_seconds: 1,
+            profile: None,
+            audience: None,
+            artifact_bytes: 1,
+            artifact_files: 1,
+        };
+        let text = format!("{st:?}");
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("Compatible"), "{text}");
+    }
+}
+
 /// A sync base the origin fence admits in another spelling of the same URL is taken in its
 /// canonical form: an upper-case scheme and an empty path.
 #[test]

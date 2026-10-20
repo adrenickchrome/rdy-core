@@ -1368,13 +1368,24 @@ fn hpb5_render_source_never_opens_a_store_or_config() {
     let s = seeded();
     let stream = export(&s.r, s.v1);
     let captured = inputs(&s.r);
-    // a working directory with a malformed config and a damaged project directory
+    // a working directory with a malformed project config, a malformed local config and a
+    // damaged project directory
     let here = tempfile::tempdir().unwrap();
     std::fs::write(here.path().join(".rdy.yaml"), "pack: [unclosed\n  - {").unwrap();
     std::fs::create_dir_all(here.path().join(".rdy/store")).unwrap();
     std::fs::write(here.path().join(".rdy/store/FORMAT"), "not a format").unwrap();
-    std::fs::write(here.path().join(".rdy/config.yaml"), "{{{").unwrap();
+    // control: a settings read there fails on the project level, then, once the local file is
+    // planted, on the local level (read first), so each file level a read could take is invalid
+    let e = config_levels::effective(here.path(), None).unwrap_err();
+    assert_eq!(e.code, E_CONFIG, "{e}");
+    assert!(e.message.ends_with(" in .rdy.yaml"), "{e}");
+    let local = here.path().join(config_levels::LOCAL_FILE);
+    std::fs::write(&local, "serve: [unclosed\n  - {").unwrap();
+    let e = config_levels::effective(here.path(), None).unwrap_err();
+    assert_eq!(e.code, E_CONFIG, "{e}");
+    assert!(e.message.ends_with(" in .rdy/local.yaml"), "{e}");
     let before = tree(here.path());
+    assert!(before.keys().any(|k| k.ends_with("local.yaml")));
     let back = std::env::current_dir().unwrap();
     std::env::set_current_dir(here.path()).unwrap();
     let got = render(&stream, captured.clone());

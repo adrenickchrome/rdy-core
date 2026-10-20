@@ -19,6 +19,9 @@
 //!   message and fix, its valid issues and a request-id issue. Any other code is the generic
 //!   refusal. A body that echoes the bearer or a token prefix, or that breaks the object's
 //!   bounds, is discarded.
+//! - **Secrets in success replies.** A discovery or state reply whose raw body or decoded text
+//!   (also percent-decoded) holds the bearer or a token prefix is invalid. Debug prints a sync
+//!   base only as its origin and a feature only by its class.
 //! - **Effects.** Discovery, state and both known steps are reads: a failed exchange is
 //!   `E_UPSTREAM_TRANSPORT` and an invalid reply `E_UPSTREAM_PROTOCOL`. Objects, file and publish
 //!   are writes: once the request may have been sent, a lost or invalid reply is
@@ -118,7 +121,8 @@ const RETRY_FIX: &str = "wait before trying again";
 
 /// What every upload call needs: the selected install and its sync base (`None` before
 /// discovery), the user CA bundle, the bound request claim and the current access token. Debug
-/// never prints the bearer.
+/// never prints the bearer, and prints the sync base, which a hub reply supplied, only as its
+/// origin.
 #[derive(Clone)]
 pub struct UploadContext {
     pub install: Origin,
@@ -132,7 +136,7 @@ impl fmt::Debug for UploadContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UploadContext")
             .field("install", &self.install)
-            .field("sync_base", &self.sync_base)
+            .field("sync_base", &self.sync_base.as_deref().map(BaseShown))
             .field("ca_file", &self.ca_file)
             .field("actor", &self.claim.actor)
             .field("run", &self.claim.run)
@@ -141,10 +145,38 @@ impl fmt::Debug for UploadContext {
 }
 
 /// A discovery reply: the absolute sync base and the protocol versions the install speaks.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Debug prints the sync base only as its origin.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Discovery {
     pub sync_base: String,
     pub protocols: Vec<u32>,
+}
+
+impl fmt::Debug for Discovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Discovery")
+            .field("sync_base", &BaseShown(&self.sync_base))
+            .field("protocols", &self.protocols)
+            .finish()
+    }
+}
+
+/// A sync base in Debug: its origin, and its path only when that is the root. The path is hub
+/// text, so a path that might hold a secret is never printed; anything that is not a URL is
+/// hidden whole.
+struct BaseShown<'a>(&'a str);
+
+impl fmt::Debug for BaseShown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match url::Url::parse(self.0) {
+            Ok(u) if u.has_host() => {
+                let origin = u.origin().ascii_serialization();
+                let path = if u.path() == "/" { "/" } else { "/<path>" };
+                write!(f, "\"{origin}{path}\"")
+            }
+            _ => f.write_str("<hidden>"),
+        }
+    }
 }
 
 /// The state step's request. `actor` and `run` must be the context claim's; a `None` run is
@@ -193,16 +225,24 @@ pub enum FeatureClass {
     Incompatible,
 }
 
-/// A feature the hub repo's records use.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A feature the hub repo's records use. Debug prints only its class: the name is hub text.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureUse {
     pub name: String,
     pub class: FeatureClass,
 }
 
+impl fmt::Debug for FeatureUse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FeatureUse")
+            .field("class", &self.class)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The state reply, validated: limits are positive and clamped to core's caps. `min_rdy` is
-/// null in H1 (hub i-DETA1).
+/// null in H1 (hub i-DETA1). Debug prints each feature by its class only.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishState {
@@ -955,6 +995,47 @@ fn echoes_token(text: &str, bearer: &Secret) -> bool {
     (!b.is_empty() && text.contains(b)) || TOKEN_PREFIXES.iter().any(|p| text.contains(p))
 }
 
+/// `text` with each `%XX` escape decoded; a decoded byte that is not UTF-8 becomes U+FFFD.
+fn percent_decoded(text: &str) -> String {
+    let b = text.as_bytes();
+    let hex = |c: u8| char::from(c).to_digit(16);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let pair = b
+            .get(i + 1)
+            .copied()
+            .and_then(hex)
+            .zip(b.get(i + 2).copied().and_then(hex));
+        match (b[i], pair) {
+            (b'%', Some((hi, lo))) => {
+                // Two hex digits are at most 255.
+                out.push(u8::try_from(hi * 16 + lo).unwrap_or(u8::MAX));
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether a success reply echoes the bearer or a token prefix: in its raw body, or in one of
+/// its decoded strings (so a JSON `\u` escape is no cover) as given or percent-decoded. Such a
+/// reply is invalid, and its text never reaches the caller.
+fn success_echoes<'a>(
+    body: &[u8],
+    texts: impl IntoIterator<Item = &'a str>,
+    bearer: &Secret,
+) -> bool {
+    echoes_token(&String::from_utf8_lossy(body), bearer)
+        || texts
+            .into_iter()
+            .any(|t| echoes_token(t, bearer) || echoes_token(&percent_decoded(t), bearer))
+}
+
 /// Whether any key or string of `object`, at any depth, holds the bearer or a token prefix. The
 /// JSON guard bounds the depth to 32, so the recursion is bounded too.
 fn object_echoes(object: &serde_json::Map<String, serde_json::Value>, bearer: &Secret) -> bool {
@@ -1226,6 +1307,9 @@ impl PublishWire for HttpPublishWire {
             },
         )?;
         let dto: DiscoveryDto = reply(&body, limits(REPLY_BYTES, MAX_JSON_VALUES), Effect::Read)?;
+        if success_echoes(&body, [dto.sync_base.as_str()], &cx.bearer) {
+            return Err(upstream_protocol());
+        }
         let p = &dto.protocols;
         let protocols_ok = !p.is_empty()
             && p.len() <= MAX_PROTOCOLS
@@ -1249,7 +1333,11 @@ impl PublishWire for HttpPublishWire {
         let body = self.post_json(cx, Effect::Read, &url, json, REPLY_BYTES, &[200])?;
         let mut st: PublishState =
             reply(&body, limits(REPLY_BYTES, MAX_JSON_VALUES), Effect::Read)?;
-        if !check_state(&mut st) {
+        let texts = [st.rdy.as_str()]
+            .into_iter()
+            .chain(st.min_rdy.as_deref())
+            .chain(st.features.iter().map(|f| f.name.as_str()));
+        if success_echoes(&body, texts, &cx.bearer) || !check_state(&mut st) {
             return Err(upstream_protocol());
         }
         Ok(st)
