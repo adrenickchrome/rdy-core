@@ -149,7 +149,7 @@ fn hc7_adapter_load_chain_matches_engine_without_a_live_store() {
     // increment
     let hdir = d.path().join("holder");
     let mut holder = Rdy::create_holder(&hdir, repo).unwrap();
-    let mut take = |h: &mut Rdy, i: usize, name: &str| {
+    let take = |h: &mut Rdy, i: usize, name: &str| {
         let (bytes, landing) = &exports[i];
         let p = d.path().join(format!("{name}.rdysync"));
         std::fs::write(&p, bytes).unwrap();
