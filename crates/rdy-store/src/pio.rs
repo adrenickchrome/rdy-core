@@ -12,7 +12,7 @@
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
 //!   `remove_dir_at`, `set_mode_at`, `rename_at`, `is_link_refusal`): each names one entry of a
 //!   directory handle, so a path that is changed after the handle was opened cannot redirect
-//!   it, and none follows a link at that entry;
+//!   it, and none follows a link at that entry; `is_empty_dir` lists a directory handle itself;
 //! - a child process that starts in an open directory (`start_in_dir`), for the same reason;
 //! - test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
 //!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
@@ -297,6 +297,53 @@ pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
     cvt(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) }).map(|_| ())
 }
 
+/// Whether the open directory `dir` holds no entry but `.` and `..`. It is listed in this
+/// process through a new open of `dir` itself (`openat(dir, ".")`), so no path is resolved
+/// again and the listing has its own position. A failed listing is an error, never "empty".
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn is_empty_dir(dir: &File) -> io::Result<bool> {
+    use std::os::unix::io::IntoRawFd;
+    // SAFETY: an open descriptor and a static C string; without O_CREAT no mode is read.
+    let fd = cvt(unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    })?;
+    // SAFETY: `fd` is a new descriptor that nothing else owns.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: `fd` is open; on success the stream owns it, and `closedir` closes it.
+    let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let _ = owned.into_raw_fd();
+    let empty = loop {
+        // SAFETY: a `dirent` is plain data; all zeros is a valid value for `readdir_r` to fill.
+        let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::dirent = std::ptr::null_mut();
+        // SAFETY: an open stream, a whole `dirent` and a valid out pointer. `readdir_r` returns
+        // its error, so an end of the listing is never confused with a failure.
+        let r = unsafe { libc::readdir_r(stream, &mut entry, &mut found) };
+        if r != 0 {
+            break Err(io::Error::from_raw_os_error(r));
+        }
+        if found.is_null() {
+            break Ok(true);
+        }
+        // SAFETY: `found` points at `entry`, whose name `readdir_r` ended with a NUL.
+        let name = unsafe { std::ffi::CStr::from_ptr((*found).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            break Ok(false);
+        }
+    };
+    // SAFETY: the stream is open and is closed once, here.
+    unsafe { libc::closedir(stream) };
+    empty
+}
+
 /// Whether `e`, from [`open_dir_at`] or [`open_read_at`], means that a link stands at the name,
 /// or something that is not a directory where a directory was opened (`ELOOP`, `ENOTDIR`).
 #[cfg(unix)]
@@ -461,6 +508,29 @@ mod tests {
         let mut one = [0u8; 1];
         f.read_exact(&mut one).unwrap();
         assert_eq!(one[0], b'f');
+    }
+
+    #[test]
+    fn pre3_is_empty_dir_lists_the_directory_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        fs::create_dir(&a).unwrap();
+        let dir = open_dir(&a).unwrap();
+        assert!(is_empty_dir(&dir).unwrap(), "a new directory");
+        assert!(is_empty_dir(&dir).unwrap(), "the same answer again");
+        // the handle is listed, not the path: moved, with a full directory at its old path
+        let b = root.path().join("b");
+        fs::rename(&a, &b).unwrap();
+        fs::create_dir(&a).unwrap();
+        fs::write(a.join("theirs"), b"x").unwrap();
+        assert!(is_empty_dir(&dir).unwrap(), "moved, still empty");
+        fs::write(b.join(".hidden"), b"x").unwrap();
+        assert!(!is_empty_dir(&dir).unwrap(), "a hidden file");
+        fs::remove_file(b.join(".hidden")).unwrap();
+        fs::create_dir(b.join("sub")).unwrap();
+        assert!(!is_empty_dir(&dir).unwrap(), "a directory");
+        fs::remove_dir(b.join("sub")).unwrap();
+        assert!(is_empty_dir(&dir).unwrap(), "empty again");
     }
 
     #[test]

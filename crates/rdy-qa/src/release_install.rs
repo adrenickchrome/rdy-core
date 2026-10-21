@@ -1210,13 +1210,16 @@ impl MadeDir {
 
     /// The directory `name` in `parent`, which a guide command has just made: a directory (not
     /// a link) that this user owns, and empty, as a directory that mkdir has just made is. `None`
-    /// for anything else: a directory with something in it is another process's.
+    /// for anything else: a directory with something in it is another process's. The check
+    /// starts no process: it reads the directory in this process, through its handle, so the
+    /// guide's commands stay the only processes between its mkdir and tar, and a listing that
+    /// fails is "not empty".
     fn claim(parent: &File, name: &OsStr) -> Option<MadeDir> {
         let dir = rdy_store::pio::open_dir_at(parent, name).ok()?;
         let meta = dir.metadata().ok()?;
         (meta.is_dir()
             && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid()
-            && is_empty_dir(&dir))
+            && platform::is_empty_dir(&dir).unwrap_or(false))
         .then_some(())?;
         Some(MadeDir {
             parent: parent.try_clone().ok()?,
@@ -1246,16 +1249,6 @@ impl MadeDir {
         // rmdir removes only an empty directory: a directory swapped in since is not removed
         emptied && self.in_place() && platform::remove_dir_at(&self.parent, &self.name).is_ok()
     }
-}
-
-/// Whether the open directory `dir` holds no entry, as `find . -mindepth 1 -maxdepth 1`,
-/// started in it through its handle, lists none. A failed or bounded-out listing is not empty.
-fn is_empty_dir(dir: &File) -> bool {
-    let mut find = Command::new("find");
-    find.args([".", "-mindepth", "1", "-maxdepth", "1"]);
-    platform::start_in_dir(&mut find, dir).is_ok()
-        && platform::run_bounded(find, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE)
-            .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
 }
 
 /// The installed check's scratch directory.
@@ -3254,7 +3247,8 @@ esac
 
     /// Runs the check of `input` against `kit` with the plain stand-ins (`attributes` for
     /// `xattr`): its result and every guide command its runner ran, as the runner's hook saw
-    /// it.
+    /// it. From the first guide command to the last, the runner starts no process but these
+    /// commands: the count of every process it starts goes up by exactly one per command.
     fn check_recorded(
         kit: &Kit,
         input: &InstallInput,
@@ -3262,11 +3256,25 @@ esac
     ) -> (Result<InstalledRelease, InstallFailure>, Vec<Shown>) {
         let ran = Mutex::new(Vec::new());
         let record = |c: &GuideCommand| {
-            ran.lock().unwrap_or_else(|e| e.into_inner()).push(shown(c));
+            let started = platform::runner_starts();
+            ran.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((shown(c), started));
         };
         let process = |c: &GuideCommand| stand_in(c, attributes);
         let got = check_kit(kit, input, &process, |s| s.ran = &record);
-        (got, ran.into_inner().unwrap_or_else(|e| e.into_inner()))
+        let ran = ran.into_inner().unwrap_or_else(|e| e.into_inner());
+        let first = ran.first().map_or(0, |r| r.1);
+        let between: Vec<(String, Option<usize>)> = ran
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.0.0.clone(), r.1.checked_sub(first + i)))
+            .collect();
+        assert!(
+            between.iter().all(|b| b.1 == Some(0)),
+            "processes started before each guide command that are not guide commands: {between:?}"
+        );
+        (got, ran.into_iter().map(|r| r.0).collect())
     }
 
     /// The argv of every guide command the check ran, in order: a log kept outside every

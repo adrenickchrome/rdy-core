@@ -231,6 +231,12 @@ pub fn opens_dir(path: &Path, dir: &File) -> bool {
     }
 }
 
+/// Whether the open directory `dir` holds no entry (`.` and `..` aside). It is listed in this
+/// process through the handle, never through a path, and starts no process.
+pub fn is_empty_dir(dir: &File) -> io::Result<bool> {
+    rdy_store::pio::is_empty_dir(dir)
+}
+
 /// Removes the entry `name` (not a directory) from the open directory `dir`; a link is removed,
 /// never followed.
 pub fn remove_file_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<()> {
@@ -367,6 +373,19 @@ pub fn run_bounded_to(
     run_bounded_inner(command, stdin, Some(stdout), max_output, until, drop).result
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many processes the bounded runner has started on this thread (a test hook).
+    static RUNNER_STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many processes the bounded runner has started on this thread so far: tests use it to
+/// see every process a check starts, not only those a hook is told of.
+#[cfg(test)]
+pub(crate) fn runner_starts() -> usize {
+    RUNNER_STARTS.with(std::cell::Cell::get)
+}
+
 /// How long a drain's read waits before it checks whether the run cancelled it.
 const DRAIN_TICK: Duration = Duration::from_millis(20);
 
@@ -407,6 +426,8 @@ pub(crate) fn run_bounded_inner(
         .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
         .stdout(out.1)
         .stderr(err.1);
+    #[cfg(test)]
+    RUNNER_STARTS.with(|n| n.set(n.get() + 1));
     let spawned = command.spawn();
     // the command holds the child's ends: drop them, or no drain would see the end of a stream
     drop(command);
@@ -1013,6 +1034,34 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(process_exited(pid));
+    }
+
+    #[test]
+    fn pre3_is_empty_dir_lists_the_open_directory_in_process() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let a = root.path().join("a");
+        std::fs::create_dir(&a).expect("mkdir");
+        let dir = open_dir(&a).expect("open");
+        let starts = runner_starts();
+        assert!(
+            is_empty_dir(&dir).expect("list"),
+            "a new directory is empty"
+        );
+        assert!(is_empty_dir(&dir).expect("list"), "the same answer again");
+        // the open directory is listed, not its old path: moved, with a full directory in its
+        // place, it is still empty
+        let b = root.path().join("b");
+        std::fs::rename(&a, &b).expect("rename");
+        std::fs::create_dir(&a).expect("mkdir");
+        std::fs::write(a.join("theirs"), b"x").expect("write");
+        assert!(is_empty_dir(&dir).expect("list"), "moved, still empty");
+        // a hidden file or a directory in it is an entry
+        std::fs::write(b.join(".hidden"), b"x").expect("write");
+        assert!(!is_empty_dir(&dir).expect("list"), "a hidden file");
+        std::fs::remove_file(b.join(".hidden")).expect("rm");
+        std::fs::create_dir(b.join("sub")).expect("mkdir");
+        assert!(!is_empty_dir(&dir).expect("list"), "a directory");
+        assert_eq!(runner_starts(), starts, "no process was started");
     }
 
     #[test]
