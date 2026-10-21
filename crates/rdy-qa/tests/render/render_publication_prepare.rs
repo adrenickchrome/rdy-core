@@ -190,26 +190,31 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// (scope, static, live at `/`). Re-taken in hpb6 for the notice styles added to
 /// `assets/site.css`; every other file, the label, the header, their ranges and the summary
 /// kept their bytes.
+/// Re-taken in PRS Task 5 (plan 2026-10-20-rdy-site-profiles, Task 5: the menu `LABEL` becomes
+/// "Versions, proposals, views and profiles" and the script fetches the pill's href in place of
+/// the hard-coded PAGE; fix rounds 2827fddd and 2f7023bd add its same-origin http/https check):
+/// only `assets/app.js`, which bundles `js/menu.js`, changed; every other file, the label, the
+/// header, their ranges and the summary kept their bytes.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "b370265d2f5b809a28dba310c2620861d9de2f711128f87ad685c3f90ced1792",
-        "5016cc8714d212a21d225659577d8ae5a286d1e6f46e51b5c7f74c60e2029607",
+        "4f64de348cef587c86874945afaae939fa4218f6fbd60f735dc9650b423c8653",
+        "851cfcc46b876fc1a306a6c06b38ebb7c985327fe1ac5e983b65543c3fe3d01f",
     ),
     (
         "tag",
-        "53b61e01193be56394a536a1a3df315810f841c95a49935a05b907416c031e64",
-        "190d40d50dff93f390536a48f245ca3b4496b1173745b0eeb2853ad81f0654c4",
+        "990c5e75fd658a17158dc323539972cf040f31411b022944b1ac6e87a1491f74",
+        "3f93c55625ab0d470ded2dcd20cc90d4a55f338f9ce09829c062d8e391867fde",
     ),
     (
         "view",
-        "17d5987fc65550c4ec1d94cd2d3ce5f9f46ce5a9df6e88602e0684f0f691c0d9",
-        "ab872cb4c0cb7caf47d5a90239f1c89a08b12893f31fc17eb2da8dc6e5e88795",
+        "df67151694ff6f4f26ad94dd1f38deeb6ee783b0e13757f329ba4956ae68aae0",
+        "42d4fe73a0ec70ef07c7cec2f307316921c82903a0b80abfc8d4fe3316913f60",
     ),
     (
         "proposal",
-        "d6f134a9165038eca2608886a8a4d7dc731dba0aaf63650a0760e92c7009513e",
-        "ee28d9a6a15162633d2213bbf6b6415b2c10c9e18928596669125c0c83f035a8",
+        "c368d4dec5a3f6a76ea226abe65f741be7a44daa051d222c05b02aa1151261e5",
+        "440ce521b45445fb2dd389a718a6b3d092f73c302a8a983f50f58d1ff29d1e53",
     ),
 ];
 
