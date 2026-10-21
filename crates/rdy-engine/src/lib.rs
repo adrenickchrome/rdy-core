@@ -5,6 +5,7 @@ pub mod answer;
 mod areas;
 pub mod brief;
 pub mod card_words;
+pub mod carried_warning;
 pub mod clone;
 pub mod code_brief;
 pub mod code_index;
@@ -19,6 +20,8 @@ mod decide;
 pub mod did_you_mean;
 pub mod diff;
 pub mod dump;
+pub mod dump_error;
+pub mod dump_stop;
 pub mod engine;
 mod error;
 pub mod events;
@@ -48,6 +51,7 @@ mod keys;
 pub mod lexicon;
 mod lint;
 pub mod load;
+pub mod load_chain;
 mod materialize;
 pub mod mention_review;
 mod pack_load;
@@ -99,6 +103,7 @@ pub use areas::by_area;
 pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
+pub use carried_warning::{CarriedTargetIssue, CarriedWarning};
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
 pub use diff::{Diff, DiffChange, DiffEntry};
@@ -114,7 +119,7 @@ pub use history::{
 };
 pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
-pub use load::LoadSummary;
+pub use load::{LoadSummary, LoadedChainFile, StoppedAt};
 pub use materialize::{Materialized, PathMiss};
 pub use mention_review::{MentionReviewInfo, MentionVerdict};
 pub use paths::TreeNode;
@@ -127,6 +132,7 @@ pub use query::{
 };
 pub use query::{RedactionRef, source_body};
 pub use rdy_store::Relay;
+pub use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpKind};
 pub use read_state::{
     AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
 };
@@ -166,7 +172,7 @@ pub use wc_check::{check_wc, lexical_path};
 use arc_swap::ArcSwap;
 use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::Store;
-use rdy_store::segment::Location;
+pub use rdy_store::segment::Location;
 use read_state::AsOfCache;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -93,6 +93,8 @@ struct ReaderShared {
     frames_read: AtomicU64,
     /// Ref entries read by `refs_with_prefix` and `open_proposal_refs` (a test hook).
     refs_read: AtomicU64,
+    /// Log frames read by `visit_carried` (a test hook).
+    carried_frames_read: AtomicU64,
     /// The redaction epoch of this store family: zero at open; it advances once per newly synced
     /// apply batch, before any payload is erased. A reader whose captured epoch is older reads a
     /// state that predates content removal.
@@ -574,10 +576,23 @@ fn replay_into(
         rules.on_frame(loc, v.kind, v.payload)?;
         // the redaction rows come from the validated stream only: an apply the bootstrap did not
         // validate is never a row, and a removed payload's entries come from its residue
-        if v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc) {
+        if (v.kind == kinds::REDACTION_APPLY && !auth.holds_apply(loc))
+            || (v.kind == kinds::REDACTION_CARRIED && !auth.holds_carried(loc))
+        {
             return Err(StoreError::corrupt_at(loc));
         }
         entries.extend(match v.payload {
+            // a carried record's rows are the validated record's: no live writer writes one, so
+            // only the bootstrap of an open or a reindex makes them
+            Some(_) if v.kind == kinds::REDACTION_CARRIED => vec![
+                IndexEntry::Object {
+                    kind: v.kind,
+                    hash: v.hash,
+                    loc,
+                },
+                auth.carried_entry_at(loc)
+                    .ok_or_else(|| StoreError::corrupt_at(loc))?,
+            ],
             // a request's spans are the log's own: a holder's come from its approvals
             Some(payload) if v.kind == kinds::REDACTION => vec![
                 IndexEntry::Object {
@@ -790,6 +805,7 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
+                carried_frames_read: AtomicU64::new(0),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
@@ -1036,7 +1052,7 @@ impl Store {
     /// sync per batch, held or not. With no batch open and `last` empty it does nothing; with no
     /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
     ///
-    /// Like `write`, it refuses a redaction record (kinds 20 to 22) and an item that would bring
+    /// Like `write`, it refuses a redaction record (kinds 20 to 23) and an item that would bring
     /// back a removed hash, before anything is appended. If the batch holds a redaction apply,
     /// `last` must be empty or one TRANSITION frame (`Refused` otherwise, the batch still open).
     ///
@@ -1361,7 +1377,7 @@ impl Store {
     /// join the open batch instead (no marker, no sync; `seal` ends it), and are indexed at once;
     /// a held batch that holds a redaction apply takes no more writes until its seal.
     ///
-    /// A redaction record (kinds 20 to 22) is refused: only the store's checked redaction writers
+    /// A redaction record (kinds 20 to 23) is refused: only the store's checked redaction writers
     /// write one. So is an item whose hash a redaction removed (`Redacted`, naming the request):
     /// a removed block, change or chunk never comes back, nor does a blob that shares a removed
     /// chunk, nor a change that embeds a removed block version. Nothing is written then.
@@ -2109,6 +2125,19 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
     }
 
+    /// Log frames read so far by `visit_carried`.
+    #[doc(hidden)]
+    pub fn carried_frames_read(&self) -> u64 {
+        self.shared.carried_frames_read.load(Ordering::Relaxed)
+    }
+
+    /// Counts one log frame read by `visit_carried`.
+    pub(crate) fn note_carried_frame_read(&self) {
+        self.shared
+            .carried_frames_read
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Object frames read so far by `get_raw` and `get_kind`.
     #[doc(hidden)]
     pub fn frames_read(&self) -> u64 {
@@ -2736,13 +2765,18 @@ impl Store {
         }
     }
 
-    /// Whether the index's six redaction tables hold exactly the rows the log's validated records
+    /// Whether the index's seven redaction tables hold exactly the rows the log's validated records
     /// before `upto` (the index's `indexed_upto`) give. They are derived again, in an index in
-    /// memory, from the requests and the validated applies; nothing in the index is trusted.
+    /// memory, from the requests, the validated applies and the validated carried records;
+    /// nothing in the index is trusted. Only a log with none of these and an index with no row
+    /// skips the derivation.
     fn redaction_index_matches(&self, upto: Location) -> Result<bool, StoreError> {
         let auth = Arc::clone(self.log.authorization());
         let have = self.index().redaction_rows()?;
-        if auth.requests.is_empty() && auth.applies.is_empty() && have.iter().all(|t| t.is_empty())
+        if auth.requests.is_empty()
+            && auth.applies.is_empty()
+            && auth.carried.is_empty()
+            && have.iter().all(|t| t.is_empty())
         {
             return Ok(true);
         }
@@ -2770,8 +2804,9 @@ impl Store {
     }
 
     /// The refusal of redaction rows a rebuilt index still holds and the log's authorization
-    /// does not give: `RedactionCorrupt` at the first redaction request or apply frame of the log
-    /// that the authorization does not hold (else at its first record, or the log's start).
+    /// does not give: `RedactionCorrupt` at the first redaction request, apply or carried record
+    /// frame of the log that the authorization does not hold (else at its first record, or the
+    /// log's start).
     fn unexplained_redaction_rows(&self) -> StoreError {
         let auth = Arc::clone(self.log.authorization());
         let walked = self.log.for_each_view(ORIGIN, |loc, v, _| {
@@ -2781,6 +2816,7 @@ impl Store {
                     .binary_search_by_key(&loc, |(l, _)| *l)
                     .is_ok(),
                 kinds::REDACTION_APPLY => auth.holds_apply(loc),
+                kinds::REDACTION_CARRIED => auth.holds_carried(loc),
                 _ => true,
             };
             if held {
@@ -2798,6 +2834,7 @@ impl Store {
                     .map(|(l, _)| *l)
                     .into_iter()
                     .chain(auth.applies.first().map(|a| a.loc))
+                    .chain(auth.carried.first().map(|c| c.at))
                     .min()
                     .unwrap_or(ORIGIN);
                 StoreError::corrupt_at(first)
@@ -2857,7 +2894,16 @@ impl Store {
         let mut counts = auth.counts();
         let mut affected: BTreeSet<u32> = BTreeSet::new();
         for (loc, hole) in &auth.holes {
-            match self.log.hole_state(*loc, hole)? {
+            let state = self.log.hole_state(*loc, hole)?;
+            if !auth.erasable(loc) {
+                // a span only a carried record explains is never erased: the bootstrap found it
+                // all zero, and anything else now is damage
+                if state != Some(true) {
+                    return Err(StoreError::corrupt_at(*loc));
+                }
+                continue;
+            }
+            match state {
                 Some(true) => continue,
                 Some(false) => counts.checked_payloads += 1,
                 None => {}
@@ -3325,6 +3371,17 @@ impl Store {
     #[doc(hidden)]
     pub fn on_take_append_for_tests(&mut self, hook: impl FnMut(u64) + Send + 'static) {
         self.faults.take_append = Some(Box::new(hook));
+    }
+
+    /// Test hook: writes `items` as the store's own checked writers do (any kind, a removed hash
+    /// refused), so a test can place a record of a redaction kind that no checked writer builds,
+    /// such as a malformed one, and read it back through a production path.
+    #[doc(hidden)]
+    pub fn write_guarded_for_tests(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.write_guarded(items)
     }
 
     /// Test hook: seals `items`, a landing batch with its REDACTION_APPLY records, through the

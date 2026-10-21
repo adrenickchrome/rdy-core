@@ -105,6 +105,42 @@ pub struct RedactionApply {
     pub report_hash: Hash,
 }
 
+/// The record that carries an applied removal into a store that does not hold its proof (kind
+/// REDACTION_CARRIED): the request, apply and landing hashes of the source, the person who
+/// approved it, its reason class and selectors, and each physical span it accounts for. It holds
+/// no reason text and no new time. It explains exact already-zero bytes; it never grants erasure
+/// authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedactionCarried {
+    #[serde(with = "hex::one")]
+    pub request: Hash,
+    #[serde(with = "hex::one")]
+    pub apply: Hash,
+    #[serde(with = "hex::one")]
+    pub landing: Hash,
+    pub approved_by: Provenance,
+    pub reason_class: ReasonClass,
+    pub targets: Vec<RedactTarget>,
+    pub spans: Vec<CarriedSpan>,
+}
+
+/// One physical span a carried record accounts for: where it is, its kind, its object hash and
+/// length, its residue if any, and whether the store still holds the frame's bytes (`held`) or
+/// holds zeros in their place.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedSpan {
+    pub place: FramePlace,
+    pub kind: u8,
+    #[serde(with = "hex::one")]
+    pub hash: Hash,
+    pub len: u32,
+    #[serde(with = "hex::opt")]
+    pub residue: Option<Hash>,
+    pub held: bool,
+}
+
 /// What survives a removed object (kind REDACTION_RESIDUE). The variants hold their records
 /// unboxed, as declared: a residue is decoded one at a time, and the declaration is the format.
 #[allow(clippy::large_enum_variant)]

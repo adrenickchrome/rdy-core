@@ -796,7 +796,7 @@ fn ha7_old_read_state_fails_after_removal() {
         &e,
         E_REDACTED_STATE,
         "This read state predates content removal.",
-        "Read the project again.",
+        "Read the project again, or run the dump again.",
     );
     // a fresh state reads the stub at the tag
     let fresh = r.read();

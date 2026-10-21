@@ -84,6 +84,18 @@ impl RecordError {
     }
 }
 
+/// Why a fallible decode ([`try_decode`]) stopped: the record's refusal, or a refused
+/// allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TryDecodeError {
+    /// The bytes are no record of the shape: the refusal [`decode`] gives.
+    #[error(transparent)]
+    Record(#[from] RecordError),
+    /// A growth of the decoded value was refused.
+    #[error("record allocation failed")]
+    Allocation,
+}
+
 /// Decodes `bytes` as exactly one `T`, within the limits above. Any input left after the value
 /// is `Decode`.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RecordError> {
@@ -92,6 +104,173 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RecordError> {
     }
     let gate = Gate::default();
     run(&gate, bytes)
+}
+
+/// A record's fallible shape: a type with the record's encoding whose decode grows only through
+/// [`TryString`] and [`TryVec`] (every other part of it allocates nothing), so [`try_decode`] can
+/// refuse a growth instead of aborting. A shape that holds a `String` or `Vec` decoded by serde's
+/// own visitors would still abort on a failed growth.
+pub trait Fallible: DeserializeOwned {}
+
+thread_local! {
+    /// Whether a fallible growth of this thread's [`try_decode`] was refused.
+    static GROWTH_REFUSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Notes a refused growth of the running [`try_decode`] and returns an error that stops it.
+fn refuse_growth<E: de::Error>() -> E {
+    GROWTH_REFUSED.with(|r| r.set(true));
+    E::custom("record allocation failed")
+}
+
+/// Decodes `bytes` as exactly one `T` as [`decode`] does, with the same limits and refusals, but
+/// every growth of the value is a fallible reservation: a refused one is
+/// [`TryDecodeError::Allocation`], never an abort.
+pub fn try_decode<T: Fallible>(bytes: &[u8]) -> Result<T, TryDecodeError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES).into());
+    }
+    GROWTH_REFUSED.with(|r| r.set(false));
+    let gate = Gate::default();
+    let out = run(&gate, bytes);
+    if GROWTH_REFUSED.with(|r| r.replace(false)) {
+        return Err(TryDecodeError::Allocation);
+    }
+    out.map_err(TryDecodeError::Record)
+}
+
+/// A text that decodes as a `String` does, into a fallibly reserved buffer.
+#[derive(Debug)]
+pub struct TryString(pub String);
+
+impl<'de> serde::Deserialize<'de> for TryString {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = TryString;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<TryString, E> {
+                let mut s = String::new();
+                s.try_reserve_exact(v.len()).map_err(|_| refuse_growth())?;
+                s.push_str(v);
+                Ok(TryString(s))
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<TryString, E> {
+                Ok(TryString(v))
+            }
+        }
+        d.deserialize_string(V)
+    }
+}
+
+/// A sequence that decodes as a `Vec<T>` does, each growth a fallible reservation. Its first
+/// reservation is the length hint (never more than the bytes left), at most 1 MiB.
+#[derive(Debug)]
+pub struct TryVec<T>(pub Vec<T>);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for TryVec<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T>(std::marker::PhantomData<T>);
+        impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for V<T> {
+            type Value = TryVec<T>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a sequence")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<TryVec<T>, A::Error> {
+                // serde's own caution: at most 1 MiB reserved from the hint
+                let most = (1 << 20) / std::mem::size_of::<T>().max(1);
+                let mut v = Vec::new();
+                v.try_reserve_exact(seq.size_hint().unwrap_or(0).min(most))
+                    .map_err(|_| refuse_growth())?;
+                while let Some(x) = seq.next_element::<T>()? {
+                    v.try_reserve(1).map_err(|_| refuse_growth())?;
+                    v.push(x);
+                }
+                Ok(TryVec(v))
+            }
+        }
+        d.deserialize_seq(V(std::marker::PhantomData))
+    }
+}
+
+/// Whether `value`'s postcard encoding is exactly `bytes`. It compares as it encodes, so it
+/// allocates nothing.
+pub fn encodes_as<T: serde::Serialize + ?Sized>(value: &T, bytes: &[u8]) -> bool {
+    struct Compare<'a> {
+        rest: &'a [u8],
+    }
+    impl postcard::ser_flavors::Flavor for Compare<'_> {
+        type Output = bool;
+        fn try_extend(&mut self, data: &[u8]) -> postcard::Result<()> {
+            match self.rest.strip_prefix(data) {
+                Some(rest) => {
+                    self.rest = rest;
+                    Ok(())
+                }
+                None => Err(postcard::Error::SerializeBufferFull),
+            }
+        }
+        fn try_push(&mut self, b: u8) -> postcard::Result<()> {
+            self.try_extend(&[b])
+        }
+        fn finalize(self) -> postcard::Result<bool> {
+            Ok(self.rest.is_empty())
+        }
+    }
+    postcard::serialize_with_flavor(value, Compare { rest: bytes }).unwrap_or(false)
+}
+
+/// A record's in-place shape: a type with the record's encoding whose decode borrows its texts
+/// from the input and keeps no collection, so decoding it allocates nothing.
+pub trait InPlace {
+    /// Decodes one value of the shape from `d` and drops it.
+    fn check<'de, D: Deserializer<'de>>(d: D) -> Result<(), D::Error>;
+}
+
+/// Checks that `bytes` decode as exactly one value of the shape `T`, within the limits above,
+/// and returns the refusal [`decode`] gives the record `T` is the shape of. The check
+/// allocates nothing, so a hostile record cannot make it abort on a failed allocation.
+pub fn check<T: InPlace>(bytes: &[u8]) -> Result<(), RecordError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
+    }
+    let gate = Gate::default();
+    let mut postcard = postcard::Deserializer::from_flavor(Source {
+        rest: bytes,
+        gate: &gate,
+    });
+    let value = T::check(Bounded {
+        inner: &mut postcard,
+        gate: &gate,
+    });
+    let left = postcard.finalize().map(|rest| rest.len());
+    match (value, left) {
+        (Ok(_), Ok(0)) => Ok(()),
+        _ => Err(gate.limit.get().unwrap_or(RecordError::Decode)),
+    }
+}
+
+/// A sequence decoded in place: each element decodes and is dropped, so the shape of a
+/// `Vec<T>` keeps nothing. It decodes exactly as the `Vec<T>` does.
+pub struct Each<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Each<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T>(std::marker::PhantomData<T>);
+        impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for V<T> {
+            type Value = Each<T>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a sequence")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Each<T>, A::Error> {
+                while seq.next_element::<T>()?.is_some() {}
+                Ok(Each(std::marker::PhantomData))
+            }
+        }
+        d.deserialize_seq(V(std::marker::PhantomData))
+    }
 }
 
 /// Decodes with `gate` counting. Separate from [`decode`] so the deserializer's lifetime is the

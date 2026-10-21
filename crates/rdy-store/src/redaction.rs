@@ -39,11 +39,14 @@ pub fn is_removable(kind: u8) -> bool {
 }
 
 /// Whether `kind` is one of the redaction record kinds, which only the store's checked redaction
-/// writers write.
+/// writers write (the carried record only through a load's ingest, `Ingest::append_carried`).
 pub fn is_redaction_kind(kind: u8) -> bool {
     matches!(
         kind,
-        kinds::REDACTION | kinds::REDACTION_RESIDUE | kinds::REDACTION_APPLY
+        kinds::REDACTION
+            | kinds::REDACTION_RESIDUE
+            | kinds::REDACTION_APPLY
+            | kinds::REDACTION_CARRIED
     )
 }
 
@@ -70,7 +73,9 @@ pub mod limit {
     pub const STRING: &str = "1048576 bytes per string";
     pub const LEVELS: &str = "64 field levels";
     pub const SOURCES: &str = "4096 source strings";
-    pub const ALL: [&str; 10] = [
+    /// The physical spans of one carried record (`crate::redaction_carried`).
+    pub const CARRIED_SPANS: &str = "100000 carried spans";
+    pub const ALL: [&str; 11] = [
         TARGETS,
         TARGET_BYTES,
         SELECTED,
@@ -78,6 +83,7 @@ pub mod limit {
         BYTES,
         ROWS,
         RECORD,
+        CARRIED_SPANS,
         STRING,
         LEVELS,
         SOURCES,
@@ -219,7 +225,7 @@ fn refused(m: String) -> StoreError {
 }
 
 /// The UTF-8 length of a target's selector in the input grammar (`id`, `id@hash`, `blob:hash`).
-fn selector_len(t: &RedactTarget) -> usize {
+pub(crate) fn selector_len(t: &RedactTarget) -> usize {
     match t {
         RedactTarget::AllVersions(id) => id.as_str().len(),
         RedactTarget::Version { id, .. } => id.as_str().len() + 1 + 64,
@@ -801,7 +807,7 @@ pub(crate) fn check_bounds(request: &Redaction) -> Result<(), StoreError> {
 }
 
 /// Whether residue `r` is the residue of a span of `kind` over the frame with hash `h`.
-fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
+pub(crate) fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
     match r {
         RedactionResidue::Block(b) => kind == kinds::BLOCK && b.version == *h,
         RedactionResidue::Change(c) => kind == kinds::CHANGE && c.change == *h,

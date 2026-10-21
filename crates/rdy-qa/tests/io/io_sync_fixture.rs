@@ -5,13 +5,16 @@
 //! that `io_dump_fixture_s15.rs` dumps (`ha17_write_fixtures_once` writes both).
 //!
 //! These vectors pin the bytes of sync batch format 1 at store format 15. They add no promise
-//! that a later rdy reads them: a batch is read only by the rdy whose store format wrote it.
-//! A change of the encoding changes this file and its digests by a decision of its own.
+//! that a later rdy reads them: a batch is read only by the rdy whose store format wrote it
+//! (p-6P4AY), so this rdy refuses them with E_STORE_FORMAT, and the tests pin that refusal. The
+//! fixture's bytes stay frozen. The tests read the same tag's batch that this rdy exports from the
+//! loaded holder dump: the fixture's records byte for byte, under a header of the current store
+//! format. A change of the encoding changes this file and its digests by a decision of its own.
 //!
-//! The test of the take splits the fixture at record boundaries into separate batches (common
-//! root and repo fields, their own prerequisites and trailers), checks each one alone, then
-//! takes their union, in reverse order, into a new holder, where every frame lands at an offset of
-//! the new log. The source's spans remain historical evidence and are never receiver places; the
+//! The test of the take splits that current batch at record boundaries into separate batches
+//! (common root and repo fields, their own prerequisites and trailers), checks each one alone,
+//! then takes their union, in reverse order, into a new holder, where every frame lands at an
+//! offset of the new log. The source's spans remain historical evidence and are never receiver places; the
 //! holder derives its removals again from its own log after its index is deleted.
 use rdy_engine::Rdy;
 use rdy_engine::load::load;
@@ -20,6 +23,7 @@ use rdy_engine::stream_take::take;
 use rdy_model::Hash;
 use rdy_model::Tag;
 use rdy_qa::every_kind;
+use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::redaction::StoredFrame;
@@ -197,6 +201,51 @@ pub(crate) fn take_split(bytes: &[u8], dir: &Path) -> (Rdy, PathBuf, Value) {
     )
 }
 
+/// The batch of the fixture's tag exported by this rdy, at its store format: the every-kind
+/// holder dump of store format 15 loaded (and so upgraded), then the tag's history written by
+/// the stream export. Returns the batch and the loaded holder's directory.
+fn current_batch(dir: &Path) -> Vec<u8> {
+    let to = dir.join("h");
+    load(
+        &crate::io_dump_fixture_s15::fixture(crate::io_dump_fixture_s15::HOLDER_DUMP),
+        &to,
+    )
+    .unwrap();
+    let held = Rdy::open_holder(&to).unwrap();
+    let tag = held
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .find(|(n, ..)| n == SYNC_TAG)
+        .unwrap()
+        .1;
+    let bytes = every_kind::export_tag(&held, tag);
+    held.close().unwrap();
+    bytes
+}
+
+/// The frozen fixture is refused by this rdy, whose store format is another: the stream's store
+/// format must equal the reader's (p-6P4AY). The refusal names both formats.
+fn assert_old_format_refused(e_code: &str, message: &str) {
+    assert_eq!(e_code, "E_STORE_FORMAT", "{message}");
+    assert_eq!(
+        message,
+        format!("stream store format 15 does not match {STORE_FORMAT}")
+    );
+}
+
+/// The facts the expect file states for the fixture, at this rdy's store format: the header's
+/// store format is the current one, and the trailer's digest (which covers the header record)
+/// is `digest`. Every record and count is the fixture's.
+fn current_facts(expect: &Value, digest: &str) -> Value {
+    let mut header = expect["header"].clone();
+    header["store_format"] = json!(STORE_FORMAT);
+    let mut totals = expect["totals"].clone();
+    totals["digest"] = json!(digest);
+    json!({"header": header, "records": expect["records"], "totals": totals})
+}
+
 #[test]
 fn ha17_stream_fixture_has_exact_wire_bytes() {
     let bytes = std::fs::read(sync_fixture(SYNC)).unwrap();
@@ -219,28 +268,79 @@ fn ha17_stream_fixture_has_exact_wire_bytes() {
     assert_eq!(len, 4 + 16 + 1 + 32 + 4);
     assert_eq!(payload[..4], 15u32.to_le_bytes());
     let header = &expect["header"];
+    assert_eq!(header["store_format"], 15);
     assert_eq!(hex(&payload[4..20]), header["repo_id"]);
     assert_eq!(payload[20], 0, "purpose tag_history");
     assert_eq!(hex(&payload[21..53]), header["tag"]);
     assert_eq!(payload[53..57], 0u32.to_le_bytes());
-    // the records, in wire order, and the trailer's totals, as written
+    // the trailer frame ends the file: 48 bytes of payload after the bytes the totals count
     assert_eq!(
-        stream_facts(&bytes),
-        json!({
-            "header": expect["header"],
-            "records": expect["records"],
-            "totals": expect["totals"],
-        }),
-        "the header, every record and the totals"
-    );
-    let (rh, records, totals) = read_batch(&bytes);
-    assert_eq!(
-        totals["bytes"].as_u64().unwrap() + TRAILER_FRAME,
+        expect["totals"]["bytes"].as_u64().unwrap() + TRAILER_FRAME,
         bytes.len() as u64,
         "the trailer frame ends the file"
     );
-    assert_eq!(bytes[bytes.len() - TRAILER_FRAME as usize + 4], 0xFF);
+    let trailer_at = bytes.len() - TRAILER_FRAME as usize;
+    assert_eq!(bytes[trailer_at..trailer_at + 4], 48u32.to_le_bytes());
+    assert_eq!(bytes[trailer_at + 4], 0xFF);
     assert_eq!(rec::TRAILER, 0xFF);
+    for canary in [
+        every_kind::HOLDER_CANARY.as_bytes(),
+        every_kind::HOLDER_BLOB,
+    ] {
+        assert!(
+            !bytes.windows(canary.len()).any(|w| w == canary),
+            "a removed payload is in the batch"
+        );
+    }
+    // this rdy reads no batch of another store format: the reader and the batch check refuse
+    // the frozen bytes by their header
+    let e = StreamReader::open(bytes.as_slice()).err().expect("refused");
+    assert_old_format_refused(e.code, &e.message);
+    let e = check_batch(bytes.as_slice(), None).unwrap_err();
+    assert_old_format_refused(e.code, &e.message);
+
+    // the export of the same tag from the loaded holder dump: the fixture's bytes at the current
+    // store format. Only the header's store format, so the header's hash and the trailer's
+    // digest, differ
+    let to = tempfile::tempdir().unwrap();
+    let now = current_batch(to.path());
+    assert_eq!(now.len(), bytes.len());
+    assert_eq!(
+        now[..16],
+        bytes[..16],
+        "the prelude and the header's length and kind"
+    );
+    let now_header = &now[49..49 + len];
+    assert_eq!(now_header[..4], STORE_FORMAT.to_le_bytes());
+    assert_eq!(
+        now_header[4..],
+        payload[4..],
+        "the repo, purpose, root and prerequisites"
+    );
+    assert_eq!(now[17..49], Hash::of(now_header).0);
+    assert_eq!(
+        now[49 + len..trailer_at],
+        bytes[49 + len..trailer_at],
+        "every record, byte for byte"
+    );
+    assert_eq!(
+        now[trailer_at..trailer_at + 5],
+        bytes[trailer_at..trailer_at + 5]
+    );
+    assert_eq!(
+        now[trailer_at + 37..trailer_at + 37 + 16],
+        bytes[trailer_at + 37..trailer_at + 37 + 16],
+        "the trailer's counts"
+    );
+    // read back: the expect file's header, records and totals at this store format
+    let (rh, records, totals) = read_batch(&now);
+    let digest = totals["digest"].as_str().unwrap().to_string();
+    assert_ne!(digest, expect["totals"]["digest"], "the header is covered");
+    assert_eq!(
+        stream_facts(&now),
+        current_facts(&expect, &digest),
+        "the header, every record and the totals"
+    );
     // the placeholders keep their removed objects' identities: the prose's versions, the changes
     // that embed them, and the blob's chunk, which has no residue
     let dropped: BTreeSet<u8> = records
@@ -257,58 +357,121 @@ fn ha17_stream_fixture_has_exact_wire_bytes() {
             assert_eq!(residue.is_none(), key.kind == kinds::BLOB_CHUNK, "{key:?}");
         }
     }
-    for canary in [
-        every_kind::HOLDER_CANARY.as_bytes(),
-        every_kind::HOLDER_BLOB,
-    ] {
-        assert!(
-            !bytes.windows(canary.len()).any(|w| w == canary),
-            "a removed payload is in the batch"
-        );
-    }
     // the same header and records encode to the same bytes
     let mut w = StreamWriter::new(Vec::new(), &rh).unwrap();
     for r in &records {
         w.record(r).unwrap();
     }
     let (again, _) = w.finish().unwrap();
-    assert_eq!(again, bytes, "the encoding is the fixture's");
+    assert_eq!(again, now, "the encoding is the export's");
     // the batch check reads the keys in wire order and the trailer's digest
-    let report = check_batch(bytes.as_slice(), Some(rh.repo_id)).unwrap();
+    let report = check_batch(now.as_slice(), Some(rh.repo_id)).unwrap();
     let keys: Vec<ObjectKey> = records.iter().map(StreamRecord::key).collect();
     assert_eq!(report.keys, keys);
-    assert_eq!(report.digest.to_string(), expect["totals"]["digest"]);
-    // the export of the same tag from the loaded holder dump writes these bytes again
-    let to = tempfile::tempdir().unwrap();
-    let dir = to.path().join("h");
-    load(
-        &crate::io_dump_fixture_s15::fixture(crate::io_dump_fixture_s15::HOLDER_DUMP),
-        &dir,
-    )
-    .unwrap();
-    let held = Rdy::open_holder(&dir).unwrap();
-    let tag = held
-        .store()
-        .tags()
-        .unwrap()
-        .into_iter()
-        .find(|(n, ..)| n == SYNC_TAG)
-        .unwrap()
-        .1;
-    assert_eq!(hex(&tag.0), header["tag"]);
-    assert_eq!(every_kind::export_tag(&held, tag), bytes, "the export");
-    held.close().unwrap();
+    assert_eq!(report.digest.to_string(), digest);
 }
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// `v` with each batch report's digest removed: the digests cover each batch's header record,
+/// which names the store format.
+fn without_batch_digests(mut v: Value) -> Value {
+    for b in v["batches"].as_array_mut().unwrap() {
+        b.as_object_mut().unwrap().remove("digest");
+    }
+    v
+}
+
+/// The ref updates of `r`'s log that set `name`, as identity keys (`8:<hash>`).
+fn ref_update_keys(r: &Rdy, name: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    r.store()
+        .reader()
+        .for_each_record_from(ORIGIN, r.store().log_end(), |_, f, _| {
+            if let StoredFrame::Present {
+                kind: kinds::REF_UPDATE,
+                hash,
+                payload,
+            } = f
+            {
+                let u: kinds::RefUpdate = postcard::from_bytes(payload).unwrap();
+                if u.name == name {
+                    out.insert(format!("{}:{hash}", kinds::REF_UPDATE));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// What the take of the current batch into holder `h` reports and reads (`got`), in the expect
+/// file's terms at store format 15: each batch report's digest is removed (it covers the batch's
+/// header, which names the store format), and the holder's own `meta/store_format` ref, its value
+/// and the one ref update that writes it, which name the current format, are the expect file's.
+/// Everything else is compared as it is.
+fn at_current_format(h: &Rdy, mut got: Value) -> Value {
+    let want = expect()["taken"].clone();
+    let refs = &mut got["holder"]["refs"]["meta/store_format"];
+    assert_eq!(*refs, json!(hex(STORE_FORMAT.to_string().as_bytes())));
+    *refs = want["holder"]["refs"]["meta/store_format"].clone();
+    let keys = |v: &Value| -> BTreeSet<String> {
+        v["holder"]["identity"]["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (now, then) = (keys(&got), keys(&want));
+    let new: Vec<&String> = now.difference(&then).collect();
+    let gone: Vec<&String> = then.difference(&now).collect();
+    assert_eq!((new.len(), gone.len()), (1, 1), "{new:?} {gone:?}");
+    assert!(
+        ref_update_keys(h, "meta/store_format").contains(new[0]),
+        "the one other key is the holder's store format ref update: {new:?}"
+    );
+    got["holder"]["identity"]["keys"] = want["holder"]["identity"]["keys"].clone();
+    without_batch_digests(got)
+}
+
 #[test]
 fn ha17_split_batches_take_at_different_offsets() {
-    let bytes = std::fs::read(sync_fixture(SYNC)).unwrap();
     let expect = expect();
+    // the frozen batch is no input of this rdy: its check and its take refuse it by its store
+    // format, and the take writes nothing
+    let frozen = std::fs::read(sync_fixture(SYNC)).unwrap();
+    let e = check_batch(frozen.as_slice(), None).unwrap_err();
+    assert_old_format_refused(e.code, &e.message);
+    let to = tempfile::tempdir().unwrap();
+    let repo: rdy_model::RepoId = expect["header"]["repo_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut h = Rdy::create_holder(&to.path().join("refused"), repo).unwrap();
+    let end = h.store().log_end();
+    let frozen_file = to.path().join("frozen.rdysync");
+    std::fs::write(&frozen_file, &frozen).unwrap();
+    let target = UploadTarget {
+        tag: SYNC_TAG.into(),
+        landing: expect["taken"]["outcome"]["landing"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    };
+    let e = take(&mut h, &[File::open(&frozen_file).unwrap()], target).unwrap_err();
+    assert_old_format_refused(e.code, &e.message);
+    assert_eq!(h.store().log_end(), end, "the refused take wrote nothing");
+    h.close().unwrap();
+
+    // the same batch at the current store format: this rdy's own export of the tag
+    let bytes = current_batch(&to.path().join("source"));
     let (header, records, _) = read_batch(&bytes);
+    assert_eq!(header.store_format, STORE_FORMAT);
     let parts = every_kind::split_batch(&bytes, PARTS);
     // separate valid batches: the common root and repo fields, their own prerequisites and their
     // own trailers; only the last one holds the root
@@ -342,9 +505,12 @@ fn ha17_split_batches_take_at_different_offsets() {
         records.iter().map(StreamRecord::key).collect::<Vec<_>>(),
         "the batches hold the fixture's records, split at record boundaries"
     );
-    let to = tempfile::tempdir().unwrap();
-    let (h, root, got) = take_split(&bytes, to.path());
-    assert_eq!(got, expect["taken"], "the take and what the holder reads");
+    let (h, root, got) = take_split(&bytes, &to.path().join("take"));
+    assert_eq!(
+        at_current_format(&h, got.clone()),
+        without_batch_digests(expect["taken"].clone()),
+        "the take and what the holder reads"
+    );
     assert_eq!(got["outcome"]["unchanged"], false);
     assert_eq!(got["holder"]["identity"]["mode"], "holder");
     assert_eq!(got["holder"]["identity"]["canon"], Value::Null);
@@ -409,7 +575,7 @@ fn ha17_split_batches_take_at_different_offsets() {
     h.fsck().unwrap();
     // the same union again appends nothing
     let files: Vec<File> = (0..PARTS)
-        .map(|i| File::open(to.path().join(format!("up/part-{i}.rdysync"))).unwrap())
+        .map(|i| File::open(to.path().join(format!("take/up/part-{i}.rdysync"))).unwrap())
         .collect();
     let again = take(&mut h, &files, target_of(&bytes)).unwrap();
     assert!(again.unchanged, "{again:?}");

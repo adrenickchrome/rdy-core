@@ -33,7 +33,9 @@ use crate::index::RedactedSpan;
 use crate::kinds;
 use crate::object_refs::ObjectKey;
 use crate::redaction::{limit, residue_matches};
-use crate::redaction_io::{Applied, Authorization, SpanAuth, collect, for_each_seen, read_record};
+use crate::redaction_io::{
+    Applied, Authorization, Collected, FrameLog, LogAccess, SpanAuth, collect, read_record,
+};
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
 use crate::stream_error::StreamError;
 use crate::sync_proof::{self, ObjectSource, PortableRemoval};
@@ -114,6 +116,14 @@ pub(crate) struct Imported {
 }
 
 impl Imported {
+    /// What the validated applies `removals` approve, before any receiver span is derived.
+    pub(crate) fn of(removals: BTreeMap<Hash, PortableRemoval>) -> Imported {
+        Imported {
+            removals,
+            request_spans: HashMap::new(),
+        }
+    }
+
     /// The receiver spans of request `request` (none when no validated apply approves it).
     pub(crate) fn spans_of(&self, request: &Hash) -> Vec<RedactedSpan> {
         self.request_spans.get(request).cloned().unwrap_or_default()
@@ -152,7 +162,7 @@ pub(crate) fn log_mode(readers: &[File]) -> Result<StoreMode, StoreError> {
 
 /// The kinds a removal proof reads by key (`sync_proof::check`): an apply, its landing and
 /// approved proposal, its request and carrier, residues and blob manifests.
-const PROOF_KINDS: [u8; 7] = [
+pub(crate) const PROOF_KINDS: [u8; 7] = [
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
@@ -166,27 +176,25 @@ const PROOF_KINDS: [u8; 7] = [
 /// scan's end, served when its payload is intact. Records of other kinds, and erased or damaged
 /// ones, are not served.
 pub(crate) struct LogSource<'a> {
-    readers: &'a [File],
+    log: &'a mut dyn FrameLog,
     first: HashMap<ObjectKey, Location>,
 }
 
 impl ObjectSource for LogSource<'_> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
-        let Some(loc) = self.first.get(&key) else {
+        let Some(loc) = self.first.get(&key).copied() else {
             return Ok(None);
         };
         let io = |e: StoreError| StreamError::io(None, 0, &std::io::Error::other(e.to_string()));
-        let f = &self.readers[loc.segment as usize];
-        let file_len = f
-            .metadata()
-            .map_err(|e| StreamError::io(None, 0, &e))?
-            .len();
-        match header_at(f, loc.offset, file_len).map_err(|e| StreamError::io(None, 0, &e))? {
+        let header_io = |e: StoreError| match e {
+            StoreError::Io(e) => StreamError::io(None, 0, &e),
+            e => io(e),
+        };
+        match self.log.header_at(loc).map_err(header_io)? {
             Some((len, _, _)) if len as usize <= MAX_RECORD_BYTES => {}
             _ => return Ok(None),
         }
-        let payload =
-            read_record(self.readers, &BTreeMap::new(), *loc, key.kind, &key.hash).map_err(io)?;
+        let payload = self.log.record(loc, key.kind, &key.hash).map_err(io)?;
         Ok(payload.map(|payload| StreamRecord::Present { key, payload }))
     }
 }
@@ -200,7 +208,7 @@ pub(crate) struct Scanned {
 
 impl Scanned {
     /// Counts one frame of `len` payload bytes; over a cap is `RedactionLimit`.
-    fn add(&mut self, len: u32, caps: &ReceiverCaps) -> Result<(), StoreError> {
+    pub(crate) fn add(&mut self, len: u32, caps: &ReceiverCaps) -> Result<(), StoreError> {
         self.frames += 1;
         self.bytes += u64::from(len);
         if self.frames > caps.frames {
@@ -220,13 +228,13 @@ impl Scanned {
 /// One header pass over the log before `upto`: the counts within the caps, and the first
 /// location of every proof-kind key.
 fn locate(
-    readers: &[File],
+    log: &mut dyn FrameLog,
     upto: Location,
     caps: &ReceiverCaps,
 ) -> Result<(Scanned, HashMap<ObjectKey, Location>), StoreError> {
     let mut scanned = Scanned::default();
     let mut first: HashMap<ObjectKey, Location> = HashMap::new();
-    for_each_seen(readers, upto, &BTreeMap::new(), |f| {
+    log.walk(upto, &BTreeMap::new(), &mut |f| {
         scanned.add(f.len, caps)?;
         if PROOF_KINDS.contains(&f.kind) {
             first
@@ -246,12 +254,13 @@ fn locate(
     Ok((scanned, first))
 }
 
-/// The authorization bootstrap of a holder's log: [`derive`] over its sealed batches, then
-/// again over the acknowledged end that the marker rule's scan finds with the derived holes,
-/// until it is stable (as the native bootstrap leaves out applies past that end). Any failure
-/// refuses the open: an apply whose proof fails, a copy that its tuple does not describe and an
-/// uncovered embedding are `RedactionCorrupt` at the frame; work over the caps is
-/// `RedactionLimit`.
+/// The authorization bootstrap of a holder's log: [`derive`] over its sealed batches, with the
+/// carried records over it (`crate::redaction_carried::overlay`: local spans, checked as a
+/// project checks them), then again over the acknowledged end that the marker rule's scan finds
+/// with the derived holes, until it is stable (as the native bootstrap leaves out applies past
+/// that end). Any failure refuses the open: an apply whose proof fails, a copy that its tuple
+/// does not describe and an uncovered embedding are `RedactionCorrupt` at the frame; work over
+/// the caps is `RedactionLimit`.
 pub(crate) fn bootstrap_holder(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
     let mut upto = c.sealed_end.unwrap_or(Location {
@@ -259,7 +268,7 @@ pub(crate) fn bootstrap_holder(readers: &[File]) -> Result<Authorization, StoreE
         offset: 0,
     });
     loop {
-        let auth = derive(&c, readers, upto)?;
+        let auth = holder_of(&c, readers, upto, upto)?;
         let end = segment::acknowledged_end(readers, &auth.holes)?;
         if end >= upto {
             return Ok(auth);
@@ -268,10 +277,66 @@ pub(crate) fn bootstrap_holder(readers: &[File]) -> Result<Authorization, StoreE
     }
 }
 
+/// The holder authorization of the frames before `upto`, with the carried records before
+/// `carried_upto` over it (a batch of `c.memory` included).
+pub(crate) fn holder_of(
+    c: &Collected,
+    readers: &[File],
+    upto: Location,
+    carried_upto: Location,
+) -> Result<Authorization, StoreError> {
+    let none = BTreeMap::new();
+    let mut auth = derive(
+        c,
+        &mut LogAccess {
+            readers,
+            memory: &none,
+        },
+        upto,
+    )?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(c, &mut log, &mut auth, carried_upto)?;
+    Ok(auth)
+}
+
+/// The holder checks of a log whose applies are already proved (`crate::dump_scan`, which proves
+/// each one as it reads it): rules 2 and 3 over every frame of `log` before `upto`
+/// ([`derive_spans`]), then the carried records of `c` before `upto` laid over the spans they
+/// derive (`crate::redaction_carried::overlay`), as the open checks a holder's log. `applies`
+/// are the proved applies in log order, `removals` what each one approves, and `residues` the
+/// residues their tuples name.
+pub(crate) fn check_proved(
+    c: &Collected,
+    log: &mut dyn FrameLog,
+    upto: Location,
+    applies: &[(Location, Hash)],
+    removals: BTreeMap<Hash, PortableRemoval>,
+    residues: HashMap<Hash, RedactionResidue>,
+) -> Result<(), StoreError> {
+    let mut imported = Imported::of(removals);
+    let caps = ReceiverCaps::current();
+    let (holes, spans) = if applies.is_empty() {
+        (Holes::new(), BTreeMap::new())
+    } else {
+        derive_spans(log, upto, applies, &mut imported, &residues, &caps)?
+    };
+    let mut auth = Authorization {
+        holes,
+        spans,
+        residues,
+        imported: Some(imported),
+        ..Authorization::default()
+    };
+    crate::redaction_carried::overlay(c, log, &mut auth, upto)
+}
+
 /// The holder authorization of the frames before `upto` (see the module docs).
 fn derive(
-    c: &crate::redaction_io::Collected,
-    readers: &[File],
+    c: &Collected,
+    log: &mut dyn FrameLog,
     upto: Location,
 ) -> Result<Authorization, StoreError> {
     let requests: Vec<(Location, Hash)> = c
@@ -290,8 +355,11 @@ fn derive(
         });
     }
     let caps = ReceiverCaps::current();
-    let (_, first) = locate(readers, upto, &caps)?;
-    let mut source = LogSource { readers, first };
+    let (_, first) = locate(log, upto, &caps)?;
+    let mut source = LogSource {
+        log: &mut *log,
+        first,
+    };
     // 1. every apply by its links
     let mut applies: Vec<Applied> = Vec::with_capacity(frames.len());
     let mut imported = Imported::default();
@@ -325,20 +393,45 @@ fn derive(
             record,
         });
     }
+    let placed: Vec<(Location, Hash)> = applies.iter().map(|a| (a.loc, a.hash)).collect();
+    let (holes, spans) = derive_spans(log, upto, &placed, &mut imported, &residues, &caps)?;
+    Ok(Authorization {
+        holes,
+        spans,
+        residues,
+        applies,
+        requests,
+        imported: Some(imported),
+        carried: vec![],
+    })
+}
+
+/// Rules 2 and 3 (see the module docs) over every frame of `log` before `upto`, for the proved
+/// `applies` (in log order) whose removals `imported` holds: the holes and spans every copy of
+/// an approved tuple gives, each request's receiver spans in `imported`, and the refusal of an
+/// uncovered embedding.
+fn derive_spans(
+    log: &mut dyn FrameLog,
+    upto: Location,
+    applies: &[(Location, Hash)],
+    imported: &mut Imported,
+    residues: &HashMap<Hash, RedactionResidue>,
+    caps: &ReceiverCaps,
+) -> Result<(Holes, BTreeMap<Location, SpanAuth>), StoreError> {
     // 2. and 3. every copy of an approved tuple, and every uncovered embedding
     let mut approved: HashMap<ObjectKey, Vec<usize>> = HashMap::new();
-    for (i, a) in applies.iter().enumerate() {
-        for k in imported.removals[&a.hash].objects.keys() {
+    for (i, (_, hash)) in applies.iter().enumerate() {
+        for k in imported.removals[hash].objects.keys() {
             approved.entry(*k).or_default().push(i);
         }
     }
     // every approval of a key gives it one tuple: a later apply with another length or residue
     // for a key an earlier one approves is damage at that apply
     for (k, by) in &approved {
-        let first = imported.removals[&applies[by[0]].hash].objects[k];
+        let first = imported.removals[&applies[by[0]].1].objects[k];
         for i in &by[1..] {
-            if imported.removals[&applies[*i].hash].objects[k] != first {
-                return Err(StoreError::corrupt_at(applies[*i].loc));
+            if imported.removals[&applies[*i].1].objects[k] != first {
+                return Err(StoreError::corrupt_at(applies[*i].0));
             }
         }
     }
@@ -350,21 +443,19 @@ fn derive(
     let mut holes = Holes::new();
     let mut spans: BTreeMap<Location, SpanAuth> = BTreeMap::new();
     let mut spans_count = 0u64;
-    for_each_seen(readers, upto, &BTreeMap::new(), |f| {
+    log.walk(upto, &BTreeMap::new(), &mut |f| {
         let key = ObjectKey {
             kind: f.kind,
             hash: f.hash,
         };
         if let Some(by) = approved.get(&key) {
-            let first = &applies[by[0]];
-            let removal = &imported.removals[&first.hash];
+            let first = applies[by[0]].1;
+            let removal = &imported.removals[&first];
             let tuple = removal.objects[&key];
             if f.len != tuple.len {
                 return Err(StoreError::corrupt_at(f.loc));
             }
-            if let (Some(p), Some(r)) = (f.intact()?, tuple.residue)
-                && !residue_matches(f.kind, &p, &residues[&r])
-            {
+            if !copy_fits(f.kind, f.len, f.intact()?.as_deref(), &tuple, residues) {
                 return Err(StoreError::corrupt_at(f.loc));
             }
             spans_count += 1;
@@ -385,12 +476,13 @@ fn derive(
                 f.loc,
                 SpanAuth {
                     residue: tuple.residue,
-                    apply: first.hash,
+                    apply: first,
                     request: removal.request,
+                    carried: false,
                 },
             );
             for i in by {
-                let r = &imported.removals[&applies[*i].hash];
+                let r = &imported.removals[&applies[*i].1];
                 imported
                     .request_spans
                     .entry(r.request)
@@ -419,14 +511,27 @@ fn derive(
         v.sort_by_key(|s| s.loc);
         v.dedup_by_key(|s| s.loc);
     }
-    Ok(Authorization {
-        holes,
-        spans,
-        residues,
-        applies,
-        requests,
-        imported: Some(imported),
-    })
+    Ok((holes, spans))
+}
+
+/// Whether a local copy of an approved key (rule 2) is what its approved `tuple` says: its header
+/// keeps the tuple's length `len`, and its payload, when it is intact (`intact`), is what the
+/// tuple's residue records (`residue_matches`, the residue decoded in `residues`). An all-zero or
+/// partly zero payload is an erased or interrupted copy, and passes.
+pub(crate) fn copy_fits(
+    kind: u8,
+    len: u32,
+    intact: Option<&[u8]>,
+    tuple: &crate::sync_proof::RemovalObject,
+    residues: &HashMap<Hash, RedactionResidue>,
+) -> bool {
+    len == tuple.len
+        && match (intact, tuple.residue) {
+            (Some(p), Some(r)) => residues
+                .get(&r)
+                .is_some_and(|res| residue_matches(kind, p, res)),
+            _ => true,
+        }
 }
 
 /// Whether `change` creates or updates a block of a version in `versions`.
@@ -439,7 +544,7 @@ pub(crate) fn embeds(change: &Change, versions: &HashSet<Hash>) -> bool {
 
 /// The open's refusal of a stored apply whose proof fails: an I/O failure stays one, anything
 /// else is `RedactionCorrupt` at the apply.
-fn proof_error(e: StreamError, at: Location) -> StoreError {
+pub(crate) fn proof_error(e: StreamError, at: Location) -> StoreError {
     if e.code == "E_IO" {
         StoreError::Io(std::io::Error::other(e.message))
     } else {

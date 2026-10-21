@@ -52,12 +52,24 @@ const REDACTION_OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("r
 const REDACTION_APPLIED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_applied");
 /// The active mask by object: an object's hash and kind byte (as `typed`) -> the request, the apply
 /// record and its location, then the residue's hash (or nothing). The earliest apply in log order
-/// keeps an object.
+/// keeps an object. A carried record's `held: false` span's object is a row too, with the carried
+/// record and its location in the apply's place, until an apply holds the object.
 const REDACTION_ACTIVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_active");
-/// The active mask by frame: a frame location (`loc_key`) -> the apply record, the request, the
-/// kind byte, the object's hash, the payload length (u32 little-endian) and the residue's hash (or
-/// nothing). The earliest apply in log order keeps a frame.
+/// The span index, and the active mask by frame: a frame location (`loc_key`) -> the apply record,
+/// the request, the kind byte, the object's hash, the payload length (u32 little-endian) and the
+/// residue's hash (or nothing). The earliest apply in log order keeps a frame. While no apply
+/// covers a frame that a carried record names, its row is the carried record's: the carried
+/// record in the apply's place, its source request, the span, then one more byte, the span's
+/// `held` flag (0 or 1). The first carried record in log order keeps the frame, except that a
+/// `held: false` span takes over a `held: true` row; an apply that covers the frame replaces any
+/// carried row. An apply's row and a `held: false` row mask the frame; a `held: true` row is
+/// provenance only, and masks nothing.
 const REDACTION_SPANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("redaction_spans");
+/// The places of the validated carried records (kind REDACTION_CARRIED): a record frame's
+/// location (`loc_key`) -> its hash. One row per physical record, so a reader finds every
+/// carried record in physical order without a walk of the log.
+const REDACTION_CARRIED_AT: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("redaction_carried_at");
 /// A signature's subject (32 bytes), then the signature's hash (32 bytes) -> empty: every
 /// signature of every subject (kind SIGNATURE, D-1Z951), derived from the frames alone.
 const SIGNATURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("signatures");
@@ -131,6 +143,17 @@ pub enum IndexEntry {
         subject: Hash,
         signature: Hash,
     },
+    /// Carried record `carried` (kind REDACTION_CARRIED), at `loc`, of source request `request`:
+    /// each span it names, with its `held` flag. Every span gets a `redaction_spans` row with
+    /// the record, its source request and its flag where no apply holds the frame; only its
+    /// `held: false` spans (and their objects) mask, with the record as their proof. A later
+    /// apply that covers a span takes its row over.
+    RedactionCarried {
+        carried: Hash,
+        request: Hash,
+        loc: Location,
+        spans: Vec<(RedactedSpan, bool)>,
+    },
 }
 
 /// One frame payload a request removes.
@@ -198,6 +221,7 @@ pub struct IndexDump {
     pub redaction_applied: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_active: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_spans: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub redaction_carried_at: BTreeMap<Vec<u8>, Vec<u8>>,
     pub signatures: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
@@ -356,15 +380,50 @@ fn active_object_from(v: &[u8]) -> Result<ActiveObject, StoreError> {
     })
 }
 
-fn active_span_from(loc: Location, v: &[u8]) -> Result<ActiveSpan, StoreError> {
-    let what = "redaction span entry";
-    if v.len() < 64 {
-        return Err(StoreError::Decode(format!("{what} is {} bytes", v.len())));
+/// The `held` byte that ends a carried record's row in `redaction_spans`.
+fn held_byte(held: bool) -> u8 {
+    u8::from(held)
+}
+
+/// One row of `redaction_spans`: the span with its proof, and for a carried record's row its
+/// `held` flag (None for an apply's row).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpanRow {
+    pub(crate) active: ActiveSpan,
+    pub(crate) held: Option<bool>,
+}
+
+impl SpanRow {
+    /// Whether the row masks its frame: an apply's row, or a carried `held: false` one.
+    pub(crate) fn masks(&self) -> bool {
+        self.held != Some(true)
     }
-    Ok(ActiveSpan {
-        apply: hash_from(&v[..32], what)?,
-        request: hash_from(&v[32..64], what)?,
-        span: span_from(loc, &v[64..], what)?,
+}
+
+/// A row of `redaction_spans`: an apply's is 101 or 133 bytes (with no residue, or with one); a
+/// carried record's has one more, its `held` byte.
+fn span_row_from(loc: Location, v: &[u8]) -> Result<SpanRow, StoreError> {
+    let what = "redaction span entry";
+    let (body, held) = match v.len() {
+        101 | 133 => (v, None),
+        102 | 134 => {
+            let (body, last) = v.split_at(v.len() - 1);
+            let held = match last[0] {
+                0 => false,
+                1 => true,
+                b => return Err(StoreError::Decode(format!("{what} has held byte {b}"))),
+            };
+            (body, Some(held))
+        }
+        n => return Err(StoreError::Decode(format!("{what} is {n} bytes"))),
+    };
+    Ok(SpanRow {
+        active: ActiveSpan {
+            apply: hash_from(&body[..32], what)?,
+            request: hash_from(&body[32..64], what)?,
+            span: span_from(loc, &body[64..], what)?,
+        },
+        held,
     })
 }
 
@@ -423,10 +482,11 @@ fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
     }
 }
 
-/// The raw rows of the six redaction tables: carriers, items, objects, applied, active, spans.
-pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 6];
+/// The raw rows of the seven redaction tables: carriers, items, objects, applied, active, spans,
+/// carried places.
+pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 7];
 
-/// The six redaction tables of one write transaction.
+/// The seven redaction tables of one write transaction.
 struct RedactionTables<'t> {
     carriers: redb::Table<'t, &'static [u8], &'static [u8]>,
     items: redb::Table<'t, &'static [u8], &'static [u8]>,
@@ -434,6 +494,7 @@ struct RedactionTables<'t> {
     applied: redb::Table<'t, &'static [u8], &'static [u8]>,
     active: redb::Table<'t, &'static [u8], &'static [u8]>,
     spans: redb::Table<'t, &'static [u8], &'static [u8]>,
+    carried_at: redb::Table<'t, &'static [u8], &'static [u8]>,
 }
 
 impl<'t> RedactionTables<'t> {
@@ -445,6 +506,7 @@ impl<'t> RedactionTables<'t> {
             applied: w.open_table(REDACTION_APPLIED).map_err(db)?,
             active: w.open_table(REDACTION_ACTIVE).map_err(db)?,
             spans: w.open_table(REDACTION_SPANS).map_err(db)?,
+            carried_at: w.open_table(REDACTION_CARRIED_AT).map_err(db)?,
         })
     }
 
@@ -532,8 +594,21 @@ impl<'t> RedactionTables<'t> {
         flag.store(true, Ordering::Release);
         for (kind, h, residue) in objects {
             let key = typed_key(kind, &h);
-            if self.active.get(&key[..]).map_err(db)?.is_some() {
-                continue;
+            let held = self
+                .active
+                .get(&key[..])
+                .map_err(db)?
+                .map(|v| v.value().to_vec());
+            let mut residue = residue;
+            if let Some(v) = held {
+                let row = active_object_from(&v)?;
+                if self.is_apply_row(&row.request, &row.apply)? {
+                    continue;
+                }
+                // a carried record's row has the residue that reads the object; the apply takes
+                // the row over (it covers the object) but lists no span of it when the frame
+                // was removed before, so the residue stays
+                residue = residue.or(row.residue);
             }
             let mut v = Vec::with_capacity(108);
             v.extend_from_slice(&request.0);
@@ -543,7 +618,15 @@ impl<'t> RedactionTables<'t> {
         }
         for span in spans {
             let key = loc_key(&span.loc);
-            if self.spans.get(&key[..]).map_err(db)?.is_some() {
+            let held = self
+                .spans
+                .get(&key[..])
+                .map_err(db)?
+                .map(|v| v.value().to_vec());
+            if let Some(v) = held
+                && span_row_from(span.loc, &v)?.held.is_none()
+            {
+                // an earlier apply keeps the frame
                 continue;
             }
             let mut v = Vec::with_capacity(64 + 69);
@@ -551,6 +634,69 @@ impl<'t> RedactionTables<'t> {
             v.extend_from_slice(&request.0);
             v.extend_from_slice(&span_value(&span));
             self.spans.insert(&key[..], &v[..]).map_err(db)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a mask row of `request` and `apply` is an apply's: `redaction_applied` names that
+    /// apply for that request. Any other row is a carried record's.
+    fn is_apply_row(&self, request: &Hash, apply: &Hash) -> Result<bool, StoreError> {
+        Ok(self
+            .applied
+            .get(&request.0[..])
+            .map_err(db)?
+            .is_some_and(|v| v.value().get(..32) == Some(&apply.0[..])))
+    }
+
+    /// A carried record's rows. Every span gets a `redaction_spans` row with the record, its
+    /// source request and its `held` flag where no row holds the frame yet; a `held: false` span
+    /// also takes over a `held: true` row (it accounts for the zeros the earlier record holds).
+    /// An apply's row, and an earlier `held: false` row, keep the frame. Only a `held: false`
+    /// span's object enters the active mask, where no row holds it yet.
+    fn carried(
+        &mut self,
+        flag: &AtomicBool,
+        carried: &Hash,
+        request: &Hash,
+        loc: &Location,
+        spans: &[(RedactedSpan, bool)],
+    ) -> Result<(), StoreError> {
+        self.carried_at
+            .insert(&loc_key(loc)[..], &carried.0[..])
+            .map_err(db)?;
+        for (span, held) in spans {
+            let key = loc_key(&span.loc);
+            let row = self
+                .spans
+                .get(&key[..])
+                .map_err(db)?
+                .map(|v| span_row_from(span.loc, v.value()))
+                .transpose()?;
+            let take = match row {
+                None => true,
+                Some(r) => !*held && r.held == Some(true),
+            };
+            if take {
+                let mut v = Vec::with_capacity(64 + 69 + 1);
+                v.extend_from_slice(&carried.0);
+                v.extend_from_slice(&request.0);
+                v.extend_from_slice(&span_value(span));
+                v.push(held_byte(*held));
+                self.spans.insert(&key[..], &v[..]).map_err(db)?;
+            }
+            if *held {
+                continue;
+            }
+            flag.store(true, Ordering::Release);
+            let key = typed_key(span.kind, &span.hash);
+            if self.active.get(&key[..]).map_err(db)?.is_none() {
+                let mut v = Vec::with_capacity(108);
+                v.extend_from_slice(&request.0);
+                v.extend_from_slice(&carried.0);
+                v.extend_from_slice(&loc_key(loc));
+                v.extend_from_slice(residue_bytes(&span.residue));
+                self.active.insert(&key[..], &v[..]).map_err(db)?;
+            }
         }
         Ok(())
     }
@@ -615,6 +761,7 @@ impl Index {
             w.open_table(REDACTION_APPLIED).map_err(db)?;
             w.open_table(REDACTION_ACTIVE).map_err(db)?;
             w.open_table(REDACTION_SPANS).map_err(db)?;
+            w.open_table(REDACTION_CARRIED_AT).map_err(db)?;
             w.open_table(SIGNATURES).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
@@ -781,6 +928,18 @@ impl Index {
                             None => redaction.insert(RedactionTables::open(&w)?),
                         };
                         t.apply(&self.redacted, apply, request, loc)?;
+                    }
+                    IndexEntry::RedactionCarried {
+                        carried,
+                        request,
+                        loc,
+                        spans,
+                    } => {
+                        let t = match &mut redaction {
+                            Some(t) => t,
+                            None => redaction.insert(RedactionTables::open(&w)?),
+                        };
+                        t.carried(&self.redacted, carried, request, loc, spans)?;
                     }
                     IndexEntry::Signature { subject, signature } => {
                         let t = match &mut signatures {
@@ -978,6 +1137,7 @@ impl Index {
             redaction_applied: dump_table(&r, REDACTION_APPLIED)?,
             redaction_active: dump_table(&r, REDACTION_ACTIVE)?,
             redaction_spans: dump_table(&r, REDACTION_SPANS)?,
+            redaction_carried_at: dump_table(&r, REDACTION_CARRIED_AT)?,
             signatures: dump_table(&r, SIGNATURES)?,
         })
     }
@@ -1140,8 +1300,8 @@ impl Index {
         Index::with_tables(database)
     }
 
-    /// The rows of the six redaction tables, from one read transaction: carriers, items,
-    /// objects, applied, active, spans.
+    /// The rows of the seven redaction tables, from one read transaction: carriers, items,
+    /// objects, applied, active, spans, carried places.
     pub(crate) fn redaction_rows(&self) -> Result<RedactionRows, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         Ok([
@@ -1151,6 +1311,7 @@ impl Index {
             dump_table(&r, REDACTION_APPLIED)?,
             dump_table(&r, REDACTION_ACTIVE)?,
             dump_table(&r, REDACTION_SPANS)?,
+            dump_table(&r, REDACTION_CARRIED_AT)?,
         ])
     }
 
@@ -1186,12 +1347,17 @@ impl Index {
         Ok(())
     }
 
-    /// Empties the applied, active and span tables in a durable commit. No store path calls it:
-    /// it is the test hook of an index that forgot the log's authorization.
+    /// Empties the applied, active, span and carried-place tables in a durable commit. No store
+    /// path calls it: it is the test hook of an index that forgot the log's authorization.
     #[doc(hidden)]
     pub fn clear_redaction_rows_for_tests(&self) -> Result<(), StoreError> {
         let w = self.db.begin_write().map_err(db)?;
-        for def in [REDACTION_APPLIED, REDACTION_ACTIVE, REDACTION_SPANS] {
+        for def in [
+            REDACTION_APPLIED,
+            REDACTION_ACTIVE,
+            REDACTION_SPANS,
+            REDACTION_CARRIED_AT,
+        ] {
             w.delete_table(def).map_err(db)?;
             w.open_table(def).map_err(db)?;
         }
@@ -1267,20 +1433,52 @@ impl Index {
         for item in t.range(&lo[..]..&hi[..]).map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let at = loc_from(k.value(), "redaction span entry")?;
-            out.insert(at, active_span_from(at, v.value())?);
+            let row = span_row_from(at, v.value())?;
+            if row.masks() {
+                out.insert(at, row.active);
+            }
         }
         Ok(out)
     }
 
-    /// The active span of the frame at `loc`, if the mask holds it.
+    /// The active span of the frame at `loc`, if the mask holds it (a `held: true` carried row
+    /// masks nothing).
     pub fn redaction_span_at(&self, loc: &Location) -> Result<Option<ActiveSpan>, StoreError> {
         if !self.any_redaction_active() {
             return Ok(None);
         }
+        Ok(self
+            .redaction_span_row_at(loc)?
+            .filter(SpanRow::masks)
+            .map(|r| r.active))
+    }
+
+    /// Calls `f` with the place and hash of every carried record frame that starts before
+    /// `before`, in physical order: one range read of the carried-place rows, no log walk.
+    pub(crate) fn for_each_carried_place(
+        &self,
+        before: Location,
+        mut f: impl FnMut(Location, Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_CARRIED_AT).map_err(db)?;
+        for item in t.range(..&loc_key(&before)[..]).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let loc = loc_from(k.value(), "carried place entry")?;
+            f(loc, hash_from(v.value(), "carried place entry")?)?;
+        }
+        Ok(())
+    }
+
+    /// The `redaction_spans` row of the frame at `loc`, masking or not.
+    pub(crate) fn redaction_span_row_at(
+        &self,
+        loc: &Location,
+    ) -> Result<Option<SpanRow>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(REDACTION_SPANS).map_err(db)?;
         match t.get(&loc_key(loc)[..]).map_err(db)? {
-            Some(v) => Ok(Some(active_span_from(*loc, v.value())?)),
+            Some(v) => Ok(Some(span_row_from(*loc, v.value())?)),
             None => Ok(None),
         }
     }

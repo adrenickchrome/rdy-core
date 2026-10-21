@@ -3,8 +3,9 @@
 //! that object". Identity hashes (pins, card hashes, residue identities, report hashes, pair and
 //! content keys, tension and conflict ids) are comparisons, not dependencies, and add no edge.
 //!
-//! Local effects (REF_UPDATE, BATCH_COMMIT) are not portable objects and are refused as `Kind`,
-//! as is every unassigned kind.
+//! Local records (REF_UPDATE, BATCH_COMMIT, and REDACTION_CARRIED, a carried removal that is
+//! never a sync proof and never travels) are not portable objects and are refused as `Kind`, as
+//! is every unassigned kind. A carried record's source request, apply and landing are no edge.
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
 use crate::kinds::{
     self, ALT_SET, ANSWER, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE, INTENT, LANDING,
@@ -23,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Every assigned portable object kind, ascending: what [`refs_of`] accepts and what a kind-None
-/// edge may resolve to. Kind 12 is unassigned; REF_UPDATE (8) and BATCH_COMMIT (14) are local.
+/// edge may resolve to. Kind 12 is unassigned; REF_UPDATE (8), BATCH_COMMIT (14) and
+/// REDACTION_CARRIED (23) are local.
 pub const PORTABLE_KINDS: [u8; 19] = [
     kinds::BLOCK,
     kinds::CHANGE,

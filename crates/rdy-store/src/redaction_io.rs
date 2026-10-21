@@ -21,6 +21,13 @@
 //! never erases unselected content, never leaves a readable copy and never changes the history
 //! a residue replays.
 //!
+//! A carried record (kind REDACTION_CARRIED, `crate::redaction_carried`) is laid over the
+//! validated applies before their check against the log: its `held: false` spans whose payload
+//! is all zero join the holes, and a validated apply that covers a span stays its proof. The
+//! check resolves a change residue's kept reference through a carried block residue, and
+//! nothing else of it. Recognition is not erasure: only a span a validated apply covers is ever
+//! erased ([`Authorization::erasable`]).
+//!
 //! The scope is the active store files. File-system snapshots, backups, responses already sent,
 //! old dumps and media remnants are outside it (`W_REDACTION_COPIES`); quarantine files are
 //! possible copies (F2(c)), and nothing here lists or removes them.
@@ -37,6 +44,7 @@ use rdy_model::redaction::{
     MAX_RECORD_BYTES, Redaction, RedactionApply, RedactionResidue, ResidualOp, record_buffer,
 };
 use rdy_model::{Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Role};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -158,13 +166,17 @@ pub(crate) fn hit(p: Failpoint) -> io::Result<()> {
     }
 }
 
-/// How one authorized span is known: the residue that replaces it for reads, and the apply and
-/// request that authorize it (the earliest apply in log order).
+/// How one span is known: the residue that replaces it for reads, and the record that is its
+/// proof with the request it names. The proof is the earliest validated apply in log order that
+/// covers the span; only while no apply covers it, the first carried record (kind
+/// REDACTION_CARRIED) that accounts for its zeros (`carried`). A carried proof recognizes exact
+/// zeros and never authorizes an erasure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SpanAuth {
     pub(crate) residue: Option<Hash>,
     pub(crate) apply: Hash,
     pub(crate) request: Hash,
+    pub(crate) carried: bool,
 }
 
 /// One validated apply record: where it is, its hash and its record.
@@ -191,12 +203,33 @@ pub(crate) struct Authorization {
     /// approves and the receiver spans each request's approved objects have. None in a project,
     /// whose spans are its requests' own places.
     pub(crate) imported: Option<crate::redaction_import::Imported>,
+    /// The validated carried records (kind REDACTION_CARRIED) of the sealed log, in log order
+    /// (`crate::redaction_carried::overlay`).
+    pub(crate) carried: Vec<crate::redaction_carried::CarriedAt>,
 }
 
 impl Authorization {
-    /// Whether an active redaction exists: a validated apply.
+    /// Whether an active redaction exists: a validated apply, or a span whose zeros a carried
+    /// record accounts for.
     pub(crate) fn is_active(&self) -> bool {
-        !self.applies.is_empty()
+        !self.applies.is_empty() || self.spans.values().any(|s| s.carried)
+    }
+
+    /// Whether the carried record frame at `loc` is one of the validated carried records.
+    pub(crate) fn holds_carried(&self, loc: Location) -> bool {
+        self.carried.binary_search_by_key(&loc, |c| c.at).is_ok()
+    }
+
+    /// The index entry of the validated carried record at `loc`, if it is one.
+    pub(crate) fn carried_entry_at(&self, loc: Location) -> Option<IndexEntry> {
+        let i = self.carried.binary_search_by_key(&loc, |c| c.at).ok()?;
+        Some(crate::redaction_carried::entry_of(&self.carried[i]))
+    }
+
+    /// Whether the span at `loc` may be erased: a validated apply covers it. A span only a
+    /// carried record explains is never erased.
+    pub(crate) fn erasable(&self, loc: &Location) -> bool {
+        self.spans.get(loc).is_some_and(|s| !s.carried)
     }
 
     /// Whether the apply frame at `loc` is one of the validated applies (kept in log order).
@@ -274,6 +307,9 @@ impl Authorization {
                     loc: a.loc,
                 },
             ));
+        }
+        for c in self.carried.iter().filter(|c| c.at < upto) {
+            at.push((c.at, crate::redaction_carried::entry_of(c)));
         }
         at.sort_by_key(|(l, _)| *l);
         Ok(at.into_iter().map(|(_, e)| e).collect())
@@ -387,15 +423,50 @@ pub(crate) struct ApplyFrame {
     landings: Vec<(Location, Hash)>,
 }
 
+impl ApplyFrame {
+    /// The apply frame at `loc` with hash `hash` and its record (None: none decodes), of batch
+    /// number `batch` (a counter in log order), after the `landings` of its batch.
+    pub(crate) fn new(
+        loc: Location,
+        hash: Hash,
+        record: Option<RedactionApply>,
+        batch: u64,
+        landings: Vec<(Location, Hash)>,
+    ) -> ApplyFrame {
+        ApplyFrame {
+            loc,
+            hash,
+            record,
+            batch,
+            landings,
+        }
+    }
+}
+
+/// One carried record frame (kind REDACTION_CARRIED) the header pass met in a sealed batch. The
+/// checks read its record through [`FrameLog::carried_record`].
+pub(crate) struct CarriedFrame {
+    pub(crate) loc: Location,
+    pub(crate) hash: Hash,
+    /// A log's header pass: the decoded record, or None when its payload is no carried record in
+    /// its bounded, canonical form or did not match its hash. A dump chain keeps no record here
+    /// (None): its source reads the record again by its place.
+    pub(crate) record: Option<rdy_model::RedactionCarried>,
+    /// Where its batch starts: every span it names ends before it.
+    pub(crate) batch_start: Location,
+}
+
 /// The records of one batch while its marker is not yet met. Only redaction records and the
 /// batch's landings are kept: a plain store's header pass retains nothing per content frame.
 #[derive(Default)]
 struct Pending {
     since: Vec<(u64, Hash)>,
+    start: Option<Location>,
     requests: Vec<(Location, Hash)>,
     residues: Vec<(Location, Hash)>,
     landings: Vec<(Location, Hash)>,
     applies: Vec<ApplyFrame>,
+    carried: Vec<CarriedFrame>,
 }
 
 /// What the header pass collected from the sealed batches, in log order. It holds the redaction
@@ -406,16 +477,56 @@ struct Pending {
 pub(crate) struct Collected {
     pub(crate) requests: Vec<(Location, Hash)>,
     request_at: HashMap<Hash, Location>,
-    residue_at: HashMap<Hash, Location>,
+    pub(crate) residue_at: HashMap<Hash, Location>,
     pub(crate) applies: Vec<ApplyFrame>,
+    /// The carried record frames of the sealed batches, in log order.
+    pub(crate) carried: Vec<CarriedFrame>,
     /// Frames of a batch not yet written (the live writer's): kind and payload, by location.
-    memory: BTreeMap<Location, (u8, Vec<u8>)>,
+    pub(crate) memory: BTreeMap<Location, (u8, Vec<u8>)>,
     batches: u64,
     /// The end of the last batch whose marker matched it.
     pub(crate) sealed_end: Option<Location>,
 }
 
 impl Collected {
+    /// Notes the sealed request frame `hash` at `loc` by its first place (a source that is not a
+    /// segment log, `crate::dump_scan`). The map grows by fallible reservation.
+    pub(crate) fn note_request(
+        &mut self,
+        loc: Location,
+        hash: Hash,
+    ) -> Result<(), std::collections::TryReserveError> {
+        if !self.request_at.contains_key(&hash) {
+            self.request_at.try_reserve(1)?;
+            self.request_at.insert(hash, loc);
+        }
+        Ok(())
+    }
+
+    /// Notes the sealed residue frame `hash` at `loc` by its first place, growing the map by
+    /// fallible reservation.
+    pub(crate) fn note_residue(
+        &mut self,
+        loc: Location,
+        hash: Hash,
+    ) -> Result<(), std::collections::TryReserveError> {
+        if !self.residue_at.contains_key(&hash) {
+            self.residue_at.try_reserve(1)?;
+            self.residue_at.insert(hash, loc);
+        }
+        Ok(())
+    }
+
+    /// The first place of the request `hash`, if a sealed batch holds one.
+    pub(crate) fn request_place(&self, hash: &Hash) -> Option<Location> {
+        self.request_at.get(hash).copied()
+    }
+
+    /// The first place of the residue `hash`, if a sealed batch holds one.
+    pub(crate) fn residue_place(&self, hash: &Hash) -> Option<Location> {
+        self.residue_at.get(hash).copied()
+    }
+
     fn seal(&mut self, p: Pending) {
         for (loc, h) in &p.requests {
             self.request_at.entry(*h).or_insert(*loc);
@@ -425,27 +536,49 @@ impl Collected {
             self.residue_at.entry(h).or_insert(loc);
         }
         self.applies.extend(p.applies);
+        self.carried.extend(p.carried);
         self.batches += 1;
     }
 
-    /// Notes one data frame of the current batch: its kind decides what is kept. An apply's
-    /// payload is given when it is hash-checked; an apply noted without one (over the record
-    /// bound, or not matching its hash) is a broken record.
-    fn note(&self, p: &mut Pending, loc: Location, kind: u8, hash: Hash, apply: Option<&[u8]>) {
+    /// Notes one data frame of the current batch: its kind decides what is kept. An apply's or
+    /// carried record's payload is given when it is hash-checked; one noted without it (over the
+    /// record bound, or not matching its hash) is a broken record.
+    /// A refused growth of a carried record's decode is `out_of_memory`.
+    fn note(
+        &self,
+        p: &mut Pending,
+        loc: Location,
+        kind: u8,
+        hash: Hash,
+        payload: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
         p.since.push((loc.offset, hash));
+        let start = *p.start.get_or_insert(loc);
         match kind {
             kinds::REDACTION_APPLY => p.applies.push(ApplyFrame {
                 loc,
                 hash,
-                record: apply.and_then(apply_record),
+                record: payload.and_then(apply_record),
                 batch: self.batches,
                 landings: p.landings.clone(),
+            }),
+            kinds::REDACTION_CARRIED => p.carried.push(CarriedFrame {
+                loc,
+                hash,
+                record: match payload {
+                    Some(b) => {
+                        crate::redaction_carried::decode_record(b).map_err(|_| out_of_memory())?
+                    }
+                    None => None,
+                },
+                batch_start: start,
             }),
             kinds::LANDING => p.landings.push((loc, hash)),
             kinds::REDACTION => p.requests.push((loc, hash)),
             kinds::REDACTION_RESIDUE => p.residues.push((loc, hash)),
             _ => {}
         }
+        Ok(())
     }
 }
 
@@ -489,7 +622,7 @@ impl<'f> Window<'f> {
 /// `MAX_RECORD_BYTES` bytes, and exactly the canonical encoding of the record it decodes to
 /// (postcard ignores trailing bytes, so a decode alone accepts a padded payload). None: no apply
 /// record.
-fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
+pub(crate) fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
     if payload.len() > MAX_RECORD_BYTES {
         return None;
     }
@@ -511,15 +644,20 @@ pub(crate) fn refuse_oversized_records(items: &[(u8, Vec<u8>)]) -> Result<(), St
     Ok(())
 }
 
+/// The refusal of a removal check whose fallible allocation failed (an I/O error of kind
+/// `OutOfMemory`).
+pub(crate) fn out_of_memory() -> StoreError {
+    StoreError::Io(io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        "cannot allocate a record buffer",
+    ))
+}
+
 /// Reads `len` payload bytes at `at` into a fallibly allocated buffer.
 pub(crate) fn read_payload(f: &File, at: u64, len: u32) -> Result<Vec<u8>, StoreError> {
     let mut buf = Vec::new();
-    buf.try_reserve_exact(len as usize).map_err(|_| {
-        StoreError::Io(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            "cannot allocate a record buffer",
-        ))
-    })?;
+    buf.try_reserve_exact(len as usize)
+        .map_err(|_| out_of_memory())?;
     buf.resize(len as usize, 0);
     crate::pio::read_exact_at(f, &mut buf, at)?;
     Ok(buf)
@@ -575,7 +713,7 @@ pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                     segment: seg,
                     offset: end,
                 });
-            } else if kind == kinds::REDACTION_APPLY {
+            } else if kind == kinds::REDACTION_APPLY || kind == kinds::REDACTION_CARRIED {
                 let payload = if len as usize > MAX_RECORD_BYTES {
                     None
                 } else if len as usize <= ERASE_BUFFER {
@@ -584,9 +722,9 @@ pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                     Some(read_payload(f, payload_start, len)?)
                 };
                 let checked = payload.filter(|b| Hash::of(b) == hash);
-                c.note(&mut p, loc, kind, hash, checked.as_deref());
+                c.note(&mut p, loc, kind, hash, checked.as_deref())?;
             } else {
-                c.note(&mut p, loc, kind, hash, None);
+                c.note(&mut p, loc, kind, hash, None)?;
             }
             offset = end;
         }
@@ -623,10 +761,144 @@ pub(crate) fn read_record(
     Ok((Hash::of(&payload) == *hash).then_some(payload))
 }
 
+/// Where the apply validator reads the records it needs (the proof source seam): a frame's
+/// header by its place, and a record by its place, kind and hash. The log's segment files (with
+/// a batch not yet written) are one source ([`LogAccess`]); the files of a dump chain are another
+/// (`crate::dump_scan`). The validator's rules are the same over both.
+pub(crate) trait RecordAccess {
+    /// Whether a frame starts at `loc` whose header holds `len`, `kind` and `hash`.
+    fn has_frame(
+        &mut self,
+        loc: Location,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<bool, StoreError>;
+
+    /// The record of `kind` with hash `hash` at `loc`, read and hash-checked; None when the
+    /// frame there is not that record or does not match its hash.
+    fn record(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<Option<Vec<u8>>, StoreError>;
+}
+
+/// A log's frames as the meaning checks read them ([`check_log`], the carried overlay and the
+/// holder's derivation): a frame's header and payload by its place, and every frame in log
+/// order. The log's segment files are one source ([`LogAccess`]); the files of a dump chain are
+/// another (`crate::dump_scan`), where a dropped frame reads as its original header and zeros, as
+/// an erased frame of a log does. The checks' rules are the same over both.
+pub(crate) trait FrameLog: RecordAccess {
+    /// The header of the whole frame at `loc`: its payload length, kind and hash. None when no
+    /// whole frame starts there. A batch not yet written is not read.
+    fn header_at(&mut self, loc: Location) -> Result<Option<(u32, u8, Hash)>, StoreError>;
+
+    /// The `len` payload bytes of the frame at `loc`, through a fallibly allocated buffer.
+    fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError>;
+
+    /// Whether the `len` payload bytes of the frame at `loc` are all zero.
+    fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError>;
+
+    /// Calls `f` with every frame of the log before `upto`, then with every frame of `memory`,
+    /// in log order ([`for_each_seen`]).
+    fn walk(
+        &mut self,
+        upto: Location,
+        memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+        f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError>;
+
+    /// The carried record of frame `f` in its bounded, canonical form; None when the frame holds
+    /// no such record. A log's header pass keeps each record decoded (`f.record`); a dump chain
+    /// keeps none and reads each one again by its place, one at a time.
+    fn carried_record<'f>(
+        &mut self,
+        f: &'f CarriedFrame,
+    ) -> Result<Option<Cow<'f, rdy_model::RedactionCarried>>, StoreError> {
+        Ok(f.record.as_ref().map(Cow::Borrowed))
+    }
+
+    /// Whether the carried overlay keeps the validated records (`Authorization::carried`): a
+    /// log's bootstrap does, for its index and its reads; a dump chain's checks keep none.
+    fn keeps_carried(&self) -> bool {
+        true
+    }
+}
+
+/// The log's segment files, and the frames of a batch not yet written, as a [`RecordAccess`].
+pub(crate) struct LogAccess<'a> {
+    pub(crate) readers: &'a [File],
+    pub(crate) memory: &'a BTreeMap<Location, (u8, Vec<u8>)>,
+}
+
+impl RecordAccess for LogAccess<'_> {
+    fn has_frame(
+        &mut self,
+        loc: Location,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<bool, StoreError> {
+        let Some(f) = self.readers.get(loc.segment as usize) else {
+            return Ok(false);
+        };
+        Ok(header_at(f, loc.offset, f.metadata()?.len())? == Some((len, kind, *hash)))
+    }
+
+    fn record(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        read_record(self.readers, self.memory, loc, kind, hash)
+    }
+}
+
+impl LogAccess<'_> {
+    fn file(&self, loc: Location) -> Result<&File, StoreError> {
+        self.readers
+            .get(loc.segment as usize)
+            .ok_or_else(|| StoreError::corrupt_at(loc))
+    }
+}
+
+impl FrameLog for LogAccess<'_> {
+    fn header_at(&mut self, loc: Location) -> Result<Option<(u32, u8, Hash)>, StoreError> {
+        let Some(f) = self.readers.get(loc.segment as usize) else {
+            return Ok(None);
+        };
+        Ok(header_at(f, loc.offset, f.metadata()?.len())?)
+    }
+
+    fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError> {
+        read_payload(self.file(loc)?, loc.offset + HEADER, len)
+    }
+
+    fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError> {
+        Ok(segment::payload_is_zero(
+            self.file(loc)?,
+            loc.offset + HEADER,
+            u64::from(len),
+        )?)
+    }
+
+    fn walk(
+        &mut self,
+        upto: Location,
+        memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+        f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        for_each_seen(self.readers, upto, memory, f)
+    }
+}
+
 /// The request an apply names, if the log holds it sealed before the apply and it decodes.
 fn request_of(
     c: &Collected,
-    readers: &[File],
+    access: &mut dyn RecordAccess,
     a: &ApplyFrame,
 ) -> Result<Option<(Location, Redaction)>, StoreError> {
     let Some(record) = &a.record else {
@@ -635,8 +907,7 @@ fn request_of(
     let Some(loc) = c.request_at.get(&record.request).filter(|l| **l < a.loc) else {
         return Ok(None);
     };
-    let Some(payload) = read_record(readers, &c.memory, *loc, kinds::REDACTION, &record.request)?
-    else {
+    let Some(payload) = access.record(*loc, kinds::REDACTION, &record.request)? else {
         return Ok(None);
     };
     Ok(decode::<Redaction>(&payload).ok().map(|r| (*loc, r)))
@@ -650,8 +921,12 @@ fn candidate_holes(
     applies: &[&ApplyFrame],
 ) -> Result<Holes, StoreError> {
     let mut holes = Holes::new();
+    let mut access = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
     for a in applies {
-        if let Some((_, r)) = request_of(c, readers, a)? {
+        if let Some((_, r)) = request_of(c, &mut access, a)? {
             for s in &r.manifest.spans {
                 holes
                     .entry(Location {
@@ -707,25 +982,73 @@ fn validate(
     applies: &[&ApplyFrame],
     pending_from: Option<Location>,
 ) -> Result<(Authorization, Vec<Selected>), StoreError> {
-    let mut auth = Authorization::default();
-    let mut selected = Vec::with_capacity(applies.len());
-    let mut report_buf: Option<Vec<u8>> = None;
-    let mut prev_in_batch: Option<(u64, Hash)> = None;
+    let mut v = Validator::default();
+    let mut access = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
     for a in applies {
+        v.apply(c, &mut access, a, pending_from)?;
+    }
+    Ok((v.auth, v.selected))
+}
+
+/// The validation of applies in log order ([`validate`]), one apply at a time: what the applies
+/// validated so far authorize, and what each one's request selects. A source that reads its
+/// records as it walks them (a dump chain, `crate::dump_scan`) validates each apply when it meets
+/// it; the rules are [`validate`]'s.
+#[derive(Default)]
+pub(crate) struct Validator {
+    /// What the validated applies authorize: each span by the earliest apply that covers it.
+    pub(crate) auth: Authorization,
+    selected: Vec<Selected>,
+    report_buf: Option<Vec<u8>>,
+    prev_in_batch: Option<(u64, Hash)>,
+}
+
+impl Validator {
+    /// Validates `a`, the next apply in log order, with its records read through `access` (see
+    /// [`validate`]), and adds what it authorizes. After a failure the validator is not used
+    /// again: a caller stops at the first failure.
+    pub(crate) fn apply(
+        &mut self,
+        c: &Collected,
+        access: &mut dyn RecordAccess,
+        a: &ApplyFrame,
+        pending_from: Option<Location>,
+    ) -> Result<(), StoreError> {
+        self.apply_after(c, access, a, &a.landings, pending_from)
+    }
+
+    /// [`Validator::apply`] with the LANDING frames of `a`'s batch before it given apart from
+    /// it: a source that keeps its batch's landings once (`crate::dump_scan`) hands each apply
+    /// the part of them before it.
+    pub(crate) fn apply_after(
+        &mut self,
+        c: &Collected,
+        access: &mut dyn RecordAccess,
+        a: &ApplyFrame,
+        landings: &[(Location, Hash)],
+        pending_from: Option<Location>,
+    ) -> Result<(), StoreError> {
+        let auth = &mut self.auth;
         let at = || StoreError::corrupt_at(a.loc);
         let record = a.record.as_ref().ok_or_else(at)?;
-        if prev_in_batch.is_some_and(|(b, r)| b == a.batch && r >= record.request) {
+        if self
+            .prev_in_batch
+            .is_some_and(|(b, r)| b == a.batch && r >= record.request)
+        {
             return Err(at());
         }
-        prev_in_batch = Some((a.batch, record.request));
+        self.prev_in_batch = Some((a.batch, record.request));
         // the same-batch human landing
-        let (lloc, _) = a
-            .landings
+        let (lloc, _) = landings
             .iter()
             .find(|(_, h)| *h == record.landing)
             .ok_or_else(at)?;
         let landing: LandingRecord = decode(
-            &read_record(readers, &c.memory, *lloc, kinds::LANDING, &record.landing)?
+            &access
+                .record(*lloc, kinds::LANDING, &record.landing)?
                 .ok_or_else(at)?,
         )
         .map_err(|_| at())?;
@@ -737,14 +1060,16 @@ fn validate(
             });
         }
         // the request, its carrier's landing and its report
-        let (rloc, request) = request_of(c, readers, a)?.ok_or_else(at)?;
-        if !request_agrees(&request, &landing, record, &mut report_buf)? {
+        let (rloc, request) = request_of(c, access, a)?.ok_or_else(at)?;
+        if !request_agrees(&request, &landing, record, &mut self.report_buf)? {
             return Err(at());
         }
         // its spans
         let versions: BTreeSet<(BlockId, Hash)> =
             request.manifest.versions.iter().cloned().collect();
         let version_hashes: HashSet<Hash> = versions.iter().map(|(_, v)| *v).collect();
+        // each distinct residue of this request is read once
+        let mut read: HashMap<Hash, RedactionResidue> = HashMap::new();
         let mut prev: Option<Location> = None;
         let mut spans = Vec::with_capacity(request.manifest.spans.len());
         for span in &request.manifest.spans {
@@ -757,25 +1082,30 @@ fn validate(
                 return Err(bad());
             }
             prev = Some(loc);
-            let f = readers.get(loc.segment as usize).ok_or_else(bad)?;
-            if header_at(f, loc.offset, f.metadata()?.len())?
-                != Some((span.len, span.kind, span.hash))
-            {
+            if !access.has_frame(loc, span.len, span.kind, &span.hash)? {
                 return Err(bad());
             }
             let residue = match span.kind {
                 kinds::BLOCK | kinds::CHANGE => {
                     let r = span.residue.ok_or_else(bad)?;
-                    let rloc = c
-                        .residue_at
-                        .get(&r)
-                        .filter(|l| **l < a.loc)
-                        .ok_or_else(bad)?;
-                    let res: RedactionResidue = decode(
-                        &read_record(readers, &c.memory, *rloc, kinds::REDACTION_RESIDUE, &r)?
-                            .ok_or_else(bad)?,
-                    )
-                    .map_err(|_| bad())?;
+                    let res = match read.get(&r) {
+                        Some(res) => res.clone(),
+                        None => {
+                            let rloc = c
+                                .residue_at
+                                .get(&r)
+                                .filter(|l| **l < a.loc)
+                                .ok_or_else(bad)?;
+                            let res: RedactionResidue = decode(
+                                &access
+                                    .record(*rloc, kinds::REDACTION_RESIDUE, &r)?
+                                    .ok_or_else(bad)?,
+                            )
+                            .map_err(|_| bad())?;
+                            read.insert(r, res.clone());
+                            res
+                        }
+                    };
                     if !residue_fits(span.kind, &span.hash, &res, &versions, &version_hashes) {
                         return Err(bad());
                     }
@@ -807,6 +1137,7 @@ fn validate(
                             residue: span.residue,
                             apply: a.hash,
                             request: record.request,
+                            carried: false,
                         },
                     );
                     if let Some((r, res)) = residue {
@@ -821,7 +1152,7 @@ fn validate(
             hash: a.hash,
             record: record.clone(),
         });
-        selected.push(Selected {
+        self.selected.push(Selected {
             apply: a.loc,
             request: rloc,
             all_ids: request
@@ -836,8 +1167,31 @@ fn validate(
             blobs: request.manifest.blobs,
             spans,
         });
+        Ok(())
     }
-    Ok((auth, selected))
+
+    /// The span places of the last validated apply's request, in manifest order.
+    pub(crate) fn last_spans(&self) -> Vec<Location> {
+        self.selected
+            .last()
+            .map(|s| s.spans.iter().map(|(l, _, _)| *l).collect())
+            .unwrap_or_default()
+    }
+
+    /// The meaning of the applies validated so far against `log` before `upto`, with the
+    /// carried records of `c` before `upto` laid over them, as the bootstrap checks a log
+    /// (`redaction_carried::overlay`, then [`check_log`], both its passes). What the validated
+    /// applies authorize is left as it is.
+    pub(crate) fn check_meaning(
+        &self,
+        c: &Collected,
+        log: &mut dyn FrameLog,
+        upto: Location,
+    ) -> Result<(), StoreError> {
+        let mut auth = self.auth.clone();
+        crate::redaction_carried::overlay(c, log, &mut auth, upto)?;
+        check_log(log, &BTreeMap::new(), &auth, &self.selected, upto)
+    }
 }
 
 /// One frame the log pass reads: its place, kind, hash and length, and how to read its payload.
@@ -849,10 +1203,42 @@ pub(crate) struct Seen<'a> {
     source: Source<'a>,
 }
 
-/// Where a frame's payload is: in a segment file, or in a batch not yet written.
+/// Where a frame's payload is: in a segment file, in a batch not yet written, or behind a reader
+/// of another source (a dump chain's frame, or its dropped frame's zeros).
 enum Source<'a> {
     File(&'a File),
     Memory(&'a [u8]),
+    Read(&'a dyn Fn() -> Result<Vec<u8>, StoreError>),
+}
+
+impl<'a> Seen<'a> {
+    /// A frame whose payload `read` reads (a source that is not a segment log).
+    pub(crate) fn read_by(
+        loc: Location,
+        kind: u8,
+        hash: Hash,
+        len: u32,
+        read: &'a dyn Fn() -> Result<Vec<u8>, StoreError>,
+    ) -> Seen<'a> {
+        Seen {
+            loc,
+            kind,
+            hash,
+            len,
+            source: Source::Read(read),
+        }
+    }
+
+    /// A frame whose payload is `payload`, in memory.
+    pub(crate) fn in_memory(loc: Location, kind: u8, hash: Hash, payload: &'a [u8]) -> Seen<'a> {
+        Seen {
+            loc,
+            kind,
+            hash,
+            len: payload.len() as u32,
+            source: Source::Memory(payload),
+        }
+    }
 }
 
 impl Seen<'_> {
@@ -861,6 +1247,7 @@ impl Seen<'_> {
         match self.source {
             Source::File(f) => read_payload(f, self.loc.offset + HEADER, self.len),
             Source::Memory(p) => Ok(p.to_vec()),
+            Source::Read(read) => read(),
         }
     }
 
@@ -947,16 +1334,22 @@ pub(crate) fn for_each_seen(
 ///    - every intact payload of a span is exactly what its residue records: a block's identity,
 ///      a change's id, audit fields, dependencies and every op in order;
 ///    - every `(id, version)` a change residue keeps by reference is a stored block of that id
-///      before its apply: an intact block frame whose payload has that id, or a span an apply
-///      authorized whose block residue has it;
+///      before its apply: an intact block frame whose payload has that id, a span an apply
+///      authorized whose block residue has it, or a zero block frame that a validated carried
+///      record explains, whose block residue has it;
 ///    - no intact frame outside the authorized spans holds selected content: a block of a
 ///      selected version, a change that embeds one, or a chunk of a selected blob (each
 ///      physical copy is a span);
 ///    - every chunk of a selected blob has a frame.
 ///
+/// The holes of `auth` are the applies' spans; the carried records' spans (`SpanAuth::carried`,
+/// laid over by `redaction_carried::overlay` before this check) take part only in the
+/// resolution of a kept reference and the id of a selected version whose block they zeroed:
+/// they never count as a span of an apply or as a copy the selection covers.
+///
 /// A failure is `RedactionCorrupt`: at the frame or span for a frame failure, else at the apply.
 fn check_log(
-    readers: &[File],
+    log: &mut dyn FrameLog,
     memory: &BTreeMap<Location, (u8, Vec<u8>)>,
     auth: &Authorization,
     sel: &[Selected],
@@ -970,8 +1363,8 @@ fn check_log(
     let blobs: HashSet<Hash> = sel.iter().flat_map(|s| s.blobs.iter().copied()).collect();
     let mut chunks_of: HashMap<Hash, Vec<Hash>> = HashMap::new();
     let mut at_frame: BTreeSet<Location> = BTreeSet::new();
-    for_each_seen(readers, last_request.min(upto), &BTreeMap::new(), |f| {
-        if auth.holes.contains_key(&f.loc) {
+    log.walk(last_request.min(upto), &BTreeMap::new(), &mut |f| {
+        if auth.erasable(&f.loc) {
             at_frame.insert(f.loc);
         }
         if f.kind == kinds::BLOB_MANIFEST
@@ -984,7 +1377,11 @@ fn check_log(
         }
         Ok(())
     })?;
-    if let Some(loc) = auth.holes.keys().find(|l| !at_frame.contains(l)) {
+    if let Some(loc) = auth
+        .holes
+        .keys()
+        .find(|l| auth.erasable(l) && !at_frame.contains(l))
+    {
         return Err(StoreError::corrupt_at(*loc));
     }
     let mut sel_chunks: Vec<HashSet<Hash>> = Vec::with_capacity(sel.len());
@@ -1045,8 +1442,16 @@ fn check_log(
     let mut kept_found: HashSet<(BlockId, Hash)> = HashSet::new();
     let mut seen_chunks: HashSet<Hash> = HashSet::new();
     let residue_of = |loc: &Location| auth.spans[loc].residue.and_then(|r| auth.residues.get(&r));
-    for_each_seen(readers, upto, memory, |f| {
-        let hole = auth.holes.contains_key(&f.loc);
+    // the id a carried record's block residue gives a zero frame it explains
+    let carried_id = |loc: &Location| match auth.spans.get(loc) {
+        Some(s) if s.carried => match s.residue.and_then(|r| auth.residues.get(&r)) {
+            Some(RedactionResidue::Block(b)) => Some(b.id.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    log.walk(upto, memory, &mut |f| {
+        let hole = auth.erasable(&f.loc);
         match f.kind {
             kinds::BLOCK => {
                 if !selected_versions.contains(&f.hash)
@@ -1079,9 +1484,23 @@ fn check_log(
                             Err(_) => return Ok(()),
                         }
                     }
-                    // a damaged payload outside the holes: the payload scan refuses it, and it
-                    // keeps no reference
-                    (false, None) => return Ok(()),
+                    // zeros a carried record explains: its block residue names the version a
+                    // change residue may keep, and gives the id of a selected version whose
+                    // retained copies (its changes) a fresh apply removes; no span, no copy
+                    (false, None) => {
+                        if let Some(id) = carried_id(&f.loc) {
+                            if selected_versions.contains(&f.hash) {
+                                id_of.entry(f.hash).or_insert_with(|| id.clone());
+                            }
+                            let key = (id, f.hash);
+                            if kept.get(&key).is_some_and(|need| f.loc < *need) {
+                                kept_found.insert(key);
+                            }
+                        }
+                        // otherwise a damaged payload outside the holes: the payload scan
+                        // refuses it, and it keeps no reference
+                        return Ok(());
+                    }
                 };
                 if kept_versions.contains(&f.hash) {
                     let key = (id.clone(), f.hash);
@@ -1145,27 +1564,40 @@ fn check_log(
 /// The authorization bootstrap of an open: the header pass, then the validation of every apply
 /// the acknowledged log holds. Which applies that is depends on the holes they authorize (the
 /// marker rule's scan reads them as frames), so the scan's end is found with the applies'
-/// unchecked holes and applies past it are left out until it is stable; the applies left are
-/// validated and checked against the log (`check_log`, both its passes, whatever the erasure has
-/// done), and any failure refuses the open. The index plays no part. A load checks a complete
-/// ingested log with it before it finishes the store.
+/// unchecked holes (with the carried records' `held: false` spans) and applies and carried
+/// records past it are left out until it is stable; the applies left are validated, the carried
+/// records left are laid over them (`redaction_carried::overlay`), and the applies are checked
+/// against the log (`check_log`, both its passes, whatever the erasure has done; a kept reference
+/// may resolve through a carried residue), and any failure refuses the open. The index plays no part. A load checks a complete ingested log with it before it
+/// finishes the store.
 pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
-    if c.applies.is_empty() && c.requests.is_empty() {
+    if c.applies.is_empty() && c.requests.is_empty() && c.carried.is_empty() {
         return Ok(Authorization::default());
     }
     let mut applies: Vec<&ApplyFrame> = c.applies.iter().collect();
+    let mut below = Location {
+        segment: u32::MAX,
+        offset: u64::MAX,
+    };
     let end = loop {
-        let holes = candidate_holes(&c, readers, &applies)?;
+        let mut holes = candidate_holes(&c, readers, &applies)?;
+        crate::redaction_carried::candidate_holes(&c, below, &mut holes);
         let end = segment::acknowledged_end(readers, &holes)?;
-        let before = applies.len();
+        let before = (applies.len(), carried_below(&c, below));
         applies.retain(|a| a.loc < end);
-        if applies.len() == before {
+        below = end;
+        if (applies.len(), carried_below(&c, below)) == before {
             break end;
         }
     };
     let (mut auth, sel) = validate(&c, readers, &applies, None)?;
-    check_log(readers, &c.memory, &auth, &sel, end)?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(&c, &mut log, &mut auth, end)?;
+    check_log(&mut log, &c.memory, &auth, &sel, end)?;
     auth.requests = c
         .requests
         .iter()
@@ -1175,23 +1607,49 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     Ok(auth)
 }
 
+/// How many carried record frames lie before `below`.
+fn carried_below(c: &Collected, below: Location) -> usize {
+    c.carried.iter().filter(|f| f.loc < below).count()
+}
+
 /// The authorization of a log whose every batch is whole (a load's ingest checked each batch
 /// against its digest before it wrote its marker): the header pass, then the validation of every
 /// apply of its sealed batches, as `bootstrap` validates them, and checked against the sealed
-/// batches (`check_log`). Frames after the last marker (a batch not yet sealed) play no part. A log
-/// with no apply authorizes nothing. Any failed apply refuses it, as it refuses an open.
+/// batches (`check_log`), with its carried records over them. Frames after the last marker (a
+/// batch not yet sealed) play no part. A log with no apply and no carried record authorizes
+/// nothing. Any failed apply or carried record refuses it, as it refuses an open.
 pub(crate) fn bootstrap_sealed(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
-    if c.applies.is_empty() {
-        return Ok(Authorization::default());
-    }
-    let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
-    let (auth, sel) = validate(&c, readers, &applies, None)?;
     let upto = c.sealed_end.unwrap_or(Location {
         segment: 0,
         offset: 0,
     });
-    check_log(readers, &BTreeMap::new(), &auth, &sel, upto)?;
+    sealed_of(&c, readers, upto)
+}
+
+/// The authorization of the sealed batches `c` collected, as [`bootstrap_sealed`] has it: the
+/// validated applies, the carried records before `carried_upto` over them (a batch of
+/// `c.memory` included), then the applies checked against the sealed log on disk.
+pub(crate) fn sealed_of(
+    c: &Collected,
+    readers: &[File],
+    carried_upto: Location,
+) -> Result<Authorization, StoreError> {
+    if c.applies.is_empty() && c.carried.is_empty() {
+        return Ok(Authorization::default());
+    }
+    let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
+    let (mut auth, sel) = validate(c, readers, &applies, None)?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(c, &mut log, &mut auth, carried_upto)?;
+    let upto = c.sealed_end.unwrap_or(Location {
+        segment: 0,
+        offset: 0,
+    });
+    check_log(&mut log, &BTreeMap::new(), &auth, &sel, upto)?;
     Ok(auth)
 }
 
@@ -1207,20 +1665,39 @@ pub(crate) fn bootstrap_pending(
     batch: &[(u8, Vec<u8>)],
 ) -> Result<Authorization, StoreError> {
     let mut c = collect(readers)?;
-    let mut p = Pending::default();
-    let mut at = start;
-    for (kind, payload) in batch {
-        let hash = Hash::of(payload);
-        c.note(&mut p, at, *kind, hash, Some(payload));
-        c.memory.insert(at, (*kind, payload.clone()));
-        at.offset += HEADER + payload.len() as u64;
-    }
-    c.seal(p);
+    c.push_batch(start, batch)?;
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
     let (mut auth, sel) = validate(&c, readers, &applies, Some(start))?;
-    check_log(readers, &c.memory, &auth, &sel, start)?;
+    let mut log = LogAccess {
+        readers,
+        memory: &c.memory,
+    };
+    crate::redaction_carried::overlay(&c, &mut log, &mut auth, start)?;
+    check_log(&mut log, &c.memory, &auth, &sel, start)?;
     auth.requests = c.requests.clone();
     Ok(auth)
+}
+
+impl Collected {
+    /// Notes `batch` as one sealed batch not yet written, whose first frame goes at `start`: its
+    /// frames are kept in `memory`, and the end of the sealed log moves past it (its marker is
+    /// not counted). Returns the place after its last data frame.
+    pub(crate) fn push_batch(
+        &mut self,
+        start: Location,
+        batch: &[(u8, Vec<u8>)],
+    ) -> Result<Location, StoreError> {
+        let mut p = Pending::default();
+        let mut at = start;
+        for (kind, payload) in batch {
+            let hash = Hash::of(payload);
+            self.note(&mut p, at, *kind, hash, Some(payload))?;
+            self.memory.insert(at, (*kind, payload.clone()));
+            at.offset += HEADER + payload.len() as u64;
+        }
+        self.seal(p);
+        Ok(at)
+    }
 }
 
 /// The span `loc` of `auth` as a `DropSpan` for `SegmentLog::zero_payload`.

@@ -303,7 +303,7 @@ fn rdx10_old_states_refuse_new_reads_after_epoch_advance() {
     let e = old.ensure_current_epoch().unwrap_err();
     assert_eq!(e.code, E_REDACTED_STATE, "{e}");
     assert_eq!(e.message, "This read state predates content removal.");
-    assert_eq!(e.fix, "Read the project again.");
+    assert_eq!(e.fix, "Read the project again, or run the dump again.");
     // a fresh state is in the new epoch and reads stubs in every scope
     let fresh = p.r.read();
     fresh.ensure_current_epoch().unwrap();

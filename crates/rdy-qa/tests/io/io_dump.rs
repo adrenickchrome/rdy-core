@@ -109,7 +109,7 @@ fn dl5_a_dump_holds_every_sealed_batch_of_the_published_state() {
     assert_eq!(marker.digest, got.last().unwrap().digest);
 
     assert_eq!(summary.bytes, std::fs::metadata(&out).unwrap().len());
-    assert_eq!(summary.out, out.display().to_string());
+    assert_eq!(summary.out, Some(out.display().to_string()));
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn dl5_the_header_names_the_rdy_that_wrote_it() {
     let (header, _) = read_back(&out);
     assert_eq!(header.rdy, env!("CARGO_PKG_VERSION"));
     assert_eq!(header.store_format, STORE_FORMAT);
-    assert_eq!(summary.dump_format, 2);
+    assert_eq!(summary.dump_format, 3);
     assert_eq!(summary.store_format, STORE_FORMAT);
 }
 

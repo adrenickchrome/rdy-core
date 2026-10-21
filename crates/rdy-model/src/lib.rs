@@ -33,10 +33,10 @@ pub use order::{
     MAX_ORDER_KEY_LEN, OrderError, order_between, order_run, rebalance_keys, valid_order_key,
 };
 pub use redaction::{
-    AssessmentSupport, BlockResidue, ChangeResidue, CopyKind, CopyRow, CopyStatus, DropSpan,
-    FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
-    RedactedBlockIdentity, Redaction, RedactionApply, RedactionManifest, RedactionResidue,
-    RedactionWarning, ResidualOp,
+    AssessmentSupport, BlockResidue, CarriedSpan, ChangeResidue, CopyKind, CopyRow, CopyStatus,
+    DropSpan, FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
+    RedactedBlockIdentity, Redaction, RedactionApply, RedactionCarried, RedactionManifest,
+    RedactionResidue, RedactionWarning, ResidualOp,
 };
 pub use repo_id::RepoId;
 pub use value::{FieldValue, MAX_FIELD_NESTING, field_nesting_fix, field_nesting_message};

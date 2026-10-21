@@ -34,7 +34,7 @@ fn review(vkey: Hash, reason: &str) -> Review {
 #[test]
 fn rvw1_kind_17_and_format_10() {
     assert_eq!(kinds::REVIEW, 17);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 15);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 16);
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn mention(block: &str, entity: &str, verdict: Verdict, at_ms: i64) -> Review {
 
 #[test]
 fn cc1_format_10() {
-    assert_eq!(rdy_store::format::STORE_FORMAT, 15);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 16);
 }
 
 #[test]

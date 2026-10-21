@@ -109,12 +109,15 @@ fn ls7_rdy_site_refuses_an_unknown_key() {
     assert!(message.contains("scope"), "{message}");
 }
 
-/// dl7: `rdy_dump` takes `out` and nothing else.
+/// dl7: `rdy_dump` takes `out` and `after` (hc8) and nothing else.
 #[test]
 fn dl7_rdy_dump_refuses_an_unknown_key() {
     let (code, message, _) = refusal::<DumpParams>("rdy_dump", json!({"outs": "x"}));
     assert_eq!(code, "E_BAD_INPUT");
     assert!(message.contains("out"), "{message}");
+    let (code, message, _) = refusal::<DumpParams>("rdy_dump", json!({"out": "x", "afters": "y"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("after"), "{message}");
 }
 
 /// ec12: `rdy_clone` takes `dir`, `file` and `fork` and nothing else.
@@ -145,12 +148,63 @@ fn ec11_rdy_export_refuses_an_unknown_key() {
     assert!(message.contains("format"), "{message}");
 }
 
-/// dl7: `rdy_load` takes `file` and `dir` and nothing else.
+/// dl7: `rdy_load` takes `file`, `dir`, `then` and `stop_at` (hc8) and nothing else.
 #[test]
 fn dl7_rdy_load_refuses_an_unknown_key() {
     let (code, message, _) = refusal::<LoadParams>("rdy_load", json!({"file": "x", "dirs": "y"}));
     assert_eq!(code, "E_BAD_INPUT");
     assert!(message.contains("dir"), "{message}");
+    let (code, message, _) =
+        refusal::<LoadParams>("rdy_load", json!({"file": "x", "dir": "y", "thens": ["z"]}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("then"), "{message}");
+    let (code, message, _) = refusal::<LoadParams>(
+        "rdy_load",
+        json!({"file": "x", "dir": "y", "stop_ats": "tag:v1"}),
+    );
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("stop_at"), "{message}");
+}
+
+/// hc8: the new optional members parse as given; a wrong type is refused, never coerced.
+#[test]
+fn hc8_chain_members_parse_in_order_and_refuse_a_wrong_type() {
+    let args = |v: Value| v.as_object().unwrap().clone();
+    let d =
+        parse_params::<DumpParams>("rdy_dump", args(json!({"out": "o", "after": "a"}))).unwrap();
+    assert_eq!((d.out.as_str(), d.after.as_deref()), ("o", Some("a")));
+    let d =
+        parse_params::<DumpParams>("rdy_dump", args(json!({"out": "o", "after": null}))).unwrap();
+    assert_eq!(d.after, None);
+    let l = parse_params::<LoadParams>(
+        "rdy_load",
+        args(json!({"file": "f", "dir": "d", "then": ["b", "a", "c"], "stop_at": "tag:v1"})),
+    )
+    .unwrap();
+    assert_eq!(l.then, Some(vec!["b".into(), "a".into(), "c".into()]));
+    assert_eq!(l.stop_at.as_deref(), Some("tag:v1"));
+    let l = parse_params::<LoadParams>(
+        "rdy_load",
+        args(json!({"file": "f", "dir": "d", "then": null, "stop_at": null})),
+    )
+    .unwrap();
+    assert_eq!((l.then, l.stop_at), (None, None));
+    assert_eq!(
+        refusal::<LoadParams>("rdy_load", json!({"file": "f", "dir": "d", "then": "b"})).0,
+        "E_BAD_INPUT"
+    );
+    assert_eq!(
+        refusal::<LoadParams>("rdy_load", json!({"file": "f", "dir": "d", "then": [1]})).0,
+        "E_BAD_INPUT"
+    );
+    assert_eq!(
+        refusal::<LoadParams>("rdy_load", json!({"file": "f", "dir": "d", "stop_at": 7})).0,
+        "E_BAD_INPUT"
+    );
+    assert_eq!(
+        refusal::<DumpParams>("rdy_dump", json!({"out": "o", "after": ["a"]})).0,
+        "E_BAD_INPUT"
+    );
 }
 
 #[test]
@@ -729,7 +783,7 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
         (
             "E_REDACTED_STATE",
             "This read state predates content removal.",
-            "Read the project again.",
+            "Read the project again, or run the dump again.",
         ),
         (
             "E_REDACTED",
@@ -766,7 +820,8 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
     let codes: Vec<&str> = ERROR_ROWS
         .iter()
         .map(|(c, _, _)| *c)
-        .filter(|c| c.contains("REDACT"))
+        // the carried-removal warning is a dump-chain row (hc8), not a redaction-request one
+        .filter(|c| c.contains("REDACT") && *c != "W_STOP_BEFORE_REDACTION")
         .collect();
     let want: Vec<&str> = errors
         .iter()

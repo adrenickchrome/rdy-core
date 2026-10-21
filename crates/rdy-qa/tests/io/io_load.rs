@@ -120,7 +120,7 @@ fn dl6_a_load_runs_fsck_and_reports_it() {
     assert!(s.landings >= 3 && s.tags >= 1 && s.views >= 3, "{s:?}");
     assert_eq!(
         (s.dump_format, s.store_format),
-        (2, rdy_store::format::STORE_FORMAT)
+        (3, rdy_store::format::STORE_FORMAT)
     );
 }
 
@@ -282,28 +282,29 @@ fn dl6_a_dump_that_fails_fsck_leaves_the_target_as_it_was() {
 fn dl6_a_dump_of_another_format_is_refused_before_anything_is_written() {
     let (_src, scratch, file) = dumped();
     let mut b = std::fs::read(&file).unwrap();
-    b[8] = 3; // dump format 3: 2 is the current format
-    let f = scratch.path().join("v3.rdydump");
+    b[8] = 4; // dump format 4: 3 is the current format
+    let f = scratch.path().join("v4.rdydump");
     std::fs::write(&f, &b).unwrap();
     let to = scratch.path().join("new");
     let e = load(&f, &to).unwrap_err();
     assert_eq!(e.code, "E_DUMP");
     assert_eq!(
         e.message,
-        format!("{}: dump format 3 is not one this rdy reads", f.display())
+        format!("{}: dump format 4 is not one this rdy reads", f.display())
     );
     assert_eq!(e.fix, "load it with the rdy that wrote it, or a later one");
     assert!(!to.exists());
 }
 
 /// Rewrites the dump `file` to `out`, keeping its project files, after `edit` changes its header
-/// and batches. The new trailer is consistent with what `out` holds.
+/// and batches. The new trailer is consistent with what `out` holds: its counts, digest and
+/// removal facts are those of the batches written.
 fn rewrite(
     file: &Path,
     out: &Path,
     edit: impl FnOnce(&mut rdy_store::dump::DumpHeader, &mut Vec<rdy_store::dump::DumpBatch>),
 ) {
-    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter};
+    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter, RemovalTally};
     let f = std::io::BufReader::new(std::fs::File::open(file).unwrap());
     let (mut r, _, mut header) = DumpReader::open(f).unwrap();
     let mut files = vec![];
@@ -319,10 +320,12 @@ fn rewrite(
     for (path, bytes) in &files {
         w.file(path, bytes).unwrap();
     }
+    let mut facts = RemovalTally::default();
     for b in &batches {
+        facts.observe(b).unwrap();
         w.batch(b).unwrap();
     }
-    w.finish().unwrap();
+    w.finish(facts.facts().unwrap()).unwrap();
 }
 
 #[test]
@@ -335,18 +338,20 @@ fn dl6_a_dump_with_missing_batches_is_refused() {
         b.truncate(b.len() / 2);
         log_end = Some(h.log_end);
     });
-    let log_end = log_end.unwrap();
+    log_end.unwrap();
     let to = scratch.path().join("new");
     let e = load(&short, &to).unwrap_err();
     assert_eq!(e.code, "E_DUMP", "{e}");
-    assert!(
-        e.message.starts_with(&format!(
-            "the dump is incomplete: its header says the log ends at segment {} offset {}, but its batches end at segment ",
-            log_end.segment, log_end.offset
-        )),
-        "{e}"
+    // the reader checks the last batch against the header's end at the trailer
+    let at = std::fs::metadata(&short).unwrap().len() - 106;
+    assert_eq!(
+        e.message,
+        format!(
+            "{} is damaged at byte {at}: the last batch does not match the header",
+            short.display()
+        ),
     );
-    assert_eq!(e.fix, "make a new dump from the source with rdy dump");
+    assert_eq!(e.fix, "dump the project again; rdy never repairs a dump");
     assert!(!to.exists(), "the load created {to:?} and left it");
 }
 
@@ -362,6 +367,9 @@ fn dl6_a_dump_with_no_batches_is_refused() {
             segment: 0,
             offset: 0,
         };
+        // a full dump of no batches ends at its base, with its zero marker
+        let c = h.chain.as_mut().unwrap();
+        c.end_batch = c.base_batch;
     });
     let to = scratch.path().join("new");
     let e = load(&empty, &to).unwrap_err();

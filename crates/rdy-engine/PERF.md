@@ -1400,6 +1400,68 @@ are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed he
 Deep gate (bench): <orchestrator fills in>
 
 
+## Dump chains (<merge date>)
+
+Three ops, reported with no target and no spec ceiling (quality gate k-CMC06). They run on both
+tiers (`dump_increment_50k`, `load_chain_50k` and `load_chain_stop_50k` on the large one), right
+after `load`, with the project closed. The cadence of shipping files is not measured here: the
+ops time one export and two loads, never an interval.
+
+All three work on one copy of the closed project, made and removed outside every timer. Per
+tier, outside the timers: the copy is opened; one write creates the `chain` view; the full file
+is written; then exactly 100 ordinary writes follow (100 new sealed batches). After the timed
+exports, one more write and one approved removal of the tier's fixture claim (a block the full
+file holds) land, and the second increment, which holds them, is written after the first. The
+stop of `load_chain_stop` is the project's last landing before the copy was made, taken from the
+copy before any write, never chosen by elapsed time. The removal comes after it, so a stopped
+load finds the removed claim's payload in its retained part.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `dump_increment` | `ReadState::dump_after_file` of the full file: the predecessor's envelope and the walk that checks the marker of its end, the walk that finds the marker of the increment's own end, the project files, the 100 batches after it, and the write, the sync and the placement of the new file. The files of runs after the first are removed outside the timer; the first is kept as the first increment | 5 (3 at 50k) | no spec target: export 100 sealed batches after a full dump (reported) |
+| `load_chain` | `rdy_engine::load::load_chain` of the full file and the two increments into a new directory, no stop: the pre-pass over every file, the ingest checks, the index build and `fsck`. The loaded directory is removed outside the timer | 5 (3 at 50k) | no spec target: validate and load a full dump and two increments (reported) |
+| `load_chain_stop` | the same load with the stop above: the part after the stop is checked by the pre-pass and not written; the retained part is written with the carried records of the removal | 5 (3 at 50k) | no spec target: load a chain before removal with carried records (reported) |
+
+Beside each op's timing, the run prints one line to stderr (from the first run of the op):
+
+`<op>: bytes read N, bytes written N, source batches N, source frames N, carried spans N (N held)`
+
+- Bytes read: for `dump_increment`, the bytes the export actually reads, in four parts: the
+  project-file bytes; the bytes of the source log between the predecessor's end and the
+  increment's end (segment files, framing included); the predecessor checks; and the walk that
+  finds the marker of the increment's own end batch. The checks are the predecessor's envelope
+  (the prelude and header, read twice, and the trailer; the body is not read) and the walk that
+  finds the marker of its end. Each walk reads the segment of its end from offset zero up to the
+  end, checking each frame and batch marker on the way. This is read volume, not source volume:
+  the source volume of the increment is the log between the two ends, and both walks repeat on
+  every export. For a load, the sum of the lengths of the three input
+  files.
+- Bytes written: for `dump_increment`, the length of the new file. For a load, the bytes of the
+  segment files of the loaded store.
+- Source batches and frames: what the new file holds, or what the load wrote into the store
+  (the retained part when a stop is given).
+- Carried spans: the spans of the carried records in the loaded store, and how many of them still
+  hold their payload. Counted after the timer, from the loaded store, in the first run only. It is
+  zero for an export and for a load without a stop.
+
+What each cost grows with:
+
+- `dump_increment` grows with the batches after the predecessor and with the project files. It
+  also pays one walk over the predecessor's segment, from its start to the predecessor's end, and
+  one over its own end's segment, from its start to that end, so its read cost grows with the
+  offsets of the two ends inside their segments (at most one segment each, never the whole log). Compare with `dump`.
+- `load_chain` grows as `load` does, plus one pre-pass over each file before the first write.
+- `load_chain_stop` pays the same pre-pass over every file; it writes only the part up to the
+  stop, plus the carried records. Compare it with `load_chain` for the cost of the files after
+  the stop.
+
+No correctness test asserts a duration, a faster-than-full result or a shipping interval. No
+laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops are
+PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+
 ## Publications (core) (<merge date>)
 
 Six ops, reported with no target and no spec ceiling (D-0VCQ5, D-5CVWB; quality gate k-CMC06).

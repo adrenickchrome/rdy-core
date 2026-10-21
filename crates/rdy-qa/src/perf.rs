@@ -210,6 +210,15 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "redaction_open" => "no spec target: open a store after content removal (reported)",
         "redaction_dump" => "no spec target: dump with removed payload records (reported)",
+        "dump_increment" => {
+            "no spec target: export 100 sealed batches after a full dump (reported)"
+        }
+        "load_chain" => {
+            "no spec target: validate and load a full dump and two increments (reported)"
+        }
+        "load_chain_stop" => {
+            "no spec target: load a chain before removal with carried records (reported)"
+        }
         "export_md" => "no spec target: the scope printed as md, written whole (reported)",
         "export_html" => "no spec target: the scope printed as html, written whole (reported)",
         "export_pdf" => "no spec target: the scope laid out and written as PDF (reported)",
@@ -3185,6 +3194,271 @@ fn tier_dump(
     }));
 }
 
+/// The ordinary batches an increment holds in `tier_dump_chain`: one write each.
+const CHAIN_INCREMENT_BATCHES: usize = 100;
+
+/// The bytes of the source log between `base` and `end`: what an export of that part reads from
+/// the segment files, framing included.
+fn log_span_bytes(
+    proj: &std::path::Path,
+    base: rdy_store::segment::Location,
+    end: rdy_store::segment::Location,
+) -> u64 {
+    let dir = proj.join(".rdy/store/segments");
+    (base.segment..=end.segment)
+        .map(|id| {
+            let to = if id == end.segment {
+                end.offset
+            } else {
+                std::fs::metadata(rdy_store::segment::seg_path(&dir, id))
+                    .expect("segment")
+                    .len()
+            };
+            to - if id == base.segment { base.offset } else { 0 }
+        })
+        .sum()
+}
+
+/// A file handle that counts the bytes it hands out.
+struct CountingFile {
+    file: std::fs::File,
+    read: u64,
+}
+
+impl std::io::Read for CountingFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.file.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for CountingFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(to)
+    }
+}
+
+/// The bytes an increment export reads from its predecessor file: the same two reads it makes,
+/// the prelude and header (the format check), then the whole envelope (prelude, header and
+/// trailer). The body between them is not read.
+fn envelope_read_bytes(prev: &std::path::Path) -> u64 {
+    let mut f = CountingFile {
+        file: std::fs::File::open(prev).expect("open the predecessor"),
+        read: 0,
+    };
+    rdy_store::dump::DumpReader::open(&mut f).expect("the predecessor opens");
+    rdy_store::dump::read_envelope(&mut f).expect("the predecessor envelope");
+    f.read
+}
+
+/// The bytes an increment export reads to check its predecessor `prev`, which ends at `base`,
+/// before it moves any batch: the envelope of the file ([`envelope_read_bytes`]) and the walk
+/// that finds the marker of its end, which reads the segment of `base` from offset zero up to
+/// `base` (no earlier segment). This is read volume, not the size of the source: the walk
+/// repeats on every export and does not grow with the new batches.
+fn predecessor_check_bytes(prev: &std::path::Path, base: rdy_store::segment::Location) -> u64 {
+    envelope_read_bytes(prev) + base.offset
+}
+
+/// The bytes an increment export `sum` of the project `proj` after the file `prev` reads beside
+/// its project files: the new batches ([`log_span_bytes`]), the predecessor checks
+/// ([`predecessor_check_bytes`]), and the walk that finds the marker of the increment's own end
+/// batch, which reads the segment of the end from offset zero up to the end (no earlier
+/// segment). Like the predecessor walk, it is read volume that repeats on every export.
+fn increment_log_bytes(
+    proj: &std::path::Path,
+    prev: &std::path::Path,
+    sum: &rdy_engine::dump::DumpSummary,
+) -> u64 {
+    log_span_bytes(proj, sum.base, sum.end)
+        + predecessor_check_bytes(prev, sum.base)
+        + sum.end.offset
+}
+
+/// One approved removal of `target`, through its durable completion: the request, its proposal
+/// and the person's approval.
+fn approved_removal(r: &mut Rdy, target: &BlockId) {
+    use rdy_engine::redaction::RedactInput;
+    let input = RedactInput {
+        targets: vec![target.to_string()],
+        reason_class: "secret".to_string(),
+        reason: "perf: remove one block".to_string(),
+        dry_run: false,
+    };
+    r.redact_in(&writer(), "redact", input)
+        .expect("record the request");
+    let prop = r
+        .propose(&writer(), "redact", "Remove one block", None)
+        .expect("propose");
+    r.land(&approver(), &prop.id).expect("land the removal");
+}
+
+/// What a chain operation prints beside its timing: the bytes it read and wrote, the source
+/// batches and frames it moved and the carried spans it met.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChainFacts {
+    read: u64,
+    written: u64,
+    batches: u64,
+    frames: u64,
+    /// The carried spans the loaded store still holds, and all it has.
+    carried_held: u64,
+    carried: u64,
+}
+
+impl ChainFacts {
+    fn print(&self, op: &str) {
+        eprintln!(
+            "{op}: bytes read {}, bytes written {}, source batches {}, source frames {}, \
+             carried spans {} ({} held)",
+            self.read, self.written, self.batches, self.frames, self.carried, self.carried_held
+        );
+    }
+}
+
+/// The carried spans of the store at `proj`: how many it still holds, and how many in all.
+fn carried_span_counts(proj: &std::path::Path) -> (u64, u64) {
+    use rdy_store::closure::END_OF_LOG;
+    let r = Rdy::open(proj).expect("open the loaded store");
+    let reader = r.store().reader();
+    let (mut held, mut all) = (0, 0);
+    reader
+        .visit_carried(END_OF_LOG, &mut |c| {
+            let (h, removed) = reader.carried_counts(&c.record)?;
+            held += h;
+            all += h + removed;
+            Ok(())
+        })
+        .expect("walk the carried records");
+    (held, all)
+}
+
+/// `dump_increment`, `load_chain` and `load_chain_stop`: the costs of shipping a project in
+/// pieces. One full file, an increment of exactly [`CHAIN_INCREMENT_BATCHES`] new sealed
+/// batches after it, and a second increment that holds one approved removal of `target`, a
+/// block the full file already holds. All three are built on a copy of the closed project
+/// `proj` under `parent`, outside every timer, and removed again.
+///
+/// `dump_increment` times the export of the first increment (the write, the sync and the
+/// placement); the file of its first run is kept for the loads. `load_chain` times a load of the
+/// three files (the pre-pass, the ingest checks, the index build and `fsck`). `load_chain_stop`
+/// times the same files up to the project's last landing before the copy was written: the
+/// removal comes after it, so the load appends carried records. The stop is that landing, never a
+/// time. The loaded directory and the files are removed outside the timers. Reported only: no
+/// spec ceiling and no baseline.
+fn tier_dump_chain(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    section: &BlockId,
+    target: &BlockId,
+    sfx: &str,
+    runs: usize,
+) -> Vec<ChainFacts> {
+    use rdy_engine::dump::project_file_bytes;
+    use rdy_engine::dump_stop::DumpStop;
+    let work = parent.join(format!("dc{sfx}"));
+    copy_project(proj, &work);
+    let mut r = Rdy::open(&work).expect("open the copy");
+    let stop = DumpStop::Landing(
+        r.read()
+            .canon_head()
+            .expect("the project has a landing")
+            .to_string(),
+    );
+    let section = section.to_string();
+    let add = |r: &mut Rdy, i: usize| {
+        write(
+            r,
+            "chain",
+            json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Chain {i}.")}]),
+        )
+        .expect("chain write");
+    };
+    // the view exists before the full file, so its creation is not one of the batches
+    add(&mut r, 0);
+    let full = parent.join(format!("dc{sfx}-full.rdydump"));
+    r.read().dump(&full).expect("full dump");
+    for i in 1..=CHAIN_INCREMENT_BATCHES {
+        add(&mut r, i);
+    }
+    let inc1 = parent.join(format!("dc{sfx}-inc1.rdydump"));
+    let mut facts = None;
+    out.push(measure_timed(&format!("dump_increment{sfx}"), runs, |i| {
+        let to = parent.join(format!("dc{sfx}-inc1-{i}.rdydump"));
+        let read0 = project_file_bytes();
+        let s = Instant::now();
+        let sum = r.read().dump_after_file(&full, &to).expect("increment");
+        let took = s.elapsed();
+        assert_eq!(sum.batches, CHAIN_INCREMENT_BATCHES as u64);
+        if i == 0 {
+            let read = project_file_bytes() - read0 + increment_log_bytes(&work, &full, &sum);
+            facts = Some(ChainFacts {
+                read,
+                written: sum.bytes,
+                batches: sum.batches,
+                frames: sum.frames,
+                carried_held: 0,
+                carried: 0,
+            });
+            std::fs::rename(&to, &inc1).expect("keep the first increment");
+        } else {
+            std::fs::remove_file(&to).expect("remove the increment");
+        }
+        took
+    }));
+    let increment = facts.expect("one run");
+    increment.print(&format!("dump_increment{sfx}"));
+    let mut all = vec![increment];
+    // after the first increment: one more write, then the approved removal of a block the full
+    // file holds, and the second increment that carries them
+    add(&mut r, CHAIN_INCREMENT_BATCHES + 1);
+    approved_removal(&mut r, target);
+    let inc2 = parent.join(format!("dc{sfx}-inc2.rdydump"));
+    r.read()
+        .dump_after_file(&inc1, &inc2)
+        .expect("second increment");
+    r.close().expect("close the copy");
+    let files = vec![full.clone(), inc1.clone(), inc2.clone()];
+    let file_bytes: u64 = files
+        .iter()
+        .map(|f| std::fs::metadata(f).expect("dump file").len())
+        .sum();
+    for (op, stop) in [("load_chain", None), ("load_chain_stop", Some(&stop))] {
+        let mut facts = None;
+        out.push(measure_timed(&format!("{op}{sfx}"), runs, |i| {
+            let target = parent.join(format!("dc{sfx}-{op}-{i}"));
+            let s = Instant::now();
+            let sum = rdy_engine::load::load_chain(&files, &target, stop).expect("load the chain");
+            let took = s.elapsed();
+            if i == 0 {
+                let carried = carried_span_counts(&target);
+                facts = Some(ChainFacts {
+                    read: file_bytes,
+                    written: segment_bytes(&target),
+                    batches: sum.batches,
+                    frames: sum.frames,
+                    carried_held: carried.0,
+                    carried: carried.1,
+                });
+                assert_eq!(sum.chain.len(), files.len());
+                assert_eq!(sum.stopped_at.is_some(), stop.is_some());
+            }
+            std::fs::remove_dir_all(&target).expect("remove the loaded directory");
+            took
+        }));
+        let loaded = facts.expect("one run");
+        loaded.print(&format!("{op}{sfx}"));
+        all.push(loaded);
+    }
+    for f in &files {
+        std::fs::remove_file(f).expect("remove the dump");
+    }
+    std::fs::remove_dir_all(&work).expect("remove the copy");
+    all
+}
+
 /// The bytes of the log's segment files: what a full scan of the log reads, framing included.
 fn segment_bytes(proj: &std::path::Path) -> u64 {
     std::fs::read_dir(proj.join(".rdy/store/segments"))
@@ -4282,6 +4556,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, "", 5);
     tier_render_cold(&mut out, &proj, dir.path(), "", 5);
     tier_dump(&mut out, &proj, dir.path(), "", 5);
+    tier_dump_chain(&mut out, &proj, dir.path(), &fx.section, &fx.claim, "", 5);
     tier_redaction(&mut out, &proj, dir.path(), &fx.claim, "", 5);
     tier_export(&mut out, &proj, dir.path(), 5);
     tier_clone(&mut out, &proj, dir.path(), "", 5);
@@ -5041,6 +5316,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_cold_open(&mut out, &proj, sfx, 3);
     tier_render_cold(&mut out, &proj, parent, sfx, 3);
     tier_dump(&mut out, &proj, parent, sfx, 3);
+    tier_dump_chain(&mut out, &proj, parent, &fx.section, &fx.claim, sfx, 3);
     tier_redaction(&mut out, &proj, parent, &fx.claim, sfx, 3);
     tier_clone(&mut out, &proj, parent, sfx, 3);
     tier_publication_costs(&mut out, &proj, parent, sfx, 3);
@@ -5694,6 +5970,159 @@ mod tests {
             assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
         }
         assert!(spec_target("load_50k").is_some());
+    }
+
+    /// Task 10: the three chain operations run on a small tree, in order, and report facts of
+    /// what they moved. The test asserts no duration.
+    #[test]
+    fn hc10_chain_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6863_3130);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        drop(r);
+        let mut out = vec![];
+        let facts = tier_dump_chain(&mut out, &proj, dir.path(), &fx.section, &fx.claim, "", 2);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, ["dump_increment", "load_chain", "load_chain_stop"]);
+        for m in &out {
+            assert!(spec_ceiling_ms(&m.op).is_none(), "{} has a ceiling", m.op);
+        }
+        let [inc, whole, stopped] = facts[..] else {
+            panic!("one set of facts per operation: {facts:?}");
+        };
+        assert_eq!(inc.batches, CHAIN_INCREMENT_BATCHES as u64);
+        assert!(inc.frames >= inc.batches && inc.read > 0 && inc.written > 0);
+        assert_eq!((inc.carried, inc.carried_held), (0, 0));
+        // the whole chain applies the removal itself; the stopped one holds it as carried spans
+        assert!(whole.batches > stopped.batches && whole.written > 0);
+        assert_eq!(whole.read, stopped.read);
+        assert_eq!(whole.carried, 0);
+        assert!(
+            stopped.carried > 0 && stopped.carried_held > 0,
+            "{stopped:?}"
+        );
+        assert!(proj.join(".rdy").is_dir());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("dir").count(),
+            1,
+            "the copy, the dumps and the loaded stores are removed"
+        );
+    }
+
+    /// Task 10 fix: an increment's read cost holds the predecessor checks. The envelope of the
+    /// predecessor is read, and the marker of its end is found by a walk of its last segment from
+    /// offset zero: both are counted, beside the new batches.
+    #[test]
+    fn hc10_increment_reads_count_the_predecessor_checks() {
+        rdy_model::seed_ids_for_tests(0x6863_3131);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let full = dir.path().join("full.rdydump");
+        let sum = r.read().dump(&full).expect("full dump");
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
+        let envelope = envelope_read_bytes(&full);
+        assert!(envelope > 0 && envelope < 4096, "{envelope}");
+        assert!(sum.end.offset > 0, "the full file ends after a batch");
+        let checks = predecessor_check_bytes(&full, sum.end);
+        assert_eq!(checks, envelope + sum.end.offset);
+        // a predecessor that ends at the start of a segment has no marker walk to count
+        let at_start = rdy_store::segment::Location {
+            segment: sum.end.segment,
+            offset: 0,
+        };
+        assert_eq!(predecessor_check_bytes(&full, at_start), envelope);
+    }
+
+    /// An increment's read cost also holds the walk that finds the marker of its own end: the
+    /// segment of the end, read from offset zero up to the end.
+    #[test]
+    fn hc10_increment_reads_count_the_end_marker_walk() {
+        rdy_model::seed_ids_for_tests(0x6863_3132);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let full = dir.path().join("full.rdydump");
+        r.read().dump(&full).expect("full dump");
+        write(
+            &mut r,
+            "work",
+            json!([{"op": "create", "type": "doc", "fields": {"name": "more", "title": "More", "doc_type": "page"}}]),
+        )
+        .expect("a write after the full file");
+        let inc = dir.path().join("inc.rdydump");
+        let sum = r.read().dump_after_file(&full, &inc).expect("increment");
+        drop(r);
+        rdy_model::unseed_ids_for_tests();
+        assert!(sum.end.offset > 0, "the increment ends after a batch");
+        assert_eq!(
+            increment_log_bytes(&proj, &full, &sum),
+            log_span_bytes(&proj, sum.base, sum.end)
+                + predecessor_check_bytes(&full, sum.base)
+                + sum.end.offset
+        );
+    }
+
+    /// Task 10: both runners register the chain operations, after the dump operations.
+    #[test]
+    fn hc10_workload_wires_typical_and_large_chain_ops() {
+        let src = include_str!("perf.rs");
+        let typical = src.find("pub fn run_workload(").expect("run_workload");
+        let typical = &src[typical..typical + src[typical..].find("\n}\n").expect("its end")];
+        let dump = typical
+            .find("tier_dump(&mut out, &proj, dir.path(), \"\", 5);")
+            .expect("tier_dump");
+        let chain = typical
+            .find("tier_dump_chain(&mut out, &proj, dir.path(), &fx.section, &fx.claim, \"\", 5);")
+            .expect("the typical tier runs the chain operations");
+        assert!(dump < chain);
+        let large = src.find("fn run_large_tier(").expect("run_large_tier");
+        let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
+        assert!(
+            large.contains(
+                "tier_dump_chain(&mut out, &proj, parent, &fx.section, &fx.claim, sfx, 3);"
+            ),
+            "the large tier runs the chain operations"
+        );
+    }
+
+    /// Task 10: the chain operations are reported, with no spec target, in both tiers.
+    #[test]
+    fn hc10_chain_ops_are_reported_without_spec_targets() {
+        for (op, target) in [
+            (
+                "dump_increment",
+                "no spec target: export 100 sealed batches after a full dump (reported)",
+            ),
+            (
+                "load_chain",
+                "no spec target: validate and load a full dump and two increments (reported)",
+            ),
+            (
+                "load_chain_stop",
+                "no spec target: load a chain before removal with carried records (reported)",
+            ),
+        ] {
+            assert_eq!(spec_target(op).as_deref(), Some(target));
+            assert_eq!(
+                spec_target(&format!("{op}_50k")).as_deref(),
+                Some(format!("{target}{LARGE_TIER_NOTE}").as_str())
+            );
+            assert_eq!(spec_ceiling_ms(op), None);
+        }
     }
 
     /// A landed, closed small tree for the redaction tier: its project path and the first claim.

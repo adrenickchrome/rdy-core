@@ -4,7 +4,8 @@
 //! the log (the same replay as a reindex), then the load runs `fsck`.
 //!
 //! The steps (closed):
-//! 1. Read the dump's prelude and header.
+//! 1. Read the dump's prelude and header. A dump of format 3 must be a full dump: an increment
+//!    alone is refused before anything is read past its header.
 //! 2. Read its project files, and check the target before anything is written: not in a
 //!    project's `.rdy` directory, no `.rdy/store`, no `.rdy/store.loading`, no live daemon that
 //!    the target's socket record ties to its `.rdy` (final ruling 1: a daemon that still serves
@@ -32,19 +33,33 @@
 //!    (`.rdy/local.yaml`, `.rdyignore`, a pack file outside the dump's set) names that file; any
 //!    other such failure is the source's. The caller's step returns its own errors.
 //!
+//! A chain (D-2FMRR, D-QF2HQ): `load_chain` takes a full dump and its increments, and a stop.
+//! Its pre-pass (`crate::load_chain::inspect`) checks every file through its end, every link
+//! and every removal proof before step 2. A single file of dump format 1 or 2 with no stop then
+//! takes the steps above as they were released. Dump format 3 takes them through one ingest of
+//! the verified chain (`crate::load_chain::load_verified`): the project files of the last file
+//! that contributes a retained batch, the retained batches of every file in order with each
+//! removed payload written as zeros only, at most one carried batch, at most one upgrade batch,
+//! then steps 5 to 7 here (`place`). Every summary lists the inputs (`chain`), the stop
+//! (`stopped_at`) and one warning per carried record (`warnings`).
+//!
 //! A failure in steps 3 to 7 removes the store, every file step 5 wrote and every directory
 //! step 3 or 5 created, so the target is as it was. The removal runs while the load holds the
 //! store's lock; a load that finds it does not hold the lock removes nothing. The load never
 //! deletes a file it did not write: a pack file at the target that the dump does not hold stays
 //! where it is.
 use crate::Rdy;
+use crate::carried_warning::CarriedWarning;
 use crate::config_levels::{LOCAL_FILE, PROJECT_FILE};
+use crate::dump_stop::DumpStop;
 use crate::error::{
     E_ALREADY_EXISTS, E_BAD_INPUT, E_DUMP, E_HELD_BY_READER, E_IO, E_LOCKED, RdyError,
 };
 use crate::fsck::FsckReport;
 use crate::wc::ignore::IGNORE_FILE;
+use rdy_model::Hash;
 use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal, Frame};
+use rdy_store::dump_chain::DumpKind;
 use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
@@ -80,6 +95,40 @@ pub fn set_daemon_probe(probe: DaemonProbe) {
     let _ = DAEMON_PROBE.set(probe);
 }
 
+/// A step of a load's placement that a test can make fail (test hook): the rename of
+/// `.rdy/store.loading` to `.rdy/store`, or the sync of `.rdy` right after it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceFault {
+    Rename,
+    SyncAfterRename,
+}
+
+thread_local! {
+    static PLACE_FAULT: std::cell::Cell<Option<PlaceFault>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests only: the next load on this thread fails at placement step `fault` with an injected
+/// i/o error, before the step runs. None disarms it.
+#[doc(hidden)]
+pub fn fail_next_placement_for_tests(fault: Option<PlaceFault>) {
+    PLACE_FAULT.with(|c| c.set(fault));
+}
+
+/// The injected failure of placement step `step`, if one is armed on this thread (it disarms).
+fn place_fault(step: PlaceFault) -> std::io::Result<()> {
+    PLACE_FAULT.with(|c| match c.get() {
+        Some(f) if f == step => {
+            c.set(None);
+            Err(std::io::Error::other(match step {
+                PlaceFault::Rename => "injected rename failure",
+                PlaceFault::SyncAfterRename => "injected sync failure",
+            }))
+        }
+        _ => Ok(()),
+    })
+}
+
 /// What `rdy load` did: the project, the dump's formats, what it held, the project files it
 /// wrote and kept, the counts of landings, tags and views, and the `fsck` report.
 #[derive(Clone, Debug, Serialize)]
@@ -96,14 +145,67 @@ pub struct LoadSummary {
     pub views: usize,
     pub fsck: FsckReport,
     pub next: String,
+    /// Every input, in argument order, the files after a stop included.
+    pub chain: Vec<LoadedChainFile>,
+    /// Where an explicit stop selected the end; null without one.
+    pub stopped_at: Option<StoppedAt>,
+    /// One warning for each carried record this load appended (D-QF2HQ).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<CarriedWarning>,
 }
 
-/// Loads the dump `file` into `project`, a directory with no store (F3). A refused or failed
-/// load leaves the target as it was.
+/// One input of a load: the file as given, its kind, and where the part of the source log it
+/// holds starts and ends. A single file of dump format 1 or 2 is a full dump from `0.0`. Not
+/// stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LoadedChainFile {
+    pub file: String,
+    pub kind: DumpKind,
+    pub base: Location,
+    pub end: Location,
+}
+
+/// Where a stopped load stopped: the batch end, the landing of a `landing:` or `tag:` selector
+/// and the tag of a `tag:` selector (both null for `pos:`). Not stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StoppedAt {
+    pub position: Location,
+    #[serde(with = "rdy_store::transition::hex::opt")]
+    pub landing: Option<Hash>,
+    pub tag: Option<String>,
+}
+
+/// The origin of a log: where a full dump starts.
+pub(crate) const ORIGIN: Location = Location {
+    segment: 0,
+    offset: 0,
+};
+
+/// Loads the dump `file` into `project`, a directory with no store (F3): [`load_chain`] of the
+/// one file with no stop. A refused or failed load leaves the target as it was.
 pub fn load(file: &Path, project: &Path) -> Result<LoadSummary, RdyError> {
-    // step 1: the prelude and the header
-    let f = open_dump(file)?;
-    load_from(file, BufReader::new(f), project, None)
+    load_chain(&[file.to_path_buf()], project, None)
+}
+
+/// Loads the dump chain `files` (a full dump, then its increments in chain order) into
+/// `project`, a directory with no store, up to `stop` when one is given (D-2FMRR, D-QF2HQ). The
+/// pre-pass (`crate::load_chain::inspect`) checks every file before the target is touched. A
+/// single file of dump format 1 or 2 with no stop takes the released single-file load; dump
+/// format 3 takes one ingest of the verified chain (`crate::load_chain`). A refused or failed
+/// load leaves the target as it was.
+pub fn load_chain(
+    files: &[PathBuf],
+    project: &Path,
+    stop: Option<&DumpStop>,
+) -> Result<LoadSummary, RdyError> {
+    let plan = crate::load_chain::inspect(files, stop)?;
+    if plan.legacy().is_some() {
+        // step 1: the prelude and the header
+        let file = &plan.files()[0];
+        let f = open_dump(file)?;
+        return load_from(file, BufReader::new(f), project, None);
+    }
+    crate::load_chain::load_verified(&plan, project)
 }
 
 /// A step that runs after the open of step 7, under the load's lock and before `fsck`: a
@@ -134,6 +236,13 @@ pub(crate) struct Opened<R: Read> {
 /// name, as in [`load_from`].
 pub(crate) fn open_stream<R: Read>(source: &Path, r: R) -> Result<Opened<R>, RdyError> {
     let (reader, dump_format, header) = DumpReader::open(r).map_err(|e| read_error(source, e))?;
+    if header.chain.is_some_and(|c| c.kind == DumpKind::Increment) {
+        return Err(RdyError::new(
+            E_DUMP,
+            format!("{}: a full dump is required", source.display()),
+            "load the full dump that rdy dump wrote",
+        ));
+    }
     Ok(Opened {
         reader,
         dump_format,
@@ -180,7 +289,12 @@ pub(crate) fn load_opened<R: Read>(
         }
     };
     let absent = check_target(project, &files)?;
-    let carried: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+    let row = LoadedChainFile {
+        file: source.display().to_string(),
+        kind: header.chain.map_or(DumpKind::Full, |c| c.kind),
+        base: header.chain.map_or(ORIGIN, |c| c.base),
+        end: header.log_end,
+    };
     let mut made = Made::default();
     let out = (|| {
         let (batches, frames, holder) = ingest(
@@ -196,43 +310,23 @@ pub(crate) fn load_opened<R: Read>(
         if holder && !files.is_empty() {
             return Err(holder_files());
         }
-        let mut written = Vec::new();
-        let mut kept = Vec::new();
-        for (path, bytes) in &files {
-            if absent.contains(path) {
-                write_new(project, path, bytes, &mut made)?;
-                written.push(path.clone());
-            } else {
-                kept.push(path.clone());
-            }
-        }
-        // step 6: the store takes its place, locked by this load until the load ends
-        let dot = project.join(".rdy");
-        let loading = dot.join(LOADING_DIR);
-        let store = dot.join(STORE_DIR);
-        if std::fs::symlink_metadata(&store).is_ok() {
-            return Err(has_store(project));
-        }
-        let lock = StoreLock::take(&loading).map_err(|e| target_error(&loading, e))?;
-        made.lock = Some(lock.clone());
-        std::fs::rename(&loading, &store).map_err(|e| io_at(&loading, e))?;
-        made.store = Some(store);
-        sync_dir(&dot).map_err(|e| io_at(&dot, e))?;
-        // step 7: the index build, fsck and the counts
-        let (fsck, tags, views) = check(project, &carried, &lock, &mut made, after_open)?;
+        let placed = place(project, &files, &absent, &mut made, after_open)?;
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format,
             store_format: header.store_format,
             batches,
             frames,
-            files_written: written,
-            files_kept: kept,
-            landings: fsck.landings,
-            tags,
-            views,
-            fsck,
-            next: if holder { HOLDER_NEXT } else { NEXT }.to_string(),
+            files_written: placed.written,
+            files_kept: placed.kept,
+            landings: placed.fsck.landings,
+            tags: placed.tags,
+            views: placed.views,
+            fsck: placed.fsck,
+            next: next_step(holder),
+            chain: vec![row],
+            stopped_at: None,
+            warnings: Vec::new(),
         })
     })();
     // step 8: a failure takes back everything this load wrote
@@ -242,10 +336,77 @@ pub(crate) fn load_opened<R: Read>(
     out
 }
 
+/// What the person does after a load of a holder or a project.
+pub(crate) fn next_step(holder: bool) -> String {
+    if holder { HOLDER_NEXT } else { NEXT }.to_string()
+}
+
+/// What steps 5 to 7 did: the project files written and kept, the `fsck` report, and the counts
+/// of tags and views.
+pub(crate) struct Placed {
+    pub(crate) written: Vec<String>,
+    pub(crate) kept: Vec<String>,
+    pub(crate) fsck: FsckReport,
+    pub(crate) tags: usize,
+    pub(crate) views: usize,
+}
+
+/// Steps 5 to 7 of a load whose ingest has finished `.rdy/store.loading`: writes each of the
+/// dump's project files `files` that step 2 found `absent`, takes the store's lock, renames the
+/// store into place, then opens it, runs `after_open`, `fsck` and the counts (`check`). The
+/// caller undoes `made` on a failure.
+pub(crate) fn place(
+    project: &Path,
+    files: &[(String, Vec<u8>)],
+    absent: &[String],
+    made: &mut Made,
+    after_open: Option<AfterOpen>,
+) -> Result<Placed, RdyError> {
+    let carried: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+    let mut written = Vec::new();
+    let mut kept = Vec::new();
+    for (path, bytes) in files {
+        if absent.contains(path) {
+            write_new(project, path, bytes, made)?;
+            written.push(path.clone());
+        } else {
+            kept.push(path.clone());
+        }
+    }
+    // step 6: the store takes its place, locked by this load until the load ends
+    let dot = project.join(".rdy");
+    let loading = dot.join(LOADING_DIR);
+    let store = dot.join(STORE_DIR);
+    if std::fs::symlink_metadata(&store).is_ok() {
+        return Err(has_store(project));
+    }
+    let lock = StoreLock::take(&loading).map_err(|e| target_error(&loading, e))?;
+    made.lock = Some(lock.clone());
+    place_fault(PlaceFault::Rename)
+        .and_then(|()| std::fs::rename(&loading, &store))
+        .map_err(|e| io_at(&loading, e))?;
+    made.store = Some(store);
+    place_fault(PlaceFault::SyncAfterRename)
+        .and_then(|()| sync_dir(&dot))
+        .map_err(|e| io_at(&dot, e))?;
+    // step 7: the index build, fsck and the counts
+    let (fsck, tags, views) = check(project, &carried, &lock, made, after_open)?;
+    Ok(Placed {
+        written,
+        kept,
+        fsck,
+        tags,
+        views,
+    })
+}
+
 /// Step 2: refuses a target in a project's `.rdy`, a target with a store, with a load's store
 /// directory, with a live daemon, or with a project file of other bytes than the dump. Returns
 /// the dumped paths the target does not have.
-fn check_target(project: &Path, files: &[(String, Vec<u8>)]) -> Result<Vec<String>, RdyError> {
+pub(crate) fn check_target(
+    project: &Path,
+    files: &[(String, Vec<u8>)],
+) -> Result<Vec<String>, RdyError> {
     inside_rdy(project)?;
     let dot = project.join(".rdy");
     if std::fs::symlink_metadata(dot.join(STORE_DIR)).is_ok() {
@@ -414,22 +575,7 @@ fn ingest<R: Read>(
     made: &mut Made,
 ) -> Result<(u64, u64, bool), RdyError> {
     let holder = first.as_ref().is_some_and(|(_, b)| sets_holder_mode(b));
-    let dot = project.join(".rdy");
-    made.create_dirs(&dot)?;
-    let loading = dot.join(LOADING_DIR);
-    let mut ingest = match Ingest::create(&loading) {
-        Ok(i) => i,
-        Err(StoreError::Io(e)) if e.kind() == ErrorKind::AlreadyExists => {
-            // another load made it after the check: never ours to remove
-            return Err(loading_exists(&loading));
-        }
-        Err(e) => {
-            // the directory may stand half made: it did not exist at the check, so it is ours
-            made.store = Some(loading.clone());
-            return Err(target_error(&loading, e));
-        }
-    };
-    made.store = Some(loading.clone());
+    let (mut ingest, loading) = create_store(project, made)?;
     let mut next = first;
     let mut n = 0u64;
     while let Some((at, b)) = next {
@@ -471,6 +617,28 @@ fn ingest<R: Read>(
     Ok((report.batches, report.frames, holder))
 }
 
+/// Step 3: creates the project and its `.rdy` if missing, then `.rdy/store.loading` with an
+/// empty log. Returns the ingest and the loading directory, which `made` owns from here on.
+pub(crate) fn create_store(project: &Path, made: &mut Made) -> Result<(Ingest, PathBuf), RdyError> {
+    let dot = project.join(".rdy");
+    made.create_dirs(&dot)?;
+    let loading = dot.join(LOADING_DIR);
+    let ingest = match Ingest::create(&loading) {
+        Ok(i) => i,
+        Err(StoreError::Io(e)) if e.kind() == ErrorKind::AlreadyExists => {
+            // another load made it after the check: never ours to remove
+            return Err(loading_exists(&loading));
+        }
+        Err(e) => {
+            // the directory may stand half made: it did not exist at the check, so it is ours
+            made.store = Some(loading.clone());
+            return Err(target_error(&loading, e));
+        }
+    };
+    made.store = Some(loading.clone());
+    Ok((ingest, loading))
+}
+
 /// Whether batch `b`, the first of a log, sets the mode ref, decoded as the ingest decodes it
 /// (`names_store_mode`), so the load never disagrees with the store about the mode. `Ingest::batch`
 /// judges the value (only `holder`) and refuses the batch otherwise, so a load that goes on has a
@@ -487,7 +655,7 @@ fn sets_holder_mode(b: &DumpBatch) -> bool {
 }
 
 /// A holder dump that carries a project file.
-fn holder_files() -> RdyError {
+pub(crate) fn holder_files() -> RdyError {
     RdyError::new(
         E_DUMP,
         "a holder dump must not contain project files",
@@ -628,7 +796,7 @@ fn target_only(project: &Path, carried: &[String]) -> Vec<(String, PathBuf)> {
 
 /// What a load wrote at the target, to take it back on a failure (step 8).
 #[derive(Default)]
-struct Made {
+pub(crate) struct Made {
     /// The directories this load created, outermost first.
     dirs: Vec<PathBuf>,
     /// The project files this load created.
@@ -664,7 +832,7 @@ impl Made {
     /// Removes the store, every file and every directory this load created, while the load
     /// still holds the store's lock; then releases the lock. A directory that holds anything
     /// else stays. A load that does not hold the store (`keep`) removes nothing.
-    fn undo(self) {
+    pub(crate) fn undo(self) {
         if self.keep {
             return;
         }
@@ -696,7 +864,7 @@ impl Made {
 
 /// An error of the dump reader at `file`: the prelude and format cases name the file, every
 /// other case is damage at a byte.
-fn read_error(file: &Path, e: StoreError) -> RdyError {
+pub(crate) fn read_error(file: &Path, e: StoreError) -> RdyError {
     match e {
         StoreError::Dump { at, what } => match DumpRefusal::of(&what) {
             DumpRefusal::NotADump => RdyError::new(
@@ -717,7 +885,7 @@ fn read_error(file: &Path, e: StoreError) -> RdyError {
 }
 
 /// The dump's batches are not the whole source log (`what` says how).
-fn incomplete(what: String) -> RdyError {
+pub(crate) fn incomplete(what: String) -> RdyError {
     RdyError::new(
         E_DUMP,
         format!("the dump is incomplete: {what}"),
@@ -727,7 +895,7 @@ fn incomplete(what: String) -> RdyError {
 
 /// `file` is damaged at byte `at`. Dropped frames that claim more bytes than rdy writes for
 /// them (`DumpRefusal::Claim`, ruling task-9) may not be rdy's dump at all, and their fix says so.
-fn damaged(file: &Path, at: u64, what: &str) -> RdyError {
+pub(crate) fn damaged(file: &Path, at: u64, what: &str) -> RdyError {
     let fix = match DumpRefusal::of(what) {
         DumpRefusal::Claim => {
             "the dump is damaged or was not written by rdy; dump the source again"
@@ -742,7 +910,7 @@ fn damaged(file: &Path, at: u64, what: &str) -> RdyError {
 }
 
 /// An error of the new store at `dir`: its i/o errors are the target's.
-fn target_error(dir: &Path, e: StoreError) -> RdyError {
+pub(crate) fn target_error(dir: &Path, e: StoreError) -> RdyError {
     match e {
         StoreError::Io(e) => io_at(dir, e),
         e => e.into(),

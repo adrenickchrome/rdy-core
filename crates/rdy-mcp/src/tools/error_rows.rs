@@ -356,6 +356,21 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "use the holder for the stream's repo",
     ),
     (
+        E_DUMP_CHAIN,
+        "The dump files do not form a chain, or the predecessor does not match this store.",
+        "Pass a full dump and its increments in order, or start a new chain.",
+    ),
+    (
+        E_LOAD_STOP,
+        "The requested stop does not name one batch end in the dump chain.",
+        "Name a landing, a tag, or a batch end that the chain holds.",
+    ),
+    (
+        rdy_engine::carried_warning::W_STOP_BEFORE_REDACTION,
+        "This store stops before redaction apply {apply} of its source, approved by {actor} at landing {landing}. It holds {held} removed payloads again, and {removed} stay removed.",
+        "Propose the redaction of the listed targets again, and have a person approve it.",
+    ),
+    (
         E_HELD_BY_READER,
         "the project store is still open in this process through a read state of an earlier open",
         HELD_BY_READER_FIX,

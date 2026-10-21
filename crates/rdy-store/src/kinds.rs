@@ -43,6 +43,9 @@ pub const REDACTION_RESIDUE: u8 = 21;
 /// The human apply record that activates a request (`rdy_model::RedactionApply`): it shares a
 /// sealed batch with the landing it names.
 pub const REDACTION_APPLY: u8 = 22;
+/// A removal carried into a store that does not hold its proof (`rdy_model::RedactionCarried`):
+/// it accounts for exact already-zero bytes and never grants erasure authority.
+pub const REDACTION_CARRIED: u8 = 23;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

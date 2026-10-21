@@ -46,6 +46,8 @@
 use crate::dump::{
     DROPPED_LEN, DumpBatch, Frame, drop_text, dropped_payload, parse_dropped, try_batch_digest,
 };
+use crate::dump_chain::chain_text;
+use crate::dump_scan::{FrameAction, ScanPlan};
 use crate::error::StoreError;
 use crate::format::{self, Format};
 use crate::fsutil::sync_dir;
@@ -53,7 +55,7 @@ use crate::holder::{FirstBatch, RefRules, StoreMode};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_REPO_ID, encode_repo_id};
 use crate::redaction_io;
-use crate::segment::{Location, SegmentLog};
+use crate::segment::{HEADER, Location, SegmentLog};
 use crate::store::{MAX_BLOB_BYTES, encode};
 use rdy_model::{Hash, RepoId};
 use std::path::{Path, PathBuf};
@@ -97,6 +99,13 @@ pub struct Ingest {
     rules: Option<RefRules>,
     /// The mode the first batch set (a project until then).
     mode: StoreMode,
+    /// Whether an ingested frame is a carried record (kind REDACTION_CARRIED): `finish` then
+    /// checks the log's authorization even when no frame was dropped.
+    has_carried: bool,
+    /// Whether `append_carried` succeeded: the carried batch comes once.
+    carried_done: bool,
+    /// Whether `upgrade` ran: the carried batch comes before it.
+    upgraded: bool,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -108,12 +117,39 @@ pub struct IngestReport {
     pub end: Location,
 }
 
+/// Whether `named`, the record a dropped frame at `loc` names, is a validated carried record of
+/// `auth` whose `held: false` span at `loc` has exactly the frame's `identity` (kind, hash,
+/// length, residue). Such a record was the span's proof when the dump that holds the frame was
+/// written; a later apply that covers the span is its proof now (D-0VG72: "an apply that covers
+/// a held:false span becomes that span's proof"), and the record stays as history.
+fn names_carried(
+    auth: &redaction_io::Authorization,
+    named: &Hash,
+    loc: Location,
+    identity: (u8, Hash, u32, Option<Hash>),
+) -> bool {
+    auth.carried.iter().filter(|c| c.hash == *named).any(|c| {
+        c.record.spans.iter().any(|s| {
+            !s.held
+                && (s.place.segment, s.place.offset) == (loc.segment, loc.offset)
+                && (s.kind, s.hash, s.len, s.residue) == identity
+        })
+    })
+}
+
 fn dump_error(what: String) -> StoreError {
     StoreError::Dump { at: 0, what }
 }
 
 fn refused_allocation() -> StoreError {
     dump_error(drop_text::ALLOCATION.into())
+}
+
+/// The refusal of a record over the record bound (`16777216 bytes per record`).
+fn record_too_big() -> StoreError {
+    StoreError::RedactionLimit {
+        limit: crate::redaction::limit::RECORD,
+    }
 }
 
 impl Ingest {
@@ -143,6 +179,9 @@ impl Ingest {
             unauthorized: 0,
             rules: None,
             mode: StoreMode::Project,
+            has_carried: false,
+            carried_done: false,
+            upgraded: false,
         })
     }
 
@@ -161,11 +200,65 @@ impl Ingest {
     /// Each failure is `StoreError::Dump`, but a ref the holder rules refuse is the store's own
     /// `StoreError::Decode`, before the batch writes a byte. Nothing is synced until `finish`.
     pub fn batch(&mut self, n: u64, b: &DumpBatch) -> Result<(), StoreError> {
+        self.take_batch(n, b, None)
+    }
+
+    /// [`Ingest::batch`] of a chain load, by the verified plan of its pre-pass
+    /// (`crate::dump_scan`): for each original physical frame of `b`, `plan` decides what is
+    /// written at its place ([`ScanPlan::frame_action`]). A `Keep` frame is written as `batch`
+    /// writes it: its payload, or its validated hole. A `Zero` frame is written directly as its
+    /// original 37-byte header and zeros of its original length, through the dropped-frame
+    /// writer (`ERASE_BUFFER` bytes at a time): a present payload is checked against its hash
+    /// and never written, not even for a moment. Its authority is the plan's (the retained apply,
+    /// or the carried record the load appends later), and it waits for `finish` as any dropped
+    /// frame does, within the same bounds: the frame counts as a pending drop and its length as
+    /// zeros not yet validated. The batch's frame hashes, digest, marker and places are the
+    /// source's. A frame the plan names with another identity is refused before the batch writes
+    /// a byte (`dropped frame does not match its authorized span`).
+    pub fn batch_with_plan(
+        &mut self,
+        n: u64,
+        b: &DumpBatch,
+        plan: &ScanPlan,
+    ) -> Result<(), StoreError> {
+        self.take_batch(n, b, Some(plan))
+    }
+
+    /// `batch`, with each frame's action from `plan` when there is one (`batch_with_plan`).
+    fn take_batch(
+        &mut self,
+        n: u64,
+        b: &DumpBatch,
+        plan: Option<&ScanPlan>,
+    ) -> Result<(), StoreError> {
         for f in &b.frames {
             if let Frame::Dropped { len, .. } = f
                 && u64::from(*len) > MAX_BLOB_BYTES
             {
                 return Err(dump_error(drop_text::claim(*len)));
+            }
+        }
+        // every frame's action before the first byte, so a refused batch writes nothing
+        let mut actions: Vec<FrameAction> = Vec::new();
+        if let Some(plan) = plan {
+            actions
+                .try_reserve_exact(b.frames.len())
+                .map_err(|_| refused_allocation())?;
+            let mut place = b.start;
+            for f in &b.frames {
+                let action = plan.frame_action(place, f.kind(), *f.hash(), f.original_len())?;
+                if let (FrameAction::Zero { .. }, Frame::Present { hash, payload, .. }) =
+                    (action, f)
+                    && Hash::of(payload) != *hash
+                {
+                    return Err(dump_error(format!("batch {n} does not match its digest")));
+                }
+                actions.push(action);
+                place.offset = place
+                    .offset
+                    .checked_add(HEADER)
+                    .and_then(|o| o.checked_add(u64::from(f.original_len())))
+                    .ok_or_else(|| dump_error(chain_text::OVERFLOW.into()))?;
             }
         }
         self.check_refs(b)?;
@@ -188,12 +281,24 @@ impl Ingest {
             .try_reserve_exact(b.frames.len())
             .map_err(|_| refused_allocation())?;
         let mut sets_repo_id = false;
-        for f in &b.frames {
-            match f {
+        for (i, f) in b.frames.iter().enumerate() {
+            // a frame the plan zeroes is written as a dropped frame with the plan's authority
+            let zeroed = match actions.get(i) {
+                Some(FrameAction::Zero { authority, residue }) => Some(Frame::Dropped {
+                    kind: f.kind(),
+                    hash: *f.hash(),
+                    len: f.original_len(),
+                    apply: *authority,
+                    residue: *residue,
+                }),
+                _ => None,
+            };
+            match zeroed.as_ref().unwrap_or(f) {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
+                    self.has_carried |= *kind == kinds::REDACTION_CARRIED;
                     sets_repo_id |= *kind == kinds::REF_UPDATE
                         && postcard::from_bytes::<RefUpdate>(payload)
                             .is_ok_and(|u| u.name == REF_REPO_ID);
@@ -330,7 +435,8 @@ impl Ingest {
                 continue;
             };
             if (hole.kind, hole.hash, hole.len) == (kind, hash, len)
-                && span.apply == apply
+                && (span.apply == apply
+                    || names_carried(&auth, &apply, p.loc, (kind, hash, len, residue)))
                 && span.residue == residue
             {
                 p.released = true;
@@ -347,13 +453,15 @@ impl Ingest {
     /// physical copy of selected content is a span, and every intact span is what its residue
     /// records) must accept the log, and must hold each dropped frame's location as an
     /// authorized span with its original kind, hash and length, from the first valid apply that
-    /// authorizes it, which the record names, and with the residue the record names. Refusals
+    /// authorizes it, which the record names (or a validated carried record that names that
+    /// exact span `held: false`, the span's proof when its dump was written: `names_carried`),
+    /// and with the residue the record names. Refusals
     /// (`StoreError::Dump`): a span the log's applies place elsewhere or with another header is
     /// `dropped frame does not match its authorized span`; no valid apply for it, or another
     /// apply than the record names, is `dropped frame has no valid authorization`; another
     /// residue is `dropped frame has an invalid residue`. An I/O error stays one.
     fn check_drops(&self) -> Result<(), StoreError> {
-        if self.pending.is_empty() && !self.has_apply {
+        if self.pending.is_empty() && !self.has_apply && !self.has_carried {
             return Ok(());
         }
         let refuse = |what: &str| Err(dump_error(what.into()));
@@ -387,7 +495,9 @@ impl Ingest {
             if (hole.kind, hole.hash, hole.len) != (kind, hash, len) {
                 return refuse(drop_text::SPAN);
             }
-            if span.apply != apply {
+            if span.apply != apply
+                && !names_carried(&auth, &apply, p.loc, (kind, hash, len, residue))
+            {
                 return refuse(drop_text::NO_AUTHORIZATION);
             }
             if span.residue != residue {
@@ -423,8 +533,21 @@ impl Ingest {
     ///   (RULING F2); then its marker. Every earlier byte is kept;
     /// - `from` is newer: refused with `StoreError::Dump`, and nothing is appended.
     ///
-    /// Returns whether it appended the batch. Call it once, after the last `batch`.
+    /// Returns whether it appended the batch. Call it once, after the last `batch` (and after
+    /// `append_carried`, if it runs).
     pub fn upgrade(&mut self, from: u32) -> Result<bool, StoreError> {
+        self.upgrade_with(from, None)
+    }
+
+    /// [`Ingest::upgrade`] of a chain prefix: when no ingested frame set `meta/repo_id`, the
+    /// upgrade batch sets `repo`, the id the chain's headers name, not a new one. A prefix
+    /// that stops before the source's own upgrade batch is the same repo as the chain.
+    pub fn upgrade_in_repo(&mut self, from: u32, repo: RepoId) -> Result<bool, StoreError> {
+        self.upgrade_with(from, Some(repo))
+    }
+
+    fn upgrade_with(&mut self, from: u32, repo: Option<RepoId>) -> Result<bool, StoreError> {
+        self.upgraded = true;
         let current = Format::CURRENT.store_format;
         if from > current {
             return Err(dump_error(format!(
@@ -437,7 +560,10 @@ impl Ingest {
         let start = self.log.end();
         let mut refs = vec![(format::REF_STORE_FORMAT, format::encode_u32(current))];
         if !self.has_repo_id {
-            refs.push((REF_REPO_ID, encode_repo_id(&RepoId::new())));
+            refs.push((
+                REF_REPO_ID,
+                encode_repo_id(&repo.unwrap_or_else(RepoId::new)),
+            ));
         }
         // the i-th ref of the batch is salted with the log end plus i, as the store salts
         let frames: Vec<(u8, Vec<u8>)> = refs
@@ -460,6 +586,83 @@ impl Ingest {
         self.log
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
         Ok(true)
+    }
+
+    /// Appends the carried records of a stopped load as one sealed batch after the source prefix
+    /// (D-QF2HQ: a carried record explains exact zero bytes and never authorizes an erasure).
+    /// It runs once, before `upgrade` and `finish`: a call after one that succeeded, or after
+    /// `upgrade`, is `StoreError::Dump`; a refused call writes nothing and counts for nothing.
+    /// The batch holds the residues of `residues` that the log does not hold yet, once each and
+    /// sorted by residue hash, then `records` in the caller's order (its validated source-apply
+    /// order). Before a byte is written:
+    ///
+    /// - each record keeps its bounds (`redaction_carried::check_bounds`: more than 100,000
+    ///   spans is `RedactionLimit` `100000 carried spans`, more than 16,777,216 encoded bytes
+    ///   `RedactionLimit` `16777216 bytes per record`), and so does each residue;
+    /// - the log as it would be, this batch included, passes the bootstrap of its mode with its
+    ///   carried records (`redaction_carried::overlay`): every span checked against the retained
+    ///   prefix, every `held: false` payload all zero. A failure is that bootstrap's refusal
+    ///   (`RedactionCorrupt`).
+    ///
+    /// An empty `records` writes nothing. The batch counts in no source batch or frame total.
+    pub fn append_carried(
+        &mut self,
+        residues: &[rdy_model::redaction::RedactionResidue],
+        records: &[rdy_model::RedactionCarried],
+    ) -> Result<(), StoreError> {
+        if self.carried_done || self.upgraded {
+            return Err(dump_error(
+                "carried records are appended once, after the source batches and before the upgrade"
+                    .into(),
+            ));
+        }
+        if records.is_empty() {
+            self.carried_done = true;
+            return Ok(());
+        }
+        let mut encoded: Vec<Vec<u8>> = Vec::new();
+        encoded
+            .try_reserve_exact(records.len())
+            .map_err(|_| refused_allocation())?;
+        for r in records {
+            encoded.push(crate::redaction_carried::check_bounds(r)?);
+        }
+        let mut c = redaction_io::collect(self.log.readers())?;
+        // the residues the log does not hold yet, once each, by residue hash, each within the
+        // record bound
+        let mut missing: std::collections::BTreeMap<Hash, Vec<u8>> = Default::default();
+        if !residues.is_empty() {
+            let mut buf = rdy_model::redaction::record_buffer().map_err(|_| record_too_big())?;
+            for r in residues {
+                let bytes =
+                    rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
+                let h = Hash::of(bytes);
+                if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
+                    missing.insert(h, bytes.to_vec());
+                }
+            }
+        }
+        let mut frames: Vec<(u8, Vec<u8>)> = missing
+            .into_values()
+            .map(|b| (kinds::REDACTION_RESIDUE, b))
+            .collect();
+        frames.extend(encoded.into_iter().map(|b| (kinds::REDACTION_CARRIED, b)));
+        let start = self.log.end();
+        let after = c.push_batch(start, &frames)?;
+        match self.mode {
+            StoreMode::Holder => {
+                crate::redaction_import::holder_of(&c, self.log.readers(), start, after)?;
+            }
+            StoreMode::Project => {
+                redaction_io::sealed_of(&c, self.log.readers(), after)?;
+            }
+        }
+        let placed = self.log.append_frames(&frames, false)?;
+        self.log
+            .append_marker(start, placed.iter().map(|(_, h)| h))?;
+        self.has_carried = true;
+        self.carried_done = true;
+        Ok(())
     }
 
     /// Checks every dropped frame's authorization against the complete log (see `batch`): a
