@@ -4,9 +4,11 @@ pub mod addr;
 pub mod guard;
 pub mod http;
 pub mod live;
+pub mod profiles;
 pub mod server;
 pub mod sse;
 
+pub use profiles::ensure_profile_site;
 pub use server::SiteServer;
 
 use rdy_engine::engine::SiteWarning;

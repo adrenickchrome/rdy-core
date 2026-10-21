@@ -711,6 +711,9 @@ impl LiveSite {
     /// One wake of the worker: refreshes each target with an open stream, and returns how many
     /// it built. A failure is logged once per run of failures of a target.
     pub fn step(&self, sh: &Shared) -> usize {
+        // every profile-only key against one captured canon state, open pages or not; a key
+        // canon no longer holds has its target removed before anything builds (D-DK03K)
+        sh.profile_sites.inspect(sh);
         let open: Vec<SiteTarget> = lock(&self.inner)
             .scopes
             .iter()
@@ -863,6 +866,21 @@ impl LiveSite {
             let _ = stream.tx.try_send(event);
         }
         stream.checked = true;
+    }
+
+    /// Removes `target`: its build, its key and its memo go, and each open page of it gets
+    /// `Reload` before its stream closes. Taken under the one-build lock, so no build of the
+    /// target is publishing meanwhile; nothing is built.
+    pub(crate) fn remove(&self, target: &SiteTarget) {
+        let target = normalize(target);
+        let _one = lock(&self.building);
+        let gone = lock(&self.inner).scopes.remove(&target);
+        if let Some(s) = gone {
+            for stream in s.streams {
+                // the sender drops here: the stream ends once its queue is read
+                let _ = stream.tx.try_send(LiveEvent::Reload);
+            }
+        }
     }
 
     /// The open streams, across every target.

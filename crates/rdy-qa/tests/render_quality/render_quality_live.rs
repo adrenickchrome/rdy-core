@@ -80,7 +80,7 @@ impl LiveHost {
 /// The source target the site serves under `prefix` (`""`, `~view/<enc>/`, ...), as the site's
 /// guard routes it.
 fn source_target(prefix: &str) -> SiteTarget {
-    let guard = Guard { port: 1, lan: None };
+    let guard = Guard::full(1, None);
     let head = format!("GET /{prefix}index.html HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n");
     match guard.check(&parse_head(head.as_bytes()).unwrap()) {
         Ok(Route::Page { target, .. }) => target,

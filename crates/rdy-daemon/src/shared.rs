@@ -55,6 +55,9 @@ pub struct Shared {
     /// Where the site listens: set once by the daemon's start, after the bind and before
     /// `ready` (ls6). Unset for a `Shared` that no daemon serves.
     pub site_info: OnceLock<SiteInfo>,
+    /// The profile-only listeners this daemon owns (D-DK03K) and the HTTP limits every listener
+    /// shares; filled in by the daemon's start, closed and joined at its stop.
+    pub profile_sites: crate::site::profiles::ProfileSites,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -106,6 +109,7 @@ impl Shared {
                 notify,
                 site,
                 site_info: OnceLock::new(),
+                profile_sites: Default::default(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
@@ -410,10 +414,7 @@ mod tests {
                 format!("proposal:{canonical}"),
             ),
         ];
-        let guard = Guard {
-            port: 51000,
-            lan: None,
-        };
+        let guard = Guard::full(51000, None);
         for (given, want) in cases {
             let v = site_reply(&*e, Some(&given)).unwrap();
             assert_eq!(v["scope"], want.as_str(), "{given}: {v}");

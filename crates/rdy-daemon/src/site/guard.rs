@@ -7,10 +7,24 @@
 use crate::site::http::{Method, Request, Response, text};
 use std::net::Ipv4Addr;
 
-/// What the site answers to: its port, and the one LAN address it is bound to, if any.
+/// What the site answers to: its port, the one LAN address it is bound to, if any, and the mode
+/// its listener serves. The mode is fixed when the listener is made (D-DK03K: "The listener a
+/// request arrives on sets the mode, never a path, a Host header or a link").
 pub struct Guard {
     pub port: u16,
     pub lan: Option<Ipv4Addr>,
+    mode: ListenerMode,
+}
+
+/// What one listener serves: the full site (every scope, profile route and the menu), or the
+/// pages of one profile of canon at its root and nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListenerMode {
+    Full,
+    /// `key` is a folded profile key, or the exact `implicit:org`.
+    ProfileOnly {
+        key: String,
+    },
 }
 
 use rdy_engine::publication::IMPLICIT_ORG;
@@ -54,6 +68,29 @@ pub enum Refusal {
 }
 
 impl Guard {
+    /// The guard of a full listener.
+    pub fn full(port: u16, lan: Option<Ipv4Addr>) -> Guard {
+        Guard {
+            port,
+            lan,
+            mode: ListenerMode::Full,
+        }
+    }
+
+    /// The guard of the profile-only listener of `key` (a folded key, or `implicit:org`).
+    pub fn profile_only(port: u16, lan: Option<Ipv4Addr>, key: String) -> Guard {
+        Guard {
+            port,
+            lan,
+            mode: ListenerMode::ProfileOnly { key },
+        }
+    }
+
+    /// The mode this listener serves, fixed when it was made.
+    pub fn mode(&self) -> &ListenerMode {
+        &self.mode
+    }
+
     /// The `Host` values the site answers to.
     pub fn hosts(&self) -> Vec<String> {
         let port = self.port;
@@ -107,8 +144,11 @@ impl Guard {
             .map(|seg| percent_decode(seg, false))
             .collect::<Option<Vec<_>>>()
             .ok_or(Refusal::NotFound)?;
-        // 6. The routes.
-        route(&r.method, &segments, query)
+        // 6. The routes of the listener's mode.
+        match &self.mode {
+            ListenerMode::Full => route(&r.method, &segments, query),
+            ListenerMode::ProfileOnly { key } => route_only(key, &r.method, &segments, query),
+        }
     }
 
     fn is_own_host(&self, value: &str) -> bool {
@@ -181,6 +221,40 @@ fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<R
     let path = content_path(segments)?;
     Ok(Route::Page {
         target: SiteTarget::Source(ScopeRef::Canon),
+        path,
+    })
+}
+
+/// Routes a path on the profile-only listener of `key`: no `~` route at all (every scope,
+/// profile and menu prefix is the plain not found, D-DK03K), the live script, the event route of
+/// its own pages, and the profile's pages and assets at the root. A page's query is ignored.
+fn route_only(
+    key: &str,
+    method: &Method,
+    segments: &[Vec<u8>],
+    query: Option<&str>,
+) -> Result<Route, Refusal> {
+    if segments[0].starts_with(b"~") {
+        return Err(Refusal::NotFound);
+    }
+    let path = page_path(segments).ok_or(Refusal::NotFound)?;
+    if path == "_rdy/live.js" {
+        return Ok(Route::LiveJs);
+    }
+    if path == "_rdy/events" {
+        if *method == Method::Head {
+            return Err(Refusal::Method);
+        }
+        return events_only(key, query.unwrap_or(""));
+    }
+    if path == "_rdy" || path.starts_with("_rdy/") {
+        return Err(Refusal::NotFound);
+    }
+    let path = content_path(segments)?;
+    Ok(Route::Page {
+        target: SiteTarget::ProfileOnly {
+            key: key.to_string(),
+        },
         path,
     })
 }
@@ -267,6 +341,51 @@ fn versions(query: &str) -> Result<SiteTarget, Refusal> {
 /// the scope (and profile); else a profile is its route under the scope, and no profile the
 /// scope's source. The base `scope=versions` alone is the menu of canon.
 fn events(query: &str) -> Result<Route, Refusal> {
+    let q = event_values(query)?;
+    let target = match (q.scope.clone(), q.profile.clone(), q.menu) {
+        (ScopeRef::Versions, None, false) => SiteTarget::Menu {
+            scope: ScopeRef::Canon,
+            profile: None,
+        },
+        // a nested versions scope is no target
+        (ScopeRef::Versions, _, _) => return Err(Refusal::Malformed),
+        (scope, profile, true) => SiteTarget::Menu { scope, profile },
+        (scope, Some(key), false) => SiteTarget::Profile { scope, key },
+        (scope, None, false) => SiteTarget::Source(scope),
+    };
+    target.validate().map_err(|_| Refusal::Malformed)?;
+    event_route(q, target)
+}
+
+/// The event route on the profile-only listener of `key`, by the same value rules as
+/// [`events`]: a valid event of its pages reads canon, with no menu, and with no profile or its
+/// own (folded) key. A well-formed context that selects any other target is not found; this
+/// check comes before the full listener's combination rules.
+fn events_only(key: &str, query: &str) -> Result<Route, Refusal> {
+    let q = event_values(query)?;
+    let own =
+        q.scope == ScopeRef::Canon && !q.menu && q.profile.as_deref().is_none_or(|p| p == key);
+    if !own {
+        return Err(Refusal::NotFound);
+    }
+    let target = SiteTarget::ProfileOnly {
+        key: key.to_string(),
+    };
+    event_route(q, target)
+}
+
+/// The values of an event query, each read by the first-of-each rule and checked on its own:
+/// the four required ones present, the scope, profile key and menu flag valid.
+struct EventValues {
+    scope: ScopeRef,
+    profile: Option<String>,
+    menu: bool,
+    page: String,
+    rev: String,
+    label: String,
+}
+
+fn event_values(query: &str) -> Result<EventValues, Refusal> {
     let [scope, page, rev, label, profile, menu] =
         first_values(query, ["scope", "page", "rev", "label", "profile", "menu"])?;
     let (Some(scope), Some(page), Some(rev), Some(label)) = (scope, page, rev, label) else {
@@ -282,29 +401,29 @@ fn events(query: &str) -> Result<Route, Refusal> {
         Some("1") => true,
         Some(_) => return Err(Refusal::Malformed),
     };
-    let target = match (scope, profile, menu) {
-        (ScopeRef::Versions, None, false) => SiteTarget::Menu {
-            scope: ScopeRef::Canon,
-            profile: None,
-        },
-        // a nested versions scope is no target
-        (ScopeRef::Versions, _, _) => return Err(Refusal::Malformed),
-        (scope, profile, true) => SiteTarget::Menu { scope, profile },
-        (scope, Some(key), false) => SiteTarget::Profile { scope, key },
-        (scope, None, false) => SiteTarget::Source(scope),
-    };
-    target.validate().map_err(|_| Refusal::Malformed)?;
-    if !is_rev(&rev) || !is_rev(&label) {
+    Ok(EventValues {
+        scope,
+        profile,
+        menu,
+        page,
+        rev,
+        label,
+    })
+}
+
+/// The event route of `target`, once its revisions and page path check.
+fn event_route(q: EventValues, target: SiteTarget) -> Result<Route, Refusal> {
+    if !is_rev(&q.rev) || !is_rev(&q.label) {
         return Err(Refusal::Malformed);
     }
     // The value is decoded once, so each `/` in it separates two segments.
-    let segments: Vec<Vec<u8>> = page.split('/').map(|s| s.as_bytes().to_vec()).collect();
+    let segments: Vec<Vec<u8>> = q.page.split('/').map(|s| s.as_bytes().to_vec()).collect();
     let page = page_path(&segments).ok_or(Refusal::Malformed)?;
     Ok(Route::Events {
         target,
         page,
-        rev,
-        label,
+        rev: q.rev,
+        label: q.label,
     })
 }
 
@@ -429,17 +548,11 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn g() -> Guard {
-        Guard {
-            port: 51000,
-            lan: None,
-        }
+        Guard::full(51000, None)
     }
 
     fn lan() -> Guard {
-        Guard {
-            port: 51000,
-            lan: Some(Ipv4Addr::new(192, 168, 1, 20)),
-        }
+        Guard::full(51000, Some(Ipv4Addr::new(192, 168, 1, 20)))
     }
 
     /// A request head from lines joined by `\n`.
