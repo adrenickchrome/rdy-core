@@ -6,6 +6,7 @@
 //!
 //! `qa-release-package` is the command; [`package`] does the work.
 use crate::platform::{self, RELEASE_CHILD_DEADLINE, RELEASE_CHILD_OUTPUT_MAX};
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -510,12 +511,1029 @@ fn preview_from_version(stdout: &[u8], version: &str) -> Result<bool, String> {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Installing a signed release: `qa-release-install` and [`check`].
+//
+// The checker takes the trusted signer line as input. It verifies the signed `SHA256SUMS` with
+// OpenSSH, then the archive's hash with the native checksum tool, and only then extracts,
+// installs and runs the binary. One command source ([`commands`]) gives both the guide a person
+// follows and the commands the checker runs.
+// ---------------------------------------------------------------------------------------------
+
+/// The release signer's principal in the allowed-signers file.
+pub const RELEASE_PRINCIPAL: &str = "rdy-release";
+/// The SSHSIG namespace of the signed `SHA256SUMS`.
+pub const RELEASE_NAMESPACE: &str = "rdy-release-v1";
+/// The signed checksum manifest.
+pub const MANIFEST_FILE: &str = "SHA256SUMS";
+/// The manifest's signature.
+pub const SIGNATURE_FILE: &str = "SHA256SUMS.sig";
+/// The allowed-signers file the check writes in the download directory.
+pub const SIGNERS_FILE: &str = "release-allowed-signers";
+/// The largest manifest accepted.
+pub const MANIFEST_MAX: u64 = 1024;
+/// The largest signature accepted.
+pub const SIGNATURE_MAX: u64 = 16_384;
+/// The longest signer line accepted, in bytes.
+pub const SIGNER_LINE_MAX: usize = 8192;
+/// The macOS attribute a browser download carries.
+pub const QUARANTINE_ATTRIBUTE: &str = "com.apple.quarantine";
+
+/// `qa-release-install`'s refusal of its arguments (stderr, with an LF; exit 2).
+pub const MSG_INSTALL_INVALID_ARGUMENTS: &str = "release install: invalid arguments";
+/// [`render_commands`]'s refusal of a token it cannot render.
+pub const MSG_INVALID_COMMAND: &str = "invalid release command";
+/// Why a release install test skips when a tool is missing.
+pub const INSTALL_SKIP_REASON: &str =
+    "release install tests require ssh-keygen, tar, install and the native checksum tool";
+/// The rendered browser block's note before downloading.
+pub const SAFARI_NOTE: &str = "In Safari, turn off “Open safe files after downloading” before downloading. Keep the original .tar.gz file.";
+/// The rendered browser block's note about the quarantine attribute.
+pub const QUARANTINE_NOTE: &str = "After both checks pass, remove com.apple.quarantine from the archive before extraction. Skip this command if the archive has no com.apple.quarantine attribute.";
+
+/// The signer line's fixed start: the principal and the namespace option.
+const SIGNER_PREFIX: &str = "rdy-release namespaces=\"rdy-release-v1\" ";
+/// The two key types a release key may have.
+const SIGNER_KEY_TYPES: [&str; 2] = ["ssh-ed25519", "sk-ssh-ed25519@openssh.com"];
+/// The macOS target, the only one with a browser path.
+const MAC_TARGET: &str = TARGETS[0];
+/// The installed check's human actor and the agent session it opens.
+const SMOKE_CONFIG: &str = "actor: human:release-check\n";
+/// The installed check's PATH after the version's bin directory.
+const SMOKE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// The installed report's checks, in order.
+pub const CHECK_NAMES: [&str; 6] = [
+    "signature",
+    "checksums",
+    "install",
+    "version",
+    "daemon",
+    "mcp",
+];
+
+/// What `qa-release-install` checks and installs. Paths are absolute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallInput {
+    /// The directory holding the downloaded archive, `SHA256SUMS` and `SHA256SUMS.sig`.
+    pub download: PathBuf,
+    /// The trusted allowed-signers line, from the README and the release notes.
+    pub signer_line: String,
+    /// The plain version V.
+    pub version: String,
+    /// The 40-hex commit S from the build receipt (its syntax only is checked).
+    pub commit: String,
+    /// The target triple of the archive to install.
+    pub target: String,
+    /// A new directory to extract into; removed afterwards.
+    pub unpack: PathBuf,
+    /// The new version prefix, `.../rdy-V`; it holds `bin/rdy` after a success.
+    pub prefix: PathBuf,
+    /// A macOS browser download: remove the quarantine attribute after both checks.
+    pub browser: bool,
+}
+
+/// One check of the installed report.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ReleaseCheck {
+    pub name: String,
+    pub passed: bool,
+}
+
+/// The report of a successful install.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct InstalledRelease {
+    /// The installed binary, `PREFIX/bin/rdy`.
+    pub binary: PathBuf,
+    pub version: String,
+    pub commit: String,
+    pub target: String,
+    /// The OS, kernel release and hardware name of this machine.
+    pub os: String,
+    pub checks: Vec<ReleaseCheck>,
+    pub skipped: u32,
+}
+
+/// Why a check failed: the stage, or a global limit, or the cleanup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallFailure {
+    Input,
+    Signature,
+    Checksums,
+    Install,
+    Version,
+    Daemon,
+    Mcp,
+    OutputLimit,
+    Deadline,
+    Cleanup,
+}
+
+impl InstallFailure {
+    /// The stage's name in `release install failed: STAGE`.
+    pub fn stage(self) -> &'static str {
+        match self {
+            InstallFailure::Input => "input",
+            InstallFailure::Signature => "signature",
+            InstallFailure::Checksums => "checksums",
+            InstallFailure::Install => "install",
+            InstallFailure::Version => "version",
+            InstallFailure::Daemon => "daemon",
+            InstallFailure::Mcp => "mcp",
+            InstallFailure::OutputLimit => "output_limit",
+            InstallFailure::Deadline => "deadline",
+            InstallFailure::Cleanup => "cleanup",
+        }
+    }
+
+    /// The failure's line, without its LF.
+    pub fn message(self) -> String {
+        format!("release install failed: {}", self.stage())
+    }
+}
+
+/// One command of the install guide: its argv, the directory it runs in and its redirections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuideCommand {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub stdin: Option<PathBuf>,
+    pub stdout: Option<PathBuf>,
+}
+
+impl GuideCommand {
+    fn new(program: &str, args: &[&OsStr], cwd: &Path) -> Self {
+        GuideCommand {
+            program: program.into(),
+            args: args.iter().map(|a| a.to_os_string()).collect(),
+            cwd: cwd.to_path_buf(),
+            stdin: None,
+            stdout: None,
+        }
+    }
+}
+
+/// The stem of the archive for `version` and `target`: the preview family, the only one PRE's
+/// manifest lists.
+fn archive_stem(version: &str, target: &str) -> String {
+    format!("rdy-{version}-preview-{target}")
+}
+
+/// The archive's file name for `version` and `target`.
+pub fn archive_name(version: &str, target: &str) -> String {
+    format!("{}.tar.gz", archive_stem(version, target))
+}
+
+/// The exact `--version` output of a binary from an archive with `stem`: `rdy V (preview)` for
+/// a preview stem, `rdy V` for a plain one; `None` for any other stem.
+fn version_text_of(stem: &str, version: &str, target: &str) -> Option<String> {
+    if stem == format!("rdy-{version}-preview-{target}") {
+        Some(format!("rdy {version} (preview)\n"))
+    } else if stem == format!("rdy-{version}-{target}") {
+        Some(format!("rdy {version}\n"))
+    } else {
+        None
+    }
+}
+
+/// Whether `line` is exactly `rdy-release namespaces="rdy-release-v1" <key-type> <base64>`: at
+/// most [`SIGNER_LINE_MAX`] bytes with no NUL, CR or LF, an Ed25519 or FIDO Ed25519 key that
+/// parses as its stated type, and no comment.
+pub fn valid_signer_line(line: &str) -> bool {
+    if line.len() > SIGNER_LINE_MAX || line.contains(['\0', '\r', '\n']) {
+        return false;
+    }
+    let Some(key) = line.strip_prefix(SIGNER_PREFIX) else {
+        return false;
+    };
+    let Some((kind, base64)) = key.split_once(' ') else {
+        return false;
+    };
+    if !SIGNER_KEY_TYPES.contains(&kind) || base64.is_empty() || base64.contains(' ') {
+        return false;
+    }
+    match ssh_key::PublicKey::from_openssh(key) {
+        Ok(parsed) => {
+            parsed.algorithm().as_str() == kind
+                && parsed.comment().is_empty()
+                && parsed.to_openssh().is_ok_and(|again| again == key)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether `commit` is 40 lowercase hexadecimal digits.
+fn valid_commit(commit: &str) -> bool {
+    commit.len() == 40
+        && commit
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `path` with `.` removed and each `..` applied to the components before it.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether two of `paths` are the same, or one contains another.
+fn overlapping(paths: &[PathBuf]) -> bool {
+    paths.iter().enumerate().any(|(i, a)| {
+        paths[i + 1..]
+            .iter()
+            .any(|b| a == b || a.starts_with(b) || b.starts_with(a))
+    })
+}
+
+/// The guide's commands, by role, for one valid input.
+struct Guide {
+    stem: String,
+    archive: PathBuf,
+    signers: GuideCommand,
+    verify: GuideCommand,
+    checksums: GuideCommand,
+    unquarantine: Option<GuideCommand>,
+    make_dirs: GuideCommand,
+    extract: GuideCommand,
+    make_bin: GuideCommand,
+    install: GuideCommand,
+    version: GuideCommand,
+}
+
+impl Guide {
+    /// The commands in the order a person runs them.
+    fn commands(&self) -> Vec<GuideCommand> {
+        let mut all = vec![
+            self.signers.clone(),
+            self.verify.clone(),
+            self.checksums.clone(),
+        ];
+        all.extend(self.unquarantine.clone());
+        all.extend([
+            self.make_dirs.clone(),
+            self.extract.clone(),
+            self.make_bin.clone(),
+            self.install.clone(),
+            self.version.clone(),
+        ]);
+        all
+    }
+}
+
+/// Checks the grammar of every argument (no filesystem access) and builds the guide.
+fn guide(input: &InstallInput) -> Result<Guide, InstallFailure> {
+    let (v, target) = (input.version.as_str(), input.target.as_str());
+    let paths = [&input.download, &input.unpack, &input.prefix];
+    let grammar = valid_version(v)
+        && valid_target(target)
+        && valid_commit(&input.commit)
+        && valid_signer_line(&input.signer_line)
+        && paths.iter().all(|p| valid_path(p))
+        && input
+            .prefix
+            .file_name()
+            .is_some_and(|n| n == format!("rdy-{v}").as_str())
+        && input.unpack.file_name().is_some()
+        && input.download.file_name().is_some()
+        && !(input.browser && target != MAC_TARGET)
+        && !overlapping(&paths.map(|p| lexical(p)));
+    if !grammar {
+        return Err(InstallFailure::Input);
+    }
+    let download = input.download.as_path();
+    let stem = archive_stem(v, target);
+    let archive = download.join(archive_name(v, target));
+    let (unpack, prefix) = (input.unpack.as_os_str(), input.prefix.as_os_str());
+    let mut signers = GuideCommand::new(
+        "printf",
+        &[r"%s\n".as_ref(), input.signer_line.as_ref()],
+        download,
+    );
+    signers.stdout = Some(download.join(SIGNERS_FILE));
+    let mut verify = GuideCommand::new(
+        "ssh-keygen",
+        &[
+            "-Y",
+            "verify",
+            "-f",
+            SIGNERS_FILE,
+            "-I",
+            RELEASE_PRINCIPAL,
+            "-n",
+            RELEASE_NAMESPACE,
+            "-s",
+            SIGNATURE_FILE,
+        ]
+        .map(OsStr::new),
+        download,
+    );
+    verify.stdin = Some(download.join(MANIFEST_FILE));
+    let checksums = if target == MAC_TARGET {
+        GuideCommand::new(
+            "shasum",
+            &["-a", "256", "-c", "--ignore-missing", MANIFEST_FILE].map(OsStr::new),
+            download,
+        )
+    } else {
+        GuideCommand::new(
+            "sha256sum",
+            &["-c", "--ignore-missing", MANIFEST_FILE].map(OsStr::new),
+            download,
+        )
+    };
+    let unquarantine = input.browser.then(|| {
+        GuideCommand::new(
+            "xattr",
+            &[
+                "-d".as_ref(),
+                QUARANTINE_ATTRIBUTE.as_ref(),
+                archive.as_os_str(),
+            ],
+            download,
+        )
+    });
+    let bin = input.prefix.join("bin");
+    let installed = bin.join("rdy");
+    let extracted = input.unpack.join(&stem).join("rdy");
+    Ok(Guide {
+        verify,
+        checksums,
+        unquarantine,
+        make_dirs: GuideCommand::new("mkdir", &[unpack, prefix], download),
+        extract: GuideCommand::new(
+            "tar",
+            &["-xzf".as_ref(), archive.as_os_str(), "-C".as_ref(), unpack],
+            download,
+        ),
+        make_bin: GuideCommand::new("mkdir", &["-p".as_ref(), bin.as_os_str()], download),
+        install: GuideCommand::new(
+            "install",
+            &[
+                "-m".as_ref(),
+                "755".as_ref(),
+                extracted.as_os_str(),
+                installed.as_os_str(),
+            ],
+            download,
+        ),
+        version: GuideCommand {
+            program: installed.clone().into_os_string(),
+            args: vec!["--version".into()],
+            cwd: download.to_path_buf(),
+            stdin: None,
+            stdout: None,
+        },
+        signers,
+        stem,
+        archive,
+    })
+}
+
+/// The guide's commands for `input`, in order, after a grammar check of every argument. It
+/// touches no path and starts no process. With `browser`, the quarantine removal comes right
+/// before `mkdir`; [`check`] skips it when the archive has no such attribute.
+pub fn commands(input: &InstallInput) -> Result<Vec<GuideCommand>, String> {
+    guide(input)
+        .map(|g| g.commands())
+        .map_err(|_| MSG_INSTALL_INVALID_ARGUMENTS.to_string())
+}
+
+/// One token, single-quoted for a POSIX shell; [`MSG_INVALID_COMMAND`] for a token that is not
+/// UTF-8 or holds NUL, CR or LF.
+fn shell_quote(token: &OsStr) -> Result<String, String> {
+    match token.to_str() {
+        Some(t) if !t.contains(['\0', '\r', '\n']) => Ok(format!("'{}'", t.replace('\'', "'\\''"))),
+        _ => Err(MSG_INVALID_COMMAND.to_string()),
+    }
+}
+
+/// The commands as one shell block: a `cd` to each new working directory, then one line per
+/// command with every token single-quoted and its redirections, the lines joined by ` &&` and
+/// LF, so a command runs only after every one before it succeeded. A block that removes the
+/// quarantine attribute starts with the two browser notes as comments. No final LF.
+pub fn render_commands(commands: &[GuideCommand]) -> Result<String, String> {
+    let mut lines = Vec::new();
+    let mut cwd: Option<&Path> = None;
+    let mut browser = false;
+    for c in commands {
+        browser |= c.program == "xattr" && c.args.first().is_some_and(|a| a == "-d");
+        if cwd != Some(c.cwd.as_path()) {
+            lines.push(format!("cd {}", shell_quote(c.cwd.as_os_str())?));
+            cwd = Some(&c.cwd);
+        }
+        let mut line = shell_quote(&c.program)?;
+        for a in &c.args {
+            line.push(' ');
+            line.push_str(&shell_quote(a)?);
+        }
+        if let Some(from) = &c.stdin {
+            line.push_str(" < ");
+            line.push_str(&shell_quote(from.as_os_str())?);
+        }
+        if let Some(to) = &c.stdout {
+            line.push_str(" > ");
+            line.push_str(&shell_quote(to.as_os_str())?);
+        }
+        lines.push(line);
+    }
+    let mut out = String::new();
+    if browser {
+        out.push_str(&format!("# {SAFARI_NOTE}\n# {QUARANTINE_NOTE}\n"));
+    }
+    out.push_str(&lines.join(" &&\n"));
+    Ok(out)
+}
+
+/// The README's install section for `version` and the public `signer_line`: the macOS, Linux
+/// and macOS browser blocks for the example paths, each rendered by [`render_commands`], then
+/// the PATH instruction. For the README's ready state only.
+pub fn readme_install_section(version: &str, signer_line: &str) -> Result<String, String> {
+    let input = |target: &str, browser: bool| InstallInput {
+        download: PathBuf::from("/path/to/download"),
+        signer_line: signer_line.to_string(),
+        version: version.to_string(),
+        commit: "0".repeat(40),
+        target: target.to_string(),
+        unpack: PathBuf::from("/path/to/unpack"),
+        prefix: PathBuf::from(format!("/path/to/rdy-{version}")),
+        browser,
+    };
+    let block = |target: &str, browser: bool| -> Result<String, String> {
+        Ok(format!(
+            "```sh\n{}\n```\n",
+            render_commands(&commands(&input(target, browser))?)?
+        ))
+    };
+    Ok(format!(
+        "### Install\n\nOn macOS arm64:\n\n{}\nOn Linux amd64:\n\n{}\nOn macOS, for an archive downloaded with Safari:\n\n{}\nAdd the version's bin directory to PATH in this shell.\nReplace `<version-prefix>` with the version prefix, such as `/path/to/rdy-{version}`:\n\n```sh\nexport PATH=\"<version-prefix>/bin:$PATH\"\n```\n",
+        block(TARGETS[0], false)?,
+        block(TARGETS[1], false)?,
+        block(TARGETS[0], true)?,
+    ))
+}
+
+/// What [`check`] reads besides its input; tests swap parts of it.
+struct InstallSetup<'a> {
+    /// This machine's release target.
+    native_target: &'a dyn Fn() -> io::Result<&'static str>,
+    /// This machine's OS line for the report.
+    os: &'a dyn Fn() -> io::Result<String>,
+    /// The process that runs one guide command (tests stand in for a tool here).
+    process: &'a dyn Fn(&GuideCommand) -> Command,
+    /// Where the installed check's scratch directory is made.
+    scratch: PathBuf,
+    /// Each child's output cap, and the MCP session's.
+    max_output: usize,
+    /// Each child's hang guard.
+    deadline: std::time::Duration,
+}
+
+impl InstallSetup<'static> {
+    /// The real check: this machine's target and OS, the real tools, the system temp dir.
+    fn release() -> Self {
+        InstallSetup {
+            native_target: &platform::release_target,
+            os: &platform::release_os,
+            process: &guide_process,
+            scratch: std::env::temp_dir(),
+            max_output: RELEASE_CHILD_OUTPUT_MAX,
+            deadline: RELEASE_CHILD_DEADLINE,
+        }
+    }
+}
+
+/// The process of a guide command: its program and arguments, started in its directory. The
+/// redirections are the check's to give.
+fn guide_process(c: &GuideCommand) -> Command {
+    let mut cmd = Command::new(&c.program);
+    cmd.args(&c.args).current_dir(&c.cwd);
+    cmd
+}
+
+/// A failed child run's class: output overflow and the deadline are global; any other failure
+/// belongs to `stage`.
+fn run_failure(e: &io::Error, stage: InstallFailure) -> InstallFailure {
+    match e.kind() {
+        io::ErrorKind::InvalidData => InstallFailure::OutputLimit,
+        io::ErrorKind::TimedOut => InstallFailure::Deadline,
+        _ => stage,
+    }
+}
+
+/// Runs `cmd` through the bounded runner; a nonzero exit is a failure of `stage`.
+fn run_ok(
+    setup: &InstallSetup,
+    cmd: Command,
+    stdin: Option<File>,
+    stage: InstallFailure,
+) -> Result<Output, InstallFailure> {
+    let out = platform::run_bounded(cmd, stdin, setup.max_output, setup.deadline)
+        .map_err(|e| run_failure(&e, stage))?;
+    if out.status.success() {
+        Ok(out)
+    } else {
+        Err(stage)
+    }
+}
+
+/// Runs the guide command `c` (see [`run_ok`]).
+fn run_guide(
+    setup: &InstallSetup,
+    c: &GuideCommand,
+    stdin: Option<File>,
+    stage: InstallFailure,
+) -> Result<Output, InstallFailure> {
+    run_ok(setup, (setup.process)(c), stdin, stage)
+}
+
+/// The checked download directory.
+struct Download {
+    /// `SHA256SUMS`, open, and the bytes read through that handle.
+    manifest: File,
+    manifest_bytes: Vec<u8>,
+    /// The expected archive names present in DOWNLOAD, in manifest order.
+    present: Vec<String>,
+}
+
+/// A directory this check made, and where.
+struct MadeDir {
+    path: PathBuf,
+    parent: File,
+    name: OsString,
+    dir: File,
+    /// Made by a `mkdir` that failed: removed only while empty.
+    empty_only: bool,
+}
+
+impl MadeDir {
+    /// The directory at `path` when one stands there now.
+    fn find(path: &Path, empty_only: bool) -> Option<MadeDir> {
+        let (parent, name) = (path.parent()?, path.file_name()?);
+        let parent = platform::open_dir(parent).ok()?;
+        let dir = rdy_store::pio::open_dir_at(&parent, name).ok()?;
+        Some(MadeDir {
+            path: path.to_path_buf(),
+            parent,
+            name: name.to_os_string(),
+            dir,
+            empty_only,
+        })
+    }
+
+    /// Removes the directory and what is in it, only while its path still names it; false
+    /// when that fails or the path names another file now.
+    fn remove(self) -> bool {
+        if !platform::holds_file(&self.parent, &self.name, &self.dir).unwrap_or(false) {
+            return false;
+        }
+        if self.empty_only {
+            platform::remove_dir_at(&self.parent, &self.name).is_ok()
+        } else {
+            fs::remove_dir_all(&self.path).is_ok()
+        }
+    }
+}
+
+/// The installed check's scratch directory.
+struct Smoke {
+    dir: tempfile::TempDir,
+    /// False while a daemon may run for its project: it is kept then.
+    stopped: bool,
+}
+
+/// What one check made, which only it may remove.
+struct Owned {
+    /// DOWNLOAD, open, and the signer file this check created in it.
+    download: File,
+    signers: Option<File>,
+    unpack: Option<MadeDir>,
+    prefix: Option<MadeDir>,
+    smoke: Option<Smoke>,
+}
+
+impl Owned {
+    /// Removes the signer file on every exit. After a successful (or no) daemon stop, removes
+    /// UNPACK and the scratch directory, and PREFIX too on failure. When the daemon stop
+    /// failed, the scratch directory and PREFIX stay for a later stop. A failed removal, or a
+    /// kept directory, is the result.
+    fn finish(
+        self,
+        made: Result<InstalledRelease, InstallFailure>,
+    ) -> Result<InstalledRelease, InstallFailure> {
+        let mut clean = true;
+        if let Some(file) = &self.signers {
+            let name = OsStr::new(SIGNERS_FILE);
+            clean &= platform::holds_file(&self.download, name, file).unwrap_or(false)
+                && platform::remove_file_at(&self.download, name).is_ok();
+        }
+        let live = self.smoke.as_ref().is_some_and(|s| !s.stopped);
+        if let Some(unpack) = self.unpack {
+            clean &= unpack.remove();
+        }
+        if let Some(smoke) = self.smoke {
+            if live {
+                // never removed on drop: the project's daemon may still run
+                let _ = smoke.dir.keep();
+                clean = false;
+            } else {
+                clean &= smoke.dir.close().is_ok();
+            }
+        }
+        if let Some(prefix) = self.prefix
+            && made.is_err()
+            && !live
+        {
+            clean &= prefix.remove();
+        }
+        if clean {
+            made
+        } else {
+            Err(InstallFailure::Cleanup)
+        }
+    }
+}
+
+/// Opens `path` (an input in DOWNLOAD) and checks through the handle that it is a regular file
+/// of 1..=`max` bytes.
+fn open_download_file(path: &Path, max: u64) -> Result<File, InstallFailure> {
+    let file = platform::open_input(path).map_err(|_| InstallFailure::Input)?;
+    match file.metadata() {
+        Ok(meta) if meta.is_file() && (1..=max).contains(&meta.len()) => Ok(file),
+        _ => Err(InstallFailure::Input),
+    }
+}
+
+/// Reads `file` from its start, at most `max + 1` bytes.
+fn read_from_start(file: &mut File, max: u64) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek};
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    (&*file)
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Whether nothing stands at `path`, not even a dangling link.
+fn absent(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+}
+
+/// `path` with its existing parent resolved; `None` when the parent is not a directory.
+fn canonical_entry(path: &Path) -> Option<PathBuf> {
+    let (parent, name) = (fs::canonicalize(path.parent()?).ok()?, path.file_name()?);
+    fs::metadata(&parent)
+        .ok()?
+        .is_dir()
+        .then(|| parent.join(name))
+}
+
+/// The filesystem checks, in order: DOWNLOAD is a directory of this user's that no one else
+/// may write; UNPACK and PREFIX are absent with directories as parents; the three do not
+/// overlap once resolved; the signer file is absent; the manifest, the signature and the
+/// selected archive (and the other archive, when present) are regular files within their
+/// caps. Then it creates the signer file. Every failure is [`InstallFailure::Input`].
+fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
+    use InstallFailure::Input;
+    let meta = fs::metadata(&input.download).map_err(|_| Input)?;
+    if !meta.is_dir()
+        || rdy_store::pio::owner(&meta) != rdy_store::pio::own_uid()
+        || rdy_store::pio::is_shared_writable(&meta)
+    {
+        return Err(Input);
+    }
+    if !(absent(&input.unpack) && absent(&input.prefix)) {
+        return Err(Input);
+    }
+    let resolved = [
+        fs::canonicalize(&input.download).map_err(|_| Input)?,
+        canonical_entry(&input.unpack).ok_or(Input)?,
+        canonical_entry(&input.prefix).ok_or(Input)?,
+    ];
+    if overlapping(&resolved) {
+        return Err(Input);
+    }
+    let dir = platform::open_dir(&input.download).map_err(|_| Input)?;
+    if !absent(&input.download.join(SIGNERS_FILE)) {
+        return Err(Input);
+    }
+    let mut manifest = open_download_file(&input.download.join(MANIFEST_FILE), MANIFEST_MAX)?;
+    let manifest_bytes = read_from_start(&mut manifest, MANIFEST_MAX).map_err(|_| Input)?;
+    let read_all = manifest
+        .metadata()
+        .is_ok_and(|m| m.len() == manifest_bytes.len() as u64);
+    if !read_all || manifest_bytes.len() as u64 > MANIFEST_MAX {
+        return Err(Input);
+    }
+    open_download_file(&input.download.join(SIGNATURE_FILE), SIGNATURE_MAX)?;
+    let mut present = Vec::new();
+    for target in TARGETS {
+        let name = archive_name(&input.version, target);
+        let path = input.download.join(&name);
+        if target == input.target || !absent(&path) {
+            open_download_file(&path, ARCHIVE_MAX)?;
+            present.push(name);
+        }
+    }
+    let signers = platform::create_new_at(&dir, OsStr::new(SIGNERS_FILE)).map_err(|_| Input)?;
+    let owned = Owned {
+        download: dir,
+        signers: Some(signers),
+        unpack: None,
+        prefix: None,
+        smoke: None,
+    };
+    Ok((
+        Download {
+            manifest,
+            manifest_bytes,
+            present,
+        },
+        owned,
+    ))
+}
+
+/// Checks the verified manifest: exactly the two archive lines for `version`, in target order,
+/// each 64 lowercase hexadecimal digits, two spaces, the file name and LF.
+fn check_manifest(bytes: &[u8], version: &str) -> Result<(), InstallFailure> {
+    let bad = InstallFailure::Checksums;
+    let text = std::str::from_utf8(bytes).map_err(|_| bad)?;
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    if lines.len() != TARGETS.len() {
+        return Err(bad);
+    }
+    for (line, target) in lines.iter().zip(TARGETS) {
+        let body = line.strip_suffix('\n').ok_or(bad)?;
+        let (hash, rest) = body.split_at_checked(64).ok_or(bad)?;
+        let hex = hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !hex || rest != format!("  {}", archive_name(version, target)) {
+            return Err(bad);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `out` (LF-separated names, as `xattr <file>` prints them) names the quarantine
+/// attribute.
+fn names_quarantine(out: &[u8]) -> bool {
+    out.split(|&b| b == b'\n')
+        .any(|name| name == QUARANTINE_ATTRIBUTE.as_bytes())
+}
+
+/// Checks `input` and installs its release: signature, checksums, install, version, then the
+/// installed CLI and MCP paths in a scratch project. On success PREFIX holds `bin/rdy` and the
+/// report has six passed checks; see the module's guide for the order and the failures.
+pub fn check(input: &InstallInput) -> Result<InstalledRelease, InstallFailure> {
+    check_with(input, &InstallSetup::release())
+}
+
+fn check_with(
+    input: &InstallInput,
+    setup: &InstallSetup,
+) -> Result<InstalledRelease, InstallFailure> {
+    let guide = guide(input)?;
+    match (setup.native_target)() {
+        Ok(native) if native == input.target => {}
+        _ => return Err(InstallFailure::Input),
+    }
+    let os = (setup.os)().map_err(|e| run_failure(&e, InstallFailure::Input))?;
+    let (mut download, mut owned) = inspect(input)?;
+    let made = install_stages(input, &guide, &mut download, setup, &mut owned).map(|()| {
+        InstalledRelease {
+            binary: input.prefix.join("bin").join("rdy"),
+            version: input.version.clone(),
+            commit: input.commit.clone(),
+            target: input.target.clone(),
+            os,
+            checks: CHECK_NAMES
+                .iter()
+                .map(|name| ReleaseCheck {
+                    name: name.to_string(),
+                    passed: true,
+                })
+                .collect(),
+            skipped: 0,
+        }
+    });
+    owned.finish(made)
+}
+
+/// The stages after the input checks, in order.
+fn install_stages(
+    input: &InstallInput,
+    guide: &Guide,
+    download: &mut Download,
+    setup: &InstallSetup,
+    owned: &mut Owned,
+) -> Result<(), InstallFailure> {
+    use InstallFailure::*;
+    use std::io::Write;
+
+    // Signature: the signer file holds printf's bytes; OpenSSH verifies the raw manifest.
+    let printed = run_guide(setup, &guide.signers, None, Signature)?;
+    if printed.stdout != format!("{}\n", input.signer_line).as_bytes() {
+        return Err(Signature);
+    }
+    let signers = owned.signers.as_mut().ok_or(Signature)?;
+    signers
+        .write_all(&printed.stdout)
+        .and_then(|()| signers.sync_all())
+        .map_err(|_| Signature)?;
+    read_from_start(&mut download.manifest, MANIFEST_MAX).map_err(|_| Signature)?;
+    let manifest = {
+        use std::io::Seek;
+        download
+            .manifest
+            .seek(io::SeekFrom::Start(0))
+            .and_then(|_| download.manifest.try_clone())
+            .map_err(|_| Signature)?
+    };
+    run_guide(setup, &guide.verify, Some(manifest), Signature)?;
+    // the bytes OpenSSH verified are the bytes read before
+    if read_from_start(&mut download.manifest, MANIFEST_MAX).map_err(|_| Signature)?
+        != download.manifest_bytes
+    {
+        return Err(Signature);
+    }
+
+    // Checksums: the manifest's grammar, then the native tool, one OK line per present archive.
+    check_manifest(&download.manifest_bytes, &input.version)?;
+    let mut sums = (setup.process)(&guide.checksums);
+    sums.env("LC_ALL", "C");
+    let out = run_ok(setup, sums, None, Checksums)?;
+    let checked = download.present.iter().all(|name| {
+        out.stdout
+            .split(|&b| b == b'\n')
+            .any(|line| line == format!("{name}: OK").as_bytes())
+    });
+    if download.present.is_empty() || !checked {
+        return Err(Checksums);
+    }
+
+    // Install: the quarantine attribute (browser only), then extract, check and install.
+    if let Some(remove) = &guide.unquarantine {
+        let probe = GuideCommand::new("xattr", &[guide.archive.as_os_str()], &input.download);
+        let names = run_guide(setup, &probe, None, Install)?;
+        if names_quarantine(&names.stdout) {
+            run_guide(setup, remove, None, Install)?;
+        }
+    }
+    let made = run_guide(setup, &guide.make_dirs, None, Install);
+    let empty_only = made.is_err();
+    owned.unpack = MadeDir::find(&input.unpack, empty_only);
+    owned.prefix = MadeDir::find(&input.prefix, empty_only);
+    made?;
+    if owned.unpack.is_none() || owned.prefix.is_none() {
+        return Err(Install);
+    }
+    run_guide(setup, &guide.extract, None, Install)?;
+    let extracted = input.unpack.join(&guide.stem).join("rdy");
+    open_download_file(&extracted, BINARY_MAX).map_err(|_| Install)?;
+    run_guide(setup, &guide.make_bin, None, Install)?;
+    run_guide(setup, &guide.install, None, Install)?;
+
+    // Version: the exact text the archive's stem calls for.
+    let want = version_text_of(&guide.stem, &input.version, &input.target).ok_or(Version)?;
+    let out = run_guide(setup, &guide.version, None, Version)?;
+    if out.stdout != want.as_bytes() || !out.stderr.is_empty() {
+        return Err(Version);
+    }
+
+    smoke(&input.prefix.join("bin").join("rdy"), setup, owned)
+}
+
+/// The class of a failed bounded MCP session.
+fn mcp_failure(f: crate::mcp::McpFailure) -> InstallFailure {
+    use crate::mcp::McpFailure;
+    match f {
+        McpFailure::Io | McpFailure::Protocol => InstallFailure::Mcp,
+        McpFailure::OutputLimit => InstallFailure::OutputLimit,
+        McpFailure::Deadline => InstallFailure::Deadline,
+        McpFailure::Cleanup => InstallFailure::Cleanup,
+    }
+}
+
+/// The installed CLI and MCP paths: a new project in a scratch directory, its daemon-backed
+/// status, then an MCP session through the same daemon, then the daemon stop. Every product
+/// command is the installed binary `rdy`, as a human with an isolated config.
+fn smoke(rdy: &Path, setup: &InstallSetup, owned: &mut Owned) -> Result<(), InstallFailure> {
+    use crate::mcp::{McpClient, Reply};
+    use InstallFailure::*;
+    let dir = tempfile::Builder::new()
+        .prefix("rdy-release-check-")
+        .tempdir_in(&setup.scratch)
+        .map_err(|_| Daemon)?;
+    let root = dir.path().to_path_buf();
+    let smoke = owned.smoke.insert(Smoke { dir, stopped: true });
+    let config = root.join("config");
+    fs::create_dir(&config)
+        .and_then(|()| fs::create_dir(config.join("rdy")))
+        .and_then(|()| fs::write(config.join("rdy").join("config.yaml"), SMOKE_CONFIG))
+        .map_err(|_| Daemon)?;
+    let project = root.join("project");
+    let bin = rdy.parent().ok_or(Daemon)?;
+    let mut path = bin.as_os_str().to_os_string();
+    path.push(":");
+    path.push(SMOKE_PATH);
+    let product = |args: &[&OsStr]| {
+        let mut cmd = Command::new(rdy);
+        cmd.args(args)
+            .current_dir(&root)
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .env("PATH", &path)
+            .env("XDG_CONFIG_HOME", &config);
+        cmd
+    };
+    let p = project.as_os_str();
+    run_ok(setup, product(&["init".as_ref(), p]), None, Daemon)?;
+    smoke.stopped = false;
+
+    let checked = (|| {
+        let status = run_ok(
+            setup,
+            product(&[
+                "--project".as_ref(),
+                p,
+                "--json".as_ref(),
+                "status".as_ref(),
+            ]),
+            None,
+            Daemon,
+        )?;
+        serde_json::from_slice::<serde_json::Value>(&status.stdout).map_err(|_| Daemon)?;
+        let mut client = McpClient::try_launch_bounded(
+            product(&["mcp".as_ref(), "--project".as_ref(), p]),
+            setup.max_output,
+        )
+        .map_err(mcp_failure)?;
+        let session = client
+            .try_call(
+                "rdy_session",
+                serde_json::json!({"actor": "agent:release-check", "run": "preview-check", "role": "reader"}),
+            )
+            .map_err(mcp_failure)?;
+        let overview = match session {
+            Reply::Ok(_) => client
+                .try_call("rdy_overview", serde_json::json!({}))
+                .map_err(mcp_failure)?,
+            other => other,
+        };
+        let answered = matches!(&overview, Reply::Ok(v) if v.is_object());
+        client
+            .try_finish(crate::mcp::DEADLINE)
+            .map_err(mcp_failure)?;
+        if answered { Ok(()) } else { Err(Mcp) }
+    })();
+
+    let stop = run_ok(
+        setup,
+        product(&["--project".as_ref(), p, "serve".as_ref(), "--stop".as_ref()]),
+        None,
+        Cleanup,
+    );
+    if stop.is_err() {
+        return Err(Cleanup);
+    }
+    smoke.stopped = true;
+    checked
+}
+
+/// Whether the tools a release install test needs start here: `ssh-keygen`, `tar`, `install`
+/// and the checksum tool of `target`.
+pub fn install_tools_available(target: &str) -> bool {
+    let sums = if target == MAC_TARGET {
+        "shasum"
+    } else {
+        "sha256sum"
+    };
+    ["ssh-keygen", "tar", "install", sums].iter().all(|tool| {
+        let mut cmd = Command::new(tool);
+        cmd.arg("--version");
+        // a tool that runs at all is present, whatever it thinks of the flag
+        platform::run_bounded(cmd, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE).is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::test_support::{fifo, fifo_line, unix_socket};
     use crate::platform::{Expiry, mode_of, run_bounded, run_bounded_inner, shell_script};
     use crate::skip::{self, Why};
+    use std::sync::Mutex;
 
     const V: &str = "0.14.0";
     const TARGET: &str = "aarch64-apple-darwin";
@@ -1522,5 +2540,1393 @@ mod tests {
         ] {
             assert!(!valid_path(Path::new(&bad)), "{bad:?}");
         }
+    }
+
+    // ----- the install check -----
+
+    const IV: &str = "0.14.0";
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    /// The hang guard of a test helper's own tool runs.
+    const GUARD: std::time::Duration = std::time::Duration::from_secs(600);
+    const MCP_INIT: &str =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#;
+    const MCP_SESSION: &str = r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"actor\":\"agent:release-check\"}"}]}}"#;
+    const MCP_OVERVIEW: &str =
+        r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"docs\":[]}"}]}}"#;
+
+    /// The target these tests install: this machine's release target, else Linux amd64, whose
+    /// checksum tool every Linux has (Linux arm64 runs these tests too).
+    fn host_target() -> &'static str {
+        platform::release_target().unwrap_or(TARGETS[1])
+    }
+
+    /// Whether the install tools run here; a skip line when they do not.
+    fn install_tools_or_skip(test: &str) -> bool {
+        if install_tools_available(host_target()) {
+            return true;
+        }
+        skip::skip(test, Why::Prerequisite, INSTALL_SKIP_REASON);
+        false
+    }
+
+    /// Runs `program` with `args`, which must succeed: a test helper's own tool run. Its stdout.
+    fn tool(program: &str, args: &[&OsStr]) -> Vec<u8> {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        let out =
+            run_bounded(cmd, None, 1 << 20, GUARD).unwrap_or_else(|e| panic!("{program}: {e}"));
+        assert!(
+            out.status.success(),
+            "{program} {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// Makes a disposable Ed25519 test key at `key`, with no passphrase; its signer line. It is
+    /// never a release key.
+    fn test_key(key: &Path) -> String {
+        tool(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-C", "", "-f"]
+                .map(OsStr::new)
+                .into_iter()
+                .chain([key.as_os_str()])
+                .collect::<Vec<_>>(),
+        );
+        let public = fs::read_to_string(format!("{}.pub", key.display())).expect("public key");
+        let mut words = public.split_whitespace();
+        let (kind, base64) = (words.next().expect("type"), words.next().expect("key"));
+        format!("{SIGNER_PREFIX}{kind} {base64}")
+    }
+
+    /// Signs `file` with `key` in `namespace` (sha512), replacing `<file>.sig`.
+    fn sign(key: &Path, file: &Path, namespace: &str) {
+        let _ = fs::remove_file(format!("{}.sig", file.display()));
+        tool(
+            "ssh-keygen",
+            &[
+                "-Y".as_ref(),
+                "sign".as_ref(),
+                "-f".as_ref(),
+                key.as_os_str(),
+                "-n".as_ref(),
+                namespace.as_ref(),
+                "-O".as_ref(),
+                "hashalg=sha512".as_ref(),
+                file.as_os_str(),
+            ],
+        );
+    }
+
+    /// The SHA-256 of `file` in lowercase hex, from the host's checksum tool.
+    fn sha256(file: &Path) -> String {
+        let out = if host_target() == MAC_TARGET {
+            tool("shasum", &["-a".as_ref(), "256".as_ref(), file.as_os_str()])
+        } else {
+            tool("sha256sum", &[file.as_os_str()])
+        };
+        String::from_utf8(out).expect("utf-8")[..64].to_string()
+    }
+
+    /// A fake `rdy` (a shell script): it logs each call's arguments to `marker`, prints
+    /// `version` for `--version`, answers the smoke commands and the MCP session, and stops its
+    /// "daemon" with exit `stop`.
+    fn fake_rdy(marker: &Path, version: &str, stop: i32) -> String {
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{marker}'
+case "$1" in
+--version) printf '%s\n' '{version}' ;;
+init) mkdir "$2" ;;
+mcp)
+  read -r l
+  printf '%s\n' '{init}'
+  read -r l
+  read -r l
+  printf '%s\n' '{session}'
+  read -r l
+  printf '%s\n' '{overview}'
+  cat > /dev/null ;;
+--project)
+  case "$3" in
+  --json) printf '%s\n' '{{"views":[]}}' ;;
+  serve) exit {stop} ;;
+  esac ;;
+esac
+"#,
+            marker = marker.display(),
+            init = MCP_INIT,
+            session = MCP_SESSION,
+            overview = MCP_OVERVIEW,
+        )
+    }
+
+    /// A download kit: a private DOWNLOAD holding a test archive for `target` with a fake
+    /// `rdy`, its two-line manifest and the manifest's signature by a disposable key.
+    struct Kit {
+        dir: tempfile::TempDir,
+        download: PathBuf,
+        key: PathBuf,
+        signer: String,
+        target: &'static str,
+        marker: PathBuf,
+        scratch: PathBuf,
+    }
+
+    impl Kit {
+        fn new(target: &'static str) -> Kit {
+            Kit::with_rdy(target, "rdy 0.14.0 (preview)", 0)
+        }
+
+        fn with_rdy(target: &'static str, version: &str, stop: i32) -> Kit {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let download = dir.path().join("down load");
+            let scratch = dir.path().join("scratch");
+            for d in [&download, &scratch, &dir.path().join("pre fix")] {
+                fs::create_dir(d).expect("mkdir");
+            }
+            platform::set_mode(&download, 0o700).expect("private download");
+            fs::write(download.join("keep"), b"sentinel\n").expect("sentinel");
+            let key = dir.path().join("key");
+            let signer = test_key(&key);
+            let marker = dir.path().join("ran");
+            let kit = Kit {
+                download,
+                key,
+                signer,
+                target,
+                marker,
+                scratch,
+                dir,
+            };
+            kit.build_archive(target, &fake_rdy(&kit.marker, version, stop));
+            kit.write_manifest(kit.lines().concat().as_bytes());
+            kit
+        }
+
+        fn archive(&self, target: &str) -> PathBuf {
+            self.download.join(archive_name(IV, target))
+        }
+
+        /// Writes the archive for `target` holding `rdy` and the other three files.
+        fn build_archive(&self, target: &str, rdy: &str) {
+            let stem = archive_stem(IV, target);
+            let src = self.dir.path().join(format!("src-{target}"));
+            let root = src.join(&stem);
+            fs::create_dir_all(&root).expect("mkdir");
+            fs::write(root.join("rdy"), rdy).expect("rdy");
+            platform::set_mode(&root.join("rdy"), 0o755).expect("chmod");
+            fs::write(root.join(MIT_FILE), MIT).expect("mit");
+            fs::write(root.join(APACHE_FILE), APACHE).expect("apache");
+            fs::write(root.join(NOTE_FILE), PREVIEW_NOTE).expect("note");
+            let mut cmd = Command::new("tar");
+            cmd.arg("-czf")
+                .arg(self.archive(target))
+                .arg("-C")
+                .arg(&src)
+                .arg(&stem)
+                .env("COPYFILE_DISABLE", "1");
+            let out = run_bounded(cmd, None, 1 << 20, GUARD).expect("tar");
+            assert!(out.status.success(), "tar");
+        }
+
+        /// The two manifest lines: each present archive's hash, else a stand-in hash.
+        fn lines(&self) -> Vec<String> {
+            TARGETS
+                .iter()
+                .map(|t| {
+                    let a = self.archive(t);
+                    let hash = if a.exists() {
+                        sha256(&a)
+                    } else {
+                        "ab".repeat(32)
+                    };
+                    format!("{hash}  {}\n", archive_name(IV, t))
+                })
+                .collect()
+        }
+
+        /// Writes `bytes` as the manifest and signs it with the kit's key.
+        fn write_manifest(&self, bytes: &[u8]) {
+            let manifest = self.download.join(MANIFEST_FILE);
+            fs::write(&manifest, bytes).expect("manifest");
+            sign(&self.key, &manifest, RELEASE_NAMESPACE);
+        }
+
+        fn input(&self) -> InstallInput {
+            InstallInput {
+                download: self.download.clone(),
+                signer_line: self.signer.clone(),
+                version: IV.into(),
+                commit: COMMIT.into(),
+                target: self.target.into(),
+                unpack: self.dir.path().join("un pack"),
+                prefix: self.dir.path().join("pre fix").join("rdy-0.14.0"),
+                browser: false,
+            }
+        }
+
+        /// Every file in DOWNLOAD with its bytes, sorted.
+        fn download_state(&self) -> Vec<(String, Vec<u8>)> {
+            let mut v: Vec<(String, Vec<u8>)> = names(&self.download)
+                .into_iter()
+                .map(|n| {
+                    let bytes = fs::read(self.download.join(&n)).unwrap_or_default();
+                    (n, bytes)
+                })
+                .collect();
+            v.sort();
+            v
+        }
+
+        /// The fake rdy's call log.
+        fn ran(&self) -> Vec<String> {
+            fs::read_to_string(&self.marker)
+                .map(|t| t.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        }
+
+        /// Asserts that nothing was extracted, installed or run, and that the signer file is
+        /// gone again.
+        fn assert_untouched(&self, input: &InstallInput, what: &str) {
+            assert!(absent(&input.unpack), "{what}: no UNPACK");
+            assert!(absent(&input.prefix), "{what}: no PREFIX");
+            assert!(!self.marker.exists(), "{what}: the binary never ran");
+            assert!(
+                absent(&self.download.join(SIGNERS_FILE)),
+                "{what}: the signer file is removed"
+            );
+            assert!(
+                names(&self.scratch).is_empty(),
+                "{what}: no scratch project"
+            );
+        }
+    }
+
+    /// The test's stand-in for each guide command: the real tool, except the macOS checksum
+    /// command on another host (the native tool instead) and `xattr`, which reports
+    /// `attributes` (a printf text) and removes nothing.
+    fn stand_in(c: &GuideCommand, attributes: &str) -> Command {
+        if c.program == "shasum" && host_target() != MAC_TARGET {
+            let mut cmd = Command::new("sha256sum");
+            cmd.args(["-c", "--ignore-missing", MANIFEST_FILE])
+                .current_dir(&c.cwd);
+            return cmd;
+        }
+        if c.program == "xattr" {
+            return if c.args.first().is_some_and(|a| a == "-d") {
+                shell_script("exit 0")
+            } else {
+                shell_script(&format!("printf '{attributes}'"))
+            };
+        }
+        guide_process(c)
+    }
+
+    /// A guide command's argv as text.
+    fn argv(c: &GuideCommand) -> Vec<String> {
+        std::iter::once(&c.program)
+            .chain(&c.args)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Runs the check of `input` against `kit`, as a machine of the kit's target. `process`
+    /// stands in for the tools; `edit` changes the setup.
+    fn check_kit<'a>(
+        kit: &Kit,
+        input: &InstallInput,
+        process: &'a dyn Fn(&GuideCommand) -> Command,
+        edit: impl FnOnce(&mut InstallSetup<'a>),
+    ) -> Result<InstalledRelease, InstallFailure> {
+        let native: &'static dyn Fn() -> io::Result<&'static str> = if kit.target == MAC_TARGET {
+            &as_mac
+        } else {
+            &as_linux
+        };
+        let mut setup = InstallSetup {
+            native_target: native,
+            os: &platform::release_os,
+            process,
+            scratch: kit.scratch.clone(),
+            max_output: RELEASE_CHILD_OUTPUT_MAX,
+            deadline: RELEASE_CHILD_DEADLINE,
+        };
+        edit(&mut setup);
+        check_with(input, &setup)
+    }
+
+    /// A macOS arm64 machine.
+    fn as_mac() -> io::Result<&'static str> {
+        Ok(TARGETS[0])
+    }
+
+    /// A Linux amd64 machine.
+    fn as_linux() -> io::Result<&'static str> {
+        Ok(TARGETS[1])
+    }
+
+    /// [`check_kit`] with the plain stand-ins and the setup unchanged.
+    fn check_plain(kit: &Kit, input: &InstallInput) -> Result<InstalledRelease, InstallFailure> {
+        check_kit(kit, input, &|c| stand_in(c, ""), |_| {})
+    }
+
+    #[test]
+    fn pre3_openssh_accepts_only_the_trusted_manifest() {
+        if !install_tools_or_skip(&crate::test_name!(
+            "pre3_openssh_accepts_only_the_trusted_manifest"
+        )) {
+            return;
+        }
+        // The trusted key verifies the two-line manifest offline, signed in rdy-release-v1 with
+        // sha512, and the release installs.
+        let kit = Kit::new(host_target());
+        let input = kit.input();
+        assert_eq!(kit.lines().len(), 2);
+        let before = kit.download_state();
+        check_plain(&kit, &input).expect("the trusted manifest");
+        assert_eq!(kit.download_state(), before, "the download is unchanged");
+
+        // Each other key, principal, namespace or manifest byte fails at the signature, before
+        // any line of the manifest is read.
+        let cases: [(&str, fn(&Kit, &mut InstallInput)); 5] = [
+            ("another key", |kit, input| {
+                input.signer_line = test_key(&kit.dir.path().join("other-key"));
+            }),
+            ("another namespace", |kit, _| {
+                sign(
+                    &kit.key,
+                    &kit.download.join(MANIFEST_FILE),
+                    "rdy-release-v2",
+                );
+            }),
+            ("a signature of other bytes", |kit, _| {
+                let other = kit.dir.path().join("other");
+                fs::write(&other, b"other bytes\n").expect("write");
+                sign(&kit.key, &other, RELEASE_NAMESPACE);
+                fs::copy(
+                    kit.dir.path().join("other.sig"),
+                    kit.download.join(SIGNATURE_FILE),
+                )
+                .expect("copy");
+            }),
+            ("a one-byte change of the manifest", |kit, _| {
+                let manifest = kit.download.join(MANIFEST_FILE);
+                let mut bytes = fs::read(&manifest).expect("read");
+                bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+                fs::write(&manifest, bytes).expect("write");
+            }),
+            ("a signature that is not SSHSIG", |kit, _| {
+                fs::write(kit.download.join(SIGNATURE_FILE), b"not a signature\n").expect("write");
+            }),
+        ];
+        for (what, spoil) in cases {
+            let kit = Kit::new(host_target());
+            let mut input = kit.input();
+            spoil(&kit, &mut input);
+            let before = kit.download_state();
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(InstallFailure::Signature),
+                "{what}"
+            );
+            kit.assert_untouched(&input, what);
+            assert_eq!(
+                kit.download_state(),
+                before,
+                "{what}: the download is unchanged"
+            );
+        }
+
+        // The principal: OpenSSH matches the identity to the allowed signer's principal.
+        let kit = Kit::new(host_target());
+        let input = kit.input();
+        let other_principal = |c: &GuideCommand| {
+            let mut c = c.clone();
+            if c.program == "ssh-keygen" {
+                for a in &mut c.args {
+                    if a == RELEASE_PRINCIPAL {
+                        *a = "someone-else".into();
+                    }
+                }
+            }
+            stand_in(&c, "")
+        };
+        assert_eq!(
+            check_kit(&kit, &input, &other_principal, |_| {}).map(|_| ()),
+            Err(InstallFailure::Signature),
+            "another principal"
+        );
+        kit.assert_untouched(&input, "another principal");
+        // ... and a signer line naming another principal or namespace is not a release line.
+        for line in [
+            kit.signer.replacen("rdy-release ", "someone-else ", 1),
+            kit.signer.replacen("rdy-release-v1", "rdy-release-v2", 1),
+        ] {
+            let mut input = kit.input();
+            input.signer_line = line;
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(InstallFailure::Input)
+            );
+        }
+
+        // A missing or empty signature is an input failure.
+        for (what, spoil) in [
+            (
+                "missing",
+                (|p: &Path| fs::remove_file(p).expect("rm")) as fn(&Path),
+            ),
+            ("empty", |p: &Path| fs::write(p, b"").expect("write")),
+        ] {
+            let kit = Kit::new(host_target());
+            let input = kit.input();
+            spoil(&kit.download.join(SIGNATURE_FILE));
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(InstallFailure::Input),
+                "a {what} signature"
+            );
+            kit.assert_untouched(&input, what);
+        }
+    }
+
+    #[test]
+    fn pre3_hash_failures_never_extract_or_execute() {
+        if !install_tools_or_skip(&crate::test_name!(
+            "pre3_hash_failures_never_extract_or_execute"
+        )) {
+            return;
+        }
+        let target = host_target();
+        let selected = TARGETS.iter().position(|t| *t == target).expect("a target");
+        type Spoil = fn(&Kit, usize);
+        let cases: [(&str, Spoil, InstallFailure); 10] = [
+            (
+                "an altered selected archive",
+                |kit, _| {
+                    let a = kit.archive(kit.target);
+                    let mut bytes = fs::read(&a).expect("read");
+                    bytes.push(0);
+                    fs::write(&a, bytes).expect("write");
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "the selected line omitted",
+                |kit, sel| {
+                    let lines = kit.lines();
+                    kit.write_manifest(lines[1 - sel].as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "a line duplicated",
+                |kit, sel| {
+                    let lines = kit.lines();
+                    kit.write_manifest(format!("{0}{0}", lines[sel]).as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "the lines reordered",
+                |kit, _| {
+                    let lines = kit.lines();
+                    kit.write_manifest(format!("{}{}", lines[1], lines[0]).as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "a third line",
+                |kit, _| {
+                    let mut text = kit.lines().concat();
+                    text.push_str(&format!("{}  extra.tar.gz\n", "cd".repeat(32)));
+                    kit.write_manifest(text.as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "CRLF line ends",
+                |kit, _| {
+                    kit.write_manifest(kit.lines().concat().replace('\n', "\r\n").as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "no final LF",
+                |kit, _| {
+                    let text = kit.lines().concat();
+                    kit.write_manifest(text.trim_end_matches('\n').as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+            (
+                "the selected archive missing",
+                |kit, _| fs::remove_file(kit.archive(kit.target)).expect("rm"),
+                InstallFailure::Input,
+            ),
+            (
+                "a failed signature",
+                |kit, _| {
+                    let lines = kit.lines();
+                    fs::write(
+                        kit.download.join(MANIFEST_FILE),
+                        lines.concat().replace("  ", "   "),
+                    )
+                    .expect("write");
+                },
+                InstallFailure::Signature,
+            ),
+            (
+                "a present nonselected archive that does not match",
+                |kit, sel| {
+                    let lines = kit.lines();
+                    fs::write(kit.archive(TARGETS[1 - sel]), b"not the archive\n").expect("write");
+                    kit.write_manifest(lines.concat().as_bytes());
+                },
+                InstallFailure::Checksums,
+            ),
+        ];
+        for (what, spoil, want) in cases {
+            let kit = Kit::new(target);
+            let input = kit.input();
+            spoil(&kit, selected);
+            let before = kit.download_state();
+            assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(want), "{what}");
+            kit.assert_untouched(&input, what);
+            assert_eq!(
+                kit.download_state(),
+                before,
+                "{what}: the download is unchanged"
+            );
+        }
+
+        // The nonselected archive may be absent (the kit's default) or present and right.
+        for present in [false, true] {
+            let kit = Kit::new(target);
+            if present {
+                kit.build_archive(TARGETS[1 - selected], "the other target's binary\n");
+                kit.write_manifest(kit.lines().concat().as_bytes());
+            }
+            let input = kit.input();
+            let report = check_plain(&kit, &input)
+                .unwrap_or_else(|f| panic!("present={present}: {}", f.message()));
+            assert_eq!(report.skipped, 0);
+            assert_eq!(kit.ran().first().map(String::as_str), Some("--version"));
+        }
+    }
+
+    /// A guide command as (program, args, cwd, stdin, stdout) text.
+    type Shown = (String, Vec<String>, String, Option<String>, Option<String>);
+
+    fn shown(c: &GuideCommand) -> Shown {
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        (
+            c.program.to_string_lossy().into_owned(),
+            c.args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+            text(&c.cwd),
+            c.stdin.as_deref().map(text),
+            c.stdout.as_deref().map(text),
+        )
+    }
+
+    /// A signer line from fixed key bytes.
+    fn sample_signer() -> String {
+        let key = ssh_key::PublicKey::new(
+            ssh_key::public::KeyData::Ed25519(ssh_key::public::Ed25519PublicKey([7u8; 32])),
+            "",
+        );
+        format!("{SIGNER_PREFIX}{}", key.to_openssh().expect("openssh"))
+    }
+
+    /// What is wrong with the README's install blocks: in the pending state there are none; in
+    /// the ready state the README holds the generated section for its V and signer line.
+    fn readme_install_problem(readme: &str) -> Result<(), String> {
+        let generated_marks = [
+            "'ssh-keygen' '-Y' 'verify'",
+            "### Install\n",
+            "export PATH=\"<version-prefix>/bin:$PATH\"",
+            "'install' '-m' '755'",
+        ];
+        if readme.contains("Release signing key: pending founder confirmation.") {
+            return match generated_marks.iter().find(|m| readme.contains(**m)) {
+                Some(m) => Err(format!("the pending state holds an install block: {m}")),
+                None => Ok(()),
+            };
+        }
+        let signer = readme
+            .split("### Release signing key\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```text\n").nth(1))
+            .and_then(|rest| rest.lines().next())
+            .ok_or("no signer line in the ready state")?;
+        let v = readme
+            .split("/releases/download/v")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .ok_or("no V in the README")?;
+        let section = readme_install_section(v, signer)?;
+        if readme.contains(&section) {
+            Ok(())
+        } else {
+            Err("the README's install blocks are not the renderer's".into())
+        }
+    }
+
+    #[test]
+    fn pre3_guide_commands_match_execution() {
+        let signer = sample_signer();
+        assert!(valid_signer_line(&signer), "{signer}");
+        let input = |target: &str, browser: bool| InstallInput {
+            download: PathBuf::from("/nowhere/dl dir/it's"),
+            signer_line: signer.clone(),
+            version: IV.into(),
+            commit: COMMIT.into(),
+            target: target.into(),
+            unpack: PathBuf::from("/nowhere/ü unpack"),
+            prefix: PathBuf::from("/nowhere/p p/rdy-0.14.0"),
+            browser,
+        };
+        let dl = "/nowhere/dl dir/it's";
+        let stem = |t: &str| format!("rdy-0.14.0-preview-{t}");
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let want = |target: &str, browser: bool| -> Vec<Shown> {
+            let archive = format!("{dl}/{}.tar.gz", stem(target));
+            let at = |program: &str, args: Vec<String>| -> Shown {
+                (program.into(), args, dl.into(), None, None)
+            };
+            let mut v = vec![
+                (
+                    "printf".into(),
+                    s(&[r"%s\n", &signer]),
+                    dl.into(),
+                    None,
+                    Some(format!("{dl}/release-allowed-signers")),
+                ),
+                (
+                    "ssh-keygen".into(),
+                    s(&[
+                        "-Y",
+                        "verify",
+                        "-f",
+                        "release-allowed-signers",
+                        "-I",
+                        "rdy-release",
+                        "-n",
+                        "rdy-release-v1",
+                        "-s",
+                        "SHA256SUMS.sig",
+                    ]),
+                    dl.into(),
+                    Some(format!("{dl}/SHA256SUMS")),
+                    None,
+                ),
+                if target == MAC_TARGET {
+                    at(
+                        "shasum",
+                        s(&["-a", "256", "-c", "--ignore-missing", "SHA256SUMS"]),
+                    )
+                } else {
+                    at("sha256sum", s(&["-c", "--ignore-missing", "SHA256SUMS"]))
+                },
+            ];
+            if browser {
+                v.push(at("xattr", s(&["-d", "com.apple.quarantine", &archive])));
+            }
+            v.extend([
+                at(
+                    "mkdir",
+                    s(&["/nowhere/ü unpack", "/nowhere/p p/rdy-0.14.0"]),
+                ),
+                at("tar", s(&["-xzf", &archive, "-C", "/nowhere/ü unpack"])),
+                at("mkdir", s(&["-p", "/nowhere/p p/rdy-0.14.0/bin"])),
+                at(
+                    "install",
+                    s(&[
+                        "-m",
+                        "755",
+                        &format!("/nowhere/ü unpack/{}/rdy", stem(target)),
+                        "/nowhere/p p/rdy-0.14.0/bin/rdy",
+                    ]),
+                ),
+                at("/nowhere/p p/rdy-0.14.0/bin/rdy", s(&["--version"])),
+            ]);
+            v
+        };
+        for (target, browser) in [(TARGETS[0], false), (TARGETS[1], false), (TARGETS[0], true)] {
+            let got = commands(&input(target, browser)).expect("commands");
+            assert_eq!(
+                got.iter().map(shown).collect::<Vec<_>>(),
+                want(target, browser),
+                "{target} browser={browser}"
+            );
+        }
+
+        // The rendered block: a cd, then one quoted line per command, each after `&&`.
+        let mac = render_commands(&commands(&input(TARGETS[0], false)).expect("commands"))
+            .expect("render");
+        let q = r"'/nowhere/dl dir/it'\''s'";
+        let qd = r"/nowhere/dl dir/it'\''s";
+        assert_eq!(
+            mac,
+            format!(
+                "cd {q} &&\n\
+                 'printf' '%s\\n' '{signer}' > '{qd}/release-allowed-signers' &&\n\
+                 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '{qd}/SHA256SUMS' &&\n\
+                 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&\n\
+                 'mkdir' '/nowhere/ü unpack' '/nowhere/p p/rdy-0.14.0' &&\n\
+                 'tar' '-xzf' '{qd}/rdy-0.14.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/nowhere/ü unpack' &&\n\
+                 'mkdir' '-p' '/nowhere/p p/rdy-0.14.0/bin' &&\n\
+                 'install' '-m' '755' '/nowhere/ü unpack/rdy-0.14.0-preview-aarch64-apple-darwin/rdy' '/nowhere/p p/rdy-0.14.0/bin/rdy' &&\n\
+                 '/nowhere/p p/rdy-0.14.0/bin/rdy' '--version'"
+            )
+        );
+        for (target, browser) in [(TARGETS[0], false), (TARGETS[1], false), (TARGETS[0], true)] {
+            let cmds = commands(&input(target, browser)).expect("commands");
+            let block = render_commands(&cmds).expect("render");
+            let lines: Vec<&str> = block.lines().filter(|l| !l.starts_with("# ")).collect();
+            assert_eq!(lines.len(), cmds.len() + 1, "a cd and one line per command");
+            assert!(lines[0].starts_with("cd "));
+            let (last, rest) = lines.split_last().expect("lines");
+            assert!(
+                rest.iter().all(|l| l.ends_with(" &&")),
+                "each command runs only after its predecessor succeeded: {block}"
+            );
+            assert!(!last.ends_with("&&"));
+            // verification comes before any extraction, and the quarantine removal before mkdir
+            let at = |word: &str| lines.iter().position(|l| l.starts_with(word)).expect(word);
+            assert!(at("'ssh-keygen'") < at("'tar'"));
+            assert!(at_or(&lines, "'shasum'").min(at_or(&lines, "'sha256sum'")) < at("'tar'"));
+            let notes = format!("# {SAFARI_NOTE}\n# {QUARANTINE_NOTE}\n");
+            if browser {
+                assert!(block.starts_with(&notes), "{block}");
+                assert_eq!(at("'xattr'") + 1, at("'mkdir'"));
+            } else {
+                assert!(!block.contains("xattr") && !block.contains("Safari"));
+            }
+        }
+        // Refused tokens.
+        let mut bad = commands(&input(TARGETS[1], false)).expect("commands");
+        for token in ["a\nb", "a\rb", "a\0b"] {
+            bad[0].args[1] = token.into();
+            assert_eq!(
+                render_commands(&bad),
+                Err(MSG_INVALID_COMMAND.to_string()),
+                "{token:?}"
+            );
+        }
+
+        // Print mode is pure: nonexistent paths are accepted and nothing is made.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pure = input(TARGETS[1], false);
+        pure.download = dir.path().join("no download");
+        pure.unpack = dir.path().join("no unpack");
+        pure.prefix = dir.path().join("no parent").join("rdy-0.14.0");
+        render_commands(&commands(&pure).expect("commands")).expect("render");
+        assert!(names(dir.path()).is_empty(), "print mode makes nothing");
+        assert_eq!(
+            commands(&InstallInput {
+                version: "0.14".into(),
+                ..pure.clone()
+            }),
+            Err(MSG_INSTALL_INVALID_ARGUMENTS.to_string())
+        );
+
+        // printf's bytes are the signer line and one LF.
+        let printf = &commands(&input(TARGETS[1], false)).expect("commands")[0];
+        let mut cmd = guide_process(printf);
+        cmd.current_dir(dir.path());
+        let out = run_bounded(cmd, None, 1 << 20, GUARD).expect("printf");
+        assert_eq!(out.stdout, format!("{signer}\n").into_bytes());
+
+        // The README: no install block while the key is pending; the generated section when
+        // ready.
+        let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
+        assert_eq!(readme_install_problem(&readme), Ok(()), "the real README");
+        let pending = "Release signing key: pending founder confirmation.\n\
+                       Preview downloads are not ready.\n\
+                       Do not install a preview until this README and its GitHub release notes show the same key and fingerprint.\n";
+        let synthetic = format!(
+            "# rdy\n\nhttps://github.com/x/releases/download/v{IV}/SHA256SUMS\n\n{pending}"
+        );
+        assert_eq!(readme_install_problem(&synthetic), Ok(()));
+        let section = readme_install_section(IV, &signer).expect("section");
+        assert!(readme_install_problem(&format!("{synthetic}\n{section}")).is_err());
+        let ready = synthetic.replace(
+            pending,
+            &format!("### Release signing key\n\n```text\n{signer}\n```\n\n{section}"),
+        );
+        assert_eq!(readme_install_problem(&ready), Ok(()));
+        for block in [render_commands(
+            &commands(&InstallInput {
+                download: "/path/to/download".into(),
+                unpack: "/path/to/unpack".into(),
+                prefix: "/path/to/rdy-0.14.0".into(),
+                ..input(TARGETS[0], false)
+            })
+            .expect("commands"),
+        )
+        .expect("render")]
+        {
+            assert!(
+                section.contains(&format!("```sh\n{block}\n```\n")),
+                "{section}"
+            );
+        }
+        assert!(section.contains("Add the version's bin directory to PATH in this shell.\n"));
+        let edited = ready.replacen("'--version'", "'-V'", 1);
+        assert!(
+            readme_install_problem(&edited).is_err(),
+            "a hand edit is caught"
+        );
+    }
+
+    /// The position of the first of `lines` that starts with `word`, else past the end.
+    fn at_or(lines: &[&str], word: &str) -> usize {
+        lines
+            .iter()
+            .position(|l| l.starts_with(word))
+            .unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn pre3_browser_quarantine_removal_follows_both_checks() {
+        if !install_tools_or_skip(&crate::test_name!(
+            "pre3_browser_quarantine_removal_follows_both_checks"
+        )) {
+            return;
+        }
+        // Both attribute branches, on the macOS target, with xattr stood in for.
+        for (attributes, removes) in [
+            (r"com.apple.provenance\ncom.apple.quarantine\n", true),
+            (r"com.apple.provenance\n", false),
+        ] {
+            let kit = Kit::new(MAC_TARGET);
+            let mut input = kit.input();
+            input.browser = true;
+            let log = Mutex::new(Vec::new());
+            let process = |c: &GuideCommand| {
+                log.lock().unwrap_or_else(|e| e.into_inner()).push(argv(c));
+                stand_in(c, attributes)
+            };
+            check_kit(&kit, &input, &process, |_| {}).unwrap_or_else(|f| panic!("{}", f.message()));
+            let ran: Vec<Vec<String>> = log.into_inner().unwrap_or_else(|e| e.into_inner());
+            let programs: Vec<&str> = ran.iter().map(|a| a[0].as_str()).collect();
+            let archive = kit.archive(MAC_TARGET).to_string_lossy().into_owned();
+            let mut want = vec!["printf", "ssh-keygen", "shasum", "xattr"];
+            if removes {
+                want.push("xattr");
+            }
+            want.extend(["mkdir", "tar", "mkdir", "install"]);
+            assert_eq!(&programs[..want.len()], &want[..], "{ran:?}");
+            assert_eq!(
+                ran[3],
+                vec!["xattr".to_string(), archive.clone()],
+                "the probe"
+            );
+            if removes {
+                assert_eq!(
+                    ran[4],
+                    vec![
+                        "xattr".into(),
+                        "-d".into(),
+                        QUARANTINE_ATTRIBUTE.into(),
+                        archive
+                    ]
+                );
+            }
+            assert_eq!(
+                programs.len(),
+                want.len() + 1,
+                "then the version: {programs:?}"
+            );
+        }
+        // No xattr call before both checks pass.
+        for spoil in [
+            (|kit: &Kit| {
+                let a = kit.archive(MAC_TARGET);
+                let mut bytes = fs::read(&a).expect("read");
+                bytes.push(0);
+                fs::write(&a, bytes).expect("write");
+            }) as fn(&Kit),
+            |kit: &Kit| fs::write(kit.download.join(SIGNATURE_FILE), b"bad\n").expect("write"),
+        ] {
+            let kit = Kit::new(MAC_TARGET);
+            let mut input = kit.input();
+            input.browser = true;
+            spoil(&kit);
+            let log = Mutex::new(Vec::new());
+            let process = |c: &GuideCommand| {
+                log.lock().unwrap_or_else(|e| e.into_inner()).push(argv(c));
+                stand_in(c, r"com.apple.quarantine\n")
+            };
+            assert!(check_kit(&kit, &input, &process, |_| {}).is_err());
+            let ran = log.into_inner().unwrap_or_else(|e| e.into_inner());
+            assert!(ran.iter().all(|a| a[0] != "xattr"), "{ran:?}");
+            kit.assert_untouched(&input, "a failed check");
+        }
+        // A failed probe or removal is an install failure.
+        for failing in ["probe", "removal"] {
+            let kit = Kit::new(MAC_TARGET);
+            let mut input = kit.input();
+            input.browser = true;
+            let process = |c: &GuideCommand| {
+                let removal = c.args.first().is_some_and(|a| a == "-d");
+                if c.program == "xattr" && (removal == (failing == "removal")) {
+                    return shell_script("exit 1");
+                }
+                stand_in(c, r"com.apple.quarantine\n")
+            };
+            assert_eq!(
+                check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+                Err(InstallFailure::Install),
+                "a failed {failing}"
+            );
+            kit.assert_untouched(&input, failing);
+        }
+    }
+
+    #[test]
+    fn pre3_bounds_and_owned_cleanup() {
+        if !install_tools_or_skip(&crate::test_name!("pre3_bounds_and_owned_cleanup")) {
+            return;
+        }
+        use InstallFailure::*;
+        let target = host_target();
+
+        // Grammar, each at N and N+1 where it has a bound.
+        let kit = Kit::new(target);
+        let grammar = |edit: &dyn Fn(&mut InstallInput)| {
+            let mut input = kit.input();
+            edit(&mut input);
+            guide(&input).map(|_| ())
+        };
+        let long = |len: usize| {
+            let tail = "/rdy-0.14.0";
+            PathBuf::from(format!("/{}{tail}", "a".repeat(len - 1 - tail.len())))
+        };
+        assert_eq!(grammar(&|i| i.prefix = long(4096)), Ok(()));
+        assert_eq!(grammar(&|i| i.prefix = long(4097)), Err(Input));
+        let over = format!(
+            "{SIGNER_PREFIX}ssh-ed25519 {}",
+            "A".repeat(8193 - SIGNER_PREFIX.len() - 12)
+        );
+        assert_eq!(over.len(), 8193);
+        assert!(!valid_signer_line(&over));
+        type Edit = fn(&mut InstallInput);
+        let refused: [(&str, Edit); 17] = [
+            ("a signer line one byte over", |i| {
+                i.signer_line = format!(
+                    "{SIGNER_PREFIX}ssh-ed25519 {}",
+                    "A".repeat(8193 - SIGNER_PREFIX.len() - 12)
+                );
+            }),
+            ("a signer comment", |i| i.signer_line.push_str(" me@host")),
+            ("a signer of another key type", |i| {
+                i.signer_line = i.signer_line.replacen("ssh-ed25519", "ssh-rsa", 1);
+            }),
+            ("a signer type that disagrees with its key", |i| {
+                i.signer_line =
+                    i.signer_line
+                        .replacen("ssh-ed25519", "sk-ssh-ed25519@openssh.com", 1);
+            }),
+            ("a signer with a CR", |i| i.signer_line.push('\r')),
+            ("a version of eleven minor digits", |i| {
+                i.version = "0.12345678901.0".into()
+            }),
+            ("a commit of 39 digits", |i| i.commit.truncate(39)),
+            ("a commit of 41 digits", |i| i.commit.push('0')),
+            ("an uppercase commit", |i| {
+                i.commit = i.commit.to_uppercase()
+            }),
+            ("another target", |i| {
+                i.target = "aarch64-unknown-linux-gnu".into()
+            }),
+            ("a relative download", |i| i.download = "down load".into()),
+            ("a prefix not named rdy-V", |i| {
+                i.prefix.set_file_name("rdy-0.15.0")
+            }),
+            ("UNPACK inside DOWNLOAD", |i| {
+                i.unpack = i.download.join("x")
+            }),
+            ("PREFIX inside UNPACK", |i| {
+                i.prefix = i.unpack.join("rdy-0.14.0")
+            }),
+            ("UNPACK as DOWNLOAD, spelled with ..", |i| {
+                i.unpack = i
+                    .download
+                    .join("..")
+                    .join(i.download.file_name().expect("name"));
+            }),
+            ("UNPACK with a NUL", |i| {
+                i.unpack = PathBuf::from("/tmp/a\0b")
+            }),
+            ("the browser path on Linux", |i| {
+                i.target = TARGETS[1].into();
+                i.browser = true;
+            }),
+        ];
+        let before = kit.download_state();
+        for (what, edit) in refused {
+            let mut input = kit.input();
+            edit(&mut input);
+            assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Input), "{what}");
+            kit.assert_untouched(&kit.input(), what);
+            assert_eq!(
+                kit.download_state(),
+                before,
+                "{what}: the download is unchanged"
+            );
+        }
+
+        // Files in DOWNLOAD: N passes the input checks (and fails the signature), N+1 does not.
+        for (name, max) in [
+            (MANIFEST_FILE, MANIFEST_MAX),
+            (SIGNATURE_FILE, SIGNATURE_MAX),
+        ] {
+            for (len, want) in [(max, Signature), (max + 1, Input)] {
+                let kit = Kit::new(target);
+                fs::write(kit.download.join(name), vec![b'x'; len as usize]).expect("write");
+                let input = kit.input();
+                assert_eq!(
+                    check_plain(&kit, &input).map(|_| ()),
+                    Err(want),
+                    "{name} of {len}"
+                );
+                kit.assert_untouched(&input, name);
+            }
+        }
+        for (len, want) in [(ARCHIVE_MAX, Signature), (ARCHIVE_MAX + 1, Input)] {
+            let kit = Kit::new(target);
+            fs::write(kit.download.join(SIGNATURE_FILE), b"bad\n").expect("write");
+            let file = File::options()
+                .write(true)
+                .open(kit.archive(target))
+                .expect("open");
+            file.set_len(len).expect("sparse archive");
+            let input = kit.input();
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(want),
+                "an archive of {len}"
+            );
+            kit.assert_untouched(&input, "archive");
+        }
+
+        // Symlinks, a directory, a non-directory DOWNLOAD and a shared one.
+        type Fs = fn(&Kit, &InstallInput);
+        let fs_cases: [(&str, Fs); 11] = [
+            ("a symlinked manifest", |k, _| {
+                link_in_place(&k.download.join(MANIFEST_FILE))
+            }),
+            ("a symlinked signature", |k, _| {
+                link_in_place(&k.download.join(SIGNATURE_FILE))
+            }),
+            ("a symlinked archive", |k, _| {
+                link_in_place(&k.archive(k.target))
+            }),
+            ("a symlinked other archive", |k, _| {
+                let other = TARGETS.iter().find(|t| **t != k.target).expect("other");
+                platform::symlink(&k.archive(k.target), &k.archive(other)).expect("symlink");
+            }),
+            ("an archive that is a directory", |k, _| {
+                let a = k.archive(k.target);
+                fs::remove_file(&a).expect("rm");
+                fs::create_dir(&a).expect("mkdir");
+            }),
+            ("a shared DOWNLOAD", |k, _| {
+                platform::set_mode(&k.download, 0o770).expect("chmod")
+            }),
+            ("an occupied signer file", |k, _| {
+                fs::write(k.download.join(SIGNERS_FILE), b"sentinel\n").expect("write");
+            }),
+            ("an occupied UNPACK", |_, i| {
+                fs::create_dir(&i.unpack).expect("mkdir");
+                fs::write(i.unpack.join("keep"), b"sentinel\n").expect("write");
+            }),
+            ("an occupied PREFIX", |_, i| {
+                fs::create_dir(&i.prefix).expect("mkdir");
+                fs::write(i.prefix.join("keep"), b"sentinel\n").expect("write");
+            }),
+            ("a dangling link at PREFIX", |k, i| {
+                platform::symlink(&k.dir.path().join("nowhere"), &i.prefix).expect("symlink");
+            }),
+            ("UNPACK under a link to DOWNLOAD", |k, _| {
+                platform::symlink(&k.download, &k.dir.path().join("link")).expect("symlink");
+            }),
+        ];
+        for (what, prepare) in fs_cases {
+            let kit = Kit::new(target);
+            let mut input = kit.input();
+            if what == "UNPACK under a link to DOWNLOAD" {
+                input.unpack = kit.dir.path().join("link").join("x");
+            }
+            prepare(&kit, &input);
+            let before = kit.download_state();
+            let unpack_before = state_of(&input.unpack);
+            let prefix_before = state_of(&input.prefix);
+            assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Input), "{what}");
+            assert_eq!(
+                kit.download_state(),
+                before,
+                "{what}: the download is unchanged"
+            );
+            assert_eq!(
+                state_of(&input.unpack),
+                unpack_before,
+                "{what}: UNPACK is unchanged"
+            );
+            assert_eq!(
+                state_of(&input.prefix),
+                prefix_before,
+                "{what}: PREFIX is unchanged"
+            );
+            assert!(!kit.marker.exists(), "{what}: nothing ran");
+        }
+        let kit = Kit::new(target);
+        let mut input = kit.input();
+        input.unpack = kit.dir.path().join("no parent").join("x");
+        assert_eq!(
+            check_plain(&kit, &input).map(|_| ()),
+            Err(Input),
+            "UNPACK without a parent"
+        );
+        input = kit.input();
+        input.download = kit.download.join(MANIFEST_FILE);
+        assert_eq!(
+            check_plain(&kit, &input).map(|_| ()),
+            Err(Input),
+            "DOWNLOAD is a file"
+        );
+
+        // The machine: another target, an unknown one, or a failed OS probe.
+        let kit = Kit::new(target);
+        let input = kit.input();
+        let other = TARGETS
+            .iter()
+            .copied()
+            .find(|t| *t != target)
+            .expect("other");
+        let wrong = move || Ok(other);
+        let unsupported = || -> io::Result<&'static str> {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "no release"))
+        };
+        let no_os = || -> io::Result<String> { Err(io::Error::other("uname failed")) };
+        let late_os =
+            || -> io::Result<String> { Err(io::Error::new(io::ErrorKind::TimedOut, "late")) };
+        let process = |c: &GuideCommand| stand_in(c, "");
+        let results = [
+            (
+                "another native target",
+                Input,
+                check_kit(&kit, &input, &process, |s| s.native_target = &wrong),
+            ),
+            (
+                "an unsupported machine",
+                Input,
+                check_kit(&kit, &input, &process, |s| s.native_target = &unsupported),
+            ),
+            (
+                "a failed OS probe",
+                Input,
+                check_kit(&kit, &input, &process, |s| s.os = &no_os),
+            ),
+            (
+                "an OS probe past its deadline",
+                Deadline,
+                check_kit(&kit, &input, &process, |s| s.os = &late_os),
+            ),
+        ];
+        for (what, want, got) in results {
+            assert_eq!(got.map(|_| ()), Err(want), "{what}");
+            kit.assert_untouched(&input, what);
+        }
+
+        // Bounded children: output past the cap, and a child past its deadline (injected).
+        let noisy = |c: &GuideCommand| {
+            if c.program == "ssh-keygen" {
+                return shell_script("head -c 1048577 /dev/zero");
+            }
+            stand_in(c, "")
+        };
+        let hanging = |c: &GuideCommand| {
+            if c.program == "ssh-keygen" {
+                return shell_script("exec sleep 1000");
+            }
+            stand_in(c, "")
+        };
+        for (what, want, process, deadline) in [
+            (
+                "output past the cap",
+                OutputLimit,
+                &noisy as &dyn Fn(&GuideCommand) -> Command,
+                RELEASE_CHILD_DEADLINE,
+            ),
+            (
+                "a child past its deadline",
+                Deadline,
+                &hanging,
+                std::time::Duration::ZERO,
+            ),
+        ] {
+            let kit = Kit::new(target);
+            let input = kit.input();
+            let before = kit.download_state();
+            assert_eq!(
+                check_kit(&kit, &input, process, |s| s.deadline = deadline).map(|_| ()),
+                Err(want),
+                "{what}"
+            );
+            kit.assert_untouched(&input, what);
+            assert_eq!(
+                kit.download_state(),
+                before,
+                "{what}: the download is unchanged"
+            );
+        }
+
+        // A failure after the install removes what this run made, and nothing else.
+        let kit = Kit::with_rdy(target, "rdy 0.15.0 (preview)", 0);
+        let input = kit.input();
+        fs::write(kit.dir.path().join("pre fix").join("keep"), b"sentinel\n").expect("sentinel");
+        assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Version));
+        assert_eq!(kit.ran(), ["--version"], "only the version check ran");
+        assert!(
+            absent(&input.unpack) && absent(&input.prefix),
+            "UNPACK and PREFIX are removed"
+        );
+        assert_eq!(
+            names(&kit.dir.path().join("pre fix")),
+            ["keep"],
+            "PREFIX's parent is kept"
+        );
+        assert!(absent(&kit.download.join(SIGNERS_FILE)));
+        assert!(names(&kit.scratch).is_empty());
+
+        // A failed daemon stop: the scratch project and PREFIX stay for a later stop.
+        let kit = Kit::with_rdy(target, "rdy 0.14.0 (preview)", 1);
+        let input = kit.input();
+        assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Cleanup));
+        let kept = names(&kit.scratch);
+        assert_eq!(kept.len(), 1, "one scratch directory is kept: {kept:?}");
+        let project = kit.scratch.join(&kept[0]).join("project");
+        assert!(project.is_dir(), "the owned project is kept");
+        assert!(
+            input.prefix.join("bin").join("rdy").is_file(),
+            "PREFIX is kept"
+        );
+        assert!(absent(&input.unpack), "UNPACK is removed");
+        assert!(
+            absent(&kit.download.join(SIGNERS_FILE)),
+            "the signer file is removed"
+        );
+        let ran = kit.ran();
+        assert_eq!(
+            ran.last().map(String::as_str),
+            Some(format!("--project {} serve --stop", project.display()).as_str())
+        );
+    }
+
+    /// What stands at `p`: nothing, a link and its target, a file's bytes or a directory's tree.
+    fn state_of(p: &Path) -> String {
+        match fs::symlink_metadata(p) {
+            Err(_) => "absent".into(),
+            Ok(m) if m.file_type().is_symlink() => format!("a link to {:?}", fs::read_link(p)),
+            Ok(m) if m.is_dir() => format!("a directory {:?}", tree_of(p)),
+            Ok(_) => format!("a file {:?}", fs::read(p)),
+        }
+    }
+
+    /// Replaces the file `p` with a symlink to its moved copy.
+    fn link_in_place(p: &Path) {
+        let real = p.with_extension("real");
+        fs::rename(p, &real).expect("mv");
+        platform::symlink(&real, p).expect("symlink");
+    }
+
+    #[test]
+    fn pre3_check_installs_and_runs_the_smoke_path() {
+        if !install_tools_or_skip(&crate::test_name!(
+            "pre3_check_installs_and_runs_the_smoke_path"
+        )) {
+            return;
+        }
+        let kit = Kit::new(host_target());
+        let input = kit.input();
+        let report = check_plain(&kit, &input).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!(report.binary, input.prefix.join("bin").join("rdy"));
+        assert_eq!(
+            (report.version.as_str(), report.commit.as_str()),
+            (IV, COMMIT)
+        );
+        assert_eq!(report.target, host_target());
+        assert_eq!(report.os, platform::release_os().expect("os"));
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .map(|c| (c.name.as_str(), c.passed))
+                .collect::<Vec<_>>(),
+            CHECK_NAMES.iter().map(|n| (*n, true)).collect::<Vec<_>>()
+        );
+        assert_eq!(report.skipped, 0);
+        let json = serde_json::to_string(&report).expect("json");
+        assert!(json.starts_with("{\"binary\":"), "{json}");
+        let keys: Vec<String> = serde_json::from_str::<serde_json::Value>(&json)
+            .expect("json")
+            .as_object()
+            .expect("object")
+            .keys()
+            .cloned()
+            .collect();
+        let mut want = [
+            "binary", "version", "commit", "target", "os", "checks", "skipped",
+        ];
+        let in_order = json.match_indices("\":").count();
+        assert!(in_order >= want.len());
+        want.sort();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(sorted, want);
+        // PREFIX holds only bin/rdy, the archive's binary; UNPACK, the signer file and the
+        // scratch project are gone.
+        assert_eq!(
+            tree_of(&input.prefix)
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            ["bin", "bin/rdy"]
+        );
+        assert_eq!(
+            fs::read(input.prefix.join("bin").join("rdy")).expect("installed"),
+            fake_rdy(&kit.marker, "rdy 0.14.0 (preview)", 0).into_bytes()
+        );
+        assert_eq!(
+            mode_of(&input.prefix.join("bin").join("rdy")).expect("mode"),
+            0o755
+        );
+        assert!(absent(&input.unpack));
+        assert!(absent(&kit.download.join(SIGNERS_FILE)));
+        assert!(
+            names(&kit.scratch).is_empty(),
+            "the scratch project is removed"
+        );
+        // The installed binary ran the version check, then the CLI and MCP paths on one
+        // project, then the stop.
+        let ran = kit.ran();
+        assert_eq!(ran.len(), 5, "{ran:?}");
+        assert_eq!(ran[0], "--version");
+        let project = ran[1].strip_prefix("init ").expect("init").to_string();
+        assert!(
+            project.starts_with(&kit.scratch.to_string_lossy().into_owned()),
+            "{project}"
+        );
+        assert_eq!(ran[2], format!("--project {project} --json status"));
+        assert_eq!(ran[3], format!("mcp --project {project}"));
+        assert_eq!(ran[4], format!("--project {project} serve --stop"));
     }
 }
