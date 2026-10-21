@@ -713,6 +713,83 @@ fn spv7_same_key_concurrent_starts_return_one_port() {
     assert!(page(guide, "manual/intro.html").contains("INTRO-ONLY-1"));
 }
 
+/// The report of a failed retry: the original error, then one fresh bind probe per candidate
+/// port, in the order given. The probes run after the failure, so they show what the ports look
+/// like now; they are not the daemon's own bind errors.
+fn retry_failure(
+    e: &RdyError,
+    ports: &[u16],
+    mut probe: impl FnMut(SocketAddr) -> std::io::Result<()>,
+) -> String {
+    let mut lines = vec![
+        format!("profile site retry failed: {}: {}", e.code, e.message),
+        format!("fix: {}", e.fix),
+        "post-failure IPv4 bind probes (candidate order):".to_string(),
+    ];
+    for &port in ports {
+        let at = sock(port);
+        let seen = match probe(at) {
+            Ok(()) => "bound".to_string(),
+            Err(error) => format!("{:?}", error.kind()),
+        };
+        lines.push(format!("{at}: {seen}"));
+    }
+    lines.join("\n")
+}
+
+#[test]
+fn plb4_retry_failure_reports_each_candidate() {
+    use std::io::{Error, ErrorKind};
+    let e = RdyError::new("E_SITE", "retry message", "retry fix");
+    let ports: Vec<u16> = (49152..=49167).collect();
+    let mut seen = Vec::new();
+    let report = retry_failure(&e, &ports, |at| {
+        let n = seen.len();
+        seen.push(at);
+        match n % 4 {
+            0 => Err(Error::from(ErrorKind::AddrInUse)),
+            1 => Err(Error::from(ErrorKind::PermissionDenied)),
+            2 => Err(Error::other("probe failed")),
+            _ => Ok(()),
+        }
+    });
+    let want_probed: Vec<SocketAddr> = ports.iter().map(|p| sock(*p)).collect();
+    assert_eq!(seen, want_probed, "every address is probed once, in order");
+    let names = ["AddrInUse", "PermissionDenied", "Other", "bound"];
+    let mut want = vec![
+        "profile site retry failed: E_SITE: retry message".to_string(),
+        "fix: retry fix".to_string(),
+        "post-failure IPv4 bind probes (candidate order):".to_string(),
+    ];
+    for (i, port) in ports.iter().enumerate() {
+        want.push(format!("127.0.0.1:{port}: {}", names[i % 4]));
+    }
+    assert_eq!(want.len(), 19);
+    assert_eq!(report, want.join("\n"));
+    assert!(!report.ends_with('\n'));
+}
+
+#[test]
+fn plb4_recorder_clears_on_unwind() {
+    let dir = tempfile::tempdir().unwrap();
+    let weak = Mutex::new(None);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rec = Recorder::on(dir.path());
+        *weak.lock().unwrap() = Some(Arc::downgrade(&rec.all));
+        // Outside every mutex guard, so no mutex is poisoned.
+        panic!("unwind with the recorder installed");
+    }));
+    assert!(out.is_err(), "the closure panicked");
+    let weak = weak
+        .into_inner()
+        .unwrap()
+        .expect("the recorder was installed");
+    assert!(
+        weak.upgrade().is_none(),
+        "the hook and the recorder held the only strong references"
+    );
+}
+
 #[test]
 fn spv7_failed_open_allocates_no_profile_site() {
     let w = world();
@@ -769,9 +846,18 @@ fn spv7_failed_open_allocates_no_profile_site() {
         "{:?}",
         rec.logs()
     );
-    // the ports free again: the same key opens, so the failure kept nothing
+    // the test releases its own sockets and retries; it cannot promise the ports are free
     drop(held);
-    let other = ensure_profile_site(Arc::clone(&sh), "other").unwrap();
+    let other = match ensure_profile_site(Arc::clone(&sh), "other") {
+        Ok(info) => info,
+        Err(e) => {
+            // Probes run only after the failure; each socket closes at once.
+            let report = retry_failure(&e, &profile_candidates(&root, "other"), |at| {
+                TcpListener::bind(at).map(drop)
+            });
+            panic!("{report}");
+        }
+    };
     assert_eq!(sh.profile_sites.keys(), vec!["other".to_string()]);
     assert!(page(port_of(&url_of(&other)), "secret.html").contains("SECRET-WORDS"));
 
