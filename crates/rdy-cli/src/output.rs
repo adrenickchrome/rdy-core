@@ -31,6 +31,16 @@ pub(crate) fn open_warnings(v: &Value) -> String {
     out
 }
 
+/// The target lines of one structured carried-removal warning, each after the warning's text.
+pub(crate) fn carried_targets(w: &Value) -> String {
+    w["issues"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| format!("\n  target: {}", text(&i["target"])))
+        .collect()
+}
+
 pub(crate) fn warning_lines(v: &Value) -> String {
     v.as_array()
         .into_iter()

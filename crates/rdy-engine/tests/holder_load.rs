@@ -7,7 +7,8 @@ mod common;
 use rdy_engine::clone::{CloneSource, clone};
 use rdy_engine::*;
 use rdy_model::*;
-use rdy_store::dump::{DumpHeader, DumpItem, DumpReader, DumpWriter};
+use rdy_store::dump::{DumpHeader, DumpItem, DumpReader, DumpWriter, RemovalFacts, RemovalTally};
+use rdy_store::dump_chain::{BatchMarker, batch_end};
 use rdy_store::holder::StoreMode;
 use rdy_store::kinds;
 use rdy_store::segment::Location;
@@ -371,13 +372,15 @@ fn ha12_holder_files_are_refused_and_target_is_restored() {
         let out = std::fs::File::create(&carrying).unwrap();
         let mut w = DumpWriter::new(std::io::BufWriter::new(out), &header).unwrap();
         w.file(".rdy.yaml", b"pack: rdy-standard\n").unwrap();
+        let mut facts = RemovalTally::default();
         for item in &batches {
             let DumpItem::Batch(b) = item else {
                 unreachable!()
             };
+            facts.observe(b).unwrap();
             w.batch(b).unwrap();
         }
-        let (buf, _) = w.finish().unwrap();
+        let (buf, _) = w.finish(facts.facts().unwrap()).unwrap();
         buf.into_inner().unwrap().sync_all().unwrap();
     }
     // a new directory is not left behind
@@ -456,6 +459,9 @@ fn trailing_mode_dump(root: &Path, file: bool) -> std::path::PathBuf {
         segment: header.log_end.segment,
         offset: header.log_end.offset + 1,
     };
+    // the one batch's marker names its new digest, and it ends one byte later
+    assert_eq!(batch_end(&b), Some(header.log_end));
+    header.chain.as_mut().unwrap().end_batch = BatchMarker::of(&b);
     let out = root.join(if file {
         "trailing-file.rdydump"
     } else {
@@ -467,7 +473,7 @@ fn trailing_mode_dump(root: &Path, file: bool) -> std::path::PathBuf {
         w.file(".rdy.yaml", b"pack: rdy-standard\n").unwrap();
     }
     w.batch(&b).unwrap();
-    let (buf, _) = w.finish().unwrap();
+    let (buf, _) = w.finish(RemovalFacts::default()).unwrap();
     buf.into_inner().unwrap().sync_all().unwrap();
     out
 }

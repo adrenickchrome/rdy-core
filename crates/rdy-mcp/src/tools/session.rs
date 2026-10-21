@@ -173,9 +173,23 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
             ),
         }
     };
+    // a carried removal this store does not repeat is part of the current store, whatever the
+    // content scope: its serialized size is reserved first and no part of it is dropped
+    let carried = st_.carried_warnings()?;
+    let carried_json = (!carried.is_empty()).then(|| json!(carried));
+    let carried_tokens = carried_json.as_ref().map_or(0, tokens_of);
+    if carried_tokens > 0 && carried_tokens + 300 > max {
+        return Err(RdyError::new(
+            E_REDACTION_BUDGET,
+            REDACTION_BUDGET_MESSAGE,
+            rdy_engine::carried_warning::CARRIED_WARNING_BUDGET_FIX,
+        ));
+    }
     // the tree gets what the fixed parts (coverage included) leave
-    let reserve =
-        300 + coverage.as_ref().map_or(0, tokens_of) + coverage_error.as_ref().map_or(0, tokens_of);
+    let reserve = 300
+        + carried_tokens
+        + coverage.as_ref().map_or(0, tokens_of)
+        + coverage_error.as_ref().map_or(0, tokens_of);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(reserve));
     let views: Vec<Value> = st_
         .views_with_changes()
@@ -214,7 +228,12 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
             })).collect::<Vec<_>>(),
         });
     }
-    Ok(budget(out, p.max_tokens))
+    // the rest of the reply fits what the warnings leave; the warnings are added whole
+    let mut out = budget(out, Some(max.saturating_sub(carried_tokens)));
+    if let Some(w) = carried_json {
+        out["redaction_warnings"] = w;
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

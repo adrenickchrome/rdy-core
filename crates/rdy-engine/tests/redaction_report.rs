@@ -911,8 +911,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 22; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=22).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 23; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=23).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -937,6 +937,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::REDACTION,
             kinds::REDACTION_RESIDUE,
             kinds::REDACTION_APPLY,
+            kinds::REDACTION_CARRIED,
         ],
         ASSIGNED_KINDS
     );
@@ -954,7 +955,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
         assert_eq!(text_policy(k), Some(want), "kind {k}");
     }
     assert_eq!(text_policy(kinds::SIGNATURE), Some(TextPolicy::Strings));
-    for k in [0, 12, 23, 255] {
+    // the carried removal: its approver's and selectors' text (it holds no reason text)
+    assert_eq!(kinds::REDACTION_CARRIED, 23);
+    assert_eq!(text_policy(23), Some(TextPolicy::Strings));
+    for k in [0, 12, 24, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1799,9 +1803,9 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
     // the base registry holds no assessment kind: every assigned kind has a policy, and a new
     // content-bearing kind without a visitor is refused, never read as absent
     require_text_policies(&ASSIGNED_KINDS).unwrap();
-    let e = require_text_policies(&[kinds::REDACTION_APPLY + 1]).unwrap_err();
+    let e = require_text_policies(&[kinds::REDACTION_CARRIED + 1]).unwrap_err();
     assert!(
-        e.message.contains("no text policy for object kind 23"),
+        e.message.contains("no text policy for object kind 24"),
         "{e}"
     );
     assert!(require_text_policies(&[12]).is_err());
@@ -2877,4 +2881,69 @@ fn sig4_redaction_scan_reports_signature_text() {
         e.fix,
         "check the source of this signature; it may be damaged or forged"
     );
+}
+
+/// The bytes of a carried removal record approved by `actor`, with one span.
+fn carried_record(actor: String) -> Vec<u8> {
+    let mut buf = vec![0u8; 2 << 20];
+    let record = rdy_model::RedactionCarried {
+        request: Hash([1; 32]),
+        apply: Hash([2; 32]),
+        landing: Hash([3; 32]),
+        approved_by: Provenance {
+            actor,
+            run: None,
+            role: Role::Approver,
+            at_ms: 0,
+        },
+        reason_class: ReasonClass::Secret,
+        targets: vec![RedactTarget::Blob(Hash([5; 32]))],
+        spans: vec![rdy_model::redaction::CarriedSpan {
+            place: rdy_model::redaction::FramePlace {
+                segment: 0,
+                offset: 0,
+            },
+            kind: kinds::BLOB_CHUNK,
+            hash: Hash([6; 32]),
+            len: 1,
+            residue: None,
+            held: false,
+        }],
+    };
+    encode_into(&record, &mut buf).unwrap().to_vec()
+}
+
+#[test]
+fn hc1_the_report_decodes_carried_records_within_bounds() {
+    let _clock = pin_clock(1_000_000);
+    let report = |payload: Vec<u8>| {
+        let mut p = base();
+        let h =
+            p.r.store_mut()
+                .write_guarded_for_tests(vec![(kinds::REDACTION_CARRIED, payload)])
+                .unwrap()[0];
+        p.r.invalidate();
+        p.r.read()
+            .redaction_report(&input(&[p.prose.to_string()], true))
+            .map(|d| (h, d))
+    };
+    // its strings are scanned: an approver whose actor quotes the removed text is audit text
+    let (h, d) = report(carried_record(format!("human:{SECRET}"))).unwrap();
+    assert!(
+        d.quotes
+            .iter()
+            .any(|q| q.kind == ImpactKind::AuditText && q.record == h.to_string()),
+        "{:?}",
+        d.quotes
+    );
+    // an approver's text of 1048576 bytes is read; one more byte is the bounded record's refusal
+    report(carried_record("a".repeat(1_048_576))).unwrap();
+    let e = report(carried_record("a".repeat(1_048_577))).unwrap_err();
+    assert!(e.message.contains("1048576 text bytes"), "{e}");
+    // an empty or truncated record does not decode
+    let full = carried_record("person:ann".into());
+    for p in [vec![], full[..full.len() - 1].to_vec()] {
+        let e = report(p).unwrap_err();
+        assert!(e.message.contains("record does not decode"), "{e}");
+    }
 }

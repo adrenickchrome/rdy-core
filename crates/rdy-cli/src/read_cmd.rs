@@ -1,5 +1,5 @@
 use crate::conn::{Env, call};
-use crate::output::{hash_short, num, open_warnings, text, warning_lines};
+use crate::output::{carried_targets, hash_short, num, open_warnings, text};
 use crate::{history_text, view_cmd, wc};
 use rdy_daemon::ErrorReply;
 use rdy_schema::CoverageDimension;
@@ -264,8 +264,28 @@ fn status_text(v: &Value) -> String {
     if caught_up > 0 {
         out.push_str(&format!("\nopen: caught up {caught_up} frames"));
     }
-    out.push_str(&warning_lines(&v["warnings"]));
+    out.push_str(&warning_lines_with_targets(
+        &v["warnings"],
+        &v["redaction_warnings"],
+    ));
     out.push_str(&open_warnings(v));
+    out
+}
+
+/// The warning lines, each carried-removal warning followed by its targets. The carried
+/// warnings are in `warnings` as strings and, in the same order, in `carried` as structured
+/// records: each is printed once, from the string.
+fn warning_lines_with_targets(warnings: &Value, carried: &Value) -> String {
+    let mut targets = carried.as_array().into_iter().flatten();
+    let mut out = String::new();
+    for w in warnings.as_array().into_iter().flatten() {
+        out.push_str(&format!("\nwarning: {}", text(w)));
+        if text(w).starts_with("W_STOP_BEFORE_REDACTION: ")
+            && let Some(c) = targets.next()
+        {
+            out.push_str(&carried_targets(c));
+        }
+    }
     out
 }
 

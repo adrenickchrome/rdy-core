@@ -1,11 +1,15 @@
 //! Format facts (D-69AY3, D-WWAK7): the formats this rdy writes and reads, and the formats of one
 //! dump file. Neither call opens a store, a config or a daemon.
+use crate::dump::ids;
 use crate::error::RdyError;
-use crate::load::{open_dump, open_stream};
-use rdy_store::dump::{DUMP_FORMAT, READS};
+use crate::load::{open_dump, read_error};
+use rdy_model::{Hash, RepoId};
+use rdy_store::dump::{DUMP_FORMAT, DumpReader, READS};
+use rdy_store::dump_chain::{BatchMarker, DumpKind};
 use rdy_store::format::STORE_FORMAT;
+use rdy_store::segment::Location;
+use rdy_store::transition::hex;
 use serde::Serialize;
-use std::io::BufReader;
 use std::path::Path;
 
 /// The version of the sync stream format this rdy writes and reads.
@@ -33,13 +37,29 @@ pub struct FormatFacts {
     pub stream: u32,
 }
 
-/// The formats of one dump file, from its prelude and header.
+/// The formats of one dump file, and the chain facts its header states, from its prelude and
+/// header only. None of them says that the file is complete or valid. A header of dump format 1
+/// or 2 states no chain facts: each is null, except `end`, which is its log end. In JSON every
+/// hash is 64 lowercase hex digits and a repo id 32.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DumpFormatFacts {
     pub dump: u32,
     pub store: u32,
     /// The version of the rdy that wrote the dump.
     pub rdy: String,
+    /// Full or increment.
+    pub kind: Option<DumpKind>,
+    #[serde(serialize_with = "ids::opt_repo")]
+    pub repo_id: Option<RepoId>,
+    /// Where the file starts in the source log, and the marker of the batch that ends there.
+    pub base: Option<Location>,
+    pub base_batch: Option<BatchMarker>,
+    /// The trailer digest of the file before it (zero for a full dump).
+    #[serde(serialize_with = "hex::opt::serialize")]
+    pub prev: Option<Hash>,
+    /// Where the file ends in the source log, and the marker of its last batch.
+    pub end: Option<Location>,
+    pub end_batch: Option<BatchMarker>,
 }
 
 /// The formats this rdy writes and reads.
@@ -57,13 +77,23 @@ pub fn formats() -> FormatFacts {
 }
 
 /// The formats of the dump `file`. This reads the prelude and the header only: it is format
-/// inspection, not a check that the whole dump is valid. File and header errors are the load's.
+/// inspection, not a check that the whole dump is valid, and it reads no trailer. A full dump and
+/// an increment alike are inspected. File and header errors are the load's.
 pub fn inspect_dump(file: &Path) -> Result<DumpFormatFacts, RdyError> {
     let f = open_dump(file)?;
-    let opened = open_stream(file, BufReader::new(f))?;
+    // unbuffered: the reader takes the prelude and the header record, and nothing after them
+    let (_, dump, header) = DumpReader::open(f).map_err(|e| read_error(file, e))?;
+    let chain = header.chain;
     Ok(DumpFormatFacts {
-        dump: opened.dump_format,
-        store: opened.header.store_format,
-        rdy: opened.header.rdy,
+        dump,
+        store: header.store_format,
+        rdy: header.rdy,
+        kind: chain.map(|c| c.kind),
+        repo_id: chain.map(|c| c.repo_id),
+        base: chain.map(|c| c.base),
+        base_batch: chain.map(|c| c.base_batch),
+        prev: chain.map(|c| c.prev),
+        end: Some(header.log_end),
+        end_batch: chain.map(|c| c.end_batch),
     })
 }

@@ -3,6 +3,8 @@
 //! one sealed batch, whatever their order or repeats; the root must name the publication target;
 //! nothing is written on a refusal; changed input rolls back; a repeat is a no-op; the relay-tag
 //! answer ref and SIG's subject rule hold at the take.
+#[path = "support/carried.rs"]
+mod carried_fixture;
 #[path = "support/redaction.rs"]
 mod redaction_fixture;
 
@@ -1009,4 +1011,283 @@ fn ha13_take_names_only_the_relay_answer_of_its_own_tag_object() {
         Some(src.relay.0.to_vec())
     );
     h.check_holder().unwrap();
+}
+
+/// The source copied to `removed` and then a person's removal of alpha applied there (the
+/// shared raw fixture), its erasure finished: the copy's path, the request and the apply.
+struct Removed {
+    path: PathBuf,
+    request: Hash,
+    apply: Hash,
+}
+
+fn removed_copy(src: &Src) -> Removed {
+    let path = src.dir.path().join("removed");
+    carried_fixture::copy_store(&src.path, &path);
+    let fixture = redaction_fixture::authorized_batch_fixture(
+        &path,
+        &[redaction_fixture::RequestSpec::new(
+            "work",
+            vec![rdy_model::redaction::RedactTarget::Version {
+                id: src.alpha.id.clone(),
+                version: src.alpha.version_hash(),
+            }],
+        )
+        .at(60)],
+        &redaction_fixture::FixtureOptions::approved(redaction_fixture::Proof::local_human()),
+    );
+    drop(Store::open(&path).unwrap());
+    Removed {
+        path,
+        request: fixture.requests[0].request,
+        apply: fixture.applies[0].0,
+    }
+}
+
+/// The whole history of `tag` in the store at `path`, as one batch file `name`.
+fn upload_of(src: &Src, path: &Path, tag: Hash, name: &str) -> PathBuf {
+    let s = Store::open(path).unwrap();
+    let r = s.reader();
+    let c = closure(&r, tag, &BTreeSet::new()).unwrap();
+    let file = src.dir.path().join(format!("{name}.rdysync"));
+    write(&r, &src.repo, tag, &c.records, c.prerequisites, &file);
+    file
+}
+
+/// The change that wrote alpha (and beta) in the source.
+fn alpha_change(src: &Src) -> Change {
+    let s = Store::open(&src.path).unwrap();
+    let id = s.producers(&src.alpha.version_hash()).unwrap()[0];
+    s.change(&id).unwrap()
+}
+
+/// A holder that took v1 from the source before the removal, loaded into `name` with one
+/// carried record of `request` and `apply` over its own frames of alpha (block and change) and,
+/// with `beta`, beta's block, each `held`. Returns the holder's path and the record.
+fn carried_holder(
+    src: &Src,
+    name: &str,
+    request: Hash,
+    apply: Hash,
+    held: bool,
+    beta: bool,
+) -> (PathBuf, rdy_model::redaction::RedactionCarried) {
+    use carried_fixture::{block_residue, change_residue, find, framed_at, span};
+    let pre = src.dir.path().join(format!("{name}-pre"));
+    {
+        let mut h = Store::create_holder(&pre, src.repo).unwrap();
+        take(&mut h, &open(&src.split(src.tag, 1, name)), &src.target()).unwrap();
+    }
+    let frames = framed_at(&pre);
+    let c = alpha_change(src);
+    let beta_block = block("b-00002", "beta");
+    let mut residues = vec![block_residue(&src.alpha), change_residue(&c)];
+    let mut spans = vec![
+        span(
+            &find(&frames, kinds::BLOCK, src.alpha.version_hash()),
+            Some(&residues[0]),
+            held,
+        ),
+        span(
+            &find(&frames, kinds::CHANGE, Hash::of(&enc(&c))),
+            Some(&residues[1]),
+            held,
+        ),
+    ];
+    if beta {
+        residues.push(block_residue(&beta_block));
+        spans.push(span(
+            &find(&frames, kinds::BLOCK, beta_block.version_hash()),
+            Some(&residues[2]),
+            held,
+        ));
+    }
+    spans.sort_by_key(|s| s.place);
+    let mut rec = carried_fixture::record(
+        vec![rdy_model::redaction::RedactTarget::Version {
+            id: src.alpha.id.clone(),
+            version: src.alpha.version_hash(),
+        }],
+        spans,
+    );
+    rec.request = request;
+    rec.apply = apply;
+    let to = src.dir.path().join(name);
+    carried_fixture::load(&pre, &to, &residues, std::slice::from_ref(&rec)).unwrap();
+    (to, rec)
+}
+
+/// The proof the record walker names for the dropped frame of `kind` and `hash`.
+fn proof_of(h: &Store, kind: u8, hash: Hash) -> Option<Hash> {
+    let mut out = None;
+    h.reader()
+        .for_each_record_from(ORIGIN, h.log_end(), |_, f, _| {
+            if let StoredFrame::Dropped {
+                kind: k,
+                hash: x,
+                apply,
+                ..
+            } = f
+                && (k, x) == (kind, hash)
+            {
+                out = Some(apply);
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+#[test]
+fn hc3_take_of_any_matching_apply_removes_held_payloads() {
+    let src = source();
+    let removed = removed_copy(&src);
+    let upload = upload_of(&src, &removed.path, src.tag, "removed");
+    let alpha = src.alpha.version_hash();
+    let c = Hash::of(&enc(&alpha_change(&src)));
+    // the source's own apply removes the held payloads its carried record names
+    let (path, rec) = carried_holder(&src, "own", removed.request, removed.apply, true, false);
+    let mut h = Store::open(&path).unwrap();
+    assert_eq!(h.reader().carried_counts(&rec).unwrap(), (2, 0));
+    take(&mut h, &open(std::slice::from_ref(&upload)), &src.target()).unwrap();
+    assert_eq!(h.reader().carried_counts(&rec).unwrap(), (0, 2));
+    assert_eq!(
+        h.get_block(&alpha).unwrap().body,
+        rdy_model::redaction::CONTENT_REMOVED
+    );
+    assert_eq!(proof_of(&h, kinds::BLOCK, alpha), Some(removed.apply));
+    drop(h);
+    // another request's apply counts too; a partial take erases only the spans it covers
+    let (path, rec) = carried_holder(
+        &src,
+        "other",
+        Hash::of(b"another request"),
+        Hash::of(b"another apply"),
+        true,
+        true,
+    );
+    let mut h = Store::open(&path).unwrap();
+    assert_eq!(h.reader().carried_counts(&rec).unwrap(), (3, 0));
+    take(&mut h, &open(std::slice::from_ref(&upload)), &src.target()).unwrap();
+    assert_eq!(h.reader().carried_counts(&rec).unwrap(), (1, 2));
+    let beta = block("b-00002", "beta");
+    assert_eq!(h.get_block(&beta.version_hash()).unwrap(), beta);
+    assert_eq!(proof_of(&h, kinds::CHANGE, c), Some(removed.apply));
+    drop(h);
+    // an apply over zeros a carried record explained becomes their proof
+    let (path, rec) = carried_holder(
+        &src,
+        "zeros",
+        Hash::of(b"another request"),
+        Hash::of(b"another apply"),
+        false,
+        false,
+    );
+    let carried = carried_fixture::carried_hash(&rec);
+    let mut h = Store::open(&path).unwrap();
+    assert_eq!(proof_of(&h, kinds::BLOCK, alpha), Some(carried));
+    take(&mut h, &open(std::slice::from_ref(&upload)), &src.target()).unwrap();
+    assert_eq!(proof_of(&h, kinds::BLOCK, alpha), Some(removed.apply));
+    assert_eq!(proof_of(&h, kinds::CHANGE, c), Some(removed.apply));
+    assert_eq!(h.reader().carried_counts(&rec).unwrap(), (0, 2));
+    let path = h.dir().to_path_buf();
+    drop(h);
+    // the reopened holder derives the same proofs
+    let h = Store::open(&path).unwrap();
+    assert_eq!(proof_of(&h, kinds::BLOCK, alpha), Some(removed.apply));
+}
+
+/// The upload of `removed` with every placeholder's proof replaced by `proof`, which the header
+/// lists as a prerequisite.
+fn forged_upload(src: &Src, removed: &Removed, proof: Hash, name: &str) -> (PathBuf, ObjectKey) {
+    let honest = upload_of(src, &removed.path, src.tag, &format!("{name}-honest"));
+    let bytes = std::fs::read(&honest).unwrap();
+    let (mut r, header) = StreamReader::open(&bytes[..]).unwrap();
+    let mut keys = vec![];
+    let mut records: BTreeMap<ObjectKey, StreamRecord> = BTreeMap::new();
+    let mut placeholder = None;
+    while let Some(rec) = r.next().unwrap() {
+        let rec = match rec {
+            StreamRecord::Dropped {
+                key,
+                original_len,
+                residue,
+                ..
+            } => {
+                placeholder.get_or_insert(key);
+                StreamRecord::Dropped {
+                    key,
+                    original_len,
+                    apply: proof,
+                    residue,
+                }
+            }
+            other => other,
+        };
+        keys.push(rec.key());
+        records.insert(rec.key(), rec);
+    }
+    r.finish().unwrap();
+    let mut prerequisites = header.prerequisites.clone();
+    prerequisites.push(key(kinds::REDACTION_APPLY, proof));
+    prerequisites.sort();
+    let header = StreamHeader::tag_history(src.repo, src.tag, prerequisites);
+    let file = src.dir.path().join(format!("{name}.rdysync"));
+    write_batch(&mut records, &header, &keys, File::create(&file).unwrap()).unwrap();
+    (file, placeholder.expect("a placeholder"))
+}
+
+#[test]
+fn hc3_take_refuses_a_placeholder_naming_a_carried_record() {
+    let src = source();
+    let removed = removed_copy(&src);
+    let (path, rec) = carried_holder(&src, "h", removed.request, removed.apply, true, false);
+    let carried = carried_fixture::carried_hash(&rec);
+    let (forged, placeholder) = forged_upload(&src, &removed, carried, "forged");
+    let mut h = Store::open(&path).unwrap();
+    let before = (segment_bytes(&path), h.log_end());
+    let e = stream_err(take(&mut h, &open(&[forged]), &src.target()).unwrap_err());
+    assert_eq!(e.code, "E_BAD_RECORD");
+    assert!(
+        e.message.ends_with("invalid removal proof"),
+        "{}",
+        e.message
+    );
+    assert_eq!(e.object, Some(placeholder));
+    // nothing was written, and the held payloads are still held
+    assert_eq!(h.reader().carried_counts(&rec).unwrap(), (2, 0));
+    let end = h.log_end();
+    drop(h);
+    assert_eq!((segment_bytes(&path), end), before);
+}
+
+#[test]
+fn hc3_a_placeholder_naming_an_invalid_carried_record_is_refused() {
+    let src = source();
+    let removed = removed_copy(&src);
+    // the holder's carried record explains zeros; it is still no removal proof for a take
+    let (path, rec) = carried_holder(
+        &src,
+        "h",
+        Hash::of(b"another request"),
+        Hash::of(b"another apply"),
+        false,
+        false,
+    );
+    let carried = carried_fixture::carried_hash(&rec);
+    let (forged, placeholder) = forged_upload(&src, &removed, carried, "forged");
+    let mut h = Store::open(&path).unwrap();
+    let before = segment_bytes(&path);
+    let e = stream_err(take(&mut h, &open(&[forged]), &src.target()).unwrap_err());
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_BAD_RECORD",
+            "stream record 0 at byte 0: invalid removal proof",
+            "request this stream again; run rdy fsck at its source"
+        )
+    );
+    assert_eq!(e.object, Some(placeholder));
+    drop(h);
+    assert_eq!(segment_bytes(&path), before);
 }

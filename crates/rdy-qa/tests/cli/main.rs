@@ -4,12 +4,14 @@
 mod cli;
 mod cli_alts;
 mod cli_blame;
+mod cli_carried_warning;
 mod cli_clone;
 mod cli_config;
 mod cli_config_file;
 mod cli_coverage;
 mod cli_daemon;
 mod cli_dump;
+mod cli_dump_chain;
 mod cli_entities;
 mod cli_export;
 mod cli_hub_auth;

@@ -106,6 +106,12 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     for w in rdy_engine::config_levels::config_warnings_for_env(&cx.engine.root()) {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
+    // a carried removal this store does not repeat is a warning while a span still holds its
+    // payload (D-QF2HQ): the string joins the list, the structured form is `redaction_warnings`
+    let carried = st.carried_warnings()?;
+    for w in &carried {
+        warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
+    }
     let suspects = st.suspects(&Scope::Canon)?.len();
     // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
     // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
@@ -134,6 +140,9 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     }
     if let Some(e) = coverage_error {
         v["coverage_error"] = Value::String(e);
+    }
+    if !carried.is_empty() {
+        v["redaction_warnings"] = to_json(&carried);
     }
     Ok(v)
 }

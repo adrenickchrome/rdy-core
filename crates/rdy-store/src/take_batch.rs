@@ -236,6 +236,30 @@ fn target_mismatch(root: ObjectKey) -> StreamError {
     }
 }
 
+/// The placeholder of the union whose proof is `proof`, when `proof` is an apply key whose hash
+/// names a carried record (kind REDACTION_CARRIED) the holder holds: such a record is never a
+/// removal proof.
+fn names_carried(
+    rx: &Receiver,
+    union: &BTreeMap<ObjectKey, Entry>,
+    proof: &ObjectKey,
+) -> Result<Option<ObjectKey>, StreamError> {
+    if proof.kind != kinds::REDACTION_APPLY {
+        return Ok(None);
+    }
+    let carried = ObjectKey {
+        kind: kinds::REDACTION_CARRIED,
+        hash: proof.hash,
+    };
+    if !rx.holds(&carried)? {
+        return Ok(None);
+    }
+    Ok(union
+        .iter()
+        .find(|(_, e)| e.dropped.iter().any(|(_, d)| d.apply == proof.hash))
+        .map(|(k, _)| *k))
+}
+
 /// Where a record of a batch file is, and the frame it must still be there: its file, its
 /// record number and frame offset, and its frame's kind, payload length and hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -697,8 +721,16 @@ pub(crate) fn prepare<E>(
         },
         masked: BTreeMap::new(),
     };
-    // 2. every prerequisite, from the union or the holder
-    stream_source::check_prerequisites(&mut source, &prerequisites)?;
+    // 2. every prerequisite, from the union or the holder. A placeholder's proof that names a
+    // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused
+    if let Err(e) = stream_source::check_prerequisites(&mut source, &prerequisites) {
+        if let Some(p) = e.object.filter(|_| e.code == "E_UNRESOLVED_REF")
+            && let Some(placeholder) = names_carried(rx, &union, &p)?
+        {
+            return Err(bad(Reason::InvalidRemovalProof, placeholder).into());
+        }
+        return Err(e.into());
+    }
     // 3. the root names the target
     let root_key = header.root();
     let root: Tag = stream_source::root_tag(&mut source, root_key)?;

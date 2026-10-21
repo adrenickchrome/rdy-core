@@ -1,5 +1,5 @@
 use crate::conn::{Env, bound_view, call, is_project, path_arg};
-use crate::output::{num, open_warnings, print_error, text};
+use crate::output::{carried_targets, num, open_warnings, print_error, text};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use rdy_engine::{
@@ -151,6 +151,15 @@ pub(crate) fn fsck(env: &Env, a: FsckArgs) -> Result<(Value, String), ErrorReply
             text(&s["name"]),
             text(&s["reason"])
         ));
+    }
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\n{}: {}\nfix: {}",
+            text(&w["code"]),
+            text(&w["message"]),
+            text(&w["fix"])
+        ));
+        t.push_str(&carried_targets(w));
     }
     t.push_str(&open_warnings(&v));
     if v["open_report"]["unclean_shutdown"] == json!(true) {

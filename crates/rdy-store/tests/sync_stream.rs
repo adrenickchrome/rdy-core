@@ -6,7 +6,8 @@
 use rdy_model::{
     Block, BlockId, Hash, Intent, IntentStatus, Provenance, RepoId, Role, StateSnapshot, Tag,
 };
-use rdy_store::dump::{DumpBatch, DumpHeader, DumpWriter, Frame};
+use rdy_store::dump::{DumpBatch, DumpHeader, DumpWriter, Frame, RemovalFacts};
+use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds::{self, batch_digest};
 use rdy_store::object_refs::ObjectKey;
@@ -233,6 +234,7 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
                 offset: 0,
             },
             rdy: String::new(),
+            chain: Some(DumpChainHeader::full(RepoId([0; 16]), BatchMarker::ZERO)),
         },
     )
     .unwrap();
@@ -251,7 +253,7 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
         }],
     })
     .unwrap();
-    let dump = dump.finish().unwrap().0;
+    let dump = dump.finish(RemovalFacts::default()).unwrap().0;
     let dumped = frame(0xF3, &dropped);
     assert!(
         dump.windows(dumped.len()).any(|w| w == dumped.as_slice()),

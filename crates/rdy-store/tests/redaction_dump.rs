@@ -16,6 +16,7 @@ mod redaction_fixture;
 use rdy_model::redaction::{RedactTarget, RedactionApply};
 use rdy_model::*;
 use rdy_store::dump::*;
+use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, BLOB_CHUNK, BLOCK, CHANGE, batch_digest};
@@ -41,6 +42,7 @@ const INVALID_KIND: &str = "dropped frame has an invalid kind";
 const INVALID_RESIDUE: &str = "dropped frame has an invalid residue";
 const NO_AUTHORIZATION: &str = "dropped frame has no valid authorization";
 const SPAN: &str = "dropped frame does not match its authorized span";
+const OVERFLOW: &str = "dump position overflows";
 const ENDS_EARLY: &str = "the file ends before its trailer";
 const TRAILER_MISMATCH: &str = "the trailer's counts or digest do not match the dump";
 const ALLOCATION: &str = "record allocation failed";
@@ -242,7 +244,7 @@ fn source() -> Src {
 impl Src {
     /// The source's batches as a dump of this rdy.
     fn dump(&self) -> Vec<u8> {
-        write_dump(self.end, &self.batches)
+        write_dump(&self.batches)
     }
 
     /// Where each dropped frame of the source is: (batch index, frame index).
@@ -268,20 +270,36 @@ impl Src {
     }
 }
 
-fn header(end: Location) -> DumpHeader {
+/// The header of a full dump that holds `batches`: it ends where the last of them ends, with its
+/// marker (at the origin when there are none).
+fn header(batches: &[DumpBatch]) -> DumpHeader {
+    let (log_end, marker) = match batches.last() {
+        Some(b) => (batch_end(b).unwrap(), BatchMarker::of(b)),
+        None => (BatchMarker::ZERO.start, BatchMarker::ZERO),
+    };
     DumpHeader {
         store_format: STORE_FORMAT,
-        log_end: end,
+        log_end,
         rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(RepoId([7; 16]), marker)),
     }
 }
 
-fn write_dump(end: Location, batches: &[DumpBatch]) -> Vec<u8> {
-    let mut w = DumpWriter::new(Vec::new(), &header(end)).unwrap();
+/// The removal facts of a full dump of `batches`, as the source walker reports them.
+fn facts_of(batches: &[DumpBatch]) -> RemovalFacts {
+    let mut facts = RemovalTally::default();
+    for b in batches {
+        facts.observe(b).unwrap();
+    }
+    facts.facts().unwrap()
+}
+
+fn write_dump(batches: &[DumpBatch]) -> Vec<u8> {
+    let mut w = DumpWriter::new(Vec::new(), &header(batches)).unwrap();
     for b in batches {
         w.batch(b).unwrap();
     }
-    w.finish().unwrap().0
+    w.finish(facts_of(batches)).unwrap().0
 }
 
 fn read_dump(bytes: &[u8]) -> Result<(u32, DumpHeader, Vec<DumpBatch>), StoreError> {
@@ -343,8 +361,54 @@ fn forge(dump_format: u32, recs: &[(u8, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// The batches `recs` holds, each `BATCH` record with its frames as a reader decodes them; None
+/// when the records do not form batches.
+fn batches_in(recs: &[(u8, Vec<u8>)]) -> Option<Vec<DumpBatch>> {
+    let mut out = vec![];
+    let mut i = 0;
+    while i < recs.len() {
+        let (k, p) = &recs[i];
+        i += 1;
+        if *k != rec::BATCH {
+            continue;
+        }
+        let start = Location {
+            segment: u32::from_le_bytes(p.get(0..4)?.try_into().ok()?),
+            offset: u64::from_le_bytes(p.get(4..12)?.try_into().ok()?),
+        };
+        let n = u32::from_le_bytes(p.get(12..16)?.try_into().ok()?) as usize;
+        let mut frames = vec![];
+        for (k, p) in recs.get(i..i + n)? {
+            frames.push(if *k == rec::DROPPED {
+                Frame::Dropped {
+                    kind: p[0],
+                    hash: Hash(p.get(1..33)?.try_into().ok()?),
+                    len: u32::from_le_bytes(p.get(33..37)?.try_into().ok()?),
+                    apply: Hash(p.get(37..69)?.try_into().ok()?),
+                    residue: (p[69] == 1).then(|| Hash(p[70..102].try_into().unwrap())),
+                }
+            } else {
+                Frame::Present {
+                    kind: *k,
+                    hash: Hash::of(p),
+                    payload: p.clone(),
+                }
+            });
+        }
+        i += n;
+        out.push(DumpBatch {
+            start,
+            digest: Hash(p.get(16..48)?.try_into().ok()?),
+            frames,
+        });
+    }
+    Some(out)
+}
+
 /// `recs` with its last record (the trailer) made true again: every record before it counted
-/// and chained as `kind || len (u64) || hash`.
+/// and chained as `kind || len (u64) || hash`, in the format-3 layout. The removal facts are the
+/// tally of its batches, as a forger computes them; when the tally refuses them (a place past
+/// `u64::MAX`), they stay as they were (none when the trailer holds none yet).
 fn reseal(recs: &mut [(u8, Vec<u8>)]) {
     let n = recs.len() - 1;
     let mut chain = vec![];
@@ -359,9 +423,23 @@ fn reseal(recs: &mut [(u8, Vec<u8>)]) {
         .filter(|(k, _)| *k < rec::HEADER || *k == rec::DROPPED)
         .count() as u64;
     let files = recs[..n].iter().filter(|(k, _)| *k == rec::FILE).count() as u32;
+    let mut facts = recs[n].1.get(20..37).unwrap_or(&[0u8; 17]).to_vec();
+    let tally = batches_in(&recs[..n]).and_then(|bs| {
+        let mut t = RemovalTally::default();
+        bs.iter().try_for_each(|b| t.observe(b)).ok()?;
+        t.facts().ok()
+    });
+    if let Some(t) = tally {
+        facts = t.removals.to_le_bytes().to_vec();
+        let at = t.first_removed.unwrap_or(BatchMarker::ZERO.start);
+        facts.push(u8::from(t.first_removed.is_some()));
+        facts.extend_from_slice(&at.segment.to_le_bytes());
+        facts.extend_from_slice(&at.offset.to_le_bytes());
+    }
     let mut p = batches.to_le_bytes().to_vec();
     p.extend_from_slice(&frames.to_le_bytes());
     p.extend_from_slice(&files.to_le_bytes());
+    p.extend_from_slice(&facts);
     p.extend_from_slice(&Hash::of(&chain).0);
     recs[n].1 = p;
 }
@@ -425,7 +503,7 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
     );
     // the dump round-trips every original frame and holds no removed byte
     let bytes = src.dump();
-    assert!(bytes.starts_with(b"RDYDUMP\n\x02\x00\x00\x00"));
+    assert!(bytes.starts_with(b"RDYDUMP\n\x03\x00\x00\x00"));
     assert!(
         !bytes.windows(CANARY.len()).any(|w| w == CANARY),
         "the dump holds the removed block's body"
@@ -583,7 +661,7 @@ fn rdx9_forward_authorization_is_checked_before_placement() {
     let case = |name: &str, bs: Vec<DumpBatch>, want: &str| {
         let to = src._dir.path().join(name);
         // the stream itself is sound: the writer and the reader take it
-        let (_, _, back) = read_dump(&write_dump(src.end, &bs)).unwrap();
+        let (_, _, back) = read_dump(&write_dump(&bs)).unwrap();
         assert_eq!(what(ingest(&to, &back).unwrap_err()), want, "{name}");
         assert!(no_store(&to), "{name}: the target holds no store");
     };
@@ -678,7 +756,9 @@ fn one_drop(dump_format: u32, store_format: u32) -> Vec<u8> {
 }
 
 /// A dump of `dump_format` whose header names `store_format`: one batch at the start of the log
-/// whose one data frame is a `DROPPED` record of `kind` that claims `len` bytes, and its trailer.
+/// whose one data frame is a `DROPPED` record of `kind` that claims `len` bytes, and its trailer
+/// (of the format-3 layout: a format-1 reader refuses the record before it). A format-3 header is
+/// a full dump's that ends at the batch's end; with no apply, its trailer names no removed span.
 fn drop_stream(
     dump_format: u32,
     store_format: u32,
@@ -689,11 +769,39 @@ fn drop_stream(
     residue: Option<Hash>,
 ) -> Vec<u8> {
     let drop = dropped_bytes(kind, hash, len, apply, residue);
-    let mut h = store_format.to_le_bytes().to_vec();
-    h.extend_from_slice(&0u32.to_le_bytes());
-    h.extend_from_slice(&(37 + u64::from(len)).to_le_bytes());
+    let mut h = vec![];
+    if dump_format >= 3 {
+        let batch = DumpBatch {
+            start: BatchMarker::ZERO.start,
+            digest: batch_digest([&hash]),
+            frames: vec![Frame::Dropped {
+                kind,
+                hash,
+                len,
+                apply,
+                residue,
+            }],
+        };
+        let end = batch_end(&batch).unwrap();
+        h.push(0); // a full dump
+        h.extend_from_slice(&store_format.to_le_bytes());
+        h.extend_from_slice(&[7u8; 16]);
+        h.extend_from_slice(&[0u8; 12 + 48 + 32]); // origin base, zero marker, zero prev
+        h.extend_from_slice(&end.segment.to_le_bytes());
+        h.extend_from_slice(&end.offset.to_le_bytes());
+        h.extend_from_slice(&0u32.to_le_bytes());
+        h.extend_from_slice(&0u64.to_le_bytes());
+        h.extend_from_slice(&1u32.to_le_bytes());
+        h.extend_from_slice(&batch.digest.0);
+    } else {
+        h.extend_from_slice(&store_format.to_le_bytes());
+        h.extend_from_slice(&0u32.to_le_bytes());
+        h.extend_from_slice(&(37 + u64::from(len)).to_le_bytes());
+    }
     h.extend_from_slice(&4u16.to_le_bytes());
     h.extend_from_slice(b"test");
+    // no apply, so no removed span: the dropped frame names no apply of this file
+    let facts = vec![0u8; 69];
     let mut kinds = vec![kind];
     kinds.extend_from_slice(&hash.0);
     let mut b = 0u32.to_le_bytes().to_vec();
@@ -705,7 +813,7 @@ fn drop_stream(
         (rec::HEADER, h),
         (rec::BATCH, b),
         (rec::DROPPED, drop),
-        (rec::TRAILER, vec![]),
+        (rec::TRAILER, facts),
     ];
     reseal(&mut recs);
     forge(dump_format, &recs)
@@ -756,19 +864,31 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
     claim.push(rec::DROPPED);
     claim.extend_from_slice(&[0u8; 32]);
     assert_eq!(read(&claim), WRONG_LENGTH);
-    // an ordinary frame that claims 4 GiB and ends: the end of the file, not an allocation
-    let mut claim = good[..at].to_vec();
-    claim.extend_from_slice(&u32::MAX.to_le_bytes());
-    claim.push(BLOCK);
-    claim.extend_from_slice(&[0u8; 32]);
-    claim.extend_from_slice(&[1u8; 1000]);
-    assert_eq!(read(&claim), ENDS_EARLY);
+    // an ordinary frame that claims 4 GiB and ends: over the 64 MiB record bound of format 3,
+    // refused by its length, never read or allocated
+    let claim_after = |prefix: &[u8]| {
+        let mut claim = prefix.to_vec();
+        claim.extend_from_slice(&u32::MAX.to_le_bytes());
+        claim.push(BLOCK);
+        claim.extend_from_slice(&[0u8; 32]);
+        claim.extend_from_slice(&[1u8; 1000]);
+        claim
+    };
+    assert_eq!(read(&claim_after(&good[..at])), ALLOCATION);
+    // a released format keeps its reader: there the claim is read in chunks until the file ends
+    let old = one_drop(2, 15);
+    let old_at = 12
+        + records(&old)[..2]
+            .iter()
+            .map(|(_, p)| HEAD + p.len())
+            .sum::<usize>();
+    assert_eq!(read(&claim_after(&old[..old_at])), ENDS_EARLY);
     // overflowing offsets: a batch start whose original frames run past u64::MAX
     let (j, _) = batch_of(&recs, i);
     let mut r = recs.clone();
     r[j].1[4..12].copy_from_slice(&(u64::MAX - 40).to_le_bytes());
     reseal(&mut r);
-    assert_eq!(read(&forge(DUMP_FORMAT, &r)), SPAN);
+    assert_eq!(read(&forge(DUMP_FORMAT, &r)), OVERFLOW);
     // the residue flag: 0 or 1; 0 with a zero hash; a block or change names one, a chunk none
     let chunk = recs
         .iter()
@@ -833,24 +953,71 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
         let mut b = src.batches[bi].clone();
         bend(&mut b.frames[fi]);
         set_digest(&mut b);
-        let mut w = DumpWriter::new(Vec::new(), &header(src.end)).unwrap();
+        let mut w = DumpWriter::new(Vec::new(), &header(&[])).unwrap();
         let r = w.batch(&b);
         match r {
             Err(StoreError::Refused(m)) => assert_eq!(m, want),
             other => panic!("not refused: {other:?}"),
         }
-        let (bytes, t) = w.finish().unwrap();
+        let (bytes, t) = w.finish(RemovalFacts::default()).unwrap();
         assert_eq!(t.batches, 0, "nothing of the refused batch was written");
         assert!(read_dump(&bytes).unwrap().2.is_empty());
     }
 }
 
 #[test]
+fn hc1_a_dropped_frame_past_u64_max_overflows_in_format_3_only() {
+    // dump format 3: the place of a dropped frame past u64::MAX is a position overflow, in the
+    // reader and the writer
+    let hash = Hash::of(b"a removed chunk");
+    let apply = Hash::of(b"apply");
+    let current = drop_stream(DUMP_FORMAT, STORE_FORMAT, BLOB_CHUNK, hash, 15, apply, None);
+    let past = |stream: &[u8], dump_format: u32| {
+        let mut r = records(stream);
+        let (j, _) = batch_of(&r, 2);
+        r[j].1[4..12].copy_from_slice(&(u64::MAX - 40).to_le_bytes());
+        reseal(&mut r);
+        what(read_dump(&forge(dump_format, &r)).unwrap_err())
+    };
+    assert_eq!(past(&current, DUMP_FORMAT), OVERFLOW);
+    let b = DumpBatch {
+        start: Location {
+            segment: 0,
+            offset: u64::MAX - 40,
+        },
+        digest: batch_digest([&hash]),
+        frames: vec![Frame::Dropped {
+            kind: BLOB_CHUNK,
+            hash,
+            len: 15,
+            apply,
+            residue: None,
+        }],
+    };
+    let mut w = DumpWriter::new(Vec::new(), &header(&[])).unwrap();
+    match w.batch(&b) {
+        Err(StoreError::Refused(m)) => assert_eq!(m, OVERFLOW),
+        other => panic!("not refused: {other:?}"),
+    }
+    // the released format-2 reader keeps its text
+    let old = drop_stream(2, 15, BLOB_CHUNK, hash, 15, apply, None);
+    assert_eq!(past(&old, 2), SPAN);
+}
+
+#[test]
 fn rdx9_current_output_uses_the_current_store_pair() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (2, 15));
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 16));
     assert_eq!(
         READS,
-        &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)]
+        &[
+            (1, 10),
+            (1, 11),
+            (1, 12),
+            (2, 13),
+            (2, 14),
+            (2, 15),
+            (3, 16)
+        ]
     );
     assert_eq!(frame_kinds(1, 13), None, "no (1, 13) reader entry");
     assert_eq!(
@@ -870,12 +1037,21 @@ fn rdx9_current_output_uses_the_current_store_pair() {
             ][..]
         )
     );
-    // the current pair: store format 15 adds refs only, so the kinds of (2, 14)
+    // store format 15 adds refs only, so the kinds of (2, 14)
     assert_eq!(
         frame_kinds(2, 15),
         Some(
             &[
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22
+            ][..]
+        )
+    );
+    // the current pair: the kinds of (2, 15) and the carried removal (23)
+    assert_eq!(
+        frame_kinds(3, 16),
+        Some(
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23
             ][..]
         )
     );
@@ -885,19 +1061,15 @@ fn rdx9_current_output_uses_the_current_store_pair() {
         Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19][..])
     );
     // no downgrade writer: a header of an older store format is refused
-    for sf in [10, 11, 12] {
+    for sf in [10, 11, 12, 13, 14, 15] {
         let old = DumpHeader {
             store_format: sf,
-            log_end: Location {
-                segment: 0,
-                offset: 0,
-            },
-            rdy: "test".into(),
+            ..header(&[])
         };
         match DumpWriter::new(Vec::new(), &old) {
             Err(StoreError::Refused(m)) => assert_eq!(
                 m,
-                format!("store format {sf} in a dump of format 2 is not one this rdy reads")
+                format!("store format {sf} in a dump of format 3 is not one this rdy reads")
             ),
             Err(other) => panic!("store format {sf}: {other:?}"),
             Ok(_) => panic!("store format {sf} was taken"),
@@ -906,7 +1078,7 @@ fn rdx9_current_output_uses_the_current_store_pair() {
     // what this rdy writes
     let src = source();
     let bytes = src.dump();
-    assert_eq!(&bytes[..12], b"RDYDUMP\n\x02\x00\x00\x00");
+    assert_eq!(&bytes[..12], b"RDYDUMP\n\x03\x00\x00\x00");
     let (format, h, _) = read_dump(&bytes).unwrap();
     assert_eq!((format, h.store_format), (DUMP_FORMAT, STORE_FORMAT));
 }
@@ -942,12 +1114,12 @@ fn batch_at(i: &Ingest, frames: Vec<Frame>) -> DumpBatch {
 fn rdx9_reader_allocation_failure_is_a_refusal() {
     let src = source();
     // a project file, ordinary frames over many batches, and every kind of dropped record
-    let mut w = DumpWriter::new(Vec::new(), &header(src.end)).unwrap();
+    let mut w = DumpWriter::new(Vec::new(), &header(&src.batches)).unwrap();
     w.file(".rdy.yaml", b"project: t\n").unwrap();
     for b in &src.batches {
         w.batch(b).unwrap();
     }
-    let bytes = w.finish().unwrap().0;
+    let bytes = w.finish(facts_of(&src.batches)).unwrap().0;
     let read_all = |bytes: &[u8]| -> Result<u64, StoreError> {
         let (mut r, _, _) = DumpReader::open(bytes)?;
         let mut items = 0u64;
@@ -1009,7 +1181,7 @@ fn rdx9_ingest_allocation_failure_is_a_refusal() {
 #[test]
 fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
     let dir = tempfile::tempdir().unwrap();
-    // the 416-byte stream: one dropped chunk claims 32 MiB and names an apply no stream holds
+    // the 590-byte stream: one dropped chunk claims 32 MiB and names an apply no stream holds
     let len = 32 << 20;
     let stream = drop_stream(
         DUMP_FORMAT,
@@ -1020,7 +1192,7 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
         Hash::of(b"no such apply"),
         None,
     );
-    assert_eq!(stream.len(), 416);
+    assert_eq!(stream.len(), 590);
     let (_, _, bs) = read_dump(&stream).unwrap();
     let to = dir.path().join("claim");
     let mut i = Ingest::create(&to).unwrap();
@@ -1049,7 +1221,7 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
     };
     let e = read_dump(&over(FRAME_BOUND + 1)).unwrap_err();
     assert!(
-        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 22 + HEAD + 80) as u64),
+        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 179 + HEAD + 80) as u64),
         "blamed on the dropped record: {e:?}"
     );
     assert_eq!(what(e), claim(FRAME_BOUND + 1));
@@ -1411,4 +1583,198 @@ fn sibling_with_another_id(d: &mut redaction_fixture::Draft, _: &Block, b: &Bloc
     }
     let residues = d.residues.clone();
     redaction_fixture::relink(&mut d.request, &residues);
+}
+
+/// hc1 (fix round 3): a project request may list more physical copies than the sync decoder's
+/// 100000 entries per collection (`rdy_store::bounded::MAX_ELEMENTS`): its selection stays within
+/// the request's own bound (`MAX_SELECTED`), and each listed span is one frame of the log. The
+/// removal tally reads such a request's spans, so the writer's resolved facts and the file's own
+/// facts agree, and the checking reader takes the trailer.
+#[test]
+fn hc1_a_request_over_100000_physical_copies_keeps_its_removal_facts() {
+    const COPIES: usize = rdy_store::bounded::MAX_ELEMENTS + 1;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("src");
+    let mut s = Store::create(&path).unwrap();
+    let a = block("b-00001", "canary alpha secret");
+    s.commit_to_view(
+        "work",
+        change("work", vec![Op::Create { block: a.clone() }]),
+    )
+    .unwrap();
+    let raw = s.get_raw(&a.version_hash()).unwrap().1;
+    drop(s);
+    // more physical copies of the selected version, appended while the store is closed
+    let (mut log, q) =
+        rdy_store::segment::SegmentLog::open_marked(&path.join("segments"), 64 * 1024 * 1024, None)
+            .unwrap();
+    assert!(q.is_empty());
+    log.append_batch(&vec![(BLOCK, raw); COPIES]).unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let spec = RequestSpec::new(
+        "work",
+        vec![RedactTarget::Version {
+            id: a.id.clone(),
+            version: a.version_hash(),
+        }],
+    );
+    let fixture = authorized_batch_fixture(
+        &path,
+        &[spec],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let spans = &fixture.requests[0].draft.request.manifest.spans;
+    assert!(spans.len() > COPIES, "{} spans", spans.len());
+    let lowest = spans
+        .iter()
+        .map(|s| Location {
+            segment: s.place.segment,
+            offset: s.place.offset,
+        })
+        .min();
+    // the open finishes the removal
+    let s = Store::open(&path).unwrap();
+    let end = s.log_end();
+    let r = s.reader();
+    let mut tally = RemovalTally::default();
+    let mut batches = vec![];
+    r.for_each_batch(end, |b| {
+        tally.observe(&b)?;
+        batches.push(b);
+        Ok(())
+    })
+    .unwrap();
+    let want = RemovalFacts {
+        removals: 1,
+        first_removed: lowest,
+    };
+    assert_eq!(tally.resolved(&r, end).unwrap(), want, "the writer's facts");
+    assert_eq!(tally.facts().unwrap(), want, "the file's facts");
+    let mut w = DumpWriter::new(Vec::new(), &header(&batches)).unwrap();
+    for b in &batches {
+        w.batch(b).unwrap();
+    }
+    let (bytes, _) = w.finish(want).unwrap();
+    let (mut rd, _, _) = DumpReader::open(&bytes[..]).unwrap();
+    while rd.next().unwrap().is_some() {}
+    assert_eq!(rd.trailer().unwrap().first_removed, lowest);
+}
+
+/// A carried removal record (kind 23) with `n` targets and spans.
+fn carried_record(n: usize) -> rdy_model::redaction::RedactionCarried {
+    use rdy_model::redaction::{CarriedSpan, FramePlace, ReasonClass, RedactionCarried};
+    RedactionCarried {
+        request: Hash::of(b"request"),
+        apply: Hash::of(b"apply"),
+        landing: Hash::of(b"landing"),
+        approved_by: Provenance {
+            actor: "human:approver".into(),
+            run: Some("r1".into()),
+            role: Role::Approver,
+            at_ms: 7,
+        },
+        reason_class: ReasonClass::Secret,
+        targets: (0..n)
+            .map(|i| RedactTarget::AllVersions(BlockId::parse(&format!("b-0000{i}")).unwrap()))
+            .collect(),
+        spans: (0..n)
+            .map(|i| CarriedSpan {
+                place: FramePlace {
+                    segment: 0,
+                    offset: 100 * i as u64,
+                },
+                kind: BLOCK,
+                hash: Hash::of(&[i as u8]),
+                len: 9,
+                residue: Some(Hash::of(b"residue")),
+                held: i % 2 == 0,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn rdx9_reader_allocation_failure_with_a_carried_record_is_a_refusal() {
+    // the reader's check of a carried record decodes it in place: each allocation of the read
+    // in turn fails, and each is the dump refusal, never an abort
+    let src = source();
+    let mut batches = src.batches.clone();
+    let payload = postcard::to_allocvec(&carried_record(3)).unwrap();
+    let hash = Hash::of(&payload);
+    batches.push(DumpBatch {
+        start: batch_end(batches.last().unwrap()).unwrap(),
+        digest: batch_digest([&hash]),
+        frames: vec![Frame::Present {
+            kind: kinds::REDACTION_CARRIED,
+            hash,
+            payload,
+        }],
+    });
+    let bytes = write_dump(&batches);
+    let read_all = |bytes: &[u8]| -> Result<u64, StoreError> {
+        let (mut r, _, _) = DumpReader::open(bytes)?;
+        let mut items = 0u64;
+        while r.next()?.is_some() {
+            items += 1;
+        }
+        Ok(items)
+    };
+    let items = read_all(&bytes).unwrap();
+    let mut refused = 0;
+    for nth in 1u64.. {
+        failing_alloc::arm(nth);
+        let got = read_all(&bytes);
+        if !failing_alloc::disarm() {
+            assert_eq!(got.unwrap(), items, "the read past its last allocation");
+            break;
+        }
+        assert_eq!(what(got.unwrap_err()), ALLOCATION, "allocation {nth}");
+        refused += 1;
+    }
+    assert!(refused > 0);
+}
+
+#[test]
+fn rdx9_carried_decode_allocation_failure_is_a_refusal() {
+    // the owned decode of a carried record, which the chain scan, the tail plan, the store's
+    // carried visit and the engine's report use, and its canonical-encoding check grow by
+    // fallible reservation: each allocation in turn fails, and each is `record allocation
+    // failed`, never an abort
+    use rdy_store::bounded::TryDecodeError;
+    use rdy_store::redaction_carried::decode_carried;
+    let mut no_run = carried_record(2);
+    no_run.approved_by.run = None;
+    no_run.targets.push(RedactTarget::Version {
+        id: BlockId::parse("b-00009").unwrap(),
+        version: Hash::of(b"v"),
+    });
+    no_run.targets.push(RedactTarget::Blob(Hash::of(b"m")));
+    for (n, record) in [carried_record(3), carried_record(1), no_run]
+        .into_iter()
+        .enumerate()
+    {
+        let payload = postcard::to_allocvec(&record).unwrap();
+        assert_eq!(decode_carried(&payload).as_ref(), Ok(&record), "form {n}");
+        let mut refused = 0;
+        for nth in 1u64.. {
+            failing_alloc::arm(nth);
+            let got = decode_carried(&payload);
+            if !failing_alloc::disarm() {
+                assert_eq!(
+                    got.as_ref(),
+                    Ok(&record),
+                    "form {n}: past its last allocation"
+                );
+                break;
+            }
+            assert_eq!(
+                got.as_ref().err(),
+                Some(&TryDecodeError::Allocation),
+                "form {n}: allocation {nth}"
+            );
+            refused += 1;
+        }
+        assert!(refused > 0, "form {n}");
+    }
 }

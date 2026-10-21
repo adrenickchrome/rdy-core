@@ -1,7 +1,8 @@
-//! dl1: the dump stream (the current format, 2): header, project files, sealed batches copied
+//! dl1: the dump stream (the current format, 3): header, project files, sealed batches copied
 //! byte for byte, trailer; every record verified on read.
 use rdy_model::Hash;
 use rdy_store::dump::*;
+use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
@@ -23,23 +24,44 @@ fn store_and_batches() -> (tempfile::TempDir, Store, Vec<DumpBatch>) {
     (base, s, batches)
 }
 
+/// The header of a full dump of all of `s`: its log end and the marker of its last batch.
 fn header(s: &Store) -> DumpHeader {
+    let r = s.reader();
+    let marker = r.batch_marker_at(s.log_end()).unwrap().unwrap();
     DumpHeader {
         store_format: STORE_FORMAT,
         log_end: s.log_end(),
         rdy: "test".into(),
+        chain: Some(DumpChainHeader::full(r.repo_id().unwrap().unwrap(), marker)),
+    }
+}
+
+/// The header of a full dump of `s` that holds `batches`: it ends where the last of them ends
+/// (at the origin when there are none).
+fn header_of(s: &Store, batches: &[DumpBatch]) -> DumpHeader {
+    let (log_end, marker) = match batches.last() {
+        Some(b) => (batch_end(b).unwrap(), BatchMarker::of(b)),
+        None => (BatchMarker::ZERO.start, BatchMarker::ZERO),
+    };
+    DumpHeader {
+        log_end,
+        chain: Some(DumpChainHeader::full(
+            s.reader().repo_id().unwrap().unwrap(),
+            marker,
+        )),
+        ..header(s)
     }
 }
 
 fn stream(s: &Store, batches: &[DumpBatch], files: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut w = DumpWriter::new(Vec::new(), &header(s)).unwrap();
+    let mut w = DumpWriter::new(Vec::new(), &header_of(s, batches)).unwrap();
     for (p, b) in files {
         w.file(p, b).unwrap();
     }
     for b in batches {
         w.batch(b).unwrap();
     }
-    w.finish().unwrap().0
+    w.finish(RemovalFacts::default()).unwrap().0
 }
 
 fn read_all(bytes: &[u8]) -> Result<Vec<DumpItem>, StoreError> {
@@ -95,7 +117,7 @@ fn dl1_a_stream_round_trips_header_files_and_batches() {
         (".rdyignore", b"*.draft.yaml\n"),
     ];
     let bytes = stream(&s, &batches, &files);
-    assert!(bytes.starts_with(b"RDYDUMP\n\x02\x00\x00\x00"));
+    assert!(bytes.starts_with(b"RDYDUMP\n\x03\x00\x00\x00"));
     let (mut r, format, h) = DumpReader::open(&bytes[..]).unwrap();
     assert_eq!(
         (format, h.store_format, h.log_end),
@@ -180,7 +202,7 @@ fn dl1_a_stream_must_end_at_its_trailer() {
         "bytes follow the trailer"
     );
     // the stream of one batch fewer, closed with the full stream's trailer: counts and digest differ
-    const TRAILER: usize = 37 + 8 + 8 + 4 + 32;
+    const TRAILER: usize = 37 + TRAILER_LEN;
     let short = stream(&s, &batches[..batches.len() - 1], &[]);
     let mut spliced = short[..short.len() - TRAILER].to_vec();
     spliced.extend_from_slice(&good[good.len() - TRAILER..]);
@@ -200,22 +222,23 @@ fn dl1_an_unknown_magic_or_format_is_refused() {
         damaged(read_all(&bad).unwrap_err()),
         "it does not start with RDYDUMP"
     );
-    let mut v3 = good.clone();
-    v3[8] = 3;
+    let mut v4 = good.clone();
+    v4[8] = 4;
     assert_eq!(
-        damaged(read_all(&v3).unwrap_err()),
-        "dump format 3 is not one this rdy reads"
+        damaged(read_all(&v4).unwrap_err()),
+        "dump format 4 is not one this rdy reads"
     );
     // the writer refuses this header (dl1_a_writer_refuses_a_store_format_it_cannot_read), so
-    // the stream is forged: a batch-less dump whose header names the next store format
+    // the stream is forged: a batch-less dump whose header names the next store format (after
+    // the header's kind byte)
     let mut recs = records(&stream(&s, &[], &[]));
-    recs[0].1[..4].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
+    recs[0].1[1..5].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
     reseal(&mut recs);
     let bytes = forge(&recs);
     assert_eq!(
         damaged(read_all(&bytes).unwrap_err()),
         format!(
-            "store format {} in a dump of format 2 is not one this rdy reads",
+            "store format {} in a dump of format 3 is not one this rdy reads",
             STORE_FORMAT + 1
         )
     );
@@ -235,7 +258,7 @@ fn dl1_a_writer_refuses_a_store_format_it_cannot_read() {
         assert_eq!(
             e.to_string(),
             StoreError::Refused(format!(
-                "store format {store_format} in a dump of format 2 is not one this rdy reads"
+                "store format {store_format} in a dump of format 3 is not one this rdy reads"
             ))
             .to_string()
         );
@@ -254,11 +277,11 @@ fn dl1_each_reader_refusal_has_its_kind() {
     bad[0] = b'X';
     assert_eq!(DumpRefusal::of(&what(&bad)), DumpRefusal::NotADump);
     assert_eq!(DumpRefusal::of(&what(&[])), DumpRefusal::NotADump);
-    let mut v3 = good.clone();
-    v3[8] = 3;
-    assert_eq!(DumpRefusal::of(&what(&v3)), DumpRefusal::FormatNotRead);
+    let mut v4 = good.clone();
+    v4[8] = 4;
+    assert_eq!(DumpRefusal::of(&what(&v4)), DumpRefusal::FormatNotRead);
     let mut recs = records(&stream(&s, &[], &[]));
-    recs[0].1[..4].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
+    recs[0].1[1..5].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
     reseal(&mut recs);
     assert_eq!(
         DumpRefusal::of(&what(&forge(&recs))),
@@ -476,7 +499,8 @@ fn trailer_digest(recs: &[(u8, Vec<u8>)]) -> Hash {
     Hash::of(&b)
 }
 
-/// The trailer payload that closes `recs` (the trailer left out), with `digest`.
+/// The format-3 trailer payload that closes `recs` (the trailer left out), with `digest` and no
+/// removal facts (these stores hold no apply).
 fn trailer_with(recs: &[(u8, Vec<u8>)], digest: Hash) -> Vec<u8> {
     let batches = recs.iter().filter(|(k, _)| *k == rec::BATCH).count() as u64;
     let frames = recs.iter().filter(|(k, _)| *k < rec::HEADER).count() as u64;
@@ -484,6 +508,8 @@ fn trailer_with(recs: &[(u8, Vec<u8>)], digest: Hash) -> Vec<u8> {
     let mut p = batches.to_le_bytes().to_vec();
     p.extend_from_slice(&frames.to_le_bytes());
     p.extend_from_slice(&files.to_le_bytes());
+    p.extend_from_slice(&0u32.to_le_bytes()); // removals
+    p.extend_from_slice(&[0u8; 13]); // no first removed span
     p.extend_from_slice(&digest.0);
     p
 }
@@ -558,10 +584,10 @@ fn dl1_an_unassigned_kind_is_refused() {
         frame_kinds(DUMP_FORMAT, STORE_FORMAT),
         Some(
             &[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23
             ][..]
         ),
-        "exactly the kinds store format 14 assigns"
+        "exactly the kinds store format 16 assigns"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
@@ -576,7 +602,8 @@ fn dl1_an_unassigned_kind_is_refused() {
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    for k in [12u8, 14] {
+    // 23 (the carried removal) is assigned now; 12 stays unassigned, and 24 is the next
+    for k in [12u8, 14, 24] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;
@@ -664,7 +691,7 @@ fn stays_failed(bytes: &[u8], want: &str) {
 fn dl1_a_reader_stays_failed_after_an_error() {
     let (_b, s, batches) = store_and_batches();
     let good = stream(&s, &batches, &[]);
-    const TRAILER: usize = 37 + 8 + 8 + 4 + 32;
+    const TRAILER: usize = 37 + TRAILER_LEN;
     // one junk byte after the trailer, then a copy of the trailer: a retry must not read it
     let mut extra = good.clone();
     extra.push(0);
@@ -681,7 +708,7 @@ fn dl1_a_path_longer_than_its_length_field_is_refused() {
     let (_b, s, _) = store_and_batches();
     let path = format!(".rdy/packs/{}.yaml", "a".repeat(65536));
     assert!(is_project_file(&path));
-    let mut w = DumpWriter::new(Vec::new(), &header(&s)).unwrap();
+    let mut w = DumpWriter::new(Vec::new(), &header_of(&s, &[])).unwrap();
     match w.file(&path, b"x") {
         Err(StoreError::Refused(m)) => assert_eq!(
             m,
@@ -690,7 +717,7 @@ fn dl1_a_path_longer_than_its_length_field_is_refused() {
         other => panic!("not refused: {other:?}"),
     }
     // nothing was written: the writer still finishes a dump that reads
-    let bytes = w.finish().unwrap().0;
+    let bytes = w.finish(RemovalFacts::default()).unwrap().0;
     assert!(read_all(&bytes).unwrap().is_empty());
 }
 

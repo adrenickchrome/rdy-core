@@ -14,7 +14,8 @@
 //! - every SIGNATURE whose subject is a closure landing or the root tag (D-1Z951), read with
 //!   `signatures_before`; its subject link then orders it after its subject;
 //! - the ANSWER that the source ref `answer/tag:<root name>` names, when it has act Tag and item
-//!   `tag:<root name>` (O11): a relayed tag's answer can have no target;
+//!   `tag:<root name>` (O11): a relayed tag's answer targets the tag (`put_tag_answered`), and a
+//!   holder requires it with the tag;
 //! - the REDACTION request whose carrier is a closure change;
 //! - the active REDACTION_APPLY of every request that names a closure block version, change,
 //!   blob manifest or chunk: a later removal proof, so a receiver can erase its own copies too.
@@ -39,6 +40,15 @@
 //!
 //! The upload's bounds are charged to the walk: at most [`MAX_RECORDS`] records and
 //! [`MAX_EDGES`] distinct references of each record, summed, known records included.
+//!
+//! # Carried removals
+//!
+//! A carried record (kind REDACTION_CARRIED, D-0VG72) is never sent, and it is no removal proof.
+//! A tag whose walk reaches an object that a carried span names, while no validated apply of
+//! this store before the end covers that span (a held payload, or zeros only the carried record
+//! explains), is refused with E_REDACTED (`StreamError::carried_content`), with the fix of the
+//! store's mode. Other tags export as before; once an apply covers every such span, the tag
+//! exports with that apply as its placeholders' proof.
 //!
 //! # The order
 //!
@@ -110,6 +120,7 @@ pub fn closure_before(
         queue: Vec::new(),
         edges: 0,
         asked: HashSet::new(),
+        carried: uncovered_carried(reader, end)?,
     };
     w.reach(root)?;
     loop {
@@ -311,6 +322,53 @@ impl ObjectSource for StoreSource<'_> {
     }
 }
 
+/// The objects that a carried span of a record before `end` names, while no validated apply of
+/// the store before `end` covers that span, each with the first carried record (in log order)
+/// that names it. A span covers when the active mask holds its frame with an apply as its proof:
+/// a held span, or one only a carried record explains, does not.
+fn uncovered_carried(
+    reader: &StoreReader,
+    end: Location,
+) -> Result<BTreeMap<ObjectKey, Hash>, StreamError> {
+    let index = reader.index();
+    let mut out: BTreeMap<ObjectKey, Hash> = BTreeMap::new();
+    let mut failed: Option<StreamError> = None;
+    let mut visit = |c: crate::redaction_carried::CarriedAt| -> Result<(), StoreError> {
+        for s in &c.record.spans {
+            let loc = Location {
+                segment: s.place.segment,
+                offset: s.place.offset,
+            };
+            let covered = match index.redaction_span_at(&loc)? {
+                Some(row) => index
+                    .redaction_applied(&row.request)?
+                    .is_some_and(|(apply, at)| apply == row.apply && at < end),
+                None => false,
+            };
+            if !covered {
+                let key = ObjectKey {
+                    kind: s.kind,
+                    hash: s.hash,
+                };
+                if !out.contains_key(&key) {
+                    if out.len() >= MAX_SEEN {
+                        failed = Some(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
+                        return Err(StoreError::Refused("the carried pass stopped".into()));
+                    }
+                    out.insert(key, c.hash);
+                }
+            }
+        }
+        Ok(())
+    };
+    let walked = reader.visit_carried(end, &mut visit);
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    walked.map_err(|e| store_error(e, None))?;
+    Ok(out)
+}
+
 /// A store failure while a closure reads its source: an I/O failure is E_IO; a missing object
 /// E_UNRESOLVED_REF; a stored record that does not decode E_BAD_RECORD `record does not decode`
 /// (run rdy fsck at the source); a signing read over its bound E_LIMIT with that bound; any
@@ -347,6 +405,9 @@ struct Walk<'a> {
     edges: u64,
     /// The landings and tags whose answers a pass looked for.
     asked: HashSet<Hash>,
+    /// The objects that a carried span names and no apply covers, each with the first carried
+    /// record that names it.
+    carried: BTreeMap<ObjectKey, Hash>,
 }
 
 /// One record of the closure.
@@ -388,6 +449,9 @@ impl Walk<'_> {
         if self.nodes.len() as u64 >= MAX_RECORDS {
             return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
         }
+        if let Some(carried) = self.carried.get(&k) {
+            return Err(self.carried_refusal(*carried).with_object(Some(k)));
+        }
         let Some(record) = self.source.record(k)? else {
             if known.contains(&k) {
                 return Ok(());
@@ -424,6 +488,23 @@ impl Walk<'_> {
             },
         );
         Ok(())
+    }
+
+    /// The refusal of this walk's tag for reaching content that carried record `carried` names.
+    fn carried_refusal(&self, carried: Hash) -> StreamError {
+        let reader = self.source.reader;
+        let err = |e| store_error(e, Some(self.root));
+        let name = match reader.get_kind(kinds::TAG, &self.root.hash) {
+            Ok(payload) => match crate::bounded::decode::<Tag>(&payload) {
+                Ok(t) => t.name,
+                Err(e) => return StreamError::from_record(0, 0, &e).with_object(Some(self.root)),
+            },
+            Err(e) => return err(e),
+        };
+        match reader.mode() {
+            Ok(mode) => StreamError::carried_content(&name, carried, mode),
+            Err(e) => err(e),
+        }
     }
 
     /// The key a link of record `from` names: its own kind, or for a kind-None link the one

@@ -40,7 +40,7 @@ fn dl7_an_agent_dumps_and_loads_through_the_tools() {
         file.is_file(),
         "the dump lands in the project directory: {d}"
     );
-    assert_eq!(d["dump_format"], 2, "{d}");
+    assert_eq!(d["dump_format"], 3, "{d}");
     assert!(d["batches"].as_u64().unwrap() > 0, "{d}");
     let again = c.call("rdy_dump", json!({"out": "p.rdydump"}));
     assert_eq!(

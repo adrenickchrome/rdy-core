@@ -741,6 +741,16 @@ fn hd3_an_op_arg_typo_gets_a_did_you_mean() {
     );
 }
 
+/// hc8: the dump op's shape hint names `after`, the field `DumpArgs` now takes.
+#[test]
+fn hc8_a_malformed_dump_arg_gets_a_shape_hint_that_names_after() {
+    let (d, e) = project();
+    let s = human();
+    let err = dispatch(&cx(&e, &s, d.path()), "dump", json!({"out": 5})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.fix, "args for dump: {out, after?}", "{err}");
+}
+
 #[test]
 fn hd3_an_alt_member_with_an_unknown_field_is_refused() {
     let (d, e) = project();

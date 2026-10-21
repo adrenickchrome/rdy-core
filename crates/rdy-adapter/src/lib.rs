@@ -19,11 +19,12 @@ pub mod stream;
 pub mod take;
 mod value;
 
+pub use maintenance::{ChainEnd, DumpStop, LoadedChainFile, StoppedAt};
 pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
 };
-pub use rdy_engine::RdyError;
+pub use rdy_engine::{CarriedTargetIssue, CarriedWarning, RdyError};
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::meta::Origin;
 pub use store::{Identity, Snapshot, StoreHandle};

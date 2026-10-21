@@ -395,7 +395,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             publication_check(cx, parse(op, args, "{profile, scope?, against?}")?)
         }
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
-        "dump" => dump(cx, parse(op, args, "{out}")?),
+        "dump" => dump(cx, parse(op, args, "{out, after?}")?),
         "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),
         "redact" => redact(
             cx,

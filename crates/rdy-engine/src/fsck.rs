@@ -43,6 +43,10 @@ pub struct FsckReport {
     /// report has none of these members.
     #[serde(flatten)]
     pub redaction: Option<FsckRedaction>,
+    /// The carried-removal warnings (`W_STOP_BEFORE_REDACTION`), derived from the log and the
+    /// current mask. Present only when not empty. A warning is not damage: fsck still succeeds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::CarriedWarning>,
 }
 
 /// What an active redaction removed, and the payloads fsck hashed, counted apart (D-3M81W).
@@ -93,6 +97,7 @@ impl Rdy {
                 redacted_bytes: c.bytes,
                 checked_payloads: c.checked_payloads,
             }),
+            warnings: self.read().carried_warnings()?,
         })
     }
 }
@@ -144,6 +149,7 @@ impl Rdy {
                 redacted_bytes: c.bytes,
                 checked_payloads: c.checked_payloads,
             }),
+            warnings: self.read().carried_warnings()?,
         })
     }
 
@@ -262,6 +268,7 @@ mod tests {
             signatures: 0,
             foreign_signatures: 0,
             redaction,
+            warnings: Vec::new(),
         }
     }
 

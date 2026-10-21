@@ -72,27 +72,97 @@
 //! reader checks only the record's own rules; the ingest checks the authorization against the
 //! complete stream before it finishes the store (`crate::ingest`).
 //!
+//! # Dump format 3
+//!
+//! Dump format 3 carries store format 16 (the pair (3, 16); its frame kinds are those of (2, 15)
+//! and 23, the carried removal). It keeps the magic, the container framing and the `FILE`,
+//! `BATCH` and `DROPPED` layouts of format 2. Its `HEADER` and `TRAILER` add the chain facts
+//! (`crate::dump_chain`): a dump is either full, the whole log from its origin, or an increment,
+//! the sealed batches after the end of the file before it.
+//!
+//! - **`HEADER` payload:** `kind: u8` (0 full, 1 increment; 2 to 255 do not parse),
+//!   `store_format: u32`, `repo_id: [u8; 16]`, `base.segment: u32`, `base.offset: u64`,
+//!   `base_batch: marker`, `prev: [u8; 32]`, `end.segment: u32`, `end.offset: u64`,
+//!   `end_batch: marker`, `rdy_len: u16`, `rdy: [u8; rdy_len]` (UTF-8, at most 256 bytes). A
+//!   marker is `start.segment: u32`, `start.offset: u64`, `frames: u32`, `digest: [u8; 32]` (48
+//!   bytes). The fixed part is 175 bytes.
+//! - **`TRAILER` payload (69 bytes):** `batches: u64`, `frames: u64`, `files: u32`,
+//!   `removals: u32`, `has_first_removed: u8`, `first_removed.segment: u32`,
+//!   `first_removed.offset: u64`, `digest: [u8; 32]` (the digest of format 1). The flag is 0 or
+//!   1; with 0 the position is zero. `removals` counts the dump's `REDACTION_APPLY` frames;
+//!   `first_removed` is the lowest local span those applies removed, absent when none has one.
+//!   An apply's spans are its request's, resolved as the store resolves them: a project's
+//!   manifest places, a holder's local copies of the manifest's keys (HA1's logical rule). The
+//!   authority a `DROPPED` record names is not the rule, and a hole only a carried record
+//!   explains is no span ([`RemovalTally`]).
+//!
+//! A full dump has base `0.0`, a zero base marker and a zero `prev`. An increment holds at least
+//! one batch. The first batch starts at `base`, or at offset zero of the next segment. The last
+//! batch ends at the header's end (its start, plus `37 + original_len` per frame, plus the marker
+//! frame), and its marker is `end_batch`; a dump of no batches ends at its base with its base
+//! marker. The reader also checks `removals` against the dump's applies, and, in a full dump,
+//! `first_removed` against the lowest span the file's own records resolve for those applies. An
+//! increment after the origin does not hold the log's first batch, so either resolution may be
+//! its log's; it may also name a span before its base, which an earlier file holds, and an
+//! apply whose request an earlier file holds is resolved by the loader of the chain. Every
+//! place is checked arithmetic: one past `u64::MAX` is `dump position overflows`. The chain links between files
+//! are checked by the loader of a chain.
+//!
+//! A record payload holds at most `MAX_BLOB_BYTES` (64 MiB): a longer one is refused by its
+//! length, before it is read or written. A carried removal record (kind 23) is decoded by the
+//! bounded record decoder (`crate::bounded`) when it is read or written, and refused with that
+//! decoder's error; the released kinds keep their own limits.
+//!
 //! The reader allocates only by fallible growth: a payload in chunks of at most `ERASE_BUFFER`
-//! bytes, each frame slot, the trailer chain, both batch digests and each project file. A refused
-//! allocation is the dump refusal `record allocation failed`, never an abort.
+//! bytes, each frame slot, the trailer chain, both batch digests, the removal tally and each
+//! project file. A refused allocation is the dump refusal `record allocation failed`, never an
+//! abort.
+use crate::dump_chain::{self, BatchMarker, DumpChainHeader, DumpKind, chain_text, follows};
 use crate::error::StoreError;
-use crate::kinds::{self, BatchCommit, batch_digest};
+use crate::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode};
+use crate::kinds::{self, BatchCommit};
 use crate::redaction::StoredFrame;
 use crate::redaction_io::ERASE_BUFFER;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{MAX_BLOB_BYTES, StoreReader};
-use rdy_model::Hash;
+use rdy_model::{Hash, RepoId};
 use std::borrow::Cow;
-use std::io::{self, Read, Write};
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+
+/// A test hook a batch walk calls with the location of each record it has read.
+#[doc(hidden)]
+pub type RecordHook = Box<dyn FnMut(Location)>;
+
+thread_local! {
+    static RECORD_HOOK: std::cell::RefCell<Option<RecordHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: a batch walk on this thread (a dump's, and a batch-marker lookup's) calls `hook`
+/// with each record's location, after the walk has read the removal spans and that record and
+/// before it reads the next one (a read barrier for race tests). None removes the hook.
+#[doc(hidden)]
+pub fn on_batch_walk_record(hook: Option<RecordHook>) {
+    RECORD_HOOK.with(|h| *h.borrow_mut() = hook);
+}
 
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
-/// The dump format this rdy writes: 2, of store format 15 (the pair (2, 15)).
-pub const DUMP_FORMAT: u32 = 2;
+/// The dump format this rdy writes: 3, of store format 16 (the pair (3, 16)).
+pub const DUMP_FORMAT: u32 = 3;
 /// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
 /// this list (D-69AY3). No (1, 13) pair exists: store formats 13 to 15 travel only in dump
-/// format 2.
-pub const READS: &[(u32, u32)] = &[(1, 10), (1, 11), (1, 12), (2, 13), (2, 14), (2, 15)];
+/// format 2, and store format 16 only in dump format 3.
+pub const READS: &[(u32, u32)] = &[
+    (1, 10),
+    (1, 11),
+    (1, 12),
+    (2, 13),
+    (2, 14),
+    (2, 15),
+    (3, 16),
+];
 /// At most this many `FILE` records.
 pub const MAX_FILES: u32 = 256;
 /// At most this many bytes in one project file.
@@ -111,7 +181,16 @@ pub mod rec {
 }
 
 const BATCH_LEN: usize = 4 + 8 + 4 + 32 + 32;
-const TRAILER_LEN: usize = 8 + 8 + 4 + 32;
+/// The length of a format-1 or format-2 `TRAILER` payload.
+const LEGACY_TRAILER_LEN: usize = 8 + 8 + 4 + 32;
+/// The length of a format-3 `TRAILER` payload.
+pub const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 1 + 4 + 8 + 32;
+/// The length of one marker in a format-3 `HEADER`.
+const MARKER_LEN: usize = 4 + 8 + 4 + 32;
+/// The length of a format-3 `HEADER` payload before its `rdy` text.
+pub const HEADER_FIXED: usize = 1 + 4 + 16 + 4 + 8 + MARKER_LEN + 32 + 4 + 8 + MARKER_LEN + 2;
+/// The length of a format-1 or format-2 `HEADER` payload before its `rdy` text.
+const LEGACY_HEADER_FIXED: usize = 4 + 4 + 8 + 2;
 /// The length of a `DROPPED` record's payload.
 pub const DROPPED_LEN: usize = 1 + 32 + 4 + 32 + 1 + 32;
 
@@ -267,7 +346,7 @@ pub(crate) fn parse_dropped(p: &[u8]) -> Result<Frame, Cow<'static, str>> {
 }
 
 /// Whether a dump of `dump_format` may hold `DROPPED` records: format 2 does, format 1 never.
-fn drops_allowed(dump_format: u32) -> bool {
+pub(crate) fn drops_allowed(dump_format: u32) -> bool {
     dump_format >= 2
 }
 
@@ -280,13 +359,15 @@ fn batch_end(start: u64, frames: &[Frame]) -> Option<u64> {
     })
 }
 
-/// The dump's header: the store format of its frames, the source log's end, and the writing
-/// rdy's version (for people only).
+/// The dump's header: the store format of its frames, the source log's end, the writing rdy's
+/// version (for people only), and the chain facts of dump format 3 (None for formats 1 and 2,
+/// which have none). A writer needs them: it writes dump format 3 only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DumpHeader {
     pub store_format: u32,
     pub log_end: Location,
     pub rdy: String,
+    pub chain: Option<DumpChainHeader>,
 }
 
 /// One sealed batch of the source log: its marker's start and digest, and its data frames.
@@ -305,12 +386,547 @@ pub enum DumpItem {
 }
 
 /// What a dump holds so far: batches, store frames, project files, and bytes of the stream.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// After the trailer (the writer's `finish`, or the reader's verified end of file) it also holds
+/// the trailer's removal facts and digest; before, they are zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DumpTotals {
     pub batches: u64,
     pub frames: u64,
     pub files: u32,
     pub bytes: u64,
+    pub removals: u32,
+    pub first_removed: Option<Location>,
+    pub digest: Hash,
+}
+
+impl Default for DumpTotals {
+    fn default() -> Self {
+        DumpTotals {
+            batches: 0,
+            frames: 0,
+            files: 0,
+            bytes: 0,
+            removals: 0,
+            first_removed: None,
+            digest: Hash([0u8; 32]),
+        }
+    }
+}
+
+/// A dump's trailer: its counts, its removal facts and the digest over every record before it.
+/// A trailer of dump format 1 or 2 records no removal facts: zero and none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DumpTrailer {
+    pub batches: u64,
+    pub frames: u64,
+    pub files: u32,
+    pub removals: u32,
+    pub first_removed: Option<Location>,
+    pub digest: Hash,
+}
+
+/// The removal facts a format-3 trailer records: how many `REDACTION_APPLY` frames the dump
+/// holds (each physical one counts), and the lowest local span those applies removed, or none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RemovalFacts {
+    pub removals: u32,
+    pub first_removed: Option<Location>,
+}
+
+/// The removal facts of a dump, gathered batch by batch, in file order, from the frames the
+/// checked source walker hands the writer or the reader reads. Every `REDACTION_APPLY` frame
+/// counts (each physical one). The first removed span is the lowest resolved local span of those
+/// applies: each apply names its request, and the request's spans are resolved as the store
+/// resolves them (`crate::redaction_io`, `crate::redaction_import`):
+///
+/// - in a project, the request's manifest places, which are places of this log;
+/// - in a holder (its first batch sets `meta/store_mode`), every dropped frame of a key the
+///   manifest lists (HA1's logical rule): a source place is never read, and a span covered by
+///   an apply counts for every request that approves its key, whichever proof its `DROPPED`
+///   record names (the earliest).
+///
+/// So a hole that only a carried record explains is no span, and the authority a `DROPPED`
+/// record names is not the rule. [`RemovalTally::facts`] resolves from the batches alone (the
+/// reader's view of a file); [`RemovalTally::resolved`] asks the store's own authorization (the
+/// writer's). Growth is fallible.
+#[derive(Clone, Debug, Default)]
+pub struct RemovalTally {
+    /// The `REDACTION_APPLY` frames seen.
+    applies: u64,
+    /// The requests those applies name, once each (an apply that does not decode names none).
+    requests: HashSet<Hash>,
+    /// Whether an apply frame did not decode.
+    undecoded: bool,
+    /// The manifest spans of each `REDACTION` frame seen that decodes: place, kind and hash.
+    manifests: HashMap<Hash, Vec<(Location, u8, Hash)>>,
+    /// The lowest place of each key (kind, hash) of a dropped frame.
+    dropped: HashMap<(u8, Hash), Location>,
+    /// The mode the first batch sets, when the first batch seen starts at the origin.
+    mode: Option<StoreMode>,
+    /// Whether a batch was seen.
+    seen: bool,
+}
+
+impl RemovalTally {
+    /// Adds batch `b`. Refuses a place past `u64::MAX` (`dump position overflows`) and a refused
+    /// growth (`record allocation failed`), as `StoreError::Refused`.
+    pub fn observe(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
+        self.add(b).map_err(|what| StoreError::Refused(what.into()))
+    }
+
+    /// The facts of the batches added so far, resolved from them alone: in a holder by HA1's
+    /// logical rule, otherwise by the manifest places. Refuses more than `u32::MAX` applies
+    /// (`dump position overflows`).
+    pub fn facts(&self) -> Result<RemovalFacts, StoreError> {
+        self.with_first(self.first_removed())
+    }
+
+    /// The first removed span the batches alone resolve.
+    fn first_removed(&self) -> Option<Location> {
+        match self.mode {
+            Some(StoreMode::Holder) => self.holder_first(),
+            _ => self.project_first(),
+        }
+    }
+
+    /// The facts of the batches added so far, with each apply's spans resolved by the store
+    /// `reader` reads, before `upto`: the request's spans in the store's redaction rows, which
+    /// the open checks against the log's validated authorization. A project's are its manifest
+    /// places; a holder's are the local copies HA1's logical rule derives
+    /// (`crate::redaction_import`), never the source's places. This is the writer's view;
+    /// [`RemovalTally::facts`] reads the same facts back from a file.
+    pub fn resolved(
+        &self,
+        reader: &StoreReader,
+        upto: Location,
+    ) -> Result<RemovalFacts, StoreError> {
+        let mut first: Option<Location> = None;
+        for request in &self.requests {
+            let (_, spans) = reader.index().redaction_request_items(request)?;
+            for p in spans.iter().map(|s| s.loc).filter(|p| *p < upto) {
+                first = Some(first.map_or(p, |f| f.min(p)));
+            }
+        }
+        self.with_first(first)
+    }
+
+    fn with_first(&self, first_removed: Option<Location>) -> Result<RemovalFacts, StoreError> {
+        let removals = u32::try_from(self.applies)
+            .map_err(|_| StoreError::Refused(chain_text::OVERFLOW.into()))?;
+        Ok(RemovalFacts {
+            removals,
+            first_removed,
+        })
+    }
+
+    /// The `REDACTION_APPLY` frames added so far.
+    fn applies(&self) -> u64 {
+        self.applies
+    }
+
+    /// The mode the batches set, when they start at the origin.
+    fn mode(&self) -> Option<StoreMode> {
+        self.mode
+    }
+
+    /// Whether every apply added so far names a request whose record was added too: only then
+    /// do the batches alone resolve its spans.
+    fn resolves_all(&self) -> bool {
+        !self.undecoded && self.requests.iter().all(|r| self.manifests.contains_key(r))
+    }
+
+    /// The spans of the applies' requests that the batches hold.
+    fn manifest_spans(&self) -> impl Iterator<Item = &(Location, u8, Hash)> {
+        self.requests
+            .iter()
+            .filter_map(|r| self.manifests.get(r))
+            .flatten()
+    }
+
+    /// The lowest manifest place of the applies' requests (a project's resolution).
+    fn project_first(&self) -> Option<Location> {
+        self.manifest_spans().map(|(at, _, _)| *at).min()
+    }
+
+    /// The lowest dropped frame of a key the applies' requests list (a holder's resolution).
+    fn holder_first(&self) -> Option<Location> {
+        self.manifest_spans()
+            .filter_map(|(_, kind, hash)| self.dropped.get(&(*kind, *hash)).copied())
+            .min()
+    }
+
+    /// [`RemovalTally::observe`], with the refusal's text only. Every allocation is fallible
+    /// (the reader's rule): the records it needs are read in place ([`wire`]), never decoded
+    /// into owned values.
+    fn add(&mut self, b: &DumpBatch) -> Result<(), &'static str> {
+        let first = !self.seen;
+        self.seen = true;
+        let origin = b.start.segment == 0 && b.start.offset == 0;
+        // the first batch of the log sets its mode (as `crate::holder::FirstBatch` reads it)
+        let mut mode = (first && origin).then_some(StoreMode::Project);
+        let mut at = b.start.offset;
+        for f in &b.frames {
+            let place = Location {
+                segment: b.start.segment,
+                offset: at,
+            };
+            match f {
+                Frame::Present { kind, payload, .. } if *kind == kinds::REF_UPDATE => {
+                    if mode.is_some() && wire::ref_name(payload) == Some(REF_STORE_MODE.as_bytes())
+                    {
+                        // a mode value other than `holder` is damage the load refuses; here the
+                        // mode stays unknown
+                        mode = match wire::ref_value(payload) {
+                            Some(v) if v == HOLDER_MODE => Some(StoreMode::Holder),
+                            _ => None,
+                        };
+                    }
+                }
+                Frame::Present { kind, payload, .. } if *kind == kinds::REDACTION_APPLY => {
+                    self.applies = self.applies.saturating_add(1);
+                    match wire::apply_request(payload) {
+                        Some(request) => {
+                            self.requests
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.requests.insert(request);
+                        }
+                        None => self.undecoded = true,
+                    }
+                }
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } if *kind == kinds::REDACTION && !self.manifests.contains_key(hash) => {
+                    let mut spans = Vec::new();
+                    if wire::request_spans(payload, &mut spans)? {
+                        self.manifests
+                            .try_reserve(1)
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        self.manifests.insert(*hash, spans);
+                    }
+                }
+                Frame::Present { .. } => {}
+                Frame::Dropped { kind, hash, .. } => match self.dropped.get_mut(&(*kind, *hash)) {
+                    Some(low) => *low = (*low).min(place),
+                    None => {
+                        self.dropped
+                            .try_reserve(1)
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        self.dropped.insert((*kind, *hash), place);
+                    }
+                },
+            }
+            at = at
+                .checked_add(FRAME_HEADER)
+                .and_then(|a| a.checked_add(u64::from(f.original_len())))
+                .ok_or(chain_text::OVERFLOW)?;
+        }
+        if first && origin {
+            self.mode = mode;
+        }
+        Ok(())
+    }
+}
+
+/// The few fields the removal tally reads from records, read in place from their postcard
+/// bytes (D-F0904: no existing kind is ever re-encoded, so these layouts are frozen), with no
+/// allocation: a dump reader's every allocation is fallible. A record these readers cannot
+/// read names nothing; whether it is a valid record is the load's check.
+mod wire {
+    use super::drop_text;
+    use crate::segment::Location;
+    use rdy_model::Hash;
+
+    /// A cursor over postcard bytes.
+    struct Cur<'a>(&'a [u8]);
+
+    impl<'a> Cur<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            if self.0.len() < n {
+                return None;
+            }
+            let (head, rest) = self.0.split_at(n);
+            self.0 = rest;
+            Some(head)
+        }
+
+        fn byte(&mut self) -> Option<u8> {
+            self.take(1).map(|b| b[0])
+        }
+
+        /// An unsigned LEB128 varint of at most `max` bytes.
+        fn varint(&mut self, max: usize) -> Option<u64> {
+            let mut v = 0u64;
+            for i in 0..max {
+                let b = self.byte()?;
+                v |= u64::from(b & 0x7f) << (7 * i);
+                if b & 0x80 == 0 {
+                    return Some(v);
+                }
+            }
+            None
+        }
+
+        fn u32(&mut self) -> Option<u32> {
+            u32::try_from(self.varint(5)?).ok()
+        }
+
+        fn u64(&mut self) -> Option<u64> {
+            self.varint(10)
+        }
+
+        fn len(&mut self) -> Option<usize> {
+            usize::try_from(self.varint(10)?).ok()
+        }
+
+        fn hash(&mut self) -> Option<Hash> {
+            Some(Hash(self.take(32)?.try_into().ok()?))
+        }
+
+        /// A string or byte string: its length, then its bytes.
+        fn bytes(&mut self) -> Option<&'a [u8]> {
+            let n = self.len()?;
+            self.take(n)
+        }
+
+        fn option<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<Option<T>> {
+            match self.byte()? {
+                0 => Some(None),
+                1 => f(self).map(Some),
+                _ => None,
+            }
+        }
+
+        /// A sequence, each element read by `f`. Its count is the record's own: the bounds of an
+        /// existing record are the checks that wrote it, never the sync decoder's smaller ones.
+        /// Every element reads at least one byte, so a count the bytes cannot hold ends at the
+        /// end of the payload.
+        fn seq(&mut self, mut f: impl FnMut(&mut Self) -> Option<()>) -> Option<usize> {
+            let n = self.len()?;
+            for _ in 0..n {
+                f(self)?;
+            }
+            Some(n)
+        }
+    }
+
+    /// The request a `REDACTION_APPLY` record names: its first field of three hashes.
+    pub(super) fn apply_request(payload: &[u8]) -> Option<Hash> {
+        if payload.len() != 96 {
+            return None;
+        }
+        Cur(payload).hash()
+    }
+
+    /// The name of a `REF_UPDATE` record (`name`, `value`, `at`).
+    pub(super) fn ref_name(payload: &[u8]) -> Option<&[u8]> {
+        Cur(payload).bytes()
+    }
+
+    /// The value of a `REF_UPDATE` record.
+    pub(super) fn ref_value(payload: &[u8]) -> Option<&[u8]> {
+        let mut c = Cur(payload);
+        c.bytes()?;
+        c.bytes()
+    }
+
+    /// The manifest spans of a `REDACTION` record, as place, kind and hash, into `out`
+    /// (fallibly grown). Ok(false) when the record cannot be read; a refused growth is
+    /// `record allocation failed`. The layout: `carrier`, `actor` (`actor`, `run`, `role`,
+    /// `at_ms`), `targets`, `reason_class`, `reason`, then the manifest's `versions`, `blobs`,
+    /// `shared_blobs` and `spans` (each `place`, `kind`, `hash`, `len`, `residue`); the fields
+    /// after `spans` are not read.
+    pub(super) fn request_spans(
+        payload: &[u8],
+        out: &mut Vec<(Location, u8, Hash)>,
+    ) -> Result<bool, &'static str> {
+        let mut c = Cur(payload);
+        let Some(()) = head(&mut c) else {
+            return Ok(false);
+        };
+        // no count bound but the payload's own (the existing record limits): a count the
+        // remaining bytes cannot hold is a record that cannot be read, so the reservation never
+        // passes what the payload holds
+        let Some(n) = c.len().filter(|n| *n <= c.0.len() / MIN_SPAN_BYTES) else {
+            return Ok(false);
+        };
+        out.try_reserve_exact(n)
+            .map_err(|_| drop_text::ALLOCATION)?;
+        for _ in 0..n {
+            let span = (|| {
+                let place = Location {
+                    segment: c.u32()?,
+                    offset: c.u64()?,
+                };
+                let kind = c.byte()?;
+                let hash = c.hash()?;
+                c.u32()?;
+                c.option(|c| c.hash())?;
+                Some((place, kind, hash))
+            })();
+            match span {
+                Some(s) => out.push(s),
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// The fewest bytes one encoded manifest span takes: one-byte varint segment, offset and
+    /// length, the kind, the 32-byte hash and an absent residue.
+    const MIN_SPAN_BYTES: usize = 1 + 1 + 1 + 32 + 1 + 1;
+
+    /// Reads a request's fields before its manifest's spans.
+    fn head(c: &mut Cur) -> Option<()> {
+        c.hash()?; // carrier
+        c.bytes()?; // actor.actor
+        c.option(|c| c.bytes())?; // actor.run
+        if c.u32()? > 3 {
+            return None; // actor.role
+        }
+        c.u64()?; // actor.at_ms (zigzag)
+        c.seq(|c| match c.u32()? {
+            0 => c.bytes().map(|_| ()),
+            1 => {
+                c.bytes()?;
+                c.hash().map(|_| ())
+            }
+            2 => c.hash().map(|_| ()),
+            _ => None,
+        })?; // targets
+        if c.u32()? > 3 {
+            return None; // reason_class
+        }
+        c.bytes()?; // reason
+        c.seq(|c| {
+            c.bytes()?;
+            c.hash().map(|_| ())
+        })?; // manifest.versions
+        c.seq(|c| c.hash().map(|_| ()))?; // manifest.blobs
+        c.seq(|c| c.hash().map(|_| ()))?; // manifest.shared_blobs
+        Some(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rdy_model::redaction::{
+            AssessmentSupport, DropSpan, FramePlace, ReasonClass, RedactTarget, Redaction,
+            RedactionApply, RedactionManifest,
+        };
+        use rdy_model::{BlockId, Provenance, Role};
+
+        /// hc1: the in-place reads agree with the records' own decoding, for every variant and
+        /// option the read layout walks, and a cut record reads as nothing.
+        #[test]
+        fn hc1_in_place_reads_match_the_decoded_records() {
+            let id = BlockId::parse("b-00001").unwrap();
+            let spans = vec![
+                DropSpan {
+                    place: FramePlace {
+                        segment: 3,
+                        offset: u64::MAX - 1,
+                    },
+                    kind: 1,
+                    hash: Hash([7; 32]),
+                    len: u32::MAX,
+                    residue: Some(Hash([8; 32])),
+                },
+                DropSpan {
+                    place: FramePlace {
+                        segment: u32::MAX,
+                        offset: 0,
+                    },
+                    kind: 6,
+                    hash: Hash([9; 32]),
+                    len: 300,
+                    residue: None,
+                },
+            ];
+            let r = Redaction {
+                carrier: Hash([1; 32]),
+                actor: Provenance {
+                    actor: "agent:w".repeat(40),
+                    run: Some("run-1".into()),
+                    role: Role::Approver,
+                    at_ms: -1_234_567_890_123,
+                },
+                targets: vec![
+                    RedactTarget::AllVersions(id.clone()),
+                    RedactTarget::Version {
+                        id: id.clone(),
+                        version: Hash([2; 32]),
+                    },
+                    RedactTarget::Blob(Hash([3; 32])),
+                ],
+                reason_class: ReasonClass::Retraction,
+                reason: "why ".repeat(100),
+                manifest: RedactionManifest {
+                    versions: vec![(id.clone(), Hash([2; 32]))],
+                    blobs: vec![Hash([3; 32])],
+                    shared_blobs: vec![Hash([4; 32]), Hash([5; 32])],
+                    spans: spans.clone(),
+                    inside: vec![],
+                    outside: vec![],
+                    quarantine: vec!["q".into()],
+                    assessment: AssessmentSupport::NotImplemented,
+                },
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let mut out = vec![];
+            assert_eq!(request_spans(&bytes, &mut out), Ok(true));
+            let want: Vec<(Location, u8, Hash)> = spans
+                .iter()
+                .map(|s| {
+                    (
+                        Location {
+                            segment: s.place.segment,
+                            offset: s.place.offset,
+                        },
+                        s.kind,
+                        s.hash,
+                    )
+                })
+                .collect();
+            assert_eq!(out, want);
+            // a span count the remaining bytes cannot hold reads as nothing, and reserves nothing
+            let mut c = Cur(&bytes);
+            head(&mut c).unwrap();
+            let at = bytes.len() - c.0.len();
+            assert_eq!(bytes[at], 2, "the span count");
+            let mut forged = bytes[..at].to_vec();
+            forged.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]); // 2^35
+            forged.extend_from_slice(&bytes[at + 1..]);
+            let mut out = vec![];
+            assert_eq!(request_spans(&forged, &mut out), Ok(false));
+            assert_eq!(out.capacity(), 0);
+            // a record cut inside its spans reads as nothing
+            let spans_at = bytes.len() - 6;
+            let mut out = vec![];
+            assert_eq!(request_spans(&bytes[..spans_at / 2], &mut out), Ok(false));
+            let apply = RedactionApply {
+                request: Hash([6; 32]),
+                landing: Hash([2; 32]),
+                report_hash: Hash([3; 32]),
+            };
+            let a = postcard::to_allocvec(&apply).unwrap();
+            assert_eq!(apply_request(&a), Some(Hash([6; 32])));
+            assert_eq!(apply_request(&a[..95]), None);
+            let u = postcard::to_allocvec(&crate::kinds::RefUpdate {
+                name: "meta/store_mode".into(),
+                value: b"holder".to_vec(),
+                at: Location {
+                    segment: 0,
+                    offset: 0,
+                },
+            })
+            .unwrap();
+            assert_eq!(ref_name(&u), Some(&b"meta/store_mode"[..]));
+            assert_eq!(ref_value(&u), Some(&b"holder"[..]));
+        }
+    }
 }
 
 /// True if `path` is one of the project files a dump carries (the closed set): `.rdy.yaml`,
@@ -474,6 +1090,33 @@ const FRAME_KINDS: &[((u32, u32), &[u8])] = &[
             kinds::REDACTION_APPLY,
         ],
     ),
+    // store format 16 adds the carried removal; dump format 3 adds the chain facts
+    (
+        (3, 16),
+        &[
+            kinds::BLOCK,
+            kinds::CHANGE,
+            kinds::PROPOSAL,
+            kinds::LANDING,
+            kinds::SNAPSHOT,
+            kinds::BLOB_CHUNK,
+            kinds::BLOB_MANIFEST,
+            kinds::REF_UPDATE,
+            kinds::TAG,
+            kinds::ANSWER,
+            kinds::SIGNATURE,
+            kinds::VIEW_OP,
+            kinds::INTENT,
+            kinds::ALT_SET,
+            kinds::REVIEW,
+            kinds::TENSION,
+            kinds::TRANSITION,
+            kinds::REDACTION,
+            kinds::REDACTION_RESIDUE,
+            kinds::REDACTION_APPLY,
+            kinds::REDACTION_CARRIED,
+        ],
+    ),
 ];
 
 /// The store kinds a batch's frames may have in a dump of `dump_format` whose frames are of
@@ -488,11 +1131,20 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
 /// The `BATCH` record's `kinds`: `Hash::of` over each frame's (original) `kind || hash`, in
 /// order. None when its buffer cannot be allocated.
 fn kinds_digest(frames: &[Frame]) -> Option<Hash> {
+    try_kinds_digest(frames.iter().map(|f| (f.kind(), f.hash())))
+}
+
+/// The `BATCH` record's `kinds` of the frames whose (original) kind and hash `pairs` gives, in
+/// order (shared with the chain scanner, `crate::dump_scan`). None when its buffer cannot be
+/// allocated.
+pub(crate) fn try_kinds_digest<'a>(
+    pairs: impl ExactSizeIterator<Item = (u8, &'a Hash)>,
+) -> Option<Hash> {
     let mut b = Vec::new();
-    b.try_reserve_exact(frames.len().checked_mul(33)?).ok()?;
-    for f in frames {
-        b.push(f.kind());
-        b.extend_from_slice(&f.hash().0);
+    b.try_reserve_exact(pairs.len().checked_mul(33)?).ok()?;
+    for (kind, hash) in pairs {
+        b.push(kind);
+        b.extend_from_slice(&hash.0);
     }
     Some(Hash::of(&b))
 }
@@ -513,6 +1165,12 @@ pub(crate) fn try_batch_digest<'a>(
 /// The bytes one record adds to the trailer chain (a dump's, and a sync stream's,
 /// `crate::sync_stream`).
 pub(crate) const LINK_LEN: usize = 1 + 8 + 32;
+
+/// The name a `REF_UPDATE` payload starts with (its first field), when `payload` holds all of
+/// it: the chain scanner reads this much of every ref before it decides to read the rest.
+pub(crate) fn ref_name(payload: &[u8]) -> Option<&[u8]> {
+    wire::ref_name(payload)
+}
 
 /// Adds one record to the bytes the trailer's digest covers: `kind || len (u64) || hash`. Its
 /// growth is fallible: None when it cannot be allocated.
@@ -540,8 +1198,19 @@ fn try_string(s: &str) -> Option<String> {
     Some(o)
 }
 
-fn cannot_stand(kind: u8) -> String {
+pub(crate) fn cannot_stand(kind: u8) -> String {
     format!("a record of kind {kind} cannot stand here")
+}
+
+/// The bounded decode of a carried removal record (kind 23), the only kind of a dump frame that
+/// is decoded on the way: the decoder's own error when it refuses one. Other kinds pass. The
+/// check decodes the record in place (`redaction_carried::check_record`), so it allocates
+/// nothing, as the reader's other checks allocate only by fallible growth.
+pub(crate) fn check_carried(kind: u8, payload: &[u8]) -> Result<(), String> {
+    if kind != kinds::REDACTION_CARRIED {
+        return Ok(());
+    }
+    crate::redaction_carried::check_record(payload).map_err(|e| e.to_string())
 }
 
 fn not_carried(path: &str) -> String {
@@ -552,38 +1221,120 @@ fn too_large(path: &str) -> String {
     format!("the project file {path:?} is larger than 16 MiB")
 }
 
-fn header_payload(h: &DumpHeader) -> Vec<u8> {
-    let mut p = Vec::with_capacity(4 + 4 + 8 + 2 + h.rdy.len());
+fn put_location(p: &mut Vec<u8>, l: &Location) {
+    p.extend_from_slice(&l.segment.to_le_bytes());
+    p.extend_from_slice(&l.offset.to_le_bytes());
+}
+
+fn put_marker(p: &mut Vec<u8>, m: &BatchMarker) {
+    put_location(p, &m.start);
+    p.extend_from_slice(&m.frames.to_le_bytes());
+    p.extend_from_slice(&m.digest.0);
+}
+
+/// The format-3 header payload of `h` with its chain facts `c`.
+fn header_payload(h: &DumpHeader, c: &DumpChainHeader) -> Vec<u8> {
+    let mut p = Vec::with_capacity(HEADER_FIXED + h.rdy.len());
+    p.push(c.kind.byte());
     p.extend_from_slice(&h.store_format.to_le_bytes());
-    p.extend_from_slice(&h.log_end.segment.to_le_bytes());
-    p.extend_from_slice(&h.log_end.offset.to_le_bytes());
+    p.extend_from_slice(&c.repo_id.0);
+    put_location(&mut p, &c.base);
+    put_marker(&mut p, &c.base_batch);
+    p.extend_from_slice(&c.prev.0);
+    put_location(&mut p, &h.log_end);
+    put_marker(&mut p, &c.end_batch);
     p.extend_from_slice(&(h.rdy.len() as u16).to_le_bytes());
     p.extend_from_slice(h.rdy.as_bytes());
     p
 }
 
-/// Parses the header payload. Err: the refusal (it does not parse, or its text cannot be
-/// allocated).
-fn parse_header(p: &[u8]) -> Result<DumpHeader, &'static str> {
-    const NO_PARSE: &str = "the header does not parse";
+/// Parses the header payload of a dump of `format`. Err: the refusal (it does not parse, its
+/// text cannot be allocated, or a full dump's base facts are not the origin's).
+fn parse_header(format: u32, p: &[u8]) -> Result<DumpHeader, &'static str> {
     let mut c = Cursor(p);
     let fields = (|| {
-        let store_format = c.u32()?;
-        let segment = c.u32()?;
-        let offset = c.u64()?;
+        let (kind, store_format) = if format >= 3 {
+            (Some(DumpKind::of_byte(c.u8()?)?), c.u32()?)
+        } else {
+            (None, c.u32()?)
+        };
+        let mut chain = match kind {
+            Some(kind) => Some(DumpChainHeader {
+                kind,
+                repo_id: RepoId(c.take(16)?.try_into().ok()?),
+                base: c.location()?,
+                base_batch: c.marker()?,
+                prev: c.hash()?,
+                // read after the end, below
+                end_batch: BatchMarker::ZERO,
+            }),
+            None => None,
+        };
+        let log_end = c.location()?;
+        if let Some(chain) = chain.as_mut() {
+            chain.end_batch = c.marker()?;
+        }
         let rdy_len = c.u16()? as usize;
         if rdy_len > MAX_RDY_BYTES {
             return None;
         }
         let rdy = std::str::from_utf8(c.take(rdy_len)?).ok()?;
         c.0.is_empty()
-            .then_some((store_format, segment, offset, rdy))
+            .then_some((store_format, log_end, rdy, chain))
     })();
-    let (store_format, segment, offset, rdy) = fields.ok_or(NO_PARSE)?;
+    let (store_format, log_end, rdy, chain) = fields.ok_or(chain_text::HEADER)?;
+    if chain.is_some_and(|c| c.kind == DumpKind::Full && !c.has_origin_base()) {
+        return Err(chain_text::FULL_BASE);
+    }
     Ok(DumpHeader {
         store_format,
-        log_end: Location { segment, offset },
+        log_end,
         rdy: try_string(rdy).ok_or(drop_text::ALLOCATION)?,
+        chain,
+    })
+}
+
+/// The format-3 trailer payload: the counts, the removal facts and the digest.
+fn trailer_payload(t: &DumpTrailer) -> Vec<u8> {
+    let mut p = Vec::with_capacity(TRAILER_LEN);
+    p.extend_from_slice(&t.batches.to_le_bytes());
+    p.extend_from_slice(&t.frames.to_le_bytes());
+    p.extend_from_slice(&t.files.to_le_bytes());
+    p.extend_from_slice(&t.removals.to_le_bytes());
+    p.push(u8::from(t.first_removed.is_some()));
+    put_location(&mut p, &t.first_removed.unwrap_or(BatchMarker::ZERO.start));
+    p.extend_from_slice(&t.digest.0);
+    p
+}
+
+/// Parses a trailer payload of a dump of `format`: exactly its length, and in format 3 a flag
+/// of 0 (with a zero position) or 1. None when it does not parse.
+pub(crate) fn parse_trailer(format: u32, p: &[u8]) -> Option<DumpTrailer> {
+    let mut c = Cursor(p);
+    let batches = c.u64()?;
+    let frames = c.u64()?;
+    let files = c.u32()?;
+    let (removals, first_removed) = if format >= 3 {
+        let removals = c.u32()?;
+        let flag = c.u8()?;
+        let at = c.location()?;
+        let first = match flag {
+            0 if at == BatchMarker::ZERO.start => None,
+            1 => Some(at),
+            _ => return None,
+        };
+        (removals, first)
+    } else {
+        (0, None)
+    };
+    let digest = c.hash()?;
+    c.0.is_empty().then_some(DumpTrailer {
+        batches,
+        frames,
+        files,
+        removals,
+        first_removed,
+        digest,
     })
 }
 
@@ -599,6 +1350,9 @@ impl<'a> Cursor<'a> {
         self.0 = rest;
         Some(head)
     }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
     }
@@ -610,6 +1364,19 @@ impl<'a> Cursor<'a> {
     }
     fn hash(&mut self) -> Option<Hash> {
         Some(Hash(self.take(32)?.try_into().ok()?))
+    }
+    fn location(&mut self) -> Option<Location> {
+        Some(Location {
+            segment: self.u32()?,
+            offset: self.u64()?,
+        })
+    }
+    fn marker(&mut self) -> Option<BatchMarker> {
+        Some(BatchMarker {
+            start: self.location()?,
+            frames: self.u32()?,
+            digest: self.hash()?,
+        })
     }
 }
 
@@ -634,12 +1401,19 @@ pub struct DumpWriter<W: Write> {
 }
 
 impl<W: Write> DumpWriter<W> {
-    /// Writes the prelude and the header. Refuses a header whose store format is not one this
-    /// rdy reads in a dump of `DUMP_FORMAT` (`READS`): its reader would refuse the dump.
+    /// Writes the prelude and the header, always of `DUMP_FORMAT` (there is no writer of an
+    /// older format). Refuses a header with no chain facts or an `rdy` text over 256 bytes (the
+    /// header does not parse), and a header whose store format is not one this rdy reads in a
+    /// dump of `DUMP_FORMAT` (`READS`): its reader would refuse the dump. The chain facts are
+    /// the caller's: the reader checks them against the batches.
     pub fn new(w: W, header: &DumpHeader) -> Result<Self, StoreError> {
-        if header.rdy.len() > MAX_RDY_BYTES {
-            return Err(StoreError::Refused("the header does not parse".into()));
-        }
+        let Some(chain) = header
+            .chain
+            .as_ref()
+            .filter(|_| header.rdy.len() <= MAX_RDY_BYTES)
+        else {
+            return Err(StoreError::Refused(chain_text::HEADER.into()));
+        };
         let Some(kinds) = READS
             .contains(&(DUMP_FORMAT, header.store_format))
             .then(|| frame_kinds(DUMP_FORMAT, header.store_format))
@@ -661,7 +1435,7 @@ impl<W: Write> DumpWriter<W> {
         me.w.write_all(MAGIC)?;
         me.w.write_all(&DUMP_FORMAT.to_le_bytes())?;
         me.totals.bytes = (MAGIC.len() + 4) as u64;
-        me.record(rec::HEADER, &header_payload(header))?;
+        me.record(rec::HEADER, &header_payload(header, chain))?;
         Ok(me)
     }
 
@@ -697,9 +1471,10 @@ impl<W: Write> DumpWriter<W> {
     /// Writes one sealed batch: its `BATCH` record, then its frames byte for byte, each dropped
     /// frame as its `DROPPED` record. Refuses a frame of a kind that cannot stand in a batch (a
     /// batch marker or an unassigned kind among them), a frame whose hash is not its payload's, a
-    /// dropped frame in a dump format that has no `DROPPED` record or one that breaks its record
-    /// rules, a batch whose original frames run past `u64::MAX`, and a batch whose digest is not
-    /// its frames'.
+    /// payload over `MAX_BLOB_BYTES`, a carried removal record the bounded decoder refuses (its
+    /// error), a dropped frame in a dump format that has no `DROPPED` record or one that breaks
+    /// its record rules, a batch with a dropped frame whose original frames run past `u64::MAX`
+    /// (`dump position overflows`), and a batch whose digest is not its frames'.
     pub fn batch(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
         let n = self.totals.batches + 1;
         // every check before the first byte, so a refused batch writes nothing; no store writes
@@ -713,12 +1488,20 @@ impl<W: Write> DumpWriter<W> {
                 return Err(StoreError::Refused(cannot_stand(f.kind())));
             }
             match f {
-                Frame::Present { hash, payload, .. } => {
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } => {
+                    if payload.len() as u64 > MAX_BLOB_BYTES {
+                        return Err(StoreError::Refused(cannot_stand(*kind)));
+                    }
                     if Hash::of(payload) != *hash {
                         return Err(StoreError::Refused(
                             "a record's hash does not match its bytes".into(),
                         ));
                     }
+                    check_carried(*kind, payload).map_err(StoreError::Refused)?;
                 }
                 Frame::Dropped {
                     kind, residue, len, ..
@@ -733,7 +1516,7 @@ impl<W: Write> DumpWriter<W> {
             }
         }
         if dropped && batch_end(b.start.offset, &b.frames).is_none() {
-            return Err(StoreError::Refused(drop_text::SPAN.into()));
+            return Err(StoreError::Refused(chain_text::OVERFLOW.into()));
         }
         let refused_allocation = || StoreError::Refused(drop_text::ALLOCATION.into());
         if try_batch_digest(b.frames.iter().map(|f| f.hash())).ok_or_else(refused_allocation)?
@@ -784,15 +1567,24 @@ impl<W: Write> DumpWriter<W> {
         Ok(())
     }
 
-    /// Writes the trailer and returns the writer and what the dump holds.
-    pub fn finish(mut self) -> Result<(W, DumpTotals), StoreError> {
-        let mut p = Vec::with_capacity(TRAILER_LEN);
-        p.extend_from_slice(&self.totals.batches.to_le_bytes());
-        p.extend_from_slice(&self.totals.frames.to_le_bytes());
-        p.extend_from_slice(&self.totals.files.to_le_bytes());
-        p.extend_from_slice(&Hash::of(&self.chain).0);
+    /// Writes the trailer with the removal facts `facts`, which the checked source walker
+    /// supplies (the reader checks them against the batches), and returns the writer and what
+    /// the dump holds.
+    pub fn finish(mut self, facts: RemovalFacts) -> Result<(W, DumpTotals), StoreError> {
+        let digest = Hash::of(&self.chain);
+        let p = trailer_payload(&DumpTrailer {
+            batches: self.totals.batches,
+            frames: self.totals.frames,
+            files: self.totals.files,
+            removals: facts.removals,
+            first_removed: facts.first_removed,
+            digest,
+        });
         self.record(rec::TRAILER, &p)?;
         self.w.flush()?;
+        self.totals.removals = facts.removals;
+        self.totals.first_removed = facts.first_removed;
+        self.totals.digest = digest;
         Ok((self.w, self.totals))
     }
 
@@ -830,11 +1622,19 @@ pub struct DumpReader<R: Read> {
     last_path: Option<String>,
     /// The store kinds a frame may have (`frame_kinds` of the dump's pair).
     kinds: &'static [u8],
-    /// Whether the dump's format has `DROPPED` records.
-    drops: bool,
     /// `kind || len || hash` of every record read so far, the trailer's excepted.
     chain: Vec<u8>,
     totals: DumpTotals,
+    /// The dump format, the header's end and its chain facts (format 3).
+    format: u32,
+    log_end: Location,
+    links: Option<DumpChainHeader>,
+    /// The physical end and the marker of the last batch read (format 3).
+    last: Option<(Location, BatchMarker)>,
+    /// The removal facts of the batches read (format 3).
+    tally: RemovalTally,
+    /// The trailer, once it and the end of the file are verified.
+    trailer: Option<DumpTrailer>,
 }
 
 /// Where the reader is in the closed order.
@@ -862,14 +1662,14 @@ fn again(e: &StoreError) -> StoreError {
     }
 }
 
-fn damaged(at: u64, what: impl Into<String>) -> StoreError {
+pub(crate) fn damaged(at: u64, what: impl Into<String>) -> StoreError {
     StoreError::Dump {
         at,
         what: what.into(),
     }
 }
 
-const ENDS_EARLY: &str = "the file ends before its trailer";
+pub(crate) const ENDS_EARLY: &str = "the file ends before its trailer";
 
 /// What a refusal of the reader (`StoreError::Dump`) means for the person: the caller picks the
 /// fix by it.
@@ -923,6 +1723,319 @@ fn store_format_not_read(store_format: u32, format: u32) -> String {
     format!("{STORE_FORMAT_WORDS}{store_format} in a dump of format {format}{NOT_READ}")
 }
 
+/// The length of the prelude: the magic and the dump format.
+pub(crate) const PRELUDE_LEN: u64 = MAGIC.len() as u64 + 4;
+
+/// Reads the prelude off `r`: the magic, then a dump format this rdy reads (some pair of
+/// `READS`). A file that does not start with the magic is not a dump.
+pub(crate) fn read_prelude(r: &mut impl Read) -> Result<u32, StoreError> {
+    // the magic, or as much of it as the file holds: a shorter file is not a dump
+    let mut magic = [0u8; MAGIC.len()];
+    let mut got = 0;
+    while got < magic.len() {
+        match r.read(&mut magic[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if got < magic.len() || &magic != MAGIC {
+        return Err(damaged(0, NOT_A_DUMP));
+    }
+    let mut format = [0u8; 4];
+    read_exact_at(r, &mut format, MAGIC.len() as u64)?;
+    let format = u32::from_le_bytes(format);
+    if !READS.iter().any(|(d, _)| *d == format) {
+        return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
+    }
+    Ok(format)
+}
+
+/// The dump format the prelude at the start of `r` names, read alone (the magic and the format,
+/// as the reader checks them): which reader a file needs, before any other byte is read.
+pub fn dump_format_of(r: &mut impl Read) -> Result<u32, StoreError> {
+    read_prelude(r)
+}
+
+/// Fills `buf` from `r`, or fails with a dump that ends before its trailer (blamed on `at`).
+pub(crate) fn read_exact_at(r: &mut impl Read, buf: &mut [u8], at: u64) -> Result<(), StoreError> {
+    match r.read_exact(buf) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(damaged(at, ENDS_EARLY)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The header of a dump of `format` from the `HEADER` payload `p` read at `at`, and the store
+/// kinds its batches may hold. Refuses a payload that does not parse and a pair outside `READS`.
+pub(crate) fn header_of(
+    format: u32,
+    at: u64,
+    p: &[u8],
+) -> Result<(DumpHeader, &'static [u8]), StoreError> {
+    let header = parse_header(format, p).map_err(|what| damaged(at, what))?;
+    let Some(kinds) = READS
+        .contains(&(format, header.store_format))
+        .then(|| frame_kinds(format, header.store_format))
+        .flatten()
+    else {
+        return Err(damaged(
+            at,
+            store_format_not_read(header.store_format, format),
+        ));
+    };
+    Ok((header, kinds))
+}
+
+/// Reads only a dump's envelope from `r`: the prelude, the `HEADER` record and the fixed-length
+/// final `TRAILER` record, each record's own hash checked. Returns the dump format, the header,
+/// the trailer and the file's length. The body between them is neither read nor checked, so its
+/// digest is not verified here: only a whole read (`DumpReader`) verifies a dump.
+pub fn read_envelope<R: Read + Seek>(
+    r: &mut R,
+) -> Result<(u32, DumpHeader, DumpTrailer, u64), StoreError> {
+    r.seek(SeekFrom::Start(0))?;
+    let format = read_prelude(r)?;
+    let at = PRELUDE_LEN;
+    let mut head = [0u8; FRAME_HEADER as usize];
+    read_exact_at(r, &mut head, at)?;
+    let len = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes")) as usize;
+    if head[4] != rec::HEADER {
+        return Err(damaged(at, cannot_stand(head[4])));
+    }
+    let fixed = if format >= 3 {
+        HEADER_FIXED
+    } else {
+        LEGACY_HEADER_FIXED
+    };
+    if len > fixed + MAX_RDY_BYTES {
+        return Err(damaged(at, chain_text::HEADER));
+    }
+    let mut payload = vec![0u8; len];
+    read_exact_at(r, &mut payload, at)?;
+    if Hash::of(&payload).0 != head[5..37] {
+        return Err(damaged(at, "a record's hash does not match its bytes"));
+    }
+    let (header, _) = header_of(format, at, &payload)?;
+    let body = at + FRAME_HEADER + len as u64;
+    let trailer_len = if format >= 3 {
+        TRAILER_LEN
+    } else {
+        LEGACY_TRAILER_LEN
+    };
+    let framed = FRAME_HEADER + trailer_len as u64;
+    let file_len = r.seek(SeekFrom::End(0))?;
+    let Some(at) = file_len.checked_sub(framed).filter(|t| *t >= body) else {
+        return Err(damaged(body, ENDS_EARLY));
+    };
+    r.seek(SeekFrom::Start(at))?;
+    let mut rec_bytes = [0u8; FRAME_HEADER as usize + TRAILER_LEN];
+    let rec_bytes = &mut rec_bytes[..framed as usize];
+    read_exact_at(r, rec_bytes, at)?;
+    let (head, payload) = rec_bytes.split_at(FRAME_HEADER as usize);
+    let len = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes")) as usize;
+    if head[4] != rec::TRAILER || len != trailer_len {
+        return Err(damaged(at, chain_text::TRAILER));
+    }
+    if Hash::of(payload).0 != head[5..37] {
+        return Err(damaged(at, "a record's hash does not match its bytes"));
+    }
+    let trailer = parse_trailer(format, payload).ok_or_else(|| damaged(at, chain_text::TRAILER))?;
+    Ok((format, header, trailer, file_len))
+}
+
+/// The head of one record of a dump: where it starts, its payload length, its kind and the hash
+/// its header names (not yet checked against the payload).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecordHead {
+    pub(crate) at: u64,
+    pub(crate) len: u64,
+    pub(crate) kind: u8,
+    pub(crate) hash: Hash,
+}
+
+impl RecordHead {
+    /// The byte offset just past the record.
+    pub(crate) fn end(&self) -> u64 {
+        self.at + FRAME_HEADER + self.len
+    }
+}
+
+/// The text of a refused trailer (counts or digest).
+pub(crate) const TRAILER_MISMATCH: &str = "the trailer's counts or digest do not match the dump";
+/// The text of a file with bytes after its trailer.
+pub(crate) const BYTES_AFTER: &str = "bytes follow the trailer";
+/// The text of a record whose payload does not match its hash.
+pub(crate) const HASH_MISMATCH: &str = "a record's hash does not match its bytes";
+
+/// Reads the head of the record at `at` off `r` of a dump of `format`, and checks it by its
+/// header alone (shared by the reader and the chain scanner, `crate::dump_scan`). The end of the
+/// file inside the head is a dump that ends before its trailer. `frame` says a batch's data frame
+/// is expected: there a `DROPPED` record is refused in a dump format without one, or with another
+/// length than 102 bytes. From dump format 3 on, a record that claims more than `MAX_BLOB_BYTES`
+/// is refused (`record allocation failed`): its claim is never read.
+pub(crate) fn read_head(
+    r: &mut impl Read,
+    at: u64,
+    format: u32,
+    frame: bool,
+) -> Result<RecordHead, StoreError> {
+    let mut head = [0u8; FRAME_HEADER as usize];
+    read_exact_at(r, &mut head, at)?;
+    let len = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes")) as u64;
+    let kind = head[4];
+    let hash = Hash(head[5..37].try_into().expect("32 bytes"));
+    if frame && kind == rec::DROPPED {
+        if !drops_allowed(format) {
+            return Err(damaged(at, drop_text::NOT_ALLOWED));
+        }
+        if len != DROPPED_LEN as u64 {
+            return Err(damaged(at, drop_text::WRONG_LENGTH));
+        }
+    }
+    if format >= 3 && len > MAX_BLOB_BYTES {
+        return Err(damaged(at, drop_text::ALLOCATION));
+    }
+    Ok(RecordHead {
+        at,
+        len,
+        kind,
+        hash,
+    })
+}
+
+/// Reads the payload of the record whose head is `head` off `r`, which stands just past the head,
+/// and checks it against the head's hash. The payload is read in chunks of at most
+/// `ERASE_BUFFER` bytes, each taken by fallible growth: a length the head claims is never
+/// reserved before its bytes arrive.
+pub(crate) fn read_body(r: &mut impl Read, head: &RecordHead) -> Result<Vec<u8>, StoreError> {
+    let mut payload: Vec<u8> = Vec::new();
+    let mut left = head.len;
+    while left > 0 {
+        let n = left.min(ERASE_BUFFER as u64) as usize;
+        payload
+            .try_reserve(n)
+            .map_err(|_| damaged(head.at, drop_text::ALLOCATION))?;
+        let from = payload.len();
+        payload.resize(from + n, 0);
+        read_exact_at(r, &mut payload[from..], head.at)?;
+        left -= n as u64;
+    }
+    if Hash::of(&payload) != head.hash {
+        return Err(damaged(head.at, HASH_MISMATCH));
+    }
+    Ok(payload)
+}
+
+/// The fields of a `BATCH` record's payload: its start, its frame count (at least 1: no store
+/// writes a batch of no frames), its digest and its kinds digest. None when it does not parse.
+pub(crate) fn parse_batch_record(p: &[u8]) -> Option<(Location, u32, Hash, Hash)> {
+    let mut c = Cursor(p);
+    let segment = c.u32()?;
+    let offset = c.u64()?;
+    let frames = c.u32()?;
+    let digest = c.hash()?;
+    let kinds = c.hash()?;
+    (c.0.is_empty() && frames > 0).then_some((Location { segment, offset }, frames, digest, kinds))
+}
+
+/// Refuses the head of the `have`-th data frame of batch `n`, whose record says `count`: a
+/// container record where a data frame is expected.
+pub(crate) fn check_frame_head(
+    n: u64,
+    have: usize,
+    count: u32,
+    head: &RecordHead,
+) -> Result<(), StoreError> {
+    if head.kind != rec::DROPPED && head.kind >= rec::HEADER {
+        return Err(damaged(
+            head.at,
+            format!("batch {n} holds {have} frames, and its record says {count}"),
+        ));
+    }
+    Ok(())
+}
+
+/// The path of the `FILE` record read at `at`, whose payload is `payload_len` bytes long and
+/// starts with `head` (the whole payload, or at least its length field and path), checked as the
+/// reader checks it: a path of the closed set, after `last_path`, at most `MAX_FILES` files
+/// (`files` before it), and a file of at most 16 MiB.
+pub(crate) fn check_file_head<'a>(
+    at: u64,
+    head: &'a [u8],
+    payload_len: u64,
+    last_path: Option<&str>,
+    files: u32,
+) -> Result<&'a str, StoreError> {
+    let mut c = Cursor(head);
+    let Some(path_len) = c.u16() else {
+        return Err(damaged(at, not_carried("")));
+    };
+    let Some(raw) = c.take(path_len as usize) else {
+        return Err(damaged(at, not_carried(&String::from_utf8_lossy(c.0))));
+    };
+    let Ok(path) = std::str::from_utf8(raw) else {
+        return Err(damaged(at, not_carried(&String::from_utf8_lossy(raw))));
+    };
+    if !is_project_file(path) {
+        return Err(damaged(at, not_carried(path)));
+    }
+    if last_path.is_some_and(|last| path <= last) {
+        return Err(damaged(at, cannot_stand(rec::FILE)));
+    }
+    if files >= MAX_FILES {
+        return Err(damaged(at, "too many project files"));
+    }
+    if payload_len - 2 - u64::from(path_len) > MAX_FILE_BYTES as u64 {
+        return Err(damaged(at, too_large(path)));
+    }
+    Ok(path)
+}
+
+/// Parses the trailer payload `p` of a dump of `format` read at `at`, and checks its counts and
+/// digest against what was read: `read` (batches, frames, files), and `digest`, the digest of
+/// every record before it.
+pub(crate) fn check_trailer(
+    at: u64,
+    format: u32,
+    p: &[u8],
+    read: (u64, u64, u32),
+    digest: Hash,
+) -> Result<DumpTrailer, StoreError> {
+    let t = match parse_trailer(format, p) {
+        Some(t) => t,
+        None if format >= 3 => return Err(damaged(at, chain_text::TRAILER)),
+        None => return Err(damaged(at, TRAILER_MISMATCH)),
+    };
+    if (t.batches, t.frames, t.files) != read || t.digest != digest {
+        return Err(damaged(at, TRAILER_MISMATCH));
+    }
+    Ok(t)
+}
+
+/// The format-3 checks of a dump's end, at its trailer read at `at`: an increment holds a batch,
+/// and the last batch (`last`: its physical end and marker; with none, the base) ends at the
+/// header's end `log_end` with the header's end marker.
+pub(crate) fn check_last(
+    at: u64,
+    links: &DumpChainHeader,
+    last: Option<(Location, BatchMarker)>,
+    log_end: Location,
+) -> Result<(), StoreError> {
+    let (end, marker) = match last {
+        Some(last) => last,
+        None if links.kind == DumpKind::Increment => {
+            return Err(damaged(at, chain_text::EMPTY_INCREMENT));
+        }
+        None => (links.base, links.base_batch),
+    };
+    if end != log_end || marker != links.end_batch {
+        return Err(damaged(at, chain_text::LAST_BATCH));
+    }
+    Ok(())
+}
+
 impl<R: Read> DumpReader<R> {
     /// Reads the prelude and the header. Refuses a file that does not start with the magic, and
     /// a `(dump_format, store_format)` pair outside `READS`. Returns the reader, the dump format
@@ -934,51 +2047,36 @@ impl<R: Read> DumpReader<R> {
             failed: None,
             last_path: None,
             kinds: &[],
-            drops: false,
             chain: Vec::new(),
             totals: DumpTotals::default(),
+            format: 0,
+            log_end: BatchMarker::ZERO.start,
+            links: None,
+            last: None,
+            tally: RemovalTally::default(),
+            trailer: None,
         };
-        // the magic, or as much of it as the file holds: a shorter file is not a dump
-        let mut magic = [0u8; MAGIC.len()];
-        let mut got = 0;
-        while got < magic.len() {
-            match me.r.read(&mut magic[got..]) {
-                Ok(0) => break,
-                Ok(n) => got += n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-        if got < magic.len() || &magic != MAGIC {
-            return Err(damaged(0, NOT_A_DUMP));
-        }
-        me.totals.bytes = MAGIC.len() as u64;
-        let mut format = [0u8; 4];
-        me.exact(&mut format, me.totals.bytes)?;
-        me.totals.bytes += 4;
-        let format = u32::from_le_bytes(format);
-        if !READS.iter().any(|(d, _)| *d == format) {
-            return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
-        }
-        me.drops = drops_allowed(format);
+        let format = read_prelude(&mut me.r)?;
+        // the record bound of format 3 holds from its header on
+        me.format = format;
+        me.totals.bytes = PRELUDE_LEN;
         let first = me.record(false)?;
         if first.kind != rec::HEADER {
             return Err(damaged(first.at, cannot_stand(first.kind)));
         }
-        let header = parse_header(&first.payload).map_err(|what| damaged(first.at, what))?;
-        let Some(kinds) = READS
-            .contains(&(format, header.store_format))
-            .then(|| frame_kinds(format, header.store_format))
-            .flatten()
-        else {
-            return Err(damaged(
-                first.at,
-                store_format_not_read(header.store_format, format),
-            ));
-        };
+        let (header, kinds) = header_of(format, first.at, &first.payload)?;
         me.kinds = kinds;
+        me.format = format;
+        me.log_end = header.log_end;
+        me.links = header.chain;
         me.link(&first)?;
         Ok((me, format, header))
+    }
+
+    /// The trailer, once the reader has verified it and the end of the file (`next` returned
+    /// `None`); None before.
+    pub fn trailer(&self) -> Option<&DumpTrailer> {
+        self.trailer.as_ref()
     }
 
     /// The next project file or batch; `None` after a verified trailer at the end of the file.
@@ -1013,7 +2111,7 @@ impl<R: Read> DumpReader<R> {
                 self.batch(&record).map(|b| Some(DumpItem::Batch(b)))
             }
             rec::TRAILER => {
-                self.trailer(&record)?;
+                self.read_trailer(&record)?;
                 Ok(None)
             }
             k => Err(damaged(record.at, cannot_stand(k))),
@@ -1031,38 +2129,17 @@ impl<R: Read> DumpReader<R> {
     }
 
     fn file(&mut self, record: &Record) -> Result<DumpItem, StoreError> {
-        let mut c = Cursor(&record.payload);
-        let Some(path_len) = c.u16() else {
-            return Err(damaged(record.at, not_carried("")));
-        };
-        let Some(raw) = c.take(path_len as usize) else {
-            return Err(damaged(
-                record.at,
-                not_carried(&String::from_utf8_lossy(c.0)),
-            ));
-        };
-        let Ok(path) = std::str::from_utf8(raw) else {
-            return Err(damaged(
-                record.at,
-                not_carried(&String::from_utf8_lossy(raw)),
-            ));
-        };
-        if !is_project_file(path) {
-            return Err(damaged(record.at, not_carried(path)));
-        }
-        if self.last_path.as_deref().is_some_and(|last| path <= last) {
-            return Err(damaged(record.at, cannot_stand(rec::FILE)));
-        }
-        if self.totals.files >= MAX_FILES {
-            return Err(damaged(record.at, "too many project files"));
-        }
-        if c.0.len() > MAX_FILE_BYTES {
-            return Err(damaged(record.at, too_large(path)));
-        }
+        let path = check_file_head(
+            record.at,
+            &record.payload,
+            record.payload.len() as u64,
+            self.last_path.as_deref(),
+            self.totals.files,
+        )?;
         let refused = || damaged(record.at, drop_text::ALLOCATION);
         let item = DumpItem::File {
             path: try_string(path).ok_or_else(refused)?,
-            bytes: try_copy(c.0).ok_or_else(refused)?,
+            bytes: try_copy(&record.payload[2 + path.len()..]).ok_or_else(refused)?,
         };
         self.last_path = Some(try_string(path).ok_or_else(refused)?);
         self.totals.files += 1;
@@ -1071,18 +2148,8 @@ impl<R: Read> DumpReader<R> {
 
     fn batch(&mut self, record: &Record) -> Result<DumpBatch, StoreError> {
         let n = self.totals.batches + 1;
-        let mut c = Cursor(&record.payload);
-        let parsed = (|| {
-            let segment = c.u32()?;
-            let offset = c.u64()?;
-            let frames = c.u32()?;
-            let digest = c.hash()?;
-            let kinds = c.hash()?;
-            c.0.is_empty()
-                .then_some((Location { segment, offset }, frames, digest, kinds))
-        })();
         // no store writes a batch of no frames
-        let Some((start, count, digest, kinds)) = parsed.filter(|p| p.1 > 0) else {
+        let Some((start, count, digest, kinds)) = parse_batch_record(&record.payload) else {
             return Err(damaged(record.at, cannot_stand(record.kind)));
         };
         // no buffer is sized from an unread count: frames are pushed as they are read, each slot
@@ -1091,15 +2158,17 @@ impl<R: Read> DumpReader<R> {
         let mut dropped = false;
         while frames.len() < count as usize {
             let f = self.record(true)?;
-            if f.kind != rec::DROPPED && f.kind >= rec::HEADER {
-                return Err(damaged(
-                    f.at,
-                    format!(
-                        "batch {n} holds {} frames, and its record says {count}",
-                        frames.len()
-                    ),
-                ));
-            }
+            check_frame_head(
+                n,
+                frames.len(),
+                count,
+                &RecordHead {
+                    at: f.at,
+                    len: f.payload.len() as u64,
+                    kind: f.kind,
+                    hash: f.hash,
+                },
+            )?;
             // the trailer's digest covers the container record as it is
             self.link(&f)?;
             let frame = if f.kind == rec::DROPPED {
@@ -1115,14 +2184,23 @@ impl<R: Read> DumpReader<R> {
             if !self.kinds.contains(&frame.kind()) {
                 return Err(damaged(f.at, cannot_stand(frame.kind())));
             }
+            if let Some(payload) = frame.present_payload() {
+                check_carried(frame.kind(), payload).map_err(|what| damaged(f.at, what))?;
+            }
             frames
                 .try_reserve(1)
                 .map_err(|_| damaged(f.at, drop_text::ALLOCATION))?;
             frames.push(frame);
         }
-        // a dropped frame's place is the batch start plus the original sizes before it
+        // a dropped frame's place is the batch start plus the original sizes before it; past
+        // u64::MAX it has none (a position overflow from format 3 on)
         if dropped && batch_end(start.offset, &frames).is_none() {
-            return Err(damaged(record.at, drop_text::SPAN));
+            let what = if self.format >= 3 {
+                chain_text::OVERFLOW
+            } else {
+                drop_text::SPAN
+            };
+            return Err(damaged(record.at, what));
         }
         let refused = || damaged(record.at, drop_text::ALLOCATION);
         if try_batch_digest(frames.iter().map(|f| f.hash())).ok_or_else(refused)? != digest
@@ -1133,46 +2211,95 @@ impl<R: Read> DumpReader<R> {
                 format!("batch {n} does not match its digest"),
             ));
         }
-        self.totals.batches += 1;
-        self.totals.frames += frames.len() as u64;
-        Ok(DumpBatch {
+        let batch = DumpBatch {
             start,
             digest,
             frames,
-        })
+        };
+        if let Some(links) = self.links {
+            self.follow(record.at, &links, &batch)?;
+        }
+        self.totals.batches += 1;
+        self.totals.frames += batch.frames.len() as u64;
+        Ok(batch)
     }
 
-    fn trailer(&mut self, record: &Record) -> Result<(), StoreError> {
-        let mismatch = || {
-            damaged(
-                record.at,
-                "the trailer's counts or digest do not match the dump",
-            )
-        };
-        let mut c = Cursor(&record.payload);
-        let batches = c.u64().ok_or_else(mismatch)?;
-        let frames = c.u64().ok_or_else(mismatch)?;
-        let files = c.u32().ok_or_else(mismatch)?;
-        let digest = c.hash().ok_or_else(mismatch)?;
-        if !c.0.is_empty()
-            || batches != self.totals.batches
-            || frames != self.totals.frames
-            || files != self.totals.files
-            || digest != Hash::of(&self.chain)
-        {
-            return Err(mismatch());
+    /// The format-3 checks of one batch read at `at`: the first follows the header's base; each
+    /// one's physical end and marker, and its removal facts, are kept for the trailer.
+    fn follow(
+        &mut self,
+        at: u64,
+        links: &DumpChainHeader,
+        b: &DumpBatch,
+    ) -> Result<(), StoreError> {
+        if self.last.is_none() && !follows(links.base, b.start) {
+            return Err(damaged(at, chain_text::FIRST_BATCH));
+        }
+        let end = dump_chain::batch_end(b).ok_or_else(|| damaged(at, chain_text::OVERFLOW))?;
+        self.last = Some((end, BatchMarker::of(b)));
+        self.tally.add(b).map_err(|what| damaged(at, what))
+    }
+
+    fn read_trailer(&mut self, record: &Record) -> Result<(), StoreError> {
+        let t = check_trailer(
+            record.at,
+            self.format,
+            &record.payload,
+            (self.totals.batches, self.totals.frames, self.totals.files),
+            Hash::of(&self.chain),
+        )?;
+        if let Some(links) = self.links {
+            self.check_ends(record.at, &links, &t)?;
         }
         let mut extra = [0u8; 1];
         let at = self.totals.bytes;
         loop {
             match self.r.read(&mut extra) {
                 Ok(0) => break,
-                Ok(_) => return Err(damaged(at, "bytes follow the trailer")),
+                Ok(_) => return Err(damaged(at, BYTES_AFTER)),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e.into()),
             }
         }
         self.phase = ReadPhase::Done;
+        self.totals.removals = t.removals;
+        self.totals.first_removed = t.first_removed;
+        self.totals.digest = t.digest;
+        self.trailer = Some(t);
+        Ok(())
+    }
+
+    /// The format-3 checks at trailer `t` (read at `at`): an increment holds a batch; the last
+    /// batch (or, with none, the base) ends at the header's end with the header's end marker; the
+    /// trailer counts the dump's applies; its first removed span is the lowest dropped frame of
+    /// those applies (none without one), or, with an apply, a span before the base, which only
+    /// an increment has: an earlier file holds it.
+    fn check_ends(
+        &self,
+        at: u64,
+        links: &DumpChainHeader,
+        t: &DumpTrailer,
+    ) -> Result<(), StoreError> {
+        check_last(at, links, self.last, self.log_end)?;
+        // the lowest resolved span of the file's applies; a hole only a carried record
+        // explains is none. Whether every hole is authorized is the ingest's check.
+        let first_ok = if links.kind == DumpKind::Full || self.tally.mode().is_some() {
+            // the file holds the whole log: its mode, requests and spans
+            t.first_removed == self.tally.first_removed()
+        } else {
+            // an increment after the origin: its first batch is not the log's, so either
+            // resolution may be the log's; a span before its base is in an earlier file; and an
+            // apply whose request an earlier file holds is resolved by the loader of the chain
+            {
+                !self.tally.resolves_all()
+                    || t.first_removed == self.tally.project_first()
+                    || t.first_removed == self.tally.holder_first()
+                    || (t.removals > 0 && t.first_removed.is_some_and(|q| q < links.base))
+            }
+        };
+        if u64::from(t.removals) != self.tally.applies() || !first_ok {
+            return Err(damaged(at, chain_text::REMOVALS));
+        }
         Ok(())
     }
 
@@ -1186,55 +2313,21 @@ impl<R: Read> DumpReader<R> {
     /// Reads one record and checks its hash. The end of the file inside a record, or where a
     /// record should start, is a dump that ends before its trailer. `frame` says a batch's data
     /// frame is expected: there a `DROPPED` record is refused by its header alone, before its
-    /// payload is read, in a dump format without one or with another length than 102 bytes. The
-    /// payload is read in chunks of at most `ERASE_BUFFER` bytes, each taken by fallible growth:
-    /// a length the header claims is never reserved before its bytes arrive.
+    /// payload is read, in a dump format without one or with another length than 102 bytes. From
+    /// dump format 3 on, a record that claims more than `MAX_BLOB_BYTES` is refused by its header
+    /// alone (`record allocation failed`). The payload is read in chunks of at most
+    /// `ERASE_BUFFER` bytes, each taken by fallible growth: a length the header claims is never
+    /// reserved before its bytes arrive.
     fn record(&mut self, frame: bool) -> Result<Record, StoreError> {
-        let at = self.totals.bytes;
-        let mut head = [0u8; FRAME_HEADER as usize];
-        self.exact(&mut head, at)?;
-        let len = u32::from_le_bytes(head[0..4].try_into().unwrap()) as u64;
-        let kind = head[4];
-        let hash = Hash(head[5..37].try_into().unwrap());
-        if frame && kind == rec::DROPPED {
-            if !self.drops {
-                return Err(damaged(at, drop_text::NOT_ALLOWED));
-            }
-            if len != DROPPED_LEN as u64 {
-                return Err(damaged(at, drop_text::WRONG_LENGTH));
-            }
-        }
-        let mut payload: Vec<u8> = Vec::new();
-        let mut left = len;
-        while left > 0 {
-            let n = left.min(ERASE_BUFFER as u64) as usize;
-            payload
-                .try_reserve(n)
-                .map_err(|_| damaged(at, drop_text::ALLOCATION))?;
-            let from = payload.len();
-            payload.resize(from + n, 0);
-            self.exact(&mut payload[from..], at)?;
-            left -= n as u64;
-        }
-        if Hash::of(&payload) != hash {
-            return Err(damaged(at, "a record's hash does not match its bytes"));
-        }
-        self.totals.bytes = at + FRAME_HEADER + len;
+        let head = read_head(&mut self.r, self.totals.bytes, self.format, frame)?;
+        let payload = read_body(&mut self.r, &head)?;
+        self.totals.bytes = head.end();
         Ok(Record {
-            at,
-            kind,
-            hash,
+            at: head.at,
+            kind: head.kind,
+            hash: head.hash,
             payload,
         })
-    }
-
-    /// Fills `buf`, or fails with a dump that ends before its trailer (blamed on `at`).
-    fn exact(&mut self, buf: &mut [u8], at: u64) -> Result<(), StoreError> {
-        match self.r.read_exact(buf) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(damaged(at, ENDS_EARLY)),
-            Err(e) => Err(e.into()),
-        }
     }
 }
 
@@ -1250,13 +2343,97 @@ impl StoreReader {
         upto: Location,
         mut f: impl FnMut(DumpBatch) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        let origin = Location {
-            segment: 0,
+        self.for_each_batch_after(BatchMarker::ZERO.start, upto, &mut f)
+    }
+
+    /// [`StoreReader::for_each_batch`] of the sealed batches of `[base, end)`: the suffix of the
+    /// log after the batch that ends at `base`. The first batch starts at `base`, or at offset
+    /// zero of the next segment when the log rolled there.
+    ///
+    /// Before any batch is visited, `base` and `end` are each checked to be a physical batch end
+    /// by [`StoreReader::batch_marker_at`]: their segment is walked from offset zero, frame by
+    /// frame. So a place inside a payload, even one whose bytes hold a hash-valid frame and
+    /// marker, is never a boundary, and a place inside a frame or a batch is refused. An `end`
+    /// before `base` is refused; an `end` equal to it visits nothing. A refusal is
+    /// `StoreError::Decode` (or the walk's own error).
+    pub fn for_each_batch_after(
+        &self,
+        base: Location,
+        end: Location,
+        visit: &mut dyn FnMut(DumpBatch) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        if end < base {
+            return Err(StoreError::Decode(format!(
+                "segment {} offset {} is before segment {} offset {}; run rdy fsck",
+                end.segment, end.offset, base.segment, base.offset
+            )));
+        }
+        // offset zero of a segment is a boundary; any other place must close a batch
+        for at in [base, end] {
+            if at.offset > 0 && self.batch_marker_at(at)?.is_none() {
+                return Err(StoreError::Decode(format!(
+                    "segment {} offset {} is not a batch end; run rdy fsck",
+                    at.segment, at.offset
+                )));
+            }
+        }
+        let mut first = true;
+        self.walk_batches(base, end, true, &mut |marker, frames| {
+            if std::mem::take(&mut first) && !follows(base, marker.start) {
+                return Err(StoreError::Decode(format!(
+                    "batch at segment {} offset {} does not follow segment {} offset {}; run rdy fsck",
+                    marker.start.segment, marker.start.offset, base.segment, base.offset
+                )));
+            }
+            visit(DumpBatch {
+                start: marker.start,
+                digest: marker.digest,
+                frames,
+            })
+        })
+    }
+
+    /// The marker of the batch that ends exactly at `end`: None for offset zero of a segment
+    /// (no batch of that segment ends there; the origin is `0.0`). The walk reads `end`'s
+    /// segment from offset zero to `end` by the record walker, checking each frame boundary and
+    /// each batch marker on the way, and no earlier segment. An `end` inside a frame, or after
+    /// frames that no marker closes, is `StoreError::Decode`.
+    pub fn batch_marker_at(&self, end: Location) -> Result<Option<BatchMarker>, StoreError> {
+        if end.offset == 0 {
+            return Ok(None);
+        }
+        let from = Location {
+            segment: end.segment,
             offset: 0,
         };
+        let mut last = None;
+        self.walk_batches(from, end, false, &mut |marker, _| {
+            last = Some(marker);
+            Ok(())
+        })?;
+        Ok(last)
+    }
+
+    /// Walks the records of `[from, upto)` and calls `visit` with each batch's checked marker
+    /// and, with `keep`, its frames (without, an empty list: only the hashes are kept for the
+    /// digest). A marker that does not match the frames it closes, or frames after the last
+    /// marker, is `StoreError::Decode`.
+    fn walk_batches(
+        &self,
+        from: Location,
+        upto: Location,
+        keep: bool,
+        visit: &mut dyn FnMut(BatchMarker, Vec<Frame>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let mut pending: Vec<Frame> = Vec::new();
+        let mut hashes: Vec<Hash> = Vec::new();
         let mut first: Option<Location> = None;
-        self.for_each_record_from(origin, upto, |loc, frame, _next| {
+        self.for_each_record_from(from, upto, |loc, frame, _next| {
+            RECORD_HOOK.with(|h| {
+                if let Some(hook) = h.borrow_mut().as_mut() {
+                    hook(loc);
+                }
+            });
             let (kind, payload) = match frame {
                 StoredFrame::Present { kind, payload, .. } => (kind, payload),
                 StoredFrame::Dropped {
@@ -1267,13 +2444,16 @@ impl StoreReader {
                     residue,
                 } => {
                     first.get_or_insert(loc);
-                    pending.push(Frame::Dropped {
-                        kind,
-                        hash,
-                        len,
-                        apply,
-                        residue,
-                    });
+                    hashes.push(hash);
+                    if keep {
+                        pending.push(Frame::Dropped {
+                            kind,
+                            hash,
+                            len,
+                            apply,
+                            residue,
+                        });
+                    }
                     return Ok(());
                 }
             };
@@ -1282,11 +2462,14 @@ impl StoreReader {
                     unreachable!("a present frame")
                 };
                 first.get_or_insert(loc);
-                pending.push(Frame::Present {
-                    kind,
-                    hash,
-                    payload: payload.to_vec(),
-                });
+                hashes.push(hash);
+                if keep {
+                    pending.push(Frame::Present {
+                        kind,
+                        hash,
+                        payload: payload.to_vec(),
+                    });
+                }
                 return Ok(());
             }
             let start = first.take().unwrap_or(loc);
@@ -1298,21 +2481,19 @@ impl StoreReader {
             };
             let marker = BatchCommit::decode(payload).ok_or_else(mismatch)?;
             let frames = std::mem::take(&mut pending);
+            let digest = kinds::batch_digest(hashes.iter());
+            let count = std::mem::take(&mut hashes).len();
             // a marker of no frames closes no batch (a store's open treats one as torn)
-            if frames.is_empty()
+            if count == 0
                 || marker.start != start
-                || marker.frames as usize != frames.len()
-                || batch_digest(frames.iter().map(|f| f.hash())) != marker.digest
+                || marker.frames as usize != count
+                || digest != marker.digest
             {
                 return Err(mismatch());
             }
-            f(DumpBatch {
-                start: marker.start,
-                digest: marker.digest,
-                frames,
-            })
+            visit(BatchMarker::of_commit(&marker), frames)
         })?;
-        if !pending.is_empty() {
+        if !hashes.is_empty() {
             return Err(StoreError::Decode(format!(
                 "the log does not end at a batch marker at segment {} offset {}; run rdy fsck",
                 upto.segment, upto.offset

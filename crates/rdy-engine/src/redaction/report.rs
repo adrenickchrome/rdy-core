@@ -26,13 +26,15 @@ use rdy_model::redaction::{
 };
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
+    Redaction, RedactionCarried, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
 };
+use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
+use rdy_store::redaction_carried::decode_carried;
 use rdy_store::segment::Location;
 use rdy_store::transition::Transitions;
-use rdy_store::{StoreReader, ViewOp, ViewOpKind};
+use rdy_store::{StoreError, StoreReader, ViewOp, ViewOpKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -725,6 +727,16 @@ pub(crate) fn compute_excluding(
                 for (_, v) in versions {
                     all &= removed(kinds::BLOCK, v)?;
                 }
+                // a block frame can be removed (an earlier apply, or a carried record's zeros)
+                // while a change that wrote it still holds the payload: the target is then
+                // not wholly removed, and a new request drops the retained copies only
+                if all {
+                    for (_, v) in versions {
+                        for p in reader.producers(v)? {
+                            all &= removed(kinds::CHANGE, &p)?;
+                        }
+                    }
+                }
                 all
             }
         };
@@ -1026,6 +1038,20 @@ pub(crate) fn compute_excluding(
             kinds::REDACTION => {
                 let r: Redaction = reader.get_typed(kinds::REDACTION, &h)?;
                 quotes.scan(audit, &rec, false, &r)?;
+            }
+            kinds::REDACTION_CARRIED => {
+                // the approver's and the selectors' text; it holds no reason text. A carried
+                // record is decoded within the bounded record decoder's limits, and refused with
+                // its error; a refused growth of its decode is this module's allocation refusal
+                let bytes = reader.get_kind(kinds::REDACTION_CARRIED, &h)?;
+                let c: RedactionCarried = match decode_carried(&bytes) {
+                    Ok(c) => c,
+                    Err(TryDecodeError::Allocation) => return Err(over(limit::RECORD)),
+                    Err(TryDecodeError::Record(e)) => {
+                        return Err(StoreError::Decode(format!("{h} (object kind 23): {e}")).into());
+                    }
+                };
+                quotes.scan(audit, &rec, false, &c)?;
             }
             kinds::REF_UPDATE => {
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
