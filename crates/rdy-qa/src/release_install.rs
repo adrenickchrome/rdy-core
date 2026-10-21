@@ -85,8 +85,9 @@ impl Failure {
     }
 }
 
-/// The command that writes the archive (path, stage, stem).
-type TarCommand<'a> = &'a dyn Fn(&Path, &Path, &str) -> Command;
+/// The command that writes the archive of the directory `stem` to its stdout. It starts in
+/// OUT, and its stdout is the archive file, reserved through OUT's handle.
+type TarCommand<'a> = &'a dyn Fn(&str) -> Command;
 
 /// What packaging reads besides its arguments; tests swap parts of it.
 struct Setup<'a> {
@@ -94,7 +95,7 @@ struct Setup<'a> {
     licenses: PathBuf,
     archive_max: u64,
     tar: TarCommand<'a>,
-    /// The version probe of the staged binary.
+    /// The version probe of the staged binary, given as `./rdy`: it starts in the stage.
     probe: &'a dyn Fn(&Path) -> Command,
     /// Runs once every input is checked, before OUT is made (tests change input paths here).
     checked: &'a dyn Fn(),
@@ -126,15 +127,10 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `tar -czf <archive> -C <stage> <stem>`. AppleDouble files stay out of the archive.
-fn tar_command(archive: &Path, stage: &Path, stem: &str) -> Command {
+/// `tar -czf - <stem>`: the archive goes to stdout. AppleDouble files stay out of the archive.
+fn tar_command(stem: &str) -> Command {
     let mut cmd = Command::new("tar");
-    cmd.arg("-czf")
-        .arg(archive)
-        .arg("-C")
-        .arg(stage)
-        .arg(stem)
-        .env("COPYFILE_DISABLE", "1");
+    cmd.args(["-czf", "-", stem]).env("COPYFILE_DISABLE", "1");
     cmd
 }
 
@@ -191,7 +187,12 @@ pub fn tar_available() -> bool {
 /// path this call created is removed again, and nothing that was there before is touched.
 ///
 /// `out` is made private to this user (mode 0700, whatever the umask), and the stage inside it
-/// too, so no other user can change a staged file between its probe and the archive.
+/// too, so no other user can change a staged file between its probe and the archive. Every
+/// step after `out` is made goes through handles to `out` and the stage, never through the
+/// path `out`: the probe and tar start in those directories, and tar writes the archive to a
+/// file this run reserved through `out`'s handle. So if someone who can write `out`'s parent
+/// moves `out` away, nothing is done in what then stands at that path; the run fails, as the
+/// archive's path would no longer name its archive.
 pub fn package(binary: &Path, version: &str, target: &str, out: &Path) -> Result<PathBuf, String> {
     package_with(binary, version, target, out, &Setup::release())
         .map_err(|f| f.message().to_string())
@@ -220,20 +221,20 @@ fn package_with(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(Failure::FileOperation),
     }
-    let parent_is_dir = out
-        .parent()
-        .is_some_and(|p| fs::metadata(p).is_ok_and(|m| m.is_dir()));
-    if !parent_is_dir {
+    let (Some(parent), Some(out_name)) = (out.parent(), out.file_name()) else {
         return Err(Failure::FileOperation);
-    }
+    };
+    let parent = platform::open_dir(parent).map_err(|_| Failure::FileOperation)?;
     (setup.checked)();
-    let out_dir = match platform::create_private_dir(out) {
+    let out_dir = match platform::create_private_dir_at(&parent, out_name) {
         Ok(dir) => dir,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::OutputExists),
         Err(_) => return Err(Failure::FileOperation),
     };
     let mut work = Work {
         out,
+        parent,
+        out_name: out_name.to_os_string(),
         out_dir,
         stage: None,
         archive: None,
@@ -249,14 +250,44 @@ struct Inputs {
     apache: File,
 }
 
-/// What one packaging run made in OUT, which only it may remove.
+/// What one packaging run made in OUT, which only it may remove. Every step reaches OUT and
+/// the stage through these handles.
 struct Work<'a> {
     out: &'a Path,
-    /// OUT, open: the archive is reserved, checked and removed through it.
+    /// OUT's parent, open, and OUT's name in it.
+    parent: File,
+    out_name: std::ffi::OsString,
+    /// OUT, open: the stage and the archive are made, checked and removed through it.
     out_dir: File,
-    stage: Option<PathBuf>,
+    stage: Option<Stage>,
     /// The archive's name and the file this run reserved there.
     archive: Option<(String, File)>,
+}
+
+/// The private stage in OUT: its name there (first [`STAGE_DIR`], then the stem), its handle,
+/// and the files this run made in it.
+struct Stage {
+    name: String,
+    dir: File,
+    files: Vec<&'static str>,
+}
+
+impl Stage {
+    /// Makes the new file `name` in the stage with `mode`, holding what `write` writes.
+    fn add(
+        &mut self,
+        name: &'static str,
+        mode: u32,
+        write: impl FnOnce(&mut File) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let mut file = platform::create_new_at(&self.dir, name.as_ref())
+            .map_err(|_| Failure::FileOperation)?;
+        self.files.push(name);
+        write(&mut file)?;
+        file.sync_all().map_err(|_| Failure::FileOperation)?;
+        // the write handle closes when this returns, before any child runs the file
+        platform::set_file_mode(&file, mode).map_err(|_| Failure::FileOperation)
+    }
 }
 
 impl Work<'_> {
@@ -269,44 +300,51 @@ impl Work<'_> {
         target: &str,
         setup: &Setup,
     ) -> Result<PathBuf, Failure> {
-        let stage = self.out.join(STAGE_DIR);
-        platform::create_private_dir(&stage).map_err(|_| Failure::FileOperation)?;
-        let stage = self.stage.insert(stage).clone();
-        let rdy = stage.join("rdy");
-        copy_from(&inputs.binary, &rdy, BINARY_MAX)?;
-        for (name, from) in [(MIT_FILE, &inputs.mit), (APACHE_FILE, &inputs.apache)] {
-            copy_from(from, &stage.join(name), LICENSE_MAX)?;
-            set_mode(&stage.join(name), 0o644)?;
-        }
-        set_mode(&rdy, 0o755)?;
-        let preview = probe_version(&rdy, version, setup)?;
+        let dir = platform::create_private_dir_at(&self.out_dir, STAGE_DIR.as_ref())
+            .map_err(|_| Failure::FileOperation)?;
+        let stage = self.stage.insert(Stage {
+            name: STAGE_DIR.to_string(),
+            dir,
+            files: Vec::new(),
+        });
+        stage.add("rdy", 0o755, |to| copy_from(&inputs.binary, to, BINARY_MAX))?;
+        stage.add(MIT_FILE, 0o644, |to| {
+            copy_from(&inputs.mit, to, LICENSE_MAX)
+        })?;
+        stage.add(APACHE_FILE, 0o644, |to| {
+            copy_from(&inputs.apache, to, LICENSE_MAX)
+        })?;
+        let preview = probe_version(&stage.dir, version, setup)?;
         let stem = if preview {
             format!("rdy-{version}-preview-{target}")
         } else {
             format!("rdy-{version}-{target}")
         };
-        let dir = stage.join(&stem);
-        fs::create_dir(&dir).map_err(|_| Failure::FileOperation)?;
-        set_mode(&dir, 0o755)?;
-        for name in ["rdy", MIT_FILE, APACHE_FILE] {
-            fs::rename(stage.join(name), dir.join(name)).map_err(|_| Failure::FileOperation)?;
-        }
         if preview {
-            let note = dir.join(NOTE_FILE);
-            write_new(&note, PREVIEW_NOTE.as_bytes())?;
-            set_mode(&note, 0o644)?;
+            stage.add(NOTE_FILE, 0o644, |to| {
+                use std::io::Write;
+                to.write_all(PREVIEW_NOTE.as_bytes())
+                    .map_err(|_| Failure::FileOperation)
+            })?;
         }
+        platform::set_file_mode(&stage.dir, 0o755).map_err(|_| Failure::FileOperation)?;
+        platform::rename_at(&self.out_dir, stage.name.as_ref(), stem.as_ref())
+            .map_err(|_| Failure::FileOperation)?;
+        stage.name.clone_from(&stem);
 
-        // Reserve the archive's name before tar writes there: a file that someone else put
-        // there first is refused and never touched.
+        // Reserve the archive's name, then let tar write into that file through its handle:
+        // a file that someone else put at the name is refused and never touched.
         let name = format!("{stem}.tar.gz");
         let reserved = platform::create_new_at(&self.out_dir, name.as_ref())
             .map_err(|_| Failure::FileOperation)?;
         let (name, reserved) = self.archive.insert((name, reserved));
-        let archive = self.out.join(&*name);
-        let tarred = platform::run_bounded(
-            (setup.tar)(&archive, &stage, &stem),
+        let mut tar = (setup.tar)(&stem);
+        platform::start_in_dir(&mut tar, &self.out_dir).map_err(|_| Failure::FileOperation)?;
+        let into = reserved.try_clone().map_err(|_| Failure::FileOperation)?;
+        let tarred = platform::run_bounded_to(
+            tar,
             None,
+            into,
             RELEASE_CHILD_OUTPUT_MAX,
             RELEASE_CHILD_DEADLINE,
         );
@@ -315,7 +353,7 @@ impl Work<'_> {
             Ok(_) => return Err(Failure::FileOperation),
             Err(e) => return Err(child_failure(&e)),
         }
-        // tar wrote into the reserved file; anything else at the name is not this run's
+        // the archive's name must still hold the file tar wrote
         if !platform::holds_file(&self.out_dir, name.as_ref(), reserved)
             .map_err(|_| Failure::FileOperation)?
         {
@@ -332,21 +370,30 @@ impl Work<'_> {
             return Err(Failure::SizeLimit);
         }
         platform::set_file_mode(reserved, 0o644).map_err(|_| Failure::FileOperation)?;
-        Ok(archive)
+        Ok(self.out.join(&*name))
     }
 
-    /// Removes the stage on every path and, on failure, the reserved archive (only while its
-    /// name still holds the reserved file) and OUT. A failed removal is the result, whatever
-    /// failed before it.
+    /// Removes the stage on every path, through its handle. A success stands only while OUT's
+    /// path still names this run's OUT. On failure it removes the reserved archive (only while
+    /// its name still holds the reserved file) and OUT (only while OUT's path still names it).
+    /// A failed removal is the result, whatever failed before it.
     fn finish(self, made: Result<PathBuf, Failure>) -> Result<PathBuf, Failure> {
         let mut cleaned = true;
         if let Some(stage) = &self.stage {
-            cleaned &= fs::remove_dir_all(stage).is_ok();
+            for name in &stage.files {
+                cleaned &= platform::remove_file_at(&stage.dir, name.as_ref()).is_ok();
+            }
+            cleaned &= platform::holds_file(&self.out_dir, stage.name.as_ref(), &stage.dir)
+                .unwrap_or(false)
+                && platform::remove_dir_at(&self.out_dir, stage.name.as_ref()).is_ok();
         }
-        let made = if cleaned {
-            made
-        } else {
-            Err(Failure::FileOperation)
+        // someone who can write OUT's parent may have moved OUT away
+        let in_place =
+            platform::holds_file(&self.parent, &self.out_name, &self.out_dir).unwrap_or(false);
+        let made = match made {
+            Ok(archive) if cleaned && in_place => Ok(archive),
+            Ok(_) => Err(Failure::FileOperation),
+            failed => failed,
         };
         if made.is_err() {
             if let Some((name, reserved)) = &self.archive {
@@ -357,8 +404,11 @@ impl Work<'_> {
                     Err(_) => false,
                 };
             }
-            // OUT is empty again unless a removal failed or someone else put a file there
-            cleaned &= fs::remove_dir(self.out).is_ok();
+            // OUT is empty again unless a removal failed or someone else put a file there; what
+            // stands at OUT's path once OUT was moved away is never this run's to remove
+            if in_place {
+                cleaned &= platform::remove_dir_at(&self.parent, &self.out_name).is_ok();
+            }
         }
         if cleaned {
             made
@@ -388,14 +438,12 @@ fn open_input(path: &Path, max: u64) -> Result<File, Failure> {
     Ok(file)
 }
 
-/// Copies the checked input `from` into the new file `to`, reading at most `max + 1` bytes: a
+/// Copies the checked input `from` into the open file `to`, reading at most `max + 1` bytes: a
 /// file that grew past `max` since its check fails, and so does one that is now empty.
-fn copy_from(from: &File, to: &Path, max: u64) -> Result<(), Failure> {
+fn copy_from(from: &File, to: &mut File, max: u64) -> Result<(), Failure> {
     use std::io::Read;
-    let mut dst = File::create_new(to).map_err(|_| Failure::FileOperation)?;
-    let copied = io::copy(&mut from.take(max.saturating_add(1)), &mut dst)
-        .map_err(|_| Failure::FileOperation)?;
-    dst.sync_all().map_err(|_| Failure::FileOperation)?;
+    let copied =
+        io::copy(&mut from.take(max.saturating_add(1)), to).map_err(|_| Failure::FileOperation)?;
     match copied {
         0 => Err(Failure::InputFile),
         n if n > max => Err(Failure::SizeLimit),
@@ -403,29 +451,19 @@ fn copy_from(from: &File, to: &Path, max: u64) -> Result<(), Failure> {
     }
 }
 
-/// Writes `bytes` to the new file `path`.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    use std::io::Write;
-    let mut f = File::create_new(path).map_err(|_| Failure::FileOperation)?;
-    f.write_all(bytes)
-        .and_then(|()| f.sync_all())
-        .map_err(|_| Failure::FileOperation)
-}
-
-fn set_mode(path: &Path, mode: u32) -> Result<(), Failure> {
-    platform::set_mode(path, mode).map_err(|_| Failure::FileOperation)
-}
-
 /// How often the probe is retried while the kernel still sees the staged copy as open for
 /// writing (`ETXTBSY`: another thread's child may hold the descriptor until it execs).
 const PROBE_BUSY_TRIES: u32 = 50;
 
-/// Runs the staged binary's `--version` (the setup's probe) and reads whether it is a preview.
-fn probe_version(binary: &Path, version: &str, setup: &Setup) -> Result<bool, Failure> {
+/// Runs the staged binary's `--version` (the setup's probe), started in the open stage `stage`
+/// as `./rdy`, and reads whether it is a preview.
+fn probe_version(stage: &File, version: &str, setup: &Setup) -> Result<bool, Failure> {
     let mut tries = 1;
     loop {
+        let mut probe = (setup.probe)(Path::new("./rdy"));
+        platform::start_in_dir(&mut probe, stage).map_err(|_| Failure::FileOperation)?;
         let run = platform::run_bounded(
-            (setup.probe)(binary),
+            probe,
             None,
             RELEASE_CHILD_OUTPUT_MAX,
             RELEASE_CHILD_DEADLINE,
@@ -791,6 +829,7 @@ mod tests {
         let run = run_bounded_inner(
             shell_script("printf 'rdy 0.14.0\\n'; exec sleep 1000"),
             None,
+            None,
             crate::platform::RELEASE_CHILD_OUTPUT_MAX,
             None,
             Expiry::expire,
@@ -917,17 +956,15 @@ mod tests {
 
         // A file that grows past its cap between the check and the copy fails the copy.
         let f = Fixture::new();
-        let to = f.dir.path().join("copy");
+        let mut to = File::create_new(f.dir.path().join("copy")).expect("create");
         let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
         assert_eq!(
-            copy_from(&from, &to, BINARY.len() as u64 - 1),
+            copy_from(&from, &mut to, BINARY.len() as u64 - 1),
             Err(Failure::SizeLimit)
         );
+        let mut to = File::create_new(f.dir.path().join("copy.b")).expect("create");
         let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
-        assert_eq!(
-            copy_from(&from, &to.with_extension("b"), BINARY.len() as u64),
-            Ok(())
-        );
+        assert_eq!(copy_from(&from, &mut to, BINARY.len() as u64), Ok(()));
     }
 
     #[test]
@@ -938,14 +975,10 @@ mod tests {
             return;
         }
         let probe = printing("rdy 0.14.0 (preview)\\n");
-        let partial = |archive: &Path, _: &Path, _: &str| {
-            let mut c = shell_script("printf partial > \"$0\"; exit 3");
-            c.arg(archive);
-            c
-        };
-        let missing = |_: &Path, _: &Path, _: &str| Command::new("/nonexistent/rdy-qa-tar");
-        let noisy = |_: &Path, _: &Path, _: &str| shell_script("head -c 1048577 /dev/zero");
-        type Tar<'a> = &'a dyn Fn(&Path, &Path, &str) -> Command;
+        let partial = |_: &str| shell_script("printf partial; exit 3");
+        let missing = |_: &str| Command::new("/nonexistent/rdy-qa-tar");
+        let noisy = |_: &str| shell_script("head -c 1048577 /dev/zero >&2");
+        type Tar<'a> = &'a dyn Fn(&str) -> Command;
         let cases: [(&str, Option<Tar>, u64, Failure); 4] = [
             (
                 "a failed tar that left a partial archive",
@@ -1021,15 +1054,38 @@ mod tests {
         rx
     }
 
+    /// A paused wrapper of `real`: it writes `ready` to the named pipe `ready`, waits for a line
+    /// on the named pipe `go`, then execs `real`'s program with its arguments and environment.
+    fn paused_exec(ready: &Path, go: &Path, real: &Command) -> Command {
+        let mut c = shell_script("echo ready > \"$0\"; read go < \"$1\"; shift; exec \"$@\"");
+        c.arg(ready)
+            .arg(go)
+            .arg(real.get_program())
+            .args(real.get_args());
+        for (key, value) in real.get_envs() {
+            match value {
+                Some(value) => c.env(key, value),
+                None => c.env_remove(key),
+            };
+        }
+        c
+    }
+
     #[test]
     fn pre1_package_never_takes_an_archive_path_it_did_not_create() {
         const STEM: &str = "rdy-0.14.0-preview-aarch64-apple-darwin";
-        let missing = |_: &Path, _: &Path, _: &str| Command::new("/nonexistent/rdy-qa-tar");
+        if !tar_or_skip(&crate::test_name!(
+            "pre1_package_never_takes_an_archive_path_it_did_not_create"
+        )) {
+            return;
+        }
+        let missing = |_: &str| Command::new("/nonexistent/rdy-qa-tar");
         for (case, what) in [
             "a newcomer at the archive path before tar, with tar",
             "a newcomer at the archive path before tar, with a tar that cannot start",
             "a newcomer in place of the archive while tar runs, then tar succeeds",
             "a newcomer in place of the archive while tar runs, then tar fails",
+            "a newcomer in place of the archive before the real tar starts",
         ]
         .into_iter()
         .enumerate()
@@ -1055,7 +1111,11 @@ mod tests {
             let paused_tar = {
                 let (r, g) = (ready.clone(), go.clone());
                 let code = if case == 2 { 0 } else { 3 };
-                move |_: &Path, _: &Path, _: &str| paused(&r, &g, &format!("exit {code}"))
+                move |_: &str| paused(&r, &g, &format!("exit {code}"))
+            };
+            let paused_real_tar = {
+                let (r, g) = (ready.clone(), go.clone());
+                move |stem: &str| paused_exec(&r, &g, &tar_command(stem))
             };
             let mut s = setup(
                 &f,
@@ -1068,7 +1128,8 @@ mod tests {
             s.tar = match case {
                 0 => &tar_command,
                 1 => &missing,
-                _ => &paused_tar,
+                2 | 3 => &paused_tar,
+                _ => &paused_real_tar,
             };
             let got = package_with(&f.binary, V, TARGET, &f.out(), &s);
             placed
@@ -1087,6 +1148,120 @@ mod tests {
             );
             let mut after = f.state();
             after[2].1.retain(|n| n != "out");
+            assert_eq!(after, before, "{what}: the inputs are unchanged");
+        }
+    }
+
+    /// Every entry under `dir`, sorted, with each file's bytes (`None` for a directory); none
+    /// when `dir` is gone.
+    fn tree_of(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+        if fs::symlink_metadata(dir).is_err() {
+            return Vec::new();
+        }
+        fn walk(root: &Path, dir: &Path, into: &mut Vec<(String, Option<Vec<u8>>)>) {
+            for e in fs::read_dir(dir).expect("read_dir") {
+                let p = e.expect("entry").path();
+                let name = p
+                    .strip_prefix(root)
+                    .expect("under the root")
+                    .to_string_lossy()
+                    .into_owned();
+                if fs::symlink_metadata(&p).expect("stat").is_dir() {
+                    into.push((name, None));
+                    walk(root, &p, into);
+                } else {
+                    into.push((name, Some(fs::read(&p).expect("read"))));
+                }
+            }
+        }
+        let mut v = Vec::new();
+        walk(dir, dir, &mut v);
+        v.sort();
+        v
+    }
+
+    /// A decoy OUT at `out`: a stage of its own, as staged inputs and as a staged release, with
+    /// an unprobed binary and other licenses.
+    fn make_decoy(out: &Path, stem: &str) {
+        for d in [out.join(STAGE_DIR), out.join(STAGE_DIR).join(stem)] {
+            fs::create_dir_all(&d).expect("mkdir");
+            for (name, bytes) in [
+                ("rdy", &b"an unprobed binary\n"[..]),
+                (MIT_FILE, b"a decoy license\n"),
+                (APACHE_FILE, b"a decoy license\n"),
+            ] {
+                fs::write(d.join(name), bytes).expect("write");
+            }
+        }
+    }
+
+    #[test]
+    fn pre1_package_keeps_to_its_own_out_when_out_is_replaced() {
+        const STEM: &str = "rdy-0.14.0-preview-aarch64-apple-darwin";
+        if !tar_or_skip(&crate::test_name!(
+            "pre1_package_keeps_to_its_own_out_when_out_is_replaced"
+        )) {
+            return;
+        }
+        let reference = tempfile::tempdir().expect("tempdir");
+        make_decoy(reference.path(), STEM);
+        let decoy = tree_of(reference.path());
+        // Someone who can write OUT's parent moves OUT aside and puts a decoy in its place: while
+        // the probe runs, and after it, before the real tar starts.
+        for (case, what) in [
+            "OUT replaced while the probe runs",
+            "OUT replaced before tar runs",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let f = Fixture::new();
+            let before = f.state();
+            let (ready, go) = (f.dir.path().join("ready"), f.dir.path().join("go"));
+            fifo(&ready);
+            fifo(&go);
+            let moved = f.parent.join("moved");
+            let replaced = on_ready(ready.clone(), go.clone(), {
+                let (out, moved) = (f.out(), moved.clone());
+                move || {
+                    fs::rename(&out, &moved).expect("move OUT aside");
+                    make_decoy(&out, STEM);
+                }
+            });
+            let paused_probe = {
+                let (r, g) = (ready.clone(), go.clone());
+                move |_: &Path| paused(&r, &g, "printf 'rdy 0.14.0 (preview)\\n'")
+            };
+            let plain_probe = printing("rdy 0.14.0 (preview)\\n");
+            let paused_real_tar = {
+                let (r, g) = (ready.clone(), go.clone());
+                move |stem: &str| paused_exec(&r, &g, &tar_command(stem))
+            };
+            let mut s = setup(
+                &f,
+                if case == 0 {
+                    &paused_probe
+                } else {
+                    &plain_probe
+                },
+            );
+            if case == 1 {
+                s.tar = &paused_real_tar;
+            }
+            let got = package_with(&f.binary, V, TARGET, &f.out(), &s);
+            replaced
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap_or_else(|_| panic!("{what}: OUT was replaced"));
+            unlock(&moved);
+            assert_eq!(tree_of(&f.out()), decoy, "{what}: the decoy is untouched");
+            assert_eq!(
+                tree_of(&moved),
+                Vec::new(),
+                "{what}: nothing of this run is left in its own OUT"
+            );
+            assert_eq!(got, Err(Failure::FileOperation), "{what}");
+            let mut after = f.state();
+            after[2].1.retain(|n| n != "out" && n != "moved");
             assert_eq!(after, before, "{what}: the inputs are unchanged");
         }
     }
@@ -1223,12 +1398,10 @@ mod tests {
         let rejected = locking("chmod 500 \"${0%/*}\"; printf 'rdy 0.13.0\\n'");
         let overflow = locking("chmod 500 \"${0%/*}\"; head -c 1048577 /dev/zero");
         let fine = printing("rdy 0.14.0\\n");
-        let locking_tar = |archive: &Path, stage: &Path, stem: &str| {
-            let mut c = shell_script("tar -czf \"$0\" -C \"$1\" \"$2\" && chmod 500 \"${0%/*}\"");
-            c.arg(archive)
-                .arg(stage)
-                .arg(stem)
-                .env("COPYFILE_DISABLE", "1");
+        // tar starts in OUT
+        let locking_tar = |stem: &str| {
+            let mut c = shell_script("tar -czf - \"$0\" && chmod 500 .");
+            c.arg(stem).env("COPYFILE_DISABLE", "1");
             c
         };
         type Probe<'a> = &'a dyn Fn(&Path) -> Command;

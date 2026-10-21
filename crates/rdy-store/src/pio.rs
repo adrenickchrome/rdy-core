@@ -10,9 +10,10 @@
 //!   check `umask_keeps_0700_at`;
 //! - calls in an open directory (`open_dir`, `open_dir_at`, `open_read_at`,
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
-//!   `rename_at`, `is_link_refusal`): each names one entry of a directory handle, so a path that
-//!   is changed after the handle was opened cannot redirect it, and none follows a link at that
-//!   entry;
+//!   `remove_dir_at`, `set_mode_at`, `rename_at`, `is_link_refusal`): each names one entry of a
+//!   directory handle, so a path that is changed after the handle was opened cannot redirect
+//!   it, and none follows a link at that entry;
+//! - a child process that starts in an open directory (`start_in_dir`), for the same reason;
 //! - test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
 //!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
 //!   child process under another umask (`under_umask`), so the store's and the engine's tests
@@ -231,6 +232,61 @@ pub fn remove_file_at(dir: &File, name: &OsStr) -> io::Result<()> {
     cvt(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) }).map(|_| ())
 }
 
+/// Removes the empty directory `name` from the open directory `dir`. A link at `name` is
+/// refused (`ENOTDIR`), never followed; a directory that is not empty stays (`ENOTEMPTY`).
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn remove_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
+    let name = entry_name(name)?;
+    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string.
+    cvt(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }).map(|_| ())
+}
+
+/// Sets the permission bits of the entry `name` in the open directory `dir` to `mode` (at most
+/// 0o7777), never through a link at `name`: for an entry that cannot be opened to set its mode
+/// through a handle, such as a directory the umask left without its owner's bits.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn set_mode_at(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+    if mode > 0o7777 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a permission mode",
+        ));
+    }
+    let name = entry_name(name)?;
+    // the check above keeps `mode` within `mode_t` (16 bits on macOS)
+    #[allow(clippy::unnecessary_cast)]
+    let mode = mode as libc::mode_t;
+    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string.
+    cvt(unsafe {
+        libc::fchmodat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            mode,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })
+    .map(|_| ())
+}
+
+/// Makes the child that `cmd` spawns start in the open directory `dir`: the child changes into
+/// it (`fchdir`) before its exec, so a path to `dir` that changes after `dir` was opened cannot
+/// move the child elsewhere. A relative program path (`./name`) is found in `dir`. `cmd` keeps
+/// its own copy of the handle, so the caller may close `dir`.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn start_in_dir(cmd: &mut std::process::Command, dir: &File) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let dir = dir.try_clone()?;
+    // SAFETY: the closure runs in the child between fork and exec. It calls only `fchdir`,
+    // which is async-signal-safe, on a descriptor the closure owns, and allocates nothing.
+    unsafe {
+        cmd.pre_exec(move || cvt(libc::fchdir(dir.as_raw_fd())).map(|_| ()));
+    }
+    Ok(())
+}
+
 /// Renames the entry `from` over the entry `to`, both in the open directory `dir`.
 #[cfg(unix)]
 #[allow(unsafe_code)]
@@ -418,6 +474,63 @@ mod tests {
         assert_eq!(&buf[..2], b"ab");
         assert_eq!(&buf[2..10], &[0u8; 8]);
         assert_eq!(&buf[10..], b"xyz");
+    }
+
+    #[test]
+    fn pre1_pio_removes_dirs_sets_modes_and_starts_children_in_a_dir_handle() {
+        let d = tempfile::tempdir().unwrap();
+        let root = open_dir(d.path()).unwrap();
+        // remove_dir_at: an empty directory goes; a full one, a file and a link stay.
+        fs::create_dir(d.path().join("empty")).unwrap();
+        remove_dir_at(&root, OsStr::new("empty")).unwrap();
+        assert!(!d.path().join("empty").exists());
+        fs::create_dir(d.path().join("full")).unwrap();
+        fs::write(d.path().join("full/f"), b"x").unwrap();
+        assert!(remove_dir_at(&root, OsStr::new("full")).is_err());
+        assert!(d.path().join("full/f").exists());
+        fs::write(d.path().join("file"), b"x").unwrap();
+        assert!(remove_dir_at(&root, OsStr::new("file")).is_err());
+        fs::create_dir(d.path().join("target")).unwrap();
+        symlink(d.path().join("target"), d.path().join("link")).unwrap();
+        assert!(remove_dir_at(&root, OsStr::new("link")).is_err());
+        assert!(d.path().join("target").is_dir());
+        assert!(remove_dir_at(&root, OsStr::new("a/b")).is_err());
+
+        // set_mode_at: a directory without its owner's bits opens again; a link's target keeps
+        // its mode.
+        set_mode(&d.path().join("target"), 0o000).unwrap();
+        assert!(open_dir_at(&root, OsStr::new("target")).is_err() || own_uid() == 0);
+        set_mode_at(&root, OsStr::new("target"), 0o700).unwrap();
+        assert_eq!(
+            mode_of(&fs::metadata(d.path().join("target")).unwrap()),
+            0o700
+        );
+        open_dir_at(&root, OsStr::new("target")).unwrap();
+        let _ = set_mode_at(&root, OsStr::new("link"), 0o777);
+        assert_eq!(
+            mode_of(&fs::metadata(d.path().join("target")).unwrap()),
+            0o700
+        );
+        assert!(set_mode_at(&root, OsStr::new("target"), 0o10000).is_err());
+
+        // start_in_dir: the child starts in the directory the handle opened, even after that
+        // directory was moved, and finds `./name` there.
+        let here = open_dir_at(&root, OsStr::new("target")).unwrap();
+        fs::rename(d.path().join("target"), d.path().join("moved")).unwrap();
+        fs::create_dir(d.path().join("target")).unwrap();
+        fs::write(d.path().join("moved/name"), b"#!/bin/sh\npwd -P\n").unwrap();
+        set_mode(&d.path().join("moved/name"), 0o700).unwrap();
+        let mut cmd = std::process::Command::new("./name");
+        start_in_dir(&mut cmd, &here).unwrap();
+        drop(here);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            fs::canonicalize(d.path().join("moved"))
+                .unwrap()
+                .to_string_lossy()
+        );
     }
 
     #[test]

@@ -96,42 +96,52 @@ fn entry_of(path: &Path) -> io::Result<(&Path, &std::ffi::OsStr)> {
     }
 }
 
-/// Creates the new directory `path`, private to this user whatever the umask, and returns a
-/// handle to it. mkdir makes it with mode 0o700, which a umask can only narrow; it is then set
-/// to exactly 0o700 through a handle that never follows a link, and checked to be a directory
-/// this user owns. An existing `path` is `ErrorKind::AlreadyExists`. If a step after mkdir
-/// fails, the new directory is removed again while it is still empty.
-pub fn create_private_dir(path: &Path) -> io::Result<File> {
-    let (parent, name) = entry_of(path)?;
-    let parent = rdy_store::pio::open_dir(parent)?;
-    rdy_store::pio::create_private_dir_at(&parent, name)?;
-    let opened = (|| {
-        let dir = match rdy_store::pio::open_dir_at(&parent, name) {
-            // a umask that took the owner's bits: give them back, then open
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                rdy_store::pio::make_private_dir(path)?;
-                rdy_store::pio::open_dir_at(&parent, name)?
-            }
-            opened => opened?,
-        };
-        dir.set_permissions(rdy_store::pio::permissions(0o700))?;
+/// Opens the directory `path` for the `*_at` calls below; links in `path` are followed (the
+/// caller trusts this path). Anything that is not a directory is refused.
+pub fn open_dir(path: &Path) -> io::Result<File> {
+    rdy_store::pio::open_dir(path)
+}
+
+/// Creates the new directory `name` in the open directory `parent`, private to this user
+/// whatever the umask, and returns a handle to it. mkdir makes it with mode 0o700, which a
+/// umask can only narrow; it is then set to exactly 0o700 through a handle that never follows
+/// a link, and checked to be a directory this user owns. An existing `name` is
+/// `ErrorKind::AlreadyExists`. If a step after mkdir fails, the directory is removed again
+/// while it is still empty, and only while `name` still holds the directory this user made.
+pub fn create_private_dir_at(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+    use rdy_store::pio;
+    pio::create_private_dir_at(parent, name)?;
+    let dir = match pio::open_dir_at(parent, name) {
+        // a umask that took the owner's bits: give them back, then open
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            pio::set_mode_at(parent, name, 0o700).and_then(|()| pio::open_dir_at(parent, name))
+        }
+        opened => opened,
+    }?;
+    let checked = (|| {
+        dir.set_permissions(pio::permissions(0o700))?;
         let meta = dir.metadata()?;
-        if meta.is_dir()
-            && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid()
-            && rdy_store::pio::is_private_dir(&meta)
-        {
-            Ok(dir)
+        if meta.is_dir() && pio::owner(&meta) == pio::own_uid() && pio::is_private_dir(&meta) {
+            Ok(())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("{} is not a private directory of this user", path.display()),
+                "not a private directory of this user",
             ))
         }
     })();
-    if opened.is_err() {
-        let _ = std::fs::remove_dir(path);
+    match checked {
+        Ok(()) => Ok(dir),
+        Err(e) => {
+            let ours = dir
+                .metadata()
+                .is_ok_and(|m| pio::owner(&m) == pio::own_uid());
+            if ours && holds_file(parent, name, &dir).unwrap_or(false) {
+                let _ = pio::remove_dir_at(parent, name);
+            }
+            Err(e)
+        }
     }
-    opened
 }
 
 /// Opens the file `path` for reading, never through a link at its last entry (the directories
@@ -160,8 +170,8 @@ pub fn create_new_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<File> {
     rdy_store::pio::create_private_at(dir, name)
 }
 
-/// Whether the entry `name` in the open directory `dir` is still the file `file` (the same
-/// device and inode). A missing entry, or a link in its place, is not.
+/// Whether the entry `name` in the open directory `dir` is still the file or directory `file`
+/// (the same device and inode). A missing entry, or a link in its place, is not.
 pub fn holds_file(dir: &File, name: &std::ffi::OsStr, file: &File) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     match rdy_store::pio::open_read_at(dir, name) {
@@ -180,6 +190,22 @@ pub fn holds_file(dir: &File, name: &std::ffi::OsStr, file: &File) -> io::Result
 /// never followed.
 pub fn remove_file_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<()> {
     rdy_store::pio::remove_file_at(dir, name)
+}
+
+/// Removes the empty directory `name` from the open directory `dir`; a link is never followed.
+pub fn remove_dir_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<()> {
+    rdy_store::pio::remove_dir_at(dir, name)
+}
+
+/// Renames the entry `from` to `to`, both in the open directory `dir`.
+pub fn rename_at(dir: &File, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
+    rdy_store::pio::rename_at(dir, from, to)
+}
+
+/// Makes the child that `cmd` spawns start in the open directory `dir`, whatever later happens
+/// to the paths that led to it; a program named `./name` is found in `dir`.
+pub fn start_in_dir(cmd: &mut Command, dir: &File) -> io::Result<()> {
+    rdy_store::pio::start_in_dir(cmd, dir)
 }
 
 /// Sets the permission bits of the open file `file` to `mode`.
@@ -279,7 +305,21 @@ pub fn run_bounded(
     deadline: Duration,
 ) -> io::Result<Output> {
     let until = Instant::now().checked_add(deadline);
-    run_bounded_inner(command, stdin, max_output, until, drop).result
+    run_bounded_inner(command, stdin, None, max_output, until, drop).result
+}
+
+/// [`run_bounded`] with the child's stdout written to the open file `stdout` instead of
+/// captured: only stderr counts against `max_output`, and the `Output`'s stdout is empty. The
+/// child writes through the handle, never through a path.
+pub fn run_bounded_to(
+    command: Command,
+    stdin: Option<File>,
+    stdout: File,
+    max_output: usize,
+    deadline: Duration,
+) -> io::Result<Output> {
+    let until = Instant::now().checked_add(deadline);
+    run_bounded_inner(command, stdin, Some(stdout), max_output, until, drop).result
 }
 
 /// How long a drain's read waits before it checks whether the run cancelled it.
@@ -292,11 +332,13 @@ fn stream_pair() -> io::Result<(UnixStream, Stdio)> {
     Ok((ours, Stdio::from(std::os::fd::OwnedFd::from(theirs))))
 }
 
-/// [`run_bounded`] with an absolute deadline (`None`: none) and `on_start`, which receives the
-/// run's [`Expiry`] once the child and its workers started.
+/// [`run_bounded`] with stdout to a file when `stdout` is given (as [`run_bounded_to`]), an
+/// absolute deadline (`None`: none) and `on_start`, which receives the run's [`Expiry`] once
+/// the child and its workers started.
 pub(crate) fn run_bounded_inner(
     mut command: Command,
     stdin: Option<File>,
+    stdout: Option<File>,
     max_output: usize,
     deadline: Option<Instant>,
     on_start: impl FnOnce(Expiry),
@@ -307,7 +349,11 @@ pub(crate) fn run_bounded_inner(
         drains_joined: 0,
         pid: None,
     };
-    let (out, err) = match (stream_pair(), stream_pair()) {
+    let captured_out = match stdout {
+        Some(file) => Ok((None, Stdio::from(file))),
+        None => stream_pair().map(|(ours, theirs)| (Some(ours), theirs)),
+    };
+    let (out, err) = match (captured_out, stream_pair()) {
         (Ok(out), Ok(err)) => (out, err),
         (Err(e), _) | (_, Err(e)) => return not_started(e),
     };
@@ -328,13 +374,16 @@ pub(crate) fn run_bounded_inner(
     let count = Arc::new(AtomicUsize::new(0));
     let cancel = Arc::new(AtomicBool::new(false));
     let mut failure: Option<io::Error> = None;
-    let mut drains = Vec::with_capacity(2);
-    for stream in [out.0, err.0] {
+    // one drain per captured stream; a stdout that goes to a file has none
+    let mut drains: [Option<std::thread::JoinHandle<Vec<u8>>>; 2] = [None, None];
+    for (slot, stream) in drains.iter_mut().zip([out.0, Some(err.0)]) {
+        let Some(stream) = stream else { continue };
         match spawn_drain(stream, &count, &cancel, max_output, &tx) {
-            Ok(handle) => drains.push(handle),
+            Ok(handle) => *slot = Some(handle),
             Err(e) => failure = failure.or(Some(e)),
         }
     }
+    let running = drains.iter().flatten().count();
     let child = Arc::new(Mutex::new(child));
     let waiter = {
         let (child, tx) = (child.clone(), tx.clone());
@@ -401,7 +450,7 @@ pub(crate) fn run_bounded_inner(
                 }
                 RunEvent::DrainDone => drains_done += 1,
             }
-            if status.is_some() && drains_done == drains.len() {
+            if status.is_some() && drains_done == running {
                 break None;
             }
         };
@@ -435,26 +484,19 @@ pub(crate) fn run_bounded_inner(
     {
         cleanup = cleanup.or(Some(lost()));
     }
-    let mut streams = Vec::with_capacity(2);
     let mut drains_joined = 0;
-    for drain in drains {
-        match drain.join() {
-            Ok(bytes) => {
-                drains_joined += 1;
-                streams.push(bytes);
-            }
-            Err(_) => {
-                cleanup = cleanup.or(Some(lost()));
-                streams.push(Vec::new());
-            }
+    let [stdout, stderr] = drains.map(|drain| match drain.map(|d| d.join()) {
+        Some(Ok(bytes)) => {
+            drains_joined += 1;
+            bytes
         }
-    }
-    let retained = streams.iter().map(Vec::len).sum();
-    let mut streams = streams.into_iter();
-    let (stdout, stderr) = (
-        streams.next().unwrap_or_default(),
-        streams.next().unwrap_or_default(),
-    );
+        Some(Err(_)) => {
+            cleanup = cleanup.take().or(Some(lost()));
+            Vec::new()
+        }
+        None => Vec::new(),
+    });
+    let retained = stdout.len() + stderr.len();
     let result = settle(failure, cleanup, status, stdout, stderr);
     BoundedRun {
         result,
@@ -1000,7 +1042,7 @@ mod tests {
              exec sleep 1000",
         );
         cmd.arg(&ready);
-        let run = within_a_minute(move || run_bounded_inner(cmd, None, 1000, None, drop));
+        let run = within_a_minute(move || run_bounded_inner(cmd, None, None, 1000, None, drop));
         let err = run.result.expect_err("1200 bytes pass a cap of 1000");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         assert_eq!(run.retained, 1000, "the bytes kept stop at the cap");
@@ -1019,7 +1061,14 @@ mod tests {
 
         // A descendant that holds the pipes after its parent exits leaves no drain behind.
         let run = within_a_minute(|| {
-            run_bounded_inner(shell_script("sleep 1000 & echo $!"), None, 1000, None, drop)
+            run_bounded_inner(
+                shell_script("sleep 1000 & echo $!"),
+                None,
+                None,
+                1000,
+                None,
+                drop,
+            )
         });
         let out = run.result.expect("the child exits 0");
         assert!(out.status.success());
@@ -1090,6 +1139,52 @@ mod tests {
     }
 
     #[test]
+    fn pre1_bounded_runner_writes_stdout_through_a_handle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("archive");
+        let file = File::create_new(&path).expect("create");
+        // The name is taken over before the child runs: its stdout still reaches the file the
+        // handle opened, and the newcomer keeps its bytes.
+        std::fs::rename(&path, dir.path().join("moved")).expect("move");
+        std::fs::write(&path, b"newcomer\n").expect("newcomer");
+        let out = within_a_minute(move || {
+            run_bounded_to(
+                shell_script("printf 'archive bytes over the cap'; printf err >&2"),
+                None,
+                file,
+                3,
+                Duration::from_secs(600),
+            )
+        })
+        .expect("stderr fits a cap of 3");
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty(), "stdout went to the file");
+        assert_eq!(out.stderr, b"err");
+        assert_eq!(
+            std::fs::read(dir.path().join("moved")).expect("read"),
+            b"archive bytes over the cap"
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), b"newcomer\n");
+
+        // stderr alone counts against the cap, and only its drain runs.
+        let file = File::create_new(dir.path().join("second")).expect("create");
+        let run = within_a_minute(move || {
+            run_bounded_inner(
+                shell_script("printf errs >&2"),
+                None,
+                Some(file),
+                3,
+                None,
+                drop,
+            )
+        });
+        let err = run.result.expect_err("4 bytes pass a cap of 3");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert_eq!(run.drains_joined, 1, "one drain, for stderr");
+        assert_eq!(run.retained, 3);
+    }
+
+    #[test]
     fn pre1_bounded_runner_timeout_cleans_up() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
@@ -1100,7 +1195,7 @@ mod tests {
         cmd.arg(&ready);
         let (seen_tx, seen) = std::sync::mpsc::channel();
         let run = within_a_minute(move || {
-            run_bounded_inner(cmd, None, 1 << 20, None, move |expiry| {
+            run_bounded_inner(cmd, None, None, 1 << 20, None, move |expiry| {
                 std::thread::spawn(move || {
                     let line = fifo_line(ready)
                         .recv_timeout(Duration::from_secs(30))
@@ -1155,7 +1250,7 @@ mod tests {
         cmd.arg(&ready).arg(&go);
         let (seen_tx, seen) = std::sync::mpsc::channel();
         let run = within_a_minute(move || {
-            run_bounded_inner(cmd, None, 1 << 20, None, move |expiry| {
+            run_bounded_inner(cmd, None, None, 1 << 20, None, move |expiry| {
                 std::thread::spawn(move || {
                     let line = fifo_line(ready)
                         .recv_timeout(Duration::from_secs(30))
