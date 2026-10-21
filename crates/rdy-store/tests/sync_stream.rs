@@ -340,11 +340,16 @@ fn ha5_first_batch_need_not_contain_the_root() {
         leaves.iter().map(StreamRecord::key).collect::<Vec<_>>()
     );
     assert_eq!(report.header.prerequisites, vec![key(kinds::TAG, root)]);
-    // without the root among its prerequisites, the header is wrong
+    // without the root among its prerequisites, the root is unlisted
     let wrong = batch(&header(root, vec![]), &leaves);
     assert_eq!(
-        refusal(check(&wrong).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&wrong).unwrap_err(),
+        fault(
+            0,
+            PRELUDE,
+            "root tag is not in the batch or its prerequisites",
+            None
+        )
     );
 }
 
@@ -360,8 +365,13 @@ fn ha5_zero_object_batch_can_name_a_held_root() {
     // a zero-object batch must still name its root
     let none = batch(&header(root, vec![]), &[]);
     assert_eq!(
-        refusal(check(&none).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&none).unwrap_err(),
+        fault(
+            0,
+            PRELUDE,
+            "root tag is not in the batch or its prerequisites",
+            None
+        )
     );
 }
 
@@ -430,11 +440,17 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         check(&ok).unwrap().header.prerequisites,
         vec![a_key, root_key]
     );
-    // a needed key that is not listed
+    // a needed key that is not listed: named at the snapshot that needs it
+    let first_at = PRELUDE + HEAD as u64 + 57 + 33;
     let missing = batch(&header(root, vec![root_key]), std::slice::from_ref(&s));
     assert_eq!(
-        refusal(check(&missing).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&missing).unwrap_err(),
+        fault(
+            1,
+            first_at,
+            &format!("unlisted dependency 1:{}", a.version_hash()),
+            Some(s.key())
+        )
     );
     // a listed key no record needs
     let extra = key(kinds::BLOCK, Hash([9; 32]));
@@ -442,8 +458,13 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
     more.sort();
     let unneeded = batch(&header(root, more), std::slice::from_ref(&s));
     assert_eq!(
-        refusal(check(&unneeded).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&unneeded).unwrap_err(),
+        fault(
+            0,
+            PRELUDE,
+            &format!("unneeded prerequisite 1:{}", "09".repeat(32)),
+            None
+        )
     );
     // a listed key the batch holds is not absent
     let held = batch(
@@ -451,8 +472,8 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         &[present(kinds::BLOCK, &a), s.clone()],
     );
     assert_eq!(
-        refusal(check(&held).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&held).unwrap_err(),
+        fault(0, PRELUDE, &format!("unneeded prerequisite {a_key}"), None)
     );
     // the root in the batch is no prerequisite; the batch needs only what its records need
     let with_root = batch(
@@ -465,14 +486,13 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         &[present(kinds::TAG, &t)],
     );
     assert_eq!(
-        refusal(check(&root_listed).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&root_listed).unwrap_err(),
+        fault(0, PRELUDE, &format!("unneeded prerequisite 9:{root}"), None)
     );
 
     // a dependency later in the batch (or the order of another file) is a cycle here
     let b = present(kinds::BLOCK, &a);
     let later = batch(&header(root, vec![root_key]), &[s.clone(), b.clone()]);
-    let first_at = PRELUDE + HEAD as u64 + 57 + 33;
     assert_eq!(
         refusal(check(&later).unwrap_err()),
         bad(1, first_at, "dependency cycle")
@@ -509,10 +529,15 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         refusal(check(&ambiguous).unwrap_err()),
         bad(1, first_at + 66, "ambiguous object kind")
     );
-    let unresolved = batch(&header(root, vec![root_key]), &[ans]);
+    let unresolved = batch(&header(root, vec![root_key]), std::slice::from_ref(&ans));
     assert_eq!(
-        refusal(check(&unresolved).unwrap_err()),
-        bad(0, PRELUDE, "invalid header"),
+        check(&unresolved).unwrap_err(),
+        fault(
+            1,
+            first_at,
+            &format!("unlisted dependency {target}"),
+            Some(ans.key())
+        ),
         "no batch check returns E_UNRESOLVED_REF"
     );
 
@@ -537,9 +562,16 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
     let mut no_apply = vec![root_key, res_key];
     no_apply.sort();
     let unlisted = batch(&header(root, no_apply), std::slice::from_ref(&dropped));
+    // two listed keys: the first record is one key further
+    let two_listed_at = first_at + 33;
     assert_eq!(
-        refusal(check(&unlisted).unwrap_err()),
-        bad(0, PRELUDE, "invalid header"),
+        check(&unlisted).unwrap_err(),
+        fault(
+            1,
+            two_listed_at,
+            &format!("unlisted dependency {apply_key}"),
+            Some(a_key)
+        ),
         "an absent apply that is no prerequisite"
     );
     let no_residue = batch(
@@ -547,8 +579,13 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         std::slice::from_ref(&dropped),
     );
     assert_eq!(
-        refusal(check(&no_residue).unwrap_err()),
-        bad(0, PRELUDE, "invalid header")
+        check(&no_residue).unwrap_err(),
+        fault(
+            1,
+            two_listed_at,
+            &format!("unlisted dependency {res_key}"),
+            Some(a_key)
+        )
     );
     // the apply in the batch, after the placeholder: no prerequisite, no cycle
     let real_apply = present(
@@ -590,10 +627,15 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
     let mut listed = needs.clone();
     listed.push(real_apply.key());
     listed.sort();
-    let held_apply = batch(&header(root, listed), &[proved, real_apply]);
+    let held_apply = batch(&header(root, listed), &[proved, real_apply.clone()]);
     assert_eq!(
-        refusal(check(&held_apply).unwrap_err()),
-        bad(0, PRELUDE, "invalid header"),
+        check(&held_apply).unwrap_err(),
+        fault(
+            0,
+            PRELUDE,
+            &format!("unneeded prerequisite {}", real_apply.key()),
+            None
+        ),
         "an apply the batch holds is no prerequisite"
     );
 
@@ -1182,4 +1224,240 @@ fn ha5_total_bytes_are_bounded_at_n_plus_one() {
     let e = read_all(two_gib(1)).unwrap_err();
     assert_eq!(limit(e.clone()), exceeds("2147483648 total bytes"));
     assert_eq!(e.record, Some(129), "the trailer would pass the bound");
+}
+
+/// The exact E_BAD_RECORD error of record `record` at byte `offset` for `reason`, naming
+/// `object`.
+fn fault(record: u64, offset: u64, reason: &str, object: Option<ObjectKey>) -> StreamError {
+    StreamError {
+        code: "E_BAD_RECORD",
+        message: format!("stream record {record} at byte {offset}: {reason}"),
+        fix: "request this stream again; run rdy fsck at its source".to_string(),
+        record: Some(record),
+        offset,
+        object,
+    }
+}
+
+/// The frame offset of each of `records` in a batch whose header lists `prerequisites` keys:
+/// the first at 12 + 37 + 57 + 33k, each next one frame header and payload further.
+fn offsets(prerequisites: usize, records: &[StreamRecord]) -> Vec<u64> {
+    let mut at = PRELUDE + HEAD as u64 + 57 + 33 * prerequisites as u64;
+    let mut out = vec![];
+    for r in records {
+        out.push(at);
+        let len = match r {
+            StreamRecord::Present { payload, .. } => payload.len() as u64,
+            StreamRecord::Dropped { .. } => 102,
+        };
+        at += HEAD as u64 + len;
+    }
+    out
+}
+
+/// An answer that confirms with `targets` and nothing else.
+fn answer(targets: Vec<Hash>) -> rdy_model::Answer {
+    rdy_model::Answer {
+        item: "P-x@1".into(),
+        act: rdy_model::AnswerAct::Confirm,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: None,
+        targets,
+        person: prov(),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    }
+}
+
+fn sorted(mut keys: Vec<ObjectKey>) -> Vec<ObjectKey> {
+    keys.sort();
+    keys
+}
+
+#[test]
+fn plb2_dependency_errors_keep_the_source_position() {
+    let a = block("b-00001", "one");
+    let b = block("b-00002", "two");
+    let root = tag("v1", Hash([4; 32])).id();
+    let root_key = key(kinds::TAG, root);
+    let leaf = present(kinds::BLOCK, &b);
+    let refused = |prerequisites: Vec<ObjectKey>, records: &[StreamRecord]| {
+        check(&batch(&header(root, prerequisites), records)).unwrap_err()
+    };
+
+    // a typed edge: the snapshot needs block a, which is neither in the batch nor listed
+    let snap = StateSnapshot {
+        blocks: BTreeMap::from([
+            (a.id.clone(), a.version_hash()),
+            (b.id.clone(), b.version_hash()),
+        ]),
+    };
+    let s = present(kinds::SNAPSHOT, &snap);
+    let records = [leaf.clone(), s.clone()];
+    let at = offsets(1, &records);
+    assert_eq!(
+        refused(vec![root_key], &records),
+        fault(
+            2,
+            at[1],
+            &format!("unlisted dependency 1:{}", a.version_hash()),
+            Some(s.key())
+        )
+    );
+
+    // an untyped edge: the answer's target matches no key, so it prints no kind
+    let ans = present(kinds::ANSWER, &answer(vec![Hash([0x5a; 32])]));
+    let records = [leaf.clone(), ans.clone()];
+    let at = offsets(1, &records);
+    assert_eq!(
+        refused(vec![root_key], &records),
+        fault(
+            2,
+            at[1],
+            &format!("unlisted dependency {}", "5a".repeat(32)),
+            Some(ans.key())
+        )
+    );
+
+    // a dropped record's residue is an ordinary edge of the dropped record
+    let a_key = key(kinds::BLOCK, a.version_hash());
+    let apply_key = key(kinds::REDACTION_APPLY, Hash([22; 32]));
+    let residue = StreamRecord::Dropped {
+        key: a_key,
+        original_len: 40,
+        apply: Hash([22; 32]),
+        residue: Some(Hash([21; 32])),
+    };
+    let records = [leaf.clone(), residue];
+    let at = offsets(2, &records);
+    assert_eq!(
+        refused(sorted(vec![root_key, apply_key]), &records),
+        fault(
+            2,
+            at[1],
+            &format!("unlisted dependency 21:{}", "15".repeat(32)),
+            Some(a_key)
+        )
+    );
+
+    // a dropped record's apply proof: two dropped records share it, the first one is named
+    let dropped = |chunk: u8| StreamRecord::Dropped {
+        key: key(kinds::BLOB_CHUNK, Hash([chunk; 32])),
+        original_len: 5,
+        apply: Hash([22; 32]),
+        residue: None,
+    };
+    let records = [leaf.clone(), dropped(6), dropped(7)];
+    let at = offsets(1, &records);
+    assert_eq!(
+        refused(vec![root_key], &records),
+        fault(
+            2,
+            at[1],
+            &format!("unlisted dependency 22:{}", "16".repeat(32)),
+            Some(key(kinds::BLOB_CHUNK, Hash([6; 32])))
+        )
+    );
+
+    // an ordinary fault is reported before a proof fault, even at a later record
+    let records = [dropped(6), ans.clone()];
+    let at = offsets(1, &records);
+    assert_eq!(
+        refused(vec![root_key], &records),
+        fault(
+            2,
+            at[1],
+            &format!("unlisted dependency {}", "5a".repeat(32)),
+            Some(ans.key())
+        )
+    );
+}
+
+#[test]
+fn plb2_header_dependency_errors_are_specific_and_ordered() {
+    let a = block("b-00001", "one");
+    let a_key = key(kinds::BLOCK, a.version_hash());
+    let root = tag("v1", Hash([4; 32])).id();
+    let root_key = key(kinds::TAG, root);
+    let leaf = present(kinds::BLOCK, &block("b-00002", "two"));
+    let snap = present(
+        kinds::SNAPSHOT,
+        &StateSnapshot {
+            blocks: BTreeMap::from([(a.id.clone(), a.version_hash())]),
+        },
+    );
+    let refused = |prerequisites: Vec<ObjectKey>, records: &[StreamRecord]| {
+        check(&batch(&header(root, prerequisites), records)).unwrap_err()
+    };
+    let no_root = "root tag is not in the batch or its prerequisites";
+
+    // the root is neither in the batch nor listed, with records or without
+    assert_eq!(
+        refused(vec![], std::slice::from_ref(&leaf)),
+        fault(0, PRELUDE, no_root, None)
+    );
+    assert_eq!(refused(vec![], &[]), fault(0, PRELUDE, no_root, None));
+
+    // two unneeded prerequisites, after a needed one: the smallest unneeded key is named
+    let landing = key(kinds::LANDING, Hash([0x30; 32]));
+    let snapshot = key(kinds::SNAPSHOT, Hash([0x01; 32]));
+    let listed = sorted(vec![snapshot, root_key, landing, a_key]);
+    assert_eq!(listed[0], a_key, "a needed key comes first");
+    assert_eq!(
+        refused(listed, std::slice::from_ref(&snap)),
+        fault(
+            0,
+            PRELUDE,
+            &format!("unneeded prerequisite 4:{}", "30".repeat(32)),
+            None
+        )
+    );
+
+    // the order of the checks: edges, then the root, then the unneeded prerequisites
+    assert_eq!(
+        refused(vec![landing], std::slice::from_ref(&leaf)),
+        fault(0, PRELUDE, no_root, None),
+        "an absent root before an unneeded prerequisite"
+    );
+    let at = offsets(1, std::slice::from_ref(&snap));
+    assert_eq!(
+        refused(vec![landing], std::slice::from_ref(&snap)),
+        fault(
+            1,
+            at[0],
+            &format!("unlisted dependency 1:{}", a.version_hash()),
+            Some(snap.key())
+        ),
+        "an unlisted dependency before an absent root"
+    );
+
+    // a header's own order and shape faults are still an invalid header
+    let two = sorted(vec![a_key, root_key]);
+    let bytes = batch(&header(root, two.clone()), std::slice::from_ref(&snap));
+    let records_at = PRELUDE as usize + HEAD + 57 + 2 * 33;
+    let reheader = |count: u32, keys: &[ObjectKey]| {
+        let mut hp = bytes[PRELUDE as usize + HEAD..PRELUDE as usize + HEAD + 53].to_vec();
+        hp.extend_from_slice(&count.to_le_bytes());
+        for k in keys {
+            hp.push(k.kind);
+            hp.extend_from_slice(&k.hash.0);
+        }
+        let mut out = bytes[..PRELUDE as usize].to_vec();
+        out.extend(frame(0xF0, &hp));
+        out.extend_from_slice(&bytes[records_at..]);
+        out
+    };
+    assert_eq!(
+        reheader(2, &two),
+        bytes,
+        "the header as the writer wrote it"
+    );
+    let invalid = fault(0, PRELUDE, "invalid header", None);
+    assert_eq!(check(&reheader(2, &[two[1], two[0]])).unwrap_err(), invalid);
+    assert_eq!(check(&reheader(2, &[two[0], two[0]])).unwrap_err(), invalid);
+    assert_eq!(check(&reheader(3, &two)).unwrap_err(), invalid);
 }

@@ -186,6 +186,7 @@ impl Rdy {
         d: DecisionInput,
         extra: Vec<(String, LinkInput)>,
         message: String,
+        old: Option<&BlockId>,
     ) -> Result<WriteResult, RdyError> {
         if let Some(name) = d
             .fields
@@ -198,6 +199,14 @@ impl Rdy {
                 "pass statement, title, why, recommend, recommend_reason, options, authority_basis, attested_by, reversibility, kind, review_by and effective_from as their own parameters; rdy sets status, decided_at and recorded_at",
             ));
         }
+        // plb1: a briefing of the old decision does not cover the new decision's parent; say so
+        // when the cited briefing covers the old one
+        let covers_old = old.filter(|o| {
+            d.brief
+                .as_deref()
+                .and_then(|t| self.briefs.get(t))
+                .is_some_and(|rec| rec.covers(o))
+        });
         let brief = d.brief.clone();
         let intent = d.intent.clone();
         let mut links = links_of(&d);
@@ -225,6 +234,16 @@ impl Rdy {
             brief,
             intent.as_deref(),
         )
+        .map_err(|mut e| {
+            if let Some(o) = covers_old
+                && e.code == crate::brief::E_BRIEF_REQUIRED
+            {
+                e.message.push_str(&format!(
+                    ". The briefing covers {o}, but a new decision needs a briefing of its parent."
+                ));
+            }
+            e
+        })
     }
 
     pub fn decide(
@@ -234,7 +253,7 @@ impl Rdy {
         d: DecisionInput,
     ) -> Result<WriteResult, RdyError> {
         let msg = format!("decide: {}", d.statement);
-        self.write_decision(s, view, d, vec![], msg)
+        self.write_decision(s, view, d, vec![], msg, None)
     }
 
     fn require_decision(&mut self, view: &str, id: &str) -> Result<BlockId, RdyError> {
@@ -343,6 +362,7 @@ impl Rdy {
                 extra
             },
             msg,
+            Some(&old_id),
         )?;
         res.inherited = inherited;
         Ok(res)
@@ -392,6 +412,7 @@ impl Rdy {
                 },
             )],
             format!("revoke {tid}"),
+            Some(&tid),
         )
     }
 }

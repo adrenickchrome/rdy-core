@@ -166,6 +166,9 @@ struct Tracked {
     tools: VecDeque<(Value, Arc<CallCancel>)>,
     /// The socket's reading half reached its end.
     socket_closed: bool,
+    /// The proxy shuts the socket's writing half down at stdin's EOF, with no write failed, while
+    /// the socket was still open: the socket's end that follows is the daemon's answer to it.
+    stdin_closing: bool,
 }
 
 impl Tracked {
@@ -528,6 +531,13 @@ where
                     failed =
                         write_replies(&mut sock_w, &mut replies, failed, shared.settled()).await;
                 }
+                if !failed {
+                    // a drain that settled at the socket's end is no orderly close
+                    let mut tracked = locked(&shared.tracked);
+                    if !tracked.socket_closed {
+                        tracked.stdin_closing = true;
+                    }
+                }
                 let _ = sock_w.shutdown().await;
                 failed
             };
@@ -559,11 +569,18 @@ where
             }
         },
         () = &mut b => {
-            // let the pump record the requests the host has already written
-            if tokio::time::timeout(STDIN_GRACE, &mut a).await.is_err() {
-                a.abort();
+            let stdin_closing = locked(&shared.tracked).stdin_closing;
+            if stdin_closing {
+                // the socket ended after the proxy's own half-close: the stdin task is
+                // completing, and its value says whether a write failed
+                !matches!(a.await, Ok(false))
+            } else {
+                // let the pump record the requests the host has already written
+                if tokio::time::timeout(STDIN_GRACE, &mut a).await.is_err() {
+                    a.abort();
+                }
+                true
             }
-            true
         }
     };
     if gone {

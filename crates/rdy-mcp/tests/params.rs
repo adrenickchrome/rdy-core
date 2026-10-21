@@ -758,7 +758,7 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
         (
             "E_REDACTION_LIMIT",
             "The redaction exceeds {limit}.",
-            "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop.",
+            "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop. For a holder load, keep the dump chain and the holder it came from; this rdy cannot load it.",
         ),
         (
             "E_REDACTION_REASON",

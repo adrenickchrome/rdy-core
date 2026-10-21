@@ -128,9 +128,12 @@ pub const REDACTION_LIMIT_FIX: &str = "Select fewer targets, then run the dry ru
 /// The fix of `E_REDACTION_LIMIT` when a stopped load's carried record is over its bounds.
 pub const STOPPED_LOAD_REDACTION_LIMIT_FIX: &str =
     "Stop at another place, or load the whole chain with no stop.";
-/// The fix of the one `E_REDACTION_LIMIT` row of the error table: it names both cases, the
-/// redaction and the stopped load. Neither refusal returns it.
-pub const REDACTION_LIMIT_ROW_FIX: &str = "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop.";
+/// The fix of `E_REDACTION_LIMIT` when a holder load's removal scan is over its work bounds.
+pub const HOLDER_LOAD_REDACTION_LIMIT_FIX: &str =
+    "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
+/// The fix of the one `E_REDACTION_LIMIT` row of the error table: it names three cases, the
+/// redaction, the stopped load and the holder load. No refusal returns it.
+pub const REDACTION_LIMIT_ROW_FIX: &str = "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop. For a holder load, keep the dump chain and the holder it came from; this rdy cannot load it.";
 /// The message of `E_REDACTION_REASON`.
 pub const REDACTION_REASON_MESSAGE: &str = "The redaction needs a reason and a reason class.";
 /// The fix of `E_REDACTION_REASON`.
@@ -213,6 +216,14 @@ pub fn redaction_limit(limit: &str) -> RdyError {
 pub(crate) fn stopped_load_redaction_limit(limit: &str) -> RdyError {
     let mut e = redaction_limit(limit);
     e.fix = STOPPED_LOAD_REDACTION_LIMIT_FIX.to_string();
+    e
+}
+
+/// `E_REDACTION_LIMIT` for `limit` when a holder load's removal scan is over its work bounds
+/// (scanned frames or bytes): the message of [`redaction_limit`], with the holder load's fix.
+pub(crate) fn holder_load_redaction_limit(limit: &str) -> RdyError {
+    let mut e = redaction_limit(limit);
+    e.fix = HOLDER_LOAD_REDACTION_LIMIT_FIX.to_string();
     e
 }
 

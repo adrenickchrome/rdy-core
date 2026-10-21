@@ -12,7 +12,9 @@
 use crate::carried_warning;
 use crate::dump_error;
 use crate::dump_stop::{DumpStop, MAX_CHAIN_FILES};
-use crate::error::{E_BAD_INPUT, E_IO, RdyError, stopped_load_redaction_limit};
+use crate::error::{
+    E_BAD_INPUT, E_IO, RdyError, holder_load_redaction_limit, stopped_load_redaction_limit,
+};
 use crate::load::{
     LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target, create_store, damaged,
     holder_files, incomplete, next_step, open_dump, place, read_error, target_error,
@@ -503,6 +505,12 @@ fn scan_error(files: &[PathBuf], e: ScanError) -> RdyError {
             if let Some(e) = carrier_limit(&source) {
                 return e;
             }
+            // the holder's removal scan is over its work bounds, whichever file it was reading
+            if let StoreError::RedactionLimit { limit: bound } = &source
+                && (*bound == limit::FRAMES || *bound == limit::BYTES)
+            {
+                return holder_load_redaction_limit(bound);
+            }
             let Some(path) = files.get(file) else {
                 return source.into();
             };
@@ -677,6 +685,61 @@ mod tests {
                     DRY_RUN_FIX
                 )
             );
+        }
+    }
+
+    #[test]
+    fn plb5_holder_scan_limit_has_its_own_fix() {
+        let files = vec![PathBuf::from("full.rdydump"), PathBuf::from("inc.rdydump")];
+        let fix =
+            "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
+        assert_eq!(crate::error::HOLDER_LOAD_REDACTION_LIMIT_FIX, fix);
+        for (lim, message) in [
+            (
+                limit::FRAMES,
+                "The redaction exceeds 1000000 scanned frames.",
+            ),
+            (
+                limit::BYTES,
+                "The redaction exceeds 2147483648 scanned bytes.",
+            ),
+        ] {
+            // an input in range and one out of range
+            for file in [1, 7] {
+                let e = scan_error(
+                    &files,
+                    ScanError::Input {
+                        file,
+                        source: StoreError::RedactionLimit { limit: lim },
+                    },
+                );
+                assert_eq!(
+                    triple(&e),
+                    ("E_REDACTION_LIMIT", message, fix),
+                    "{lim} at input {file}"
+                );
+            }
+            // the dry run and the generic conversion keep the dry-run advice
+            let direct = crate::error::redaction_limit(lim);
+            let converted: RdyError = StoreError::RedactionLimit { limit: lim }.into();
+            for e in [direct, converted] {
+                assert_eq!(
+                    triple(&e),
+                    ("E_REDACTION_LIMIT", message, DRY_RUN_FIX),
+                    "{lim}"
+                );
+            }
+        }
+        // the two carried limits keep the stopped-load advice
+        for lim in [limit::CARRIED_SPANS, limit::RECORD] {
+            let e = scan_error(
+                &files,
+                ScanError::Input {
+                    file: 1,
+                    source: StoreError::RedactionLimit { limit: lim },
+                },
+            );
+            assert_eq!(e.fix, LOAD_FIX, "{lim}");
         }
     }
 

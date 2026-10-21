@@ -4,9 +4,10 @@
 //! whole batch passes.
 use rdy_engine::Rdy;
 use rdy_engine::stream_check::check_batch;
+use rdy_engine::stream_error::to_rdy;
 use rdy_mcp::params::parse_params;
-use rdy_mcp::tools::StreamCheckParams;
-use rdy_model::{Hash, RepoId};
+use rdy_mcp::tools::{ERROR_ROWS, StreamCheckParams};
+use rdy_model::{Answer, AnswerAct, BlockId, Hash, Provenance, RepoId, Role, StateSnapshot};
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::{output_within_stdin, rdy_bin};
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
@@ -14,7 +15,7 @@ use rdy_qa::mcp::{McpClient, Reply};
 use rdy_store::closure::{self, END_OF_LOG, StoreSource};
 use rdy_store::kinds;
 use rdy_store::object_refs::{ObjectKey, refs_of};
-use rdy_store::sync_stream::{StreamHeader, StreamWriter};
+use rdy_store::sync_stream::{self, StreamHeader, StreamRecord, StreamWriter};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -450,4 +451,296 @@ fn ha15_hostile_batch_refuses_and_mcp_remains_alive() {
         let e: Value = serde_json::from_str(err.trim()).unwrap();
         assert_eq!(e["code"], code, "{name}: {e}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// plb2: the batch dependency faults, named on every surface
+
+const ROOT: Hash = Hash([0x41; 32]);
+
+fn key(kind: u8, hash: Hash) -> ObjectKey {
+    ObjectKey { kind, hash }
+}
+
+/// A present record of `kind` holding `value`, encoded as the store tests encode it.
+fn present<T: serde::Serialize>(kind: u8, value: &T) -> StreamRecord {
+    let payload = postcard::to_allocvec(value).unwrap();
+    StreamRecord::Present {
+        key: key(kind, Hash::of(&payload)),
+        payload,
+    }
+}
+
+/// `records` as one batch rooted at [`ROOT`] that lists `prerequisites` (sorted here).
+fn plb2_batch(mut prerequisites: Vec<ObjectKey>, records: &[StreamRecord]) -> Vec<u8> {
+    prerequisites.sort();
+    let header = StreamHeader::tag_history(RepoId([7; 16]), ROOT, prerequisites);
+    let mut w = StreamWriter::new(Vec::new(), &header).unwrap();
+    for r in records {
+        w.record(r).unwrap();
+    }
+    w.finish().unwrap().0
+}
+
+/// One fault case: its name, the records, the prerequisites that miss the dependency, the
+/// exact prerequisites, and the expected message and issue.
+struct Case {
+    name: &'static str,
+    records: Vec<StreamRecord>,
+    faulty: Vec<ObjectKey>,
+    exact: Vec<ObjectKey>,
+    message: String,
+    issue: String,
+}
+
+/// The frame offset of the first record after a header with `k` prerequisites.
+fn first_at(k: u64) -> u64 {
+    12 + 37 + 57 + 33 * k
+}
+
+fn plb2_cases() -> Vec<Case> {
+    let root = key(kinds::TAG, ROOT);
+    let block = key(kinds::BLOCK, Hash([0x31; 32]));
+    let snapshot = present(
+        kinds::SNAPSHOT,
+        &StateSnapshot {
+            blocks: BTreeMap::from([(BlockId::parse("b-00001").unwrap(), block.hash)]),
+        },
+    );
+    let answer = present(
+        kinds::ANSWER,
+        &Answer {
+            item: "P-x@1".into(),
+            act: AnswerAct::Confirm,
+            option: None,
+            label: None,
+            options: vec![],
+            card_hash: None,
+            targets: vec![Hash([0x5a; 32])],
+            person: Provenance {
+                actor: "agent:w".into(),
+                run: None,
+                role: Role::Writer,
+                at_ms: 1,
+            },
+            relayed_by: None,
+            relay_evidence: None,
+            evidence_kind: None,
+            note: None,
+        },
+    );
+    let apply = key(kinds::REDACTION_APPLY, Hash([0x16; 32]));
+    let residue = key(kinds::REDACTION_RESIDUE, Hash([0x15; 32]));
+    let dropped_block = key(kinds::BLOCK, Hash([0x32; 32]));
+    let with_residue = StreamRecord::Dropped {
+        key: dropped_block,
+        original_len: 40,
+        apply: apply.hash,
+        residue: Some(residue.hash),
+    };
+    let chunk = key(kinds::BLOB_CHUNK, Hash([0x06; 32]));
+    let dropped_chunk = StreamRecord::Dropped {
+        key: chunk,
+        original_len: 5,
+        apply: apply.hash,
+        residue: None,
+    };
+    let extra = key(kinds::LANDING, Hash([0x30; 32]));
+    let at = |k: u64, n: u64, object: &ObjectKey| {
+        format!("record {n} at byte {}; object {object}", first_at(k))
+    };
+    vec![
+        Case {
+            name: "typed",
+            message: format!(
+                "stream record 1 at byte {}: unlisted dependency 1:{}",
+                first_at(1),
+                "31".repeat(32)
+            ),
+            issue: at(1, 1, &snapshot.key()),
+            records: vec![snapshot.clone()],
+            faulty: vec![root],
+            exact: vec![block, root],
+        },
+        Case {
+            name: "untyped",
+            message: format!(
+                "stream record 1 at byte {}: unlisted dependency {}",
+                first_at(1),
+                "5a".repeat(32)
+            ),
+            issue: at(1, 1, &answer.key()),
+            records: vec![answer.clone()],
+            faulty: vec![root],
+            exact: vec![key(kinds::BLOCK, Hash([0x5a; 32])), root],
+        },
+        Case {
+            name: "residue",
+            message: format!(
+                "stream record 1 at byte {}: unlisted dependency 21:{}",
+                first_at(2),
+                "15".repeat(32)
+            ),
+            issue: at(2, 1, &dropped_block),
+            records: vec![with_residue],
+            faulty: vec![root, apply],
+            exact: vec![root, residue, apply],
+        },
+        Case {
+            name: "apply",
+            message: format!(
+                "stream record 1 at byte {}: unlisted dependency 22:{}",
+                first_at(1),
+                "16".repeat(32)
+            ),
+            issue: at(1, 1, &chunk),
+            records: vec![dropped_chunk],
+            faulty: vec![root],
+            exact: vec![root, apply],
+        },
+        Case {
+            name: "root",
+            message:
+                "stream record 0 at byte 12: root tag is not in the batch or its prerequisites"
+                    .into(),
+            issue: "record 0 at byte 12; object none".into(),
+            records: vec![],
+            faulty: vec![],
+            exact: vec![root],
+        },
+        Case {
+            name: "unneeded",
+            message: format!(
+                "stream record 0 at byte 12: unneeded prerequisite 4:{}",
+                "30".repeat(32)
+            ),
+            issue: "record 0 at byte 12; object none".into(),
+            records: vec![],
+            faulty: vec![extra, root],
+            exact: vec![root],
+        },
+    ]
+}
+
+/// The code, message, fix and positioned issues of an error's JSON.
+fn surface(e: &Value) -> Value {
+    json!({
+        "code": e["code"],
+        "message": e["message"],
+        "fix": e["fix"],
+        "issues": e["issues"],
+    })
+}
+
+#[test]
+fn plb2_batch_faults_match_mcp_and_cli() {
+    let s = Served::new();
+    let mut c = McpClient::start(s.dir.path());
+    agent(&mut c, "reader");
+    for case in plb2_cases() {
+        let name = case.name;
+        let bytes = plb2_batch(case.faulty, &case.records);
+        // the store's error, as the engine maps it
+        let store = sync_stream::check_batch(bytes.as_slice()).unwrap_err();
+        let core = serde_json::to_value(to_rdy(store)).unwrap();
+        let engine =
+            serde_json::to_value(check_batch(bytes.as_slice(), None).unwrap_err()).unwrap();
+        assert_eq!(surface(&engine), surface(&core), "{name}");
+        assert_eq!(core["code"], "E_BAD_RECORD", "{name}");
+        assert_eq!(core["message"], case.message, "{name}");
+        assert_eq!(
+            core["fix"], "request this stream again; run rdy fsck at its source",
+            "{name}"
+        );
+        assert_eq!(
+            core["issues"],
+            json!([{
+                "severity": "error",
+                "code": "E_BAD_RECORD",
+                "block": null,
+                "message": case.issue,
+                "fix": "request this stream again; run rdy fsck at its source",
+            }]),
+            "{name}"
+        );
+
+        // the chat path: the tool error itself, issues and all
+        let file = format!("{name}.rdybatch");
+        std::fs::write(s.dir.path().join(&file), &bytes).unwrap();
+        let Reply::ToolError(mcp) = c.call("rdy_stream_check", json!({"file": file})) else {
+            panic!("{name}: expected a tool error")
+        };
+        assert_eq!(surface(&mcp), surface(&core), "{name}");
+
+        // the fallback
+        let (ok, out, err) = cli(&["-"], &bytes);
+        assert!(!ok && out.is_empty(), "{name}: {out}");
+        let cli_error: Value = serde_json::from_str(err.trim()).unwrap();
+        assert_eq!(surface(&cli_error), surface(&core), "{name}");
+    }
+}
+
+#[test]
+fn plb2_listed_dependencies_still_pass_the_stateless_check() {
+    let s = Served::new();
+    let mut c = McpClient::start(s.dir.path());
+    agent(&mut c, "reader");
+    for case in plb2_cases() {
+        let name = case.name;
+        let mut exact = case.exact.clone();
+        exact.sort();
+        let bytes = plb2_batch(case.exact, &case.records);
+        let core = check_batch(bytes.as_slice(), None).unwrap();
+        assert_eq!(core.header.prerequisites, exact, "{name}");
+        assert_eq!(
+            core.keys,
+            case.records
+                .iter()
+                .map(StreamRecord::key)
+                .collect::<Vec<_>>(),
+            "{name}"
+        );
+        let want = serde_json::to_value(&core).unwrap();
+
+        let file = format!("{name}.rdybatch");
+        std::fs::write(s.dir.path().join(&file), &bytes).unwrap();
+        let v = c.call("rdy_stream_check", json!({"file": file})).ok();
+        assert_eq!(v, want, "{name}");
+        assert_eq!(
+            v["header"]["prerequisites"],
+            serde_json::to_value(&exact).unwrap(),
+            "{name}"
+        );
+
+        let (ok, out, err) = cli(&["-"], &bytes);
+        assert!(ok, "{name}: {err}");
+        assert_eq!(
+            serde_json::from_str::<Value>(out.trim()).unwrap(),
+            want,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn plb2_schema_names_batch_dependency_faults() {
+    const WHEN: &str = "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a dependency cycle or a repeated object";
+    const FIX: &str = "request this stream again; run rdy fsck at its source";
+    let rows: Vec<_> = ERROR_ROWS
+        .iter()
+        .filter(|(code, _, _)| *code == "E_BAD_RECORD")
+        .collect();
+    assert_eq!(rows, vec![&("E_BAD_RECORD", WHEN, FIX)]);
+
+    let s = Served::new();
+    let mut c = McpClient::start(s.dir.path());
+    agent(&mut c, "reader");
+    let schema = c.call("rdy_schema", json!({})).ok();
+    let errors = schema["errors"].as_object().unwrap();
+    assert_eq!(
+        errors.keys().filter(|k| *k == "E_BAD_RECORD").count(),
+        1,
+        "one E_BAD_RECORD row"
+    );
+    assert_eq!(errors["E_BAD_RECORD"], json!({"when": WHEN, "fix": FIX}));
 }
