@@ -90,8 +90,10 @@ impl Block {
     }
 
     /// lpin1 (FW-LP1): the hash a pin records. It covers the block's id, type, parent, order,
-    /// fields except [`DERIVED_FIELDS`], body and links, so a change to the block's pins or
-    /// derived fields only leaves it unchanged. Domain-separated by [`CONTENT_DOMAIN`].
+    /// fields except [`DERIVED_FIELDS`] and the engine metadata fields
+    /// ([`crate::engine_fields::ENGINE_FIELDS`]), body and links, so a change to the block's
+    /// pins, derived fields or metadata only leaves it unchanged. Domain-separated by
+    /// [`CONTENT_DOMAIN`].
     /// Equal to [`Block::content_hash_with`] with an empty [`Tracking`].
     pub fn content_hash(&self) -> Hash {
         self.content_hash_with(&Tracking::default())
@@ -118,6 +120,7 @@ impl Block {
                 .fields
                 .iter()
                 .filter(|(k, _)| !DERIVED_FIELDS.contains(&k.as_str()))
+                .filter(|(k, _)| !crate::engine_fields::is_engine_field(k))
                 .filter(|(k, _)| !tracking.is_some_and(|f| f.contains(k.as_str())))
                 .collect(),
             body: &self.body,
@@ -136,13 +139,17 @@ impl Block {
     }
 
     /// Every `{{token}}` this block's body and string fields contain, under `RefMode` rules.
+    /// The engine metadata fields are never scanned: a re-affirmation reason that names
+    /// `{{D-x}}` is no reference (p-RNK9B).
     pub fn ref_tokens(&self) -> BTreeSet<String> {
         let mut out: BTreeSet<String> = ref_spans(&self.body, RefMode::for_body(&self.block_type))
             .into_iter()
             .map(|s| s.token)
             .collect();
-        for v in self.fields.values() {
-            scan_value(v, &mut out);
+        for (name, v) in &self.fields {
+            if !crate::engine_fields::is_engine_field(name) {
+                scan_value(v, &mut out);
+            }
         }
         out
     }

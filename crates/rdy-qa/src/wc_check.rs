@@ -25,8 +25,10 @@ use serde_yaml_ng::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// Fields rdy sets and keeps in the store: a working-copy file never shows them.
-pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto"];
+/// Fields rdy sets and keeps in the store: a working-copy file never shows them. From the
+/// file-formats page's store-only field list (p-8YP1G): the path-derived key mark and the two
+/// engine metadata fields, in that order.
+pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto", "reaffirmed", "reflects_at"];
 
 /// Link kinds that live only in the store (justification links).
 pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements"];

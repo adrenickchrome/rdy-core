@@ -473,6 +473,14 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 "type {name}: field reflects is reserved for the engine on content types"
             )));
         }
+        if let Some(f) = rdy_model::engine_fields::ENGINE_FIELDS
+            .iter()
+            .find(|f| t.fields.contains_key(**f))
+        {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field {f} is reserved for the engine"
+            )));
+        }
         check_tracking(name, t)?;
         for (fname, fd) in &t.fields {
             if fd.kind == FieldKind::Enum && fd.values.is_empty() {
@@ -540,6 +548,7 @@ fn check_tracking(name: &str, t: &BlockTypeDef) -> Result<(), SchemaError> {
         } else if rdy_model::block::DERIVED_FIELDS.contains(&f.as_str())
             || f == "key"
             || f == crate::validate::REFLECTS_FIELD
+            || rdy_model::engine_fields::is_engine_field(f)
         {
             "is derived or reserved by the engine"
         } else if !t.fields.contains_key(f) {

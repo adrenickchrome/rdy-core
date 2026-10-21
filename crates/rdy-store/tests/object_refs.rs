@@ -1050,10 +1050,11 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     };
     let answer_edges = vec![any(36), any(37)];
     let acts = every!(AnswerAct: RejectProposal, Later, Confirm, RejectDecision, AnswerQuestion,
-        Dismiss, Tag, ViewOwn, CloseStale, Propose);
+        Dismiss, Tag, ViewOwn, CloseStale, Propose, KeepSuspect, AcceptDeferrals, RefuseDeferrals,
+        RejectReaffirm);
     let roles = every!(Role: Reader, Writer, Reviewer, Approver);
     let evidence = every!(EvidenceKind: Elicited, Card, Text);
-    assert_eq!((acts.len(), roles.len(), evidence.len()), (10, 4, 3));
+    assert_eq!((acts.len(), roles.len(), evidence.len()), (14, 4, 3));
     for act in &acts {
         let a = answer(*act, Role::Approver, Some(EvidenceKind::Text));
         assert_eq!(

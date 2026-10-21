@@ -2,7 +2,7 @@ use crate::glob::Glob;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
 use crate::publication;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
-use rdy_model::{decision, tree};
+use rdy_model::{decision, engine_fields, tree};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -218,6 +218,19 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                     "E_FIELD_KIND",
                     format!("field {name:?} must be true, next to a key"),
                     format!("remove {name}; rdy sets it when it derives a key from the path"),
+                ));
+            }
+            continue;
+        }
+        if let Some(shape) = engine_fields::check(name, v) {
+            // `reaffirmed` and `reflects_at` are engine metadata on every type (O22): only rdy's
+            // own writes set them, so a bad shape is damaged stored metadata.
+            if shape.is_err() {
+                out.push(err(
+                    block,
+                    "E_FIELD_KIND",
+                    format!("field {name:?} has an invalid engine value"),
+                    "restore the block through rdy's write tools".to_string(),
                 ));
             }
             continue;
@@ -438,7 +451,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
 
 /// Refuses display text that starts with an unescaped `@` other than the `@key` mark: a leading
 /// `@` is reserved for engine marks (FW-F2a), so a literal one is written `\@`. Checked in bodies
-/// read in `Strict` mode and in every string field.
+/// read in `Strict` mode and in every string field but the engine metadata fields.
 fn reserved_at(block: &Block, out: &mut Vec<Issue>) {
     fn scan(block: &Block, place: &str, text: &str, mode: RefMode, out: &mut Vec<Issue>) {
         for span in ref_spans(text, mode) {
@@ -471,8 +484,11 @@ fn reserved_at(block: &Block, out: &mut Vec<Issue>) {
     if RefMode::for_body(&block.block_type) == RefMode::Strict {
         scan(block, "the body", &block.body, RefMode::Strict, out);
     }
+    // the engine metadata fields hold no references (p-RNK9B)
     for (name, v) in &block.fields {
-        field(block, name, v, out);
+        if !engine_fields::is_engine_field(name) {
+            field(block, name, v, out);
+        }
     }
 }
 
