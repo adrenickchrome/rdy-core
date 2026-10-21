@@ -216,11 +216,15 @@ impl Recorder {
         Recorder::probing(dir, &[])
     }
 
-    /// [`Recorder::on`]; at each stop stage it also records whether every port of `ports` has
-    /// stopped accepting by then, as `<stage>: ports closed <bool>`.
+    /// [`Recorder::on`]; at each stop stage it also records whether this process (the daemon)
+    /// holds no listening socket on any port of `ports` by then, as `<stage>: ports closed
+    /// <bool>` ([`holds_listener`]). Every port must have a listener of the daemon now.
     fn probing(dir: &Path, ports: &[u16]) -> Recorder {
         let root = root_of(dir);
         let ports = ports.to_vec();
+        for p in &ports {
+            assert!(holds_listener(*p), "no listener of this process on port {p}");
+        }
         let all = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = channel();
         let (keep, tx) = (Arc::clone(&all), Mutex::new(tx));
@@ -236,7 +240,7 @@ impl Recorder {
                 if let Ev::Stage(stage) = &ev
                     && !ports.is_empty()
                 {
-                    let shut = ports.iter().all(|p| TcpStream::connect(sock(*p)).is_err());
+                    let shut = !ports.iter().any(|p| holds_listener(*p));
                     keep.lock()
                         .unwrap()
                         .push(Ev::Stage(format!("{stage}: ports closed {shut}")));
@@ -1387,6 +1391,39 @@ fn opts(dir: &Path) -> ServeOptions {
         human_actor: Some("human:qa".into()),
         site_lan_override: None,
     }
+}
+
+/// Whether a descriptor of this process is a listening TCP socket on `port` (`127.0.0.1` or
+/// `[::1]`). A connect probe cannot tell this: a child that another test's thread spawns holds
+/// a copy of every descriptor from its fork to its exec, so a listener the daemon has closed
+/// can still accept while that child waits (seen under gate load). Linux reads the descriptor
+/// table; elsewhere a connect probe stands in.
+#[cfg(target_os = "linux")]
+fn holds_listener(port: u16) -> bool {
+    let mut inodes = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let local = f[1].rsplit(':').next().unwrap();
+            // st 0A: LISTEN
+            if f[3] == "0A" && u16::from_str_radix(local, 16).unwrap() == port {
+                inodes.push(format!("socket:[{}]", f[9]));
+            }
+        }
+    }
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .flatten()
+        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+        .any(|link| inodes.iter().any(|i| link.as_os_str() == i.as_str()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn holds_listener(port: u16) -> bool {
+    TcpStream::connect(sock(port)).is_ok()
 }
 
 /// Asserts no listener answers on `port` any more.
