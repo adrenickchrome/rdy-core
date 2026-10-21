@@ -368,7 +368,6 @@ fn plb1_schema_explains_the_decision_parent() {
             (name.to_string(), rdy_model::Hash::of(&bytes).to_string())
         })
         .collect();
-    eprintln!("tool schema digests: {digests:?}");
     let edit_loop = sch["edit_loop"].as_str().unwrap();
     assert!(
         edit_loop.contains(
@@ -381,11 +380,24 @@ fn plb1_schema_explains_the_decision_parent() {
         json!({"when": "a write touches stable content and cites no briefing, or one that does not cover the block",
             "fix": "retry with the token of the briefing the error carries"})
     );
+    // the digests at the base of this change (b97ad25)
     let base: Vec<(String, String)> = [
-        ("rdy_write", "TBD"),
-        ("rdy_decide", "TBD"),
-        ("rdy_supersede", "TBD"),
-        ("rdy_revoke", "TBD"),
+        (
+            "rdy_write",
+            "ec9d49224a18d21dc90d448e982186376eca76d0923cd0396b759980fc6ffae3",
+        ),
+        (
+            "rdy_decide",
+            "54e7f89fd3f25ec09ddc3c5a4b683d22220a3bf350135fe368860819352ec06a",
+        ),
+        (
+            "rdy_supersede",
+            "efbf0ffddb57921583acf5b9062e079620b2a8ae8ec8b056658eb93af444ba10",
+        ),
+        (
+            "rdy_revoke",
+            "14da91157f1a655f88561a1cb50995638cc6b900f1475eecb5bce4c81b99db60",
+        ),
     ]
     .iter()
     .map(|(n, d)| (n.to_string(), d.to_string()))

@@ -1606,12 +1606,13 @@ enum Anchor {
     Unknown,
 }
 
-/// What one op is about: the block a briefing must cover, and whether the op touches stable
-/// content.
+/// What one op is about: the block a briefing must cover, whether the op touches stable
+/// content, and, for a create, the type of the block it creates under the target.
 #[derive(Clone, Debug)]
-struct Subject {
+struct Subject<'a> {
     target: BlockId,
     stable: bool,
+    created_type: Option<&'a str>,
 }
 
 /// A block's own `lifecycle`, if it has one (a null value counts as none).
@@ -1649,7 +1650,7 @@ pub(crate) fn effective_lifecycle(m: &Materialized, id: Option<&BlockId>) -> Opt
 /// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose
 /// block does not resolve are skipped; a subject of a presentational type is exempt (Q6d), and
 /// for `create` and `rebalance` the subject is the parent.
-fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
+fn subjects<'a>(pack: &Pack, m: &Materialized, ops: &'a [OpInput]) -> Vec<Subject<'a>> {
     // the anchor each create of this batch hangs from, by the id it was given ($name or an id)
     let mut created: HashMap<&str, Anchor> = HashMap::new();
     let existing = |text: &str| -> Option<BlockId> {
@@ -1670,7 +1671,12 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
     let mut out = vec![];
     for op in ops {
         match op {
-            OpInput::Create { id, parent, .. } => {
+            OpInput::Create {
+                id,
+                parent,
+                block_type,
+                ..
+            } => {
                 // the subject is the parent's nearest existing ancestor (the coverage target),
                 // so its type decides the exemption; the new block's own type does not count
                 let a = anchor(&created, parent.as_deref());
@@ -1683,6 +1689,7 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                     out.push(Subject {
                         stable: effective_stable(m, Some(&p)),
                         target: p,
+                        created_type: Some(block_type.as_str()),
                     });
                 }
             }
@@ -1722,6 +1729,7 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                 out.push(Subject {
                     target: b.id.clone(),
                     stable: before || after,
+                    created_type: None,
                 });
             }
             OpInput::Move { id, parent, .. } => {
@@ -1742,6 +1750,7 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                 out.push(Subject {
                     target: b.id.clone(),
                     stable: before || after,
+                    created_type: None,
                 });
             }
             OpInput::Delete { id, .. } | OpInput::Repin { id, .. } => {
@@ -1754,6 +1763,7 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                 out.push(Subject {
                     target: b.id.clone(),
                     stable: effective_stable(m, Some(&b.id)),
+                    created_type: None,
                 });
             }
             OpInput::Rebalance { parent } => match anchor(&created, parent.as_deref()) {
@@ -1762,6 +1772,7 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                         out.push(Subject {
                             stable: effective_stable(m, Some(&p)),
                             target: p,
+                            created_type: None,
                         });
                     }
                 }
@@ -1774,6 +1785,7 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                             out.push(Subject {
                                 target: b.id.clone(),
                                 stable: true,
+                                created_type: None,
                             });
                         }
                     }
@@ -1884,21 +1896,38 @@ pub(crate) fn check(
     };
     let missing: BTreeSet<BlockId> = stable.into_iter().filter(|id| !rec.covers(id)).collect();
     if !missing.is_empty() {
-        let issues = missing
-            .iter()
-            .map(|id| {
-                block_issue(
+        // the type of each target's first stable create, in op order: a create's parent needs
+        // the briefing, so the refusal names it as one
+        let mut created: HashMap<&BlockId, &str> = HashMap::new();
+        for s in subjects.iter().filter(|s| s.stable) {
+            if let Some(t) = s.created_type {
+                created.entry(&s.target).or_insert(t);
+            }
+        }
+        let mut entries = Vec::with_capacity(missing.len());
+        let mut issues = Vec::with_capacity(missing.len());
+        for id in &missing {
+            if let Some(t) = created.get(id) {
+                entries.push(format!("{id} (the parent of the new {t})"));
+                issues.push(block_issue(
+                    id,
+                    &format!("not covered by the cited briefing: the write creates a {t} under it"),
+                    "brief this parent; a briefing of a parent covers its new children",
+                ));
+            } else {
+                entries.push(id.to_string());
+                issues.push(block_issue(
                     id,
                     "not covered by the cited briefing",
                     "brief it (or, to create under it, its parent)",
-                )
-            })
-            .collect();
+                ));
+            }
+        }
         return Err(refuse(
             E_BRIEF_REQUIRED,
             format!(
                 "the cited briefing does not cover {}, which this write touches on stable content",
-                joined(&missing)
+                entries.join(", ")
             ),
             issues,
         ));
