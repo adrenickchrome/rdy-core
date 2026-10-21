@@ -681,12 +681,11 @@ fn cp5_reaffirm_refusals_have_exact_text() {
             "omit targets, or pass a current suspect target",
         ),
     ];
-    let mut by_cause = vec![f.d1.clone(), f.d2.clone()];
-    by_cause.sort();
+    let by_cause = std::cmp::min(&f.d1, &f.d2);
     let mut cases = cases;
     cases.push((
         json!({"op": "reaffirm", "because": f.t, "targets": [f.c], "reason": "R"}),
-        format!("{} is not a selected suspect of {}", f.c, by_cause[0]),
+        format!("{} is not a selected suspect of {by_cause}", f.c),
         "pass targets from the decision's current suspects",
     ));
     for (op, message, fix) in cases {
