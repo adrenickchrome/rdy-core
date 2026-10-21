@@ -365,6 +365,19 @@ fn spec_target(op: &str) -> Option<String> {
             "< 1 s p95 at 10k blocks (proposed, ledger F4; reported until the founder rules)"
         }
         "site_fanout_32" => "no spec target: the fan-out to 32 open pages (recorded)",
+        "site_profile_build" => {
+            "no spec target: build a stored public profile of canon live, check and page bytes included (reported)"
+        }
+        "site_profile_review" => {
+            "no spec target: build a proposal's profile with a changed selection and body, old and new selected sides compared (reported)"
+        }
+        "site_profile_menu" => {
+            "no spec target: build the versions page seen from a proposal and a profile, profile rows and cached source counts included (reported)"
+        }
+        "site_profile_get_page" => "no spec target: GET a warm profile-only page (reported)",
+        "site_profile_event_after_land" => {
+            "no spec target: from the end of the writer's landing to the profile page's reload event (reported)"
+        }
         "site_get_page" => "< 5 ms p95 (proposed, ledger F4; reported)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
@@ -4023,6 +4036,314 @@ fn tier_publication_costs(
     out.extend(measures);
 }
 
+/// The profile ops of the live site (D-CWC91, D-DK03K; core tb-A4DAV), in the order
+/// [`site_profiles`] measures them. All are reported with no ceiling.
+const SITE_PROFILE_OPS: [&str; 5] = [
+    "site_profile_build",
+    "site_profile_review",
+    "site_profile_menu",
+    "site_profile_get_page",
+    "site_profile_event_after_land",
+];
+
+/// The samples of `site_profile_get_page`, as `site_get_page` takes.
+const SITE_PROFILE_GET_RUNS: usize = 50;
+
+/// The key of the profile that selects the edited doc, and of the one that does not.
+const PROFILE_IN: &str = "perf-prs-in";
+const PROFILE_OUT: &str = "perf-prs-out";
+
+/// The fixture facts of the profile ops, reported beside the timings (no timing is a fact).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProfileFacts {
+    /// The docs the profile with the edited doc selects in canon.
+    selected_docs: usize,
+    /// The bytes of the files of that profile's cold canon build.
+    rendered_bytes: u64,
+    /// The blocks the selected old and new sides of the proposal differ in.
+    review_blocks: usize,
+}
+
+/// A count callback of the versions page that keeps its answers in `cache`, as the live site's
+/// cache keeps the full-source counts of views and proposals: a view by its head and base, any
+/// other scope by its name.
+fn cached_counts<'a>(
+    st: &'a rdy_engine::ReadState,
+    cache: &'a mut BTreeMap<String, usize>,
+) -> impl FnMut(&Scope) -> Result<usize, rdy_engine::RdyError> + 'a {
+    move |s| {
+        let key = match s {
+            Scope::View(n) => format!(
+                "{s:?}|{:?}|{:?}",
+                st.view_head(n).map(|h| h.head),
+                st.effective_base(n)
+            ),
+            _ => format!("{s:?}"),
+        };
+        if let Some(n) = cache.get(&key) {
+            return Ok(*n);
+        }
+        let n = rdy_render::menu::docs_changed(st, s)?;
+        cache.insert(key, n);
+        Ok(n)
+    }
+}
+
+/// `view`'s landed body edit of the fixture claim, as the daemon's writer runs it, and the instant
+/// the writer's work ended: after the write and the landing, before the state is published and
+/// the site worker is woken.
+fn land_claim_on_writer(
+    sh: &std::sync::Arc<Shared>,
+    claim: &str,
+    view: &str,
+    body: String,
+) -> Instant {
+    let (claim, view) = (claim.to_string(), view.to_string());
+    let done = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = std::sync::Arc::clone(&done);
+    write_typed(&*sh.engine(), move |r| {
+        write(
+            r,
+            &view,
+            json!([{"op": "update", "id": claim, "body": body}]),
+        )?;
+        land(r, &view)?;
+        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("the claim landing failed: {e}"));
+    let at = done.lock().unwrap_or_else(|e| e.into_inner()).take();
+    at.expect("the writer ran the landing")
+}
+
+/// The profile ops (D-CWC91, D-DK03K), all reported with no ceiling. `proj` is closed. A copy of
+/// it gets two public profiles in one landing: `perf-prs-in` selects the doc `fx` edits and the
+/// first half of the others (in sorted id order, rounded up and capped at
+/// [`PUBLICATION_SELECT_CAP`]), `perf-prs-out` the same count of the others. A view then changes
+/// the doc's body and the first profile's selection (one doc out, one in) and is proposed. The
+/// profiles, the proposal, the open handle, the warmed states, the daemon, the profile-only
+/// listener, its first build and its page stream are made outside every timer. The copy is
+/// removed before this returns.
+///
+/// - `site_profile_build`: `build_profile_live` of the profile in canon, with a fresh
+///   `ProfileHistoryMemo` each run: resolution, the reference check, the pages, the history chip.
+/// - `site_profile_review`: the same in the proposal, a fresh memo each run: both selected sides
+///   and their comparison.
+/// - `site_profile_menu`: `build_versions_for` the proposal and the profile, with the profile
+///   rows and the source counts of proposals and views filled in by one build beforehand.
+/// - `site_profile_get_page`: `GET` of the edited doc's page on the profile-only listener.
+/// - `site_profile_event_after_land`: a landed body edit of that doc through the writer, from the
+///   end of the writer's work to the `Reload` of the page's stream.
+fn site_profiles(
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    fx: &Fixture,
+    sfx: &str,
+    build_runs: usize,
+    runs: &Runs,
+) -> (Vec<Measure>, ProfileFacts) {
+    use rdy_engine::diff::diff_states;
+    use rdy_engine::publication::resolve_inspection;
+    use rdy_engine::site_scope::proposal_ref;
+    use rdy_render::live::{ProfileHistoryMemo, build_profile_live};
+    use rdy_render::menu::build_versions_for;
+    let copy = parent.join(format!("p-prof{sfx}"));
+    copy_project(proj, &copy);
+    let mut r = Rdy::open(&copy).expect("open the copy");
+    let edited = r
+        .read()
+        .resolve_path(&Scope::Canon, &fx.doc_path)
+        .expect("the fixture doc")
+        .to_string();
+    let m = r.read().materialized(&Scope::Canon).expect("canon");
+    let mut others: Vec<String> = m
+        .iter()
+        .filter(|b| b.block_type == rdy_model::tree::DOC && b.id.to_string() != edited)
+        .map(|b| b.id.to_string())
+        .collect();
+    others.sort();
+    drop(m);
+    let take = (others.len() + 1)
+        .div_ceil(2)
+        .min(PUBLICATION_SELECT_CAP)
+        .min(others.len());
+    let mut inside = vec![edited.clone()];
+    inside.extend(others[..take - 1].iter().cloned());
+    let outside: Vec<String> = others[..take].to_vec();
+    let made = write(
+        &mut r,
+        "prfa",
+        json!([
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "prs-admin", "title": "Profile admin", "doc_type": "page"}},
+            {"op": "create", "type": "publication_profile", "id": "$in", "parent": "$admin",
+             "fields": {"key": PROFILE_IN, "title": "Perf with the edit", "audience": "public", "select": inside}},
+            {"op": "create", "type": "publication_profile", "id": "$out", "parent": "$admin",
+             "fields": {"key": PROFILE_OUT, "title": "Perf without the edit", "audience": "public", "select": outside}}
+        ]),
+    )
+    .expect("write the profiles");
+    land(&mut r, "prfa").expect("land the profiles");
+    // the proposal: the doc's body changes, and one selected doc leaves the profile for another
+    let mut changed = inside.clone();
+    if changed.len() > 1 {
+        changed.pop();
+    }
+    changed.push(others[take - 1].clone());
+    write(
+        &mut r,
+        "prfr",
+        json!([
+            {"op": "update", "id": fx.claim.to_string(), "body": "Reviewed in the profile."},
+            {"op": "update", "id": made.created["$in"], "fields": {"select": changed}}
+        ]),
+    )
+    .expect("write the proposal's changes");
+    let proposal = r
+        .propose(&writer(), "prfr", "Profile review", None)
+        .expect("propose");
+    let pref = proposal_ref(&proposal.r#ref).expect("the proposal's ref");
+
+    let st = r.read();
+    let pscope = st
+        .resolve_scope(&format!("proposal:{}", proposal.r#ref))
+        .expect("the proposal's scope");
+    st.materialized(&Scope::Canon).expect("warm canon");
+    st.materialized(&pscope).expect("warm the proposal");
+    let canon_target = |key: &str| SiteTarget::Profile {
+        scope: ScopeRef::Canon,
+        key: key.into(),
+    };
+    let proposal_target = SiteTarget::Profile {
+        scope: ScopeRef::Proposal(pref.clone()),
+        key: PROFILE_IN.into(),
+    };
+    let page = format!("{}.html", fx.doc_path);
+
+    // the facts, and the two profiles' difference in the edited doc's page
+    let selected = resolve_inspection(&st, &Scope::Canon, PROFILE_IN).expect("the profile");
+    let without = resolve_inspection(&st, &Scope::Canon, PROFILE_OUT).expect("the other profile");
+    assert_eq!(selected.docs.len(), take, "the profile selects its docs");
+    assert_eq!(
+        without.docs.len(),
+        take,
+        "the other profile selects its docs"
+    );
+    let mut memo = ProfileHistoryMemo::default();
+    let first = build_profile_live(&st, &canon_target(PROFILE_IN), &mut memo).expect("build");
+    assert!(first.live.files.contains_key(&page), "no page {page}");
+    let other = build_profile_live(&st, &canon_target(PROFILE_OUT), &mut memo).expect("build");
+    assert!(
+        !other.live.files.contains_key(&page),
+        "the other profile has the edited page"
+    );
+    let rendered_bytes: u64 = first.live.files.values().map(|b| b.len() as u64).sum();
+    let reviewed = resolve_inspection(&st, &pscope, PROFILE_IN).expect("the proposal's profile");
+    let review_blocks = diff_states(&selected.m, &reviewed.m).entries.len();
+    let facts = ProfileFacts {
+        selected_docs: selected.docs.len(),
+        rendered_bytes,
+        review_blocks,
+    };
+    drop((selected, without, reviewed, first, other));
+
+    let mut out = vec![];
+    let name = |i: usize| format!("{}{sfx}", SITE_PROFILE_OPS[i]);
+    out.push(measure(&name(0), build_runs, |_| {
+        let mut memo = ProfileHistoryMemo::default();
+        let b = build_profile_live(&st, &canon_target(PROFILE_IN), &mut memo).expect("build");
+        std::hint::black_box(b);
+    }));
+    out.push(measure(&name(1), build_runs, |_| {
+        let mut memo = ProfileHistoryMemo::default();
+        let b = build_profile_live(&st, &proposal_target, &mut memo).expect("build the review");
+        std::hint::black_box(b);
+    }));
+    let menu = SiteTarget::Menu {
+        scope: ScopeRef::Proposal(pref),
+        profile: Some(PROFILE_IN.into()),
+    };
+    let mut cache: BTreeMap<String, usize> = BTreeMap::new();
+    let filled =
+        build_versions_for(&st, &menu, &mut cached_counts(&st, &mut cache)).expect("the menu");
+    let menu_page = String::from_utf8_lossy(&filled.files["index.html"]).into_owned();
+    for title in ["Perf with the edit", "Perf without the edit"] {
+        assert!(menu_page.contains(title), "the menu lists {title}");
+    }
+    out.push(measure(&name(2), build_runs, |_| {
+        let st = r.read();
+        let b =
+            build_versions_for(&st, &menu, &mut cached_counts(&st, &mut cache)).expect("the menu");
+        std::hint::black_box(b);
+    }));
+    drop(filled);
+    drop(st);
+    drop(r);
+
+    // the live ops, on a daemon over the copy
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime");
+    let (run, hold) = site_daemon_start(&copy, Duration::from_secs(60));
+    drop(rt.block_on(daemon_ready(&copy)));
+    let sh = std::sync::Arc::clone(run.shared());
+    let info = rdy_daemon::site::ensure_profile_site(std::sync::Arc::clone(&sh), PROFILE_IN)
+        .expect("the profile's listener");
+    let base = info.url.expect("the listener's address");
+    let only = SiteTarget::ProfileOnly {
+        key: PROFILE_IN.into(),
+    };
+    let b = sh.site.refresh(&sh, &only).expect("the profile builds");
+    assert!(b.live.revs.contains_key(&page), "no page {page} live");
+    let url = format!("{base}{page}");
+    // one untimed request, so the timed ones read a warm build
+    assert_eq!(crate::http::get(&url).status, 200, "GET {url}");
+    out.push(measure(&name(3), SITE_PROFILE_GET_RUNS, |_| {
+        let got = crate::http::get(&url);
+        assert_eq!(got.status, 200, "GET {url}");
+    }));
+
+    let claim = fx.claim.to_string();
+    let mut sub = sh
+        .site
+        .subscribe(&sh, &only, &page, &b.live.revs[&page], &b.live.label_rev)
+        .unwrap_or_else(|_| panic!("the site is busy"));
+    out.push(measure_timed(&name(4), runs.write, |i| {
+        drain_events(&mut sub);
+        let done = land_claim_on_writer(&sh, &claim, &format!("spe-{i}"), format!("Landed {i}."));
+        await_reload(&rt, &mut sub);
+        let took = done.elapsed();
+        // let the worker finish what the run's publishes started, outside the timer
+        sh.site.refresh(&sh, &only).expect("the profile builds");
+        took
+    }));
+    drop(sub);
+    drop(rt);
+    drop(hold);
+    daemon_stop(run);
+    std::fs::remove_dir_all(&copy).expect("remove the copy");
+    (out, facts)
+}
+
+/// [`site_profiles`] into `out`, with the three fixture facts on standard error for the ledger.
+/// `sfx` names the tier (`""` or `_50k`).
+fn tier_site_profiles(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    fx: &Fixture,
+    sfx: &str,
+    build_runs: usize,
+    runs: &Runs,
+) {
+    let (measures, facts) = site_profiles(proj, parent, fx, sfx, build_runs, runs);
+    eprintln!(
+        "site_profile{sfx}: {} selected docs, {} rendered bytes, {} selected review blocks",
+        facts.selected_docs, facts.rendered_bytes, facts.review_blocks
+    );
+    out.extend(measures);
+}
+
 /// The runs of each signature op, in both tiers: the ops are pure reads of a few microseconds.
 const SIGNATURE_RUNS: usize = 200;
 
@@ -4600,6 +4921,7 @@ pub fn run_workload() -> Vec<Measure> {
     out.extend(daemon_ops(&proj, ""));
     out.extend(daemon_mcp_on_copy(&proj, dir.path()));
     out.extend(site_ops(&proj, dir.path(), &docs, &fx, "", &TYPICAL_RUNS));
+    tier_site_profiles(&mut out, &proj, dir.path(), &fx, "", 5, &TYPICAL_RUNS);
     out.extend(daemon_clients_ops(&proj, dir.path(), TYPICAL_RUNS.write));
     out.extend(bound_ops(dir.path()));
     out.extend(stdio_mcp_ops(dir.path()));
@@ -5328,6 +5650,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
+    tier_site_profiles(&mut out, &proj, parent, &fx, sfx, 3, &LARGE_RUNS);
     // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
     let mut r = Rdy::open(&proj).expect("open");
     // as the daemon does after `ready`, outside every timer (plan M2e2)
@@ -6583,6 +6906,131 @@ mod tests {
             body("fn run_large_tier(")
                 .contains("tier_publication_costs(&mut out, &proj, parent, sfx, 3);")
         );
+    }
+
+    /// The runs of a tiny profile fixture: two samples everywhere.
+    fn spv11_runs() -> Runs {
+        Runs {
+            write: 2,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        }
+    }
+
+    /// Task 11: the five profile ops have unique names with the tier's suffix, in the order of
+    /// [`SITE_PROFILE_OPS`], run once each on a small fixture, and report the three fixture
+    /// facts. The checks are on names, sample counts, selected counts and nonempty output: no
+    /// duration is asserted.
+    #[test]
+    fn spv11_profile_ops_have_unique_names_and_measured_work() {
+        rdy_model::seed_ids_for_tests(0x7370_7631);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        r.tag(&approver(), "v0.1.0", None, None).expect("tag");
+        let fx = fixture(&r, &docs);
+        drop(r);
+        let runs = spv11_runs();
+        for sfx in ["", LARGE_SUFFIX] {
+            let (measures, facts) = site_profiles(&proj, dir.path(), &fx, sfx, 2, &runs);
+            let names: Vec<String> = measures.iter().map(|m| m.op.clone()).collect();
+            let want: Vec<String> = SITE_PROFILE_OPS
+                .iter()
+                .map(|o| format!("{o}{sfx}"))
+                .collect();
+            assert_eq!(names, want);
+            let unique: BTreeSet<&String> = names.iter().collect();
+            assert_eq!(unique.len(), SITE_PROFILE_OPS.len(), "names are unique");
+            let counts: Vec<usize> = measures.iter().map(|m| m.runs).collect();
+            assert_eq!(counts, [2, 2, 2, SITE_PROFILE_GET_RUNS, runs.write]);
+            // the edited doc and half of the others are selected
+            assert!(facts.selected_docs >= 2, "{facts:?}");
+            assert!(facts.rendered_bytes > 0, "{facts:?}");
+            assert!(facts.review_blocks > 0, "{facts:?}");
+            // the same fixture again selects and reviews the same (page bytes carry dates)
+            let (_, again) = site_profiles(&proj, dir.path(), &fx, sfx, 2, &runs);
+            assert_eq!(again.selected_docs, facts.selected_docs);
+            assert_eq!(again.review_blocks, facts.review_blocks);
+        }
+        rdy_model::unseed_ids_for_tests();
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("p")]);
+    }
+
+    /// Task 11: the five ops are reported with no ceiling and no baseline entry, in both tiers,
+    /// and each target text says which setup work stays outside its sample.
+    #[test]
+    fn spv11_profile_ops_are_reported_without_a_ceiling() {
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        assert_eq!(
+            SITE_PROFILE_OPS,
+            [
+                "site_profile_build",
+                "site_profile_review",
+                "site_profile_menu",
+                "site_profile_get_page",
+                "site_profile_event_after_land"
+            ]
+        );
+        for op in SITE_PROFILE_OPS {
+            let large = format!("{op}{LARGE_SUFFIX}");
+            let text = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
+            assert!(text.starts_with("no spec target: "), "{op}: {text}");
+            assert!(text.contains("(reported)"), "{op}: {text}");
+            assert_eq!(
+                spec_target(&large),
+                Some(format!("{text}{LARGE_TIER_NOTE}")),
+                "{large}"
+            );
+            for name in [op.to_string(), large] {
+                assert_eq!(spec_ceiling_ms(&name), None, "{name} has a ceiling");
+                for class in baseline["classes"].as_object().expect("classes").values() {
+                    assert!(class["ops"].get(&name).is_none(), "{name} is baselined");
+                }
+            }
+        }
+    }
+
+    /// Task 11: the ordinary and the large runner each call the tier once, with their own suffix
+    /// and sample counts (five and three build/menu samples, the tier's event runs).
+    #[test]
+    fn spv11_profile_ops_join_both_workload_tiers() {
+        let src = include_str!("perf.rs");
+        let body = |name: &str| {
+            let from = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        let typical = body("pub fn run_workload(");
+        let call = "tier_site_profiles(&mut out, &proj, dir.path(), &fx, \"\", 5, &TYPICAL_RUNS);";
+        assert_eq!(typical.matches("tier_site_profiles(").count(), 1);
+        assert!(typical.contains(call));
+        let large = body("fn run_large_tier(");
+        let call = "tier_site_profiles(&mut out, &proj, parent, &fx, sfx, 3, &LARGE_RUNS);";
+        assert_eq!(large.matches("tier_site_profiles(").count(), 1);
+        assert!(large.contains(call));
+        // the helper names its five ops through the constant, once each, with the tier's suffix
+        let helper = body("fn site_profiles(");
+        for i in 0..SITE_PROFILE_OPS.len() {
+            assert_eq!(
+                helper.matches(&format!("&name({i})")).count(),
+                1,
+                "op {i} is measured once"
+            );
+        }
+        assert!(helper.contains("format!(\"{}{sfx}\", SITE_PROFILE_OPS[i])"));
     }
 
     /// The intake ops run end to end on a small tree with two proposals, and each has a reported
