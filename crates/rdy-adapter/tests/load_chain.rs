@@ -237,29 +237,20 @@ fn plb5_whole_holder_limit_matches_engine_before_target_writes() {
     let files = chains(d.path()).holder;
     let inputs: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
     let fix = "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
-    let cases: [(&str, fn(&mut ReceiverCaps), &str); 3] = [
-        (
-            "spans",
-            |c| c.spans = 0,
-            "The redaction exceeds 1000000 scanned frames.",
-        ),
-        (
-            "frames",
-            |c| c.frames = 0,
-            "The redaction exceeds 1000000 scanned frames.",
-        ),
-        (
-            "bytes",
-            |c| c.bytes = 0,
-            "The redaction exceeds 2147483648 scanned bytes.",
-        ),
-    ];
+    let frames = "The redaction exceeds 1000000 scanned frames.";
+    let bytes = "The redaction exceeds 2147483648 scanned bytes.";
+    // each case lowers one cap; the other two keep the values the guard captured
+    let cases = [("spans", frames), ("frames", frames), ("bytes", bytes)];
     let kept = ReceiverCaps::current();
-    for (name, lower, message) in cases {
+    for (name, message) in cases {
         let core_dir = d.path().join(format!("{name}-core"));
         let adapter_dir = d.path().join(format!("{name}-adapter"));
         {
-            let _caps = LoweredCap::new(lower);
+            let _caps = LoweredCap::new(|c| match name {
+                "spans" => c.spans = 0,
+                "frames" => c.frames = 0,
+                _ => c.bytes = 0,
+            });
             let core = rdy_engine::load::load_chain(&files, &core_dir, None).unwrap_err();
             let got = maintenance::load_chain(&files, &adapter_dir, None).unwrap_err();
             for e in [core, got] {
