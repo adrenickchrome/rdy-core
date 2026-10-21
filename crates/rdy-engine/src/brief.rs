@@ -1649,8 +1649,14 @@ pub(crate) fn effective_lifecycle(m: &Materialized, id: Option<&BlockId>) -> Opt
 
 /// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose
 /// block does not resolve are skipped; a subject of a presentational type is exempt (Q6d), and
-/// for `create` and `rebalance` the subject is the parent.
-fn subjects<'a>(pack: &Pack, m: &Materialized, ops: &'a [OpInput]) -> Vec<Subject<'a>> {
+/// for `create` and `rebalance` the subject is the parent. A `reaffirm` op's subjects are the
+/// decisions `reaffirmed` says it selected (p-0SH30), each once, never a parent.
+fn subjects<'a>(
+    pack: &Pack,
+    m: &Materialized,
+    ops: &'a [OpInput],
+    reaffirmed: &crate::reaffirm::Selection,
+) -> Vec<Subject<'a>> {
     // the anchor each create of this batch hangs from, by the id it was given ($name or an id)
     let mut created: HashMap<&str, Anchor> = HashMap::new();
     let existing = |text: &str| -> Option<BlockId> {
@@ -1669,8 +1675,23 @@ fn subjects<'a>(pack: &Pack, m: &Materialized, ops: &'a [OpInput]) -> Vec<Subjec
     };
     let exempt = |b: &Block| pack.is_presentational(&b.block_type);
     let mut out = vec![];
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
         match op {
+            OpInput::Reaffirm { .. } => {
+                for s in reaffirmed.of(i) {
+                    let Some(b) = m.get(&s.id) else {
+                        continue;
+                    };
+                    if exempt(b) {
+                        continue;
+                    }
+                    out.push(Subject {
+                        target: b.id.clone(),
+                        stable: effective_stable(m, Some(&b.id)),
+                        created_type: None,
+                    });
+                }
+            }
             OpInput::Create {
                 id,
                 parent,
@@ -1813,14 +1834,16 @@ fn short_token(t: &str) -> String {
 /// briefing where they touch stable content. Writes that touch only drafts are never refused;
 /// an unknown or stale cited briefing is a `W_BRIEF_STALE` warning on them. A refusal names, in
 /// `briefing.ids`, every block a fresh briefing must cover (`expand_error` computes it).
+/// `reaffirmed` is what the write's reaffirm ops selected on `m` (`reaffirm::select`).
 pub(crate) fn check(
     pack: &Pack,
     reg: &BriefRegistry,
     m: &Materialized,
     ops: &[OpInput],
+    reaffirmed: &crate::reaffirm::Selection,
     brief: Option<&str>,
 ) -> Result<Vec<Issue>, RdyError> {
-    let subjects = subjects(pack, m, ops);
+    let subjects = subjects(pack, m, ops, reaffirmed);
     let stable: BTreeSet<BlockId> = subjects
         .iter()
         .filter(|s| s.stable)

@@ -1402,6 +1402,7 @@ impl Rdy {
             names: BTreeMap::new(),
             keys,
             inherited: BTreeMap::new(),
+            reaffirmed: vec![],
             warnings,
         })
     }

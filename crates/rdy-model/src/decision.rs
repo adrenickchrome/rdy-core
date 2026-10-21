@@ -69,6 +69,35 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
             .any(|f| old.fields.get(f) != new.fields.get(f))
 }
 
+/// D-EJBPD (p-QMGB4, p-HF5W0): `new` re-affirms `old`. It differs from `old` only in the
+/// store-only `reaffirmed` field and in the hashes of pins `old` already holds: the same id,
+/// type, parent, order, body, links, pinned targets and every other field. A re-affirmation
+/// changes no content, so a frozen decision may take one.
+///
+/// A redacted block's removed fields are unknown, so a write over one is never a re-affirmation.
+pub fn only_reaffirmation_changed(old: &Block, new: &Block) -> bool {
+    use crate::engine_fields::REAFFIRMED;
+    if old.is_redacted() || new.is_redacted() {
+        return false;
+    }
+    let rest = |b: &Block| {
+        b.fields
+            .iter()
+            .filter(|(k, _)| k.as_str() != REAFFIRMED)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>()
+    };
+    old.id == new.id
+        && old.block_type == new.block_type
+        && old.parent == new.parent
+        && old.order == new.order
+        && old.body == new.body
+        && old.links == new.links
+        && old.pins.keys().eq(new.pins.keys())
+        && rest(old) == rest(new)
+        && new.fields.contains_key(REAFFIRMED)
+}
+
 /// An accepted or rejected decision. A redacted block keeps the frozen fact its marker
 /// recorded; removing a body never unfreezes a decision.
 pub fn is_frozen(b: &Block) -> bool {

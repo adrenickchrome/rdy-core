@@ -92,12 +92,15 @@ fn check_base(
 }
 
 /// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
-/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, and
-/// so does one that leaves the block as it is (cf1: the landed side of a conflict, taken).
+/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, so
+/// does a re-affirmation (only `reaffirmed` and pin hashes, D-EJBPD), and so does one that leaves
+/// the block as it is (cf1: the landed side of a conflict, taken).
 fn frozen_for(store: &StoreReader, base: &Block, new: Option<&Block>) -> bool {
     decision::is_frozen(base)
         && !new.is_some_and(|n| {
-            n == base || decision::only_tracking_changed(base, n, store.tracking())
+            n == base
+                || decision::only_tracking_changed(base, n, store.tracking())
+                || decision::only_reaffirmation_changed(base, n)
         })
 }
 

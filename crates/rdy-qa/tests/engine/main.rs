@@ -20,6 +20,7 @@ mod engine_pins;
 mod engine_port;
 mod engine_priv;
 mod engine_pver;
+mod engine_reaffirm;
 mod engine_repin;
 mod engine_retype;
 mod engine_semantic_accept;

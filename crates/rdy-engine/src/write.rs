@@ -218,6 +218,22 @@ pub enum OpInput {
         #[serde(default)]
         targets: Vec<String>,
     },
+    /// D-EJBPD (p-0H3JT): re-affirms a suspect live or partly superseded decision (`id`), or
+    /// every such decision in the view that is suspect on one block (`because`), with a reason.
+    Reaffirm {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        because: Option<String>,
+        #[serde(default)]
+        base: Option<String>,
+        /// Limits the op to suspects on these targets; absent: every current suspect.
+        #[serde(default)]
+        targets: Option<Vec<String>>,
+        /// 1 to 2000 characters once trimmed; an absent reason is empty, and refused.
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 /// The fix for an op that does not parse (and names no unknown field).
@@ -283,6 +299,9 @@ pub struct WriteResult {
     /// Every change an import wrote, oldest first (one per author); empty for every other write.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<String>,
+    /// p-0SH30: each decision a reaffirm op re-affirmed, with its causes; sorted by id.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reaffirmed: Vec<crate::reaffirm::Reaffirmed>,
     pub warnings: Vec<Issue>,
 }
 
@@ -981,6 +1000,9 @@ pub(crate) struct ViewConflicts<'a> {
     pub view: &'a str,
     pub list: &'a [Conflict],
     pub included: &'a [Hash],
+    /// Whether a frozen decision is one a reaffirm op could re-affirm (its `E_FROZEN` fix says
+    /// so); read only when a refusal is built.
+    pub reaffirmable: &'a dyn Fn(&BlockId) -> bool,
 }
 
 /// The block an update, move, delete or repin of `id` starts from, and the base its op records.
@@ -1014,7 +1036,7 @@ fn current_for_edit<'b>(
     }
     if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
         let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts)?;
-        check_not_frozen(id, &cur)?;
+        check_not_frozen(id, &cur, conflicts.reaffirmable)?;
         return Ok((b, cur));
     }
     let cur = ov.get(id).ok_or_else(|| {
@@ -1039,7 +1061,7 @@ fn current_for_edit<'b>(
         ));
     }
     if !update {
-        check_not_frozen(id, cur)?;
+        check_not_frozen(id, cur, conflicts.reaffirmable)?;
     }
     Ok((cur_hash, Cow::Borrowed(cur)))
 }
@@ -1055,7 +1077,17 @@ fn conflicted_for_edit<'b>(
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     let cid = c.id.short();
     let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
-    frozen_in_conflict(conflicts.view, id, c, store, conflicts.included)?;
+    // the hint is computed only when something in the conflict is frozen
+    if conflict_has_frozen(c, store)? {
+        frozen_in_conflict_hinted(
+            conflicts.view,
+            id,
+            c,
+            store,
+            conflicts.included,
+            (conflicts.reaffirmable)(id),
+        )?;
+    }
     let Some(b) = parse_base(base)? else {
         let side_list = sides
             .iter()
@@ -1111,6 +1143,19 @@ pub(crate) fn frozen_in_conflict(
     c: &Conflict,
     store: &rdy_store::Store,
     included: &[Hash],
+) -> Result<(), RdyError> {
+    frozen_in_conflict_hinted(view, id, c, store, included, false)
+}
+
+/// `frozen_in_conflict` for an edit: when `reaffirmable` (a suspect accepted decision a reaffirm
+/// op could re-affirm), the fix ends by naming the op, after the landed-side instruction.
+fn frozen_in_conflict_hinted(
+    view: &str,
+    id: &BlockId,
+    c: &Conflict,
+    store: &rdy_store::Store,
+    included: &[Hash],
+    reaffirmable: bool,
 ) -> Result<(), RdyError> {
     // first pass: the base's and the sides' blocks decide whether anything is frozen
     let frozen_base = match c.base {
@@ -1176,7 +1221,7 @@ pub(crate) fn frozen_in_conflict(
         format!(
             "{id} is an accepted or rejected decision ({which}) and cannot change; this conflict cannot be resolved by an edit"
         ),
-        fix,
+        crate::reaffirm::frozen_fix(fix, reaffirmable),
     ))
 }
 
@@ -1289,12 +1334,13 @@ fn check_tracking_edit(
     new: &Block,
     tracking: &rdy_model::Tracking,
     justification: Option<&Justification>,
+    reaffirmable: &dyn Fn(&BlockId) -> bool,
 ) -> Result<bool, RdyError> {
     if !decision::is_frozen(cur) {
         return Ok(false);
     }
     if !decision::only_tracking_changed(cur, new, tracking) {
-        check_not_frozen(id, cur)?;
+        check_not_frozen(id, cur, reaffirmable)?;
     }
     match justification {
         Some(Justification::Editorial { reason, .. }) if !reason.trim().is_empty() => Ok(true),
@@ -1305,25 +1351,34 @@ fn check_tracking_edit(
     }
 }
 
-fn check_not_frozen(id: &BlockId, cur: &Block) -> Result<(), RdyError> {
+/// `E_FROZEN` for a frozen `cur`; the fix names the reaffirm op when `reaffirmable(id)`.
+fn check_not_frozen(
+    id: &BlockId,
+    cur: &Block,
+    reaffirmable: &dyn Fn(&BlockId) -> bool,
+) -> Result<(), RdyError> {
     if decision::is_frozen(cur) {
         return Err(RdyError::new(
             E_FROZEN,
             format!("{id} is an accepted or rejected decision and cannot change"),
-            format!("write a new decision that supersedes or revokes {id}"),
+            crate::reaffirm::frozen_fix(
+                format!("write a new decision that supersedes or revokes {id}"),
+                reaffirmable(id),
+            ),
         ));
     }
     Ok(())
 }
 
 /// What `build_ops` makes: the ops, created placeholders → ids, the blocks touched, the names
-/// rdy assigned and the keys rdy assigned (both by block id).
+/// rdy assigned and the keys rdy assigned (both by block id), and the decisions re-affirmed.
 type Built = (
     Vec<Op>,
     BTreeMap<String, String>,
     BTreeSet<BlockId>,
     BTreeMap<String, String>,
     BTreeMap<String, String>,
+    Vec<crate::reaffirm::Reaffirmed>,
 );
 
 /// The path of `id` in the overlay: each tree ancestor's name, itself included, joined with `/`.
@@ -1664,20 +1719,38 @@ fn relocate(
     Ok((block.parent != was.0 || block.order != was.1, rekeys))
 }
 
-/// rkey1: `key_auto` marks a key rdy chose (a create without a key, an import, `rdy keys
-/// assign`). An agent never sends it: a copied marker would let rdy re-derive a key the agent chose.
-fn refuse_key_auto(fields: &BTreeMap<String, serde_json::Value>, at: &str) -> Result<(), RdyError> {
-    if !fields.contains_key(rdy_model::key::AUTO_FIELD) {
+/// The fields rdy sets and a write's input never does. rkey1: `key_auto` marks a key rdy chose
+/// (a create without a key, an import, `rdy keys assign`); a copied marker would let rdy
+/// re-derive a key the agent chose. p-8YP1G: the engine metadata fields (`reaffirmed`,
+/// `reflects_at`) are written only by a reaffirm op or a code repin, never set or unset by a
+/// create or an update.
+fn refuse_engine_input(
+    fields: &BTreeMap<String, serde_json::Value>,
+    unset: &[String],
+    at: &str,
+) -> Result<(), RdyError> {
+    let (message, fix) = if fields.contains_key(rdy_model::key::AUTO_FIELD) {
+        (
+            format!(
+                "{at} sets {:?}, and rdy sets it: it marks a key rdy derived from the path",
+                rdy_model::key::AUTO_FIELD
+            ),
+            format!(
+                "remove {}; set key to choose the key yourself, or leave key out and rdy derives one",
+                rdy_model::key::AUTO_FIELD
+            ),
+        )
+    } else if let Some(f) = rdy_model::engine_fields::ENGINE_FIELDS
+        .iter()
+        .find(|f| fields.contains_key(**f) || unset.iter().any(|u| u == *f))
+    {
+        (
+            format!("{at} sets {f:?}, and rdy sets it"),
+            format!("remove {f}; use reaffirm or repin with code: true"),
+        )
+    } else {
         return Ok(());
-    }
-    let message = format!(
-        "{at} sets {:?}, and rdy sets it: it marks a key rdy derived from the path",
-        rdy_model::key::AUTO_FIELD
-    );
-    let fix = format!(
-        "remove {}; set key to choose the key yourself, or leave key out and rdy derives one",
-        rdy_model::key::AUTO_FIELD
-    );
+    };
     let mut e = RdyError::new(E_VALIDATION, message.clone(), fix.clone());
     e.issues = vec![Issue {
         severity: rdy_schema::Severity::Error,
@@ -1691,7 +1764,8 @@ fn refuse_key_auto(fields: &BTreeMap<String, serde_json::Value>, at: &str) -> Re
 
 /// Builds the ops of `inputs` against `base`. `rdy_keys` names the blocks whose key an update
 /// in `inputs` sets on rdy's behalf (`rdy keys assign`): those keys get `key_auto`; any other
-/// key an update sets is the caller's.
+/// key an update sets is the caller's. `selection` holds what each reaffirm op selected on
+/// `base` (`reaffirm::select`, run before the briefing check).
 #[allow(clippy::too_many_arguments)]
 fn build_ops(
     pack: &Pack,
@@ -1702,6 +1776,7 @@ fn build_ops(
     conflicts: &ViewConflicts<'_>,
     justification: Option<&Justification>,
     rdy_keys: &BTreeSet<BlockId>,
+    selection: &crate::reaffirm::Selection,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
@@ -1720,6 +1795,8 @@ fn build_ops(
     let mut repinned: Vec<BlockId> = vec![];
     // trk1: frozen decisions this write changes only in tracking fields
     let mut tracking_edits: BTreeSet<BlockId> = BTreeSet::new();
+    // D-EJBPD: decisions this write re-affirms (metadata and pins only), with their causes
+    let mut reaffirmed: BTreeMap<BlockId, Vec<String>> = BTreeMap::new();
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -1835,7 +1912,7 @@ fn build_ops(
                     &mut prior,
                 )?;
                 let body = res.text(&body, RefMode::for_body(&block_type))?;
-                refuse_key_auto(&fields, &format!("op {i}"))?;
+                refuse_engine_input(&fields, &[], &format!("op {i}"))?;
                 let sets_key = fields.contains_key("key");
                 let mut block = Block {
                     id: new_id.clone(),
@@ -1884,7 +1961,7 @@ fn build_ops(
                 move_to,
             } => {
                 let id = res.id(&id)?;
-                refuse_key_auto(&fields, id.as_str())?;
+                refuse_engine_input(&fields, &unset, id.as_str())?;
                 let (base_hash, cur) =
                     current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, true)?;
                 let cur: &Block = &cur;
@@ -1964,7 +2041,14 @@ fn build_ops(
                     .1;
                 }
                 // after the move: a frozen decision that moves is not a tracking-only edit
-                if check_tracking_edit(&id, cur, &block, store.tracking(), justification)? {
+                if check_tracking_edit(
+                    &id,
+                    cur,
+                    &block,
+                    store.tracking(),
+                    justification,
+                    conflicts.reaffirmable,
+                )? {
                     tracking_edits.insert(id.clone());
                 }
                 check_decided_at(session, &block, Some(cur))?;
@@ -2271,6 +2355,52 @@ fn build_ops(
                     block,
                 });
             }
+            OpInput::Reaffirm { id, base: b, .. } => {
+                let (Some(sel), Some(g)) = (selection.ops.get(&i), selection.graph.as_deref())
+                else {
+                    return Err(RdyError::new(
+                        E_INTERNAL,
+                        format!("op {i}: a reaffirm op was not selected before the write"),
+                        "report this as a bug in rdy",
+                    ));
+                };
+                // only `id` takes a base (`because` with one is refused by the selection)
+                let b = if id.is_some() { b } else { None };
+                for s in &sel.decisions {
+                    // the strict base, stale-base and conflict checks of every edit; a clean
+                    // frozen decision passes here, as for an update (the dedicated path)
+                    let (base_hash, cur) = current_for_edit(
+                        &ov,
+                        &s.id,
+                        &b,
+                        &touched,
+                        &rekey_only,
+                        conflicts,
+                        store,
+                        true,
+                    )?;
+                    let tracking = store.tracking();
+                    let block =
+                        crate::reaffirm::reaffirmed_block(g, &cur, &s.causes, &sel.reason, &|t| {
+                            ov.get(t).map(|x| x.content_hash_with(tracking))
+                        })?;
+                    // like a repin: re-affirming against a target this write changes is refused
+                    // below, and the content hash leaves the metadata and pins out
+                    repinned.extend(s.causes.iter().cloned());
+                    reaffirmed.insert(
+                        s.id.clone(),
+                        s.causes.iter().map(ToString::to_string).collect(),
+                    );
+                    drop_rekey_op(&s.id, &mut rekey_only, &mut ops, &mut prior);
+                    prior.push((true, block.pins.clone())); // the second pass keeps these pins
+                    touched.insert(s.id.clone());
+                    ov.set(s.id.clone(), Some(block.clone()));
+                    ops.push(Op::Update {
+                        base: base_hash,
+                        block,
+                    });
+                }
+            }
         }
     }
     // akey1 (FW-PR3): a doc or folder created without a key gets one from its path, once every
@@ -2351,7 +2481,10 @@ fn build_ops(
             Op::Delete { .. } => continue,
         };
         let mut targets = vec![];
-        for tok in block.ref_tokens() {
+        // a re-affirmation keeps the content, so the references the decision holds, a deleted
+        // target's included (`against: deleted`); its op set its pins
+        let keeps_refs = reaffirmed.contains_key(&block.id);
+        for tok in block.ref_tokens().into_iter().filter(|_| !keeps_refs) {
             if let Some(name) = tok.strip_prefix('$') {
                 return Err(bad(
                     format!("placeholder ${name} is used before it is created"),
@@ -2386,7 +2519,7 @@ fn build_ops(
             })?;
             targets.push((target, t.content_hash_with(store.tracking())));
         }
-        for link in block.links.values().flatten() {
+        for link in block.links.values().flatten().filter(|_| !keeps_refs) {
             let t = ov.get(&link.target).ok_or_else(|| {
                 RdyError::new(
                     E_UNKNOWN_REF,
@@ -2399,11 +2532,13 @@ fn build_ops(
             })?;
             targets.push((link.target.clone(), t.content_hash_with(store.tracking())));
         }
-        // a tracking edit keeps the status the decision already has (trk1)
+        // a tracking edit keeps the status the decision already has (trk1), and so does a
+        // re-affirmation (D-EJBPD)
         if block.block_type == decision::DECISION
             && block.field_str("status") != Some("proposed")
             && !session.role.can_land()
             && !tracking_edits.contains(&block.id)
+            && !reaffirmed.contains_key(&block.id)
         {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -2458,7 +2593,14 @@ fn build_ops(
     // a block whose only change is a key that yielded to a top-level name is not one the caller
     // edited
     let touched: BTreeSet<BlockId> = touched.difference(&followed).cloned().collect();
-    Ok((ops, created, touched, names, assigned))
+    let reaffirmed = reaffirmed
+        .into_iter()
+        .map(|(id, causes)| crate::reaffirm::Reaffirmed {
+            id: id.to_string(),
+            causes,
+        })
+        .collect();
+    Ok((ops, created, touched, names, assigned, reaffirmed))
 }
 
 /// The ruling on D-YQCY9's task: `implements` names the decision a change carries out, which
@@ -2798,8 +2940,13 @@ impl Rdy {
         let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
         check_implements(&st, &scope, &m, req.justification.as_ref())?;
-        let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
-        let (ops, created, touched, names, keys) = build_ops(
+        // D-EJBPD: what each reaffirm op selects, once, on the starting view, before the
+        // briefing check (which must cover exactly those decisions) and before any op applies
+        let selection = crate::reaffirm::select(&st, &scope, &req.ops)?;
+        let brief_warnings =
+            crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, &selection, brief)?;
+        let reaffirmable = |id: &BlockId| crate::reaffirm::reaffirmable(&st, &scope, id);
+        let (ops, created, touched, names, keys, reaffirmed) = build_ops(
             &self.pack,
             &self.store,
             &m,
@@ -2809,9 +2956,11 @@ impl Rdy {
                 view: &req.view,
                 list: &conflicts,
                 included: &included,
+                reaffirmable: &reaffirmable,
             },
             req.justification.as_ref(),
             rdy_keys,
+            &selection,
         )?;
         refuse_removed_content(&self.store, &ops)?;
         let change = Change {
@@ -2873,6 +3022,7 @@ impl Rdy {
             keys,
             inherited: BTreeMap::new(),
             changes: vec![],
+            reaffirmed,
             warnings,
         })
     }
