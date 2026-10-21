@@ -432,6 +432,10 @@ fn hc5_valid_source_with_too_many_carried_spans_refuses_before_target() {
     ));
     assert_eq!(e.code, E_REDACTION_LIMIT, "{e:?}");
     assert_eq!(e.message, "The redaction exceeds 100000 carried spans.");
+    assert_eq!(
+        e.fix,
+        "Stop at another place, or load the whole chain with no stop."
+    );
     assert_eq!(tree(d.path()), before);
     // the whole chain still loads: its apply covers every copy
     let whole = inspect_facts(&files, None).unwrap();

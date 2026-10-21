@@ -125,6 +125,12 @@ pub const REDACTION_TARGET_FIX: &str =
     "Use a block id, id@full-version-hash, or blob:full-manifest-hash.";
 /// The fix of `E_REDACTION_LIMIT`.
 pub const REDACTION_LIMIT_FIX: &str = "Select fewer targets, then run the dry run again.";
+/// The fix of `E_REDACTION_LIMIT` when a stopped load's carried record is over its bounds.
+pub const STOPPED_LOAD_REDACTION_LIMIT_FIX: &str =
+    "Stop at another place, or load the whole chain with no stop.";
+/// The fix of the one `E_REDACTION_LIMIT` row of the error table: it names both cases, the
+/// redaction and the stopped load. Neither refusal returns it.
+pub const REDACTION_LIMIT_ROW_FIX: &str = "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop.";
 /// The message of `E_REDACTION_REASON`.
 pub const REDACTION_REASON_MESSAGE: &str = "The redaction needs a reason and a reason class.";
 /// The fix of `E_REDACTION_REASON`.
@@ -200,6 +206,14 @@ pub fn redaction_limit(limit: &str) -> RdyError {
         format!("The redaction exceeds {limit}."),
         REDACTION_LIMIT_FIX,
     )
+}
+
+/// `E_REDACTION_LIMIT` for `limit` when a stopped load's carried record is over its bounds: the
+/// message of [`redaction_limit`], with the stopped load's fix.
+pub(crate) fn stopped_load_redaction_limit(limit: &str) -> RdyError {
+    let mut e = redaction_limit(limit);
+    e.fix = STOPPED_LOAD_REDACTION_LIMIT_FIX.to_string();
+    e
 }
 
 /// `E_REDACTION_REASON`.
