@@ -1292,17 +1292,18 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     if overlapping(&resolved) {
         return Err(Input);
     }
-    let open_parent = |p: &Path| -> Result<(File, OsString), InstallFailure> {
+    // the resolved parents, open, with nothing at the outputs' names in them
+    let open_parent = |p: &Path| -> Result<File, InstallFailure> {
         let (parent, name) = (p.parent().ok_or(Input)?, p.file_name().ok_or(Input)?);
         let parent = platform::open_dir(parent).map_err(|_| Input)?;
         if absent_at(&parent, name) {
-            Ok((parent, name.to_os_string()))
+            Ok(parent)
         } else {
             Err(Input)
         }
     };
-    let (unpack_parent, _) = open_parent(&resolved[1])?;
-    let (prefix_parent, _) = open_parent(&resolved[2])?;
+    let unpack_parent = open_parent(&resolved[1])?;
+    let prefix_parent = open_parent(&resolved[2])?;
     if !absent_at(&dir, OsStr::new(SIGNERS_FILE)) {
         return Err(Input);
     }
@@ -1589,15 +1590,17 @@ fn mcp_failure(f: crate::mcp::McpFailure) -> InstallFailure {
 fn scratch_dir(parent: &File) -> io::Result<(String, MadeDir)> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    loop {
+    for _ in 0..100 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let name = format!("rdy-release-check-{}-{n}", std::process::id());
         match MadeDir::make(parent, name.as_ref()) {
             Ok(dir) => return Ok((name, dir)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < u64::from(u16::MAX) => {}
+            // a name left by an earlier process with this ID: try the next
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
     }
+    Err(io::ErrorKind::AlreadyExists.into())
 }
 
 /// Writes the isolated config `config/rdy/config.yaml` in the open directory `root`, through
