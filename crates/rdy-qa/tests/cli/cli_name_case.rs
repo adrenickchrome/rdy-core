@@ -77,8 +77,9 @@ fn tree(doc_stem: Option<&str>, folder: Option<&str>) -> tempfile::TempDir {
     t
 }
 
+/// The open views with their change counts: a refused write leaves it as it was.
 fn log_of(s: &Served) -> Value {
-    let (ok, v) = s.json(&["--json", "log"]);
+    let (ok, v) = s.json(&["--json", "view", "ls"]);
     assert!(ok, "{v}");
     v
 }
@@ -167,7 +168,11 @@ fn plc4_tree_check_refuses_case_folded_id_stems() {
         ("fd-7kq2m", tree(None, Some("fd-7kq2m"))),
     ] {
         let diags = check_path(&pack(), None, t.path()).unwrap();
-        let hit: Vec<_> = diags.iter().filter(|d| d.code == "E_BAD_NAME").collect();
+        // the file-name check at (1,1); the block check on the entry adds its own line
+        let hit: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == "E_BAD_NAME" && (d.line, d.column) == (1, 1))
+            .collect();
         assert_eq!(hit.len(), 1, "{bad}: {diags:#?}");
         let d = hit[0];
         assert_eq!((d.line, d.column), (1, 1), "{d:?}");
