@@ -571,11 +571,13 @@ mod tests {
         rt
     }
 
+    type Before = Box<dyn FnOnce(&dyn Engine) + Send>;
+
     /// An engine that runs `before` once, between the profile lookup and the build facts: right
     /// after the link is given.
     struct Barrier {
         inner: Arc<dyn Engine>,
-        before: Mutex<Option<Box<dyn FnOnce(&dyn Engine) + Send>>>,
+        before: Mutex<Option<Before>>,
     }
 
     impl Engine for Barrier {
