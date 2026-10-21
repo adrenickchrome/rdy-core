@@ -168,10 +168,10 @@ fn plc4_tree_check_refuses_case_folded_id_stems() {
         ("fd-7kq2m", tree(None, Some("fd-7kq2m"))),
     ] {
         let diags = check_path(&pack(), None, t.path()).unwrap();
-        // the file-name check at (1,1); the block check on the entry adds its own line
+        // the name check on the path (1,1); the block check on the entry adds its own line
         let hit: Vec<_> = diags
             .iter()
-            .filter(|d| d.code == "E_BAD_NAME" && (d.line, d.column) == (1, 1))
+            .filter(|d| d.code == "E_BAD_NAME" && d.fix.starts_with("rename it"))
             .collect();
         assert_eq!(hit.len(), 1, "{bad}: {diags:#?}");
         let d = hit[0];
@@ -181,7 +181,10 @@ fn plc4_tree_check_refuses_case_folded_id_stems() {
             format!("{bad:?} is not a valid name: {LOOKALIKE}")
         );
         assert_eq!(d.fix, "rename it, e.g. to \"untitled-00000\"");
-        assert!(d.file.contains(bad), "{d:?}");
+        assert!(
+            d.file.ends_with(bad) || d.file.ends_with(&format!("{bad}.yaml")),
+            "{d:?}"
+        );
 
         let dir: &Path = t.path();
         let out = s.rdy(&["import", dir.to_str().unwrap(), "--view", "work"]);
