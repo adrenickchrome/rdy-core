@@ -830,3 +830,168 @@ fn hc8_stopped_warning_lists_reapprovable_targets() {
         .unwrap();
     assert!(stop.status.success());
 }
+
+/// One bad output path of a dump call, and the error triple every dump call gives for it.
+struct OutCase {
+    name: &'static str,
+    out: PathBuf,
+    dir: PathBuf,
+    code: &'static str,
+    message: &'static str,
+    fix: &'static str,
+}
+
+const SENTINEL: &[u8] = b"a file that a dump must never touch";
+
+/// An existing file, a missing parent, and a fresh path under the project `.rdy`.
+fn out_cases(c: &Chain) -> Vec<OutCase> {
+    let sentinel = c.to("sentinel.rdydump");
+    std::fs::write(&sentinel, SENTINEL).unwrap();
+    let missing = c.to("no-such-dir");
+    let rdy = c.s.dir.path().join(".rdy");
+    vec![
+        OutCase {
+            name: "an existing file",
+            dir: c.scratch.path().to_path_buf(),
+            out: sentinel,
+            code: "E_ALREADY_EXISTS",
+            message: "<OUT> exists",
+            fix: "pick a new file name; rdy dump never overwrites a file",
+        },
+        OutCase {
+            name: "a missing parent",
+            out: missing.join("x.rdydump"),
+            dir: missing,
+            code: "E_BAD_INPUT",
+            message: "<DIR> does not exist",
+            fix: "create the directory first, or pick another path",
+        },
+        OutCase {
+            name: "a path under .rdy",
+            out: rdy.join("plc2-out.rdydump"),
+            dir: rdy,
+            code: "E_BAD_INPUT",
+            message: "<OUT> is inside the project .rdy directory",
+            fix: "dump to a path outside .rdy",
+        },
+    ]
+}
+
+impl OutCase {
+    /// The error triple of a failed call, with this case's paths replaced by placeholders.
+    fn normalized(&self, triple: &Value) -> Value {
+        let text = |k: &str| {
+            triple[k]
+                .as_str()
+                .unwrap_or_else(|| panic!("{}: {triple}", self.name))
+                .replace(arg(&self.out), "<OUT>")
+                .replace(arg(&self.dir), "<DIR>")
+        };
+        json!({"code": triple["code"], "message": text("message"), "fix": text("fix")})
+    }
+
+    fn want(&self) -> Value {
+        json!({"code": self.code, "message": self.message, "fix": self.fix})
+    }
+
+    /// Nothing was written: the sentinel keeps its bytes, and no output or partial file exists
+    /// next to the path.
+    fn assert_untouched(&self, what: &str) {
+        if self.name == "an existing file" {
+            assert_eq!(std::fs::read(&self.out).unwrap(), SENTINEL, "{what}");
+        } else {
+            assert!(!self.out.exists(), "{what}: {}", self.name);
+        }
+        if self.dir.exists() {
+            let stem = self.out.file_name().unwrap().to_string_lossy().into_owned();
+            let near: Vec<String> = std::fs::read_dir(&self.dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&stem) && *n != stem)
+                .collect();
+            assert!(near.is_empty(), "{what}: {}: partial {near:?}", self.name);
+        }
+    }
+}
+
+fn cli_dump_failure(c: &Chain, out: &Path, after: Option<&Path>) -> Value {
+    let mut args = vec!["--json", "dump", "--out", arg(out)];
+    if let Some(after) = after {
+        args.extend(["--after", arg(after)]);
+    }
+    let (ok, e) = c.s.json(&args);
+    assert!(!ok, "{e}");
+    reply_failure(&e)
+}
+
+fn mcp_dump_failure(m: &mut McpClient, out: &Path, after: Option<&Path>) -> Value {
+    let mut args = json!({"out": arg(out)});
+    if let Some(after) = after {
+        args["after"] = json!(arg(after));
+    }
+    match m.call("rdy_dump", args) {
+        rdy_qa::mcp::Reply::ToolError(v) => reply_failure(&v),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn plc2_empty_increment_checks_out_on_cli_and_mcp() {
+    let c = chain();
+    let mut m = c.agent();
+    for case in out_cases(&c) {
+        let cli = cli_dump_failure(&c, &case.out, Some(&c.i2));
+        assert_eq!(case.normalized(&cli), case.want(), "{}: cli", case.name);
+        case.assert_untouched("cli");
+        let mcp = mcp_dump_failure(&mut m, &case.out, Some(&c.i2));
+        assert_eq!(case.normalized(&mcp), case.want(), "{}: mcp", case.name);
+        case.assert_untouched("mcp");
+    }
+}
+
+#[test]
+fn plc2_output_guards_match_full_and_nonempty_dump() {
+    let c = chain();
+    let mut m = c.agent();
+    for case in out_cases(&c) {
+        let empty = case.normalized(&cli_dump_failure(&c, &case.out, Some(&c.i2)));
+        assert_eq!(empty, case.want(), "{}: empty", case.name);
+        for (what, after) in [("full", None), ("after f0", Some(c.f0.as_path()))] {
+            let cli = case.normalized(&cli_dump_failure(&c, &case.out, after));
+            assert_eq!(cli, empty, "{}: cli {what}", case.name);
+            case.assert_untouched(what);
+            let mcp = case.normalized(&mcp_dump_failure(&mut m, &case.out, after));
+            assert_eq!(mcp, empty, "{}: mcp {what}", case.name);
+            case.assert_untouched(what);
+        }
+    }
+}
+
+#[test]
+fn plc2_predecessor_error_precedes_output_error() {
+    let c = chain();
+    // a file that is no dump: cut the last bytes off i2, as the late-corruption test does
+    let bytes = std::fs::read(&c.i2).unwrap();
+    let bad = c.to("bad-cut.rdydump");
+    std::fs::write(&bad, &bytes[..bytes.len() - 5]).unwrap();
+    let sentinel = c.to("sentinel.rdydump");
+    std::fs::write(&sentinel, SENTINEL).unwrap();
+    // the engine path, with a fresh output
+    let want = {
+        let r = Rdy::open(c.s.dir.path()).unwrap();
+        let st = r.read();
+        let e = st
+            .dump_after_file(&bad, &c.to("fresh.rdydump"))
+            .expect_err("a corrupt predecessor");
+        drop(st);
+        r.close().unwrap();
+        failure(&e)
+    };
+    assert_eq!(want["code"], "E_DUMP", "{want}");
+    let cli = cli_dump_failure(&c, &sentinel, Some(&bad));
+    assert_eq!(cli, want, "cli");
+    let mut m = c.agent();
+    let mcp = mcp_dump_failure(&mut m, &sentinel, Some(&bad));
+    assert_eq!(mcp, want, "mcp");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), SENTINEL);
+}

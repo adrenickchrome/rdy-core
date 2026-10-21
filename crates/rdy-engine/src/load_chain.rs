@@ -12,7 +12,7 @@
 use crate::carried_warning;
 use crate::dump_error;
 use crate::dump_stop::{DumpStop, MAX_CHAIN_FILES};
-use crate::error::{E_BAD_INPUT, E_IO, RdyError};
+use crate::error::{E_BAD_INPUT, E_IO, RdyError, stopped_load_redaction_limit};
 use crate::load::{
     LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target, create_store, damaged,
     holder_files, incomplete, next_step, open_dump, place, read_error, target_error,
@@ -27,6 +27,7 @@ use rdy_store::dump_scan::{
 };
 use rdy_store::holder::StoreMode;
 use rdy_store::ingest::Ingest;
+use rdy_store::redaction::limit;
 use rdy_store::redaction_carried::check_bounds;
 use rdy_store::segment::Location;
 use std::io::{BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -246,7 +247,7 @@ fn carried_records(
     out.try_reserve_exact(scan.carried().len())
         .map_err(|_| allocation())?;
     for r in scan.carried() {
-        let bytes = check_bounds(r)?;
+        let bytes = check_bounds(r).map_err(|e| carrier_limit(&e).unwrap_or_else(|| e.into()))?;
         out.push((rdy_model::Hash::of(&bytes), r.clone()));
     }
     Ok(out)
@@ -444,7 +445,7 @@ fn ingest_tail(
     }
     ingest
         .append_carried(scan.residues(), scan.carried())
-        .map_err(|e| target_error(loading, e))?;
+        .map_err(|e| carried_target_error(loading, e))?;
     ingest
         .upgrade_in_repo(scan.store_format(), chain_repo(scan))
         .map_err(|e| target_error(loading, e))?;
@@ -452,6 +453,25 @@ fn ingest_tail(
         StoreError::Dump { what, .. } => damaged(file, at, &what),
         e => target_error(loading, e),
     })
+}
+
+/// The engine's error of the carried batch's write into `loading`: a carried record or residue
+/// over its bounds is the stopped load's `E_REDACTION_LIMIT`; any other error is the target's.
+fn carried_target_error(loading: &Path, error: StoreError) -> RdyError {
+    carrier_limit(&error).unwrap_or_else(|| target_error(loading, error))
+}
+
+/// The stopped load's `E_REDACTION_LIMIT` when `error` is a carried record's bound: its span
+/// count or its encoded size. None for any other error.
+fn carrier_limit(error: &StoreError) -> Option<RdyError> {
+    match error {
+        StoreError::RedactionLimit { limit: bound }
+            if *bound == limit::CARRIED_SPANS || *bound == limit::RECORD =>
+        {
+            Some(stopped_load_redaction_limit(bound))
+        }
+        _ => None,
+    }
 }
 
 /// The repo id every header of the scanned chain names (the scanner refused any other).
@@ -480,6 +500,9 @@ fn stop_match(stop: &DumpStop) -> StopMatch {
 fn scan_error(files: &[PathBuf], e: ScanError) -> RdyError {
     match e {
         ScanError::Input { file, source } => {
+            if let Some(e) = carrier_limit(&source) {
+                return e;
+            }
             let Some(path) = files.get(file) else {
                 return source.into();
             };
@@ -597,4 +620,91 @@ pub fn inspect_facts(files: &[PathBuf], stop: Option<&str>) -> Result<InspectFac
         carried: s.carried().len(),
         residues: s.residues().len(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOAD_FIX: &str = "Stop at another place, or load the whole chain with no stop.";
+    const DRY_RUN_FIX: &str = "Select fewer targets, then run the dry run again.";
+
+    fn triple(e: &RdyError) -> (&str, &str, &str) {
+        (e.code, e.message.as_str(), e.fix.as_str())
+    }
+
+    #[test]
+    fn plc1_carried_limit_translation_keeps_redaction_advice_separate() {
+        let files = vec![PathBuf::from("full.rdydump"), PathBuf::from("inc.rdydump")];
+        for (lim, message) in [
+            (
+                limit::CARRIED_SPANS,
+                "The redaction exceeds 100000 carried spans.",
+            ),
+            (
+                limit::RECORD,
+                "The redaction exceeds 16777216 bytes per record.",
+            ),
+        ] {
+            // the scanner's prepared-carrier bound, for an input in range and one out of range
+            for file in [1, 7] {
+                let e = scan_error(
+                    &files,
+                    ScanError::Input {
+                        file,
+                        source: StoreError::RedactionLimit { limit: lim },
+                    },
+                );
+                assert_eq!(
+                    triple(&e),
+                    ("E_REDACTION_LIMIT", message, LOAD_FIX),
+                    "{lim} at input {file}"
+                );
+            }
+        }
+        // a redaction keeps the dry-run advice: the constructor and the generic conversion
+        let direct = crate::error::redaction_limit(limit::TARGETS);
+        let converted: RdyError = StoreError::RedactionLimit {
+            limit: limit::TARGETS,
+        }
+        .into();
+        for e in [direct, converted] {
+            assert_eq!(
+                triple(&e),
+                (
+                    "E_REDACTION_LIMIT",
+                    "The redaction exceeds 256 targets.",
+                    DRY_RUN_FIX
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn plc1_residue_record_limit_uses_the_load_fix() {
+        let loading = Path::new("p/.rdy/store.loading");
+        for (lim, message) in [
+            (
+                limit::RECORD,
+                "The redaction exceeds 16777216 bytes per record.",
+            ),
+            (
+                limit::CARRIED_SPANS,
+                "The redaction exceeds 100000 carried spans.",
+            ),
+        ] {
+            let e = carried_target_error(loading, StoreError::RedactionLimit { limit: lim });
+            assert_eq!(
+                triple(&e),
+                ("E_REDACTION_LIMIT", message, LOAD_FIX),
+                "{lim}"
+            );
+        }
+        // every other error keeps the target's context
+        let io = || StoreError::Io(std::io::Error::other("disk full"));
+        let want = target_error(loading, io());
+        let got = carried_target_error(loading, io());
+        assert_eq!(triple(&got), triple(&want));
+        assert!(got.message.contains("store.loading"), "{got:?}");
+    }
 }

@@ -188,7 +188,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         E_REDACTION_LIMIT,
         "The redaction exceeds {limit}.",
-        REDACTION_LIMIT_FIX,
+        REDACTION_LIMIT_ROW_FIX,
     ),
     (
         E_REDACTION_REASON,

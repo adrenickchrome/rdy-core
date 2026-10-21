@@ -288,25 +288,33 @@ impl<S: Service<RoleServer>> Service<RoleServer> for Ordered<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn ord1_turns_go_in_order_and_a_retired_turn_is_skipped() {
         let t = Arc::new(Turns::default());
         let order = Arc::new(Mutex::new(vec![]));
         let mut tasks = vec![];
+        // worker 1 says when it is done with its turn: the test waits for that signal
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut done_tx = Some(done_tx);
         // started newest first: the order comes from the stamps, not from who waits first
         for seq in [4u64, 3, 1, 0] {
             let (t, order) = (Arc::clone(&t), Arc::clone(&order));
+            let done = if seq == 1 { done_tx.take() } else { None };
             tasks.push(tokio::spawn(async move {
-                let _turn = t.take(seq).await;
+                let turn = t.take(seq).await;
                 order.lock().unwrap().push(seq);
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                drop(turn);
+                if let Some(done) = done {
+                    done.send(()).unwrap();
+                }
             }));
         }
-        // turn 2 never comes: retiring it lets 3 and 4 go
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // turn 2 never comes: turns 0 and 1 are done, and 3 and 4 still wait
+        done_rx.await.unwrap();
         assert_eq!(*order.lock().unwrap(), vec![0, 1]);
+        assert_eq!(t.current(), 2);
+        // retiring turn 2 lets 3 and 4 go
         t.end(2);
         for task in tasks {
             task.await.unwrap();
@@ -322,18 +330,20 @@ mod tests {
     async fn ord1_a_wait_dropped_before_its_turn_retires_it() {
         let t = Arc::new(Turns::default());
         let first = t.take(0).await;
-        let waiting = {
-            let t = Arc::clone(&t);
-            tokio::spawn(async move {
-                let _turn = t.take(1).await;
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        waiting.abort();
-        let _ = waiting.await;
+        let mut waiting = Box::pin(t.take(1));
+        // one poll takes the future past its first wait: it is pending while turn 0 is held
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(waiting.as_mut().poll(cx).is_pending())
+        })
+        .await;
+        assert!(pending, "turn 1 did not wait for turn 0");
+        // the wait is dropped before its turn came, and the drop retires turn 1
+        drop(waiting);
         drop(first);
         // turn 1 was retired by the dropped wait: turn 2 does not hang
-        let next = tokio::time::timeout(Duration::from_secs(2), t.take(2)).await;
-        assert!(next.is_ok(), "turn 2 waited for an abandoned turn 1");
+        let next = t.take(2).await;
+        assert_eq!(t.current(), 2);
+        drop(next);
+        assert_eq!(t.current(), 3);
     }
 }

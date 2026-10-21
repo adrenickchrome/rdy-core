@@ -319,9 +319,12 @@ fn hc4_no_suffix_returns_prior_end_without_any_file() {
     let kept = d.path().join("kept.rdydump");
     std::fs::write(&kept, b"someone else's file").unwrap();
     let reads = project_file_reads();
+    // an output that exists is refused even when nothing would be written
+    let e = st.dump_after(&full.chain_end(), &kept).unwrap_err();
+    assert_eq!(e.code, "E_ALREADY_EXISTS", "{e:?}");
+    assert_eq!(e.message, format!("{} exists", kept.display()));
     for (got, target) in [
         (st.dump_after(&full.chain_end(), &out).unwrap(), &out),
-        (st.dump_after(&full.chain_end(), &kept).unwrap(), &kept),
         (st.dump_after_file(&full_path, &out).unwrap(), &out),
     ] {
         assert_eq!(
@@ -345,7 +348,7 @@ fn hc4_no_suffix_returns_prior_end_without_any_file() {
             }
         );
         assert_eq!(got.chain_end(), full.chain_end());
-        assert!(target == &kept || !target.exists());
+        assert!(!target.exists());
     }
     // no project file was read, no output was written or replaced, no partial was left
     assert_eq!(project_file_reads(), reads);

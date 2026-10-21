@@ -1529,4 +1529,83 @@ mod tests {
         assert_eq!(u.href_from("c.html"), "a/b.html#x");
         assert_eq!(u.href_from("a/c.html"), "../a/b.html#x");
     }
+
+    /// rdx11 (POST-LAUNCH 52): a write can no longer name a sibling like a removed doc's id, but
+    /// the clash refusal stays as defence in depth. On a synthetic state, built with no write, a
+    /// removed doc's file (named by its id) and a sibling named that id ignoring case refuse a
+    /// build that writes files, naming the sibling to rename. `Site::new` writes nothing, and both
+    /// builds that write files ask for this refusal before they build anything, so the last site
+    /// is kept.
+    #[test]
+    fn rdx11_a_neutral_path_that_matches_a_sibling_refuses_with_no_write() {
+        use rdy_model::FieldValue;
+        use rdy_model::redaction::RedactedBlockIdentity;
+        let removed = BlockId::parse("d-SECRT").expect("an id");
+        let sibling = BlockId::parse("d-NBR00").expect("an id");
+        let doc = |id: &BlockId, order: &str, name: &str| Block {
+            id: id.clone(),
+            block_type: tree::DOC.into(),
+            parent: None,
+            order: order.into(),
+            fields: BTreeMap::from([
+                ("name".into(), FieldValue::Str(name.into())),
+                ("title".into(), FieldValue::Str("Neighbour".into())),
+                ("doc_type".into(), FieldValue::Str("page".into())),
+            ]),
+            body: String::new(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            read_identity: None,
+        };
+        let gone = Block::redacted(
+            removed.clone(),
+            tree::DOC.into(),
+            None,
+            "a0".into(),
+            RedactedBlockIdentity {
+                version: rdy_model::Hash::of(b"version"),
+                content_hash: rdy_model::Hash::of(b"content"),
+                frozen: false,
+                request: rdy_model::Hash::of(b"request"),
+            },
+        );
+        let pack = rdy_schema::PackSet::with_builtin()
+            .resolve("rdy-standard")
+            .expect("the pack");
+        let state = |name: &str| {
+            Materialized::build(
+                rdy_model::StateSnapshot::default(),
+                BTreeMap::from([
+                    (removed.clone(), gone.clone()),
+                    (sibling.clone(), doc(&sibling, "a1", name)),
+                ]),
+            )
+        };
+        for name in ["d-secrt", "D-SECRT", "D-secrt"] {
+            let m = state(name);
+            let site = Site::new(&m, &pack, "Project");
+            for verb in ["render", "export"] {
+                let e = site.path_clash(verb).expect("a refusal");
+                assert_eq!(e.code, E_PATH_CLASH);
+                assert_eq!(
+                    e.message,
+                    format!(
+                        "{sibling} is named {name:?}, which matches the file name of redacted doc {removed} (ignoring case), so they cannot both be written as files"
+                    )
+                );
+                assert_eq!(
+                    e.fix,
+                    format!(
+                        "rename {sibling} (a redacted doc's file is named by its id), then {verb} again"
+                    )
+                );
+            }
+        }
+        // renamed, the sibling no longer matches: no refusal, and both docs have pages
+        let m = state("neighbour");
+        let site = Site::new(&m, &pack, "Project");
+        assert!(site.path_clash("render").is_none());
+        assert_eq!(site.page(&removed).as_deref(), Some("d-SECRT.html"));
+        assert_eq!(site.page(&sibling).as_deref(), Some("neighbour.html"));
+    }
 }

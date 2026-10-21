@@ -707,7 +707,7 @@ fn dl1_a_reader_stays_failed_after_an_error() {
 fn dl1_a_path_longer_than_its_length_field_is_refused() {
     let (_b, s, _) = store_and_batches();
     let path = format!(".rdy/packs/{}.yaml", "a".repeat(65536));
-    assert!(is_project_file(&path));
+    assert!(!is_project_file(&path));
     let mut w = DumpWriter::new(Vec::new(), &header_of(&s, &[])).unwrap();
     match w.file(&path, b"x") {
         Err(StoreError::Refused(m)) => assert_eq!(
@@ -719,6 +719,92 @@ fn dl1_a_path_longer_than_its_length_field_is_refused() {
     // nothing was written: the writer still finishes a dump that reads
     let bytes = w.finish(RemovalFacts::default()).unwrap().0;
     assert!(read_all(&bytes).unwrap().is_empty());
+}
+
+/// A pack path whose file name (the part after `.rdy/packs/`) is `n` bytes long, ending in
+/// `suffix`.
+fn pack_path(n: usize, suffix: &str) -> String {
+    format!(".rdy/packs/{}{suffix}", "a".repeat(n - suffix.len()))
+}
+
+#[test]
+fn plc3_pack_filename_bound_includes_the_extension() {
+    assert_eq!(MAX_PACK_FILE_NAME_BYTES, 255);
+    for suffix in [".yaml", ".yml"] {
+        let at = pack_path(255, suffix);
+        assert!(is_project_file(&at), "255 bytes with {suffix}");
+        // the whole path is longer than 255 bytes; only the file name is bounded
+        assert!(at.len() > 255, "{}", at.len());
+        let over = pack_path(256, suffix);
+        assert!(!is_project_file(&over), "256 bytes with {suffix}");
+        let (_b, s, _) = store_and_batches();
+        let mut w = DumpWriter::new(Vec::new(), &header_of(&s, &[])).unwrap();
+        match w.file(&over, b"x") {
+            Err(StoreError::Refused(m)) => assert_eq!(
+                m,
+                format!("the project file path {over:?} is not one rdy carries")
+            ),
+            other => panic!("not refused: {other:?}"),
+        }
+        w.file(&at, b"x").unwrap();
+    }
+    // the closed set is otherwise as it was
+    for ok in [".rdy.yaml", ".rdyignore", ".rdy/packs/a.yml"] {
+        assert!(is_project_file(ok), "{ok}");
+    }
+    for no in [
+        ".rdy/packs/.hidden.yaml",
+        ".rdy/packs/a b.yaml",
+        ".rdy/packs/x.json",
+        ".rdy/packs/a/b.yaml",
+    ] {
+        assert!(!is_project_file(no), "{no}");
+    }
+}
+
+#[test]
+fn plc3_hash_valid_oversized_pack_path_is_refused_on_read() {
+    let (_b, s, batches) = store_and_batches();
+    let good = stream(&s, &batches[..2], &[(".rdy/packs/x.yaml", b"name: x\n")]);
+    let recs = records(&good);
+    assert_eq!(recs[1].0, rec::FILE);
+    let with_path = |path: &str| {
+        let mut r = recs.clone();
+        let mut p = (path.len() as u16).to_le_bytes().to_vec();
+        p.extend_from_slice(path.as_bytes());
+        p.extend_from_slice(b"name: x\n");
+        r[1].1 = p;
+        reseal(&mut r);
+        forge(&r)
+    };
+    for suffix in [".yaml", ".yml"] {
+        // exactly 255 bytes reads, its file whole
+        let at = pack_path(255, suffix);
+        let items = read_all(&with_path(&at)).unwrap();
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, DumpItem::File { path, .. } if *path == at)),
+            "{suffix}"
+        );
+        // 256 bytes: every record is hash-valid and the trailer is true; the path refuses it
+        let over = pack_path(256, suffix);
+        let forged = with_path(&over);
+        match read_all(&forged).unwrap_err() {
+            StoreError::Dump { at, what } => {
+                assert_eq!(
+                    what,
+                    format!("the project file path {over:?} is not one rdy carries")
+                );
+                assert_eq!(at, offset_of(&forged, 1) as u64, "the FILE record's offset");
+            }
+            other => panic!("not a damaged dump: {other}"),
+        }
+    }
+    // the unbent copy is the good stream
+    let mut r = recs.clone();
+    reseal(&mut r);
+    assert_eq!(forge(&r), good);
 }
 
 #[test]

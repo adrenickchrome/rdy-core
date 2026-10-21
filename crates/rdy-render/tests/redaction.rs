@@ -1112,18 +1112,6 @@ fn rdx11_pdf_text_and_images_prove_removal() {
     assert_eq!(pdf_images(pdf), BTreeSet::from([(3, 2)]));
 }
 
-/// Every file under `dir`, by its path under `dir`.
-fn tree(dir: &Path) -> Outputs {
-    walk(dir)
-        .into_iter()
-        .map(|f| {
-            let name = f.strip_prefix(dir).unwrap().display().to_string();
-            let bytes = std::fs::read(&f).unwrap();
-            (name, bytes)
-        })
-        .collect()
-}
-
 /// The words a change page marks as removed (`<del>`), the screen-reader word left out.
 fn deleted_words(html: &str) -> String {
     Regex::new(r#"<del><span class="sr-word">removed: </span>(.*?)</del>"#)
@@ -1134,10 +1122,12 @@ fn deleted_words(html: &str) -> String {
         .join(" ")
 }
 
-/// A removed doc is named by its id (Task 3). When a sibling's name is that id ignoring case,
-/// the two pages would be one file on a file system that ignores case: the render and the print
-/// refuse with E_PATH_CLASH, naming the sibling to rename, and the last rendered site stays as it
-/// was. Once the sibling is renamed, both docs' unaffected children have their pages.
+/// A removed doc is named by its id (Task 3), so a sibling whose name is that id ignoring case
+/// would be the same file on a file system that ignores case. Since POST-LAUNCH 52 a doc or
+/// folder name that is a `d-` or `fd-` id ignoring case is refused at write (E_BAD_NAME), so that
+/// sibling cannot be made: each such write is refused with the name diagnostic and writes
+/// nothing. The render's neutral-path clash refusal (E_PATH_CLASH, the last site kept) stays as
+/// defence in depth; a unit test in `site.rs` pins it on a synthetic state.
 #[test]
 fn rdx11_a_neutral_path_that_matches_a_sibling_refuses_and_keeps_the_last_site() {
     let dir = tempfile::tempdir().unwrap();
@@ -1146,89 +1136,57 @@ fn rdx11_a_neutral_path_that_matches_a_sibling_refuses_and_keeps_the_last_site()
         &mut r,
         "w1",
         json!([
-            {"op": "create", "type": "doc", "id": "d-SECRT", "fields": {"name": "secret", "title": "CANARY doc title", "doc_type": "page"}}
-        ]),
-    );
-    // a fixed id with letters, so the case-folded name always differs from it (a random id
-    // can be all digits; final review fix round 1, finding 10)
-    let removed = bid("d-SECRT");
-    write(
-        &mut r,
-        "w1",
-        json!([
+            {"op": "create", "type": "doc", "id": "d-SECRT", "fields": {"name": "secret", "title": "CANARY doc title", "doc_type": "page"}},
             {"op": "create", "type": "prose", "parent": "d-SECRT", "body": "Kept text of the removed doc."}
         ]),
     );
-    let lower = removed.to_string().to_ascii_lowercase();
-    assert_ne!(lower, removed.to_string(), "the id has upper-case letters");
-    let w = write(
-        &mut r,
-        "w1",
-        json!([
-            {"op": "create", "type": "doc", "id": "$b", "fields": {"name": lower, "title": "Neighbour", "doc_type": "page"}},
-            {"op": "create", "type": "prose", "parent": "$b", "body": "Neighbour text."}
-        ]),
-    );
-    let sibling = bid(&w.created["$b"]);
-    land(&mut r, "w1");
-    let out_dir = tempfile::tempdir().unwrap();
-    let out = out_dir.path().join("site");
-    rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap();
-    let last = tree(&out);
-    let secret = text(&last["secret.html"]);
-    assert!(secret.contains("Kept text of the removed doc."), "{secret}");
-    let neighbour = text(&last[&format!("{lower}.html")]);
-    assert!(neighbour.contains("Neighbour text."), "{neighbour}");
-    r.close().unwrap();
-    authorized_batch_fixture(
-        &dir.path().join(".rdy/store"),
-        &[RequestSpec::new(
-            "redact",
-            vec![RedactTarget::AllVersions(removed.clone())],
-        )],
-        &FixtureOptions::approved(Proof::relayed_human()),
-    );
-
-    let mut r = Rdy::open(dir.path()).unwrap();
-    let message = format!(
-        "{sibling} is named {lower:?}, which matches the file name of redacted doc {removed} (ignoring case), so they cannot both be written as files"
-    );
-    let fix = |verb: &str| {
-        format!("rename {sibling} (a redacted doc's file is named by its id), then {verb} again")
+    let removed = bid("d-SECRT");
+    let state = |r: &mut Rdy| {
+        let end = format!("{:?}", r.store().log_end());
+        let views = r.read().views_with_changes();
+        let ids: Vec<String> = r
+            .read()
+            .materialized(&Scope::View("w1".into()))
+            .unwrap()
+            .ids()
+            .map(|i| i.as_str().to_string())
+            .collect();
+        (end, views, ids)
     };
-    let e = rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (E_PATH_CLASH, message.as_str(), fix("render").as_str())
-    );
-    // nothing was written: the last site, both unaffected children with it, is as it was
-    assert_eq!(tree(&out), last);
-    let e = build_site(&r.read(), &Scope::Canon, Mode::Static)
-        .err()
-        .expect("a refusal");
-    assert_eq!(e.code, E_PATH_CLASH);
-    let e = print::build(&r.read(), &Scope::Canon).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (E_PATH_CLASH, message.as_str(), fix("export").as_str())
-    );
-
-    // renamed, the sibling no longer matches: both docs and their children have pages
-    write(
-        &mut r,
-        "w2",
-        json!([{"op": "update", "id": sibling.to_string(), "fields": {"name": "neighbour"}}]),
-    );
-    land(&mut r, "w2");
-    rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap();
-    let now = tree(&out);
-    let stub = text(&now[&format!("{removed}.html")]);
-    assert!(stub.contains("<title>Content removed."), "{stub}");
-    assert!(stub.contains("Kept text of the removed doc."), "{stub}");
-    let neighbour = text(&now["neighbour.html"]);
-    assert!(neighbour.contains("Neighbour text."), "{neighbour}");
-    assert!(holding(&BTreeMap::from([("site".to_string(), now)]), CANARY).is_empty());
-    print::build(&r.read(), &Scope::Canon).unwrap();
+    let why = "a name cannot look like a block id (it would be read as one)";
+    // the id lower-cased, the id itself, and a mixed case: each names the removed doc's file
+    for bad in ["d-secrt", "D-SECRT", "D-secrt"] {
+        assert!(bad.eq_ignore_ascii_case(removed.as_str()));
+        let before = state(&mut r);
+        let e = r
+            .write(
+                &agent(),
+                WriteRequest {
+                    view: "w1".into(),
+                    ops: serde_json::from_value(json!([
+                        {"op": "create", "type": "doc", "id": "$b", "fields": {"name": bad, "title": "Neighbour", "doc_type": "page"}},
+                        {"op": "create", "type": "prose", "parent": "$b", "body": "Neighbour text."}
+                    ]))
+                    .unwrap(),
+                    justification: None,
+                    message: "write to w1".into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(e.code, E_BAD_NAME, "{bad}");
+        assert_eq!(e.message, format!("{bad:?} is not a valid name: {why}"));
+        let fixed = e.corrected.as_ref().unwrap()["fields"]["name"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(fixed.starts_with("untitled-"), "{fixed}");
+        assert_eq!(e.fix, format!("use a name like {fixed:?}"));
+        assert_eq!(
+            e.corrected,
+            Some(json!({"op": 0, "fields": {"name": fixed}}))
+        );
+        assert_eq!(state(&mut r), before, "{bad}: nothing written");
+    }
 }
 
 /// A draft replaces a figure's file and its alt text; then a redaction removes the old file. The

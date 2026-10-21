@@ -222,8 +222,9 @@ impl ReadState {
     /// predecessor is checked first, in this order: its repo, its store format, an end at or
     /// before this state's, an end that closes a batch of this store, and that batch's marker.
     /// Its errors name it `previous dump`. A removal that lands while the marker is looked up is
-    /// `E_REDACTED_STATE`, never a predecessor error. When this state ends at `prev`, nothing is
-    /// written, no project file is read, and the summary has no `out` and names `prev`'s end.
+    /// `E_REDACTED_STATE`, never a predecessor error. The output guards of [`ReadState::dump`]
+    /// follow the predecessor checks. When this state ends at `prev`, nothing is written, no
+    /// project file is read, and the summary has no `out` and names `prev`'s end.
     pub fn dump_after(&self, prev: &ChainEnd, out: &Path) -> Result<DumpSummary, RdyError> {
         self.dump_following(None, prev, out)
     }
@@ -285,7 +286,9 @@ impl ReadState {
             ));
         }
         if at == self.seq() {
-            // no batch to hold: no file, and no project file read; still one epoch's answer
+            // no batch to hold: no file, and no project file read; still the output guards,
+            // then one epoch's answer
+            self.check_dump_out(out)?;
             self.ensure_current_epoch()?;
             return Ok(DumpSummary {
                 out: None,
@@ -325,9 +328,10 @@ impl ReadState {
         }
     }
 
-    /// Writes the dump (`prev` None) or the increment after `prev` to `out`, through the
-    /// output guards and [`place`].
-    fn dump_to(&self, out: &Path, prev: Option<&ChainEnd>) -> Result<DumpSummary, RdyError> {
+    /// The output guards of every dump call: `out` is unused, its parent exists, and the parent
+    /// is outside the project's `.rdy`. A call that writes no file runs them too, so a path no
+    /// dump could use is refused whether or not the call has batches to write.
+    fn check_dump_out(&self, out: &Path) -> Result<(), RdyError> {
         if std::fs::symlink_metadata(out).is_ok() {
             return Err(exists(out, DUMP_CMD));
         }
@@ -342,7 +346,13 @@ impl ReadState {
                 "create the directory first, or pick another path",
             ));
         }
-        inside_rdy(self.root(), dir, out)?;
+        inside_rdy(self.root(), dir, out)
+    }
+
+    /// Writes the dump (`prev` None) or the increment after `prev` to `out`, through the
+    /// output guards and [`place`].
+    fn dump_to(&self, out: &Path, prev: Option<&ChainEnd>) -> Result<DumpSummary, RdyError> {
+        self.check_dump_out(out)?;
         let files = self.dump_files()?;
         let (totals, chain) = place(out, DUMP_CMD, |partial, file| {
             self.write_chain(BufWriter::new(file), &files, prev)
