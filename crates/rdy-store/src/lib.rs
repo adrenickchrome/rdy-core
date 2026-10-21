@@ -22,6 +22,7 @@ pub mod merge;
 pub mod meta;
 pub mod object_refs;
 pub mod pio;
+pub mod plan;
 pub mod redaction;
 pub mod redaction_carried;
 pub mod redaction_import;

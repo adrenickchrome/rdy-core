@@ -13,6 +13,7 @@ mod carried_fixture;
 #[path = "support/redaction.rs"]
 mod redaction_fixture;
 
+use rdy_model::plan::{Plan, PlanSeal};
 use rdy_model::redaction::{
     BlockResidue, DropSpan, FramePlace, RedactTarget, Redaction, RedactionApply, RedactionResidue,
 };
@@ -126,6 +127,8 @@ struct Src {
     relay: Hash,
     side_change: Hash,
     side_block: Hash,
+    /// The bound plan of the proposal and the landing's seal.
+    plans: [Hash; 2],
 }
 
 fn source() -> Src {
@@ -202,8 +205,38 @@ fn source() -> Src {
             ),
         )
         .unwrap();
+    // the proposal with its bound plan, then the landing with its seal: each pair one batch
+    s.set_held(true).unwrap();
     let proposal = s.propose("work", "first", w.clone()).unwrap();
+    let bound = Plan {
+        stable: None,
+        prev: None,
+        view: "work".into(),
+        proposal: Some(proposal),
+        answers: vec![],
+        heads: vec![],
+        provenance: w.clone(),
+        seal: None,
+    };
+    s.write_guarded_for_tests(plan_frames(&bound)).unwrap();
+    s.seal(vec![]).unwrap();
     let landing = s.land(&proposal, human.clone()).unwrap();
+    let version = s.landing(&landing).unwrap().proposal;
+    let sealed = Plan {
+        stable: Some(bound.id()),
+        prev: Some(bound.id()),
+        proposal: Some(version),
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: vec![],
+            items: vec![],
+        }),
+        ..bound.clone()
+    };
+    s.write_guarded_for_tests(plan_frames(&sealed)).unwrap();
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
     let pair = vec![
         PairItem {
             block: secret.id.clone(),
@@ -327,7 +360,26 @@ fn source() -> Src {
         relay,
         side_change,
         side_block: side.version_hash(),
+        plans: [bound.id(), sealed.id()],
     }
+}
+
+/// The PLAN frame of `p` and its `plan/<view>` ref, as the plan writers compose them.
+fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
+    vec![
+        (kinds::PLAN, enc(p)),
+        (
+            kinds::REF_UPDATE,
+            enc(&kinds::RefUpdate {
+                name: format!("plan/{}", p.view),
+                value: p.id().0.to_vec(),
+                at: rdy_store::segment::Location {
+                    segment: 0,
+                    offset: 0,
+                },
+            }),
+        ),
+    ]
 }
 
 impl Src {
@@ -438,6 +490,9 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
         key(kinds::LANDING, src.later_landing()),
         key(kinds::PROPOSAL, src.fixture.proposal.unwrap()),
         key(kinds::SNAPSHOT, later.state),
+        // the landing's seal and the chain it ends
+        key(kinds::PLAN, src.plans[0]),
+        key(kinds::PLAN, src.plans[1]),
     ]);
     want.extend(chunks.iter().map(|h| key(kinds::BLOB_CHUNK, *h)));
     want.extend(src.view_ops.iter().map(|h| key(kinds::VIEW_OP, *h)));

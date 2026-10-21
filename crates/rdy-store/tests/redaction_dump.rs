@@ -1006,7 +1006,7 @@ fn hc1_a_dropped_frame_past_u64_max_overflows_in_format_3_only() {
 
 #[test]
 fn rdx9_current_output_uses_the_current_store_pair() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 16));
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 17));
     assert_eq!(
         READS,
         &[
@@ -1016,7 +1016,8 @@ fn rdx9_current_output_uses_the_current_store_pair() {
             (2, 13),
             (2, 14),
             (2, 15),
-            (3, 16)
+            (3, 16),
+            (3, 17)
         ]
     );
     assert_eq!(frame_kinds(1, 13), None, "no (1, 13) reader entry");
@@ -1046,12 +1047,21 @@ fn rdx9_current_output_uses_the_current_store_pair() {
             ][..]
         )
     );
-    // the current pair: the kinds of (2, 15) and the carried removal (23)
+    // the kinds of (2, 15) and the carried removal (23)
     assert_eq!(
         frame_kinds(3, 16),
         Some(
             &[
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23
+            ][..]
+        )
+    );
+    // the current pair: the kinds of (3, 16) and the change plan (24)
+    assert_eq!(
+        frame_kinds(3, 17),
+        Some(
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
             ][..]
         )
     );

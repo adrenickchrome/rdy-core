@@ -13,8 +13,9 @@
 //! beside it), so its relay answers are found by tag object, never by tag name: a local
 //! project's `answer/tag:<name>` never stands in a holder. Only the take writes an answer ref
 //! there, through the store's crate-private path; a public ref write of one is refused. Canon,
-//! views, proposals, pending and inbox refs, coordination heads and every other answer ref
-//! never stand in a holder.
+//! views, proposals, plans (`plan/`), pending and inbox refs, coordination heads and every other
+//! answer ref never stand in a holder. A holder keeps the PLAN objects a take brings (a seal and
+//! its chain, D-4JMPH) and their derived tables, with no `plan/` ref.
 //!
 //! One set of rules serves every path that adds refs: a write (`Store::write` and the seals),
 //! the replay of the log into the index (an open's catch-up and a reindex), an ingest, and the

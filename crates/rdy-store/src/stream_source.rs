@@ -179,6 +179,8 @@ struct Attachments {
     requests: HashMap<Hash, Vec<ObjectKey>>,
     /// Applies by each object their request names.
     applies: HashMap<ObjectKey, Vec<ObjectKey>>,
+    /// Sealed plans by the landing their seal names.
+    seals: HashMap<Hash, Vec<ObjectKey>>,
     /// The relay answers of the root (O11).
     relay: Vec<ObjectKey>,
 }
@@ -197,7 +199,11 @@ fn attachments(
     let keys = input_keys.iter().filter(|k| {
         matches!(
             k.kind,
-            kinds::ANSWER | kinds::SIGNATURE | kinds::REDACTION | kinds::REDACTION_APPLY
+            kinds::ANSWER
+                | kinds::SIGNATURE
+                | kinds::REDACTION
+                | kinds::REDACTION_APPLY
+                | kinds::PLAN
         )
     });
     for k in keys.copied() {
@@ -221,6 +227,12 @@ fn attachments(
             kinds::REDACTION => {
                 if let Some(r) = typed::<Redaction>(source, k)? {
                     a.requests.entry(r.carrier).or_default().push(k);
+                }
+            }
+            kinds::PLAN => {
+                if let Some(seal) = typed::<rdy_model::plan::Plan>(source, k)?.and_then(|p| p.seal)
+                {
+                    a.seals.entry(seal.landing).or_default().push(k);
                 }
             }
             _ => {
@@ -266,8 +278,8 @@ fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
 /// Checks that every incoming key is in the root's closure: reached from the root by forward
 /// links (through every record of the source), or attached as the closure attaches it
 /// (`crate::closure`): answers of reached landings and tags, signatures of reached landings and
-/// of the root, the root's relay answer (O11), requests of reached carriers, and applies whose
-/// request names a reached object. The first incoming key outside it, in key order, is
+/// of the root, the root's relay answer (O11), the sealed plans of reached landings, requests of
+/// reached carriers, and applies whose request names a reached object. The first incoming key outside it, in key order, is
 /// `object is outside the tag closure`. A record of the source that is not incoming (a holder's)
 /// may be reached, and is never required to be.
 pub(crate) fn check_closure(
@@ -319,6 +331,9 @@ pub(crate) fn check_closure(
         }
         if k.kind == kinds::LANDING || k == root_key {
             links.extend(att.signatures.get(&k.hash).into_iter().flatten());
+        }
+        if k.kind == kinds::LANDING {
+            links.extend(att.seals.get(&k.hash).into_iter().flatten());
         }
         if k.kind == kinds::CHANGE {
             links.extend(att.requests.get(&k.hash).into_iter().flatten());

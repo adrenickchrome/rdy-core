@@ -6,7 +6,7 @@
 //! reviews they name (cc1), and the values of the inbox refs (ib1), and the fold of the
 //! TRANSITION records against the open-move tables (ib14), and the ANSWER records and the
 //! `answer/` and `pending/` refs (di1), and the SIGNATURE records against the signature table
-//! (sig4).
+//! (sig4), and the PLAN records, the `plan/` refs and the plan tables (`crate::plan`).
 use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
@@ -154,6 +154,7 @@ impl StoreReader {
         let inboxes = self.check_inboxes()?;
         let transitions = self.check_transitions()?;
         let answers = self.check_answers()?;
+        self.check_plans()?;
         self.check_signatures()?;
         self.check_carried()?;
         self.check_meta()?;

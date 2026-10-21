@@ -6,6 +6,7 @@ use crate::holder::{Creation, FirstBatch, RefRules, RefWrite, StoreMode, Walk};
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
+use crate::plan::{Held, NoneHeld, Resolver};
 use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
     CrashPoint, HEADER, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
@@ -412,11 +413,27 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError>
 }
 
 /// The single code path that turns a log frame into index entries, used both live and when rebuilding.
+/// `r` resolves what a plan entry reads of earlier objects: the store and the frames of the pass
+/// before this one, which it then notes.
 fn entries_for_frame(
     kind: u8,
     hash: Hash,
     loc: Location,
     payload: &[u8],
+    r: &mut Resolver<'_>,
+) -> Result<Vec<IndexEntry>, StoreError> {
+    let out = frame_entries(kind, hash, loc, payload, r)?;
+    r.note(kind, hash, loc)?;
+    Ok(out)
+}
+
+/// `entries_for_frame` before the frame is noted.
+fn frame_entries(
+    kind: u8,
+    hash: Hash,
+    loc: Location,
+    payload: &[u8],
+    r: &Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
     if kind == kinds::BATCH_COMMIT {
         // a marker is neither an object nor a dedupe candidate
@@ -489,10 +506,51 @@ fn entries_for_frame(
                 key: m.key(),
                 record: hash,
             }));
+            out.extend(crate::plan::transition_entries(&rec, loc));
         }
+        kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
+        kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
         _ => {}
     }
     Ok(out)
+}
+
+/// What a replay's plan entries read of earlier objects: the index being built and the log, with
+/// its authorized holes (a removed block version's id is its residue's).
+struct ReplayHeld<'a> {
+    index: &'a Index,
+    log: &'a SegmentLog,
+    auth: &'a crate::redaction_io::Authorization,
+}
+
+impl Held for ReplayHeld<'_> {
+    fn block_id(&self, v: &Hash) -> Result<Option<BlockId>, StoreError> {
+        match self.index.typed(kinds::BLOCK, v)? {
+            Some(loc) => self.block_id_at(loc, v),
+            None => Ok(None),
+        }
+    }
+
+    fn block_id_at(&self, loc: Location, v: &Hash) -> Result<Option<BlockId>, StoreError> {
+        if let Some(span) = self.auth.spans.get(&loc) {
+            return Ok(
+                match span.residue.and_then(|r| self.auth.residues.get(&r)) {
+                    Some(rdy_model::redaction::RedactionResidue::Block(b)) => Some(b.id.clone()),
+                    _ => None,
+                },
+            );
+        }
+        Ok(match self.log.read_hashed(loc) {
+            Ok((kinds::BLOCK, found, payload)) if found == *v => {
+                decode::<Block>(&payload).ok().map(|b| b.id)
+            }
+            _ => None,
+        })
+    }
+
+    fn landing_at(&self, l: &Hash) -> Result<Option<Location>, StoreError> {
+        self.index.typed(kinds::LANDING, l)
+    }
 }
 
 impl Drop for Store {
@@ -569,6 +627,12 @@ fn replay_into(
     let mut entries = vec![];
     let mut in_chunk = 0usize;
     let auth = log.authorization();
+    let held = ReplayHeld {
+        index,
+        log,
+        auth: auth.as_ref(),
+    };
+    let mut r = Resolver::new(&held);
     log.for_each_view(from, |loc, v, next| {
         if fail_after == Some(done.frames) {
             return Err(StoreError::Db("injected replay failure".into()));
@@ -602,8 +666,11 @@ fn replay_into(
                 },
                 auth.request_entry(v.hash, payload)?,
             ],
-            Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload)?,
-            None => auth.entries_for_hole(v.kind, v.hash, loc)?,
+            Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload, &mut r)?,
+            None => {
+                r.note(v.kind, v.hash, loc)?;
+                auth.entries_for_hole(v.kind, v.hash, loc)?
+            }
         });
         done.frames += 1;
         in_chunk += 1;
@@ -611,6 +678,7 @@ fn replay_into(
             index.apply(&entries, next)?;
             done.commits += 1;
             entries.clear();
+            r.clear();
             in_chunk = 0;
         }
         Ok::<(), StoreError>(())
@@ -1072,6 +1140,7 @@ impl Store {
         // the store's checked redaction writers write one) or an item that would bring back a
         // removed hash is refused with the batch still open, and nothing poisoned
         crate::redaction::refuse_redaction_kinds(&last)?;
+        crate::plan::refuse_plan_writes(&last)?;
         self.check_refs(&last, RefWrite::Public)?;
         self.refuse_removed(&last)?;
         self.check_new_signatures(&last)?;
@@ -1086,17 +1155,12 @@ impl Store {
         }
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
-        let mut entries = vec![];
+        let mut probe = Resolver::new(&NoneHeld);
         for (kind, payload) in &last {
-            entries.push(entries_for_frame(
-                *kind,
-                Hash::of(payload),
-                ORIGIN,
-                payload,
-            )?);
+            entries_for_frame(*kind, Hash::of(payload), ORIGIN, payload, &mut probe)?;
         }
         let start = self.open.as_ref().map_or(self.log.end(), |o| o.start);
-        match self.seal_batch(last, entries) {
+        match self.seal_batch(last) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.open = None;
@@ -1115,13 +1179,8 @@ impl Store {
         }
     }
 
-    /// `seal` once `last` decoded: `entries` holds each frame's index entries, with its
-    /// location still to fill in.
-    fn seal_batch(
-        &mut self,
-        last: Vec<(u8, Vec<u8>)>,
-        entries: Vec<Vec<IndexEntry>>,
-    ) -> Result<(), StoreError> {
+    /// `seal` once `last` decoded: its frames are indexed at their places once appended.
+    fn seal_batch(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<(), StoreError> {
         let placed = self.log.append_frames(&last, self.open.is_none())?;
         if let Some((loc, _)) = placed.first() {
             self.open.get_or_insert(OpenBatch {
@@ -1132,15 +1191,7 @@ impl Store {
         let open = self.open.as_mut().expect("a batch is open");
         open.frames
             .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
-        let mut placed_entries = vec![];
-        for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
-            for e in &mut frame {
-                if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } = e {
-                    *loc = *at;
-                }
-            }
-            placed_entries.extend(frame);
-        }
+        let placed_entries = self.placed_entries(&last, &placed)?;
         self.log.crash_point(CrashPoint::BeforeMarker);
         let open = self.open.as_ref().expect("a batch is open");
         self.log
@@ -1156,6 +1207,22 @@ impl Store {
         let open = self.open.take().expect("a batch is open");
         self.acknowledge(open.frames);
         Ok(())
+    }
+
+    /// The index entries of `frames`, appended at `placed`, in order: each read against the
+    /// store and the frames before it.
+    fn placed_entries(
+        &self,
+        frames: &[(u8, Vec<u8>)],
+        placed: &[(Location, Hash)],
+    ) -> Result<Vec<IndexEntry>, StoreError> {
+        let reader = self.reader();
+        let mut r = Resolver::new(&reader);
+        let mut out = vec![];
+        for ((kind, payload), (at, hash)) in frames.iter().zip(placed) {
+            out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
+        }
+        Ok(out)
     }
 
     /// What a batch does once it is durable in the log: it becomes `last_batch`, and the index
@@ -1385,6 +1452,7 @@ impl Store {
     /// The mode ref is never written (`store mode cannot change`); in a holder, a ref outside its
     /// families, or an `answer/tag-object:` ref, is refused (`crate::holder`).
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        crate::plan::refuse_plan_writes(&items)?;
         self.write_refs(items, RefWrite::Public)
     }
 
@@ -1510,17 +1578,13 @@ impl Store {
             return Ok(hashes);
         }
         let placed = self.log.append_frames(&batch, self.open.is_none())?;
-        let mut entries = vec![];
-        for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
-            // an apply's mask is not activated here: the shared index serves every reader, and
-            // the apply authorizes nothing before its seal syncs it (`seal_held_apply`
-            // activates it then)
-            entries.extend(
-                entries_for_frame(*kind, *hash, *loc, payload)?
-                    .into_iter()
-                    .filter(|e| !matches!(e, IndexEntry::RedactionApply { .. })),
-            );
-        }
+        // an apply's mask is not activated here: the shared index serves every reader, and the
+        // apply authorizes nothing before its seal syncs it (`seal_held_apply` activates it then)
+        let entries: Vec<IndexEntry> = self
+            .placed_entries(&batch, &placed)?
+            .into_iter()
+            .filter(|e| !matches!(e, IndexEntry::RedactionApply { .. }))
+            .collect();
         if self.take_index_fault() {
             return Err(StoreError::Db("injected index failure".into()));
         }
@@ -1549,10 +1613,7 @@ impl Store {
             return Ok(hashes);
         }
         let placed = self.log.append_batch(&batch)?;
-        let mut entries = vec![];
-        for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
-            entries.extend(entries_for_frame(*kind, *hash, *loc, payload)?);
-        }
+        let entries = self.placed_entries(&batch, &placed)?;
         self.log.crash_point(CrashPoint::BeforeSync);
         self.log.sync()?;
         self.log.crash_point(CrashPoint::AfterSync);
@@ -1810,6 +1871,8 @@ impl Store {
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
         let items = self.ref_items(refs.clone());
         self.check_refs(&items, RefWrite::Public)?;
+        // a `plan/` ref: only the plan writers write one, with its plan
+        crate::plan::refuse_plan_writes(&items)?;
         if let Some((name, _)) = refs
             .iter()
             .find(|(name, _)| name.starts_with(crate::review::DISMISS_REF))
@@ -2990,14 +3053,9 @@ impl Store {
             .load(Ordering::Acquire)
             .checked_add(1)
             .ok_or(StoreError::RedactionPending)?;
-        let mut entries = vec![];
+        let mut probe = Resolver::new(&NoneHeld);
         for (kind, payload) in &batch {
-            entries.push(entries_for_frame(
-                *kind,
-                Hash::of(payload),
-                ORIGIN,
-                payload,
-            )?);
+            entries_for_frame(*kind, Hash::of(payload), ORIGIN, payload, &mut probe)?;
         }
         let before = self.log.end();
         let placed = match self.log.append_batch(&batch) {
@@ -3007,15 +3065,13 @@ impl Store {
                 return Err(e.into());
             }
         };
-        let mut placed_entries = vec![];
-        for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
-            for e in &mut frame {
-                if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } = e {
-                    *loc = *at;
-                }
+        let placed_entries = match self.placed_entries(&batch, &placed) {
+            Ok(e) => e,
+            Err(e) => {
+                self.roll_back(before);
+                return Err(e);
             }
-            placed_entries.extend(frame);
-        }
+        };
         self.log.crash_point(CrashPoint::BeforeSync);
         if let Err(e) = self.log.sync() {
             self.roll_back(before);
@@ -3084,31 +3140,16 @@ impl Store {
             .load(Ordering::Acquire)
             .checked_add(1)
             .ok_or(StoreError::RedactionPending)?;
-        let mut entries = vec![];
+        let mut probe = Resolver::new(&NoneHeld);
         for (kind, payload) in &last {
-            entries.push(entries_for_frame(
-                *kind,
-                Hash::of(payload),
-                ORIGIN,
-                payload,
-            )?);
+            entries_for_frame(*kind, Hash::of(payload), ORIGIN, payload, &mut probe)?;
         }
         let synced = (|| -> Result<Vec<IndexEntry>, StoreError> {
             let placed = self.log.append_frames(&last, false)?;
             let open = self.open.as_mut().expect("a batch is open");
             open.frames
                 .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
-            let mut placed_entries = vec![];
-            for (mut frame, (at, _)) in entries.into_iter().zip(&placed) {
-                for e in &mut frame {
-                    if let IndexEntry::Object { loc, .. } | IndexEntry::RedactionApply { loc, .. } =
-                        e
-                    {
-                        *loc = *at;
-                    }
-                }
-                placed_entries.extend(frame);
-            }
+            let placed_entries = self.placed_entries(&last, &placed)?;
             let open = self.open.as_ref().expect("a batch is open");
             self.log
                 .append_marker(open.start, open.frames.iter().map(|(_, h)| h))?;
@@ -3341,6 +3382,8 @@ impl Store {
             .map_err(|_| crate::stream_error::StreamError::allocation(None, 0))?;
         let mut entries = vec![];
         let mut buf = Vec::new();
+        let reader = self.reader();
+        let mut r = Resolver::new(&reader);
         for (i, w) in plan.writes.iter().enumerate() {
             if let Some(hook) = self.faults.take_append.as_mut() {
                 hook(i as u64);
@@ -3351,7 +3394,7 @@ impl Store {
                         .map_err(|e| e.with_object(Some(*key)))?;
                     let (loc, hash) = self.log.append_unrolled(key.kind, &buf)?;
                     if !plan.redaction {
-                        entries.extend(entries_for_frame(key.kind, hash, loc, &buf)?);
+                        entries.extend(entries_for_frame(key.kind, hash, loc, &buf, &mut r)?);
                     }
                     frames.push((key.kind, hash));
                 }
@@ -3365,7 +3408,7 @@ impl Store {
         }
         for (kind, payload) in refs {
             let (loc, hash) = self.log.append_unrolled(*kind, payload)?;
-            entries.extend(entries_for_frame(*kind, hash, loc, payload)?);
+            entries.extend(entries_for_frame(*kind, hash, loc, payload, &mut r)?);
             frames.push((*kind, hash));
         }
         self.log.crash_point(CrashPoint::BeforeMarker);

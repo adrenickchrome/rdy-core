@@ -31,11 +31,14 @@ use rdy_engine::stream_take::take;
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::tensions::{TensionKind, tension_label};
 use rdy_engine::{DecisionInput, Engine, LandOptions, Local, Rdy, Scope, Session};
+use rdy_model::plan::{
+    Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem, item_hash,
+};
 use rdy_model::redaction::{Redaction, RedactionApply};
 use rdy_model::signature::{Signature, StatementSource};
 use rdy_model::{
-    ActorRun, Assurance, BlockId, Finding, Hash, PairItem, Provenance, RelayEvidence, RepoId,
-    Review, ReviewSubject, Role, SemanticTension, Verdict, pair_key,
+    ActorRun, Answer, AnswerAct, Assurance, BlockId, Finding, Hash, PairItem, Provenance,
+    RelayEvidence, RepoId, Review, ReviewSubject, Role, SemanticTension, Verdict, pair_key,
 };
 use rdy_store::Relay;
 use rdy_store::holder::StoreMode;
@@ -55,12 +58,13 @@ use std::path::{Path, PathBuf};
 /// the repo id (`meta/repo_id`) and the clone's origin (`meta/origin`). Store formats 13 and 14
 /// add kinds and no family: a redaction and a signature have no ref. Store format 15 adds two
 /// families that only a holder holds (`meta/store_mode`, `answer/tag-object:`), so none here. A
-/// store format that adds a project family adds it here; each frozen fixture test keeps its own
+/// store format that adds a project family adds it here (store format 17: `plan/`, the change
+/// plans); each frozen fixture test keeps its own
 /// list (`V1_FAMILIES` in `io_dump_fixture.rs`, `V11_FAMILIES` in `io_dump_fixture_s11.rs`,
 /// `V12_FAMILIES` in `io_dump_fixture_s12.rs`, `V13_FAMILIES` in `io_dump_fixture_s13.rs`,
 /// `V14_FAMILIES` in `io_dump_fixture_s14.rs`, `V15_FAMILIES` and `HOLDER_FAMILIES` in
 /// `io_dump_fixture_s15.rs`).
-pub const FAMILIES: [&str; 16] = [
+pub const FAMILIES: [&str; 17] = [
     "meta/store_format",
     "meta/repo_id",
     "meta/origin",
@@ -77,6 +81,7 @@ pub const FAMILIES: [&str; 16] = [
     "proposal/",
     "answer/",
     "pending/",
+    "plan/",
 ];
 
 /// The object kinds of dump format 1 with store format 10 that the project holds: every kind but
@@ -682,6 +687,13 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
         after.as_ref().unwrap().cursor > before.unwrap().cursor,
         "the ack moved the cursor"
     );
+    // store format 17: a plan chain with its seal, an unsealed plan, every plan act and the four
+    // plan answer acts (`add_plan_fixture_records`)
+    let sec = s.section.clone();
+    let cause = s.k3.clone();
+    on(&e, move |r| {
+        add_plan_fixture_records(r, &sec, &cause);
+    });
     // store format 13: two blobs that share their first chunk (the request selects one), and
     // the bytes of the term's version
     let t = term.clone();
@@ -760,6 +772,322 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     src.close().unwrap();
     std::fs::write(to.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
     to
+}
+
+/// What [`add_plan_fixture_records`] wrote: the view of its chain, the chain's bound, answer-only
+/// and sealed versions, the landing the seal names, and the unsealed version of another view.
+#[derive(Clone, Debug)]
+pub struct PlanFixture {
+    pub view: String,
+    pub bound: Hash,
+    pub answered: Hash,
+    pub seal: Hash,
+    pub landing: Hash,
+    pub unsealed: Hash,
+    /// The four plan answer acts' answers: keep, accept, refuse, reject.
+    pub answers: [Hash; 4],
+}
+
+/// The view of the every-kind plan chain.
+pub const PLAN_VIEW: &str = "plan-a";
+
+/// The PLAN frame of `p` and its `plan/<view>` ref, as the plan writers compose them.
+pub fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
+    let refs = vec![(rdy_store::plan::plan_ref(&p.view), p.id().0.to_vec())];
+    let mut out = vec![(kinds::PLAN, postcard::to_allocvec(p).unwrap())];
+    out.extend(refs.into_iter().map(|(name, value)| {
+        (
+            kinds::REF_UPDATE,
+            postcard::to_allocvec(&rdy_store::kinds::RefUpdate {
+                name,
+                value,
+                at: Location {
+                    segment: 0,
+                    offset: 0,
+                },
+            })
+            .unwrap(),
+        )
+    }));
+    out
+}
+
+/// The fixture-only typed builder of store format 17's records (D-4JMPH): while no engine path
+/// writes a plan, it composes them as the plan writers will, through the store's own writers and
+/// the doc-hidden `write_guarded_for_tests` hook, each in one held batch that `invalidate` seals.
+///
+/// - View [`PLAN_VIEW`] gets a claim under `parent`, then a version of it whose fields hold both
+///   engine metadata shapes (`reaffirmed` against `cause`, and `reflects_at`).
+/// - Its proposal and the chain's bound version, in one batch.
+/// - An answer-only version through `Store::put_plan`, with each plan act: confirm, defer and
+///   done (a code item).
+/// - The four plan answer acts: KeepSuspect of the claim for `cause`, AcceptDeferrals,
+///   RefuseDeferrals and RejectReaffirm.
+/// - The landing and its seal, in one batch: the confirmed, deferred (with the acceptance) and
+///   done items, and `cause` among its decisions.
+/// - An unsealed answer-only version of view `sa`, which stays open.
+///
+/// Production callers compose plans through the typed proposal and landing paths, never this.
+pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) -> PlanFixture {
+    use rdy_model::engine_fields::{
+        Against, REAFFIRMED, REFLECTS_AT, Reaffirmation, ReflectsAt, encode_reaffirmed,
+        encode_reflects_at,
+    };
+    let view = PLAN_VIEW;
+    let w = put(
+        r,
+        view,
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": parent.to_string(), "body": "The planned claim."}]),
+    );
+    let subject = created(&w, "$c");
+    let agent = Provenance {
+        actor: "agent:plan".into(),
+        run: Some("plan".into()),
+        role: Role::Writer,
+        at_ms: 2,
+    };
+    let person = Provenance {
+        actor: PERSON.into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 3,
+    };
+    // both metadata shapes on the claim's next version
+    let mut next = r.read().block(&Scope::View(view.into()), &subject).unwrap();
+    let base = next.version_hash();
+    next.fields.insert(
+        REAFFIRMED.into(),
+        encode_reaffirmed(&BTreeMap::from([(
+            cause.clone(),
+            Reaffirmation {
+                against: Against::Retiring(vec![]),
+                reason: "the claim still follows it".into(),
+            },
+        )])),
+    );
+    next.fields.insert(
+        REFLECTS_AT.into(),
+        encode_reflects_at(&ReflectsAt {
+            files: Hash([0x5c; 32]),
+            commits: BTreeMap::from([
+                ("app".to_string(), Some("b".repeat(40))),
+                ("web".to_string(), None),
+            ]),
+        }),
+    );
+    let version = next.version_hash();
+    let deps = r.read().included(view).to_vec();
+    r.store_mut()
+        .commit_to_view(
+            view,
+            rdy_model::Change {
+                view: view.into(),
+                ops: vec![rdy_model::Op::Update { base, block: next }],
+                deps,
+                provenance: agent.clone(),
+                justification: None,
+                message: "records the re-affirmation".into(),
+                links: Default::default(),
+                read_identity: None,
+            },
+        )
+        .unwrap();
+    r.invalidate();
+    // the proposal and its bound version, one batch
+    let heads = vec![
+        PlanHead {
+            repo: "app".into(),
+            head: Some("b".repeat(40)),
+        },
+        PlanHead {
+            repo: "web".into(),
+            head: None,
+        },
+    ];
+    let proposal = r
+        .store_mut()
+        .propose(view, "Plans the planned claim", agent.clone())
+        .unwrap();
+    let bound = Plan {
+        stable: None,
+        prev: None,
+        view: view.into(),
+        proposal: Some(proposal),
+        answers: vec![],
+        heads: heads.clone(),
+        provenance: agent.clone(),
+        seal: None,
+    };
+    r.store_mut()
+        .write_guarded_for_tests(plan_frames(&bound))
+        .unwrap();
+    r.invalidate();
+    // an answer-only version with each plan act
+    let code = "app:src/plan.rs";
+    let items = [
+        (
+            item_hash(cause, subject.as_str(), PlanKind::Confirm),
+            PlanAct::Confirm,
+        ),
+        (
+            item_hash(cause, subject.as_str(), PlanKind::Reaffirm),
+            PlanAct::Defer,
+        ),
+        (
+            item_hash(cause, code, PlanKind::UpdateImplementation),
+            PlanAct::Done,
+        ),
+    ];
+    let mut answers: Vec<PlanAnswer> = items
+        .iter()
+        .map(|(item, act)| PlanAnswer {
+            item: *item,
+            act: *act,
+            reason: (*act != PlanAct::Done).then(|| format!("{} for now", act.as_str())),
+            subject: (*act != PlanAct::Done).then_some(Hash([0x51; 32])),
+            cause: Hash([0x52; 32]),
+            by: agent.clone(),
+        })
+        .collect();
+    answers.sort_by_key(|a| a.item);
+    let answered = Plan {
+        stable: Some(bound.id()),
+        prev: Some(bound.id()),
+        proposal: None,
+        answers: answers.clone(),
+        ..bound.clone()
+    };
+    let answered = r.store_mut().put_plan(&answered).unwrap();
+    // the four plan answer acts
+    let short = |h: &Hash| h.to_string()[..12].to_string();
+    let answer = |item: String, act: AnswerAct, targets: Vec<Hash>, note: Option<&str>| Answer {
+        item,
+        act,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: None,
+        targets,
+        person: person.clone(),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: note.map(str::to_string),
+    };
+    let p_ref = format!("P-{}", &proposal.to_string()[..8]);
+    let keep = answer(
+        format!("reaffirm:{cause}@{}", short(&version)),
+        AnswerAct::KeepSuspect,
+        vec![version],
+        Some("the planned claim still holds"),
+    );
+    let accept = answer(
+        format!("defer:{p_ref}@1"),
+        AnswerAct::AcceptDeferrals,
+        vec![],
+        None,
+    );
+    let refuse = answer(
+        format!("defer:{p_ref}@2"),
+        AnswerAct::RefuseDeferrals,
+        vec![],
+        None,
+    );
+    let reject = answer(
+        format!("{subject}@{}", short(&version)),
+        AnswerAct::RejectReaffirm,
+        vec![],
+        None,
+    );
+    let mut acts = [Hash([0; 32]); 4];
+    for (i, a) in [keep, accept, refuse, reject].iter().enumerate() {
+        acts[i] = r.store_mut().put_answer(a).unwrap();
+    }
+    r.invalidate();
+    // the landing and its seal, one batch
+    let landing = r.store_mut().land(&proposal, person.clone()).unwrap();
+    let landed = r.store().landing(&landing).unwrap().proposal;
+    let mut sealed_items: Vec<SealedItem> = items
+        .iter()
+        .map(|(item, act)| {
+            let (kind, subject_text, outcome, answer) = match act {
+                PlanAct::Confirm => (
+                    PlanKind::Confirm,
+                    subject.to_string(),
+                    PlanOutcome::Confirmed,
+                    None,
+                ),
+                PlanAct::Defer => (
+                    PlanKind::Reaffirm,
+                    subject.to_string(),
+                    PlanOutcome::Deferred,
+                    Some(acts[1]),
+                ),
+                PlanAct::Done => (
+                    PlanKind::UpdateImplementation,
+                    code.to_string(),
+                    PlanOutcome::Done,
+                    None,
+                ),
+            };
+            SealedItem {
+                id: *item,
+                kind,
+                subject: subject_text,
+                cause: cause.clone(),
+                edge: if kind == PlanKind::UpdateImplementation {
+                    "implements".into()
+                } else {
+                    "reflects".into()
+                },
+                outcome,
+                answer,
+            }
+        })
+        .collect();
+    sealed_items.sort_by_key(|i| i.id);
+    let seal = Plan {
+        stable: Some(bound.id()),
+        prev: Some(answered),
+        proposal: Some(landed),
+        answers,
+        provenance: person.clone(),
+        seal: Some(PlanSeal {
+            landing,
+            version: landed,
+            decisions: vec![cause.clone()],
+            items: sealed_items,
+        }),
+        ..bound.clone()
+    };
+    r.store_mut()
+        .write_guarded_for_tests(plan_frames(&seal))
+        .unwrap();
+    r.invalidate();
+    // an unsealed version of another view, which stays open
+    let unsealed = r
+        .store_mut()
+        .put_plan(&Plan {
+            stable: None,
+            prev: None,
+            view: "sa".into(),
+            proposal: None,
+            answers: vec![],
+            heads,
+            provenance: agent,
+            seal: None,
+        })
+        .unwrap();
+    r.invalidate();
+    PlanFixture {
+        view: view.into(),
+        bound: bound.id(),
+        answered,
+        seal: seal.id(),
+        landing,
+        unsealed,
+        answers: acts,
+    }
 }
 
 /// Appends three valid signatures to the project at `dir`, each in its own batch, with the
