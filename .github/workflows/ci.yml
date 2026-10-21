@@ -74,6 +74,12 @@ jobs:
       - name: Reports
         if: always()
         run: |
+          # The config_edit test hsa2_new_directories_are_0700_or_not_made_at_all runs its own
+          # instrumented binary under umasks 477 and 700 on purpose. The profile runtime makes each
+          # .profraw 0666 less the umask, so those profiles are whole but 0200 or 0066, and
+          # llvm-profdata crashes (SIGILL) on a file it cannot open. Give the owner read back: the
+          # data is kept, and any other merge error still fails this step.
+          find target/llvm-cov-target -name '*.profraw' ! -perm -u=r -print -exec chmod u+r {} +
           cargo llvm-cov report --summary-only | tee coverage-summary.txt
           cargo llvm-cov report --html --output-dir coverage-html
           cargo llvm-cov report --json --summary-only --output-path coverage-summary.json
