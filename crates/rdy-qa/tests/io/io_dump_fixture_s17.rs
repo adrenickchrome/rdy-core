@@ -59,18 +59,54 @@ const HOLDER_CHAIN_EXPECT: &str = "v3-s17-holder-chain.expect.json";
 /// Each member of the pair `(3, 17)` and its blake3, set when it was written. A change here
 /// needs a founder decision.
 pub(crate) const MEMBERS: [(&str, &str); 12] = [
-    (FULL, "TBD"),
-    (FULL_EXPECT, "TBD"),
-    (CHAIN_FULL, "TBD"),
-    (CHAIN_1, "TBD"),
-    (CHAIN_2, "TBD"),
-    (CHAIN_EXPECT, "TBD"),
-    (HOLDER, "TBD"),
-    (HOLDER_EXPECT, "TBD"),
-    (HOLDER_CHAIN_FULL, "TBD"),
-    (HOLDER_CHAIN_1, "TBD"),
-    (HOLDER_CHAIN_2, "TBD"),
-    (HOLDER_CHAIN_EXPECT, "TBD"),
+    (
+        FULL,
+        "94157e0d99fbd0170ea7eeca37315e141a4776485923bd27264bbc00e70442b5",
+    ),
+    (
+        FULL_EXPECT,
+        "397680b93467ef7a9dce3fdb0e16cb1a71d8bbcdbe734ce96907d657578fd44a",
+    ),
+    (
+        CHAIN_FULL,
+        "c0ee2f5236c226df0eaac875b317872d10bbc2f0f441145ea9df139317636872",
+    ),
+    (
+        CHAIN_1,
+        "1189a0c637444c8f9ec13ad4f6b1ee93dc12c7b2d912b4f877d253bc6e3e313d",
+    ),
+    (
+        CHAIN_2,
+        "1c72ece30389ba89621cf4b01702b0a640628280d0297f3ca04418fbff73b42b",
+    ),
+    (
+        CHAIN_EXPECT,
+        "9dcb2982bcae43cf79476b6ecaff2e13f528bb1a86d5f2caf0ec4e98c0f775b8",
+    ),
+    (
+        HOLDER,
+        "771c2118924d0324885f25a73c60c7a1331221c156b2b0df298b6de613d694aa",
+    ),
+    (
+        HOLDER_EXPECT,
+        "44a941765c88b7cc84b33cd9bbe27ea9665023cdd00835654a0299e9128f3ae5",
+    ),
+    (
+        HOLDER_CHAIN_FULL,
+        "ec0e4a4f6f3f5c6efde8229b8b65205adfa4a18de8098f4945864021f4ebf5eb",
+    ),
+    (
+        HOLDER_CHAIN_1,
+        "ac46691bf0b612877c6fbd1cb1e487068d884f93d1f82b26f8bdd766ec80dc4e",
+    ),
+    (
+        HOLDER_CHAIN_2,
+        "48a2f8a431ce2ff38eaab1b6adb567441cf7fce5c9f96902e942b310a6f4605d",
+    ),
+    (
+        HOLDER_CHAIN_EXPECT,
+        "54958cbc0723d1c9dc7b589fdcc3a64912546841bcadcfd31a49a7f7abd912ed",
+    ),
 ];
 
 /// The blake3 of member `name`, as [`MEMBERS`] pins it.

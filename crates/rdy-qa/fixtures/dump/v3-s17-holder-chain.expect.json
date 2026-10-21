@@ -1,0 +1,1731 @@
+{
+  "files": [
+    {
+      "batch_starts": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          263
+        ]
+      ],
+      "batches": 2,
+      "chain": {
+        "base": {
+          "offset": 0,
+          "segment": 0
+        },
+        "base_batch": {
+          "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "frames": 0,
+          "start": {
+            "offset": 0,
+            "segment": 0
+          }
+        },
+        "end_batch": {
+          "digest": "f78cda7f2f5e3428bce408e45e2fc0fbebc056267aa0f7830a90898392bfbde1",
+          "frames": 14,
+          "start": {
+            "offset": 263,
+            "segment": 0
+          }
+        },
+        "kind": "full",
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3"
+      },
+      "dropped": 0,
+      "dump_format": 3,
+      "files": [],
+      "frames": 17,
+      "len": 3553,
+      "log_end": [
+        0,
+        3128
+      ],
+      "name": "v3-s17-holder-chain-full.rdydump",
+      "rdy": "0.16.0",
+      "store_format": 17,
+      "trailer": {
+        "batches": 2,
+        "digest": "b2350162792e571e8349199ffe7863fd72b207815dd627436b3bc4a363333ae8",
+        "files": 0,
+        "first_removed": null,
+        "frames": 17,
+        "removals": 0
+      }
+    },
+    {
+      "batch_starts": [
+        [
+          1,
+          0
+        ]
+      ],
+      "batches": 1,
+      "chain": {
+        "base": {
+          "offset": 3128,
+          "segment": 0
+        },
+        "base_batch": {
+          "digest": "f78cda7f2f5e3428bce408e45e2fc0fbebc056267aa0f7830a90898392bfbde1",
+          "frames": 14,
+          "start": {
+            "offset": 263,
+            "segment": 0
+          }
+        },
+        "end_batch": {
+          "digest": "f9733b3bfef000d9ccc89a43be77c96acc157555c24d962a74ced5e7a17e7ecf",
+          "frames": 8,
+          "start": {
+            "offset": 0,
+            "segment": 1
+          }
+        },
+        "kind": "increment",
+        "prev": "b2350162792e571e8349199ffe7863fd72b207815dd627436b3bc4a363333ae8",
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3"
+      },
+      "dropped": 0,
+      "dump_format": 3,
+      "files": [],
+      "frames": 8,
+      "len": 2077,
+      "log_end": [
+        1,
+        1696
+      ],
+      "name": "v3-s17-holder-chain-1.rdydump",
+      "rdy": "0.16.0",
+      "store_format": 17,
+      "trailer": {
+        "batches": 1,
+        "digest": "645268c789d1f4c879c4b6acf51b3e488842674827fb30e60a15adeb6ab07aa5",
+        "files": 0,
+        "first_removed": null,
+        "frames": 8,
+        "removals": 0
+      }
+    },
+    {
+      "batch_starts": [
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      "batches": 2,
+      "chain": {
+        "base": {
+          "offset": 1696,
+          "segment": 1
+        },
+        "base_batch": {
+          "digest": "f9733b3bfef000d9ccc89a43be77c96acc157555c24d962a74ced5e7a17e7ecf",
+          "frames": 8,
+          "start": {
+            "offset": 0,
+            "segment": 1
+          }
+        },
+        "end_batch": {
+          "digest": "6432ea806fa9ea73a07ff52d5e51151e427735a3305e7a4bae2ec86d92347ec4",
+          "frames": 11,
+          "start": {
+            "offset": 0,
+            "segment": 3
+          }
+        },
+        "kind": "increment",
+        "prev": "645268c789d1f4c879c4b6acf51b3e488842674827fb30e60a15adeb6ab07aa5",
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3"
+      },
+      "dropped": 3,
+      "dump_format": 3,
+      "files": [],
+      "frames": 35,
+      "len": 9109,
+      "log_end": [
+        3,
+        2034
+      ],
+      "name": "v3-s17-holder-chain-2.rdydump",
+      "rdy": "0.16.0",
+      "store_format": 17,
+      "trailer": {
+        "batches": 2,
+        "digest": "ec6172b0edb1d3cd831c807f499a74cae05152db2c5bab8c7e90ccd04478e3c2",
+        "files": 0,
+        "first_removed": [
+          0,
+          263
+        ],
+        "frames": 35,
+        "removals": 1
+      }
+    }
+  ],
+  "full_alone": {
+    "end": [
+      0,
+      3128
+    ],
+    "segments": {
+      "seg-000000.log": "56f3be9768224aaf11a165ea665917280e29357aa5e0340729a7e326e18b6a89"
+    },
+    "store": {
+      "canon_blocks": null,
+      "facts": {
+        "fsck": {
+          "alt_sets": 0,
+          "frames": 17,
+          "intents": 0,
+          "landed_changes": 1,
+          "landings": 1,
+          "reviews": 0,
+          "signatures": 2,
+          "transitions": 0,
+          "unlogged_moves": 0,
+          "versions": 1,
+          "views": 0
+        },
+        "landings": [],
+        "objects": {
+          "1": 4,
+          "11": 2,
+          "2": 1,
+          "3": 1,
+          "4": 1,
+          "5": 1,
+          "6": 1,
+          "7": 1,
+          "8": 4,
+          "9": 1
+        },
+        "refs": {
+          "meta/repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+          "meta/store_format": "3137",
+          "meta/store_mode": "686f6c646572",
+          "tag/v1.0.0": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+        },
+        "signatures": {
+          "df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "24ed99427dd07133717cfcf705d92f050375c2844cac8fc33d52529c3601c7ac",
+            "statement_hash": "10ac910b491409da28ceed79f88ad9b2b203d3ceb9bc6c543c2cf56a1fd33513",
+            "subject": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2"
+          },
+          "f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "tag",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-tag-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-tag-v1",
+            "sig_hash": "1db06d16f96e7dc9ea2237e823f8d885f62d789778e3ca7d780792dc195fe035",
+            "statement_hash": "64236c0dcedcbbb8d352c26864f0e18b8e758f4a6fbba0c13462743911510e13",
+            "subject": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          }
+        }
+      },
+      "identity": {
+        "canon": null,
+        "keys": [
+          "11:df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3",
+          "11:f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160",
+          "1:038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+          "1:e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785",
+          "1:f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146",
+          "1:f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a",
+          "2:8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+          "3:b2e8c445a4a069b88d58bf720a243432b7d8386bab1ac76aff738484534ddc33",
+          "4:ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+          "5:3afb891798e45a453fd2690d1f1cb101d191d9b1bffd680e1b0ce1bb3cc11822",
+          "6:d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+          "7:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b",
+          "8:7ebf114a0c1b258049953cd2482ede3395d5a3afb8d781443e426f72db57c96e",
+          "8:9f70b1657c4aec46ad5124620ed4f2b6892d10c980b2cf31d465849aa504e247",
+          "8:e2cad918395e208a4b3363db66f39cb4e49496f3e23d723a0020440f14771605",
+          "8:f1205706fd8763e19ec28de8000267ef5cfabc797fcac08bf03dd798a5ba13ea",
+          "9:b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+        ],
+        "mode": "holder",
+        "origin": null,
+        "redacted": {},
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+        "tags": {
+          "v1.0.0": {
+            "landing": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+            "tag": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          }
+        }
+      },
+      "plans": {
+        "records": [],
+        "tables": {
+          "plan_decisions": [],
+          "plan_deferrals": [],
+          "plan_proposals": [],
+          "plan_seals": []
+        }
+      },
+      "projections": {
+        "v1.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": false,
+            "version": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        }
+      },
+      "removals": {
+        "applies": [],
+        "carried": [],
+        "dropped": [],
+        "requests": []
+      },
+      "views": []
+    },
+    "summary": {
+      "batches": 2,
+      "chain": [
+        {
+          "base": [
+            0,
+            0
+          ],
+          "end": [
+            0,
+            3128
+          ],
+          "kind": "full"
+        }
+      ],
+      "dump_format": 3,
+      "files_kept": [],
+      "files_written": [],
+      "frames": 17,
+      "landings": 1,
+      "stopped_at": null,
+      "store_format": 17,
+      "tags": 1,
+      "views": 0,
+      "warnings": []
+    }
+  },
+  "held_stop": {
+    "end": [
+      1,
+      2548
+    ],
+    "fsck_warnings": [
+      {
+        "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+        "carried": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+        "code": "W_STOP_BEFORE_REDACTION",
+        "fix": "Ask the uploader to send the removal again, and take the upload that carries it.",
+        "issues": [
+          {
+            "target": "p-HGR8H"
+          },
+          {
+            "target": "blob:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+          }
+        ],
+        "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+        "message": "This store stops before redaction apply 82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2 of its source, approved by human:qa at landing eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69. It holds 3 removed payloads again, and 0 stay removed.",
+        "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+      }
+    ],
+    "position": [
+      1,
+      1696
+    ],
+    "selector": "tag:v2.0.0",
+    "store": {
+      "canon_blocks": null,
+      "facts": {
+        "fsck": {
+          "alt_sets": 0,
+          "frames": 28,
+          "intents": 0,
+          "landed_changes": 2,
+          "landings": 2,
+          "reviews": 0,
+          "signatures": 3,
+          "transitions": 0,
+          "unlogged_moves": 0,
+          "versions": 2,
+          "views": 0,
+          "warnings": [
+            {
+              "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+              "carried": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+              "code": "W_STOP_BEFORE_REDACTION",
+              "fix": "Ask the uploader to send the removal again, and take the upload that carries it.",
+              "issues": [
+                {
+                  "target": "p-HGR8H"
+                },
+                {
+                  "target": "blob:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+                }
+              ],
+              "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+              "message": "This store stops before redaction apply 82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2 of its source, approved by human:qa at landing eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69. It holds 3 removed payloads again, and 0 stay removed.",
+              "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+            }
+          ]
+        },
+        "landings": [],
+        "objects": {
+          "1": 5,
+          "11": 3,
+          "2": 2,
+          "21": 2,
+          "23": 1,
+          "3": 2,
+          "4": 2,
+          "5": 2,
+          "6": 1,
+          "7": 1,
+          "8": 5,
+          "9": 2
+        },
+        "refs": {
+          "meta/repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+          "meta/store_format": "3137",
+          "meta/store_mode": "686f6c646572",
+          "tag/v1.0.0": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6",
+          "tag/v2.0.0": "a5af553e3fa2404fc7270c5c67b221cf1c531f73adad13d63b7afe61f18e369e"
+        },
+        "signatures": {
+          "df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "24ed99427dd07133717cfcf705d92f050375c2844cac8fc33d52529c3601c7ac",
+            "statement_hash": "10ac910b491409da28ceed79f88ad9b2b203d3ceb9bc6c543c2cf56a1fd33513",
+            "subject": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2"
+          },
+          "e4a5e0cf5e551cab2278d2f613fedf5b597514a623fc2fd5c9491ba1a5eeb48f": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "1f9b8c770c2dad436d0103a3181b976ab1ff2b4533fae246ee151e9560d3cdb6",
+            "statement_hash": "8f10a11d8b6040d32920b1b316a7b06730877a663d07206c67b3ed4713aac302",
+            "subject": "e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0"
+          },
+          "f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "tag",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-tag-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-tag-v1",
+            "sig_hash": "1db06d16f96e7dc9ea2237e823f8d885f62d789778e3ca7d780792dc195fe035",
+            "statement_hash": "64236c0dcedcbbb8d352c26864f0e18b8e758f4a6fbba0c13462743911510e13",
+            "subject": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          }
+        }
+      },
+      "identity": {
+        "canon": null,
+        "keys": [
+          "11:df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3",
+          "11:e4a5e0cf5e551cab2278d2f613fedf5b597514a623fc2fd5c9491ba1a5eeb48f",
+          "11:f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160",
+          "1:038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+          "1:0bf1e4eb40b3c8c030b69d509f6b26e990b392e2ce313c118a43c3a830b11bec",
+          "1:e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785",
+          "1:f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146",
+          "1:f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a",
+          "21:62be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b2178",
+          "21:74ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8",
+          "23:a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+          "2:8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+          "2:e6d9eb9be3bbeb321f5e01ef1cf9f325efb98158589e60b6a48211d1811cfea7",
+          "3:4120a46acfa3d7546bc14998005c602be3769dea55337b3a6fc082038cba7d10",
+          "3:b2e8c445a4a069b88d58bf720a243432b7d8386bab1ac76aff738484534ddc33",
+          "4:e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0",
+          "4:ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+          "5:3afb891798e45a453fd2690d1f1cb101d191d9b1bffd680e1b0ce1bb3cc11822",
+          "5:56c744c20f21653e5355b0f95eb0b69a6af318b1ab133e4736569be2146ad37e",
+          "6:d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+          "7:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b",
+          "8:6adaf29f13e57f7dba0141c59296ac6618a39807b5c4277d4859144bec6f164c",
+          "8:7ebf114a0c1b258049953cd2482ede3395d5a3afb8d781443e426f72db57c96e",
+          "8:9f70b1657c4aec46ad5124620ed4f2b6892d10c980b2cf31d465849aa504e247",
+          "8:e2cad918395e208a4b3363db66f39cb4e49496f3e23d723a0020440f14771605",
+          "8:f1205706fd8763e19ec28de8000267ef5cfabc797fcac08bf03dd798a5ba13ea",
+          "9:a5af553e3fa2404fc7270c5c67b221cf1c531f73adad13d63b7afe61f18e369e",
+          "9:b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+        ],
+        "mode": "holder",
+        "origin": null,
+        "redacted": {},
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+        "tags": {
+          "v1.0.0": {
+            "landing": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+            "tag": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          },
+          "v2.0.0": {
+            "landing": "e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0",
+            "tag": "a5af553e3fa2404fc7270c5c67b221cf1c531f73adad13d63b7afe61f18e369e"
+          }
+        }
+      },
+      "plans": {
+        "records": [],
+        "tables": {
+          "plan_decisions": [],
+          "plan_deferrals": [],
+          "plan_proposals": [],
+          "plan_seals": []
+        }
+      },
+      "projections": {
+        "v1.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": false,
+            "version": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        },
+        "v2.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": false,
+            "version": "0bf1e4eb40b3c8c030b69d509f6b26e990b392e2ce313c118a43c3a830b11bec"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        }
+      },
+      "removals": {
+        "applies": [],
+        "carried": [
+          {
+            "at": [
+              1,
+              2094
+            ],
+            "hash": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+            "record": {
+              "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+              "approved_by": {
+                "actor": "human:qa",
+                "at_ms": 1760000000021,
+                "role": "Approver",
+                "run": "cli"
+              },
+              "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+              "reason_class": "personal",
+              "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356",
+              "spans": [
+                {
+                  "hash": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+                  "held": true,
+                  "kind": 1,
+                  "len": 51,
+                  "place": {
+                    "offset": 263,
+                    "segment": 0
+                  },
+                  "residue": "62be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b2178"
+                },
+                {
+                  "hash": "d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+                  "held": true,
+                  "kind": 6,
+                  "len": 29,
+                  "place": {
+                    "offset": 554,
+                    "segment": 0
+                  },
+                  "residue": null
+                },
+                {
+                  "hash": "8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+                  "held": true,
+                  "kind": 2,
+                  "len": 357,
+                  "place": {
+                    "offset": 867,
+                    "segment": 0
+                  },
+                  "residue": "74ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8"
+                }
+              ],
+              "targets": [
+                {
+                  "all_versions": "p-HGR8H"
+                },
+                {
+                  "blob": "65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+                }
+              ]
+            },
+            "zero_bytes": 0
+          }
+        ],
+        "dropped": [],
+        "requests": []
+      },
+      "views": []
+    },
+    "summary": {
+      "batches": 3,
+      "chain": [
+        {
+          "base": [
+            0,
+            0
+          ],
+          "end": [
+            0,
+            3128
+          ],
+          "kind": "full"
+        },
+        {
+          "base": [
+            0,
+            3128
+          ],
+          "end": [
+            1,
+            1696
+          ],
+          "kind": "increment"
+        },
+        {
+          "base": [
+            1,
+            1696
+          ],
+          "end": [
+            3,
+            2034
+          ],
+          "kind": "increment"
+        }
+      ],
+      "dump_format": 3,
+      "files_kept": [],
+      "files_written": [],
+      "frames": 25,
+      "landings": 2,
+      "stopped_at": {
+        "landing": "e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0",
+        "position": {
+          "offset": 1696,
+          "segment": 1
+        },
+        "tag": "v2.0.0"
+      },
+      "store_format": 17,
+      "tags": 2,
+      "views": 0,
+      "warnings": [
+        {
+          "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+          "carried": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+          "code": "W_STOP_BEFORE_REDACTION",
+          "fix": "Ask the uploader to send the removal again, and take the upload that carries it.",
+          "issues": [
+            {
+              "target": "p-HGR8H"
+            },
+            {
+              "target": "blob:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+            }
+          ],
+          "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+          "message": "This store stops before redaction apply 82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2 of its source, approved by human:qa at landing eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69. It holds 3 removed payloads again, and 0 stay removed.",
+          "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+        }
+      ]
+    },
+    "tail": "5c0000001562be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b217800038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc207702d48475238480570726f73650107642d504b4b59300261317693688b6990751d8c225757b83af0f5a2a7deb4c2b09a67a4bbd7d1f4b4b96f00e80000001574ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8018bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee6104776f726b040007642d504b4b5930f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f1460007702d4847523848038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc20007702d5148533159e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785000866672d3659435341f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a000868756d616e3a71610103636c69018080e682b9660000000000005801000017a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a35682b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a690868756d616e3a71610103636c6903aa80e682b96601020007702d48475238480265201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b0300870201038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2330162be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b21780100aa0406d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b521d000100e306028bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61e5020174ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd801240000000e0997b8a3503ada10e6f8265b9c871fbf71f856bb7808318ed911fe67b365dbe901a00d03611cf5ec96359d6d159075dd9b699ae6992205353f084b5c3977fb5f39499c6f"
+  },
+  "missing_stop": {
+    "end": [
+      0,
+      3980
+    ],
+    "fsck_warnings": [
+      {
+        "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+        "carried": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+        "code": "W_STOP_BEFORE_REDACTION",
+        "fix": "Ask the uploader to send the removal again, and take the upload that carries it.",
+        "issues": [
+          {
+            "target": "p-HGR8H"
+          },
+          {
+            "target": "blob:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+          }
+        ],
+        "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+        "message": "This store stops before redaction apply 82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2 of its source, approved by human:qa at landing eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69. It holds 3 removed payloads again, and 0 stay removed.",
+        "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+      }
+    ],
+    "position": [
+      0,
+      3128
+    ],
+    "selector": "tag:v1.0.0",
+    "store": {
+      "canon_blocks": null,
+      "facts": {
+        "fsck": {
+          "alt_sets": 0,
+          "frames": 20,
+          "intents": 0,
+          "landed_changes": 1,
+          "landings": 1,
+          "reviews": 0,
+          "signatures": 2,
+          "transitions": 0,
+          "unlogged_moves": 0,
+          "versions": 1,
+          "views": 0,
+          "warnings": [
+            {
+              "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+              "carried": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+              "code": "W_STOP_BEFORE_REDACTION",
+              "fix": "Ask the uploader to send the removal again, and take the upload that carries it.",
+              "issues": [
+                {
+                  "target": "p-HGR8H"
+                },
+                {
+                  "target": "blob:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+                }
+              ],
+              "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+              "message": "This store stops before redaction apply 82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2 of its source, approved by human:qa at landing eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69. It holds 3 removed payloads again, and 0 stay removed.",
+              "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+            }
+          ]
+        },
+        "landings": [],
+        "objects": {
+          "1": 4,
+          "11": 2,
+          "2": 1,
+          "21": 2,
+          "23": 1,
+          "3": 1,
+          "4": 1,
+          "5": 1,
+          "6": 1,
+          "7": 1,
+          "8": 4,
+          "9": 1
+        },
+        "refs": {
+          "meta/repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+          "meta/store_format": "3137",
+          "meta/store_mode": "686f6c646572",
+          "tag/v1.0.0": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+        },
+        "signatures": {
+          "df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "24ed99427dd07133717cfcf705d92f050375c2844cac8fc33d52529c3601c7ac",
+            "statement_hash": "10ac910b491409da28ceed79f88ad9b2b203d3ceb9bc6c543c2cf56a1fd33513",
+            "subject": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2"
+          },
+          "f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "tag",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-tag-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-tag-v1",
+            "sig_hash": "1db06d16f96e7dc9ea2237e823f8d885f62d789778e3ca7d780792dc195fe035",
+            "statement_hash": "64236c0dcedcbbb8d352c26864f0e18b8e758f4a6fbba0c13462743911510e13",
+            "subject": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          }
+        }
+      },
+      "identity": {
+        "canon": null,
+        "keys": [
+          "11:df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3",
+          "11:f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160",
+          "1:038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+          "1:e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785",
+          "1:f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146",
+          "1:f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a",
+          "21:62be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b2178",
+          "21:74ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8",
+          "23:a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+          "2:8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+          "3:b2e8c445a4a069b88d58bf720a243432b7d8386bab1ac76aff738484534ddc33",
+          "4:ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+          "5:3afb891798e45a453fd2690d1f1cb101d191d9b1bffd680e1b0ce1bb3cc11822",
+          "6:d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+          "7:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b",
+          "8:7ebf114a0c1b258049953cd2482ede3395d5a3afb8d781443e426f72db57c96e",
+          "8:9f70b1657c4aec46ad5124620ed4f2b6892d10c980b2cf31d465849aa504e247",
+          "8:e2cad918395e208a4b3363db66f39cb4e49496f3e23d723a0020440f14771605",
+          "8:f1205706fd8763e19ec28de8000267ef5cfabc797fcac08bf03dd798a5ba13ea",
+          "9:b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+        ],
+        "mode": "holder",
+        "origin": null,
+        "redacted": {},
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+        "tags": {
+          "v1.0.0": {
+            "landing": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+            "tag": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          }
+        }
+      },
+      "plans": {
+        "records": [],
+        "tables": {
+          "plan_decisions": [],
+          "plan_deferrals": [],
+          "plan_proposals": [],
+          "plan_seals": []
+        }
+      },
+      "projections": {
+        "v1.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": false,
+            "version": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        }
+      },
+      "removals": {
+        "applies": [],
+        "carried": [
+          {
+            "at": [
+              0,
+              3526
+            ],
+            "hash": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+            "record": {
+              "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+              "approved_by": {
+                "actor": "human:qa",
+                "at_ms": 1760000000021,
+                "role": "Approver",
+                "run": "cli"
+              },
+              "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+              "reason_class": "personal",
+              "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356",
+              "spans": [
+                {
+                  "hash": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+                  "held": true,
+                  "kind": 1,
+                  "len": 51,
+                  "place": {
+                    "offset": 263,
+                    "segment": 0
+                  },
+                  "residue": "62be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b2178"
+                },
+                {
+                  "hash": "d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+                  "held": true,
+                  "kind": 6,
+                  "len": 29,
+                  "place": {
+                    "offset": 554,
+                    "segment": 0
+                  },
+                  "residue": null
+                },
+                {
+                  "hash": "8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+                  "held": true,
+                  "kind": 2,
+                  "len": 357,
+                  "place": {
+                    "offset": 867,
+                    "segment": 0
+                  },
+                  "residue": "74ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8"
+                }
+              ],
+              "targets": [
+                {
+                  "all_versions": "p-HGR8H"
+                },
+                {
+                  "blob": "65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+                }
+              ]
+            },
+            "zero_bytes": 0
+          }
+        ],
+        "dropped": [],
+        "requests": []
+      },
+      "views": []
+    },
+    "summary": {
+      "batches": 2,
+      "chain": [
+        {
+          "base": [
+            0,
+            0
+          ],
+          "end": [
+            0,
+            3128
+          ],
+          "kind": "full"
+        },
+        {
+          "base": [
+            0,
+            3128
+          ],
+          "end": [
+            1,
+            1696
+          ],
+          "kind": "increment"
+        },
+        {
+          "base": [
+            1,
+            1696
+          ],
+          "end": [
+            3,
+            2034
+          ],
+          "kind": "increment"
+        }
+      ],
+      "dump_format": 3,
+      "files_kept": [],
+      "files_written": [],
+      "frames": 17,
+      "landings": 1,
+      "stopped_at": {
+        "landing": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+        "position": {
+          "offset": 3128,
+          "segment": 0
+        },
+        "tag": "v1.0.0"
+      },
+      "store_format": 17,
+      "tags": 1,
+      "views": 0,
+      "warnings": [
+        {
+          "apply": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+          "carried": "a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988",
+          "code": "W_STOP_BEFORE_REDACTION",
+          "fix": "Ask the uploader to send the removal again, and take the upload that carries it.",
+          "issues": [
+            {
+              "target": "p-HGR8H"
+            },
+            {
+              "target": "blob:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b"
+            }
+          ],
+          "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+          "message": "This store stops before redaction apply 82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2 of its source, approved by human:qa at landing eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69. It holds 3 removed payloads again, and 0 stay removed.",
+          "request": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+        }
+      ]
+    },
+    "tail": "5c0000001562be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b217800038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc207702d48475238480570726f73650107642d504b4b59300261317693688b6990751d8c225757b83af0f5a2a7deb4c2b09a67a4bbd7d1f4b4b96f00e80000001574ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8018bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee6104776f726b040007642d504b4b5930f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f1460007702d4847523848038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc20007702d5148533159e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785000866672d3659435341f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a000868756d616e3a71610103636c69018080e682b9660000000000005801000017a1f041c415abec13572b412a7cd4c1412fc95e0e0e8b07125bb81b00db9c9988c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a35682b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a690868756d616e3a71610103636c6903aa80e682b96601020007702d48475238480265201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b0300870201038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2330162be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b21780100aa0406d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b521d000100e306028bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61e5020174ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd801240000000e8e04542bff59c81d926c91c052025a8539440bedc527f786cf157e3e639d025100b81803611cf5ec96359d6d159075dd9b699ae6992205353f084b5c3977fb5f39499c6f"
+  },
+  "segment_max": 4096,
+  "whole": {
+    "end": [
+      3,
+      2034
+    ],
+    "segments": {
+      "seg-000000.log": "efde71a48e34b3d04a054c171ed8a3c62236d605bffbf94aa9fe472670e5a833",
+      "seg-000001.log": "0f200d4ef09732b9ed0e9f177b532e80a8b21e32a544e571ccbb3f33989cfd10",
+      "seg-000002.log": "fb9f3473647ed235673910d5881607db90d1b0ab5f948a55bb747bd51762bb8c",
+      "seg-000003.log": "50514635a670be61146bf58f98264c0b35a83eba059a008a9e9dc4d8197b14b1"
+    },
+    "store": {
+      "canon_blocks": null,
+      "facts": {
+        "fsck": {
+          "alt_sets": 0,
+          "checked_payloads": 54,
+          "frames": 60,
+          "intents": 0,
+          "landed_changes": 6,
+          "landings": 6,
+          "redacted_bytes": 786,
+          "redacted_frames": 6,
+          "redacted_objects": 6,
+          "reviews": 0,
+          "signatures": 5,
+          "transitions": 0,
+          "unlogged_moves": 0,
+          "versions": 4,
+          "views": 0
+        },
+        "landings": [],
+        "objects": {
+          "1": 8,
+          "10": 2,
+          "11": 5,
+          "2": 6,
+          "20": 1,
+          "21": 5,
+          "22": 1,
+          "24": 2,
+          "3": 6,
+          "4": 6,
+          "5": 4,
+          "6": 1,
+          "7": 1,
+          "8": 8,
+          "9": 4
+        },
+        "refs": {
+          "answer/tag-object:9dc8e5c4a93bc5c56bd72d5c9ba4190f4361dccfdf9c0b164e1bb32b111de53b": "a7cf5befe4042554a761efeb3bc4a9e3bdba4763821def2334db50c85b3643e3",
+          "meta/repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+          "meta/store_format": "3137",
+          "meta/store_mode": "686f6c646572",
+          "tag/v1.0.0": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6",
+          "tag/v2.0.0": "a5af553e3fa2404fc7270c5c67b221cf1c531f73adad13d63b7afe61f18e369e",
+          "tag/v3.0.0": "9dc8e5c4a93bc5c56bd72d5c9ba4190f4361dccfdf9c0b164e1bb32b111de53b",
+          "tag/v4.0.0": "847f94c5e73d078920dbb0e76f6bed48e11ed3454b044d8f38d1a0a4881c8283"
+        },
+        "signatures": {
+          "70e25ea69683317df268f870602c21e0fe7d434d2709efb31d246aa57b750589": {
+            "check": {
+              "at_ms": 2,
+              "code": null,
+              "key": "SHA256:2IFK1njANj8LeE9kRZp4dh2dIgarxYHSTKoGUeCawlo",
+              "key_type": "ssh-ed25519",
+              "kind": "relay",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "agent:relay",
+                "run": "chat"
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:2IFK1njANj8LeE9kRZp4dh2dIgarxYHSTKoGUeCawlo is not trusted for agent:relay in rdy-relay-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-relay-v1",
+            "sig_hash": "4f2f0f820e71af8977ec5384c173bbc18fa3614cb11705d09330cb6b079cdb26",
+            "statement_hash": "e6392d8cd0f6da2ba05f6e4deecbd92f6293df361ee5abd4ffc07d44846e9a42",
+            "subject": "9dc8e5c4a93bc5c56bd72d5c9ba4190f4361dccfdf9c0b164e1bb32b111de53b"
+          },
+          "df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "24ed99427dd07133717cfcf705d92f050375c2844cac8fc33d52529c3601c7ac",
+            "statement_hash": "10ac910b491409da28ceed79f88ad9b2b203d3ceb9bc6c543c2cf56a1fd33513",
+            "subject": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2"
+          },
+          "e4a5e0cf5e551cab2278d2f613fedf5b597514a623fc2fd5c9491ba1a5eeb48f": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "1f9b8c770c2dad436d0103a3181b976ab1ff2b4533fae246ee151e9560d3cdb6",
+            "statement_hash": "8f10a11d8b6040d32920b1b316a7b06730877a663d07206c67b3ed4713aac302",
+            "subject": "e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0"
+          },
+          "f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "tag",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-tag-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-tag-v1",
+            "sig_hash": "1db06d16f96e7dc9ea2237e823f8d885f62d789778e3ca7d780792dc195fe035",
+            "statement_hash": "64236c0dcedcbbb8d352c26864f0e18b8e758f4a6fbba0c13462743911510e13",
+            "subject": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          },
+          "f7640bd008e303b6cda1aa4075ad7a9cc934a7ff7bfe69623c51d8b5c2524a54": {
+            "check": {
+              "at_ms": 1,
+              "code": null,
+              "key": "SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA",
+              "key_type": "ssh-ed25519",
+              "kind": "approval",
+              "presence": "absent",
+              "signed": "valid",
+              "signed_by": {
+                "actor": "human:qa",
+                "run": null
+              },
+              "statement": "match",
+              "trust": "unknown",
+              "warnings": [
+                {
+                  "code": "W_SIG_UNKNOWN_KEY",
+                  "fix": "add the key and principal to signing.allowed_signers",
+                  "message": "key SHA256:zXnpmpdqaO3y8uHlGGIs6KSqQXmrVkl3eLpe0PR8vJA is not trusted for human:qa in rdy-approval-v1"
+                }
+              ]
+            },
+            "namespace": "rdy-approval-v1",
+            "sig_hash": "4f35323d75d0775b9e2899a876815b25799789aca925ff2e989ab7bcf1a3e43f",
+            "statement_hash": "1405c8120ab4c28e3386a85f9ad45bcd4d583ffa4bc5ff0e27258ac80a46055d",
+            "subject": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69"
+          }
+        }
+      },
+      "identity": {
+        "canon": null,
+        "keys": [
+          "10:8a2627830ee8da53caaa0f7024154903b69c0fc95b068749816f5d7c6d13abd5",
+          "10:a7cf5befe4042554a761efeb3bc4a9e3bdba4763821def2334db50c85b3643e3",
+          "11:70e25ea69683317df268f870602c21e0fe7d434d2709efb31d246aa57b750589",
+          "11:df07fabe570c85c4102e0abbbe93ee77476fc28fc84b21139620f303c073bcc3",
+          "11:e4a5e0cf5e551cab2278d2f613fedf5b597514a623fc2fd5c9491ba1a5eeb48f",
+          "11:f368cbbae243dca2c20ecaa1c703e7ab466c899141f6424d076a54cae9e74160",
+          "11:f7640bd008e303b6cda1aa4075ad7a9cc934a7ff7bfe69623c51d8b5c2524a54",
+          "1:038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+          "1:0bf1e4eb40b3c8c030b69d509f6b26e990b392e2ce313c118a43c3a830b11bec",
+          "1:12641d6db5c8d81ce36e8234ad145421c3cb35d1f2bfc75fa958a8066c5dcf5e",
+          "1:3964841857769cfdd14e8fe30c89cda19c4c9a68efdd0d17dc0d7fe1b2dae7c5",
+          "1:689ff7a43019e01b544f8a73351c05f398ab65482980a942e58ece008e558c41",
+          "1:e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785",
+          "1:f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146",
+          "1:f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a",
+          "20:c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356",
+          "21:0c2530a024c4f0183ca97ba7d9a6a94960ef7a5abcd0354b190ca5d278a6ac86",
+          "21:62be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b2178",
+          "21:74ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8",
+          "21:a89fc7307f9787e3cd3792598b036a10bb3be4c681b00dcd48d333b63a3bd1b0",
+          "21:e778fd4b1b9681527dd709bdc736a1970c49c44c9ca391a468da94d3b9c005f6",
+          "22:82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+          "24:2a0e397b2165999f596b3e4883fe3f01a1f34fe76e6ebc0076c91c52398f8dd8",
+          "24:e6ea524edccf3d970bdbeda2acb79bd50389c76c49b8189bb77f0aad1d568c8b",
+          "2:32b83d55e454abdb9de8ba322731a53a59902feb0108f784e532a094e2b29bd5",
+          "2:5193195518af24bf59a6279c902a8c1751c2ec95ab7f33e5df9d33a51a36ec62",
+          "2:7b30b2d4319b8ecf2a684e061c93c40c263f8a4b83b123c5606199df2739fdc9",
+          "2:8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+          "2:8cb7fb4844c139d9216b9f52d63c92a2230d14a83ff30f82d5959a49e5f4791d",
+          "2:e6d9eb9be3bbeb321f5e01ef1cf9f325efb98158589e60b6a48211d1811cfea7",
+          "3:4120a46acfa3d7546bc14998005c602be3769dea55337b3a6fc082038cba7d10",
+          "3:4f4500bf6ae4fd58c4dd90fc5523aeca6beea048b9eb5fb8daf89a9b2fa64e13",
+          "3:89f61a0e41507ae3a364121d65491aaff567e6d96c1f40928b8b0b46a02577db",
+          "3:b2e8c445a4a069b88d58bf720a243432b7d8386bab1ac76aff738484534ddc33",
+          "3:ea9e7f054e3b12e9099e8647c2a36199a0a4af3903ae621c4c99801daab32da9",
+          "3:eb2017cea3563dd7b49f840cfa97b68b1bbd992a5e3775a20307e23506ef9ead",
+          "4:830efacb2d34b489c981632c71c534ee3d0a5dc42e41e888020137ac5a86bc62",
+          "4:cb16b794cf423637c94ac076acdd83cae0afca0c430dbea45a069c9bee72ce53",
+          "4:d76a7744e0c13a6d984a9e975743b217e74bbf42a368387338653b057cbd3cd8",
+          "4:e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0",
+          "4:ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+          "4:eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+          "5:01257a426cbe3c1a1160a1c360395f2b60fbd25aba5e7811635897dcaf0e04f2",
+          "5:3afb891798e45a453fd2690d1f1cb101d191d9b1bffd680e1b0ce1bb3cc11822",
+          "5:56c744c20f21653e5355b0f95eb0b69a6af318b1ab133e4736569be2146ad37e",
+          "5:e9728c5432e32bc2ac2318bd81c754a04e9a43e1209019f3105e88427e943f10",
+          "6:d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+          "7:65201ecba13daf8e9706b151de61df82c2770926dad88c6495aacd284f02942b",
+          "8:0617f5f33a5c1ec7ffeec6a9ca77fc1cc8d1ab4a060c0a362e08ade3e07be708",
+          "8:192c42396c9b9afe3f2837c19942db8d78432b8550b1ead03da17e047a79f7fc",
+          "8:4fa8fb70eef3dc8233e16899d07504c487506f0acc1ef531f49e55b9e3066005",
+          "8:6adaf29f13e57f7dba0141c59296ac6618a39807b5c4277d4859144bec6f164c",
+          "8:7ebf114a0c1b258049953cd2482ede3395d5a3afb8d781443e426f72db57c96e",
+          "8:9f70b1657c4aec46ad5124620ed4f2b6892d10c980b2cf31d465849aa504e247",
+          "8:e2cad918395e208a4b3363db66f39cb4e49496f3e23d723a0020440f14771605",
+          "8:f1205706fd8763e19ec28de8000267ef5cfabc797fcac08bf03dd798a5ba13ea",
+          "9:847f94c5e73d078920dbb0e76f6bed48e11ed3454b044d8f38d1a0a4881c8283",
+          "9:9dc8e5c4a93bc5c56bd72d5c9ba4190f4361dccfdf9c0b164e1bb32b111de53b",
+          "9:a5af553e3fa2404fc7270c5c67b221cf1c531f73adad13d63b7afe61f18e369e",
+          "9:b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+        ],
+        "mode": "holder",
+        "origin": null,
+        "redacted": {
+          "1": 2,
+          "2": 3,
+          "6": 1
+        },
+        "repo_id": "b9d9f1adf65be1f5950c0e9124034ad3",
+        "tags": {
+          "v1.0.0": {
+            "landing": "ec1b7b8e036c2434975e678d40cd0bcf605ebf40f8b8b15943c52643c489c0f2",
+            "tag": "b6ce17c80ad8eb590b4620aab7e9d0cac38094e3fd89836e38f6295d1517d3d6"
+          },
+          "v2.0.0": {
+            "landing": "e409a79b3753576bdb65fe4b8ae23f4a358a06d5e0651e6b62b8fbb0984e30d0",
+            "tag": "a5af553e3fa2404fc7270c5c67b221cf1c531f73adad13d63b7afe61f18e369e"
+          },
+          "v3.0.0": {
+            "landing": "eebdd4d8487ab277234111e89f47d1e0a60ceb38a43a267248e0fcbf78ba4a69",
+            "tag": "9dc8e5c4a93bc5c56bd72d5c9ba4190f4361dccfdf9c0b164e1bb32b111de53b"
+          },
+          "v4.0.0": {
+            "landing": "d76a7744e0c13a6d984a9e975743b217e74bbf42a368387338653b057cbd3cd8",
+            "tag": "847f94c5e73d078920dbb0e76f6bed48e11ed3454b044d8f38d1a0a4881c8283"
+          }
+        }
+      },
+      "plans": {
+        "records": [
+          {
+            "answers": [],
+            "at": [
+              3,
+              1217
+            ],
+            "hash": "e6ea524edccf3d970bdbeda2acb79bd50389c76c49b8189bb77f0aad1d568c8b",
+            "prev": null,
+            "proposal": "eb2017cea3563dd7b49f840cfa97b68b1bbd992a5e3775a20307e23506ef9ead",
+            "seal": null,
+            "stable": null,
+            "view": "plan"
+          },
+          {
+            "answers": [
+              "defer"
+            ],
+            "at": [
+              3,
+              1362
+            ],
+            "hash": "2a0e397b2165999f596b3e4883fe3f01a1f34fe76e6ebc0076c91c52398f8dd8",
+            "prev": "e6ea524edccf3d970bdbeda2acb79bd50389c76c49b8189bb77f0aad1d568c8b",
+            "proposal": "eb2017cea3563dd7b49f840cfa97b68b1bbd992a5e3775a20307e23506ef9ead",
+            "seal": {
+              "decisions": [
+                "D-00002"
+              ],
+              "items": [
+                [
+                  "rejustify",
+                  "deferred",
+                  "8a2627830ee8da53caaa0f7024154903b69c0fc95b068749816f5d7c6d13abd5"
+                ]
+              ],
+              "landing": "d76a7744e0c13a6d984a9e975743b217e74bbf42a368387338653b057cbd3cd8",
+              "version": "eb2017cea3563dd7b49f840cfa97b68b1bbd992a5e3775a20307e23506ef9ead"
+            },
+            "stable": "e6ea524edccf3d970bdbeda2acb79bd50389c76c49b8189bb77f0aad1d568c8b",
+            "view": "plan"
+          }
+        ],
+        "tables": {
+          "plan_decisions": [
+            [
+              "442d30303030320000000003000000000000032c",
+              "2a0e397b2165999f596b3e4883fe3f01a1f34fe76e6ebc0076c91c52398f8dd8000000030000000000000552"
+            ]
+          ],
+          "plan_deferrals": [
+            [
+              "622d303030303100442d3030303032",
+              "002a0e397b2165999f596b3e4883fe3f01a1f34fe76e6ebc0076c91c52398f8dd856c4f939b0f533537f096abc81bd2d59767c55801755d675ccad53ea18d679a78a2627830ee8da53caaa0f7024154903b69c0fc95b068749816f5d7c6d13abd503d20a00"
+            ]
+          ],
+          "plan_proposals": [
+            [
+              "eb2017cea3563dd7b49f840cfa97b68b1bbd992a5e3775a20307e23506ef9ead",
+              "e6ea524edccf3d970bdbeda2acb79bd50389c76c49b8189bb77f0aad1d568c8b0000000300000000000004c1"
+            ]
+          ],
+          "plan_seals": [
+            [
+              "d76a7744e0c13a6d984a9e975743b217e74bbf42a368387338653b057cbd3cd8",
+              "2a0e397b2165999f596b3e4883fe3f01a1f34fe76e6ebc0076c91c52398f8dd8000000030000000000000552"
+            ]
+          ]
+        }
+      },
+      "projections": {
+        "v1.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": true,
+            "version": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        },
+        "v2.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": false,
+            "version": "0bf1e4eb40b3c8c030b69d509f6b26e990b392e2ce313c118a43c3a830b11bec"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        },
+        "v3.0.0": {
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": true,
+            "version": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        },
+        "v4.0.0": {
+          "d-FTJ9C": {
+            "redacted": false,
+            "version": "12641d6db5c8d81ce36e8234ad145421c3cb35d1f2bfc75fa958a8066c5dcf5e"
+          },
+          "d-PKKY0": {
+            "redacted": false,
+            "version": "f32f9959f0da7ed594f7724f57fdfaa3ad08616b0c0ca7a5920cb6b3dbd1f146"
+          },
+          "fg-6YCSA": {
+            "redacted": false,
+            "version": "f8898f67c353d67999cfa0898db351b9c4917271ca3207976e1aa8078368899a"
+          },
+          "p-HGR8H": {
+            "redacted": true,
+            "version": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2"
+          },
+          "p-Q0JTN": {
+            "redacted": false,
+            "version": "689ff7a43019e01b544f8a73351c05f398ab65482980a942e58ece008e558c41"
+          },
+          "p-QHS1Y": {
+            "redacted": false,
+            "version": "e28f72bf63429be77979d63fd3b6df76b81edd3f8a2074ba3d5d1a0302895785"
+          }
+        }
+      },
+      "removals": {
+        "applies": [
+          {
+            "at": [
+              2,
+              6247
+            ],
+            "hash": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2"
+          }
+        ],
+        "carried": [],
+        "dropped": [
+          {
+            "at": [
+              0,
+              263
+            ],
+            "authority": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+            "hash": "038b25ef34c3aa8c216fb0031cc1193b3617f79e05c1b2d8d624e0fc91dfcbc2",
+            "kind": 1,
+            "len": 51,
+            "residue": "62be5a2146d923e7d1d57175dcd198067c7853938c0e8ac09d5a92206a4b2178"
+          },
+          {
+            "at": [
+              0,
+              554
+            ],
+            "authority": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+            "hash": "d2d8ca75481229bac5756176bb93e9b03e827b4686dc8aea2c21e9a8b3c61b52",
+            "kind": 6,
+            "len": 29,
+            "residue": null
+          },
+          {
+            "at": [
+              0,
+              867
+            ],
+            "authority": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+            "hash": "8bf0776551eaa9a32197a5e9f7348568e944d02977b782d3b60895bde87fee61",
+            "kind": 2,
+            "len": 357,
+            "residue": "74ce20a4b630c9e157129c99e1d30e9bf47cb6ca7a690ccc9f71d30be518dbd8"
+          },
+          {
+            "at": [
+              2,
+              221
+            ],
+            "authority": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+            "hash": "3964841857769cfdd14e8fe30c89cda19c4c9a68efdd0d17dc0d7fe1b2dae7c5",
+            "kind": 1,
+            "len": 50,
+            "residue": "0c2530a024c4f0183ca97ba7d9a6a94960ef7a5abcd0354b190ca5d278a6ac86"
+          },
+          {
+            "at": [
+              2,
+              517
+            ],
+            "authority": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+            "hash": "7b30b2d4319b8ecf2a684e061c93c40c263f8a4b83b123c5606199df2739fdc9",
+            "kind": 2,
+            "len": 149,
+            "residue": "a89fc7307f9787e3cd3792598b036a10bb3be4c681b00dcd48d333b63a3bd1b0"
+          },
+          {
+            "at": [
+              2,
+              912
+            ],
+            "authority": "82b2c57fae2dd2a4f7764539026f68e1453bb1acd77480b3b0bda14c85c08de2",
+            "hash": "5193195518af24bf59a6279c902a8c1751c2ec95ab7f33e5df9d33a51a36ec62",
+            "kind": 2,
+            "len": 150,
+            "residue": "e778fd4b1b9681527dd709bdc736a1970c49c44c9ca391a468da94d3b9c005f6"
+          }
+        ],
+        "requests": [
+          {
+            "at": [
+              2,
+              2600
+            ],
+            "hash": "c2e8bdca6234481af6f2788ca7363834d671a28b5d1b2954638f31f486f4a356"
+          }
+        ]
+      },
+      "views": []
+    },
+    "summary": {
+      "batches": 5,
+      "chain": [
+        {
+          "base": [
+            0,
+            0
+          ],
+          "end": [
+            0,
+            3128
+          ],
+          "kind": "full"
+        },
+        {
+          "base": [
+            0,
+            3128
+          ],
+          "end": [
+            1,
+            1696
+          ],
+          "kind": "increment"
+        },
+        {
+          "base": [
+            1,
+            1696
+          ],
+          "end": [
+            3,
+            2034
+          ],
+          "kind": "increment"
+        }
+      ],
+      "dump_format": 3,
+      "files_kept": [],
+      "files_written": [],
+      "frames": 60,
+      "landings": 6,
+      "stopped_at": null,
+      "store_format": 17,
+      "tags": 4,
+      "views": 0,
+      "warnings": []
+    }
+  }
+}

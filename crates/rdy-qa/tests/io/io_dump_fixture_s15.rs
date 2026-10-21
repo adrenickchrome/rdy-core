@@ -770,7 +770,7 @@ struct Released {
 
 /// Every released fixture of a full dump. The checksums repeat the ones each pair's own test pins:
 /// a change to any file needs a founder decision, and none is made here.
-const RELEASED: [Released; 9] = [
+const RELEASED: [Released; 11] = [
     Released {
         dump: "v1-s10.rdydump",
         expect: "v1-s10.expect.json",
@@ -843,6 +843,22 @@ const RELEASED: [Released; 9] = [
         pair: (3, 16),
         holder: true,
     },
+    Released {
+        dump: "v3-s17.rdydump",
+        expect: "v3-s17.expect.json",
+        dump_blake3: "94157e0d99fbd0170ea7eeca37315e141a4776485923bd27264bbc00e70442b5",
+        expect_blake3: "397680b93467ef7a9dce3fdb0e16cb1a71d8bbcdbe734ce96907d657578fd44a",
+        pair: (3, 17),
+        holder: false,
+    },
+    Released {
+        dump: "v3-s17-holder.rdydump",
+        expect: "v3-s17-holder.expect.json",
+        dump_blake3: "771c2118924d0324885f25a73c60c7a1331221c156b2b0df298b6de613d694aa",
+        expect_blake3: "44a941765c88b7cc84b33cd9bbe27ea9665023cdd00835654a0299e9128f3ae5",
+        pair: (3, 17),
+        holder: true,
+    },
 ];
 
 /// A released dump chain: its full dump and increments in chain order, its expect file, the
@@ -855,8 +871,9 @@ struct ReleasedChain {
     holder: bool,
 }
 
-/// Every released dump chain. The checksums repeat the ones `io_dump_fixture_s16` pins.
-const RELEASED_CHAINS: [ReleasedChain; 2] = [
+/// Every released dump chain. The checksums repeat the ones `io_dump_fixture_s16` and
+/// `io_dump_fixture_s17` pin.
+const RELEASED_CHAINS: [ReleasedChain; 4] = [
     ReleasedChain {
         files: [
             "v3-s16-chain-full.rdydump",
@@ -889,7 +906,49 @@ const RELEASED_CHAINS: [ReleasedChain; 2] = [
         pair: (3, 16),
         holder: true,
     },
+    ReleasedChain {
+        files: [
+            "v3-s17-chain-full.rdydump",
+            "v3-s17-chain-1.rdydump",
+            "v3-s17-chain-2.rdydump",
+        ],
+        expect: "v3-s17-chain.expect.json",
+        blake3: [
+            "c0ee2f5236c226df0eaac875b317872d10bbc2f0f441145ea9df139317636872",
+            "1189a0c637444c8f9ec13ad4f6b1ee93dc12c7b2d912b4f877d253bc6e3e313d",
+            "1c72ece30389ba89621cf4b01702b0a640628280d0297f3ca04418fbff73b42b",
+            "9dcb2982bcae43cf79476b6ecaff2e13f528bb1a86d5f2caf0ec4e98c0f775b8",
+        ],
+        pair: (3, 17),
+        holder: false,
+    },
+    ReleasedChain {
+        files: [
+            "v3-s17-holder-chain-full.rdydump",
+            "v3-s17-holder-chain-1.rdydump",
+            "v3-s17-holder-chain-2.rdydump",
+        ],
+        expect: "v3-s17-holder-chain.expect.json",
+        blake3: [
+            "ec0e4a4f6f3f5c6efde8229b8b65205adfa4a18de8098f4945864021f4ebf5eb",
+            "ac46691bf0b612877c6fbd1cb1e487068d884f93d1f82b26f8bdd766ec80dc4e",
+            "48a2f8a431ce2ff38eaab1b6adb567441cf7fce5c9f96902e942b310a6f4605d",
+            "54958cbc0723d1c9dc7b589fdcc3a64912546841bcadcfd31a49a7f7abd912ed",
+        ],
+        pair: (3, 17),
+        holder: true,
+    },
 ];
+
+/// The blake3 of member `name` of `pair`, as that pair's own test pins it: (3, 16) and (3, 17)
+/// each in their own module, and never another pair's name.
+fn member_digest(pair: (u32, u32), name: &str) -> &'static str {
+    match pair {
+        (3, 16) => crate::io_dump_fixture_s16::digest_of(name),
+        (3, 17) => crate::io_dump_fixture_s17::digest_of(name),
+        other => panic!("{name}: pair {other:?} keeps its digests here only"),
+    }
+}
 
 /// Checks the store loaded at `dir` from the dump files whose batches are `batches` and whose
 /// log ends at `log_end`: every original frame under its hash and kind, at most an upgrade batch
@@ -970,7 +1029,7 @@ fn ha17_all_released_dump_pairs_still_load() {
         )
         .collect();
     assert_eq!(on_disk, listed, "every fixture member is a released one");
-    // the seven released pairs, each with its fixture, and each pair this rdy reads among them
+    // the eight released pairs, each with its fixture, and each pair this rdy reads among them
     let pairs: BTreeSet<(u32, u32)> = RELEASED.iter().map(|f| f.pair).collect();
     assert_eq!(
         pairs,
@@ -981,7 +1040,8 @@ fn ha17_all_released_dump_pairs_still_load() {
             (2, 13),
             (2, 14),
             (2, 15),
-            (3, 16)
+            (3, 16),
+            (3, 17)
         ])
     );
     assert_eq!(
@@ -1007,13 +1067,9 @@ fn ha17_all_released_dump_pairs_still_load() {
             "{}",
             f.expect
         );
-        if f.pair == (3, 16) {
+        if f.pair.0 == 3 {
             for (name, digest) in [(f.dump, f.dump_blake3), (f.expect, f.expect_blake3)] {
-                assert_eq!(
-                    digest,
-                    crate::io_dump_fixture_s16::digest_of(name),
-                    "{name}"
-                );
+                assert_eq!(digest, member_digest(f.pair, name), "{name}");
             }
         }
         // the dump still loads into this store format with every original object under its
@@ -1039,11 +1095,7 @@ fn ha17_all_released_dump_pairs_still_load() {
         for (name, digest) in c.files.iter().chain([&c.expect]).zip(c.blake3) {
             let bytes = std::fs::read(fixture(name)).unwrap();
             assert_eq!(Hash::of(&bytes).to_string(), digest, "{name}");
-            assert_eq!(
-                digest,
-                crate::io_dump_fixture_s16::digest_of(name),
-                "{name}"
-            );
+            assert_eq!(digest, member_digest(c.pair, name), "{name}");
         }
         // the whole chain still loads, as one log, with every original object
         let mut batches = vec![];
