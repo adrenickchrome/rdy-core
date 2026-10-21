@@ -33,18 +33,78 @@ The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is 
 
 | Platform | Target | Archive |
 |---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
 
-The release is [v0.15.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.15.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS.sig).
+The release is [v0.17.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.17.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/SHA256SUMS.sig).
 
 Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
 Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
 This signature is not Apple notarization.
 
-Release signing key: pending founder confirmation.
-Preview downloads are not ready.
-Do not install a preview until this README and its GitHub release notes show the same key and fingerprint.
+### Release signing key
+
+```text
+rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==
+```
+
+Fingerprint: SHA256:Baa52ZPJSzazbmd2KDEkzUM6OYTnl8mznJXsmnwvvJc.
+
+Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.17.0). Use the key only when both match.
+
+### Install
+
+On macOS arm64, for an archive downloaded with curl:
+
+```sh
+cd '/path/to/download' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
+'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.17.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.17.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.17.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.17.0/bin/rdy' &&
+'/path/to/rdy-0.17.0/bin/rdy' '--version'
+```
+
+On Linux amd64:
+
+```sh
+cd '/path/to/download' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
+'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.17.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.17.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.17.0-preview-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.17.0/bin/rdy' &&
+'/path/to/rdy-0.17.0/bin/rdy' '--version'
+```
+
+On macOS arm64, for an archive downloaded with a web browser:
+
+```sh
+# In Safari, turn off “Open safe files after downloading” before downloading. Keep the original .tar.gz file.
+# After both checks pass, remove com.apple.quarantine from the archive before extraction. Skip this command if the archive has no com.apple.quarantine attribute.
+cd '/path/to/download' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
+'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.17.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.17.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.17.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.17.0/bin/rdy' &&
+'/path/to/rdy-0.17.0/bin/rdy' '--version'
+```
+
+Add the version's bin directory to PATH in this shell.
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.17.0`:
+
+```sh
+export PATH="<version-prefix>/bin:$PATH"
+```
 
 ## Quick start
 
