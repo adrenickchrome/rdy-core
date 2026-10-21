@@ -828,9 +828,14 @@ impl SocketAgent {
                         return;
                     }
                     let Ok(mut conn) = conn else { continue };
-                    if serve_agent_request(&mut conn, &*signer) {
-                        served.fetch_add(1, Ordering::SeqCst);
-                    }
+                    let Some(packet) = agent_reply(&mut conn, &*signer) else {
+                        continue;
+                    };
+                    // counted before the reply is written: once the caller reads the reply,
+                    // the count already holds its request (counting after the write raced
+                    // with a test that reads the count as soon as its call returned)
+                    served.fetch_add(1, Ordering::SeqCst);
+                    let _ = std::io::Write::write_all(&mut conn, &packet);
                 }
             })
         };
@@ -848,7 +853,8 @@ impl SocketAgent {
         &self.path
     }
 
-    /// The requests answered so far (a failure reply counts too).
+    /// The requests answered so far (a failure reply counts too); a request is counted before
+    /// its reply is written, so a caller that has read a reply sees it counted.
     pub fn requests(&self) -> usize {
         self.served.load(Ordering::SeqCst)
     }
@@ -881,25 +887,25 @@ fn agent_take<'a>(body: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
     Some(out)
 }
 
-/// Serves one request on `conn`; whether a reply was written.
-fn serve_agent_request(
+/// Reads one request on `conn` and builds its reply packet; `None` when no request was read.
+fn agent_reply(
     conn: &mut std::os::unix::net::UnixStream,
     signer: &dyn rdy_engine::signing_crypto::SigningAgent,
-) -> bool {
-    use std::io::{Read, Write};
+) -> Option<Vec<u8>> {
+    use std::io::Read;
     let mut len = [0u8; 4];
     if conn.read_exact(&mut len).is_err() {
-        return false;
+        return None;
     }
     let Ok(len) = usize::try_from(u32::from_be_bytes(len)) else {
-        return false;
+        return None;
     };
     if len == 0 || len > SOCKET_AGENT_PACKET_MAX {
-        return false;
+        return None;
     }
     let mut body = vec![0u8; len];
     if conn.read_exact(&mut body).is_err() {
-        return false;
+        return None;
     }
     let failure = vec![5u8];
     let reply = match body[0] {
@@ -938,7 +944,7 @@ fn serve_agent_request(
         .to_be_bytes()
         .to_vec();
     packet.extend(reply);
-    conn.write_all(&packet).is_ok()
+    Some(packet)
 }
 
 /// Test helpers that the release module's tests share: named pipes for readiness, and hang
