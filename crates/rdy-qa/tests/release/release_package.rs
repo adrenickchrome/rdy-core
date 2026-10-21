@@ -1,4 +1,4 @@
-//! `qa-release-package` and the dual license of the workspace (D-NFJ3D, D-XTWM9).
+//! `qa-release-package` and the dual license of the workspace.
 use rdy_qa::fixtures::output_within;
 use rdy_qa::platform;
 use rdy_qa::release_install::{
@@ -287,7 +287,9 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     assert_eq!(fs::read(&bin).expect("binary"), b"rdy fixture\n");
 
     // A binary of exactly the cap is packaged: a sparse file whose script answers --version.
-    if !tar_available_or_skip() {
+    if !tar_available_or_skip(&rdy_qa::test_name!(
+        "pre1_package_refuses_inputs_and_never_overwrites"
+    )) {
         return;
     }
     let full = dir.path().join("full");
@@ -310,14 +312,99 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     assert_eq!(fs::read_dir(&out).expect("read_dir").count(), 1);
 }
 
-fn tar_available_or_skip() -> bool {
+fn tar_available_or_skip(test: &str) -> bool {
     if release_install::tar_available() {
         return true;
     }
-    skip::skip(
-        &rdy_qa::test_name!("pre1_package_refuses_inputs_and_never_overwrites"),
-        Why::Prerequisite,
-        TAR_SKIP_REASON,
-    );
+    skip::skip(test, Why::Prerequisite, TAR_SKIP_REASON);
     false
+}
+
+/// Makes a named pipe at `path`.
+fn fifo(path: &Path) {
+    let made = Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {}", path.display());
+}
+
+#[test]
+fn pre1_package_stage_stays_private_under_any_umask() {
+    if !tar_available_or_skip(&rdy_qa::test_name!(
+        "pre1_package_stage_stays_private_under_any_umask"
+    )) {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ready, go) = (dir.path().join("ready"), dir.path().join("go"));
+    fifo(&ready);
+    fifo(&go);
+    // The binary's --version waits on the pipes, so the stage can be inspected mid-probe.
+    let bin = dir.path().join("rdy");
+    fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\necho ready > '{}'\nread go < '{}'\nprintf 'rdy 0.14.0\\n'\n",
+            ready.display(),
+            go.display()
+        ),
+    )
+    .expect("binary");
+    let out = dir.path().join("out");
+    let mut cmd =
+        rdy_store::pio::under_umask("000", Path::new(env!("CARGO_BIN_EXE_qa-release-package")));
+    cmd.args(flags(bin.as_os_str(), "0.14.0", TARGET, out.as_os_str()));
+    let cli = std::thread::spawn(move || output_within(&mut cmd, Duration::from_secs(600)));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut line = String::new();
+        let read =
+            fs::File::open(&ready).and_then(|f| std::io::BufReader::new(f).read_line(&mut line));
+        let _ = tx.send(read.map(|_| line));
+    });
+    let line = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the version probe started")
+        .expect("read the readiness pipe");
+    assert_eq!(line, "ready\n");
+    let out_mode = platform::mode_of(&out).expect("OUT's mode");
+    let inside: Vec<(String, u32)> = fs::read_dir(&out)
+        .expect("read OUT")
+        .map(|e| {
+            let e = e.expect("entry");
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                platform::mode_of(&e.path()).expect("mode"),
+            )
+        })
+        .collect();
+    {
+        use std::io::Write;
+        fs::File::options()
+            .write(true)
+            .open(&go)
+            .and_then(|mut g| g.write_all(b"go\n"))
+            .expect("let the probe finish");
+    }
+    let done = cli
+        .join()
+        .expect("the command's thread")
+        .expect("run qa-release-package");
+    assert_eq!(out_mode, 0o700, "OUT is private under umask 000");
+    assert_eq!(inside.len(), 1, "OUT holds only the stage: {inside:?}");
+    assert_eq!(inside[0].1, 0o700, "the stage is private under umask 000");
+    assert_eq!(done.status.code(), Some(0), "{done:?}");
+    let archive = out.join(format!("rdy-0.14.0-{TARGET}.tar.gz"));
+    assert_eq!(
+        String::from_utf8_lossy(&done.stdout),
+        format!("{}\n", archive.display())
+    );
+    assert_eq!(
+        platform::mode_of(&archive).expect("the archive's mode"),
+        0o644,
+        "the archive is not writable by others under umask 000"
+    );
+    assert_eq!(fs::read_dir(&out).expect("read_dir").count(), 1);
 }

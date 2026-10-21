@@ -1,4 +1,4 @@
-//! `qa-release-package`: packages a release build of rdy as one native `.tar.gz` (D-NFJ3D).
+//! `qa-release-package`: packages a release build of rdy as one native `.tar.gz`.
 //! Prints the archive's absolute path; see `rdy_qa::release_install::package`.
 use clap::Parser;
 use rdy_qa::release_install::{self, MSG_INVALID_ARGUMENTS};

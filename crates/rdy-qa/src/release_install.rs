@@ -1,4 +1,4 @@
-//! Release archives (D-NFJ3D, D-XTWM9): one native `.tar.gz` per platform, holding the `rdy`
+//! Release archives: one native `.tar.gz` per platform, holding the `rdy`
 //! binary, both license files and, for a preview build, the preview note as `PREVIEW.txt`. The
 //! binary's own `--version` output decides whether it is a preview, so the archive's name and
 //! note follow the build, with no second switch. Packaging stops at the unsigned archive: the
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// The preview note: `PREVIEW.txt` in a preview archive, and the start of the README section
-/// and of each preview's release notes (D-XTWM9).
+/// and of each preview's release notes.
 pub const PREVIEW_NOTE: &str = "This is a preview of rdy.
 It comes before Release 1, the first release with a compatibility promise.
 
@@ -26,7 +26,7 @@ A project made with a preview moves to Release 1 the same way.
 Report problems at https://github.com/adrenickchrome/rdy-core/issues.
 ";
 
-/// The two release targets (D-NFJ3D): macOS arm64 and Linux amd64.
+/// The two release targets: macOS arm64 and Linux amd64.
 pub const TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"];
 /// The MIT license file, at the repository root and in each archive.
 pub const MIT_FILE: &str = "LICENSE-MIT";
@@ -96,7 +96,12 @@ struct Setup<'a> {
     tar: TarCommand<'a>,
     /// The version probe of the staged binary.
     probe: &'a dyn Fn(&Path) -> Command,
+    /// Runs once every input is checked, before OUT is made (tests change input paths here).
+    checked: &'a dyn Fn(),
 }
+
+/// The real release's `checked`: nothing.
+fn nothing() {}
 
 impl Setup<'static> {
     /// The real release: the repository's license files, native tar, the binary's own probe.
@@ -106,6 +111,7 @@ impl Setup<'static> {
             archive_max: ARCHIVE_MAX,
             tar: &tar_command,
             probe: &version_command,
+            checked: &nothing,
         }
     }
 }
@@ -183,10 +189,16 @@ pub fn tar_available() -> bool {
 /// The error is one of the `MSG_` texts. Checks run in order: the grammar of the arguments, the
 /// binary, `LICENSE-MIT`, `LICENSE-APACHE`, then that `out` does not exist. On failure every
 /// path this call created is removed again, and nothing that was there before is touched.
+///
+/// `out` is made private to this user (mode 0700, whatever the umask), and the stage inside it
+/// too, so no other user can change a staged file between its probe and the archive.
 pub fn package(binary: &Path, version: &str, target: &str, out: &Path) -> Result<PathBuf, String> {
     package_with(binary, version, target, out, &Setup::release())
         .map_err(|f| f.message().to_string())
 }
+
+/// The private staging directory's name in OUT.
+const STAGE_DIR: &str = ".rdy-stage";
 
 fn package_with(
     binary: &Path,
@@ -198,11 +210,11 @@ fn package_with(
     if !(valid_version(version) && valid_target(target) && valid_path(binary) && valid_path(out)) {
         return Err(Failure::Arguments);
     }
-    check_input(binary, BINARY_MAX)?;
-    let mit = setup.licenses.join(MIT_FILE);
-    check_input(&mit, LICENSE_MAX)?;
-    let apache = setup.licenses.join(APACHE_FILE);
-    check_input(&apache, LICENSE_MAX)?;
+    let inputs = Inputs {
+        binary: open_input(binary, BINARY_MAX)?,
+        mit: open_input(&setup.licenses.join(MIT_FILE), LICENSE_MAX)?,
+        apache: open_input(&setup.licenses.join(APACHE_FILE), LICENSE_MAX)?,
+    };
     match fs::symlink_metadata(out) {
         Ok(_) => return Err(Failure::OutputExists),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -214,139 +226,174 @@ fn package_with(
     if !parent_is_dir {
         return Err(Failure::FileOperation);
     }
-    match fs::create_dir(out) {
-        Ok(()) => {}
+    (setup.checked)();
+    let out_dir = match platform::create_private_dir(out) {
+        Ok(dir) => dir,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::OutputExists),
         Err(_) => return Err(Failure::FileOperation),
-    }
-    let made = (|| {
-        let stage = tempfile::Builder::new()
-            .prefix(".rdy-stage-")
-            .tempdir_in(out)
+    };
+    let mut work = Work {
+        out,
+        out_dir,
+        stage: None,
+        archive: None,
+    };
+    let made = work.build(&inputs, version, target, setup);
+    work.finish(made)
+}
+
+/// The three inputs, open: the handles their checks read, which the copies read too.
+struct Inputs {
+    binary: File,
+    mit: File,
+    apache: File,
+}
+
+/// What one packaging run made in OUT, which only it may remove.
+struct Work<'a> {
+    out: &'a Path,
+    /// OUT, open: the archive is reserved, checked and removed through it.
+    out_dir: File,
+    stage: Option<PathBuf>,
+    /// The archive's name and the file this run reserved there.
+    archive: Option<(String, File)>,
+}
+
+impl Work<'_> {
+    /// Stages the release in a private directory in OUT and writes `<stem>.tar.gz` beside it;
+    /// returns the archive's path.
+    fn build(
+        &mut self,
+        inputs: &Inputs,
+        version: &str,
+        target: &str,
+        setup: &Setup,
+    ) -> Result<PathBuf, Failure> {
+        let stage = self.out.join(STAGE_DIR);
+        platform::create_private_dir(&stage).map_err(|_| Failure::FileOperation)?;
+        let stage = self.stage.insert(stage).clone();
+        let rdy = stage.join("rdy");
+        copy_from(&inputs.binary, &rdy, BINARY_MAX)?;
+        for (name, from) in [(MIT_FILE, &inputs.mit), (APACHE_FILE, &inputs.apache)] {
+            copy_from(from, &stage.join(name), LICENSE_MAX)?;
+            set_mode(&stage.join(name), 0o644)?;
+        }
+        set_mode(&rdy, 0o755)?;
+        let preview = probe_version(&rdy, version, setup)?;
+        let stem = if preview {
+            format!("rdy-{version}-preview-{target}")
+        } else {
+            format!("rdy-{version}-{target}")
+        };
+        let dir = stage.join(&stem);
+        fs::create_dir(&dir).map_err(|_| Failure::FileOperation)?;
+        set_mode(&dir, 0o755)?;
+        for name in ["rdy", MIT_FILE, APACHE_FILE] {
+            fs::rename(stage.join(name), dir.join(name)).map_err(|_| Failure::FileOperation)?;
+        }
+        if preview {
+            let note = dir.join(NOTE_FILE);
+            write_new(&note, PREVIEW_NOTE.as_bytes())?;
+            set_mode(&note, 0o644)?;
+        }
+
+        // Reserve the archive's name before tar writes there: a file that someone else put
+        // there first is refused and never touched.
+        let name = format!("{stem}.tar.gz");
+        let reserved = platform::create_new_at(&self.out_dir, name.as_ref())
             .map_err(|_| Failure::FileOperation)?;
-        let staged = assemble(stage.path(), binary, &mit, &apache, version, target, setup);
-        // the stage goes on every path; failing to remove it fails the run
-        let closed = stage.close().map_err(|_| Failure::FileOperation);
-        let archive = out.join(format!("{}.tar.gz", staged?));
-        let checked = archive_written(&archive, setup.archive_max).and(closed);
-        if checked.is_err() {
-            let _ = fs::remove_file(&archive);
+        let (name, reserved) = self.archive.insert((name, reserved));
+        let archive = self.out.join(&*name);
+        let tarred = platform::run_bounded(
+            (setup.tar)(&archive, &stage, &stem),
+            None,
+            RELEASE_CHILD_OUTPUT_MAX,
+            RELEASE_CHILD_DEADLINE,
+        );
+        match tarred {
+            Ok(o) if o.status.success() => {}
+            Ok(_) => return Err(Failure::FileOperation),
+            Err(e) => return Err(child_failure(&e)),
         }
-        checked.map(|()| archive)
-    })();
-    if made.is_err() {
-        // OUT itself, which this call made; it is empty again unless a cleanup failed
-        let _ = fs::remove_dir(out);
-    }
-    made
-}
-
-/// Stages the release in `stage` and writes `<out>/<stem>.tar.gz` beside it; returns the stem.
-/// A partial archive is removed on failure.
-fn assemble(
-    stage: &Path,
-    binary: &Path,
-    mit: &Path,
-    apache: &Path,
-    version: &str,
-    target: &str,
-    setup: &Setup,
-) -> Result<String, Failure> {
-    let rdy = stage.join("rdy");
-    copy_bounded(binary, &rdy, BINARY_MAX)?;
-    let licenses = [(MIT_FILE, mit), (APACHE_FILE, apache)];
-    for (name, from) in licenses {
-        copy_bounded(from, &stage.join(name), LICENSE_MAX)?;
-        set_mode(&stage.join(name), 0o644)?;
-    }
-    set_mode(&rdy, 0o755)?;
-    let preview = probe_version(&rdy, version, setup)?;
-    let stem = if preview {
-        format!("rdy-{version}-preview-{target}")
-    } else {
-        format!("rdy-{version}-{target}")
-    };
-    let dir = stage.join(&stem);
-    fs::create_dir(&dir).map_err(|_| Failure::FileOperation)?;
-    set_mode(&dir, 0o755)?;
-    for name in ["rdy", MIT_FILE, APACHE_FILE] {
-        fs::rename(stage.join(name), dir.join(name)).map_err(|_| Failure::FileOperation)?;
-    }
-    if preview {
-        let note = dir.join(NOTE_FILE);
-        write_new(&note, PREVIEW_NOTE.as_bytes())?;
-        set_mode(&note, 0o644)?;
-    }
-    let out = stage.parent().ok_or(Failure::FileOperation)?;
-    let archive = out.join(format!("{stem}.tar.gz"));
-    let tarred = platform::run_bounded(
-        (setup.tar)(&archive, stage, &stem),
-        None,
-        RELEASE_CHILD_OUTPUT_MAX,
-        RELEASE_CHILD_DEADLINE,
-    );
-    let tarred = match tarred {
-        Ok(o) if o.status.success() => Ok(stem),
-        Ok(_) => Err(Failure::FileOperation),
-        Err(e) => Err(child_failure(&e)),
-    };
-    if tarred.is_err() {
-        let _ = fs::remove_file(&archive);
-    }
-    tarred
-}
-
-/// The archive tar wrote: a regular file of 1..=`max` bytes.
-fn archive_written(archive: &Path, max: u64) -> Result<(), Failure> {
-    let meta = fs::symlink_metadata(archive).map_err(|_| Failure::FileOperation)?;
-    if !meta.file_type().is_file() || meta.len() == 0 {
-        return Err(Failure::FileOperation);
-    }
-    if meta.len() > max {
-        return Err(Failure::SizeLimit);
-    }
-    Ok(())
-}
-
-/// An input file: a regular file (not a symlink) of 1..=`max` bytes.
-fn check_input(path: &Path, max: u64) -> Result<(), Failure> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound
-                    | io::ErrorKind::NotADirectory
-                    | io::ErrorKind::InvalidFilename
-            ) =>
+        // tar wrote into the reserved file; anything else at the name is not this run's
+        if !platform::holds_file(&self.out_dir, name.as_ref(), reserved)
+            .map_err(|_| Failure::FileOperation)?
         {
-            return Err(Failure::InputFile);
+            return Err(Failure::FileOperation);
         }
-        Err(_) => return Err(Failure::FileOperation),
-    };
-    if !meta.file_type().is_file() || meta.len() == 0 {
+        let len = reserved
+            .metadata()
+            .map_err(|_| Failure::FileOperation)?
+            .len();
+        if len == 0 {
+            return Err(Failure::FileOperation);
+        }
+        if len > setup.archive_max {
+            return Err(Failure::SizeLimit);
+        }
+        platform::set_file_mode(reserved, 0o644).map_err(|_| Failure::FileOperation)?;
+        Ok(archive)
+    }
+
+    /// Removes the stage on every path and, on failure, the reserved archive (only while its
+    /// name still holds the reserved file) and OUT. A failed removal is the result, whatever
+    /// failed before it.
+    fn finish(self, made: Result<PathBuf, Failure>) -> Result<PathBuf, Failure> {
+        let mut cleaned = true;
+        if let Some(stage) = &self.stage {
+            cleaned &= fs::remove_dir_all(stage).is_ok();
+        }
+        let made = if cleaned {
+            made
+        } else {
+            Err(Failure::FileOperation)
+        };
+        if made.is_err() {
+            if let Some((name, reserved)) = &self.archive {
+                cleaned &= match platform::holds_file(&self.out_dir, name.as_ref(), reserved) {
+                    Ok(true) => platform::remove_file_at(&self.out_dir, name.as_ref()).is_ok(),
+                    // gone, or another's: never removed
+                    Ok(false) => true,
+                    Err(_) => false,
+                };
+            }
+            // OUT is empty again unless a removal failed or someone else put a file there
+            cleaned &= fs::remove_dir(self.out).is_ok();
+        }
+        if cleaned {
+            made
+        } else {
+            Err(Failure::FileOperation)
+        }
+    }
+}
+
+/// Opens an input file and checks it through the open handle: a regular file (not a symlink, a
+/// FIFO or a directory) of 1..=`max` bytes.
+fn open_input(path: &Path, max: u64) -> Result<File, Failure> {
+    let file = platform::open_input(path).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound
+        | io::ErrorKind::NotADirectory
+        | io::ErrorKind::InvalidFilename
+        | io::ErrorKind::InvalidInput => Failure::InputFile,
+        _ => Failure::FileOperation,
+    })?;
+    let meta = file.metadata().map_err(|_| Failure::FileOperation)?;
+    if !meta.is_file() || meta.len() == 0 {
         return Err(Failure::InputFile);
     }
     if meta.len() > max {
         return Err(Failure::SizeLimit);
     }
-    Ok(())
+    Ok(file)
 }
 
-/// Copies `from` into the new file `to`, reading at most `max + 1` bytes: a file that grew past
-/// `max` since its check fails, and so does one that is now empty or not a regular file.
-fn copy_bounded(from: &Path, to: &Path, max: u64) -> Result<(), Failure> {
+/// Copies the checked input `from` into the new file `to`, reading at most `max + 1` bytes: a
+/// file that grew past `max` since its check fails, and so does one that is now empty.
+fn copy_from(from: &File, to: &Path, max: u64) -> Result<(), Failure> {
     use std::io::Read;
-    let src = File::open(from).map_err(|_| Failure::FileOperation)?;
-    if !src
-        .metadata()
-        .map_err(|_| Failure::FileOperation)?
-        .is_file()
-    {
-        return Err(Failure::InputFile);
-    }
     let mut dst = File::create_new(to).map_err(|_| Failure::FileOperation)?;
-    let copied = io::copy(&mut src.take(max.saturating_add(1)), &mut dst)
+    let copied = io::copy(&mut from.take(max.saturating_add(1)), &mut dst)
         .map_err(|_| Failure::FileOperation)?;
     dst.sync_all().map_err(|_| Failure::FileOperation)?;
     match copied {
@@ -428,6 +475,7 @@ fn preview_from_version(stdout: &[u8], version: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::test_support::{fifo, fifo_line};
     use crate::platform::{Expiry, mode_of, run_bounded, run_bounded_inner, shell_script};
     use crate::skip::{self, Why};
 
@@ -870,12 +918,14 @@ mod tests {
         // A file that grows past its cap between the check and the copy fails the copy.
         let f = Fixture::new();
         let to = f.dir.path().join("copy");
+        let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
         assert_eq!(
-            copy_bounded(&f.binary, &to, BINARY.len() as u64 - 1),
+            copy_from(&from, &to, BINARY.len() as u64 - 1),
             Err(Failure::SizeLimit)
         );
+        let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
         assert_eq!(
-            copy_bounded(&f.binary, &to.with_extension("b"), BINARY.len() as u64),
+            copy_from(&from, &to.with_extension("b"), BINARY.len() as u64),
             Ok(())
         );
     }
@@ -932,6 +982,282 @@ mod tests {
             );
             assert_eq!(f.state(), before, "{what}: only new paths were removed");
             assert!(!f.out().exists(), "{what}: OUT and its stage are gone");
+        }
+    }
+
+    /// A paused child: it writes `ready` to the named pipe `ready`, waits for a line on the named
+    /// pipe `go`, then runs the shell text `then`.
+    fn paused(ready: &Path, go: &Path, then: &str) -> Command {
+        let mut c = shell_script(&format!("echo ready > \"$0\"; read go < \"$1\"; {then}"));
+        c.arg(ready).arg(go);
+        c
+    }
+
+    /// On a thread of its own: waits for the ready line, runs `act`, then sends the go line. The
+    /// returned channel reports that `act` ran.
+    fn on_ready(
+        ready: PathBuf,
+        go: PathBuf,
+        act: impl FnOnce() + Send + 'static,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if fifo_line(ready)
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .is_err()
+            {
+                return;
+            }
+            act();
+            use std::io::Write;
+            let sent = File::options()
+                .write(true)
+                .open(&go)
+                .and_then(|mut g| g.write_all(b"go\n"));
+            if sent.is_ok() {
+                let _ = tx.send(());
+            }
+        });
+        rx
+    }
+
+    #[test]
+    fn pre1_package_never_takes_an_archive_path_it_did_not_create() {
+        const STEM: &str = "rdy-0.14.0-preview-aarch64-apple-darwin";
+        let missing = |_: &Path, _: &Path, _: &str| Command::new("/nonexistent/rdy-qa-tar");
+        for (case, what) in [
+            "a newcomer at the archive path before tar, with tar",
+            "a newcomer at the archive path before tar, with a tar that cannot start",
+            "a newcomer in place of the archive while tar runs, then tar succeeds",
+            "a newcomer in place of the archive while tar runs, then tar fails",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let f = Fixture::new();
+            let before = f.state();
+            let (ready, go) = (f.dir.path().join("ready"), f.dir.path().join("go"));
+            fifo(&ready);
+            fifo(&go);
+            let archive = f.out().join(format!("{STEM}.tar.gz"));
+            let placed = on_ready(ready.clone(), go.clone(), {
+                let archive = archive.clone();
+                move || {
+                    let _ = fs::remove_file(&archive);
+                    fs::write(&archive, b"newcomer\n").expect("place the newcomer");
+                }
+            });
+            let paused_probe = {
+                let (r, g) = (ready.clone(), go.clone());
+                move |_: &Path| paused(&r, &g, "printf 'rdy 0.14.0 (preview)\\n'")
+            };
+            let plain_probe = printing("rdy 0.14.0 (preview)\\n");
+            let paused_tar = {
+                let (r, g) = (ready.clone(), go.clone());
+                let code = if case == 2 { 0 } else { 3 };
+                move |_: &Path, _: &Path, _: &str| paused(&r, &g, &format!("exit {code}"))
+            };
+            let mut s = setup(
+                &f,
+                if case < 2 {
+                    &paused_probe
+                } else {
+                    &plain_probe
+                },
+            );
+            s.tar = match case {
+                0 => &tar_command,
+                1 => &missing,
+                _ => &paused_tar,
+            };
+            let got = package_with(&f.binary, V, TARGET, &f.out(), &s);
+            placed
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap_or_else(|_| panic!("{what}: the newcomer was placed"));
+            assert_eq!(got, Err(Failure::FileOperation), "{what}");
+            assert_eq!(
+                fs::read(&archive).expect("the newcomer"),
+                b"newcomer\n",
+                "{what}: the newcomer is untouched"
+            );
+            assert_eq!(
+                names(&f.out()),
+                vec![format!("{STEM}.tar.gz")],
+                "{what}: OUT holds only the newcomer"
+            );
+            let mut after = f.state();
+            after[2].1.retain(|n| n != "out");
+            assert_eq!(after, before, "{what}: the inputs are unchanged");
+        }
+    }
+
+    /// Packages a fixture on a thread of its own: `prepare` runs before packaging, `change`
+    /// once the inputs are checked. A hang guard: packaging must end within a minute.
+    fn package_changed(
+        prepare: fn(&Fixture),
+        change: fn(&Fixture),
+    ) -> (Result<PathBuf, Failure>, Fixture) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let f = Fixture::new();
+            prepare(&f);
+            let probe = printing("rdy 0.14.0\\n");
+            let hook = || change(&f);
+            let got = {
+                let mut s = setup(&f, &probe);
+                s.checked = &hook;
+                package_with(&f.binary, V, TARGET, &f.out(), &s)
+            };
+            let _ = tx.send((got, f));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("packaging did not wait on a changed input")
+    }
+
+    #[test]
+    fn pre1_package_copies_the_inputs_it_checked() {
+        fn unchanged(_: &Fixture) {}
+        // A FIFO is refused at the check, without waiting for a writer.
+        let cases: [(&str, fn(&Fixture)); 2] = [
+            ("a FIFO binary", |f| {
+                fs::remove_file(&f.binary).expect("rm");
+                fifo(&f.binary);
+            }),
+            ("a FIFO LICENSE-MIT", |f| {
+                let p = f.licenses.join(MIT_FILE);
+                fs::remove_file(&p).expect("rm");
+                fifo(&p);
+            }),
+        ];
+        for (what, prepare) in cases {
+            let (got, f) = package_changed(prepare, unchanged);
+            assert_eq!(got, Err(Failure::InputFile), "{what}");
+            assert!(!f.out().exists(), "{what}: no OUT");
+        }
+
+        // Once checked, an input path that changes does not change what is packaged.
+        if !tar_or_skip(&crate::test_name!(
+            "pre1_package_copies_the_inputs_it_checked"
+        )) {
+            return;
+        }
+        let cases: [(&str, fn(&Fixture)); 4] = [
+            ("a symlink in place of LICENSE-MIT", |f| {
+                let p = f.licenses.join(MIT_FILE);
+                let other = f.dir.path().join("other");
+                fs::write(&other, b"other bytes\n").expect("write");
+                fs::remove_file(&p).expect("rm");
+                crate::platform::symlink(&other, &p).expect("symlink");
+            }),
+            ("another file in place of LICENSE-APACHE", |f| {
+                let p = f.licenses.join(APACHE_FILE);
+                fs::remove_file(&p).expect("rm");
+                fs::write(&p, b"other bytes\n").expect("write");
+            }),
+            ("a FIFO in place of the binary", |f| {
+                fs::remove_file(&f.binary).expect("rm");
+                fifo(&f.binary);
+            }),
+            ("a symlink in place of the binary", |f| {
+                let other = f.dir.path().join("other");
+                fs::write(&other, b"other bytes\n").expect("write");
+                fs::remove_file(&f.binary).expect("rm");
+                crate::platform::symlink(&other, &f.binary).expect("symlink");
+            }),
+        ];
+        for (what, change) in cases {
+            let (got, f) = package_changed(unchanged, change);
+            let archive = got
+                .map_err(Failure::message)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let into = f.dir.path().join("x");
+            extract(&archive, &into);
+            let root = into.join("rdy-0.14.0-aarch64-apple-darwin");
+            assert_eq!(fs::read(root.join("rdy")).expect("rdy"), BINARY, "{what}");
+            assert_eq!(fs::read(root.join(MIT_FILE)).expect("mit"), MIT, "{what}");
+            assert_eq!(
+                fs::read(root.join(APACHE_FILE)).expect("apache"),
+                APACHE,
+                "{what}"
+            );
+        }
+    }
+
+    /// Sets OUT and each directory in it back to 0700, so the fixture can be removed.
+    fn unlock(out: &Path) {
+        if fs::symlink_metadata(out).is_err() {
+            return;
+        }
+        crate::platform::set_mode(out, 0o700).expect("unlock OUT");
+        for e in fs::read_dir(out).expect("read_dir") {
+            let p = e.expect("entry").path();
+            if fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
+                crate::platform::set_mode(&p, 0o700).expect("unlock the stage");
+            }
+        }
+    }
+
+    #[test]
+    fn pre1_package_cleanup_failure_takes_precedence() {
+        let name = crate::test_name!("pre1_package_cleanup_failure_takes_precedence");
+        let probe_dir = tempfile::tempdir().expect("tempdir");
+        crate::platform::set_mode(probe_dir.path(), 0o500).expect("chmod");
+        let writable = fs::write(probe_dir.path().join("x"), b"x").is_ok();
+        crate::platform::set_mode(probe_dir.path(), 0o700).expect("chmod");
+        if writable {
+            skip::skip(
+                &name,
+                Why::Prerequisite,
+                "a read-only directory takes writes here (running as root?)",
+            );
+            return;
+        }
+        // Each probe or tar makes a directory that the cleanup must empty read-only.
+        let locking = |script: &'static str| {
+            move |bin: &Path| {
+                let mut c = shell_script(script);
+                c.arg(bin);
+                c
+            }
+        };
+        let rejected = locking("chmod 500 \"${0%/*}\"; printf 'rdy 0.13.0\\n'");
+        let overflow = locking("chmod 500 \"${0%/*}\"; head -c 1048577 /dev/zero");
+        let fine = printing("rdy 0.14.0\\n");
+        let locking_tar = |archive: &Path, stage: &Path, stem: &str| {
+            let mut c = shell_script("tar -czf \"$0\" -C \"$1\" \"$2\" && chmod 500 \"${0%/*}\"");
+            c.arg(archive)
+                .arg(stage)
+                .arg(stem)
+                .env("COPYFILE_DISABLE", "1");
+            c
+        };
+        type Probe<'a> = &'a dyn Fn(&Path) -> Command;
+        let cases: [(&str, Probe, Option<TarCommand>, u64); 3] = [
+            ("a version rejection", &rejected, None, ARCHIVE_MAX),
+            ("an output overflow", &overflow, None, ARCHIVE_MAX),
+            ("an archive over its cap", &fine, Some(&locking_tar), 1),
+        ];
+        for (what, probe, tar, archive_max) in cases {
+            if tar.is_some() && !tar_or_skip(&name) {
+                continue;
+            }
+            let f = Fixture::new();
+            let before = f.state();
+            let mut s = setup(&f, probe);
+            s.archive_max = archive_max;
+            if let Some(tar) = tar {
+                s.tar = tar;
+            }
+            let got = package_with(&f.binary, V, TARGET, &f.out(), &s);
+            unlock(&f.out());
+            assert_eq!(
+                got,
+                Err(Failure::FileOperation),
+                "{what}: the cleanup failure is the result"
+            );
+            let mut after = f.state();
+            after[2].1.retain(|n| n != "out");
+            assert_eq!(after, before, "{what}: the inputs are unchanged");
         }
     }
 

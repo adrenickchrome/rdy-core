@@ -2,7 +2,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
@@ -85,6 +85,108 @@ pub fn mode_of(path: &Path) -> io::Result<u32> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
 }
 
+/// The directory that holds `path` and `path`'s own entry name in it.
+fn entry_of(path: &Path) -> io::Result<(&Path, &std::ffi::OsStr)> {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => Ok((parent, name)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no directory entry", path.display()),
+        )),
+    }
+}
+
+/// Creates the new directory `path`, private to this user whatever the umask, and returns a
+/// handle to it. mkdir makes it with mode 0o700, which a umask can only narrow; it is then set
+/// to exactly 0o700 through a handle that never follows a link, and checked to be a directory
+/// this user owns. An existing `path` is `ErrorKind::AlreadyExists`. If a step after mkdir
+/// fails, the new directory is removed again while it is still empty.
+pub fn create_private_dir(path: &Path) -> io::Result<File> {
+    let (parent, name) = entry_of(path)?;
+    let parent = rdy_store::pio::open_dir(parent)?;
+    rdy_store::pio::create_private_dir_at(&parent, name)?;
+    let opened = (|| {
+        let dir = match rdy_store::pio::open_dir_at(&parent, name) {
+            // a umask that took the owner's bits: give them back, then open
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                rdy_store::pio::make_private_dir(path)?;
+                rdy_store::pio::open_dir_at(&parent, name)?
+            }
+            opened => opened?,
+        };
+        dir.set_permissions(rdy_store::pio::permissions(0o700))?;
+        let meta = dir.metadata()?;
+        if meta.is_dir()
+            && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid()
+            && rdy_store::pio::is_private_dir(&meta)
+        {
+            Ok(dir)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not a private directory of this user", path.display()),
+            ))
+        }
+    })();
+    if opened.is_err() {
+        let _ = std::fs::remove_dir(path);
+    }
+    opened
+}
+
+/// Opens the file `path` for reading, never through a link at its last entry (the directories
+/// above it are trusted) and without waiting on a FIFO. A link there is
+/// `ErrorKind::InvalidInput`. The caller judges the file's kind and size from the handle and
+/// reads that same handle, so a path changed after the open changes nothing.
+pub fn open_input(path: &Path) -> io::Result<File> {
+    let (parent, name) = entry_of(path)?;
+    let dir = rdy_store::pio::open_dir(parent)?;
+    rdy_store::pio::open_read_at(&dir, name).map_err(|e| {
+        if rdy_store::pio::is_link_refusal(&e) {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symbolic link", path.display()),
+            )
+        } else {
+            e
+        }
+    })
+}
+
+/// Creates the new file `name` in the open directory `dir`, for reading and writing, never
+/// through a link: anything already at `name` is `ErrorKind::AlreadyExists`. Its mode is 0o600
+/// less the umask until [`set_file_mode`] sets it.
+pub fn create_new_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+    rdy_store::pio::create_private_at(dir, name)
+}
+
+/// Whether the entry `name` in the open directory `dir` is still the file `file` (the same
+/// device and inode). A missing entry, or a link in its place, is not.
+pub fn holds_file(dir: &File, name: &std::ffi::OsStr, file: &File) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    match rdy_store::pio::open_read_at(dir, name) {
+        Ok(found) => {
+            let (a, b) = (found.metadata()?, file.metadata()?);
+            Ok(a.dev() == b.dev() && a.ino() == b.ino())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound || rdy_store::pio::is_link_refusal(&e) => {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Removes the entry `name` (not a directory) from the open directory `dir`; a link is removed,
+/// never followed.
+pub fn remove_file_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<()> {
+    rdy_store::pio::remove_file_at(dir, name)
+}
+
+/// Sets the permission bits of the open file `file` to `mode`.
+pub fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
+    file.set_permissions(rdy_store::pio::permissions(mode))
+}
+
 /// The output cap of a release tool's child process (the version probe, tar, `uname`).
 pub const RELEASE_CHILD_OUTPUT_MAX: usize = 1_048_576;
 /// The hang guard of a release tool's child process.
@@ -156,14 +258,20 @@ pub(crate) struct BoundedRun {
 }
 
 /// Runs `command` in a process group of its own, with stdin from `stdin` (null when `None`)
-/// and stdout and stderr captured under one combined cap of `max_output` bytes (tb-A4DAV).
+/// and stdout and stderr captured under one combined cap of `max_output` bytes.
 ///
-/// When the direct child exits, the group is stopped, so a descendant that still holds a pipe
-/// cannot keep a drain running. On overflow, at `deadline`, on a pipe error or a setup failure,
-/// the group is stopped too; the runner always waits for the direct child and joins both drains
-/// before it returns. Overflow is `InvalidData`, the deadline `TimedOut`, and a setup, pipe or
-/// cleanup failure keeps its own kind; a failed cleanup is never reported as success. A nonzero
-/// exit status is an `Output`, for the caller to judge.
+/// When the direct child exits, the group is stopped, so a descendant in the group that still
+/// holds a stream cannot keep a drain running. On overflow, at `deadline`, on a read error or a
+/// setup failure, the group is stopped too; the runner then waits for the direct child, cancels
+/// both drains and joins them. A drain's read waits at most [`DRAIN_TICK`] before it checks for
+/// cancellation, so a process that left the group and keeps the streams open cannot hold the
+/// runner past its deadline. Overflow is `InvalidData`, the deadline `TimedOut`, and a setup,
+/// read or cleanup failure keeps its own kind. A cleanup failure is the result even after an
+/// earlier failure, and never becomes success. A nonzero exit status is an `Output`, for the
+/// caller to judge.
+///
+/// The streams are Unix socket pairs rather than pipes: std gives a socket a read timeout,
+/// which is what makes a drain cancellable.
 pub fn run_bounded(
     command: Command,
     stdin: Option<File>,
@@ -172,6 +280,16 @@ pub fn run_bounded(
 ) -> io::Result<Output> {
     let until = Instant::now().checked_add(deadline);
     run_bounded_inner(command, stdin, max_output, until, drop).result
+}
+
+/// How long a drain's read waits before it checks whether the run cancelled it.
+const DRAIN_TICK: Duration = Duration::from_millis(20);
+
+/// One captured stream: the runner's end, and the child's end for `Stdio`.
+fn stream_pair() -> io::Result<(UnixStream, Stdio)> {
+    let (ours, theirs) = UnixStream::pair()?;
+    ours.set_read_timeout(Some(DRAIN_TICK))?;
+    Ok((ours, Stdio::from(std::os::fd::OwnedFd::from(theirs))))
 }
 
 /// [`run_bounded`] with an absolute deadline (`None`: none) and `on_start`, which receives the
@@ -183,32 +301,36 @@ pub(crate) fn run_bounded_inner(
     deadline: Option<Instant>,
     on_start: impl FnOnce(Expiry),
 ) -> BoundedRun {
+    let not_started = |e| BoundedRun {
+        result: Err(e),
+        retained: 0,
+        drains_joined: 0,
+        pid: None,
+    };
+    let (out, err) = match (stream_pair(), stream_pair()) {
+        (Ok(out), Ok(err)) => (out, err),
+        (Err(e), _) | (_, Err(e)) => return not_started(e),
+    };
     own_process_group(&mut command);
     command
         .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
+        .stdout(out.1)
+        .stderr(err.1);
+    let spawned = command.spawn();
+    // the command holds the child's ends: drop them, or no drain would see the end of a stream
+    drop(command);
+    let child = match spawned {
         Ok(child) => child,
-        Err(e) => {
-            return BoundedRun {
-                result: Err(e),
-                retained: 0,
-                drains_joined: 0,
-                pid: None,
-            };
-        }
+        Err(e) => return not_started(e),
     };
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
     let count = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut failure: Option<io::Error> = None;
     let mut drains = Vec::with_capacity(2);
-    for drain in [
-        spawn_drain(child.stdout.take(), &count, max_output, &tx),
-        spawn_drain(child.stderr.take(), &count, max_output, &tx),
-    ] {
-        match drain {
+    for stream in [out.0, err.0] {
+        match spawn_drain(stream, &count, &cancel, max_output, &tx) {
             Ok(handle) => drains.push(handle),
             Err(e) => failure = failure.or(Some(e)),
         }
@@ -236,7 +358,6 @@ pub(crate) fn run_bounded_inner(
     on_start(Expiry(tx.clone()));
     drop(tx);
 
-    let lost = || io::Error::other("the bounded runner lost its workers");
     let mut status: Option<ExitStatus> = None;
     let mut exited = false;
     let mut drains_done = 0;
@@ -270,7 +391,7 @@ pub(crate) fn run_bounded_inner(
                 RunEvent::Exited(result) => {
                     exited = true;
                     match result {
-                        // a descendant may still hold a pipe: stop the whole group
+                        // a descendant may still hold a stream: stop the whole group
                         Ok(s) => match kill_process_group(pid) {
                             Ok(()) => status = Some(s),
                             Err(e) => break Some(e),
@@ -286,6 +407,8 @@ pub(crate) fn run_bounded_inner(
         };
     }
 
+    // Cleanup: stop the group, reap the direct child, then cancel and join the drains, whose
+    // reads end within a tick whoever still holds the streams.
     let mut cleanup: Option<io::Error> = None;
     if failure.is_some() {
         if let Err(e) = kill_process_group(pid) {
@@ -306,6 +429,7 @@ pub(crate) fn run_bounded_inner(
             }
         }
     }
+    cancel.store(true, Ordering::SeqCst);
     if let Some(waiter) = waiter
         && waiter.join().is_err()
     {
@@ -331,15 +455,7 @@ pub(crate) fn run_bounded_inner(
         streams.next().unwrap_or_default(),
         streams.next().unwrap_or_default(),
     );
-    let result = match (failure.or(cleanup), status) {
-        (Some(e), _) => Err(e),
-        (None, Some(status)) => Ok(Output {
-            status,
-            stdout,
-            stderr,
-        }),
-        (None, None) => Err(lost()),
-    };
+    let result = settle(failure, cleanup, status, stdout, stderr);
     BoundedRun {
         result,
         retained,
@@ -348,33 +464,60 @@ pub(crate) fn run_bounded_inner(
     }
 }
 
-/// Starts a drain of `pipe` (an error when the child has no such pipe).
+/// The runner's own failure: a worker it waits on is gone.
+fn lost() -> io::Error {
+    io::Error::other("the bounded runner lost its workers")
+}
+
+/// A bounded run's result from what its run and its cleanup found: a cleanup failure first,
+/// then the run's own failure, then the child's output.
+fn settle(
+    failure: Option<io::Error>,
+    cleanup: Option<io::Error>,
+    status: Option<ExitStatus>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> io::Result<Output> {
+    match (cleanup.or(failure), status) {
+        (Some(e), _) => Err(e),
+        (None, Some(status)) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        (None, None) => Err(lost()),
+    }
+}
+
+/// Starts a drain of `stream`.
 fn spawn_drain<R: Read + Send + 'static>(
-    pipe: Option<R>,
+    stream: R,
     count: &Arc<AtomicUsize>,
+    cancel: &Arc<AtomicBool>,
     max_output: usize,
     tx: &mpsc::Sender<RunEvent>,
 ) -> io::Result<std::thread::JoinHandle<Vec<u8>>> {
-    let pipe = pipe.ok_or_else(|| io::Error::other("the child has no output pipe"))?;
-    let (count, tx) = (count.clone(), tx.clone());
+    let (count, cancel, tx) = (count.clone(), cancel.clone(), tx.clone());
     std::thread::Builder::new()
         .name("rdy-qa-drain".into())
-        .spawn(move || drain_bounded(pipe, &count, max_output, &tx))
+        .spawn(move || drain_bounded(stream, &count, &cancel, max_output, &tx))
 }
 
-/// Reads `pipe` to its end, keeping each byte only while the count both streams share stays
-/// within `max_output`; a byte is counted before it is kept. Reports overflow or a read error,
-/// then stops; always reports that it is done.
+/// Reads `stream` to its end, keeping each byte only while the count both streams share stays
+/// within `max_output`; a byte is counted before it is kept. A read that times out only checks
+/// `cancel`, which stops the drain. Reports overflow or a read error, then stops; always
+/// reports that it is done.
 fn drain_bounded(
-    mut pipe: impl Read,
+    mut stream: impl Read,
     count: &AtomicUsize,
+    cancel: &AtomicBool,
     max_output: usize,
     tx: &mpsc::Sender<RunEvent>,
 ) -> Vec<u8> {
     let mut kept = Vec::new();
     let mut buf = [0u8; 8192];
-    loop {
-        match pipe.read(&mut buf) {
+    while !cancel.load(Ordering::SeqCst) {
+        match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 let before = count.fetch_add(n, Ordering::SeqCst);
@@ -385,7 +528,13 @@ fn drain_bounded(
                     break;
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
             Err(e) => {
                 let _ = tx.send(RunEvent::PipeError(e));
                 break;
@@ -684,8 +833,61 @@ fn serve_agent_request(
     conn.write_all(&packet).is_ok()
 }
 
+/// Test helpers that the release module's tests share: named pipes for readiness, and hang
+/// guards (never speed checks).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Makes a named pipe at `path`: a test's readiness channel from a child.
+    pub(crate) fn fifo(path: &Path) {
+        let made = Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", path.display());
+    }
+
+    /// Reads one line from the named pipe at `path` on a thread of its own; the line arrives on
+    /// the returned channel. The open blocks until the child opens the pipe to write.
+    pub(crate) fn fifo_line(path: PathBuf) -> std::sync::mpsc::Receiver<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let pipe = File::open(&path).expect("open the fifo");
+            let mut line = String::new();
+            std::io::BufReader::new(pipe)
+                .read_line(&mut line)
+                .expect("read the fifo");
+            let _ = tx.send(line.trim_end().to_string());
+        });
+        rx
+    }
+
+    /// A hang guard: `f` on a thread, which must end within a minute (not a speed check).
+    pub(crate) fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("the bounded run did not end within 60 s")
+    }
+
+    /// A hang guard for a process that a kill already ended: it may need a moment to leave the
+    /// process table. Not a speed check.
+    pub(crate) fn eventually(what: &str, done: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < until, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
@@ -771,41 +973,6 @@ mod tests {
         assert_eq!(agent.connections(), 2);
     }
 
-    /// Makes a named pipe at `path`: a test's readiness channel from a child.
-    fn fifo(path: &Path) {
-        let made = Command::new("mkfifo")
-            .arg(path)
-            .status()
-            .expect("run mkfifo");
-        assert!(made.success(), "mkfifo {}", path.display());
-    }
-
-    /// Reads one line from the named pipe at `path` on a thread of its own; the line arrives on
-    /// the returned channel. The open blocks until the child opens the pipe to write.
-    fn fifo_line(path: PathBuf) -> std::sync::mpsc::Receiver<String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let pipe = File::open(&path).expect("open the fifo");
-            let mut line = String::new();
-            std::io::BufReader::new(pipe)
-                .read_line(&mut line)
-                .expect("read the fifo");
-            let _ = tx.send(line.trim_end().to_string());
-        });
-        rx
-    }
-
-    /// A hang guard: `f` on a thread, which must end within a minute (not a speed check).
-    fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(f());
-        });
-        rx.recv_timeout(Duration::from_secs(60))
-            .expect("the bounded run did not end within 60 s")
-    }
-
     /// Whether process group `pgid` still has a member that is not a zombie.
     fn group_has_live_member(pgid: u32) -> bool {
         let out = Command::new("ps")
@@ -817,16 +984,6 @@ mod tests {
             let mut f = l.split_whitespace();
             f.next() == Some(want.as_str()) && f.next().is_some_and(|s| !s.starts_with('Z'))
         })
-    }
-
-    /// A hang guard for a process that a kill already ended: it may need a moment to leave the
-    /// process table. Not a speed check.
-    fn eventually(what: &str, done: impl Fn() -> bool) {
-        let until = Instant::now() + Duration::from_secs(10);
-        while !done() {
-            assert!(Instant::now() < until, "{what}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
     }
 
     #[test]
@@ -968,6 +1125,113 @@ mod tests {
         });
     }
 
+    /// SIGKILLs process `pid` when dropped: a test's escaped process never outlives the test.
+    struct KillOnDrop(u32);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-9", &self.0.to_string()])
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[test]
+    fn pre1_bounded_runner_timeout_cleans_up_after_an_escaped_pipe_holder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (ready, go) = (dir.path().join("ready"), dir.path().join("go"));
+        fifo(&ready);
+        fifo(&go);
+        // A descendant leaves the child's process group, keeps stdout and stderr, and names
+        // itself and the child on the readiness pipe. The child then waits for the go signal
+        // and exits, so only the escaped process holds the pipes. The run has no deadline of
+        // its own: only the injected expiry can end it.
+        let mut cmd = shell_script(
+            "perl -e 'setpgrp(0, 0) or die; open(my $f, \">\", $ARGV[0]) or die; \
+             print $f \"$$ $ARGV[1]\\n\"; close $f; sleep 1000' \"$0\" $$ & \
+             read go < \"$1\"; exit 0",
+        );
+        cmd.arg(&ready).arg(&go);
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        let run = within_a_minute(move || {
+            run_bounded_inner(cmd, None, 1 << 20, None, move |expiry| {
+                std::thread::spawn(move || {
+                    let line = fifo_line(ready)
+                        .recv_timeout(Duration::from_secs(30))
+                        .unwrap_or_default();
+                    let pids: Vec<u32> = line
+                        .split_whitespace()
+                        .filter_map(|p| p.parse().ok())
+                        .collect();
+                    let _ = seen_tx.send(pids.clone());
+                    if let [_, child] = pids[..] {
+                        use std::io::Write;
+                        let _ = File::options()
+                            .write(true)
+                            .open(&go)
+                            .and_then(|mut g| g.write_all(b"go\n"));
+                        eventually("the direct child exited", || process_exited(child));
+                    }
+                    expiry.expire();
+                });
+            })
+        });
+        let pids = seen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the child signalled readiness");
+        let [escaped, child] = pids[..] else {
+            panic!("the readiness line named {pids:?}");
+        };
+        let _escaped = KillOnDrop(escaped);
+        let err = run.result.expect_err("the injected expiry ends the run");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert_eq!(run.drains_joined, 2, "both drains were joined");
+        assert_eq!(run.pid, Some(child));
+        assert!(process_exited(child), "the direct child was reaped");
+        assert!(
+            process_running(escaped),
+            "the run ended while the escaped process still holds the pipes"
+        );
+    }
+
+    #[test]
+    fn pre1_bounded_runner_cleanup_failure_overrides() {
+        let status = Command::new("true").status().expect("run true");
+        let err = |kind| Some(io::Error::new(kind, "x"));
+        let kind = |r: io::Result<Output>| r.expect_err("a failed run").kind();
+        // A cleanup failure is the result, whatever the run found before it, and keeps its kind.
+        for failure in [
+            None,
+            err(io::ErrorKind::InvalidData),
+            err(io::ErrorKind::TimedOut),
+        ] {
+            assert_eq!(
+                kind(settle(
+                    failure,
+                    err(io::ErrorKind::PermissionDenied),
+                    Some(status),
+                    vec![],
+                    vec![]
+                )),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        assert_eq!(
+            kind(settle(
+                err(io::ErrorKind::TimedOut),
+                None,
+                None,
+                vec![],
+                vec![]
+            )),
+            io::ErrorKind::TimedOut
+        );
+        let out = settle(None, None, Some(status), b"o".to_vec(), b"e".to_vec()).expect("a run");
+        assert_eq!((out.stdout, out.stderr), (b"o".to_vec(), b"e".to_vec()));
+        assert!(settle(None, None, None, vec![], vec![]).is_err());
+    }
+
     #[test]
     fn pre1_native_release_facts_stay_in_the_platform_seam() {
         assert_eq!(
@@ -1037,6 +1301,34 @@ mod tests {
                 assert!(!text.contains(token), "{file} holds {token}");
             }
         }
+        // The release files name no design block.
+        let block = regex::Regex::new(r"\b(D|tb|FW)-[0-9A-Z]{2,}").expect("regex");
+        for (file, text) in [
+            ("release_install.rs", include_str!("release_install.rs")),
+            (
+                "bin/qa-release-package.rs",
+                include_str!("bin/qa-release-package.rs"),
+            ),
+            (
+                "tests/release/release_package.rs",
+                include_str!("../tests/release/release_package.rs"),
+            ),
+            (
+                "tests/release/main.rs",
+                include_str!("../tests/release/main.rs"),
+            ),
+        ] {
+            let found: Vec<&str> = block.find_iter(text).map(|m| m.as_str()).collect();
+            assert!(found.is_empty(), "{file} names {found:?}");
+        }
+        // Nor does the runner's own text in this file.
+        let runner = include_str!("platform.rs");
+        let runner = &runner[runner
+            .find("pub const RELEASE_CHILD_OUTPUT_MAX")
+            .expect("runner")
+            ..runner.find("pub fn shell_script").expect("runner end")];
+        let found: Vec<&str> = block.find_iter(runner).map(|m| m.as_str()).collect();
+        assert!(found.is_empty(), "the runner names {found:?}");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let f = dir.path().join("f");
