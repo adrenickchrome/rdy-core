@@ -107,3 +107,68 @@ fn dedupe_appends_a_number() {
     assert!(d.ends_with("-2"));
     assert!(is_tree_type("doc") && is_tree_type("folder") && !is_tree_type("section"));
 }
+
+const LOOKALIKE: &str = "a name cannot look like a block id (it would be read as one)";
+
+#[test]
+fn plc4_only_file_id_prefixes_fold_name_case() {
+    // the id grammar is unchanged: the name rule alone folds case, and only for d and fd
+    for n in [
+        "d-abcde",
+        "D-AbCdE",
+        "fd-7kq2m",
+        "Fd-7Kq2m",
+        "d-ABCDE",
+        "fd-7KQ2M",
+        "ABC-ZZZZZ",
+        "c-ABCDE",
+    ] {
+        assert_eq!(name_problem(n).as_deref(), Some(LOOKALIKE), "{n:?}");
+    }
+    for n in [
+        "ABC-zzzzz",
+        "c-abcde",
+        "has-space",
+        "use-cases",
+        "api-specs",
+        "the-graph",
+        "new-terms",
+        "ci-check",
+        "abcd-abcde",
+        "d-abcdi",
+        "d-abcdu",
+        "d-abcdef",
+        "d-abcd",
+    ] {
+        assert_eq!(name_problem(n), None, "{n:?}");
+    }
+    assert!(name_problem("").is_some());
+    let long = format!("d-{}", "a".repeat(63));
+    assert_eq!(long.len(), 65);
+    assert_eq!(
+        name_problem(&long).as_deref(),
+        Some("a name has 1 to 64 characters")
+    );
+    assert!(
+        BlockId::parse("d-abcde").is_err(),
+        "ids stay case-sensitive"
+    );
+    assert!(!BlockId::is_valid("d-abcde"));
+}
+
+#[test]
+fn plc4_default_name_preserves_ordinary_slugs() {
+    let id = BlockId::parse("d-7KQ2M").unwrap();
+    assert_eq!(default_name(Some("D-AbCdE"), &id), "untitled-7kq2m");
+    assert_eq!(default_name(Some("fd-7kq2m"), &id), "untitled-7kq2m");
+    for (title, want) in [
+        ("has space", "has-space"),
+        ("Use cases", "use-cases"),
+        ("API specs", "api-specs"),
+        ("The graph", "the-graph"),
+        ("New terms", "new-terms"),
+        ("CI check", "ci-check"),
+    ] {
+        assert_eq!(default_name(Some(title), &id), want, "{title:?}");
+    }
+}

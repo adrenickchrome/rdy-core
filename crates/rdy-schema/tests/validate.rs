@@ -306,3 +306,27 @@ fn docs_and_folders_sit_only_in_folders_whatever_the_pack_says() {
         );
     }
 }
+
+#[test]
+fn plc4_schema_names_fold_only_file_id_prefixes() {
+    let p = pack();
+    let why = "a name cannot look like a block id (it would be read as one)";
+    for (id, ty) in [("d-AAAAA", "doc"), ("fd-AAAAA", "folder")] {
+        for name in ["d-abcde", "fd-7kq2m"] {
+            let i = validate_block(&p, &named(id, ty, None, name), None);
+            assert_eq!(codes(&i), vec!["E_BAD_NAME"], "{ty} {name}");
+            assert_eq!(i[0].message, format!("{name:?} is not a valid name: {why}"));
+            assert_eq!(
+                i[0].fix,
+                format!(
+                    "use a name like {:?}",
+                    format!("untitled-{}", &id[id.len() - 5..].to_ascii_lowercase())
+                )
+            );
+        }
+        for name in ["has-space", "use-cases", "c-abcde"] {
+            let i = validate_block(&p, &named(id, ty, None, name), None);
+            assert!(i.is_empty(), "{ty} {name}: {i:?}");
+        }
+    }
+}

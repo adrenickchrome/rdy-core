@@ -22,6 +22,7 @@ mod cli_intake;
 mod cli_intents;
 mod cli_keys;
 mod cli_log;
+mod cli_name_case;
 mod cli_output;
 mod cli_proposal;
 mod cli_publication_check;

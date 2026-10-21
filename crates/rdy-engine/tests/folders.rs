@@ -501,3 +501,59 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
         .blocks;
     assert_eq!(imported, original);
 }
+
+/// The log end, the views holding changes and the blocks of `work`: what a refused write must
+/// leave as it was.
+fn plc4_state(r: &mut Rdy) -> (String, Vec<(String, usize)>, Vec<String>) {
+    let end = format!("{:?}", r.store().log_end());
+    let views = r.read().views_with_changes();
+    let ids = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .unwrap()
+        .ids()
+        .map(|i| i.as_str().to_string())
+        .collect();
+    (end, views, ids)
+}
+
+#[test]
+fn plc4_explicit_names_refuse_without_writes() {
+    let (_d, mut r) = project();
+    let seeded = write(&mut r, "work", json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "seed-folder"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed-doc", "title": "Seed", "doc_type": "overview"}}
+    ])).unwrap();
+    let (fid, did) = (seeded.created["$f"].clone(), seeded.created["$d"].clone());
+    let why = "a name cannot look like a block id (it would be read as one)";
+    for bad in ["d-abcde", "fd-7kq2m"] {
+        let ops = [
+            json!([{"op": "create", "type": "folder", "fields": {"name": bad}}]),
+            json!([{"op": "create", "type": "doc", "fields": {"name": bad, "title": "T", "doc_type": "overview"}}]),
+            json!([{"op": "update", "id": fid, "fields": {"name": bad}}]),
+            json!([{"op": "update", "id": did, "fields": {"name": bad}}]),
+        ];
+        for ops in ops {
+            let before = plc4_state(&mut r);
+            let e = write(&mut r, "work", ops.clone()).unwrap_err();
+            assert_eq!(e.code, "E_BAD_NAME", "{bad} {ops}");
+            assert_eq!(e.message, format!("{bad:?} is not a valid name: {why}"));
+            let fixed = e.corrected.as_ref().unwrap()["fields"]["name"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(fixed.starts_with("untitled-"), "{fixed}");
+            assert_eq!(e.fix, format!("use a name like {fixed:?}"));
+            assert_eq!(
+                e.corrected,
+                Some(json!({"op": 0, "fields": {"name": fixed}}))
+            );
+            assert_eq!(
+                rdy_model::tree::name_problem(&fixed),
+                None,
+                "the correction is valid"
+            );
+            assert_eq!(plc4_state(&mut r), before, "{bad} {ops}: nothing written");
+        }
+    }
+}

@@ -44,7 +44,7 @@ pub fn name_problem(name: &str) -> Option<String> {
     if lower == "index" {
         return Some("index is reserved for folder pages".into());
     }
-    if BlockId::parse(name).is_ok() {
+    if BlockId::parse(name).is_ok() || folds_to_file_id(name, &lower) {
         return Some("a name cannot look like a block id (it would be read as one)".into());
     }
     let stem = lower.split('.').next().unwrap_or("");
@@ -55,6 +55,15 @@ pub fn name_problem(name: &str) -> Option<String> {
         return Some(format!("{stem} is a Windows device name"));
     }
     None
+}
+
+/// Whether `name` is a `d` or `fd` block id once its case is ignored. Those two prefixes name the
+/// neutral files of redacted docs and folders, so a name that differs from one only in case
+/// would clash with it on a case-insensitive disk. Every other prefix keeps the exact-case rule.
+/// `lower` is `name` in lower case; the caller has already bounded `name` to [`NAME_MAX`] ASCII bytes.
+fn folds_to_file_id(name: &str, lower: &str) -> bool {
+    matches!(lower.split_once('-'), Some(("d" | "fd", _)))
+        && BlockId::is_valid(&name.to_ascii_uppercase())
 }
 
 /// The name rdy assigns from a title (see the spec's §2.2a).
