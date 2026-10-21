@@ -100,6 +100,10 @@ struct Setup<'a> {
     probe: &'a dyn Fn(&Path) -> Command,
     /// Runs once every input is checked, before OUT is made (tests change input paths here).
     checked: &'a dyn Fn(),
+    /// This machine's release target, the only one the real release packages for: the version
+    /// probe runs the binary here, so a binary it accepts is native. `None` (stand-ins only)
+    /// accepts either target.
+    native_target: Option<&'a dyn Fn() -> io::Result<&'static str>>,
 }
 
 /// The real release's `checked`: nothing.
@@ -114,6 +118,7 @@ impl Setup<'static> {
             tar: &tar_command,
             probe: &version_command,
             checked: &nothing,
+            native_target: Some(&platform::release_target),
         }
     }
 }
@@ -183,9 +188,11 @@ pub fn tar_available() -> bool {
 /// `<stem>/` with `rdy` (0755), `LICENSE-MIT` and `LICENSE-APACHE` (0644) from the repository
 /// root and, for a preview, `PREVIEW.txt` (0644) with [`PREVIEW_NOTE`].
 ///
-/// The error is one of the `MSG_` texts. Checks run in order: the grammar of the arguments, the
-/// binary, `LICENSE-MIT`, `LICENSE-APACHE`, then that `out` does not exist. On failure every
-/// path this call created is removed again, and nothing that was there before is touched.
+/// The error is one of the `MSG_` texts. Checks run in order: the grammar of the arguments and
+/// that `target` is this machine's release target (the version probe runs the binary here, so
+/// the binary is native), the binary, `LICENSE-MIT`, `LICENSE-APACHE`, then that `out` does not
+/// exist. On failure every path this call created is removed again, and nothing that was there
+/// before is touched.
 ///
 /// `out` is made private to this user (mode 0700, whatever the umask), and the stage inside it
 /// too, so no other user can change a staged file between its probe and the archive. Every
@@ -210,6 +217,11 @@ fn package_with(
     setup: &Setup,
 ) -> Result<PathBuf, Failure> {
     if !(valid_version(version) && valid_target(target) && valid_path(binary) && valid_path(out)) {
+        return Err(Failure::Arguments);
+    }
+    if let Some(native) = setup.native_target
+        && native().ok() != Some(target)
+    {
         return Err(Failure::Arguments);
     }
     let inputs = Inputs {
@@ -974,7 +986,7 @@ pub fn readme_install_section(version: &str, signer_line: &str) -> Result<String
         ))
     };
     Ok(format!(
-        "### Install\n\nOn macOS arm64:\n\n{}\nOn Linux amd64:\n\n{}\nOn macOS, for an archive downloaded with Safari:\n\n{}\nAdd the version's bin directory to PATH in this shell.\nReplace `<version-prefix>` with the version prefix, such as `/path/to/rdy-{version}`:\n\n```sh\nexport PATH=\"<version-prefix>/bin:$PATH\"\n```\n",
+        "### Install\n\nOn macOS arm64, for an archive downloaded with curl:\n\n{}\nOn Linux amd64:\n\n{}\nOn macOS arm64, for an archive downloaded with a web browser:\n\n{}\nAdd the version's bin directory to PATH in this shell.\nReplace `<version-prefix>` with the version prefix, such as `/path/to/rdy-{version}`:\n\n```sh\nexport PATH=\"<version-prefix>/bin:$PATH\"\n```\n",
         block(TARGETS[0], false)?,
         block(TARGETS[1], false)?,
         block(TARGETS[0], true)?,
@@ -1948,6 +1960,7 @@ mod tests {
         Setup {
             licenses: f.licenses.clone(),
             probe,
+            native_target: None,
             ..Setup::release()
         }
     }
@@ -2096,10 +2109,23 @@ mod tests {
             Some(v) => (v, true),
             None => (line, false),
         };
-        let target = crate::platform::release_target().unwrap_or(TARGETS[0]);
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("out");
-        let archive = package(&rdy, version, target, &out).expect("package the built CLI");
+        // the real release packages only for this machine's target; on a machine with none,
+        // the same release setup without that check stands in
+        let (target, archive) = match crate::platform::release_target() {
+            Ok(target) => (target, package(&rdy, version, target, &out)),
+            Err(_) => {
+                let any = Setup {
+                    native_target: None,
+                    ..Setup::release()
+                };
+                let made = package_with(&rdy, version, TARGETS[0], &out, &any)
+                    .map_err(|f| f.message().to_string());
+                (TARGETS[0], made)
+            }
+        };
+        let archive = archive.expect("package the built CLI");
         let stem = if preview {
             format!("rdy-{version}-preview-{target}")
         } else {
@@ -2119,6 +2145,13 @@ mod tests {
                 fs::read(into.join(&stem).join(name)).expect("license"),
                 fs::read(root.join(name)).expect("license"),
                 "{name}"
+            );
+        }
+        if preview {
+            assert!(
+                fs::read(into.join(&stem).join(NOTE_FILE)).expect("PREVIEW.txt")
+                    == PREVIEW_NOTE.as_bytes(),
+                "PREVIEW.txt is the note"
             );
         }
     }
@@ -2836,6 +2869,30 @@ mod tests {
             after[2].1.retain(|n| n != "out");
             assert_eq!(after, before, "{what}: the inputs are unchanged");
         }
+    }
+
+    #[test]
+    fn pre1_package_refuses_a_target_that_is_not_this_machines() {
+        // The version probe runs the binary here, so the real release packages only for this
+        // machine's target: the other triple is an argument error, before any file work. On a
+        // machine with no release target, both are.
+        let native = crate::platform::release_target().ok();
+        let mut refused = 0;
+        for target in TARGETS {
+            if native == Some(target) {
+                continue;
+            }
+            let f = Fixture::new();
+            let before = f.state();
+            assert_eq!(
+                package(&f.binary, V, target, &f.out()),
+                Err(MSG_INVALID_ARGUMENTS.to_string()),
+                "{target} on a {native:?} machine"
+            );
+            assert_eq!(f.state(), before, "{target}: nothing made or touched");
+            refused += 1;
+        }
+        assert_eq!(refused, if native.is_some() { 1 } else { 2 });
     }
 
     #[test]
@@ -3932,9 +3989,22 @@ esac
             &format!("### Release signing key\n\n```text\n{signer}\n```\n\n{section}"),
         );
         assert_eq!(readme_install_problem(&ready), Ok(()));
-        // the section holds the three blocks for the example paths, in order
+        // the section holds the three blocks for the example paths, in order, each after its
+        // label; a browser download on macOS keeps its quarantine mark until the third block
         let mut from = 0;
-        for (target, browser) in [(TARGETS[0], false), (TARGETS[1], false), (TARGETS[0], true)] {
+        for (label, target, browser) in [
+            (
+                "On macOS arm64, for an archive downloaded with curl:\n\n",
+                TARGETS[0],
+                false,
+            ),
+            ("On Linux amd64:\n\n", TARGETS[1], false),
+            (
+                "On macOS arm64, for an archive downloaded with a web browser:\n\n",
+                TARGETS[0],
+                true,
+            ),
+        ] {
             let example = InstallInput {
                 download: "/path/to/download".into(),
                 unpack: "/path/to/unpack".into(),
@@ -3942,7 +4012,7 @@ esac
                 ..input(target, browser)
             };
             let block = render_commands(&commands(&example).expect("commands")).expect("render");
-            let fenced = format!("```sh\n{block}\n```\n");
+            let fenced = format!("{label}```sh\n{block}\n```\n");
             let at = section[from..]
                 .find(&fenced)
                 .unwrap_or_else(|| panic!("{target} browser={browser}: {section}"));

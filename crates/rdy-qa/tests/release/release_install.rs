@@ -4,8 +4,8 @@
 use rdy_qa::fixtures::{output_within, rdy_bin};
 use rdy_qa::platform::{self, RELEASE_CHILD_DEADLINE, RELEASE_CHILD_OUTPUT_MAX};
 use rdy_qa::release_install::{
-    self, GuideCommand, InstallInput, MSG_INSTALL_INVALID_ARGUMENTS, MSG_INVALID_COMMAND,
-    PREVIEW_NOTE, TAR_SKIP_REASON, TARGETS,
+    self, GuideCommand, InstallInput, MSG_INSTALL_INVALID_ARGUMENTS, MSG_INVALID_ARGUMENTS,
+    MSG_INVALID_COMMAND, PREVIEW_NOTE, TAR_SKIP_REASON, TARGETS,
 };
 use rdy_qa::skip::{self, Why};
 use std::ffi::{OsStr, OsString};
@@ -321,7 +321,19 @@ fn pre3_preview_note_matches_readme_and_archive() {
     }
     let rdy = rdy_bin();
     let work = tempfile::tempdir().expect("tempdir");
-    let target = platform::release_target().unwrap_or(TARGETS[1]);
+    // The real release packages only for this machine's target. A machine with none (Linux
+    // arm64) refuses both; there the unit pin `pre1_package_reads_the_binary_version` packages
+    // the built CLI through a stand-in setup and checks its PREVIEW.txt against the note.
+    let Ok(target) = platform::release_target() else {
+        for t in TARGETS {
+            assert_eq!(
+                release_install::package(&rdy, V, t, &work.path().join("out")),
+                Err(MSG_INVALID_ARGUMENTS.to_string()),
+                "{t} on a machine with no release target"
+            );
+        }
+        return;
+    };
     let archive =
         release_install::package(&rdy, V, target, &work.path().join("out")).expect("package");
     let into = work.path().join("x");
@@ -380,7 +392,14 @@ fn pre3_cli_prints_the_guide_and_refuses_bad_arguments() {
     // --help exits 0 with usage.
     let out = install(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("Usage"));
+    let usage = String::from_utf8_lossy(&out.stdout);
+    assert!(usage.contains("Usage"));
+    // DOWNLOAD must be private: the help says so, as a plain mkdir under umask 0002 is not.
+    assert!(
+        usage.contains("owned by you and not writable by group or others")
+            && usage.contains("mkdir -m 700"),
+        "{usage}"
+    );
 
     // Argument errors exit 2 with the one text, before any file work.
     let refused = |args: Vec<OsString>, what: &str| {

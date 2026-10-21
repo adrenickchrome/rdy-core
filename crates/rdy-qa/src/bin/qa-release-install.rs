@@ -13,7 +13,8 @@ use std::process::ExitCode;
     about = "Verify a signed rdy preview download, install it and smoke-test the installed binary"
 )]
 struct Args {
-    /// The directory holding the archive, SHA256SUMS and SHA256SUMS.sig (absolute).
+    /// The directory holding the archive, SHA256SUMS and SHA256SUMS.sig (absolute). It must be
+    /// owned by you and not writable by group or others (for example, made with `mkdir -m 700`).
     #[arg(long, value_name = "DIR")]
     download: String,
     /// The trusted allowed-signers line, as the README and the release notes print it.

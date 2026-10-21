@@ -18,7 +18,7 @@ struct Args {
     /// The plain release version, `0.<minor>.0`; the binary's `--version` must print it.
     #[arg(long, value_name = "V")]
     version: String,
-    /// The target triple: aarch64-apple-darwin or x86_64-unknown-linux-gnu.
+    /// This machine's target triple: aarch64-apple-darwin or x86_64-unknown-linux-gnu.
     #[arg(long, value_name = "TRIPLE")]
     target: String,
     /// The output directory (an absolute path that does not exist yet).

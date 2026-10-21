@@ -3,7 +3,7 @@ use rdy_qa::fixtures::output_within;
 use rdy_qa::platform;
 use rdy_qa::release_install::{
     self, BINARY_MAX, MSG_FILE_OPERATION, MSG_INVALID_ARGUMENTS, MSG_INVALID_INPUT,
-    MSG_OUTPUT_EXISTS, MSG_SIZE_LIMIT, TAR_SKIP_REASON,
+    MSG_OUTPUT_EXISTS, MSG_SIZE_LIMIT, TAR_SKIP_REASON, TARGETS,
 };
 use rdy_qa::skip::{self, Why};
 use std::ffi::{OsStr, OsString};
@@ -12,7 +12,26 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
-const TARGET: &str = "x86_64-unknown-linux-gnu";
+/// This machine's release target, the only one the package tool packages for (its version
+/// probe runs the binary here). On a machine with none, such as Linux arm64, the tool refuses
+/// both targets as invalid arguments, which this asserts for `binary` and `out`; then `None`.
+/// The unit pins cover packaging there through a stand-in setup.
+fn native_or_refused(binary: &OsStr, out: &Path) -> Option<&'static str> {
+    if let Ok(target) = platform::release_target() {
+        return Some(target);
+    }
+    for t in TARGETS {
+        let what = format!("{t} on a machine with no release target");
+        refused(
+            &run(&flags(binary, "0.14.0", t, out.as_os_str())),
+            2,
+            MSG_INVALID_ARGUMENTS,
+            &what,
+        );
+        assert!(fs::symlink_metadata(out).is_err(), "{what}: no OUT");
+    }
+    None
+}
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -128,9 +147,12 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     let usage = String::from_utf8_lossy(&help.stdout);
     assert!(usage.contains("Usage: qa-release-package"), "{usage}");
     assert!(help.stderr.is_empty());
+    let Some(target) = native_or_refused(b, &out) else {
+        return;
+    };
 
     // Arguments: exit 2, one fixed text, nothing created.
-    let good = flags(b, "0.14.0", TARGET, o);
+    let good = flags(b, "0.14.0", target, o);
     let mut cases: Vec<(&str, Vec<OsString>)> = vec![("no arguments", vec![])];
     for (i, what) in ["no --binary", "no --version", "no --target", "no --out"]
         .into_iter()
@@ -141,7 +163,7 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
         cases.push((what, v));
     }
     let mut twice = good.clone();
-    twice.extend(["--target".into(), TARGET.into()]);
+    twice.extend(["--target".into(), target.into()]);
     cases.push(("--target twice", twice));
     let mut unknown = good.clone();
     unknown.extend(["--sign".into(), "x".into()]);
@@ -156,10 +178,14 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
         "0.14.0-preview",
         "0.12345678901.0",
     ] {
-        cases.push(("a bad version", flags(b, v, TARGET, o)));
+        cases.push(("a bad version", flags(b, v, target, o)));
     }
     for t in ["x86_64-apple-darwin", "aarch64-unknown-linux-gnu", ""] {
         cases.push(("a bad target", flags(b, "0.14.0", t, o)));
+    }
+    // The other release target: the version probe runs the binary here, so it is native.
+    for t in TARGETS.into_iter().filter(|t| *t != target) {
+        cases.push(("another machine's target", flags(b, "0.14.0", t, o)));
     }
     let long = format!("/{}", "a".repeat(4096));
     for (what, binary, out_arg) in [
@@ -183,7 +209,7 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
             o.to_owned(),
         ),
     ] {
-        cases.push((what, flags(&binary, "0.14.0", TARGET, &out_arg)));
+        cases.push((what, flags(&binary, "0.14.0", target, &out_arg)));
     }
     for (what, args) in &cases {
         refused(&run(args), 2, MSG_INVALID_ARGUMENTS, what);
@@ -191,11 +217,11 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     }
     // A NUL cannot reach a command line; the library refuses it the same way.
     assert_eq!(
-        release_install::package(Path::new("/a\0b"), "0.14.0", TARGET, &out),
+        release_install::package(Path::new("/a\0b"), "0.14.0", target, &out),
         Err(MSG_INVALID_ARGUMENTS.to_string())
     );
     assert_eq!(
-        release_install::package(&bin, "0.14.0", TARGET, Path::new("/a\0b")),
+        release_install::package(&bin, "0.14.0", target, Path::new("/a\0b")),
         Err(MSG_INVALID_ARGUMENTS.to_string())
     );
 
@@ -224,7 +250,7 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
         ("one byte over the cap", over.clone(), MSG_SIZE_LIMIT),
     ] {
         refused(
-            &run(&flags(binary.as_os_str(), "0.14.0", TARGET, o)),
+            &run(&flags(binary.as_os_str(), "0.14.0", target, o)),
             1,
             want,
             what,
@@ -240,13 +266,13 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     fs::write(&file_out, b"mine\n").expect("file");
     let dangling = dir.path().join("dangling");
     platform::symlink(&dir.path().join("nowhere"), &dangling).expect("symlink");
-    for (what, target) in [
+    for (what, taken) in [
         ("a directory", &occupied),
         ("a file", &file_out),
         ("a dangling symlink", &dangling),
     ] {
         refused(
-            &run(&flags(b, "0.14.0", TARGET, target.as_os_str())),
+            &run(&flags(b, "0.14.0", target, taken.as_os_str())),
             1,
             MSG_OUTPUT_EXISTS,
             what,
@@ -268,7 +294,7 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
         &run(&flags(
             missing.as_os_str(),
             "0.14.0",
-            TARGET,
+            target,
             occupied.as_os_str(),
         )),
         1,
@@ -278,7 +304,7 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     // OUT's parent must be a directory.
     for parent in [missing.join("out"), file_out.join("out")] {
         refused(
-            &run(&flags(b, "0.14.0", TARGET, parent.as_os_str())),
+            &run(&flags(b, "0.14.0", target, parent.as_os_str())),
             1,
             MSG_FILE_OPERATION,
             "OUT's parent is not a directory",
@@ -300,8 +326,8 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
         .expect("open");
     f.set_len(BINARY_MAX).expect("a sparse file at the cap");
     drop(f);
-    let done = run(&flags(full.as_os_str(), "0.14.0", TARGET, o));
-    let archive = out.join(format!("rdy-0.14.0-{TARGET}.tar.gz"));
+    let done = run(&flags(full.as_os_str(), "0.14.0", target, o));
+    let archive = out.join(format!("rdy-0.14.0-{target}.tar.gz"));
     assert_eq!(done.status.code(), Some(0), "{done:?}");
     assert_eq!(
         String::from_utf8_lossy(&done.stdout),
@@ -337,6 +363,11 @@ fn pre1_package_stage_stays_private_under_any_umask() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
+    let Some(target) =
+        native_or_refused(dir.path().join("rdy").as_os_str(), &dir.path().join("out"))
+    else {
+        return;
+    };
     let (ready, go) = (dir.path().join("ready"), dir.path().join("go"));
     fifo(&ready);
     fifo(&go);
@@ -354,7 +385,7 @@ fn pre1_package_stage_stays_private_under_any_umask() {
     let out = dir.path().join("out");
     let mut cmd =
         rdy_store::pio::under_umask("000", Path::new(env!("CARGO_BIN_EXE_qa-release-package")));
-    cmd.args(flags(bin.as_os_str(), "0.14.0", TARGET, out.as_os_str()));
+    cmd.args(flags(bin.as_os_str(), "0.14.0", target, out.as_os_str()));
     let cli = std::thread::spawn(move || output_within(&mut cmd, Duration::from_secs(600)));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -396,7 +427,7 @@ fn pre1_package_stage_stays_private_under_any_umask() {
     assert_eq!(inside.len(), 1, "OUT holds only the stage: {inside:?}");
     assert_eq!(inside[0].1, 0o700, "the stage is private under umask 000");
     assert_eq!(done.status.code(), Some(0), "{done:?}");
-    let archive = out.join(format!("rdy-0.14.0-{TARGET}.tar.gz"));
+    let archive = out.join(format!("rdy-0.14.0-{target}.tar.gz"));
     assert_eq!(
         String::from_utf8_lossy(&done.stdout),
         format!("{}\n", archive.display())
