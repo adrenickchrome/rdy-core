@@ -168,6 +168,11 @@ impl Home {
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::null());
+        // an instrumented build (coverage) writes its raw profile where this names, and into
+        // its working directory when it is unset: keep it where the test run put it
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            cmd.env("LLVM_PROFILE_FILE", profile);
+        }
         cmd
     }
 
