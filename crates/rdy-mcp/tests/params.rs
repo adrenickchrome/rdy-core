@@ -100,13 +100,18 @@ fn mparm1_nested_and_list_paths_point_inside() {
     );
 }
 
-/// ls7: `rdy_site` takes `scope` and nothing else; an unknown key names the parameter it was
-/// close to.
+/// ls7: `rdy_site` takes `scope`, `profile` and `only` and nothing else; an unknown key names
+/// the parameter it was close to, and `only` is a boolean.
 #[test]
 fn ls7_rdy_site_refuses_an_unknown_key() {
     let (code, message, _) = refusal::<SiteParams>("rdy_site", json!({"scopes": "x"}));
     assert_eq!(code, "E_BAD_INPUT");
     assert!(message.contains("scope"), "{message}");
+    let (code, _, fix) = refusal::<SiteParams>("rdy_site", json!({"profiel": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(fix.contains("profile"), "{fix}");
+    let (code, ..) = refusal::<SiteParams>("rdy_site", json!({"profile": "x", "only": "yes"}));
+    assert_eq!(code, "E_BAD_INPUT");
 }
 
 /// dl7: `rdy_dump` takes `out` and `after` (hc8) and nothing else.

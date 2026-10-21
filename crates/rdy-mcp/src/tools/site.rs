@@ -16,13 +16,23 @@ use serde_json::Value;
 pub struct SiteParams {
     /// canon (default), a version as tag:<version>, a view name or view:<name>, or proposal:P-x@n (P-x follows its latest version). A view or proposal renders in review mode and updates as it changes.
     pub scope: Option<String>,
+    /// A publication profile id or key in this scope, or implicit:org. Omit it for all docs.
+    pub profile: Option<String>,
+    /// Serve canon through this profile on a separate port. Requires profile and scope canon. This changes presentation, not source access.
+    pub only: Option<bool>,
 }
 
-/// `rdy_site`: the link to the live docs site for `scope`, for the person to open. A session is
-/// required, as for `rdy_inbox`.
+/// `rdy_site`: the link to the live docs site for `scope`, for the person to open, through
+/// `profile` when given (D-CWC91), and on the profile's own port with `only` (D-DK03K). A session
+/// is required, as for `rdy_inbox`; every role may inspect, because the site is read-only.
 pub fn rdy_site(st: &mut McpState, p: SiteParams) -> Result<Value, RdyError> {
     session(st)?;
-    site_reply(&*st.engine, p.scope.as_deref(), None, false)
+    site_reply(
+        &*st.engine,
+        p.scope.as_deref(),
+        p.profile.as_deref(),
+        p.only.unwrap_or(false),
+    )
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -122,7 +132,7 @@ pub fn rdy_render(st: &mut McpState, p: RenderParams) -> Result<Value, RdyError>
 pub struct PublicationCheckParams {
     /// A publication profile id or key, or implicit:org for every doc.
     pub profile: String,
-    /// canon (the default, whatever your session view is), tag:<name> or landing:<hash>.
+    /// canon (default), tag:<name>, landing:<hash>, a view name, view:<name>, or proposal:P-x@n.
     pub scope: Option<String>,
     /// A baseline to compare with: canon, tag:<name> or landing:<hash>. It must hold the same profile id and audience. Omit it for no comparison.
     pub against: Option<String>,

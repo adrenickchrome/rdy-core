@@ -6,7 +6,7 @@ use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
-const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Pass profile implicit:org for every doc. Pass against to compare with an explicit canon, tag, or landing baseline. This checks local output; it does not authorize publication or find the last publication. Relay warnings to the person.";
+const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. This check does not authorize publication or find the last publication. Relay warnings to the person.";
 
 /// A public profile `open` that refers outside its selection, an org profile `site` over the same
 /// doc, and a tag `v1.0.0`.
@@ -256,8 +256,8 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
         *rows[0],
         (
             "W_PUBLICATION_REFERENCE",
-            "an org profile refers to blocks outside its selection",
-            "Review these references before you share the output."
+            "an org profile has references outside its selection, or a live public profile has blocked references",
+            "follow the warning's own fix"
         )
     );
 }

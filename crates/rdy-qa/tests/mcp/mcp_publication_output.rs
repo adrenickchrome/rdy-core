@@ -148,9 +148,8 @@ fn pub10_output_parameters_are_strict_and_scope_defaults_to_canon() {
     assert_eq!(code, "E_BAD_INPUT");
     let (code, ..) = refused(c.call("rdy_render", json!({"out": p(&out("x")), "profile": 7})));
     assert_eq!(code, "E_BAD_INPUT");
-    // the live site tool, the dump and the source reads take no profile
+    // the dump and the source reads take no profile
     for (tool, args) in [
-        ("rdy_site", json!({"profile": "orgp"})),
         (
             "rdy_dump",
             json!({"out": p(&out("dump")), "profile": "orgp"}),
@@ -290,9 +289,12 @@ fn pub10_output_parameters_are_strict_and_scope_defaults_to_canon() {
             "{tool}: profile is optional"
         );
     }
-    // the live site tool still takes a scope alone
+    // the live site tool takes a profile and the profile-only flag
     let site = &find("rdy_site")["inputSchema"]["properties"];
-    assert!(site.get("profile").is_none(), "{site}");
+    assert!(
+        site.get("profile").is_some() && site.get("only").is_some(),
+        "{site}"
+    );
 }
 
 #[test]

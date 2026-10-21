@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = site_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "The link to this project's live docs site, for the person to open in a browser. Pages update by themselves as the scope changes. Pass scope for a view or proposal version: it renders in review mode with Show changes. Relay warning and each entry of warnings to the person. Read and write through the tools yourself, not the site."
+        description = "Get the live docs link for the person. Pass profile to show its selection in canon, a tag, a view or a proposal. Pass only with profile to serve canon on a separate port. This changes presentation, not source access. Relay warning and every entry of warnings. Use the tools to read and write."
     )]
     async fn rdy_site(&self, Parameters(p): Parameters<SiteParams>) -> CallToolResult {
         self.run("rdy_site", p, tools::rdy_site).await
@@ -29,7 +29,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Check a publication profile's selected docs and references. Pass profile implicit:org for every doc. Pass against to compare with an explicit canon, tag, or landing baseline. This checks local output; it does not authorize publication or find the last publication. Relay warnings to the person."
+        description = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. This check does not authorize publication or find the last publication. Relay warnings to the person."
     )]
     async fn rdy_publication_check(
         &self,
