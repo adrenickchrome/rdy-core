@@ -324,6 +324,19 @@ fn cli2_a_relative_project_starts_the_daemon() {
 
 #[test]
 fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
+    edit_survives_stop_with_notice(None);
+}
+
+/// A waiting notice on stderr (the stop writes one after its grace on a loaded machine) must not
+/// change what the stop prints on stdout. The notice is injected, so no grace has to run out.
+#[test]
+fn plc8_stop_waiting_notice_does_not_change_stdout() {
+    edit_survives_stop_with_notice(Some(
+        "waiting for the daemon (pid 12345) to finish its work and close the store",
+    ));
+}
+
+fn edit_survives_stop_with_notice(notice: Option<&str>) {
     let s = Served::new();
     // made directly, so the edit below is the command that spawns the daemon (and so its parent)
     let (ok, v) = s.json(&[
@@ -338,22 +351,36 @@ fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
     assert!(ok, "{v}");
     let id = created_doc(&v);
     let stop_out = s.dir.path().join("stop.out");
+    let stop_err = s.dir.path().join("stop.err");
+    let notice_cmd = notice
+        .map(|n| format!("printf '%s\\n' '{n}' >&2; "))
+        .unwrap_or_default();
     let script = editor_script(
         &s,
         &format!(
-            "sed -i.bak 's/title: Before/title: After/' \"$1\"\n'{}' --project '{}' serve --stop > '{}' 2>&1\necho \"exit=$?\" >> '{}'\n",
+            "sed -i.bak 's/title: Before/title: After/' \"$1\"\n{{ {}'{}' --project '{}' serve --stop; }} > '{}' 2> '{}'\necho \"exit=$?\" >> '{}'\n",
+            notice_cmd,
             rdy_bin().display(),
             s.dir.path().display(),
             stop_out.display(),
+            stop_err.display(),
             stop_out.display()
         ),
     );
     let out = edit_with(&s, &script, &id);
     let stopped = std::fs::read_to_string(&stop_out).unwrap();
+    let stop_stderr = std::fs::read_to_string(&stop_err).unwrap_or_default();
+    // stdout alone is asserted; a waiting notice may appear on stderr in either case
     assert!(
-        stopped.starts_with("stopped\n") && stopped.ends_with("exit=0\n"),
-        "the daemon the edit spawned stopped (it is reaped, not a zombie): {stopped}"
+        stopped.starts_with("stopped\n") && stopped == "stopped\nexit=0\n",
+        "the daemon the edit spawned stopped (it is reaped, not a zombie): stdout {stopped:?}, stderr {stop_stderr:?}"
     );
+    if let Some(n) = notice {
+        assert!(
+            stop_stderr.starts_with(&format!("{n}\n")),
+            "the injected notice leads stderr: {stop_stderr:?}"
+        );
+    }
     // the stop drained every connection rather than waiting out its grace: the daemon logs
     // when the grace ran out (read from its log, not a clock, so a loaded machine cannot fail it)
     let log = std::fs::read_to_string(s.run_dir().log_file()).unwrap_or_default();
