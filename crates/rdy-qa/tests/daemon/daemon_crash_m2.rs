@@ -52,18 +52,38 @@ enum Hit {
 const MIN_WIDTH: u64 = 4;
 
 /// A seeded kill delay in `[lo, hi]` ms, and the window narrowed by where it fell: a kill after the
-/// answer lowers `hi`, a kill before the op reached the daemon raises `lo`.
+/// answer lowers `hi`, a kill before the op reached the daemon raises `lo`. Under load the time an
+/// op takes drifts from attempt to attempt, so a window narrowed on earlier attempts can sit beside
+/// the op: a miss in a window already at `MIN_WIDTH` resets it to the timed window `[0, full]`.
 struct Window {
     lo: u64,
     hi: u64,
+    /// The timed window's upper end: the un-killed op's time, in ms.
+    full: u64,
     seed: u64,
 }
 
 impl Window {
+    fn new(full: u64, seed: u64) -> Window {
+        Window {
+            lo: 0,
+            hi: full,
+            full,
+            seed,
+        }
+    }
     fn draw(&mut self) -> u64 {
         self.lo + lcg(&mut self.seed) % (self.hi - self.lo + 1)
     }
     fn narrow(&mut self, d: u64, hit: &Hit) {
+        if *hit != Hit::InFlight && self.hi - self.lo <= MIN_WIDTH {
+            eprintln!(
+                "sg6 window {}..{} ms missed at {d} ms ({hit:?}): reset to 0..{} ms",
+                self.lo, self.hi, self.full
+            );
+            (self.lo, self.hi) = (0, self.full);
+            return;
+        }
         match hit {
             Hit::Answered => self.hi = d.max(self.lo + MIN_WIDTH),
             Hit::Early => self.lo = d.min(self.hi.saturating_sub(MIN_WIDTH)),
@@ -178,11 +198,7 @@ fn sg6_a_kill_during_a_large_include_is_all_or_nothing() {
     assert_eq!(hit, Hit::Answered);
     let n = in_process(&s, "dst-cal", |r| r.read().included("dst-cal").len());
     assert_eq!(n, SRC_CHANGES, "the include took every change");
-    let mut w = Window {
-        lo: 0,
-        hi: took.as_millis() as u64,
-        seed: 0x7367_3661,
-    };
+    let mut w = Window::new(took.as_millis() as u64, 0x7367_3661);
     let (mut hits, mut attempt) = (0, 0);
     while hits < points() {
         assert!(
@@ -410,11 +426,7 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
     }
     assert_eq!(all_or_nothing(&s, &l, "no kill"), (true, after));
     drop(s);
-    let mut w = Window {
-        lo: 0,
-        hi: took.as_millis() as u64,
-        seed: 0x6c61_6e64,
-    };
+    let mut w = Window::new(took.as_millis() as u64, 0x6c61_6e64);
     let (mut hits, mut attempt) = (0, 0);
     while hits < points() {
         assert!(
