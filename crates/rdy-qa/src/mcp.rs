@@ -1182,7 +1182,9 @@ sleep 20"#;
         use McpFailure::*;
         // Everything the server writes after the last reply, up to the end of its stdout, is
         // checked before a finish succeeds. The peer waits for its input to close first.
-        let cases: [(&str, String, Result<Option<i32>, McpFailure>); 8] = [
+        // what, the peer's end, and the finish's exit code or failure
+        type Case = (&'static str, String, Result<Option<i32>, McpFailure>);
+        let cases: [Case; 8] = [
             (
                 "a line that is not JSON",
                 "cat > /dev/null; echo 'not json'".into(),
@@ -1523,24 +1525,36 @@ sleep 20"#;
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
         fifo(&ready);
-        // The server closes its input: the call cannot be written.
-        let mut c = McpClient::try_launch_bounded(
-            peer(
-                &after_init("exec 0<&-; echo ready > \"$0\"; exec sleep 1000"),
-                &[&ready],
-            ),
-            CAP,
-        )
-        .expect("launch");
-        let line = fifo_line(ready.clone());
-        assert_eq!(
-            line.recv_timeout(DEADLINE).as_deref(),
-            Ok("ready"),
-            "the peer closed its input"
-        );
-        assert_eq!(c.try_call("rdy_overview", json!({})).map(|_| ()), Err(Io));
-        assert_stopped(&c, "closed input");
-        drop(c);
+        // The server closes its input: the call cannot be written. A child that another test
+        // forks while this session's pipe is being made holds a copy of the pipe's read end
+        // until that child's exec, and the write then succeeds and the call waits. So each try
+        // has a short hang guard, and a try passes only with the write's failure (Io).
+        let mut waited = Vec::new();
+        loop {
+            let mut c = McpClient::try_launch_bounded(
+                peer(
+                    &after_init("exec 0<&-; echo ready > \"$0\"; exec sleep 1000"),
+                    &[&ready],
+                ),
+                CAP,
+            )
+            .expect("launch");
+            let line = fifo_line(ready.clone());
+            assert_eq!(
+                line.recv_timeout(DEADLINE).as_deref(),
+                Ok("ready"),
+                "the peer closed its input"
+            );
+            c.budget = Duration::from_secs(5);
+            let got = c.try_call("rdy_overview", json!({})).map(|_| ());
+            assert_stopped(&c, "closed input");
+            drop(c);
+            if got == Err(Io) {
+                break;
+            }
+            waited.push(got);
+            assert!(waited.len() < 5, "closed input: {waited:?}");
+        }
 
         // An injected expiry: no reply within the budget. The peer's own child is killed with it.
         let mut c = McpClient::try_launch_bounded(
