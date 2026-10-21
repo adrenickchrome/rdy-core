@@ -2,6 +2,7 @@ pub mod coord;
 
 use imbl::OrdMap;
 use rdy_model::decision::{self, DecisionStatus};
+use rdy_model::engine_fields::{self, Against};
 use rdy_model::{Block, BlockId, Hash, Tracking};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -114,6 +115,10 @@ pub struct Graph {
     /// Each removed block (a read projection, [`Block::is_redacted`]) and the request that removed
     /// it, apart from `contents`.
     redacted: OrdMap<BlockId, Hash>,
+    /// p-QMGB4 (D-EJBPD): each decision's decoded `reaffirmed` record, by target: the
+    /// retirement or deletion it re-affirmed that premise against. Only decisions with a valid,
+    /// non-empty record are here. [`Graph::edge_suspect`] alone reads it.
+    reaffirmed: OrdMap<BlockId, BTreeMap<BlockId, Against>>,
     /// trk1: the project pack's tracking fields, left out of every content hash.
     tracking: Arc<Tracking>,
 }
@@ -248,6 +253,18 @@ pub fn edges_of(b: &Block) -> Vec<Edge> {
     edges
 }
 
+/// `b`'s `reaffirmed` record, by target, when it holds one with a valid shape and at least one
+/// target. Read validation refuses a malformed record; one here adds no exemption.
+fn reaffirmed_of(b: &Block) -> Option<BTreeMap<BlockId, Against>> {
+    let v = b.fields.get(engine_fields::REAFFIRMED)?;
+    let acks: BTreeMap<BlockId, Against> = engine_fields::decode_reaffirmed(v)
+        .ok()?
+        .into_iter()
+        .map(|(t, r)| (t, r.against))
+        .collect();
+    (!acks.is_empty()).then_some(acks)
+}
+
 impl Graph {
     /// The graph of `blocks`, which are visited in the order given (id order, for a state), with
     /// no tracking fields.
@@ -266,9 +283,7 @@ impl Graph {
         };
         for b in blocks {
             g.add_content(b);
-            if let Some(s) = decision::status(b) {
-                g.decision_status.insert(b.id.clone(), s);
-            }
+            g.add_status(b);
             for e in Graph::edges_of(b) {
                 g.inc.entry(e.to.clone()).or_default().push(e.clone());
                 g.out.entry(e.from.clone()).or_default().push(e);
@@ -288,6 +303,17 @@ impl Graph {
                 self.contents
                     .insert(b.id.clone(), b.content_hash_with(&self.tracking));
             }
+        }
+    }
+
+    /// Records `b`'s decision status and, for a decision, its `reaffirmed` record.
+    fn add_status(&mut self, b: &Block) {
+        let Some(s) = decision::status(b) else {
+            return;
+        };
+        self.decision_status.insert(b.id.clone(), s);
+        if let Some(acks) = reaffirmed_of(b) {
+            self.reaffirmed.insert(b.id.clone(), acks);
         }
     }
 
@@ -321,6 +347,7 @@ impl Graph {
             g.contents.remove(&b.id);
             g.redacted.remove(&b.id);
             g.decision_status.remove(&b.id);
+            g.reaffirmed.remove(&b.id);
             for e in Graph::edges_of(b) {
                 unlist(&mut g.out, &e.from, &e);
                 unlist(&mut g.inc, &e.to, &e);
@@ -328,9 +355,7 @@ impl Graph {
         }
         for b in new {
             g.add_content(b);
-            if let Some(s) = decision::status(b) {
-                g.decision_status.insert(b.id.clone(), s);
-            }
+            g.add_status(b);
             for e in Graph::edges_of(b) {
                 enlist(&mut g.inc, e.to.clone(), e.clone());
                 enlist(&mut g.out, e.from.clone(), e);
@@ -376,6 +401,7 @@ impl Graph {
             decision_status: values(&self.decision_status, keep),
             contents: values(&self.contents, keep),
             redacted: values(&self.redacted, keep),
+            reaffirmed: values(&self.reaffirmed, keep),
             tracking: self.tracking.clone(),
         }
     }
@@ -445,6 +471,35 @@ impl Graph {
         } else {
             DerivedStatus::Live
         })
+    }
+
+    /// p-HF5W0: the accepted decisions that supersede (wholly or in part) or revoke `id`,
+    /// sorted and once each: the set a re-affirmation of a premise on `id` records. It holds
+    /// every partial superseder, also when a whole superseder or a revoker sets the status.
+    pub fn retiring_decisions(&self, id: &BlockId) -> BTreeSet<BlockId> {
+        self.incoming(id)
+            .iter()
+            .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES))
+            .filter(|e| self.accepted(&e.from))
+            .map(|e| e.from.clone())
+            .collect()
+    }
+
+    /// p-QMGB4: what `source` re-affirmed its premise on `target` against, when `source` is an
+    /// accepted decision that is live or partly superseded. A proposed, rejected, wholly
+    /// superseded or revoked decision, or a block that is no decision, has no exemption.
+    fn reaffirmed_against(&self, source: &BlockId, target: &BlockId) -> Option<&Against> {
+        let against = self.reaffirmed.get(source)?.get(target)?;
+        self.is_live(source).then_some(against)
+    }
+
+    /// Whether `source` re-affirmed its premise on the retired `target` against exactly the
+    /// decisions that retire it now. A decision added to or taken from that set breaks it.
+    fn retirement_reaffirmed(&self, source: &BlockId, target: &BlockId) -> bool {
+        match self.reaffirmed_against(source, target) {
+            Some(Against::Retiring(ids)) => ids.iter().eq(self.retiring_decisions(target).iter()),
+            _ => false,
+        }
     }
 
     fn is_live(&self, id: &BlockId) -> bool {
@@ -566,9 +621,10 @@ impl Graph {
     /// and its incoming edges from decisions with theirs. So: each block whose outgoing edges
     /// differ, and each block with an edge (in either graph) to a target whose content hash,
     /// decision status or incoming edges differ, or to which a decision whose status differs
-    /// has an edge. Found by diffing the graphs' maps, which skips the structure a graph
-    /// carried across a write (`with_changes`) shares with the one it came from: the cost
-    /// follows what changed, not the size of the graph.
+    /// has an edge; and each decision whose `reaffirmed` record differs, or that has one and
+    /// whose own status can differ. Found by diffing the graphs' maps, which skips the
+    /// structure a graph carried across a write (`with_changes`) shares with the one it came
+    /// from: the cost follows what changed, not the size of the graph.
     pub fn suspect_candidates(&self, prev: &Graph) -> BTreeSet<BlockId> {
         let mut out: BTreeSet<BlockId> = BTreeSet::new();
         let mut targets: BTreeSet<BlockId> = BTreeSet::new();
@@ -593,9 +649,18 @@ impl Graph {
                 targets.extend(g.outgoing(d).iter().map(|e| e.to.clone()));
             }
         }
+        // p-QMGB4: a decision's `reaffirmed` record decides its own suspects, and so does its
+        // status (only a live decision uses the record). Every block whose status can differ is
+        // in `targets`.
+        for item in prev.reaffirmed.diff(&self.reaffirmed) {
+            out.insert(key_of(item).clone());
+        }
         for t in &targets {
             for g in [prev, self] {
                 out.extend(g.incoming(t).iter().map(|e| e.from.clone()));
+                if g.reaffirmed.contains_key(t) {
+                    out.insert(t.clone());
+                }
             }
         }
         out
@@ -631,9 +696,15 @@ impl Graph {
         {
             return None;
         }
-        let reason = match self.status(&e.to) {
-            Some(DerivedStatus::Superseded { .. }) => "superseded",
-            Some(DerivedStatus::Revoked { .. }) => "revoked",
+        let retired = match self.status(&e.to) {
+            Some(DerivedStatus::Superseded { .. }) => Some("superseded"),
+            Some(DerivedStatus::Revoked { .. }) => Some("revoked"),
+            _ => None,
+        };
+        // p-QMGB4: a retirement re-affirmed against its whole current set is no cause; the
+        // premise's pin still decides whether its content drifted
+        let reason = match retired {
+            Some(r) if !self.retirement_reaffirmed(&e.from, &e.to) => r,
             _ => {
                 let premise = match &e.kind {
                     EdgeKind::References => true,
@@ -644,6 +715,15 @@ impl Graph {
                     return None;
                 }
                 match (e.pin, self.contents.get(&e.to)) {
+                    // p-HF5W0: `against: deleted` holds while the target stays absent
+                    (Some(_), None)
+                        if matches!(
+                            self.reaffirmed_against(&e.from, &e.to),
+                            Some(Against::Deleted)
+                        ) =>
+                    {
+                        return None;
+                    }
                     (Some(_), None) => "deleted",
                     (Some(pin), Some(cur)) if pin != *cur => "changed",
                     _ => return None,
