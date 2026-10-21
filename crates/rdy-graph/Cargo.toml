@@ -3,6 +3,7 @@ name = "rdy-graph"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
+license.workspace = true
 
 [dependencies]
 imbl.workspace = true

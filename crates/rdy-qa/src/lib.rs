@@ -18,6 +18,7 @@ pub mod packs;
 pub mod perf;
 pub mod platform;
 pub mod reindex_check;
+pub mod release_install;
 pub mod report;
 pub mod seams;
 pub mod signing;
