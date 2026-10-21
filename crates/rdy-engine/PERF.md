@@ -1378,7 +1378,7 @@ no diff since a tag (F3). None is a spec ceiling.
 | `site_versions_page_warm` | the same build with a cache filled by one build outside the timer, after one commit to one view (outside the timer). Only that view is recounted | 5 | no spec target: the versions page after one view commit, one view recounted (recorded) |
 
 
-## Live profiles (<merge date>)
+## Live profiles (2026-10-21)
 
 Five ops, reported with no target and no spec ceiling (D-CWC91, D-DK03K; quality gate tb-A4DAV).
 They run on both tiers (`_50k` on the large one), right after the live site ops. The ops measure
@@ -1434,7 +1434,7 @@ baseline step records these ops only after two bench runs agree within 10%.
 No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
 are PASS-NEW until the baseline holds them.
 
-Deep gate (bench): <orchestrator fills in>
+Deep gate (bench): PASS-PERF-INFO at cd01f92 (2026-10-21; merged b44c7cc, v0.14.0): no FAIL row; dump +78%, site_event_after_view_write +42%, site_event_after_view_write_50k +28% (1.06 s against the proposed 1 s), all under 2x.
 
 
 ## Dump and load (2026-10-14)
@@ -1459,7 +1459,7 @@ are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed he
 Deep gate (bench): <orchestrator fills in>
 
 
-## Dump chains (<merge date>)
+## Dump chains (2026-10-21)
 
 Three ops, reported with no target and no spec ceiling (quality gate k-CMC06). They run on both
 tiers (`dump_increment_50k`, `load_chain_50k` and `load_chain_stop_50k` on the large one), right
@@ -1518,10 +1518,10 @@ No correctness test asserts a duration, a faster-than-full result or a shipping 
 laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops are
 PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
 
-Deep gate (bench): <orchestrator fills in>
+Deep gate (bench): PASS-PERF-INFO at 362c808 (2026-10-21; merged 5290e61, v0.13.0): no FAIL row; dump +76%, site_event_after_view_write +39%, site_event_after_view_write_50k +29%, daemon_write_8_clients +393% (POST-LAUNCH 44).
 
 
-## Publications (core) (<merge date>)
+## Publications (core) (2026-10-18)
 
 Six ops, reported with no target and no spec ceiling (D-0VCQ5, D-5CVWB; quality gate k-CMC06).
 They run on the typical tier only, right after `clone`. An org profile (the benchmark audience,
@@ -1553,7 +1553,7 @@ What each cost grows with:
 No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
 are PASS-NEW until the baseline holds them. `qa-baseline.json` is not changed here.
 
-Deep gate (bench): <orchestrator fills in>
+Deep gate (bench): PASS-PERF-INFO at e0afcc3 (2026-10-18; merged 97479bc, v0.8.0): no FAIL row; render_cold +26%, site_event_after_view_write +33%, site_event_after_view_write_50k +30% (1.08 s against the proposed 1 s).
 
 
 ## Export and clone (2026-10-16)
