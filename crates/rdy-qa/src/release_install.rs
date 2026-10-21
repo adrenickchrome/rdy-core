@@ -1091,12 +1091,12 @@ mod tests {
         }
     }
 
+    /// A change to a fixture's input paths.
+    type Change = fn(&Fixture);
+
     /// Packages a fixture on a thread of its own: `prepare` runs before packaging, `change`
     /// once the inputs are checked. A hang guard: packaging must end within a minute.
-    fn package_changed(
-        prepare: fn(&Fixture),
-        change: fn(&Fixture),
-    ) -> (Result<PathBuf, Failure>, Fixture) {
+    fn package_changed(prepare: Change, change: Change) -> (Result<PathBuf, Failure>, Fixture) {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let f = Fixture::new();
@@ -1118,7 +1118,7 @@ mod tests {
     fn pre1_package_copies_the_inputs_it_checked() {
         fn unchanged(_: &Fixture) {}
         // A FIFO is refused at the check, without waiting for a writer.
-        let cases: [(&str, fn(&Fixture)); 2] = [
+        let cases: [(&str, Change); 2] = [
             ("a FIFO binary", |f| {
                 fs::remove_file(&f.binary).expect("rm");
                 fifo(&f.binary);
@@ -1141,7 +1141,7 @@ mod tests {
         )) {
             return;
         }
-        let cases: [(&str, fn(&Fixture)); 4] = [
+        let cases: [(&str, Change); 4] = [
             ("a symlink in place of LICENSE-MIT", |f| {
                 let p = f.licenses.join(MIT_FILE);
                 let other = f.dir.path().join("other");
