@@ -49,13 +49,25 @@ pub(crate) struct SiteArgs {
     /// canon (default), a version as tag:<version>, a view name or view:<name>, or proposal:P-x@n. A view or proposal opens in review mode.
     #[arg(long)]
     scope: Option<String>,
+    // the help is given in full: a doc comment would lose its closing period
+    #[arg(
+        long,
+        help = "Show this publication profile's selection. Accepts an id, a key, or implicit:org."
+    )]
+    profile: Option<String>,
 }
 
 /// `rdy site`: the link to the live docs site, the CLI twin of `rdy_site`. The URL alone on one
 /// line, then `changes: <url>` when the scope has a diff summary, then the LAN URL when the site is
 /// open to the network, then the render's warnings for the scope's pages as `rdy render` prints them. The LAN warning and its fix go to stderr.
+/// With `--profile`, the link is to that profile's selection of the scope (D-CWC91); `--json`
+/// prints the `site_url` reply as it is.
 pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply> {
-    let v = call(env, "site_url", json!({"scope": a.scope}))?;
+    let v = call(
+        env,
+        "site_url",
+        json!({"scope": a.scope, "profile": a.profile}),
+    )?;
     let mut lines = vec![text(&v["url"]).to_string()];
     if !v["changes"].is_null() {
         lines.push(format!("changes: {}", text(&v["changes"])));
@@ -63,6 +75,14 @@ pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply
     if !v["lan_url"].is_null() {
         lines.push(text(&v["lan_url"]).to_string());
     }
+    lan_warning(&v);
+    let t = format!("{}{}", lines.join("\n"), warning_lines(&v["warnings"]));
+    Ok((v, t))
+}
+
+/// The structured LAN warning of a `site_url` reply, if any, on stderr: `warning: <message>`,
+/// then `fix: <fix>`, one line each, in text and JSON mode alike.
+pub(crate) fn lan_warning(v: &Value) {
     if !v["warning"].is_null() {
         eprintln!(
             "warning: {}\nfix: {}",
@@ -70,8 +90,6 @@ pub(crate) fn site(env: &Env, a: SiteArgs) -> Result<(Value, String), ErrorReply
             text(&v["warning"]["fix"])
         );
     }
-    let t = format!("{}{}", lines.join("\n"), warning_lines(&v["warnings"]));
-    Ok((v, t))
 }
 
 pub(crate) fn render(env: &Env, a: RenderArgs) -> Result<(Value, String), ErrorReply> {
