@@ -8,6 +8,7 @@ pub mod card_words;
 pub mod carried_warning;
 pub mod clone;
 pub mod code_brief;
+pub mod code_evidence;
 pub mod code_index;
 mod config;
 pub mod config_edit;
