@@ -23,6 +23,7 @@ use rdy_qa::daemon::Hosted;
 use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::golden::tiny;
 use rdy_qa::http::{self, Sse};
+use rdy_qa::platform;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -216,11 +217,17 @@ impl Recorder {
         Recorder::probing(dir, &[])
     }
 
-    /// [`Recorder::on`]; at each stop stage it also records whether every port of `ports` has
-    /// stopped accepting by then, as `<stage>: ports closed <bool>`.
+    /// [`Recorder::on`]; at each stop stage it also records whether this process (the daemon)
+    /// holds no listening socket on any port of `ports` by then, as `<stage>: ports closed
+    /// <bool>` ([`platform::tcp_listen_ports`]). Every port must have a listener of the
+    /// daemon now.
     fn probing(dir: &Path, ports: &[u16]) -> Recorder {
         let root = root_of(dir);
         let ports = ports.to_vec();
+        let open = platform::tcp_listen_ports();
+        for p in &ports {
+            assert!(open.contains(p), "no listener of this process on port {p}");
+        }
         let all = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = channel();
         let (keep, tx) = (Arc::clone(&all), Mutex::new(tx));
@@ -236,7 +243,8 @@ impl Recorder {
                 if let Ev::Stage(stage) = &ev
                     && !ports.is_empty()
                 {
-                    let shut = ports.iter().all(|p| TcpStream::connect(sock(*p)).is_err());
+                    let open = platform::tcp_listen_ports();
+                    let shut = !ports.iter().any(|p| open.contains(p));
                     keep.lock()
                         .unwrap()
                         .push(Ev::Stage(format!("{stage}: ports closed {shut}")));
@@ -713,6 +721,83 @@ fn spv7_same_key_concurrent_starts_return_one_port() {
     assert!(page(guide, "manual/intro.html").contains("INTRO-ONLY-1"));
 }
 
+/// The report of a failed retry: the original error, then one fresh bind probe per candidate
+/// port, in the order given. The probes run after the failure, so they show what the ports look
+/// like now; they are not the daemon's own bind errors.
+fn retry_failure(
+    e: &RdyError,
+    ports: &[u16],
+    mut probe: impl FnMut(SocketAddr) -> std::io::Result<()>,
+) -> String {
+    let mut lines = vec![
+        format!("profile site retry failed: {}: {}", e.code, e.message),
+        format!("fix: {}", e.fix),
+        "post-failure IPv4 bind probes (candidate order):".to_string(),
+    ];
+    for &port in ports {
+        let at = sock(port);
+        let seen = match probe(at) {
+            Ok(()) => "bound".to_string(),
+            Err(error) => format!("{:?}", error.kind()),
+        };
+        lines.push(format!("{at}: {seen}"));
+    }
+    lines.join("\n")
+}
+
+#[test]
+fn plb4_retry_failure_reports_each_candidate() {
+    use std::io::{Error, ErrorKind};
+    let e = RdyError::new("E_SITE", "retry message", "retry fix");
+    let ports: Vec<u16> = (49152..=49167).collect();
+    let mut seen = Vec::new();
+    let report = retry_failure(&e, &ports, |at| {
+        let n = seen.len();
+        seen.push(at);
+        match n % 4 {
+            0 => Err(Error::from(ErrorKind::AddrInUse)),
+            1 => Err(Error::from(ErrorKind::PermissionDenied)),
+            2 => Err(Error::other("probe failed")),
+            _ => Ok(()),
+        }
+    });
+    let want_probed: Vec<SocketAddr> = ports.iter().map(|p| sock(*p)).collect();
+    assert_eq!(seen, want_probed, "every address is probed once, in order");
+    let names = ["AddrInUse", "PermissionDenied", "Other", "bound"];
+    let mut want = vec![
+        "profile site retry failed: E_SITE: retry message".to_string(),
+        "fix: retry fix".to_string(),
+        "post-failure IPv4 bind probes (candidate order):".to_string(),
+    ];
+    for (i, port) in ports.iter().enumerate() {
+        want.push(format!("127.0.0.1:{port}: {}", names[i % 4]));
+    }
+    assert_eq!(want.len(), 19);
+    assert_eq!(report, want.join("\n"));
+    assert!(!report.ends_with('\n'));
+}
+
+#[test]
+fn plb4_recorder_clears_on_unwind() {
+    let dir = tempfile::tempdir().unwrap();
+    let weak = Mutex::new(None);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rec = Recorder::on(dir.path());
+        *weak.lock().unwrap() = Some(Arc::downgrade(&rec.all));
+        // Outside every mutex guard, so no mutex is poisoned.
+        panic!("unwind with the recorder installed");
+    }));
+    assert!(out.is_err(), "the closure panicked");
+    let weak = weak
+        .into_inner()
+        .unwrap()
+        .expect("the recorder was installed");
+    assert!(
+        weak.upgrade().is_none(),
+        "the hook and the recorder held the only strong references"
+    );
+}
+
 #[test]
 fn spv7_failed_open_allocates_no_profile_site() {
     let w = world();
@@ -769,9 +854,18 @@ fn spv7_failed_open_allocates_no_profile_site() {
         "{:?}",
         rec.logs()
     );
-    // the ports free again: the same key opens, so the failure kept nothing
+    // the test releases its own sockets and retries; it cannot promise the ports are free
     drop(held);
-    let other = ensure_profile_site(Arc::clone(&sh), "other").unwrap();
+    let other = match ensure_profile_site(Arc::clone(&sh), "other") {
+        Ok(info) => info,
+        Err(e) => {
+            // Probes run only after the failure; each socket closes at once.
+            let report = retry_failure(&e, &profile_candidates(&root, "other"), |at| {
+                TcpListener::bind(at).map(drop)
+            });
+            panic!("{report}");
+        }
+    };
     assert_eq!(sh.profile_sites.keys(), vec!["other".to_string()]);
     assert!(page(port_of(&url_of(&other)), "secret.html").contains("SECRET-WORDS"));
 
@@ -1303,12 +1397,15 @@ fn opts(dir: &Path) -> ServeOptions {
     }
 }
 
-/// Asserts no listener answers on `port` any more.
+/// Asserts this process (the daemon) holds no listening socket on `port` any more. A connect
+/// cannot tell this: a child that another test's thread spawns holds a copy of every
+/// descriptor from its fork to its exec, so a listener the daemon has closed can still accept
+/// while that child waits (seen under gate load).
 #[track_caller]
 fn closed(port: u16) {
     assert!(
-        TcpStream::connect(sock(port)).is_err(),
-        "port {port} still accepts"
+        !platform::tcp_listen_ports().contains(&port),
+        "this process still listens on port {port}"
     );
 }
 
@@ -1498,6 +1595,10 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
             let port = port_of(&url_of(&ready.info));
             let body = page(port, "manual/intro.html");
             assert!(body.contains("INTRO-ONLY-1"));
+            assert!(
+                platform::tcp_listen_ports().contains(&port),
+                "the daemon listens"
+            );
             *keep.lock().unwrap() = Some((ready.key.clone(), ready.profile.title.clone(), port));
             Err(RdyError::new(
                 "E_TEST",
@@ -1583,6 +1684,10 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         assert!(ready.warnings.is_empty(), "{:?}", ready.warnings);
         let port = port_of(&url_of(&ready.info));
         assert!(page(port, "manual/intro.html").contains("INTRO-ONLY-1"));
+        assert!(
+            platform::tcp_listen_ports().contains(&port),
+            "the daemon listens"
+        );
         let rt = Hosted::rt();
         rt.block_on(request_stop(
             &RunDir::of_project(dir.path()),
@@ -1595,6 +1700,63 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         closed(port);
         assert!(rx.try_recv().is_err(), "one callback");
     }
+}
+
+/// The test name of [`plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon`].
+const HELD_FORK: &str = "plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon";
+
+/// A held child copies every descriptor of this process, and the area binary runs other tests
+/// beside this one: their sockets would stay open too. So the test re-runs itself as a child
+/// that runs it alone (`--exact`, one thread) and holds the fork there.
+#[test]
+fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
+    if std::env::var_os("RDY_QA_PLB4_CHILD").is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &rdy_qa::test_name!(HELD_FORK),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RDY_QA_PLB4_CHILD", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child ran no test: {stdout}\n{stderr}"
+        );
+        return;
+    }
+    let mut w = world();
+    let sh = shared(&w.h);
+    let guide = port_of(&url_of(
+        &ensure_profile_site(Arc::clone(&sh), "guide").unwrap(),
+    ));
+    let rec = Recorder::probing(w.h.dir.path(), &[guide]);
+    // a child forked now holds a copy of the listener until the test lets it exec
+    let child = platform::fork_held_before_exec();
+    assert_eq!(w.h.stop(), ExitReason::Stopped);
+    // the child's copy still accepts, yet the stopped daemon holds no listener of its own
+    assert!(
+        TcpStream::connect(sock(guide)).is_ok(),
+        "the held child keeps the listener open"
+    );
+    closed(guide);
+    let stages = rec.stages();
+    assert!(
+        at(&stages, "profiles-joined: ports closed true") < at(&stages, "store-closed"),
+        "{stages:?}"
+    );
+    assert!(sh.profile_sites.keys().is_empty());
+    assert!(child.release().success());
+    // the child has exited: nothing accepts any more
+    assert!(
+        TcpStream::connect(sock(guide)).is_err(),
+        "port {guide} still accepts"
+    );
 }
 
 /// What a hello to the daemon of `dir` finds.

@@ -337,7 +337,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         E_BAD_RECORD,
-        "a sync batch has an invalid object, frame, dependency cycle or repeated object",
+        "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a dependency cycle or a repeated object",
         "request this stream again; run rdy fsck at its source",
     ),
     (

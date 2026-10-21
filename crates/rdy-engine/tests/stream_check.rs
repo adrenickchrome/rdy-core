@@ -500,7 +500,15 @@ fn ha9_batch_can_precede_root_and_dependencies() {
     let header = StreamHeader::tag_history(repo(&r), tag, extra);
     let bad = written(&r, &header, &leaves[1..]);
     let e = refused_as_store(&bad);
-    assert_eq!(e.message, "stream record 0 at byte 12: invalid header");
+    let first = leaves.first().unwrap();
+    assert_eq!(
+        e.message,
+        format!(
+            "stream record 0 at byte 12: unneeded prerequisite {}:{}",
+            first.kind, first.hash
+        )
+    );
+    assert_eq!(e.issues[0].message, "record 0 at byte 12; object none");
 }
 
 /// The child half of [`ha9_check_has_no_process_state`] and

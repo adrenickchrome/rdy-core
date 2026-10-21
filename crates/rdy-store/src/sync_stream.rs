@@ -918,10 +918,15 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
 /// removal proof a dropped record names to a record of the batch (before or after it) or to a
 /// prerequisite. A kind-None edge resolves to exactly one of them by hash (two or more:
 /// `ambiguous object kind`). An edge to the record itself or to a later record is `dependency
-/// cycle` at the record that needs it; an edge or proof to neither, an absent root TAG that is
-/// no prerequisite and a prerequisite that no record needs are each `invalid header` at the
-/// header. No order between batch files is
-/// required, and E_UNRESOLVED_REF is never returned here: that needs the whole upload.
+/// cycle` at the record that needs it. An edge or proof to neither is `unlisted dependency` at
+/// the record that names it, with the edge's object (its hash alone for a kind-None edge).
+///
+/// The checks keep one order: the edges in record order, then the proofs in the order of their
+/// dropped records, then the root, then the prerequisites. An absent root TAG that is no
+/// prerequisite is `root tag is not in the batch or its prerequisites`, and a prerequisite that
+/// no record needs is `unneeded prerequisite` with the smallest such key; both are at the header.
+/// `invalid header` stays for a header's own fields. No order between batch files is required,
+/// and E_UNRESOLVED_REF is never returned here: that needs the whole upload.
 pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
     check_batch_with(input, |_| Ok(()), |_, _, _| Ok(()))
 }
@@ -943,8 +948,9 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     let mut index: HashMap<ObjectKey, u32> = HashMap::new();
     let mut edges: Vec<ObjectRef> = Vec::new();
     let mut ends: Vec<u32> = Vec::new();
-    // the removal proofs the dropped records name, which keep no order
-    let mut proofs: Vec<ObjectKey> = Vec::new();
+    // the removal proofs the dropped records name, which keep no order, each with the index of
+    // its dropped record
+    let mut proofs: Vec<(ObjectKey, usize)> = Vec::new();
     while let Some(r) = reader.next()? {
         let (n, offset) = reader.position();
         let key = r.key();
@@ -971,7 +977,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
         edges.extend(refs);
         if let Some(p) = proof {
             proofs.try_reserve(1).map_err(|_| grow())?;
-            proofs.push(p);
+            proofs.push((p, keys.len()));
         }
         keys.try_reserve(1).map_err(|_| grow())?;
         at.try_reserve(1).map_err(|_| grow())?;
@@ -1003,7 +1009,9 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
                         .iter()
                         .map(|&kind| ObjectKey { kind, hash: e.hash })
                         .filter(|k| index.contains_key(k) || is_prerequisite(k));
-                    let first = found.next().ok_or_else(bad_header)?;
+                    let Some(first) = found.next() else {
+                        return Err(fail(Reason::UnlistedDependency(*e)).into());
+                    };
                     if found.next().is_some() {
                         return Err(fail(Reason::AmbiguousObjectKind).into());
                     }
@@ -1016,30 +1024,43 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
                 None if is_prerequisite(&target) => {
                     needed.insert(target);
                 }
-                None => return Err(bad_header().into()),
+                None => return Err(fail(Reason::UnlistedDependency(*e)).into()),
             }
         }
         depth.push(depth_of(n, at[i], deps).map_err(|e| e.with_object(Some(keys[i])))?);
         start = *end as usize;
     }
     // a removal proof: anywhere in the batch, or a prerequisite
-    for p in &proofs {
-        if !index.contains_key(p) {
-            if !is_prerequisite(p) {
-                return Err(bad_header().into());
+    for &(p, i) in &proofs {
+        if !index.contains_key(&p) {
+            if !is_prerequisite(&p) {
+                let named = ObjectRef {
+                    kind: Some(p.kind),
+                    hash: p.hash,
+                };
+                return Err(StreamError::bad_record(
+                    i as u64 + 1,
+                    at[i],
+                    Reason::UnlistedDependency(named),
+                )
+                .with_object(Some(keys[i]))
+                .into());
             }
-            needed.insert(*p);
+            needed.insert(p);
         }
     }
+    let at_header = |reason| StreamError::bad_record(0, PRELUDE, reason);
     let root = header.root();
     if !index.contains_key(&root) {
         if !is_prerequisite(&root) {
-            return Err(bad_header().into());
+            return Err(at_header(Reason::RootTagNotListed).into());
         }
         needed.insert(root);
     }
-    if needed.len() != prerequisites.len() {
-        return Err(bad_header().into());
+    // every needed key is a prerequisite, so the first listed key that is not needed is the
+    // smallest unneeded one
+    if let Some(extra) = prerequisites.iter().find(|k| !needed.contains(k)) {
+        return Err(at_header(Reason::UnneededPrerequisite(*extra)).into());
     }
     Ok(BatchReport {
         header,
