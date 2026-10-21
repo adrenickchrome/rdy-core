@@ -10,6 +10,7 @@ use rdy_model::{
     Link, Op, Provenance, Role, tree,
 };
 use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
+use rdy_store::segment::Location;
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -176,9 +177,12 @@ fn bad_authors(what: String) -> RdyError {
 /// How far after now an `at_ms` in `authors.yaml` may be: 24 h, for clocks that differ.
 const AUTHORS_FUTURE_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// `authors.yaml` of export `dir`, checked against the import's blocks: by id. No file is no
-/// rows.
-fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Provenance>, RdyError> {
+/// `authors.yaml` of export `dir`, checked against the import's blocks: by id, each with its
+/// zero-based row in the file. No file is no rows.
+fn read_authors(
+    dir: &Path,
+    blocks: &[Block],
+) -> Result<BTreeMap<BlockId, (Provenance, usize)>, RdyError> {
     let path = dir.join(AUTHORS_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -192,7 +196,7 @@ fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Proven
     let known: BTreeSet<&BlockId> = blocks.iter().map(|b| &b.id).collect();
     let now = crate::now_ms();
     let mut out = BTreeMap::new();
-    for row in rows {
+    for (index, row) in rows.into_iter().enumerate() {
         let id = BlockId::parse(&row.id)
             .map_err(|_| bad_authors(format!("{} is not a block id", row.id)))?;
         if !known.contains(&id) {
@@ -227,7 +231,7 @@ fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Proven
             role,
             at_ms: row.at_ms,
         };
-        if out.insert(id.clone(), prov).is_some() {
+        if out.insert(id.clone(), (prov, index)).is_some() {
             return Err(bad_authors(format!("{id} appears more than once")));
         }
     }
@@ -833,13 +837,29 @@ impl ReadState {
             Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
         };
         // per-block authorship: who last wrote each block, and when it landed; an in-flight
-        // scope has no one chain, so it carries none
+        // scope has no one chain, so it carries none. The rows follow the log location of each
+        // block's producing change, then the block id, so an import of rows with equal times
+        // writes the authors in the order they wrote.
         if !matches!(scope, Scope::Inflight) {
             let ids: Vec<BlockId> = m.iter().map(|b| b.id.clone()).collect();
-            let rows: Vec<AuthorYaml> = self
+            let mut located: Vec<(Location, BlockId, crate::history::HistoryEntry)> = self
                 .last_changes(scope, &ids)?
                 .into_iter()
-                .map(|(id, h)| AuthorYaml {
+                .map(|(id, h)| {
+                    let change: Hash = h.change.parse().map_err(|_| {
+                        RdyError::new(
+                            E_INTERNAL,
+                            "The producing change hash is invalid.",
+                            "report this as a bug in rdy",
+                        )
+                    })?;
+                    Ok((self.reader().change_location(&change)?, id, h))
+                })
+                .collect::<Result<_, RdyError>>()?;
+            located.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            let rows: Vec<AuthorYaml> = located
+                .into_iter()
+                .map(|(_, id, h)| AuthorYaml {
                     id: id.to_string(),
                     actor: h.author.actor,
                     run: h.author.run,
@@ -1176,24 +1196,33 @@ impl Rdy {
         let warnings = import_skeleton_gaps(&self.pack, &blocks);
         // one change per author (grouped by actor), oldest first; blocks with no author row are
         // the importer's, last. Each change takes the run, role and time of its newest block
-        // (largest at_ms, then id).
+        // (largest at_ms, then id). Changes with the same time keep the file's order: each sits
+        // at its author's last row with its newest time.
         struct Group {
             /// The newest block: its time, then its id.
             newest: (i64, BlockId),
             provenance: Provenance,
+            /// The last row of authors.yaml with this author's newest time.
+            tie_row: usize,
             ops: Vec<Op>,
         }
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         let mut mine: Vec<Op> = vec![];
         for block in blocks {
             match authors.get(&block.id) {
-                Some(p) => {
+                Some((p, row)) => {
                     let newest = (p.at_ms, block.id.clone());
                     let g = groups.entry(p.actor.clone()).or_insert_with(|| Group {
                         newest: newest.clone(),
                         provenance: p.clone(),
+                        tie_row: *row,
                         ops: vec![],
                     });
+                    if p.at_ms > g.newest.0 {
+                        g.tie_row = *row;
+                    } else if p.at_ms == g.newest.0 {
+                        g.tie_row = g.tie_row.max(*row);
+                    }
                     if newest > g.newest {
                         g.newest = newest;
                         g.provenance = p.clone();
@@ -1203,11 +1232,12 @@ impl Rdy {
                 None => mine.push(Op::Create { block }),
             }
         }
-        let mut order: Vec<(Provenance, Vec<Op>)> = groups
-            .into_values()
-            .map(|g| (g.provenance, g.ops))
-            .collect();
-        order.sort_by(|a, b| (a.0.at_ms, &a.0.actor).cmp(&(b.0.at_ms, &b.0.actor)));
+        let mut groups: Vec<Group> = groups.into_values().collect();
+        groups.sort_by_key(|g| g.tie_row);
+        // stable: groups with the same time stay in row order
+        groups.sort_by_key(|g| g.provenance.at_ms);
+        let order: Vec<(Provenance, Vec<Op>)> =
+            groups.into_iter().map(|g| (g.provenance, g.ops)).collect();
         // df6: the messages name the directory, never its path (a path can hold a user name)
         let from = import_label(dir)
             .map(|l| format!(" from {l}"))

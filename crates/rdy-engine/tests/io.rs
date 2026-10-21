@@ -731,8 +731,15 @@ fn export_import_export_is_byte_identical() {
     let rows = |m: &mut std::collections::BTreeMap<String, Vec<u8>>| -> Vec<serde_yaml_ng::Value> {
         serde_yaml_ng::from_slice(&m.remove("authors.yaml").expect("authors.yaml")).unwrap()
     };
-    let (again_rows, first_rows) = (rows(&mut again), rows(&mut first));
+    let (mut again_rows, mut first_rows) = (rows(&mut again), rows(&mut first));
     assert_eq!(again, first);
+    // import merges each author's writes into one change, so the row order (producing change
+    // location) is not a fixed point of import then export: compare the rows by id
+    let by_id = |x: &serde_yaml_ng::Value, y: &serde_yaml_ng::Value| {
+        x["id"].as_str().cmp(&y["id"].as_str())
+    };
+    again_rows.sort_by(by_id);
+    first_rows.sort_by(by_id);
     // mfb3: one change per author, so each block keeps its author, run and role, and its time
     // is its author's newest time
     let mut newest: BTreeMap<String, i64> = BTreeMap::new();

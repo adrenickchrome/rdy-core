@@ -76,6 +76,114 @@ fn row<'a>(rows: &'a [serde_yaml_ng::Value], id: &str) -> &'a serde_yaml_ng::Val
         .unwrap_or_else(|| panic!("{id} not in authors.yaml"))
 }
 
+/// Where `r`'s log holds each change, read by walking the log's records.
+fn change_locations(r: &Rdy) -> std::collections::BTreeMap<Hash, rdy_store::segment::Location> {
+    let mut out = std::collections::BTreeMap::new();
+    let store = r.store();
+    let origin = rdy_store::segment::Location {
+        segment: 0,
+        offset: 0,
+    };
+    store
+        .reader()
+        .for_each_record_from(origin, store.log_end(), |loc, f, _| {
+            if let rdy_store::redaction::StoredFrame::Present { kind, hash, .. } = f
+                && kind == rdy_store::kinds::CHANGE
+            {
+                out.insert(hash, loc);
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// The ids of `rows` in the order a canon export gives them: by the log location of each
+/// block's producing change, then by id.
+fn log_order(r: &Rdy, rows: &[serde_yaml_ng::Value]) -> Vec<String> {
+    let locs = change_locations(r);
+    let ids: Vec<BlockId> = rows
+        .iter()
+        .map(|x| BlockId::parse(x["id"].as_str().unwrap()).unwrap())
+        .collect();
+    let last = r.read().last_changes(&Scope::Canon, &ids).unwrap();
+    let mut keyed: Vec<(rdy_store::segment::Location, String)> = last
+        .iter()
+        .map(|(id, h)| (locs[&h.change.parse::<Hash>().unwrap()], id.to_string()))
+        .collect();
+    keyed.sort();
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// The actor of each row, in file order.
+fn actors(rows: &[serde_yaml_ng::Value]) -> Vec<String> {
+    rows.iter()
+        .map(|x| x["actor"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Rewrites `at_ms` on every row of `out`'s authors.yaml to `at` and checks the file now holds
+/// that time on every row. File order stays.
+fn tie_every_row(out: &Path, at: i64) {
+    let mut rows = authors(out);
+    for x in rows.iter_mut() {
+        x["at_ms"] = serde_yaml_ng::Value::from(at);
+    }
+    std::fs::write(
+        out.join("authors.yaml"),
+        serde_yaml_ng::to_string(&rows).unwrap(),
+    )
+    .unwrap();
+    let rows = authors(out);
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|x| x["at_ms"].as_i64() == Some(at)),
+        "every row has at_ms {at}: {rows:?}"
+    );
+}
+
+/// plc5 (PL 49): canon holds four docs by agent:c. Then agent:z updates the two greatest ids in
+/// one change and agent:a the two least in one later change; each update is landed. Every
+/// author row now comes from those two changes, and their id order opposes their log order.
+/// Returns the project, the export of canon, and the four ids sorted.
+fn opposed_export(dir: &Path, out: &Path) -> (Rdy, Vec<String>) {
+    let mut r = Rdy::init(dir, "rdy-standard").unwrap();
+    let c = sess("agent:c", Some("rc"), Role::Writer);
+    let w = put(
+        &mut r,
+        &c,
+        "vc",
+        json!([
+            {"op": "create", "type": "doc", "id": "$1", "fields": {"name": "one", "title": "One", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$2", "fields": {"name": "two", "title": "Two", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$3", "fields": {"name": "three", "title": "Three", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$4", "fields": {"name": "four", "title": "Four", "doc_type": "page"}}
+        ]),
+    );
+    let mut ids: Vec<String> = ["$1", "$2", "$3", "$4"]
+        .iter()
+        .map(|k| w.created[*k].clone())
+        .collect();
+    ids.sort();
+    let p = r.propose(&c, "vc", "c", None).unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    for (actor, run, view, pair) in [
+        ("agent:z", "rz", "vz", &ids[2..]),
+        ("agent:a", "ra", "va", &ids[..2]),
+    ] {
+        let s = sess(actor, Some(run), Role::Writer);
+        let updates: Vec<serde_json::Value> = pair
+            .iter()
+            .map(|id| json!({"op": "update", "id": id, "fields": {"title": format!("By {actor}")}}))
+            .collect();
+        put(&mut r, &s, view, serde_json::Value::Array(updates));
+        let p = r.propose(&s, view, "update", None).unwrap();
+        r.land(&founder(), &p.id).unwrap();
+    }
+    r.read().export(&Scope::Canon, out).unwrap();
+    (r, ids)
+}
+
 #[test]
 fn mfb3_export_writes_each_blocks_author_and_times() {
     let a_dir = tempfile::tempdir().unwrap();
@@ -90,10 +198,15 @@ fn mfb3_export_writes_each_blocks_author_and_times() {
     assert_eq!(row(&rows, &p)["actor"].as_str(), Some("agent:b"));
     assert!(row(&rows, &p)["at_ms"].as_i64().is_some());
     assert!(row(&rows, &p)["landed_ms"].as_i64().is_some());
-    let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
-    let mut sorted = ids.clone();
-    sorted.sort();
-    assert_eq!(ids, sorted, "sorted by id");
+    let ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        ids,
+        log_order(&r, &rows),
+        "by producing change location, then by id within one change"
+    );
 }
 
 #[test]
@@ -584,24 +697,10 @@ fn older_author_export(out: &Path, ops: serde_json::Value) {
     let p = r.propose(&b, "vb", "b", None).unwrap();
     r.land(&founder(), &p.id).unwrap();
     r.read().export(&Scope::Canon, out).unwrap();
-    // The authors wrote in this order, but a fast machine can stamp the founder's landing and
-    // agent:b's write in the same millisecond, and import breaks a tie by actor name
-    // (POST-LAUNCH 49). Give each author its own time, in the order they wrote.
-    let mut rows = authors(out);
-    for row in rows.iter_mut() {
-        let at = match row["actor"].as_str().unwrap() {
-            "agent:a" => 1_000,
-            "human:founder" => 2_000,
-            "agent:b" => 3_000,
-            other => panic!("unexpected author {other}"),
-        };
-        row["at_ms"] = serde_yaml_ng::Value::from(at);
-    }
-    std::fs::write(
-        out.join("authors.yaml"),
-        serde_yaml_ng::to_string(&rows).unwrap(),
-    )
-    .unwrap();
+    // Every author gets the same time, the founder's rows too, so the import orders its author
+    // changes by the file's row order alone: the order the export wrote them in, which is the
+    // order the authors wrote.
+    tie_every_row(out, 1_000_000);
 }
 
 /// Fix round 2 (finding 1): the import reply reports what every author change gives, not only
@@ -973,4 +1072,187 @@ fn cc1_a_write_stores_no_importer() {
         .change(&w.change.parse::<Hash>().unwrap())
         .unwrap();
     assert_eq!(c.links.imported_by, None);
+}
+
+/// plc5 (PL 49): export orders the author rows by the log location of each block's producing
+/// change, then by id within one change, not by id alone.
+#[test]
+fn plc5_authors_export_uses_producing_change_log_order() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    let (r, ids) = opposed_export(a_dir.path(), &out);
+    let rows = authors(&out);
+    let got: Vec<String> = rows
+        .iter()
+        .map(|x| x["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(got, log_order(&r, &rows), "{rows:?}");
+    assert_eq!(
+        got,
+        [&ids[2], &ids[3], &ids[0], &ids[1]].map(String::clone),
+        "agent:z's change, then agent:a's; by id within each"
+    );
+    assert_eq!(actors(&rows), ["agent:z", "agent:z", "agent:a", "agent:a"]);
+}
+
+/// plc5 (PL 49): author groups with the same time import in the file's row order, not by
+/// actor name.
+#[test]
+fn plc5_same_millisecond_import_keeps_source_order() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    opposed_export(a_dir.path(), &out);
+    tie_every_row(&out, 1_000_000);
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", Some("imp-run"), Role::Approver);
+    let res = b.import(&imp, "import", &out).unwrap();
+    assert_eq!(res.changes.len(), 2, "{res:?}");
+    let st = b.read();
+    let want_importer = Some(ActorRun {
+        actor: "human:imp".into(),
+        run: Some("imp-run".into()),
+    });
+    let changes: Vec<Change> = res
+        .changes
+        .iter()
+        .map(|h| st.reader().change(&h.parse::<Hash>().unwrap()).unwrap())
+        .collect();
+    let order: Vec<&str> = changes
+        .iter()
+        .map(|c| c.provenance.actor.as_str())
+        .collect();
+    assert_eq!(order, ["agent:z", "agent:a"], "{:?}", authors(&out));
+    for ((h, c), run) in res.changes.iter().zip(&changes).zip(["rz", "ra"]) {
+        assert_eq!(c.provenance.run.as_deref(), Some(run), "{h}");
+        assert_eq!(c.provenance.role, Role::Writer, "{h}");
+        assert_eq!(c.provenance.at_ms, 1_000_000, "{h}");
+        assert_eq!(c.links.imported_by, want_importer, "{h}");
+        assert_eq!(c.ops.len(), 2, "{h}");
+    }
+}
+
+/// Writes `rows` (id, actor, run, role, at_ms) as `out`'s authors.yaml, in that order.
+fn write_rows(out: &Path, rows: &[(&str, &str, &str, &str, i64)]) {
+    let text: String = rows
+        .iter()
+        .map(|(id, actor, run, role, at)| {
+            format!("- id: {id}\n  actor: {actor}\n  run: {run}\n  role: {role}\n  at_ms: {at}\n")
+        })
+        .collect();
+    std::fs::write(out.join("authors.yaml"), text).unwrap();
+}
+
+/// Imports `out` into a new project: each change's actor, run, role and time, in order.
+fn imported(out: &Path) -> Vec<(String, Option<String>, Role, i64)> {
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", None, Role::Approver);
+    let res = b.import(&imp, "import", out).unwrap();
+    let st = b.read();
+    res.changes
+        .iter()
+        .map(|h| {
+            let c = st.reader().change(&h.parse::<Hash>().unwrap()).unwrap();
+            let p = c.provenance.clone();
+            (p.actor, p.run, p.role, p.at_ms)
+        })
+        .collect()
+}
+
+/// plc5 (PL 49): an author's tie position is its last row at its newest time. Rows A, B, A at
+/// one time import B then A; A's run and role still come from its greatest id. A row of A at an
+/// older time does not move its position, and a newer time wins over file order.
+#[test]
+fn plc5_interleaved_actor_ties_use_the_last_row_at_the_newest_time() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    let (_r, ids) = opposed_export(a_dir.path(), &out);
+    let (a, b) = ("agent:a", "agent:b");
+    let t = 1_000_000;
+    let a_big = (a.to_string(), Some("ra-big".to_string()), Role::Approver, t);
+    let b_one = (b.to_string(), Some("rb".to_string()), Role::Writer, t);
+    // A (its greatest id first), B, A, all at one time; the fourth doc is the importer's
+    write_rows(
+        &out,
+        &[
+            (&ids[3], a, "ra-big", "approver", t),
+            (&ids[0], b, "rb", "writer", t),
+            (&ids[1], a, "ra-small", "writer", t),
+        ],
+    );
+    let got = imported(&out);
+    assert_eq!(got[..2], [b_one.clone(), a_big.clone()], "{got:?}");
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(
+        got[2].0, "human:imp",
+        "the importer's change is last: {got:?}"
+    );
+    // an A row at an older time, after those rows, does not move A's tie position
+    write_rows(
+        &out,
+        &[
+            (&ids[3], a, "ra-big", "approver", t),
+            (&ids[0], b, "rb", "writer", t),
+            (&ids[1], a, "ra-small", "writer", t),
+            (&ids[2], a, "ra-old", "writer", t - 1),
+        ],
+    );
+    let got = imported(&out);
+    assert_eq!(got, [b_one.clone(), a_big.clone()], "{got:?}");
+    // and the only row after B being older leaves A at its first row: A then B
+    write_rows(
+        &out,
+        &[
+            (&ids[3], a, "ra-big", "approver", t),
+            (&ids[0], b, "rb", "writer", t),
+            (&ids[2], a, "ra-old", "writer", t - 1),
+        ],
+    );
+    let got = imported(&out);
+    assert_eq!(got[..2], [a_big.clone(), b_one.clone()], "{got:?}");
+    // a newer time wins over file order
+    write_rows(
+        &out,
+        &[
+            (&ids[3], a, "ra-big", "approver", t),
+            (&ids[0], b, "rb", "writer", t + 1),
+            (&ids[1], a, "ra-small", "writer", t),
+        ],
+    );
+    let got = imported(&out);
+    let b_newer = (b.to_string(), Some("rb".to_string()), Role::Writer, t + 1);
+    assert_eq!(got[..2], [a_big, b_newer], "{got:?}");
+}
+
+/// plc5: the export order comes from the log, so a reindex (which rebuilds the index from the
+/// log) leaves it as it was.
+#[test]
+fn plc5_export_order_survives_reindex() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let first = out.path().join("one");
+    let (mut r, _ids) = opposed_export(a_dir.path(), &first);
+    let order = |rows: &[serde_yaml_ng::Value]| -> Vec<(String, String)> {
+        rows.iter()
+            .map(|x| {
+                (
+                    x["id"].as_str().unwrap().to_string(),
+                    x["actor"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let before = order(&authors(&first));
+    r.reindex().unwrap();
+    let second = out.path().join("two");
+    r.read().export(&Scope::Canon, &second).unwrap();
+    assert_eq!(order(&authors(&second)), before);
+    assert_eq!(
+        std::fs::read(first.join("authors.yaml")).unwrap(),
+        std::fs::read(second.join("authors.yaml")).unwrap()
+    );
 }
