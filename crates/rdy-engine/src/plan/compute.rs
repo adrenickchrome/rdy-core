@@ -352,30 +352,26 @@ impl Closes<'_> {
         })
     }
 
-    /// The close of an item of `kind` on pair `p`, before any answer (tb-2ZED7).
+    /// The close of an item of `kind` on pair `p`, before any answer (tb-2ZED7). A subject the
+    /// version deletes closes first, as updated, whatever the kind: deleting it is the
+    /// version's own change to it, so it needs no answer (D-4JMPH, O4).
     fn close(&self, kind: PlanKind, p: &PlanPair) -> Option<PlanOutcome> {
         let before = self.sides.base.m.get(&p.subject);
-        let after = self.sides.fin.m.get(&p.subject);
+        let Some(after) = self.sides.fin.m.get(&p.subject) else {
+            return Some(PlanOutcome::Updated);
+        };
         match kind {
-            // the subject's content changed, or it is gone
-            PlanKind::Update => match (before, after) {
-                (_, None) | (None, Some(_)) => Some(PlanOutcome::Updated),
-                (Some(a), Some(b)) => {
-                    (self.hash(a) != self.hash(b)).then_some(PlanOutcome::Updated)
-                }
+            // the subject's content changed, or it is new
+            PlanKind::Update => match before {
+                None => Some(PlanOutcome::Updated),
+                Some(a) => (self.hash(a) != self.hash(after)).then_some(PlanOutcome::Updated),
             },
             // no link and no reference to the retired cause is left
-            PlanKind::Rejustify => match after {
-                None => Some(PlanOutcome::Relinked),
-                Some(b) => {
-                    (!edges_of(b).iter().any(|e| e.to == p.cause)).then_some(PlanOutcome::Relinked)
-                }
-            },
+            PlanKind::Rejustify => {
+                (!edges_of(after).iter().any(|e| e.to == p.cause)).then_some(PlanOutcome::Relinked)
+            }
             // a retirement of the subject wins; else its metadata or pin cleared the cause
             PlanKind::Reaffirm => {
-                let Some(after) = after else {
-                    return Some(PlanOutcome::Retired);
-                };
                 let landed = self.landed();
                 if matches!(
                     landed.status(&p.subject),
@@ -395,9 +391,7 @@ impl Closes<'_> {
             // a suspect on the cause that a repin alone cleared: never for a reach or a
             // neighbour, which has no suspect, nor for a rewrite
             PlanKind::Confirm => {
-                let (Some(before), Some(after)) = (before, after) else {
-                    return None;
-                };
+                let before = before?;
                 let repinned = !p.reach
                     && p.prior_suspect
                     && !p.suspect
@@ -456,12 +450,24 @@ pub(crate) fn compute_in(
             .unwrap_or_else(|| deleted_identity(id))
     };
     let mut items: BTreeMap<Hash, PlanCandidate> = BTreeMap::new();
-    for p in st.plan_pairs(base, fin, &touched, &lineage.reach)? {
-        let Some(kind) = kind_of(&p) else { continue };
+    // the decisions whose re-affirm item the version closes as re-affirmed: they re-affirm, for
+    // the code closes as for the document
+    let mut reaffirmed: BTreeSet<BlockId> = BTreeSet::new();
+    // each pair is filtered, deduplicated and admitted as it is judged, so the first one past
+    // the bound stops the walk
+    st.plan_pairs(base, fin, &touched, &lineage.reach, |p| {
+        let Some(kind) = kind_of(&p) else {
+            return Ok(());
+        };
         // a link the version wrote to a block it changed, with no suspect: written against the
-        // final state, it owes nothing (D-NJ2SP)
-        if kind == PlanKind::Confirm && !p.in_base && !p.suspect {
-            continue;
+        // final state, it owes nothing (D-NJ2SP). A reach is no such link: it always needs a
+        // reasoned confirm (p-0HXT0)
+        if kind == PlanKind::Confirm && !p.reach && !p.in_base && !p.suspect {
+            return Ok(());
+        }
+        let close = closes.close(kind, &p);
+        if kind == PlanKind::Reaffirm && close == Some(PlanOutcome::Reaffirmed) {
+            reaffirmed.insert(p.subject.clone());
         }
         let subject = p.subject.to_string();
         admit(
@@ -469,7 +475,7 @@ pub(crate) fn compute_in(
             PlanCandidate {
                 id: item_hash(&p.cause, &subject, kind),
                 kind,
-                close: closes.close(kind, &p),
+                close,
                 subject_hash: Some(hash_or_deleted(&p.subject)),
                 cause_hash: hash_or_deleted(&p.cause),
                 subject,
@@ -477,12 +483,21 @@ pub(crate) fn compute_in(
                 edge: p.edge,
             },
             limit,
-        )?;
-    }
+        )
+    })?;
     let (code_files, code_unavailable) = match code {
         None => (0, true),
         Some(code) => (
-            code_items(sides, &t, &touched, &lineage, code, &mut items, limit)?,
+            code_items(
+                sides,
+                &t,
+                &touched,
+                &lineage,
+                &reaffirmed,
+                code,
+                &mut items,
+                limit,
+            )?,
             false,
         ),
     };
@@ -498,12 +513,16 @@ pub(crate) fn compute_in(
 /// whose content (place left out) the version changes or that it deletes, and each decision it
 /// supersedes (whole or in part) or revokes. An item closes on a commit after the first HEAD
 /// that touched the file and cites the cause, or a decision the version creates, refines,
-/// supersedes or revokes with, or re-affirms.
+/// supersedes or revokes with, or re-affirms. A decision re-affirms when its `reaffirmed`
+/// metadata changes, or when the version closes one of its re-affirm items as re-affirmed
+/// (`reaffirmed`: a repeated re-affirmation moves only the pin).
+#[allow(clippy::too_many_arguments)]
 fn code_items(
     sides: &Sides,
     t: &Tracking,
     touched: &BTreeSet<BlockId>,
     lineage: &Lineage,
+    reaffirmed: &BTreeSet<BlockId>,
     code: &[CodeSide],
     items: &mut BTreeMap<Hash, PlanCandidate>,
     limit: usize,
@@ -529,7 +548,7 @@ fn code_items(
     let created = sides.written.iter().filter(|id| {
         base.m.get(id).is_none() && fin.m.get(id).is_some_and(|b| b.block_type == DECISION)
     });
-    let reaffirmed = sides
+    let acknowledged = sides
         .written
         .iter()
         .filter(|id| match (base.m.get(id), fin.m.get(id)) {
@@ -542,7 +561,8 @@ fn code_items(
         .cloned()
         .chain(lineage.refined.iter().cloned())
         .chain(lineage.deciders.iter().cloned())
-        .chain(reaffirmed.cloned())
+        .chain(acknowledged.cloned())
+        .chain(reaffirmed.iter().cloned())
         .collect();
     let cause_hash = |id: &BlockId| {
         fin.m
@@ -982,10 +1002,11 @@ mod tests {
             close_of(&done, D1, R, PlanKind::Rejustify),
             Some(PlanOutcome::Relinked)
         );
+        // a deleted subject closes first, as updated (task-6 R1; D-4JMPH, O4)
         let gone = plan(&st, &base, &[d1.clone(), d2.clone()]);
         assert_eq!(
             close_of(&gone, D1, R, PlanKind::Rejustify),
-            Some(PlanOutcome::Relinked)
+            Some(PlanOutcome::Updated)
         );
         // still citing it in the text keeps it open
         let cited = link(
@@ -1695,6 +1716,213 @@ mod tests {
         assert_eq!(
             REAFFIRM_FIX,
             "if it still holds, re-affirm it with a reaffirm op; otherwise supersede it"
+        );
+    }
+
+    /// An existing refiner that also depends on its target keeps that dependency: only the
+    /// version's own lineage links are the change. Accepted S refines and depends on D1; the
+    /// version supersedes D1 with D2, so S owes a re-affirmation on D1.
+    #[test]
+    fn cp6_an_existing_refiner_keeps_its_own_dependency() {
+        let (_d, r) = project();
+        let st = r.read();
+        let d1 = decision(D1, "Keep 30 days", "accepted");
+        let s = pin(
+            link(
+                link(
+                    decision(S, "Keep 30 days for teams", "accepted"),
+                    "refines",
+                    D1,
+                    None,
+                ),
+                "depends_on",
+                D1,
+                None,
+            ),
+            &d1,
+        );
+        let d2 = link(
+            decision(D2, "Keep 60 days", "proposed"),
+            "supersedes",
+            D1,
+            None,
+        );
+        let p = plan(&st, &[d1.clone(), s.clone()], &[d1, s, d2]);
+        assert_eq!(
+            doc_items(&p),
+            vec![(D1.to_string(), S.to_string(), PlanKind::Reaffirm, None)]
+        );
+        assert_eq!(find(&p, D1, S, PlanKind::Reaffirm).edge, "depends_on");
+    }
+
+    /// p-0HXT0: a reach on a link the version itself writes still needs a reasoned confirm.
+    /// G is ungoverned; the version links it to D1 and refines D1 with D3.
+    #[test]
+    fn cp6_a_reach_on_new_governance_still_needs_a_confirm() {
+        let (_d, r) = project();
+        let st = r.read();
+        let d1 = decision(D1, "Keep A", "accepted");
+        let g = claim(G, "G follows the rule.");
+        let governed = pin(link(g.clone(), "decided_by", D1, None), &d1);
+        let d3 = link(
+            decision(D3, "Keep A, in short", "proposed"),
+            "refines",
+            D1,
+            None,
+        );
+        let p = plan(&st, &[d1.clone(), g], &[d1, governed, d3]);
+        assert_eq!(
+            doc_items(&p),
+            vec![(D1.to_string(), G.to_string(), PlanKind::Confirm, None)]
+        );
+        assert_eq!(find(&p, D1, G, PlanKind::Confirm).edge, "refines");
+    }
+
+    /// A repeated re-affirmation (the same reason and `against`, only the pin moves) is a
+    /// re-affirmation for code closes too, as it is for the document item.
+    #[test]
+    fn cp6_a_repeated_reaffirmation_closes_its_code_item() {
+        let (_d, r) = project();
+        let st = r.read();
+        let a = claim(A, "A holds.");
+        let a2 = claim(A, "A holds firmly.");
+        let s = link(decision(S, "Build on A", "accepted"), "depends_on", A, None);
+        let before = reaffirmed(pin(s.clone(), &a), A, Against::Retiring(vec![]));
+        let after = reaffirmed(pin(s, &a2), A, Against::Retiring(vec![]));
+        assert_eq!(
+            before.fields.get(engine_fields::REAFFIRMED),
+            after.fields.get(engine_fields::REAFFIRMED)
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_init(dir);
+        let first = commit(dir, "f.rs", "start\n\nImplements: c-AAAAA");
+        let later = commit(dir, "f.rs", "follow S\n\nImplements: D-SSSSS");
+        let sides = sides(&st, &[a, before], &[a2, after]);
+        let p = compute_in(
+            &st,
+            &sides,
+            Some(&[code_side(dir, &later, Some(&first))]),
+            MAX_PLAN_ITEMS,
+        )
+        .unwrap();
+        assert_eq!(
+            close_of(&p, A, S, PlanKind::Reaffirm),
+            Some(PlanOutcome::Reaffirmed)
+        );
+        assert_eq!(
+            close_of(&p, A, "app:f.rs", PlanKind::UpdateImplementation),
+            Some(PlanOutcome::Committed)
+        );
+    }
+
+    /// The bound stops the plan at the first candidate past it: no later pair is judged.
+    #[test]
+    fn cp6_the_limit_stops_at_the_first_excess_candidate() {
+        use crate::consequence::PLAN_PAIRS_JUDGED;
+        let (_d, r) = project();
+        let st = r.read();
+        let a = claim(A, "A holds.");
+        let deps = [
+            pin(claim(B, "B builds on {{c-AAAAA}}."), &a),
+            pin(claim(C, "C builds on {{c-AAAAA}}."), &a),
+            pin(claim(P, "P builds on {{c-AAAAA}}."), &a),
+        ];
+        let mut base = vec![a];
+        base.extend(deps.iter().cloned());
+        let mut fin = vec![claim(A, "A holds now.")];
+        fin.extend(deps.iter().cloned());
+        let sides = sides(&st, &base, &fin);
+        let judged = |limit: usize| {
+            PLAN_PAIRS_JUDGED.with(|c| c.set(0));
+            let out = compute_in(&st, &sides, None, limit);
+            (out, PLAN_PAIRS_JUDGED.with(|c| c.get()))
+        };
+        let (all, n) = judged(3);
+        assert_eq!(all.unwrap().items.len(), 3);
+        assert_eq!(n, 3);
+        let (refused, n) = judged(1);
+        assert_eq!(
+            refused.unwrap_err().message,
+            "change plan exceeds 1 plan items"
+        );
+        assert_eq!(n, 2, "the plan stops at the second candidate");
+    }
+
+    /// task-6 R1 (D-4JMPH, O4): a deleted subject closes first, as updated, whatever its kind:
+    /// a confirm, a reach and a neighbour too. The item stays, with the deleted identity.
+    #[test]
+    fn cp6_a_deleted_subject_closes_as_updated() {
+        // the review's case through the public write path: b references a without its
+        // literals; the version changes a and deletes b
+        let (_d, mut r) = project();
+        let (a, b, _c, _s) = landed_spec(&mut r);
+        let mut changes = vec![update(&mut r, "w", &a, "A holds now.")];
+        changes.push(change(&put(
+            &mut r,
+            "w",
+            json!([{"op": "delete", "id": b.to_string()}]),
+        )));
+        let st = r.read();
+        let p = compute(&st, "w", &changes, st.canon_head(), &[], &[]).unwrap();
+        assert_eq!(
+            rows(&p),
+            vec![(
+                a.to_string(),
+                b.to_string(),
+                PlanKind::Confirm,
+                Some(PlanOutcome::Updated)
+            )]
+        );
+        assert_eq!(p.items[0].subject_hash, Some(deleted_identity(&b)));
+
+        // a reach and a neighbour with a deleted subject
+        let (_d, r) = project();
+        let st = r.read();
+        let d1 = decision(D1, "Keep A", "accepted");
+        let a = claim(A, "A holds.");
+        let g = pin(
+            link(claim(G, "G follows the rule."), "decided_by", D1, None),
+            &d1,
+        );
+        let n = pin(link(claim(N, "N notes it."), "describes", A, None), &a);
+        let d3 = link(
+            decision(D3, "Keep A, in short", "proposed"),
+            "refines",
+            D1,
+            None,
+        );
+        let base = [d1.clone(), a, g, n];
+        let p = plan(&st, &base, &[d1.clone(), claim(A, "A holds now."), d3]);
+        let mut want = vec![
+            (
+                D1.to_string(),
+                G.to_string(),
+                PlanKind::Confirm,
+                Some(PlanOutcome::Updated),
+            ),
+            (
+                A.to_string(),
+                N.to_string(),
+                PlanKind::Confirm,
+                Some(PlanOutcome::Updated),
+            ),
+        ];
+        want.sort_by_key(|(c, s, k, _)| item_hash(&id(c), s, *k));
+        assert_eq!(doc_items(&p), want);
+        assert_eq!(find(&p, D1, G, PlanKind::Confirm).edge, "refines");
+        assert_eq!(find(&p, A, N, PlanKind::Confirm).edge, "describes");
+
+        // a re-affirm subject deleted closes as updated too, not retired
+        let a = claim(A, "A holds.");
+        let s = pin(
+            link(decision(S, "Build on A", "accepted"), "depends_on", A, None),
+            &a,
+        );
+        let p = plan(&st, &[a, s], &[claim(A, "A holds now.")]);
+        assert_eq!(
+            close_of(&p, A, S, PlanKind::Reaffirm),
+            Some(PlanOutcome::Updated)
         );
     }
 }

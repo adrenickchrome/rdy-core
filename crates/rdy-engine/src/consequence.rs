@@ -21,7 +21,7 @@ use rdy_graph::{
 };
 use rdy_model::Tracking;
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::{Block, BlockId, Hash, Op};
+use rdy_model::{Block, BlockId, Hash, Link, Op};
 use rdy_store::StoreError;
 use serde::Serialize;
 use std::cell::{OnceCell, RefCell};
@@ -832,6 +832,20 @@ fn visit_pairs<'e>(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test counter: the subject/cause pairs `plan_pairs` has judged on this thread, so a test
+    /// can see where a plan stops.
+    pub(crate) static PLAN_PAIRS_JUDGED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Counts one judged plan pair (tests only).
+fn count_plan_pair() {
+    #[cfg(test)]
+    PLAN_PAIRS_JUDGED.with(|c| c.set(c.get() + 1));
+}
+
 /// One state a change plan reads (D-4JMPH): its blocks, its graph and its names.
 pub(crate) struct NetState {
     pub(crate) m: Arc<Materialized>,
@@ -888,16 +902,21 @@ impl ReadState {
     /// read through the edges of both states, the version's own written blocks included, by
     /// `Compare::judge` with the baseline as the one ordinary baseline. A subject is judged as
     /// its baseline version under the baseline's statuses (work the version did), or, when it is
-    /// new, as its final version. No pair for a dead decision subject, a subject that retires or
-    /// refines its cause itself, or a block and itself. Then each reached target's governed
-    /// blocks, judged as the reach entries are. In visit order; nothing is cut.
+    /// new, as its final version. No pair for a dead decision subject or a block and itself. A
+    /// `supersedes`, `revokes` or `refines` link the version writes or removes is the change, not
+    /// a dependency, so it gives no pair; the subject's other edges, and a lineage link it
+    /// already held, still do. Then each reached target's governed blocks, judged as the reach
+    /// entries are. Each pair goes to `visit` in visit order as it is judged, and the first
+    /// error `visit` returns stops the walk: nothing is cut, and nothing is judged past a
+    /// refusal.
     pub(crate) fn plan_pairs(
         &self,
         base: &NetState,
         fin: &NetState,
         touched: &BTreeSet<BlockId>,
         reach: &[(BlockId, BlockId, &'static str)],
-    ) -> Result<Vec<PlanPair>, RdyError> {
+        mut visit: impl FnMut(PlanPair) -> Result<(), RdyError>,
+    ) -> Result<(), RdyError> {
         let mut changed = touched.clone();
         for id in touched {
             for b in [base.m.get(id), fin.m.get(id)].into_iter().flatten() {
@@ -930,18 +949,24 @@ impl ReadState {
                 .any(|v| v.target == *x && !self.is_presentational_source(&fin.m, v))
         };
         let prior = |s: &BlockId, x: &BlockId| prior_suspect(base.m.get(s), fin.m.get(x), x, &t);
-        // a decision's own lineage link to its target is the change, never a dependency
-        let retires = |s: &BlockId, x: &BlockId| {
-            [base.m.get(s), fin.m.get(s)]
-                .into_iter()
-                .flatten()
-                .any(|b| {
-                    b.block_type == DECISION
-                        && [SUPERSEDES, REVOKES, REFINES]
-                            .iter()
-                            .flat_map(|n| b.links.get(*n).into_iter().flatten())
-                            .any(|l| l.target == *x)
-                })
+        // a lineage link the version itself writes or removes is the change, never a
+        // dependency; a lineage link the subject already held, and every other edge, stay
+        let own_lineage = |e: &Edge| {
+            let EdgeKind::Link(n) = &e.kind else {
+                return false;
+            };
+            if ![SUPERSEDES, REVOKES, REFINES].contains(&n.as_str()) {
+                return false;
+            }
+            fn links<'b>(b: Option<&'b Block>, name: &str, to: &BlockId) -> Vec<&'b Link> {
+                b.filter(|b| b.block_type == DECISION)
+                    .and_then(|b| b.links.get(name))
+                    .into_iter()
+                    .flatten()
+                    .filter(|l| l.target == *to)
+                    .collect()
+            }
+            links(base.m.get(&e.from), n, &e.to) != links(fin.m.get(&e.from), n, &e.to)
         };
         // the version's own work is classified as it stood before (the baseline subject under
         // the baseline's statuses); a new subject as it stands after
@@ -951,20 +976,27 @@ impl ReadState {
                 None => fin.m.get(s).map(|b| (&*fin.g, b)),
             }
         };
-        let mut out = vec![];
         visit_pairs(
             &changed,
-            |x| base.g.incoming(x).iter().chain(fin.g.incoming(x)).collect(),
+            |x| {
+                base.g
+                    .incoming(x)
+                    .iter()
+                    .chain(fin.g.incoming(x))
+                    .filter(|e| !own_lineage(e))
+                    .collect()
+            },
             |s| base.m.get(s).is_some() || fin.m.get(s).is_some(),
             |s, x| suspect(s, x) || prior(s, x),
             |p| {
-                if p.from == p.changed || retires(&p.from, &p.changed) {
+                if p.from == p.changed {
                     return Ok(());
                 }
                 let Some((g, src)) = judged_as(&p.from) else {
                     return Ok(());
                 };
                 let lineage = cmp.lineage_of(&p.changed);
+                count_plan_pair();
                 let Some(j) = cmp.judge(g, &p.from, src, &p.changed, lineage)? else {
                     return Ok(());
                 };
@@ -973,7 +1005,7 @@ impl ReadState {
                     .outgoing(&p.from)
                     .iter()
                     .any(|e| e.to == p.changed && e.kind != EdgeKind::Contains);
-                out.push(PlanPair {
+                visit(PlanPair {
                     suspect: suspect(&p.from, &p.changed),
                     prior_suspect: prior(&p.from, &p.changed),
                     subject: p.from,
@@ -983,8 +1015,7 @@ impl ReadState {
                     retired: matches!(lineage, Lineage::Retired(_)),
                     reach: false,
                     in_base,
-                });
-                Ok(())
+                })
             },
         )?;
         for (decision, target, via) in reach {
@@ -1008,10 +1039,11 @@ impl ReadState {
                 let Some((g, src)) = judged_as(&block) else {
                     continue;
                 };
+                count_plan_pair();
                 let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial)? else {
                     continue;
                 };
-                out.push(PlanPair {
+                visit(PlanPair {
                     suspect: suspect(&block, target),
                     prior_suspect: false,
                     in_base: before.contains(&block),
@@ -1021,10 +1053,10 @@ impl ReadState {
                     follow: j.follow,
                     retired: false,
                     reach: true,
-                });
+                })?;
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// The consequences of `change` in this state (the one the write published): for each block
