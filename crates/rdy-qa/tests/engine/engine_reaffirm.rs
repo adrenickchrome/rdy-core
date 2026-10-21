@@ -715,11 +715,22 @@ fn cp5_reaffirm_refusals_have_exact_text() {
         "{e}"
     );
 
-    // the selection bound: 5001 decisions suspect on one superseded decision
-    let blocks: Vec<Block> = (0..5001)
-        .map(|i| {
+    // the selection bound: 5001 decisions suspect on one superseded decision (distinct new ids:
+    // 5001 random ones would often collide)
+    let held = r.read().materialized(&w()).unwrap();
+    let mut fresh = std::collections::BTreeSet::new();
+    while fresh.len() < 5001 {
+        let d = BlockId::new("D");
+        if held.get(&d).is_none() {
+            fresh.insert(d);
+        }
+    }
+    let blocks: Vec<Block> = fresh
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
             let mut b = raw(
-                &BlockId::new("D").to_string(),
+                d.as_str(),
                 "decision",
                 Some(&f.s),
                 &format!("z{i:05}a"),
