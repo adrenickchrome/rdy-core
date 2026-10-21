@@ -106,6 +106,7 @@ fn plc4_names_have_cli_mcp_parity() {
             let r = from_cli(&v);
             assert_refused(&r, bad, &format!("cli new {kind}"));
             assert_eq!(v["fix"], json!(format!("use a name like {:?}", r.fixed)));
+            assert_eq!(log_of(&s), before, "cli new {kind} {bad}: no write");
             seen.push(r);
         }
         let ops = [
@@ -126,6 +127,7 @@ fn plc4_names_have_cli_mcp_parity() {
                 v["corrected"],
                 json!({"op": 0, "fields": {"name": r.fixed}})
             );
+            assert_eq!(log_of(&s), before, "{bad}: rdy_write create left no write");
         }
     }
     // a rename onto each name, from valid docs and folders
