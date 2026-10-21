@@ -2,7 +2,9 @@
 //! source holds more physical copies of a removed version than one carried record names. A load
 //! of its chain stopped before the removal is refused before any target exists, with the same
 //! error on the CLI and through rdy_load, and with a fix that works: the whole chain, with no
-//! stop, loads and passes fsck. rdy_schema has one row for the code, naming both of its fixes.
+//! stop, loads and passes fsck. rdy_schema has one row for the code, naming the fixes of its three
+//! cases: a redaction, a stopped load and a holder load. The holder load case has no remedy but
+//! to keep the chain and the holder; the adapter tests pin it.
 use rdy_engine::Rdy;
 use rdy_engine::redaction::RedactInput;
 use rdy_mcp::tools::ERROR_ROWS;
@@ -16,7 +18,7 @@ use std::path::{Path, PathBuf};
 const SECRET: &str = "The launch code is ZEBRA-7731.";
 /// One more physical copy than a carried record may name.
 const COPIES: usize = 100_001;
-const LIMIT_ROW_FIX: &str = "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop.";
+const LIMIT_ROW_FIX: &str = "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop. For a holder load, keep the dump chain and the holder it came from; this rdy cannot load it.";
 
 /// A served project with `COPIES` extra physical copies of the secret's block frame, and its
 /// chain: the full dump `full` before the removal of every copy, and the increment `inc` after
@@ -212,6 +214,19 @@ fn plc1_stopped_load_limit_has_cli_mcp_parity() {
 
 #[test]
 fn plc1_schema_has_one_limit_row_with_both_fixes() {
+    // the runtime fixes of the first two cases keep their texts
+    assert_eq!(
+        rdy_engine::REDACTION_LIMIT_FIX,
+        "Select fewer targets, then run the dry run again."
+    );
+    assert_eq!(
+        rdy_engine::STOPPED_LOAD_REDACTION_LIMIT_FIX,
+        "Stop at another place, or load the whole chain with no stop."
+    );
+    assert_eq!(
+        rdy_engine::HOLDER_LOAD_REDACTION_LIMIT_FIX,
+        "Keep the dump chain and the holder it came from. This rdy cannot load this chain."
+    );
     let s = Served::new();
     let mut m = agent(&s);
     let schema = m.call("rdy_schema", json!({})).ok();

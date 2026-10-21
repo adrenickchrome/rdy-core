@@ -6,6 +6,7 @@ use rdy_adapter::{CarriedWarning, RepoId, StoreHandle};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, Session, SessionKind, WriteRequest, stream_export, stream_take};
 use rdy_model::{Hash, Role};
+use rdy_store::redaction_import::{ReceiverCaps, set_receiver_caps_for_tests};
 use rdy_store::segment::Location;
 use rdy_store::take_batch::UploadTarget;
 use serde_json::{Value, json};
@@ -107,51 +108,42 @@ fn both(dir: &Path, name: &str, files: &[PathBuf], stop: Option<&str>) -> (LoadS
     (got, adapter_dir)
 }
 
-#[test]
-fn hc7_adapter_load_chain_matches_engine_without_a_live_store() {
-    let _clock = rdy_engine::pin_clock(1_000_000);
-    let d = tempfile::tempdir().unwrap();
+/// A project chain whose increment removes the secret, and a holder chain that took the project
+/// before and after the removal. Each chain is a full dump and an increment; `*_stop` is the end
+/// of the full dump.
+struct Chains {
+    project: Vec<PathBuf>,
+    project_stop: Location,
+    holder: Vec<PathBuf>,
+    holder_stop: Location,
+}
 
+fn chains(d: &Path) -> Chains {
     // a project chain whose increment removes the secret
-    let root = d.path().join("p");
+    let root = d.join("p");
     let mut r = Rdy::init(&root, "rdy-standard").unwrap();
     let secret = add(&mut r, 0, SECRET);
     land(&mut r);
     let (v1, v1_landing) = tag(&mut r, "v1.0.0");
     // the holder's first upload, made before the removal (a later export carries it)
     let mut exports = vec![(export(&r, v1), v1_landing)];
-    let f0 = d.path().join("f0.rdydump");
+    let f0 = d.join("f0.rdydump");
     let s0 = r.read().dump(&f0).unwrap();
     remove(&mut r, &secret);
     let (v2, v2_landing) = tag(&mut r, "v2.0.0");
-    let i1 = d.path().join("i1.rdydump");
+    let i1 = d.join("i1.rdydump");
     r.read().dump_after(&s0.chain_end(), &i1).unwrap();
     let repo: RepoId = r.store().repo_id().unwrap().unwrap();
     exports.push((export(&r, v2), v2_landing));
     r.close().unwrap();
-    let files = vec![f0, i1];
-
-    let (whole, _) = both(d.path(), "whole", &files, None);
-    assert!(whole.warnings.is_empty() && whole.stopped_at.is_none());
-    assert_eq!(whole.chain.len(), 2);
-    let stop = format!("pos:{}.{}", s0.end.segment, s0.end.offset);
-    let (stopped, at) = both(d.path(), "stopped", &files, Some(&stop));
-    let position: Location = stopped.stopped_at.as_ref().unwrap().position;
-    assert_eq!(position, s0.end);
-    assert_eq!(stopped.warnings.len(), 1);
-    // the host reads the same warning from the loaded store
-    let h = StoreHandle::open(&at).unwrap();
-    let read: Vec<CarriedWarning> = h.redaction_warnings().unwrap();
-    assert_eq!(read, stopped.warnings);
-    h.close().unwrap();
 
     // a holder chain: the take before the removal in its full dump, the removal's in its
     // increment
-    let hdir = d.path().join("holder");
+    let hdir = d.join("holder");
     let mut holder = Rdy::create_holder(&hdir, repo).unwrap();
     let take = |h: &mut Rdy, i: usize, name: &str| {
         let (bytes, landing) = &exports[i];
-        let p = d.path().join(format!("{name}.rdysync"));
+        let p = d.join(format!("{name}.rdysync"));
         std::fs::write(&p, bytes).unwrap();
         stream_take::take(
             h,
@@ -164,17 +156,48 @@ fn hc7_adapter_load_chain_matches_engine_without_a_live_store() {
         .unwrap();
     };
     take(&mut holder, 0, "v1.0.0");
-    let h0 = d.path().join("h0.rdydump");
+    let h0 = d.join("h0.rdydump");
     let hs0 = holder.read().dump(&h0).unwrap();
     take(&mut holder, 1, "v2.0.0");
-    let h1 = d.path().join("h1.rdydump");
+    let h1 = d.join("h1.rdydump");
     holder.read().dump_after(&hs0.chain_end(), &h1).unwrap();
     holder.close().unwrap();
-    let files = vec![h0, h1];
+    Chains {
+        project: vec![f0, i1],
+        project_stop: s0.end,
+        holder: vec![h0, h1],
+        holder_stop: hs0.end,
+    }
+}
+
+#[test]
+fn hc7_adapter_load_chain_matches_engine_without_a_live_store() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let d = tempfile::tempdir().unwrap();
+    let c = chains(d.path());
+
+    let files = c.project;
+    let (whole, _) = both(d.path(), "whole", &files, None);
+    assert!(whole.warnings.is_empty() && whole.stopped_at.is_none());
+    assert_eq!(whole.chain.len(), 2);
+    let s0_end = c.project_stop;
+    let stop = format!("pos:{}.{}", s0_end.segment, s0_end.offset);
+    let (stopped, at) = both(d.path(), "stopped", &files, Some(&stop));
+    let position: Location = stopped.stopped_at.as_ref().unwrap().position;
+    assert_eq!(position, s0_end);
+    assert_eq!(stopped.warnings.len(), 1);
+    // the host reads the same warning from the loaded store
+    let h = StoreHandle::open(&at).unwrap();
+    let read: Vec<CarriedWarning> = h.redaction_warnings().unwrap();
+    assert_eq!(read, stopped.warnings);
+    h.close().unwrap();
+
+    let files = c.holder;
     let (whole, _) = both(d.path(), "holder-whole", &files, None);
     assert!(whole.warnings.is_empty());
     assert_eq!(whole.next, "read the holder through the adapter at a tag");
-    let stop = format!("pos:{}.{}", hs0.end.segment, hs0.end.offset);
+    let hs0_end = c.holder_stop;
+    let stop = format!("pos:{}.{}", hs0_end.segment, hs0_end.offset);
     let (stopped, at) = both(d.path(), "holder-stopped", &files, Some(&stop));
     assert_eq!(stopped.warnings.len(), 1);
     assert_eq!(
@@ -184,4 +207,76 @@ fn hc7_adapter_load_chain_matches_engine_without_a_live_store() {
     let h = StoreHandle::open_holder(&at).unwrap();
     assert_eq!(h.redaction_warnings().unwrap(), stopped.warnings);
     h.close().unwrap();
+}
+
+/// Lowers one field of the receiver's scan caps on this thread and restores the caps it found
+/// when it drops, also on unwind.
+struct LoweredCap(ReceiverCaps);
+
+impl LoweredCap {
+    fn new(lower: impl FnOnce(&mut ReceiverCaps)) -> LoweredCap {
+        let kept = ReceiverCaps::current();
+        let mut caps = kept;
+        lower(&mut caps);
+        set_receiver_caps_for_tests(Some(caps));
+        LoweredCap(kept)
+    }
+}
+
+impl Drop for LoweredCap {
+    fn drop(&mut self) {
+        set_receiver_caps_for_tests(Some(self.0));
+    }
+}
+
+#[test]
+fn plb5_whole_holder_limit_matches_engine_before_target_writes() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let d = tempfile::tempdir().unwrap();
+    // every fixture is built before a cap is lowered
+    let files = chains(d.path()).holder;
+    let inputs: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+    let fix = "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
+    let cases: [(&str, fn(&mut ReceiverCaps), &str); 3] = [
+        (
+            "spans",
+            |c| c.spans = 0,
+            "The redaction exceeds 1000000 scanned frames.",
+        ),
+        (
+            "frames",
+            |c| c.frames = 0,
+            "The redaction exceeds 1000000 scanned frames.",
+        ),
+        (
+            "bytes",
+            |c| c.bytes = 0,
+            "The redaction exceeds 2147483648 scanned bytes.",
+        ),
+    ];
+    let kept = ReceiverCaps::current();
+    for (name, lower, message) in cases {
+        let core_dir = d.path().join(format!("{name}-core"));
+        let adapter_dir = d.path().join(format!("{name}-adapter"));
+        {
+            let _caps = LoweredCap::new(lower);
+            let core = rdy_engine::load::load_chain(&files, &core_dir, None).unwrap_err();
+            let got = maintenance::load_chain(&files, &adapter_dir, None).unwrap_err();
+            for e in [core, got] {
+                assert_eq!(
+                    (e.code, e.message.as_str(), e.fix.as_str()),
+                    ("E_REDACTION_LIMIT", message, fix),
+                    "{name}"
+                );
+            }
+        }
+        assert_eq!(ReceiverCaps::current(), kept, "{name}: caps restored");
+        assert!(!core_dir.exists() && !adapter_dir.exists(), "{name}");
+        for (f, before) in files.iter().zip(&inputs) {
+            assert_eq!(&std::fs::read(f).unwrap(), before, "{name}: input changed");
+        }
+    }
+    // the same fixture loads once the caps are back: it was valid
+    let (whole, _) = both(d.path(), "restored", &files, None);
+    assert_eq!(whole.chain.len(), 2);
 }
