@@ -307,8 +307,8 @@ impl ProfileSites {
     }
 
     /// A publish wake: checks every registered key against one captured canon state, with or
-    /// without open pages. A key canon stopped holding clears its target's cache and its open
-    /// pages' streams; a key that became missing is logged once. Nothing is built.
+    /// without open pages. A key canon does not hold has its target's cache and its open pages'
+    /// streams cleared; a key that became missing is logged once. Nothing is built.
     pub(crate) fn inspect(&self, sh: &Shared) {
         let (keys, root) = {
             let reg = lock(&self.inner);
@@ -334,7 +334,11 @@ impl ProfileSites {
                 e.checked = Some((Arc::downgrade(&st), a));
                 std::mem::replace(&mut e.seen, a)
             };
-            if before == Availability::Held && a != Availability::Held {
+            // cleared on every wake that finds it not held, not only on the change: a stream
+            // or build of a state the last wake never inspected (a restore and a removal
+            // between two wakes) goes too; clearing a target the site keeps nothing of is a
+            // no-op
+            if a != Availability::Held {
                 cleared.push(key.clone());
             }
             if a == Availability::Missing && before != Availability::Missing {

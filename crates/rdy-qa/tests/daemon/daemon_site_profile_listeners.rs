@@ -6,14 +6,15 @@
 //! foreground entry point validates its profile before any HTTP port opens, and every failure
 //! stops the daemon it created.
 use rdy_daemon::site::addr::profile_candidates;
+use rdy_daemon::site::guard::SiteTarget;
 use rdy_daemon::site::guard::{Refusal, refusal};
-use rdy_daemon::site::live::MAX_STREAMS;
+use rdy_daemon::site::live::{LiveEvent, MAX_STREAMS, NoStream};
 use rdy_daemon::site::profiles::{TestEvent, set_test_hooks};
 use rdy_daemon::site::server::{LAN_BIND_FIX, MAX_CONNECTIONS, NO_LAN_ADDRESS_FIX};
 use rdy_daemon::site::{LanOverride, SiteInfo, ensure_profile_site};
 use rdy_daemon::{
-    ExitReason, Hello, PROTO_VERSION, ProfileSiteReady, Proto, RunDir, ServeError, ServeOptions,
-    Shared, request_stop, serve_with_profile,
+    Attempt, ExitReason, Hello, PROTO_VERSION, ProfileSiteReady, Proto, RunDir, ServeError,
+    ServeOptions, Shared, connect, request_stop, serve_with_profile,
 };
 use rdy_engine::engine::{SITE_LAN_FIX, write_typed};
 use rdy_engine::publication::profile_at;
@@ -278,6 +279,17 @@ impl Recorder {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Waits for stop or start stage `stage`.
+    fn await_stage(&self, stage: &str) {
+        loop {
+            match self.rx.recv_timeout(T) {
+                Ok(Ev::Stage(s)) if s == stage => return,
+                Ok(_) => {}
+                Err(e) => panic!("no stage {stage:?} ({e:?}): {:?}", self.events()),
+            }
+        }
     }
 
     /// Waits for log line `line`.
@@ -612,6 +624,21 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
         format!("scope=canon&{page_q}"),
         format!("{page_q}{rev_label}"),
         format!("scope=canon&page=../x{rev_label}"),
+        // a malformed page, revision or label is 400 before the bound target is compared: a
+        // valid context of another target does not turn it into the not found
+        "scope=view:work&page=../secret&rev=XYZ&label=0011223344556677".to_string(),
+        format!("scope=view:work&page=../secret{rev_label}"),
+        format!("scope=view:work&{page_q}&rev=XYZ&label=0011223344556677"),
+        format!("scope=view:work&{page_q}&rev=0011223344556677&label=XYZ"),
+        format!("scope=canon&page=a//b{rev_label}&profile=other"),
+        format!("scope=canon&{page_q}&rev=00112233AABBCCDD&label=0011223344556677&profile=other"),
+        format!("scope=canon&page=%2E%2E/x{rev_label}&menu=1"),
+        format!("scope=tag:v1.0.0&page=x%5Cy{rev_label}"),
+        format!("scope=proposal:{prop}&{page_q}&rev=XYZ&label=0011223344556677"),
+        format!("scope=versions&page=../x{rev_label}&profile=guide&menu=1"),
+        format!("scope=versions&page=../x{rev_label}"),
+        format!("scope=view:work&{page_q}"),
+        format!("scope=view:work&page=%ZZ{rev_label}"),
     ] {
         let r = refused_events(only, &query);
         assert_refusal(&r, Refusal::Malformed, &query);
@@ -972,6 +999,147 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
     );
 }
 
+/// Holds every subscribe of a profile-only target after its refresh, before its stream
+/// registers: each one says it arrived on the first channel, then waits for one release on the
+/// second.
+fn hold_profile_subscribes(sh: &Arc<Shared>) -> (Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (arrived, at) = channel();
+    let (go, release) = channel::<()>();
+    let gate = Mutex::new((arrived, release));
+    sh.site
+        .set_after_subscribe_refresh(Some(Box::new(move |t: &SiteTarget| {
+            if !matches!(t, SiteTarget::ProfileOnly { .. }) {
+                return;
+            }
+            let g = gate.lock().unwrap();
+            g.0.send(()).unwrap();
+            g.1.recv_timeout(T)
+                .expect("the test releases the subscribe");
+        })));
+    (at, go)
+}
+
+#[test]
+fn spv7_removal_between_subscribe_refresh_and_registration_opens_no_stream() {
+    let w = world();
+    let sh = shared(&w.h);
+    let rec = Recorder::on(w.h.dir.path());
+    let info = ensure_profile_site(Arc::clone(&sh), "guide").unwrap();
+    let only = port_of(&url_of(&info));
+    let target = SiteTarget::ProfileOnly {
+        key: "guide".to_string(),
+    };
+    let built = sh.site.refresh(&sh, &target).unwrap();
+    let path = "manual/intro.html".to_string();
+    let (rev, label) = (built.live.revs[&path].clone(), built.live.label_rev.clone());
+    let (at, go) = hold_profile_subscribes(&sh);
+
+    // through the site's API: the subscribe's refresh read canon with the profile; the profile
+    // is removed and its removal inspected before the stream registers
+    let opening = {
+        let (sh, target, path) = (Arc::clone(&sh), target.clone(), path.clone());
+        let (rev, label) = (rev.clone(), label.clone());
+        std::thread::spawn(move || {
+            sh.site
+                .subscribe(&sh, &target, &path, &rev, &label)
+                .map(|_| ())
+        })
+    };
+    at.recv_timeout(T)
+        .expect("the subscribe reaches its barrier");
+    remove_profile(&sh, &w.ids["$guide"]);
+    rec.await_log(&removed_line("guide"));
+    go.send(()).unwrap();
+    assert_eq!(
+        opening.join().unwrap(),
+        Err(NoStream::NotFound),
+        "no stream after the removal"
+    );
+    assert_eq!(sh.site.streams(), 0);
+    sh.site.step(&sh);
+    assert_eq!(sh.site.streams(), 0, "after another step");
+
+    // through the listener: the event request passed its availability check before the
+    // removal, and gets the plain not found, with no stream and no hold
+    let fresh = restore_profile(&sh, &w, "guide", "Guide book again");
+    let html = page(only, "manual/intro.html");
+    let q = events_query(&html);
+    let opening = std::thread::spawn(move || refused_events(only, &q));
+    at.recv_timeout(T)
+        .expect("the event request reaches its barrier");
+    remove_profile(&sh, &fresh);
+    rec.await_log(&removed_line("guide"));
+    go.send(()).unwrap();
+    let r = opening.join().expect("no stream opened");
+    assert_refusal(&r, Refusal::NotFound, "events after the removal");
+    assert_eq!(sh.site.streams(), 0);
+    sh.site.step(&sh);
+    assert_eq!(sh.site.streams(), 0, "after another step");
+    sh.site.set_after_subscribe_refresh(None);
+}
+
+#[test]
+fn spv7_a_removal_after_a_restore_both_unseen_by_the_worker_still_clears_the_stream() {
+    let w = world();
+    let sh = shared(&w.h);
+    ensure_profile_site(Arc::clone(&sh), "guide").unwrap();
+    let root = root_of(w.h.dir.path());
+    // the worker is held after it logs the first removal, outside every lock, so the restore
+    // and the second removal below both publish before its next inspection
+    let (arrived, at) = channel();
+    let (go, release) = channel::<()>();
+    let gate = Mutex::new(Some((arrived, release)));
+    let removed = removed_line("guide");
+    set_test_hooks(
+        &root,
+        Some(Box::new(move |e: TestEvent<'_>| {
+            if let TestEvent::Log(l) = e
+                && l == removed
+                && let Some((arrived, release)) = gate.lock().unwrap().take()
+            {
+                arrived.send(()).unwrap();
+                release
+                    .recv_timeout(T)
+                    .expect("the test releases the worker");
+            }
+        })),
+    );
+    remove_profile(&sh, &w.ids["$guide"]);
+    at.recv_timeout(T).expect("the worker inspects the removal");
+
+    // restored: a stream of the profile-only site opens in that state
+    let fresh = restore_profile(&sh, &w, "guide", "Guide book again");
+    let target = SiteTarget::ProfileOnly {
+        key: "guide".to_string(),
+    };
+    let built = sh.site.refresh(&sh, &target).unwrap();
+    let path = "manual/intro.html";
+    let mut sub = sh
+        .site
+        .subscribe(
+            &sh,
+            &target,
+            path,
+            &built.live.revs[path],
+            &built.live.label_rev,
+        )
+        .expect("canon holds the profile again");
+    assert_eq!(sh.site.streams(), 1);
+
+    // removed again before the worker saw the restore: its next inspection still clears it
+    remove_profile(&sh, &fresh);
+    go.send(()).unwrap();
+    sh.site.step(&sh);
+    assert_eq!(sub.rx.try_recv().ok(), Some(LiveEvent::Reload));
+    assert_eq!(
+        sub.rx.try_recv().err(),
+        Some(tokio::sync::mpsc::error::TryRecvError::Disconnected),
+        "the stream closed"
+    );
+    assert_eq!(sh.site.streams(), 0);
+    set_test_hooks(&root, None);
+}
+
 #[test]
 fn spv7_lan_uses_the_profile_port_and_warning() {
     // an injected private address (the stand-in 127.0.0.1)
@@ -1144,6 +1312,17 @@ fn closed(port: u16) {
     );
 }
 
+/// Waits until the registry of `sh` is closed (its slots released), which the stop does right
+/// before it joins the listeners.
+fn stopping_now(sh: &Arc<Shared>) {
+    let mut tries = 0u64;
+    while !sh.profile_sites.keys().is_empty() {
+        tries += 1;
+        assert!(tries < 100_000_000, "the registry never closed");
+        std::thread::yield_now();
+    }
+}
+
 /// The index of `stage` in `stages`.
 fn at(stages: &[String], stage: &str) -> usize {
     stages
@@ -1185,7 +1364,9 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         assert!(sh.profile_sites.keys().is_empty());
         stopping(&ensure_profile_site(Arc::clone(&sh), "guide").unwrap_err());
     }
-    // the join outlasts a listener held at its end: by the join, every listener has ended
+    // the join outlasts a listener held at its end: each listener's task is held after it
+    // ends, and its completion is recorded only once the test releases it; the stop's join is
+    // reported only after both completions
     {
         let mut w = world();
         let sh = shared(&w.h);
@@ -1194,34 +1375,55 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         let root = root_of(w.h.dir.path());
         let order = Arc::new(Mutex::new(Vec::<String>::new()));
         let keep = Arc::clone(&order);
+        let (arrived, at_end) = channel();
+        let (release, held) = channel::<()>();
+        let (arrived, held) = (Mutex::new(arrived), Mutex::new(held));
         set_test_hooks(
             &root,
             Some(Box::new(move |e: TestEvent<'_>| {
                 let TestEvent::Stage(stage) = e else { return };
-                if stage == "profiles-joined" {
-                    let ended = keep
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|s| *s == "profile-listener-ended")
-                        .count();
-                    keep.lock()
-                        .unwrap()
-                        .push(format!("joined after {ended} ended"));
-                }
-                keep.lock().unwrap().push(stage.to_string());
-                if stage == "profile-listener-ended" {
-                    // a hold at the listener's end (a joined stop waits it out; no assertion
-                    // reads its length)
-                    std::thread::sleep(Duration::from_millis(300));
+                match stage {
+                    "profile-listener-ended" => {
+                        keep.lock().unwrap().push("listener held".to_string());
+                        arrived.lock().unwrap().send(()).unwrap();
+                        held.lock()
+                            .unwrap()
+                            .recv_timeout(T)
+                            .expect("the test releases the listener");
+                        // the held work is done: the task completes as the hook returns
+                        keep.lock().unwrap().push("listener done".to_string());
+                    }
+                    "profiles-joined" => {
+                        let mut o = keep.lock().unwrap();
+                        let done = o.iter().filter(|s| *s == "listener done").count();
+                        o.push(format!("joined after {done} done"));
+                        o.push(stage.to_string());
+                    }
+                    _ => keep.lock().unwrap().push(stage.to_string()),
                 }
             })),
         );
-        assert_eq!(w.h.stop(), ExitReason::Stopped);
+        let run = w.h.run.take().unwrap();
+        run.handle().stop();
+        let stopping = std::thread::spawn(move || run.wait());
+        // both listeners have ended and are held; the registry is closed (the step right
+        // before the join): the join has nothing to report while they are held
+        for _ in 0..2 {
+            at_end.recv_timeout(T).expect("a listener ends");
+        }
+        stopping_now(&sh);
+        assert!(
+            !order.lock().unwrap().iter().any(|s| s == "profiles-joined"),
+            "joined while both listeners are held: {:?}",
+            order.lock().unwrap()
+        );
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(stopping.join().unwrap().unwrap(), ExitReason::Stopped);
         set_test_hooks(&root, None);
         let order = order.lock().unwrap().clone();
         assert!(
-            order.contains(&"joined after 2 ended".to_string()),
+            order.contains(&"joined after 2 done".to_string()),
             "{order:?}"
         );
         assert!(
@@ -1392,5 +1594,111 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         assert_eq!(serving.join().unwrap().unwrap(), ExitReason::Stopped);
         closed(port);
         assert!(rx.try_recv().is_err(), "one callback");
+    }
+}
+
+/// What a hello to the daemon of `dir` finds.
+fn hello_attempt(rt: &tokio::runtime::Runtime, dir: &Path) -> Attempt {
+    rt.block_on(connect(&RunDir::of_project(dir), &hello(dir)))
+}
+
+#[test]
+fn spv7_foreground_readiness_waits_for_the_callback() {
+    // a callback error: the warm-up is done, yet a client hears only `starting` while the
+    // callback runs, and never `ready` after it fails
+    {
+        let (dir, _, _) = project(0, None);
+        let rec = Recorder::on(dir.path());
+        let rt = Hosted::rt();
+        let mut waiting = None;
+        let out = serve_with_profile(opts(dir.path()), "guide", |_ready| {
+            rec.await_stage("warmed");
+            match hello_attempt(&rt, dir.path()) {
+                Attempt::Starting(p) => waiting = Some(p),
+                other => panic!("ready before the callback returned: {other:?}"),
+            }
+            Err(RdyError::new(
+                "E_TEST",
+                "the callback failed",
+                "fix the callback",
+            ))
+        });
+        let Err(ServeError::Open(e)) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(e.code, "E_TEST");
+        let pending = waiting.expect("the callback connected");
+        let after = rt.block_on(pending.wait(std::time::Instant::now() + T, &mut |_| {}));
+        assert!(after.is_err(), "no ready after the failed callback");
+        let stages = rec.stages();
+        assert!(!stages.iter().any(|s| s == "ready"), "{stages:?}");
+        assert!(!rec.logs().iter().any(|l| l == "ready"), "{:?}", rec.logs());
+        drop(Rdy::open(dir.path()).expect("the store was released"));
+    }
+    // a build error: no readiness either
+    {
+        let (dir, ids, _) = project(0, None);
+        let mut r = Rdy::open(dir.path()).unwrap();
+        put(
+            &mut r,
+            "badsel",
+            json!([profile_op(
+                "badsel",
+                "Bad book",
+                &ids["$admin"],
+                &[&ids["$ip"]]
+            )]),
+        );
+        land(&mut r, "badsel").unwrap();
+        drop(r);
+        let rec = Recorder::on(dir.path());
+        let out = serve_with_profile(opts(dir.path()), "badsel", |_| {
+            panic!("no callback after a failed build")
+        });
+        assert!(matches!(out, Err(ServeError::Open(_))), "{out:?}");
+        let stages = rec.stages();
+        assert!(!stages.iter().any(|s| s == "ready"), "{stages:?}");
+        drop(Rdy::open(dir.path()).expect("the store was released"));
+    }
+    // success: `starting` while the callback runs, `ready` once it returned
+    {
+        let (dir, _, _) = project(0, None);
+        let rec = Recorder::on(dir.path());
+        let path = dir.path().to_path_buf();
+        let (tx, rx) = channel();
+        let (go, release) = channel::<()>();
+        let serving = std::thread::spawn(move || {
+            serve_with_profile(opts(&path), "guide", move |_ready| {
+                tx.send(()).unwrap();
+                release
+                    .recv_timeout(T)
+                    .expect("the test releases the callback");
+                Ok(())
+            })
+        });
+        rx.recv_timeout(T).expect("the callback ran");
+        rec.await_stage("warmed");
+        let rt = Hosted::rt();
+        let Attempt::Starting(pending) = hello_attempt(&rt, dir.path()) else {
+            panic!("ready while the callback runs")
+        };
+        assert!(
+            !rec.stages().iter().any(|s| s == "ready"),
+            "{:?}",
+            rec.stages()
+        );
+        go.send(()).unwrap();
+        let client = rt
+            .block_on(pending.wait(std::time::Instant::now() + T, &mut |_| {}))
+            .expect("ready once the callback returned");
+        drop(client);
+        rt.block_on(request_stop(
+            &RunDir::of_project(dir.path()),
+            &hello(dir.path()),
+            T,
+        ))
+        .unwrap()
+        .expect("a daemon answered");
+        assert_eq!(serving.join().unwrap().unwrap(), ExitReason::Stopped);
     }
 }

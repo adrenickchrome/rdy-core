@@ -321,7 +321,10 @@ fn ls5_the_streams_are_capped() {
         &b.live.revs["alpha.html"],
         &b.live.label_rev,
     );
-    assert!(matches!(refused, Err(SiteBusy)), "the 33rd is refused");
+    assert!(
+        matches!(refused, Err(NoStream::Busy)),
+        "the 33rd is refused"
+    );
     drop(open.pop());
     assert_eq!(sh.site.streams(), MAX_STREAMS - 1);
     open.push(sub(&sh, &C, "alpha.html", &b));

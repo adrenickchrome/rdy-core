@@ -27,7 +27,7 @@ use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -93,6 +93,10 @@ pub struct ServeRun {
     readiness: Readiness,
     shared: Arc<Shared>,
     thread: JoinHandle<Result<ExitReason, ServeError>>,
+    /// A foreground profile-only start's hold on readiness: `ready` is answered only once the
+    /// warm-up is done and this sends (see [`serve_with_profile`]). Dropped unsent, the daemon
+    /// never answers `ready`.
+    gate: Option<mpsc::Sender<()>>,
 }
 
 impl ServeRun {
@@ -112,7 +116,15 @@ impl ServeRun {
 
     /// Waits for the daemon to exit. The store is closed before this returns.
     pub fn wait(self) -> Result<ExitReason, ServeError> {
-        let ServeRun { shared, thread, .. } = self;
+        let ServeRun {
+            shared,
+            thread,
+            gate,
+            ..
+        } = self;
+        // a start not released by now never is: the warm-up stops waiting, answers no `ready`,
+        // and the runtime's blocking pool can drain
+        drop(gate);
         match thread.join() {
             Ok(out) => out,
             Err(_) => {
@@ -217,14 +229,23 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         root.clone(),
         opts.site_lan_override,
     );
-    // (5)
+    // (5) a foreground profile-only start answers `ready` only once its caller released it
+    let (gate, released) = match profile {
+        Some(_) => {
+            let (tx, rx) = mpsc::channel();
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
     let thread = {
         let shared = Arc::clone(&shared);
         let readiness = readiness.clone();
         let handle = handle.clone();
         std::thread::Builder::new()
             .name("rdy-serve".into())
-            .spawn(move || serve_thread(rt, daemon, shared, readiness, site, handle, root))
+            .spawn(move || {
+                serve_thread(rt, daemon, shared, readiness, site, handle, root, released)
+            })
     };
     let thread = match thread {
         Ok(t) => t,
@@ -243,6 +264,7 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         readiness,
         shared,
         thread,
+        gate,
     })
 }
 
@@ -314,10 +336,15 @@ pub fn serve_with_profile(
         let err = ServeError::Open(e);
         say(&root, &err.to_string());
         run.handle().stop();
+        // the gate goes unsent: no client hears `ready` from this daemon
         if let Err(w) = run.wait() {
             log(&format!("the daemon did not stop cleanly: {w}"));
         }
         return Err(err);
+    }
+    // the start succeeded: `ready` goes out once the warm-up is done too
+    if let Some(gate) = &run.gate {
+        let _ = gate.send(());
     }
     run.wait()
 }
@@ -405,21 +432,33 @@ fn close(shared: &Shared) {
     }
 }
 
-/// Runs the warm-up, then answers ready. A panic in the warm-up is logged and the daemon serves
-/// with a cold cache: readiness is always reached, so no client waits out its start timeout.
-pub(crate) fn warm_then_ready(readiness: &Readiness, warm: impl FnOnce()) {
+/// Runs the warm-up, then answers ready once `released` (called after the warm-up) is true. A
+/// panic in the warm-up is logged and the daemon serves with a cold cache: a released start
+/// always reaches readiness, so no client waits out its start timeout. A foreground
+/// profile-only start waits in `released` for its caller's callback; false leaves the daemon
+/// `starting` (it is stopping) and logs no `ready`. Returns whether ready was answered.
+pub(crate) fn warm_then_ready(
+    readiness: &Readiness,
+    warm: impl FnOnce(),
+    released: impl FnOnce() -> bool,
+) -> bool {
     if let Err(p) = catch_unwind(AssertUnwindSafe(warm)) {
         log(&format!(
             "warm-up panicked ({}); serving with a cold cache",
             panic_text(&*p)
         ));
     }
+    if !released() {
+        return false;
+    }
     readiness.ready();
     log("ready");
+    true
 }
 
 /// The body of the `rdy-serve` thread: warms canon beside the accept loop and serves the site,
 /// then, once the daemon exits, ends the site and closes the store.
+#[allow(clippy::too_many_arguments)]
 fn serve_thread(
     rt: tokio::runtime::Runtime,
     daemon: Daemon,
@@ -428,6 +467,7 @@ fn serve_thread(
     site: Option<SiteServer>,
     handle: DaemonHandle,
     root: PathBuf,
+    released: Option<mpsc::Receiver<()>>,
 ) -> Result<ExitReason, ServeError> {
     // the site accepts until the daemon stops; the runtime's drop below ends what is left of
     // it before the store closes, so a successor finds the port free
@@ -437,18 +477,32 @@ fn serve_thread(
     readiness.progress("building canon");
     log("building canon");
     let warm = Arc::clone(&shared);
+    let warmed = root.clone();
     rt.spawn_blocking(move || {
-        warm_then_ready(&readiness, || {
-            let st = warm.engine().read();
-            for scope in WARM_SCOPES {
-                if let Err(e) = st
-                    .materialized(scope)
-                    .and_then(|_| st.graph(scope).map(drop))
-                {
-                    log(&format!("warm-up failed: {e}"));
+        let ready = warm_then_ready(
+            &readiness,
+            || {
+                let st = warm.engine().read();
+                for scope in WARM_SCOPES {
+                    if let Err(e) = st
+                        .materialized(scope)
+                        .and_then(|_| st.graph(scope).map(drop))
+                    {
+                        log(&format!("warm-up failed: {e}"));
+                    }
                 }
-            }
-        });
+            },
+            || {
+                profiles::report(&warmed, TestEvent::Stage("warmed"));
+                // a foreground profile-only start: its callback's success releases it, and
+                // a failure drops the gate unsent
+                released.is_none_or(|rx| rx.recv().is_ok())
+            },
+        );
+        if !ready {
+            return;
+        }
+        profiles::report(&warmed, TestEvent::Stage("ready"));
         // plan M2e2 (D-Z0EMP): what moved while no daemon ran (the pack, the rdy build) is
         // logged once, after ready, in a batch of cause `reopened`
         warm.writer.reconcile_soon();
@@ -656,7 +710,11 @@ mod tests {
     #[test]
     fn msw9_a_warm_up_that_panics_still_answers_ready() {
         let r = Readiness::new();
-        warm_then_ready(&r, || panic!("warm-up test panic"));
+        assert!(warm_then_ready(
+            &r,
+            || panic!("warm-up test panic"),
+            || true
+        ));
         assert!(r.is_ready());
     }
 }

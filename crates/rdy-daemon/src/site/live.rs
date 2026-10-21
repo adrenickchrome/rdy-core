@@ -39,6 +39,7 @@
 use crate::daemon::log;
 use crate::shared::Shared;
 use crate::site::guard::{ScopeRef, SiteTarget};
+use crate::site::profiles::Availability;
 use crate::writer::panic_text;
 use rdy_engine::publication::ResolvedProfile;
 use rdy_engine::site_scope::{CHANGES_PAGE, SINCE_PAGE, summary_page_taken};
@@ -136,9 +137,35 @@ pub enum LiveEvent {
     Label { text: String, html: String },
 }
 
-/// The site has as many open streams as it keeps ([`MAX_STREAMS`]).
-#[derive(Debug)]
-pub struct SiteBusy;
+/// Why a subscribe opened no stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoStream {
+    /// The site has as many open streams as it keeps ([`MAX_STREAMS`]), or it is closed.
+    Busy,
+    /// A profile-only target whose key canon does not hold in the state published when the
+    /// stream would register (D-DK03K): its listener serves the plain not found.
+    NotFound,
+    /// A profile-only target whose key names a block whose profile metadata does not read.
+    Broken,
+}
+
+/// Why `target` opens no stream in the published state `st`: a profile-only target whose key
+/// canon does not hold (D-DK03K). `None` for every other target, and for a state older than a
+/// removal (a subscribe then compares again; the fresh state's publish wakes the inspection
+/// that clears a key canon no longer holds).
+fn unavailable(sh: &Shared, target: &SiteTarget, st: &Arc<ReadState>) -> Option<NoStream> {
+    let SiteTarget::ProfileOnly { key } = target else {
+        return None;
+    };
+    if st.ensure_current_epoch().is_err() {
+        return None;
+    }
+    match sh.profile_sites.availability(st, key) {
+        Availability::Held => None,
+        Availability::Missing => Some(NoStream::NotFound),
+        Availability::Broken => Some(NoStream::Broken),
+    }
+}
 
 /// The scope `scope` names, read from `st`. A view must exist; `P-x` reads as the proposal's
 /// latest version each time; a tag must exist. The versions page is not a read scope.
@@ -764,12 +791,12 @@ impl LiveSite {
         page: &str,
         rev: &str,
         label_rev: &str,
-    ) -> Result<Subscription, SiteBusy> {
+    ) -> Result<Subscription, NoStream> {
         let scope = &normalize(target);
         {
             let inner = lock(&self.inner);
             if inner.closed || inner.streams() >= MAX_STREAMS {
-                return Err(SiteBusy);
+                return Err(NoStream::Busy);
             }
         }
         let first = self.refresh(sh, scope);
@@ -782,7 +809,16 @@ impl LiveSite {
         }
         let mut inner = lock(&self.inner);
         if inner.closed || inner.streams() >= MAX_STREAMS {
-            return Err(SiteBusy);
+            return Err(NoStream::Busy);
+        }
+        // a profile-only target opens a stream only while canon holds its key (D-DK03K), in the
+        // state published now, read under the lock a removal's clearing takes
+        // ([`Self::remove`]): a removal whose state was published before this load is seen
+        // here, so no stream registers after its target was cleared; the clearing of one
+        // published after it finds the stream registered below. A request's check has usually
+        // remembered the answer for this state already.
+        if let Some(no) = unavailable(sh, scope, &sh.state.load_full()) {
+            return Err(no);
         }
         // the store's epoch, sampled under the lock a build's fan-out takes (final review
         // finding 4): a removal whose epoch moved before this sample is seen here, so the

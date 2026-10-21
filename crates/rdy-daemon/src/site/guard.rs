@@ -354,7 +354,7 @@ fn events(query: &str) -> Result<Route, Refusal> {
         (scope, None, false) => SiteTarget::Source(scope),
     };
     target.validate().map_err(|_| Refusal::Malformed)?;
-    event_route(q, target)
+    Ok(event_route(q, target))
 }
 
 /// The event route on the profile-only listener of `key`, by the same value rules as
@@ -371,15 +371,19 @@ fn events_only(key: &str, query: &str) -> Result<Route, Refusal> {
     let target = SiteTarget::ProfileOnly {
         key: key.to_string(),
     };
-    event_route(q, target)
+    Ok(event_route(q, target))
 }
 
 /// The values of an event query, each read by the first-of-each rule and checked on its own:
-/// the four required ones present, the scope, profile key and menu flag valid.
+/// the four required ones present; the scope, page path, revision, label, profile key and menu
+/// flag valid. Every recognized value is checked here, before any target rule (the bound
+/// listener's or the full listener's), so a malformed value is 400 whatever target the others
+/// name.
 struct EventValues {
     scope: ScopeRef,
     profile: Option<String>,
     menu: bool,
+    /// The page path, by rule 5.
     page: String,
     rev: String,
     label: String,
@@ -392,6 +396,12 @@ fn event_values(query: &str) -> Result<EventValues, Refusal> {
         return Err(Refusal::Malformed);
     };
     let scope = parse_scope(&scope).ok_or(Refusal::Malformed)?;
+    if !is_rev(&rev) || !is_rev(&label) {
+        return Err(Refusal::Malformed);
+    }
+    // The value is decoded once, so each `/` in it separates two segments.
+    let segments: Vec<Vec<u8>> = page.split('/').map(|s| s.as_bytes().to_vec()).collect();
+    let page = page_path(&segments).ok_or(Refusal::Malformed)?;
     let profile = match profile {
         None => None,
         Some(p) => Some(profile_key(p.as_bytes()).ok_or(Refusal::Malformed)?),
@@ -411,20 +421,14 @@ fn event_values(query: &str) -> Result<EventValues, Refusal> {
     })
 }
 
-/// The event route of `target`, once its revisions and page path check.
-fn event_route(q: EventValues, target: SiteTarget) -> Result<Route, Refusal> {
-    if !is_rev(&q.rev) || !is_rev(&q.label) {
-        return Err(Refusal::Malformed);
-    }
-    // The value is decoded once, so each `/` in it separates two segments.
-    let segments: Vec<Vec<u8>> = q.page.split('/').map(|s| s.as_bytes().to_vec()).collect();
-    let page = page_path(&segments).ok_or(Refusal::Malformed)?;
-    Ok(Route::Events {
+/// The event route of `target`, from its checked values.
+fn event_route(q: EventValues, target: SiteTarget) -> Route {
+    Route::Events {
         target,
-        page,
+        page: q.page,
         rev: q.rev,
         label: q.label,
-    })
+    }
 }
 
 /// `canon`, `versions`, `tag:<name>`, `view:<name>` or `proposal:<ref>`.

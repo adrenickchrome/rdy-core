@@ -13,7 +13,7 @@ use crate::site::guard::{Guard, ListenerMode, Refusal, Route, SiteTarget, refusa
 use crate::site::http::{
     MAX_HEAD_BYTES, Method, ParseError, Response, content_type, parse_head, to_bytes,
 };
-use crate::site::live::{label, resolve};
+use crate::site::live::{NoStream, label, resolve};
 use crate::site::profiles::{self, Availability, TestEvent};
 use crate::site::{LanOverride, SiteInfo, addr, sse};
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
@@ -482,7 +482,9 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
                     sse::serve(stream, sub, hold, ctx.handle.stopped(), epoch, now_secs()).await;
                     return;
                 }
-                Ok(Err(_busy)) => refusal(Refusal::Busy),
+                Ok(Err(NoStream::Busy)) => refusal(Refusal::Busy),
+                Ok(Err(NoStream::NotFound)) => refusal(Refusal::NotFound),
+                Ok(Err(NoStream::Broken)) => refusal(Refusal::Broken),
                 Err(_panicked) => refusal(Refusal::Broken),
             }
         }
