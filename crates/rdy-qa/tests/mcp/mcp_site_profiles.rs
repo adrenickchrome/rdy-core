@@ -539,3 +539,108 @@ fn spv9_mcp_schema_and_error_rows_describe_the_same_contract() {
         )
     );
 }
+
+/// Final review I1: a canon profile route that generates `changes-since.html` (selected landings
+/// since its tag) gives `changes` and `lan_changes` through the real build-facts-to-reply path,
+/// for a named profile and for `implicit:org`. A profile with no selected landing since the tag,
+/// a tag route and a profile-only site give none.
+#[test]
+fn spv9_canon_profile_replies_link_the_summary_since_the_tag() {
+    let (dir, mut r) = tiny();
+    let ids = put(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "folder", "id": "$manual", "fields": {"name": "manual", "title": "Manual", "description": "Manual folder."}},
+            {"op": "create", "type": "doc", "id": "$intro", "parent": "$manual", "fields": {"name": "intro", "title": "Intro page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$ip", "parent": "$intro", "body": "INTRO-ONLY-1"},
+            {"op": "create", "type": "doc", "id": "$secret", "fields": {"name": "secret", "title": "Secret page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$secret", "body": "SECRET-WORDS"},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}
+        ]),
+    );
+    land(&mut r, "w1").unwrap();
+    put(
+        &mut r,
+        "admin",
+        json!([
+            profile_op(
+                "guide",
+                "Guide book",
+                "org",
+                &ids["$admin"],
+                &[&ids["$manual"]]
+            ),
+            profile_op(
+                "other",
+                "Other book",
+                "org",
+                &ids["$admin"],
+                &[&ids["$secret"]]
+            )
+        ]),
+    );
+    land(&mut r, "admin").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    // one landing since the tag, in `guide`'s selection only
+    put(
+        &mut r,
+        "w2",
+        json!([{"op": "update", "id": ids["$ip"], "body": "INTRO-SINCE"}]),
+    );
+    land(&mut r, "w2").unwrap();
+    drop(r);
+    std::fs::write(
+        dir.path().join(".rdy/local.yaml"),
+        "serve:\n  site_lan: true\n",
+    )
+    .unwrap();
+    let h = Hosted::start_with(dir, Some(LanOverride::Addr(std::net::Ipv4Addr::LOCALHOST)));
+    let engine = h.run.as_ref().unwrap().shared().engine();
+    let reply = |scope: Option<&str>, profile: Option<&str>, only: bool| {
+        site_reply(&*engine, scope, profile, only)
+            .unwrap_or_else(|e| panic!("{scope:?} {profile:?}: {e}"))
+    };
+
+    // a named profile and the implicit profile on canon: both links, each to a served summary
+    for (profile, key) in [("guide", "guide"), ("implicit:org", "implicit%3Aorg")] {
+        let v = reply(None, Some(profile), false);
+        let url = v["url"].as_str().unwrap();
+        let lan = v["lan_url"].as_str().unwrap_or_else(|| panic!("{v}"));
+        assert!(url.ends_with(&format!("/~profile/{key}/")), "{v}");
+        assert_eq!(
+            v["changes"].as_str(),
+            Some(format!("{url}changes-since.html").as_str()),
+            "{profile}: {v}"
+        );
+        assert_eq!(
+            v["lan_changes"].as_str(),
+            Some(format!("{lan}changes-since.html").as_str()),
+            "{profile}: {v}"
+        );
+        let (status, body) = get(url, "changes-since.html");
+        assert_eq!(status, 200, "{profile}: {v}");
+        assert!(body.contains("v1.0.0"), "{profile}: {body}");
+        assert_eq!(get(lan, "changes-since.html").0, 200, "{profile}: {v}");
+    }
+    // no selected landing since the tag: no summary, no link
+    let other = reply(None, Some("other"), false);
+    assert!(other.get("changes").is_none(), "{other}");
+    assert!(other.get("lan_changes").is_none(), "{other}");
+    assert_eq!(
+        get(other["url"].as_str().unwrap(), "changes-since.html").0,
+        404,
+        "{other}"
+    );
+    // a tag route and the profile-only site have none
+    let tag = reply(Some("tag:v1.0.0"), Some("guide"), false);
+    assert!(
+        tag.get("changes").is_none() && tag.get("lan_changes").is_none(),
+        "{tag}"
+    );
+    let only = reply(None, Some("guide"), true);
+    assert!(
+        only.get("changes").is_none() && only.get("lan_changes").is_none(),
+        "{only}"
+    );
+}

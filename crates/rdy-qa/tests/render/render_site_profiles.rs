@@ -997,6 +997,8 @@ fn spv4_selected_since_counts_landings() {
         since_sentence(&b),
         "4 landings since v1.0.0 changed 3 blocks in 2 docs."
     );
+    // final review I1: the build names the summary it generated, for the reply's link
+    assert_eq!(b.changes, Some("changes-since.html"));
     assert_absent(&b, "SECRETCANARY");
     // the profile that did not exist at the tag: only the landing that made it
     let late = build(&st, &profile(ScopeRef::Canon, "late"));
@@ -1014,6 +1016,7 @@ fn spv4_selected_since_counts_landings() {
         since_chip(&implicit),
         Some(("+5".into(), "5 landings since v1.0.0".into()))
     );
+    assert_eq!(implicit.changes, Some("changes-since.html"));
     // a review route reads canon's selected history for this chip
     put(
         &mut w.r,
@@ -1037,6 +1040,7 @@ fn spv4_selected_since_counts_landings() {
             !b.live.files.contains_key("changes-since.html"),
             "{target:?}"
         );
+        assert_eq!(b.changes, None, "{target:?}");
     }
 
     // an edit and its revert: two landings, and no net block on the since page
@@ -1073,6 +1077,7 @@ fn spv4_selected_since_counts_landings() {
     let b = build(&w.r.read(), &profile(ScopeRef::Canon, "userguide"));
     assert_eq!(since_chip(&b), None);
     assert!(!b.live.files.contains_key("changes-since.html"));
+    assert_eq!(b.changes, None);
 }
 
 // --- 7. the profile-only site -------------------------------------------------------------------

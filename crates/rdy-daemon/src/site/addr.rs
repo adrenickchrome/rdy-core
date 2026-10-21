@@ -184,23 +184,25 @@ mod tests {
                 "{key}: a second spelling of the root"
             );
         }
-        // the key and the root both feed the hash, and the domain keeps it apart from the source's
-        assert_ne!(
-            profile_candidates(&real, "docs"),
-            profile_candidates(&real, "doc")
-        );
-        assert_ne!(
-            profile_candidates(&real, "docs"),
-            profile_candidates(&d.path().join("other"), "docs")
-        );
-        assert_ne!(profile_candidates(&real, "docs"), candidates(None, &real));
+        // the key and the root both feed the hash, and the domain keeps it apart from the
+        // source's. Fixed inputs with known first ports: the hash is cut to 16384 offsets, so two
+        // arbitrary inputs may share a window, and a random root could fail a correct build
+        let source = |root: &[u8]| {
+            let h = Hash::of(root).0;
+            49152 + u16::from_le_bytes([h[0], h[1]]) % 16384
+        };
+        assert_eq!(recipe(b"/fixed/project", "docs")[0], 60127);
+        assert_eq!(recipe(b"/fixed/project", "doc")[0], 58185);
+        assert_eq!(recipe(b"/fixed/other", "docs")[0], 50814);
+        assert_eq!(source(b"/fixed/project"), 50417);
         // equivalent folded keys: the caller folds, and one folded key gives one list
         assert_eq!(
             profile_candidates(&real, &rdy_model::key::fold("Docs")),
             profile_candidates(&real, "docs")
         );
         // the length prefixes separate the two fields: moving a byte between them changes the hash
-        assert_ne!(recipe(b"ab", "c"), recipe(b"a", "bc"));
+        assert_eq!(recipe(b"ab", "c")[0], 50632);
+        assert_eq!(recipe(b"a", "bc")[0], 49401);
     }
 
     #[test]

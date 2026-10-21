@@ -326,7 +326,15 @@ pub(crate) fn build_within(
     if let Some(p) = prepared.profile.as_mut() {
         p.presentation = presentation;
     }
-    let changes = hist.changes.is_some().then_some(CHANGES_PAGE);
+    // the summary page the build generated, by the rules a source build's link follows: a review
+    // route has `changes.html`, canon `changes-since.html` while it has selected landings since
+    // its tag (each is left out when a top-level doc owns its page or the history is over its
+    // limit). A tag route and the profile-only site have none
+    let changes = match scope_ref {
+        ScopeRef::View(_) | ScopeRef::Proposal(_) => hist.changes.is_some().then_some(CHANGES_PAGE),
+        ScopeRef::Canon if route => hist.since.is_some().then_some(SINCE_PAGE),
+        _ => None,
+    };
     prepared.history = hist;
     prepared.menu_url = target.menu_url();
     drop(m);
@@ -1249,11 +1257,13 @@ mod spv4 {
         let b = at(&p);
         assert_eq!(chip(&b).as_deref(), Some("+2"));
         assert!(b.live.files.contains_key("changes-since.html"));
+        assert_eq!(b.changes, Some(SINCE_PAGE));
         assert!(b.live.warnings.is_empty(), "{:?}", b.live.warnings);
         p.edit("$ip", "Intro words, three.");
         let b = at(&p);
         assert_eq!(chip(&b), None);
         assert!(!b.live.files.contains_key("changes-since.html"));
+        assert_eq!(b.changes, None);
         assert!(
             !b.live.header.contains("changes-since"),
             "{}",

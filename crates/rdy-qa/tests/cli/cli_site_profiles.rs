@@ -571,7 +571,9 @@ fn always_exiting(dir: &Path) -> (tokio::runtime::Runtime, Arc<AtomicUsize>) {
 
 /// A scripted ctl peer at a project's socket: it answers the first hello `starting`, says so,
 /// and answers `ready` only once released; then it answers `session` and `site_url` (with
-/// `site`) and records every request. Alive until `rt` is dropped.
+/// `site`) and records every request. Alive until `rt` is dropped. The held `ready` waits on an
+/// awaited oneshot, never a blocking task: a failed assertion before the release drops the
+/// runtime, which cancels the wait instead of hanging on it and hiding the failure.
 struct StartingPeer {
     rt: tokio::runtime::Runtime,
     /// The hello the client sent.
@@ -579,7 +581,7 @@ struct StartingPeer {
     /// Sent once the `starting` reply is written, before any `ready` exists.
     starting_sent: Receiver<()>,
     /// Releases the `ready` reply.
-    release: std::sync::mpsc::Sender<()>,
+    release: tokio::sync::oneshot::Sender<()>,
     /// The client's ctl requests, in order.
     requests: Receiver<Value>,
     /// The connections the peer accepted.
@@ -604,7 +606,7 @@ fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
     };
     let (hello_tx, hello) = channel();
     let (sent_tx, starting_sent) = channel();
-    let (release, released) = channel::<()>();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
     let (req_tx, requests) = channel();
     let accepts = Arc::new(AtomicUsize::new(0));
     let n = Arc::clone(&accepts);
@@ -630,9 +632,10 @@ fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
                 w.write_all(&json_line(&starting)).await.unwrap();
                 w.flush().await.unwrap();
                 sent_tx.send(()).unwrap();
-                tokio::task::spawn_blocking(move || released.recv().unwrap())
-                    .await
-                    .unwrap();
+                // a release dropped unsent (a failed test) ends the script
+                if released.await.is_err() {
+                    return;
+                }
                 let ready = HelloReply::Ready {
                     version: VERSION.into(),
                     session: rdy_daemon::SessionId(7),
@@ -668,6 +671,36 @@ fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
         requests,
         accepts,
     }
+}
+
+/// Final review M2: a scripted peer dropped while it holds `ready` (a test that fails before its
+/// release) tears down at once: its wait is cancelled with the runtime, and never holds the
+/// teardown that would report the failure.
+#[test]
+fn spv10_starting_peer_teardown_never_waits_on_its_release() {
+    let dir = short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let peer = starting_peer(dir.path(), json!({}));
+    let run = RunDir::of_project(dir.path());
+    let client_rt = Hosted::rt();
+    let attempt = client_rt.block_on(rdy_daemon::client::connect(&run, &hello(dir.path())));
+    assert!(
+        matches!(attempt, rdy_daemon::client::Attempt::Starting(_)),
+        "the peer answers starting"
+    );
+    peer.hello.recv_timeout(T).expect("the client's hello");
+    peer.starting_sent
+        .recv_timeout(T)
+        .expect("the starting reply is written");
+    // drop the peer as an unwinding test would: field by field, the release still unsent
+    let (done_tx, done) = channel();
+    std::thread::spawn(move || {
+        drop(peer);
+        done_tx.send(()).unwrap();
+    });
+    done.recv_timeout(T)
+        .expect("the peer's teardown waits on nothing");
+    drop(attempt);
 }
 
 /// The start races, each behind a barrier: a daemon still starting (a scripted peer that holds
