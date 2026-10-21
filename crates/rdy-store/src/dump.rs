@@ -929,8 +929,12 @@ mod wire {
     }
 }
 
+/// The longest pack file name a dump carries, in bytes, its `.yaml` or `.yml` extension counted.
+pub const MAX_PACK_FILE_NAME_BYTES: usize = 255;
+
 /// True if `path` is one of the project files a dump carries (the closed set): `.rdy.yaml`,
-/// `.rdyignore`, or `.rdy/packs/<name>` with a plain YAML file name.
+/// `.rdyignore`, or `.rdy/packs/<name>` with a plain YAML file name of at most
+/// `MAX_PACK_FILE_NAME_BYTES` bytes.
 pub fn is_project_file(path: &str) -> bool {
     if path == ".rdy.yaml" || path == ".rdyignore" {
         return true;
@@ -938,7 +942,8 @@ pub fn is_project_file(path: &str) -> bool {
     let Some(name) = path.strip_prefix(".rdy/packs/") else {
         return false;
     };
-    !name.starts_with('.')
+    name.len() <= MAX_PACK_FILE_NAME_BYTES
+        && !name.starts_with('.')
         && (name.ends_with(".yaml") || name.ends_with(".yml"))
         && name
             .bytes()

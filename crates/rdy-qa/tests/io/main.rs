@@ -13,6 +13,7 @@ mod io_dump_fixture_s13;
 mod io_dump_fixture_s14;
 mod io_dump_fixture_s15;
 mod io_dump_fixture_s16;
+mod io_dump_names;
 mod io_imported_by;
 mod io_keys;
 mod io_link_keys;
