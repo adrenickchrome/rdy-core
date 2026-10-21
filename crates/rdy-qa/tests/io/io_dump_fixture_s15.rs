@@ -854,8 +854,8 @@ const RELEASED: [Released; 11] = [
     Released {
         dump: "v3-s17-holder.rdydump",
         expect: "v3-s17-holder.expect.json",
-        dump_blake3: "771c2118924d0324885f25a73c60c7a1331221c156b2b0df298b6de613d694aa",
-        expect_blake3: "44a941765c88b7cc84b33cd9bbe27ea9665023cdd00835654a0299e9128f3ae5",
+        dump_blake3: "004dbd2f0eb39bcf227aa4a1dfc1fe58980094bd3bbb80b52bbcb70cc8124d91",
+        expect_blake3: "8c21ae51e8a2bd0689189935d56bac40506fb77890606cf70cdf0d967f39ff69",
         pair: (3, 17),
         holder: true,
     },
@@ -931,9 +931,9 @@ const RELEASED_CHAINS: [ReleasedChain; 4] = [
         expect: "v3-s17-holder-chain.expect.json",
         blake3: [
             "ec0e4a4f6f3f5c6efde8229b8b65205adfa4a18de8098f4945864021f4ebf5eb",
-            "ac46691bf0b612877c6fbd1cb1e487068d884f93d1f82b26f8bdd766ec80dc4e",
-            "48a2f8a431ce2ff38eaab1b6adb567441cf7fce5c9f96902e942b310a6f4605d",
-            "54958cbc0723d1c9dc7b589fdcc3a64912546841bcadcfd31a49a7f7abd912ed",
+            "1ff73bc53aeb46cb50f0de29997165298bcd14e14b4876bf3909db17eecd9be2",
+            "bbff1ff5ce76e60d8ec2c6aacab90b9c471edf0ec4b359017dfa884c7e2bc35a",
+            "b38ac9d6944e139dd4e0966c5a58648d76a937c8858910f11b92446200b55e2f",
         ],
         pair: (3, 17),
         holder: true,

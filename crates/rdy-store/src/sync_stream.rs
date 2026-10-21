@@ -869,7 +869,8 @@ pub(crate) fn depth_of(
 /// relay, card evidence with its card hash, the plan acts' items, notes and targets), and a PLAN
 /// its own record rules (`crate::plan`), with fsck's own text. Its targets rule is the
 /// batch's edge rule; the typed rules that need other records (a plan's chain and seal, a
-/// KeepSuspect's BLOCK targets) are the whole upload's (`crate::stream_source`). A take checks every file of an upload this way, so no take keeps an answer
+/// KeepSuspect's BLOCK targets) are the whole upload's (`crate::stream_source`). A take checks
+/// every file of an upload this way, and the upload whole, so no take keeps an answer or a plan
 /// that the holder's fsck would refuse.
 fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError> {
     let StreamRecord::Present { key, payload } = r else {

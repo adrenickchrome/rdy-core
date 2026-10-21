@@ -50,8 +50,8 @@
 //!    the frames, payload bytes and spans of the batch included; the marker counts only when
 //!    there is a frame to write (a complete retry writes none).
 //!
-//! Steps 2, 3 (the root), 5 (with the typed context) and 6 (the portable proofs, the dropped records and the one tuple of
-//! each key) and the relay answers of step 8 are `crate::stream_source`'s checks, which a checked
+//! Steps 2, 3 (the root), 5 (with the typed context) and 6 (the portable proofs, the dropped
+//! records and the one tuple of each key) and the relay answers of step 8 are `crate::stream_source`'s checks, which a checked
 //! stream runs with nothing held; the take runs them over the union and the holder. The
 //! receiver's own steps stay here: the repo, the upload target, SIG's rule over the holder, the
 //! scan of the holder's local copies, the receiver caps, the tag choice and the append.

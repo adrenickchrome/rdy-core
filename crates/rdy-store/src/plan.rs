@@ -8,8 +8,9 @@
 //! first version and its immediate predecessor, of the same view. A sealed version ends the
 //! chain: nothing follows it. Answers are cumulative, sorted by full item hash, one (the latest)
 //! per item: a later version keeps every item its predecessor answers, and may replace an
-//! item's answer or add items; heads are sorted and distinct by repo. An answer-only version has no `proposal`; a
-//! bound version names the proposal version it was written with, in the same batch, and every
+//! item's answer or add items. Heads are sorted and distinct by repo. An answer-only version
+//! has no `proposal`; a bound version names the proposal version it was written with, in the
+//! same batch, and every
 //! bound proposal has one unsealed version. A seal names its landing, in the same batch before
 //! it, and that landing's landed proposal version (`seal.version`, which `proposal` repeats). An
 //! unbound proposal's seal has no earlier chain version (`stable` and `prev` absent).

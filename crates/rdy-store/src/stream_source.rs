@@ -7,9 +7,10 @@
 //! same functions over the holder and the incoming files): every prerequisite is held, the root
 //! TAG decodes, every incoming record is in the root's closure (forward links and the closure's
 //! attachments), every incoming PLAN and ANSWER keeps its typed context as fsck checks a
-//! holder's ([`check_typed_context`]), every new apply passes its portable proof (`sync_proof::check`), every dropped
-//! record names a validated apply that approves its exact tuple, and each approved or dropped
-//! key has one tuple. [`check_complete`] runs them over any [`ObjectSource`] with nothing held.
+//! holder's ([`check_typed_context`]), every new apply passes its portable proof
+//! (`sync_proof::check`), every dropped record names a validated apply that approves its exact
+//! tuple, and each approved or dropped key has one tuple. [`check_complete`] runs them over any
+//! [`ObjectSource`] with nothing held.
 //! The take's step 7 (a present change that embeds an approved block version and that no
 //! approval covers) reads only incoming records too: [`CheckedStream`] finds it with the same
 //! rule as the take ([`CheckedStream::uncovered_change`]), and its caller refuses it with the
