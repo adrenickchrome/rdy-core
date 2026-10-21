@@ -1432,7 +1432,7 @@ fn decisions_written(
 /// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
 /// E_FROZEN early; on the approve path (`approving`, the version's view) they are worded for the
 /// approver.
-fn prospective(
+pub(crate) fn prospective(
     st: &ReadState,
     changes: &[Change],
     approving: Option<&str>,
