@@ -1,6 +1,6 @@
 # rdy
 
-rdy is a system for keeping decisions and documentation consistent while agents change them.
+A system for keeping decisions and documentation consistent while agents change them.
 
 Agents should never change the accepted design blind. rdy computes. Agents write. People decide.
 
@@ -15,9 +15,42 @@ Documentation and the decisions behind it are stored as typed blocks in an appen
 | Windows | Not supported yet: `rdy-store` and the daemon use Unix-only APIs, so the workspace does not compile. `rdy-model`, `rdy-schema` and `rdy-graph` build. Windows support is planned after M3. |
 | Other Unix (the BSDs, illumos) | Untested. |
 
+## Preview archives
+
+This is a preview of rdy.
+It comes before Release 1, the first release with a compatibility promise.
+
+Until Release 1, any command, flag, tool, code or file format may change in the next preview, with no deprecation period.
+One thing stays: every later rdy, Release 1 included, reads every dump that this rdy writes.
+
+To move a project to a newer preview, run `rdy dump --out <file>` with this rdy.
+Then run `rdy load <file> <dir>` with the new rdy, into a directory with no store.
+A project made with a preview moves to Release 1 the same way.
+
+Report problems at https://github.com/adrenickchrome/rdy-core/issues.
+
+The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.
+
+| Platform | Target | Archive |
+|---|---|---|
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+
+The release is [v0.15.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.15.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS.sig).
+
+Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
+Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
+This signature is not Apple notarization.
+
+Release signing key: pending founder confirmation.
+Preview downloads are not ready.
+Do not install a preview until this README and its GitHub release notes show the same key and fingerprint.
+
 ## Quick start
 
 ```bash
+git clone https://github.com/adrenickchrome/rdy-core.git
+cd rdy-core
 cargo install --path crates/rdy-cli
 rdy init                      # creates .rdy/ and .rdy.yaml (pack rdy-standard)
 rdy mcp                       # MCP server over stdio for your agent harness
@@ -36,7 +69,18 @@ rdy show <id> --scope tag:v0.1.0   # read as of a version (also landing:<id>)
 
 Agent sessions (`rdy mcp`) and the human commands share the project's daemon (see Daemon below), so `rdy status`, `rdy propose`, `rdy approve` and the rest work while an agent session runs.
 
-A store written by a different `rdy` build is refused with `E_STORE_FORMAT` ("re-create it with this rdy").
+rdy refuses a store from a different store format with E_STORE_FORMAT.
+Before you replace the old binary, close its sessions and dump each project with that binary.
+Stop the old project's daemon. Keep the original project and the old binary.
+Use the new binary to load the dump into a directory with no store.
+Check the loaded project with rdy fsck.
+
+```bash
+rdy dump --out <dump-file>             # old binary
+rdy load <dump-file> <new-directory>   # new binary
+```
+
+Run the dump command in the old project. Run the load command with the new binary. Existing `rdy_dump` and `rdy_load` are the chat route.
 
 Claude Code MCP config:
 
@@ -188,3 +232,11 @@ tier, and writes `target/qa/report.md`. Flags: `--deep` (before a milestone), `-
 `--only perf` runs the release build and the perf tier only. `--only <area>` for any other area
 keeps fmt, clippy, the workspace tests, the `rdy-qa` unit tests and the perf tier (unless
 `--skip-perf`) and narrows only the hardening suite to that area's test files. The `swarm` area runs eight scripted agents and one person against one daemon, through MCP first. It checks for lost writes, unreported tensions, landings past the gate and inboxes that differ from the log. It also checks that every stable write cites a briefing.
+
+## License
+
+rdy is available under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your choice.
+
+## Report problems
+
+Report problems at https://github.com/adrenickchrome/rdy-core/issues.

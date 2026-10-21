@@ -3,7 +3,7 @@
 ## What rdy is
 
 rdy is a system for keeping decisions and documentation consistent while agents change them.
-Design decisions and the current-state docs live in the rdy-design project, in its own repository.
+Design decisions and the current-state docs live in a separate rdy project, which is not public.
 Read them through rdy's MCP tools.
 
 ## Crates

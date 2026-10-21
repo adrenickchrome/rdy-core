@@ -14,7 +14,17 @@ jobs:
   fast:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      # The same disk settings as the coverage job: no debug info, and the preinstalled
+      # toolchains we never use are removed first.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:

@@ -38,11 +38,23 @@ mod tension_cmd;
 mod view_cmd;
 mod wc;
 
+/// True until Release 1: the human version output carries the preview mark. This is the
+/// only switch. Machine-read versions (the daemon hello, MCP serverInfo, dump headers, format
+/// facts and the PDF producer) stay `env!("CARGO_PKG_VERSION")`.
+const PREVIEW: bool = true;
+
+/// The text of `rdy --version`, `-V` and `--json --version`.
+const VERSION_TEXT: &str = if PREVIEW {
+    concat!(env!("CARGO_PKG_VERSION"), " (preview)")
+} else {
+    env!("CARGO_PKG_VERSION")
+};
+
 #[derive(Parser)]
 #[command(
     name = "rdy",
-    version,
-    about = "Version control for agent-aided design"
+    version = VERSION_TEXT,
+    about = "A system for keeping decisions and documentation consistent while agents change them."
 )]
 struct Cli {
     /// Print machine-readable JSON.
@@ -374,6 +386,14 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// PRE task 2: machine-read versions stay plain; only the human `--version` output carries
+    /// the preview mark.
+    #[test]
+    fn pre2_daemon_hello_version_stays_plain() {
+        assert_eq!(conn::VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(!conn::VERSION.contains("preview"));
+    }
 
     fn about_of(name: &str) -> String {
         let cmd = Cli::command();
