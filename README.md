@@ -33,10 +33,10 @@ The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is 
 
 | Platform | Target | Archive |
 |---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.14.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.14.0/rdy-0.14.0-preview-aarch64-apple-darwin.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.14.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.14.0/rdy-0.14.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
 
-The release is [v0.14.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.14.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.14.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.14.0/SHA256SUMS.sig).
+The release is [v0.15.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.15.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS.sig).
 
 Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
 Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
