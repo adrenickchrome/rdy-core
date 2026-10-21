@@ -569,9 +569,110 @@ fn always_exiting(dir: &Path) -> (tokio::runtime::Runtime, Arc<AtomicUsize>) {
     (rt, count)
 }
 
-/// The start races, each behind a barrier: a daemon still starting (a held foreground
-/// callback), a concurrent foreground winner, and a daemon exiting to be replaced. Configured
-/// timeouts give the existing `E_DAEMON_START` texts.
+/// A scripted ctl peer at a project's socket: it answers the first hello `starting`, says so,
+/// and answers `ready` only once released; then it answers `session` and `site_url` (with
+/// `site`) and records every request. Alive until `rt` is dropped.
+struct StartingPeer {
+    rt: tokio::runtime::Runtime,
+    /// The hello the client sent.
+    hello: Receiver<Value>,
+    /// Sent once the `starting` reply is written, before any `ready` exists.
+    starting_sent: Receiver<()>,
+    /// Releases the `ready` reply.
+    release: std::sync::mpsc::Sender<()>,
+    /// The client's ctl requests, in order.
+    requests: Receiver<Value>,
+    /// The connections the peer accepted.
+    accepts: Arc<AtomicUsize>,
+}
+
+/// One newline-ended JSON line.
+fn json_line(v: &impl serde::Serialize) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(v).unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+
+fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let run = RunDir::of_project(dir);
+    run.ensure().unwrap();
+    let rt = Hosted::rt();
+    let listener = {
+        let _g = rt.enter();
+        rdy_daemon::sys::bind(&run.socket()).unwrap()
+    };
+    let (hello_tx, hello) = channel();
+    let (sent_tx, starting_sent) = channel();
+    let (release, released) = channel::<()>();
+    let (req_tx, requests) = channel();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let n = Arc::clone(&accepts);
+    rt.spawn(async move {
+        let mut script = Some((hello_tx, sent_tx, released, req_tx, site));
+        while let Ok((stream, _)) = listener.accept().await {
+            n.fetch_add(1, Ordering::SeqCst);
+            // a later connection is counted and closed: the client must not need one
+            let Some((hello_tx, sent_tx, released, req_tx, site)) = script.take() else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let mut stream = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                hello_tx
+                    .send(serde_json::from_str::<Value>(&line).unwrap())
+                    .unwrap();
+                let starting = HelloReply::Starting {
+                    progress: "opening store".into(),
+                };
+                let w = stream.get_mut();
+                w.write_all(&json_line(&starting)).await.unwrap();
+                w.flush().await.unwrap();
+                sent_tx.send(()).unwrap();
+                tokio::task::spawn_blocking(move || released.recv().unwrap())
+                    .await
+                    .unwrap();
+                let ready = HelloReply::Ready {
+                    version: VERSION.into(),
+                    session: rdy_daemon::SessionId(7),
+                };
+                let w = stream.get_mut();
+                w.write_all(&json_line(&ready)).await.unwrap();
+                w.flush().await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    let ok = match req["op"].as_str() {
+                        Some("session") => json!({"session": 7}),
+                        Some("site_url") => site.clone(),
+                        other => panic!("an unexpected op {other:?}"),
+                    };
+                    let reply = json_line(&json!({"id": req["id"], "ok": ok}));
+                    req_tx.send(req).unwrap();
+                    let w = stream.get_mut();
+                    w.write_all(&reply).await.unwrap();
+                    w.flush().await.unwrap();
+                }
+            });
+        }
+    });
+    StartingPeer {
+        rt,
+        hello,
+        starting_sent,
+        release,
+        requests,
+        accepts,
+    }
+}
+
+/// The start races, each behind a barrier: a daemon still starting (a scripted peer that holds
+/// `ready`, and a held foreground callback), a concurrent foreground winner, and a daemon
+/// exiting to be replaced. Configured timeouts give the existing `E_DAEMON_START` texts.
 #[test]
 fn spv10_serve_profile_handles_start_and_exit_races() {
     let (_cfg, env) = human_env("human:qa");
@@ -634,8 +735,57 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
     assert!(!RunDir::of_project(dir.path()).pid_file().exists());
     drop(fake);
 
-    // 3. Starting: a foreground profile start in this process holds its callback, so its
-    // daemon answers `starting` until released
+    // 3a. Starting, waited for: a scripted peer answers the hello `starting` and holds `ready`
+    // until the test has seen that reply written. The client cannot have read `ready` from its
+    // first reply, so the line it prints comes through `Pending::wait`, then the session and
+    // `site_url` of that same connection
+    let dir = short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let site = json!({
+        "url": "http://127.0.0.1:1/scripted/",
+        "lan_url": null,
+        "warning": null,
+        "profile_only": true,
+        "profile": {"key": "guide", "title": "Guide book"},
+        "warnings": ["scripted warning"]
+    });
+    let peer = starting_peer(dir.path(), site.clone());
+    let mut cmd = human_command(dir.path(), &env, &["serve", "--profile", "guide"]);
+    cmd.stdin(Stdio::null());
+    let client = Proc::spawn(cmd);
+    let h: Value = peer.hello.recv_timeout(T).expect("the client's hello");
+    assert_eq!(h["proto"], "ctl", "{h}");
+    assert_eq!(h["version"], VERSION, "{h}");
+    peer.starting_sent
+        .recv_timeout(T)
+        .expect("the starting reply is written");
+    assert!(client.running(), "no ready yet: the client waits");
+    peer.release.send(()).unwrap();
+    assert_eq!(
+        client.line(),
+        "profile site guide: http://127.0.0.1:1/scripted/"
+    );
+    assert_eq!(client.line(), "warning: scripted warning");
+    let (status, rest, err) = client.finish();
+    assert_eq!(status.code(), Some(0), "{err}");
+    assert!(rest.is_empty(), "{rest:?}");
+    assert!(!err.contains("rdy serve:"), "no start of its own: {err}");
+    let session = peer.requests.recv_timeout(T).expect("the session request");
+    assert_eq!(session["op"], "session", "{session}");
+    assert!(
+        session["args"].get("actor").is_some() && session["args"].get("run").is_some(),
+        "the CLI caller's classification: {session}"
+    );
+    let url = peer.requests.recv_timeout(T).expect("the site_url request");
+    assert_eq!(url["op"], "site_url", "{url}");
+    assert_eq!(url["args"], json!({"profile": "guide", "only": true}));
+    assert!(peer.requests.try_recv().is_err(), "no other request");
+    assert_eq!(peer.accepts.load(Ordering::SeqCst), 1, "one connection");
+    assert!(!RunDir::of_project(dir.path()).pid_file().exists());
+    drop(peer.rt);
+
+    // 3b. Starting, past the deadline: a foreground profile start in this process holds its
+    // callback, so its daemon answers `starting` until released
     let (dir, _, _) = seeded_dir(None);
     let p = dir.path().to_path_buf();
     let (entered_tx, entered) = channel::<String>();
@@ -655,18 +805,15 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
             Ok(())
         })
     });
-    let url = entered.recv_timeout(T).expect("the callback runs");
-    // a person whose user config sets a one-second start timeout
+    entered.recv_timeout(T).expect("the callback runs");
+    // a person whose user config sets a one-second start timeout meets the held start and gives
+    // up
     let (short_cfg, short_env) = human_env("human:qa");
     std::fs::write(
         short_cfg.path().join("rdy/config.yaml"),
         "actor: human:qa\nserve:\n  start_timeout: 1\n",
     )
     .unwrap();
-    // the waiting client is spawned first; the short one meets the held start and gives up
-    let mut cmd = human_command(&p, &env, &["serve", "--profile", "guide"]);
-    cmd.stdin(Stdio::null());
-    let waiting = Proc::spawn(cmd);
     let out = human_command(&p, &short_env, &["serve", "--profile", "guide"])
         .output()
         .unwrap();
@@ -678,15 +825,8 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
         "{}",
         stderr(&out)
     );
-    assert!(waiting.running(), "the other client still waits");
+    assert!(!stderr(&out).contains("rdy serve:"), "no start of its own");
     release.send(()).unwrap();
-    let line = waiting.line();
-    assert_eq!(line, format!("profile site guide: {url}"));
-    waiting.tail();
-    let (status, rest, err) = waiting.finish();
-    assert_eq!(status.code(), Some(0), "the reused daemon: {err}");
-    assert!(rest.is_empty());
-    assert!(!err.contains("rdy serve:"), "no start of its own: {err}");
     // this process is the daemon: stop it over its socket (`rdy serve --stop` would wait for
     // this process to exit)
     let run = RunDir::of_project(&p);
@@ -792,6 +932,100 @@ fn spv10_serve_profile_unknown_key_cleans_up_its_own_start() {
     }
     let source = stdout(&s.rdy(&["site"])).trim_end().to_string();
     assert_eq!(http::get(&source).status, 200);
+}
+
+/// Runs `cmd` with no stdin, stdout read in full, and a stderr whose reader closed before the
+/// spawn, so each of the child's stderr writes fails. Its exit and stdout.
+fn with_closed_stderr(mut cmd: Command) -> (ExitStatus, String) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(writer))
+        .spawn()
+        .expect("spawn rdy");
+    // drop the parent's copy of the pipe's writer with `cmd`
+    drop(cmd);
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output().expect("wait for rdy"));
+    });
+    let out = rx.recv_timeout(T).expect("rdy exits");
+    (out.status, raw_stdout(&out))
+}
+
+/// Fix round 1: with a stderr whose reader has closed, the structured LAN warning cannot be
+/// written. A foreground start fails through its callback with an error, not a panic: exit 1,
+/// no result line, and the daemon it created is stopped (no pid file, socket or lock left). A
+/// reuse and `rdy site` exit 1 the same way and leave the running daemon serving.
+#[test]
+fn spv10_serve_profile_closed_stderr_fails_and_cleans_up() {
+    // an address this machine does not hold: the LAN bind fails, so every listener has its
+    // structured warning
+    let lan = "serve:\n  site_lan: true\n  site_lan_address: 10.255.255.254\n";
+    let (dir, _, _) = seeded_dir(Some(lan));
+    let (_cfg, env) = human_env("human:qa");
+    let p = dir.path().to_path_buf();
+    let run = RunDir::of_project(&p);
+    // the control: with a stderr that is read, this start serves and writes its warning there
+    let mut cmd = human_command(&p, &env, &["serve", "--profile", "guide"]);
+    cmd.stdin(Stdio::null());
+    let child = Proc::spawn(cmd);
+    let first = child.line();
+    assert!(
+        first.starts_with("profile site guide: http://127.0.0.1:"),
+        "{first}"
+    );
+    child.tail();
+    let stop = human_command(&p, &env, &["serve", "--stop"])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&stop), "stopped\n");
+    let (status, _, err) = child.finish();
+    assert_eq!(status.code(), Some(0), "{err}");
+    assert!(
+        err.lines().any(|l| l
+            .starts_with("warning: profile \"Guide book\": could not listen on 10.255.255.254 (")),
+        "the profile listener's LAN warning: {err}"
+    );
+    for args in [
+        vec!["serve", "--profile", "guide"],
+        vec!["--json", "serve", "--profile", "guide"],
+    ] {
+        let (status, out) = with_closed_stderr(human_command(&p, &env, &args));
+        assert_eq!(status.code(), Some(1), "{args:?}: an error, not a panic");
+        assert_eq!(out, "", "{args:?}: no result line");
+        assert!(!run.pid_file().exists(), "{args:?}: no daemon");
+        assert!(!run.socket().exists(), "{args:?}: no socket");
+        // the store is free again
+        drop(Rdy::open(&p).unwrap());
+    }
+
+    // a running daemon: the reuse and `rdy site` fail on the same write and leave it serving
+    let h = Hosted::start_for_binary(dir, None);
+    let p = h.dir.path();
+    let want = ok_ctl(p, "site_url", json!({"profile": "guide", "only": true}));
+    assert!(want["warning"].is_object(), "{want}");
+    assert!(
+        ok_ctl(p, "site_url", json!({"profile": "guide"}))["warning"].is_object(),
+        "rdy site's reply has the warning too"
+    );
+    for args in [
+        vec!["serve", "--profile", "guide"],
+        vec!["--json", "serve", "--profile", "guide"],
+        vec!["site", "--profile", "guide"],
+        vec!["--json", "site", "--profile", "guide"],
+    ] {
+        let (status, out) = with_closed_stderr(human_command(p, &env, &args));
+        assert_eq!(status.code(), Some(1), "{args:?}: an error, not a panic");
+        assert_eq!(out, "", "{args:?}: no result line");
+    }
+    assert_eq!(
+        ok_ctl(p, "site_url", json!({"profile": "guide", "only": true})),
+        want,
+        "the daemon still serves its profile site"
+    );
 }
 
 /// Line discipline: text and JSON, the warnings' channels, one result per call, and the clap

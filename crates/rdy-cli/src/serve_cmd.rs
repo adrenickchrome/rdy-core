@@ -75,7 +75,8 @@ fn serve_exit(r: Result<rdy_daemon::ExitReason, ServeError>) -> ExitCode {
         Err(ServeError::AlreadyRunning(_)) => ExitCode::from(2),
         Err(ServeError::Open(_)) => ExitCode::FAILURE,
         Err(e) => {
-            eprintln!("{e}");
+            // a closed stderr loses the line, never panics
+            let _ = writeln!(std::io::stderr(), "{e}");
             ExitCode::FAILURE
         }
     }
@@ -274,7 +275,7 @@ fn reuse(rt: &tokio::runtime::Runtime, client: Client, profile: &str, as_json: b
             notices.push(n);
         }
         for n in notices {
-            eprintln!("notice: {n}");
+            let _ = writeln!(std::io::stderr(), "notice: {n}");
         }
         v
     });
@@ -294,11 +295,12 @@ fn reuse(rt: &tokio::runtime::Runtime, client: Client, profile: &str, as_json: b
     }
 }
 
+/// A failed write of the profile site's result: its stdout lines or its stderr LAN warning.
 fn print_failed(e: std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
         format!("could not print the profile site: {e}"),
-        "check where the standard output goes, then run rdy serve --profile again",
+        "check where the standard output and standard error go, then run rdy serve --profile again",
     )
 }
 
@@ -335,9 +337,10 @@ fn print_ready(ready: ProfileSiteReady, as_json: bool) -> Result<(), RdyError> {
 
 /// Prints a profile-only `site_url` reply. Text: `profile site <key>: <url>`, then the LAN URL
 /// when bound, then one `warning: <entry>` per entry of `warnings`, one line each. JSON: the
-/// reply on one line. Either way the structured LAN warning goes to stderr.
+/// reply on one line. Either way the structured LAN warning goes to stderr first. A failed write
+/// to either is returned.
 fn print_profile_site(v: &Value, as_json: bool) -> std::io::Result<()> {
-    lan_warning(v);
+    lan_warning(v)?;
     let out = if as_json {
         format!("{v}\n")
     } else {

@@ -1,5 +1,6 @@
 use rdy_daemon::ErrorReply;
 use serde_json::Value;
+use std::fmt::Write as _;
 
 pub(crate) fn hash_short(s: &str) -> &str {
     &s[..s.len().min(12)]
@@ -50,11 +51,14 @@ pub(crate) fn warning_lines(v: &Value) -> String {
 }
 
 pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
+    // the whole report, then one write that cannot panic (formatting into a String cannot fail)
+    let mut out = String::new();
     if as_json {
-        eprintln!("{}", serde_json::to_string(e).unwrap_or_default());
+        let _ = writeln!(out, "{}", serde_json::to_string(e).unwrap_or_default());
+        write_stderr(&out);
         return;
     }
-    eprintln!("error {}: {}\nfix: {}", e.code, e.message, e.fix);
+    let _ = writeln!(out, "error {}: {}\nfix: {}", e.code, e.message, e.fix);
     // an answer that names a card that moved, or an approval that waits for exceptions, carries
     // the fresh card or cards (O21): show them to the person
     if let Some(corrected) = e.extra.get("corrected") {
@@ -66,7 +70,7 @@ pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
             .chain(corrected.get("card").map(|_| corrected));
         for c in cards {
             if let Some(card) = c.get("card").and_then(Value::as_str) {
-                eprintln!("\n{card}");
+                let _ = writeln!(out, "\n{card}");
             }
         }
     }
@@ -76,7 +80,8 @@ pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
                 Some(b) => format!("Some({b})"),
                 None => "None".to_string(),
             };
-            eprintln!(
+            let _ = writeln!(
+                out,
                 "  {} {block}: {} (fix: {})",
                 text(&i["code"]),
                 text(&i["message"]),
@@ -91,7 +96,8 @@ pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
         .into_iter()
         .flatten()
     {
-        eprintln!(
+        let _ = writeln!(
+            out,
             "{}:{}:{}: {} {} (fix: {})",
             text(&d["file"]),
             num(&d["line"]),
@@ -101,6 +107,16 @@ pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
             text(&d["fix"])
         );
     }
+    write_stderr(&out);
+}
+
+/// Writes `text` to stderr, ignoring a failed write: an error report on a closed stderr has
+/// nowhere to go, and must not panic.
+fn write_stderr(text: &str) {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(text.as_bytes());
+    let _ = err.flush();
 }
 
 /// One line per key rdy re-derived on propose or approve (`keys`: block id → new key, K1).
