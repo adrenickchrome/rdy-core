@@ -126,6 +126,24 @@ fn cp7_stage_refuses_forged_engine_fields() {
             diags.as_array().unwrap().iter().any(hit),
             "{field}: {diags}"
         );
+        // wc_check.rs reuses lint_tree's STORE_ONLY_FIELDS loop (ruling task-7): the same
+        // diagnostic comes from `check_wc` itself, called on the stopped project
+        s.stop();
+        {
+            let r = Rdy::open(s.dir.path()).expect("open");
+            let st = r.read();
+            let mat = st.materialized(&Scope::View("work".into())).unwrap();
+            let diags = check_wc(st.pack(), &mat, s.dir.path(), None).unwrap();
+            assert!(
+                diags.iter().any(|d| d.code == E_WC_STORE_ONLY
+                    && d.file == "notes.yaml"
+                    && d.message == format!("{field} is set by rdy and lives only in the store")
+                    && d.fix == format!("remove {field} from the file")),
+                "{field}: {diags:?}"
+            );
+            drop(st);
+            r.close().expect("close");
+        }
         // the commit is refused with E_WC_INVALID and the same diagnostic
         ok(&s, &["add", "notes.yaml"]);
         let (okk, v) = json(&s, &["commit", "-m", "forged"]);

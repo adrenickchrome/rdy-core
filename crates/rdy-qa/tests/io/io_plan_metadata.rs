@@ -174,6 +174,12 @@ fn cp7_import_refuses_metadata_before_writing() {
         // the raw input is checked before any shape check: a bad value is refused the same way
         (REAFFIRMED, "    reaffirmed: 5\n"),
         (REFLECTS_AT, "    reflects_at: nope\n"),
+        // a value that fails the field conversion (a float; a mapping with a non-string key)
+        // gets the same refusal, not a file-format error
+        (REAFFIRMED, "    reaffirmed: 1.5\n"),
+        (REFLECTS_AT, "    reflects_at: 2.5\n"),
+        (REAFFIRMED, "    reaffirmed:\n      1: x\n"),
+        (REFLECTS_AT, "    reflects_at:\n      ? [a, b]\n      : x\n"),
     ];
     for (field, yaml) in cases {
         let (_d, mut r) = project();
@@ -235,6 +241,27 @@ fn cp7_edit_buffer_preserves_hidden_metadata() {
         .unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert!(e.message.starts_with("nothing changed"), "{e}");
+
+    // the same for a value that fails the field conversion: the raw buffer is checked first
+    for (field, value) in [
+        (REAFFIRMED, "1.5"),
+        (REFLECTS_AT, "2.5"),
+        (REAFFIRMED, "{1: x}"),
+        (REFLECTS_AT, "{? [a, b] : x}"),
+    ] {
+        let mut odd = block_to_yaml(&stored(&r, &c));
+        odd.push_str(&format!("fields:\n  {field}: {value}\n"));
+        let e = r
+            .edit_yaml(&writer(), "work", &odd, None, None)
+            .unwrap_err();
+        assert_eq!(e.code, "E_VALIDATION", "{field}: {value}: {e}");
+        assert!(
+            e.issues.iter().any(|i| i.code == "E_FIELD_UNKNOWN"
+                && i.message == format!("{c} sets \"{field}\", and rdy sets it")),
+            "{field}: {value}: {:?}",
+            e.issues
+        );
+    }
 
     // a buffer that sets a metadata field is refused: rdy sets it
     // (the claim has no other field, so its buffer has no `fields` key to extend)

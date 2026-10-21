@@ -558,17 +558,39 @@ fn engine_field_issues<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Vec<I
     for b in blocks {
         for f in engine_fields::ENGINE_FIELDS {
             if b.fields.contains_key(f) {
-                out.push(Issue {
-                    severity: Severity::Error,
-                    code: "E_FIELD_UNKNOWN",
-                    block: Some(b.id.clone()),
-                    message: format!("{} sets \"{f}\", and rdy sets it", b.id),
-                    fix: format!("remove {f}; use reaffirm or repin with code: true"),
-                });
+                out.push(engine_field_issue(&b.id, f));
             }
         }
     }
     out
+}
+
+fn engine_field_issue(id: &BlockId, field: &str) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: "E_FIELD_UNKNOWN",
+        block: Some(id.clone()),
+        message: engine_field_message(id, field),
+        fix: engine_field_fix(field),
+    }
+}
+
+pub(crate) fn engine_field_message(id: &BlockId, field: &str) -> String {
+    format!("{id} sets \"{field}\", and rdy sets it")
+}
+
+pub(crate) fn engine_field_fix(field: &str) -> String {
+    format!("remove {field}; use reaffirm or repin with code: true")
+}
+
+/// The engine metadata fields a decoded entry names, by key and whatever the value is: the check
+/// on raw input, before any value is converted (a float or a mapping with a non-string key would
+/// otherwise fail the conversion first and hide the real fault).
+pub(crate) fn supplied_engine_fields(y: &BlockYaml) -> Vec<&'static str> {
+    engine_fields::ENGINE_FIELDS
+        .into_iter()
+        .filter(|f| y.fields.contains_key(*f))
+        .collect()
 }
 
 /// The refusal for a non-empty [`engine_field_issues`] list.
@@ -731,7 +753,7 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
 
 /// A YAML syntax error is `E_BAD_INPUT`; a key the block does not take is `E_FILE_FORMAT` with a
 /// did-you-mean, as import and commit report it (hd8, ruling Q14).
-fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
+fn parse_yaml_struct(text: &str) -> Result<BlockYaml, RdyError> {
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)
         .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
     if let Some(f) = tree_io::key_faults(&value).into_iter().next() {
@@ -749,9 +771,12 @@ fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
             f.fix(),
         ));
     }
-    let y: BlockYaml = serde_yaml_ng::from_str(text)
-        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
-    from_yaml_struct(y)
+    serde_yaml_ng::from_str(text)
+        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))
+}
+
+fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
+    from_yaml_struct(parse_yaml_struct(text)?)
 }
 
 /// insc1: an export (or a rendered site) is a state someone can read back, so never `inflight`.
@@ -1016,6 +1041,26 @@ impl Rdy {
         let (mut blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
             let ignore = crate::wc::ignore::Ignore::load(dir)?;
             let (loaded, diags) = tree_io::read_tree_with(&dir.join("docs"), "docs", Some(&ignore));
+            // p-8YP1G: a tree that sets engine metadata is refused before anything is stored or
+            // changed, on the input as decoded (the reader names it before converting a value)
+            let supplied: Vec<Issue> = diags
+                .iter()
+                .filter(|d| d.code == "E_FIELD_UNKNOWN")
+                .map(|d| Issue {
+                    severity: Severity::Error,
+                    code: "E_FIELD_UNKNOWN",
+                    block: d
+                        .message
+                        .split(' ')
+                        .next()
+                        .and_then(|t| BlockId::parse(t).ok()),
+                    message: d.message.clone(),
+                    fix: d.fix.clone(),
+                })
+                .collect();
+            if !supplied.is_empty() {
+                return Err(engine_field_refusal("import", supplied));
+            }
             if let Some(d) = diags
                 .iter()
                 .find(|d| d.severity == rdy_schema::Severity::Error)
@@ -1024,11 +1069,6 @@ impl Rdy {
             }
             loaded.into_iter().map(|l| (l.block, l.keyed)).unzip()
         };
-        // p-8YP1G: before anything is stored or changed, on the input as decoded
-        let supplied = engine_field_issues(&blocks);
-        if !supplied.is_empty() {
-            return Err(engine_field_refusal("import", supplied));
-        }
         let scope = Scope::View(view.to_string());
         // an import is a commit: it claims an unowned view and checks against the view's
         // recorded conflicts, as `write_linked` does
@@ -1391,11 +1431,16 @@ impl Rdy {
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
-        let (mut edited, keyed) = parse_yaml(yaml)?;
-        let supplied = engine_field_issues([&edited]);
+        let y = parse_yaml_struct(yaml)?;
+        // p-8YP1G: on the decoded buffer, before any value is converted
+        let supplied: Vec<Issue> = supplied_engine_fields(&y)
+            .into_iter()
+            .map(|f| engine_field_issue(&y.id, f))
+            .collect();
         if !supplied.is_empty() {
             return Err(engine_field_refusal("edit", supplied));
         }
+        let (mut edited, keyed) = from_yaml_struct(y)?;
         if !keyed.is_empty() {
             let m = self.read().materialized(&Scope::View(view.to_string()))?;
             let keys = Keys::of(m.iter());
