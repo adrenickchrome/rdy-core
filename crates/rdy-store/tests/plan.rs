@@ -1342,3 +1342,292 @@ fn cp3_failed_plan_append_keeps_acknowledged_bytes() {
     assert_eq!(plan_ref_of(&s, "next"), Some(h));
     s.check_objects().unwrap();
 }
+
+// -------------------------------------------------------------------------------------------
+// fix round 1: cumulative answers, and the take's plan and plan-answer context
+
+#[test]
+fn cp3_successor_plans_keep_every_earlier_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    let (a, b) = (Hash([1; 32]), Hash([2; 32]));
+    let first = Plan {
+        answers: vec![defer_answer(a)],
+        ..fresh("solo")
+    };
+    let first = s.put_plan(&first).unwrap();
+    let next = |prev: Hash, answers: Vec<PlanAnswer>| Plan {
+        stable: Some(first),
+        prev: Some(prev),
+        answers,
+        ..fresh("solo")
+    };
+    // a successor that drops an earlier answer is refused, with nothing written
+    let end = s.log_end();
+    let dropped = next(first, vec![]);
+    match s.put_plan(&dropped) {
+        Err(StoreError::Refused(m)) => {
+            assert_eq!(m, format!("plan {}: invalid chain", dropped.id()))
+        }
+        other => panic!("a dropped answer: {other:?}"),
+    }
+    let other_item = next(first, vec![defer_answer(b)]);
+    assert!(matches!(
+        s.put_plan(&other_item),
+        Err(StoreError::Refused(m)) if m == format!("plan {}: invalid chain", other_item.id())
+    ));
+    assert_eq!(s.log_end(), end);
+    assert_eq!(plan_ref_of(&s, "solo"), Some(first));
+    // a successor may replace an item's answer and add new items
+    let replaced = PlanAnswer {
+        act: PlanAct::Confirm,
+        reason: Some("it holds after all".into()),
+        ..defer_answer(a)
+    };
+    let second = s.put_plan(&next(first, vec![replaced.clone()])).unwrap();
+    let third = s
+        .put_plan(&next(second, vec![replaced, defer_answer(b)]))
+        .unwrap();
+    assert_eq!(plan_ref_of(&s, "solo"), Some(third));
+    s.check_objects().unwrap();
+    // fsck reads a successor that drops an answer as damage
+    let forged = next(third, vec![defer_answer(b)]);
+    s.write_guarded_for_tests(plan_frames(&forged)).unwrap();
+    assert_damage(&s, &forged.id(), "invalid chain");
+}
+
+/// The closure of `tag` in `s`, as records by key and in order.
+fn closure_records(
+    s: &Store,
+    tag: Hash,
+) -> (
+    BTreeMap<ObjectKey, rdy_store::sync_stream::StreamRecord>,
+    Vec<ObjectKey>,
+) {
+    let r = s.reader();
+    let c = closure(&r, tag, &BTreeSet::new()).unwrap();
+    let mut source = StoreSource {
+        reader: &r,
+        end: END_OF_LOG,
+    };
+    let mut records = BTreeMap::new();
+    for k in &c.records {
+        records.insert(*k, source.record(*k).unwrap().unwrap());
+    }
+    (records, c.records)
+}
+
+/// A stream of the built tag's closure that `edit` changes, written to `name`: a batch check
+/// of the file alone passes.
+fn edited_upload(
+    b: &Built,
+    tag: Hash,
+    name: &str,
+    edit: impl FnOnce(
+        &mut BTreeMap<ObjectKey, rdy_store::sync_stream::StreamRecord>,
+        &mut Vec<ObjectKey>,
+    ),
+) -> PathBuf {
+    let (mut records, mut order) = closure_records(&b.s, tag);
+    edit(&mut records, &mut order);
+    let header = StreamHeader::tag_history(b.s.repo_id().unwrap().unwrap(), tag, vec![]);
+    let path = b.dir.path().join(name);
+    write_batch(&mut records, &header, &order, File::create(&path).unwrap()).unwrap();
+    check_batch(File::open(&path).unwrap()).unwrap();
+    path
+}
+
+fn present<T: serde::Serialize>(
+    kind: u8,
+    v: &T,
+) -> (ObjectKey, rdy_store::sync_stream::StreamRecord) {
+    let payload = enc(v);
+    let k = key(kind, Hash::of(&payload));
+    (
+        k,
+        rdy_store::sync_stream::StreamRecord::Present { key: k, payload },
+    )
+}
+
+/// Adds the record of `kind` holding `v` at the end of the upload; returns its hash.
+fn add_record<T: serde::Serialize>(
+    records: &mut BTreeMap<ObjectKey, rdy_store::sync_stream::StreamRecord>,
+    order: &mut Vec<ObjectKey>,
+    kind: u8,
+    v: &T,
+) -> Hash {
+    let (k, r) = present(kind, v);
+    records.insert(k, r);
+    order.push(k);
+    k.hash
+}
+
+/// Puts the record of PLAN `p` in the place of the upload's seal `old`.
+fn replace_seal(
+    records: &mut BTreeMap<ObjectKey, rdy_store::sync_stream::StreamRecord>,
+    order: &mut [ObjectKey],
+    old: Hash,
+    p: &Plan,
+) {
+    let old = key(kinds::PLAN, old);
+    records.remove(&old);
+    let (k, r) = present(kinds::PLAN, p);
+    records.insert(k, r);
+    let at = order.iter().position(|x| *x == old).unwrap();
+    order[at] = k;
+}
+
+/// What a holder holds: its log end, its refs and its derived tables.
+fn holder_state(
+    h: &Store,
+) -> (
+    Location,
+    Vec<(String, Vec<u8>)>,
+    rdy_store::index::IndexDump,
+) {
+    (
+        h.log_end(),
+        h.refs_with_prefix("").unwrap(),
+        h.index_dump_for_tests().unwrap(),
+    )
+}
+
+/// The upload at `path` is refused, before anything is written, with E_BAD_RECORD ending
+/// `rule`: by a take into `h`, and by a checked stream with nothing held when `alone`.
+fn refused_upload(h: &mut Store, b: &Built, path: &std::path::Path, rule: &str, alone: bool) {
+    let before = holder_state(h);
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing: b.landing,
+    };
+    match h.take_batches(&[File::open(path).unwrap()], &target, incoming) {
+        Err(rdy_store::take_batch::TakeError::Stream(e)) => {
+            assert_eq!(e.code, "E_BAD_RECORD", "{}", e.message);
+            assert!(e.message.ends_with(rule), "{}: {rule}", e.message);
+        }
+        Err(e) => panic!("{rule}: {e}"),
+        Ok(_) => panic!("{rule}: the take wrote the upload"),
+    }
+    assert_eq!(holder_state(h), before, "{rule}: the holder is unchanged");
+    h.check_holder().unwrap();
+    if alone {
+        match rdy_store::stream_source::CheckedStream::open(File::open(path).unwrap()) {
+            Err(e) => assert!(e.message.ends_with(rule), "{}: {rule}", e.message),
+            Ok(_) => panic!("{rule}: the checked stream passed"),
+        }
+    }
+}
+
+fn new_holder(b: &Built, name: &str) -> Store {
+    Store::create_holder(&b.dir.path().join(name), b.s.repo_id().unwrap().unwrap()).unwrap()
+}
+
+#[test]
+fn cp3_holder_take_refuses_conflicting_or_broken_seals() {
+    let (b, tag) = tagged();
+    let seal = b.s.plan(&b.seal).unwrap();
+    // a second seal of the landing in the same upload
+    let other = Plan {
+        provenance: prov("human:bob", Role::Approver),
+        ..seal.clone()
+    };
+    let path = edited_upload(&b, tag, "two-seals.rdysync", |r, o| {
+        add_record(r, o, kinds::PLAN, &other);
+    });
+    let later = b.seal.max(other.id());
+    let mut h = new_holder(&b, "h-two");
+    refused_upload(
+        &mut h,
+        &b,
+        &path,
+        &format!("plan {later}: duplicate landing seal"),
+        true,
+    );
+    // the seal names a proposal version that is not its landing's
+    let another = Proposal {
+        title: "another version".into(),
+        ..b.s.proposal(&b.version).unwrap()
+    };
+    let (pk, pr) = present(kinds::PROPOSAL, &another);
+    let mismatch = Plan {
+        proposal: Some(pk.hash),
+        seal: Some(PlanSeal {
+            version: pk.hash,
+            ..seal.seal.clone().unwrap()
+        }),
+        ..seal.clone()
+    };
+    let path = edited_upload(&b, tag, "mismatch.rdysync", |r, o| {
+        replace_seal(r, o, b.seal, &mismatch);
+        let at = o.iter().position(|k| k.hash == mismatch.id()).unwrap();
+        o.insert(at, pk);
+        r.insert(pk, pr);
+    });
+    let rule = format!("plan {}: invalid seal", mismatch.id());
+    refused_upload(&mut h, &b, &path, &rule, true);
+    // a seal whose chain is not its predecessor's
+    let unchained = Plan {
+        stable: Some(b.answered),
+        ..seal.clone()
+    };
+    let path = edited_upload(&b, tag, "unchained.rdysync", |r, o| {
+        replace_seal(r, o, b.seal, &unchained)
+    });
+    let rule = format!("plan {}: invalid chain", unchained.id());
+    refused_upload(&mut h, &b, &path, &rule, true);
+    // a seal that drops its predecessor's answer
+    let forgetful = Plan {
+        answers: vec![],
+        ..seal.clone()
+    };
+    let path = edited_upload(&b, tag, "forgetful.rdysync", |r, o| {
+        replace_seal(r, o, b.seal, &forgetful)
+    });
+    let rule = format!("plan {}: invalid chain", forgetful.id());
+    refused_upload(&mut h, &b, &path, &rule, true);
+    // the valid upload is taken, and taken again
+    let valid = b.dir.path().join("valid.rdysync");
+    export(&b.s, tag, END_OF_LOG, &valid);
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing: b.landing,
+    };
+    h.take_batches(&[File::open(&valid).unwrap()], &target, incoming)
+        .unwrap();
+    let end = h.log_end();
+    h.take_batches(&[File::open(&valid).unwrap()], &target, incoming)
+        .unwrap();
+    assert_eq!(h.log_end(), end);
+    // a later upload with another seal of the held landing conflicts with the holder's seal
+    let path = edited_upload(&b, tag, "conflict.rdysync", |r, o| {
+        replace_seal(r, o, b.seal, &other)
+    });
+    let rule = format!("plan {}: duplicate landing seal", other.id());
+    refused_upload(&mut h, &b, &path, &rule, false);
+    assert_eq!(h.plan_of_landing(&b.landing, end).unwrap(), Some(b.seal));
+}
+
+#[test]
+fn cp3_holder_take_refuses_a_keep_suspect_of_no_block() {
+    let (b, tag) = tagged();
+    // a grammatically valid KeepSuspect that targets the closure's landing, not a BLOCK version
+    let keep = answer(
+        &reaffirm_item(),
+        AnswerAct::KeepSuspect,
+        vec![b.landing],
+        Some("the claim still holds"),
+    );
+    let mut k = Hash([0; 32]);
+    let path = edited_upload(&b, tag, "keep.rdysync", |r, o| {
+        k = add_record(r, o, kinds::ANSWER, &keep);
+    });
+    let mut h = new_holder(&b, "h-keep");
+    let rule = format!("answer {k}: invalid plan answer targets");
+    refused_upload(&mut h, &b, &path, &rule, true);
+    // the store's own writer refuses it too
+    let mut s = b.s;
+    assert!(matches!(
+        s.put_answer(&keep),
+        Err(StoreError::Refused(m)) if m == rule
+    ));
+}

@@ -868,7 +868,8 @@ pub(crate) fn depth_of(
 /// record rules (`crate::answer`: relay and evidence together, an evidence kind only with a
 /// relay, card evidence with its card hash, the plan acts' items, notes and targets), and a PLAN
 /// its own record rules (`crate::plan`), with fsck's own text. Its targets rule is the
-/// batch's edge rule. A take checks every file of an upload this way, so no take keeps an answer
+/// batch's edge rule; the typed rules that need other records (a plan's chain and seal, a
+/// KeepSuspect's BLOCK targets) are the whole upload's (`crate::stream_source`). A take checks every file of an upload this way, so no take keeps an answer
 /// that the holder's fsck would refuse.
 fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError> {
     let StreamRecord::Present { key, payload } = r else {
@@ -876,7 +877,8 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
     };
     if key.kind == crate::kinds::PLAN {
         // the plan record rules (`crate::plan`), with fsck's own text; its chain, bound
-        // proposal and seal need the records around it, which the receiver's fsck checks
+        // proposal and seal need the records around it, which the whole-upload check
+        // (`crate::stream_source::check_typed_context`) checks before a take appends
         let p = crate::plan::decode_plan(payload)
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
         return match crate::plan::invalid_record(&p) {

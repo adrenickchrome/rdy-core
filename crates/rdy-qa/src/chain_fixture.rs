@@ -8,10 +8,13 @@
 //!
 //! Store format 17 (D-4JMPH): the project chain's full dump holds a proposal with its bound
 //! plan (an unsealed PLAN, [`PLAN_VIEW`]); increment 1 holds that proposal's landing and its
-//! seal, which names the earlier file's plan. The holder chain's last increment takes the
-//! history of a sealed plan landing of the holder's first source ([`PLAN_TAG`]) through an
-//! export, a batch check and a take: the seal, its chain and its acceptance. The standalone
-//! holder takes that history again after its other takes.
+//! seal, which names the earlier file's plan. The holder's second source (`b`) writes a proposal
+//! with its bound plan, and a clone of it (`c`) is made; each lands that proposal with its own
+//! approver and seal, and tags it ([`PLAN_TAG`] in `b`, [`PLAN_FORK_TAG`] in `c`). Each history
+//! reaches the holder through an export, a batch check and a take: increment 1 takes `b`'s seal,
+//! its chain and its acceptance; increment 2 takes `c`'s seal, whose chain names the bound plan
+//! that increment 1 holds. The standalone holder takes both histories again after its other
+//! takes.
 //!
 //! - The project chain starts from [`every_kind::rolling_project`]. Before the full dump it adds a
 //!   removable prose block (its version and the change that embeds it, with [`EARLY_CANARY`]) and
@@ -75,9 +78,14 @@ pub const LATE_TAG: &str = "v0.5.0";
 pub const STANDALONE_TAG: &str = "v0.6.0";
 /// The view of the project chain's plan: bound in the full dump, sealed in increment 1.
 pub const PLAN_VIEW: &str = "harrier-plan";
-/// The tag of the holder's first source's sealed plan landing, taken in the holder chain's last
-/// increment.
+/// The tag of the holder's second source's sealed plan landing, taken in the holder chain's
+/// first increment.
 pub const PLAN_TAG: &str = "v4.0.0";
+/// The tag of the other seal of that plan, in a clone of the second source, taken in the holder
+/// chain's last increment.
+pub const PLAN_FORK_TAG: &str = "v4.1.0";
+/// The approver of the clone's landing of the plan's proposal: another landing of one version.
+pub const PLAN_FORK_PERSON: &str = "human:qa-fork";
 
 /// The removable blob: a full first chunk (1 MiB of one byte) and a short second chunk.
 pub fn blob_bytes() -> Vec<u8> {
@@ -221,11 +229,11 @@ fn bound_plan(r: &mut Rdy, view: &str, body: &str) -> (Hash, Plan) {
     (proposal, bound)
 }
 
-/// The landing of `proposal` and its seal, which ends `bound`'s chain, in one batch; the seal's
-/// deferred item names an AcceptDeferrals answer of an earlier batch. Returns the landing and
-/// the seal.
-fn sealed_landing(r: &mut Rdy, proposal: Hash, bound: &Plan) -> (Hash, Hash) {
-    let person = plan_prov(PERSON, Role::Approver);
+/// The landing of `proposal` by `approver` and its seal, which ends `bound`'s chain, in one
+/// batch; the seal's deferred item names an AcceptDeferrals answer of an earlier batch. Returns
+/// the landing and the seal.
+fn sealed_landing(r: &mut Rdy, proposal: Hash, bound: &Plan, approver: &str) -> (Hash, Hash) {
+    let person = plan_prov(approver, Role::Approver);
     let accept = Answer {
         item: format!("defer:P-{}@1", &proposal.to_string()[..8]),
         act: AnswerAct::AcceptDeferrals,
@@ -301,7 +309,7 @@ pub fn project_chain() -> Chain {
     let full = dir.path().join("chain-full.rdydump");
     let s0 = r.read().dump(&full).unwrap();
     // increment 1: the plan's landing and seal, then an ordinary landing and its tag
-    sealed_landing(&mut r, proposal, &bound);
+    sealed_landing(&mut r, proposal, &bound, PERSON);
     landed_block(&mut r, "harrier-ordinary", "An ordinary block.");
     tag(&mut r, ORDINARY_TAG);
     let inc1 = dir.path().join("chain-1.rdydump");
@@ -432,16 +440,21 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     let root = built.dir.path().join("chain-holder");
     let mut h = Rdy::create_holder(&root, repo).unwrap();
     h.store_mut().set_segment_max(SEGMENT_MAX);
+    // store format 17: the second source's plan, sealed in it and in its clone
+    let [plan, fork] = plan_uploads(&built, repo);
+    ups.push(plan);
+    ups.push(fork);
     take(&mut h, &ups[0]);
     let full = built.dir.path().join("holder-chain-full.rdydump");
     let s0 = h.read().dump(&full).unwrap();
     take(&mut h, &ups[1]);
+    // the second source's seal, its chain (the bound plan) and its acceptance
+    take(&mut h, &ups[3]);
     let inc1 = built.dir.path().join("holder-chain-1.rdydump");
     let s1 = h.read().dump_after(&s0.chain_end(), &inc1).unwrap();
     take(&mut h, &ups[2]);
-    // store format 17: the first source's sealed plan landing, through an export and a take
-    ups.push(plan_upload(&built, repo));
-    take(&mut h, &ups[3]);
+    // the clone's seal: its chain's bound plan is the one increment 1 holds
+    take(&mut h, &ups[4]);
     // the earlier uploads again: every key is held, so nothing is appended
     let end = h.store().log_end();
     take(&mut h, &ups[1]);
@@ -467,35 +480,46 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     (chain, HolderUploads(ups))
 }
 
-/// The upload of [`PLAN_TAG`]: the every-kind holder's first source (`a`) gets a proposal with
-/// its bound plan, its landing with the seal, and the tag; its history is exported, checked and
-/// written as one batch file.
-fn plan_upload(built: &every_kind::HolderBuild, repo: RepoId) -> Upload {
-    let mut a = Rdy::open(&built.dir.path().join("a")).unwrap();
-    let (proposal, bound) = bound_plan(&mut a, "plan", "A planned prose.");
-    let (landing, _) = sealed_landing(&mut a, proposal, &bound);
-    a.tag(&approver(), PLAN_TAG, None, None).unwrap();
-    seal(&mut a);
-    let tag = a
-        .store()
-        .tags()
-        .unwrap()
-        .into_iter()
-        .find(|(n, ..)| n == PLAN_TAG)
-        .unwrap()
-        .1;
-    let bytes = every_kind::export_tag(&a, tag);
-    a.close().unwrap();
-    rdy_engine::stream_check::check_batch(bytes.as_slice(), Some(repo)).unwrap();
-    let path = built.dir.path().join("uploads").join("v4-0.rdysync");
-    std::fs::write(&path, &bytes).unwrap();
-    Upload {
-        files: vec![path],
-        target: UploadTarget {
-            tag: PLAN_TAG.into(),
-            landing,
-        },
-    }
+/// The uploads of [`PLAN_TAG`] and [`PLAN_FORK_TAG`]: the every-kind holder's second source
+/// (`b`) gets a proposal with its bound plan; a clone of it (`c`) is made; each of the two lands
+/// the proposal with its own approver and seal and tags the landing. Each history is exported,
+/// checked and written as one batch file.
+fn plan_uploads(built: &every_kind::HolderBuild, repo: RepoId) -> [Upload; 2] {
+    let (b_root, c_root) = (built.dir.path().join("b"), built.dir.path().join("c"));
+    let mut b = Rdy::open(&b_root).unwrap();
+    let (proposal, bound) = bound_plan(&mut b, "plan", "A planned prose.");
+    b.close().unwrap();
+    every_kind::copy_tree(&b_root, &c_root);
+    [
+        (&b_root, PERSON, PLAN_TAG, "v4-0.rdysync"),
+        (&c_root, PLAN_FORK_PERSON, PLAN_FORK_TAG, "v4-1-0.rdysync"),
+    ]
+    .map(|(root, person, name, file)| {
+        let mut r = Rdy::open(root).unwrap();
+        let (landing, _) = sealed_landing(&mut r, proposal, &bound, person);
+        r.tag(&approver(), name, None, None).unwrap();
+        seal(&mut r);
+        let tag = r
+            .store()
+            .tags()
+            .unwrap()
+            .into_iter()
+            .find(|(n, ..)| n == name)
+            .unwrap()
+            .1;
+        let bytes = every_kind::export_tag(&r, tag);
+        r.close().unwrap();
+        rdy_engine::stream_check::check_batch(bytes.as_slice(), Some(repo)).unwrap();
+        let path = built.dir.path().join("uploads").join(file);
+        std::fs::write(&path, &bytes).unwrap();
+        Upload {
+            files: vec![path],
+            target: UploadTarget {
+                tag: name.into(),
+                landing,
+            },
+        }
+    })
 }
 
 /// The every-kind holder's uploads, which the holder chain took.
@@ -513,8 +537,9 @@ pub fn holder_standalone(c: &Chain, ups: &HolderUploads) -> Standalone {
     h.store_mut().set_segment_max(SEGMENT_MAX);
     take(&mut h, &ups.0[1]);
     take(&mut h, &ups.0[2]);
-    // store format 17: the sealed plan landing's history again, after the removal
+    // store format 17: both sealed plan landings' histories again, after the removal
     take(&mut h, &ups.0[3]);
+    take(&mut h, &ups.0[4]);
     let dump = dir.path().join("standalone-holder.rdydump");
     h.read().dump(&dump).unwrap();
     h.close().unwrap();

@@ -14,9 +14,10 @@
 //!   plan. Increment 2 holds the two approved removals and the fixed stops of the `(3, 16)` set.
 //! - `v3-s17` is the standalone full fixture, built as `v3-s16` is.
 //! - `v3-s17-holder-chain-*` and `v3-s17-holder` are the same for a holder, filled by takes of the
-//!   every-kind holder's uploads and, in the chain's last increment, of a sealed plan landing's
-//!   history (`chain_fixture::PLAN_TAG`) through an export, a batch check and a take: the seal,
-//!   its chain and its acceptance, and no `plan/` ref.
+//!   every-kind holder's uploads and of two sealed plan landings' histories through an export, a
+//!   batch check and a take, with no `plan/` ref: increment 1 takes a seal with its chain and
+//!   acceptance (`chain_fixture::PLAN_TAG`), and increment 2 takes another source's seal of the
+//!   same proposal (`chain_fixture::PLAN_FORK_TAG`), which names the bound plan of increment 1.
 //!
 //! Every expect file pins what a load of its files must give, as the `(3, 16)` set pins it, and
 //! the plan facts: every PLAN record and every row of the four plan tables. A later store format
@@ -83,30 +84,12 @@ pub(crate) const MEMBERS: [(&str, &str); 12] = [
         CHAIN_EXPECT,
         "9dcb2982bcae43cf79476b6ecaff2e13f528bb1a86d5f2caf0ec4e98c0f775b8",
     ),
-    (
-        HOLDER,
-        "771c2118924d0324885f25a73c60c7a1331221c156b2b0df298b6de613d694aa",
-    ),
-    (
-        HOLDER_EXPECT,
-        "44a941765c88b7cc84b33cd9bbe27ea9665023cdd00835654a0299e9128f3ae5",
-    ),
-    (
-        HOLDER_CHAIN_FULL,
-        "ec0e4a4f6f3f5c6efde8229b8b65205adfa4a18de8098f4945864021f4ebf5eb",
-    ),
-    (
-        HOLDER_CHAIN_1,
-        "ac46691bf0b612877c6fbd1cb1e487068d884f93d1f82b26f8bdd766ec80dc4e",
-    ),
-    (
-        HOLDER_CHAIN_2,
-        "48a2f8a431ce2ff38eaab1b6adb567441cf7fce5c9f96902e942b310a6f4605d",
-    ),
-    (
-        HOLDER_CHAIN_EXPECT,
-        "54958cbc0723d1c9dc7b589fdcc3a64912546841bcadcfd31a49a7f7abd912ed",
-    ),
+    (HOLDER, "TBD"),
+    (HOLDER_EXPECT, "TBD"),
+    (HOLDER_CHAIN_FULL, "TBD"),
+    (HOLDER_CHAIN_1, "TBD"),
+    (HOLDER_CHAIN_2, "TBD"),
+    (HOLDER_CHAIN_EXPECT, "TBD"),
 ];
 
 /// The blake3 of member `name`, as [`MEMBERS`] pins it.
@@ -1184,13 +1167,12 @@ fn cp3_format17_chain_seal_resolves_an_earlier_file() {
             }
         }
         assert!(seals >= 1, "{expect}: a seal");
-        if !holder {
-            // the full dump's bound plan, sealed by increment 1
-            assert!(
-                crossing >= 1,
-                "{expect}: a seal names an earlier file's plan"
-            );
-        }
+        // the project: the full dump's bound plan, sealed by increment 1; the holder: increment
+        // 1's bound plan, which a second source's seal names in increment 2
+        assert!(
+            crossing >= 1,
+            "{expect}: a seal names an earlier file's plan"
+        );
         // the indexes a reindex rebuilds are the load's
         let tables = r.store().index_dump_for_tests().unwrap();
         r.reindex().unwrap();

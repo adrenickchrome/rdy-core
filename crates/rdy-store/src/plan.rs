@@ -7,7 +7,8 @@
 //! A chain's first version has neither `stable` nor `prev`; each later one names the chain's
 //! first version and its immediate predecessor, of the same view. A sealed version ends the
 //! chain: nothing follows it. Answers are cumulative, sorted by full item hash, one (the latest)
-//! per item; heads are sorted and distinct by repo. An answer-only version has no `proposal`; a
+//! per item: a later version keeps every item its predecessor answers, and may replace an
+//! item's answer or add items; heads are sorted and distinct by repo. An answer-only version has no `proposal`; a
 //! bound version names the proposal version it was written with, in the same batch, and every
 //! bound proposal has one unsealed version. A seal names its landing, in the same batch before
 //! it, and that landing's landed proposal version (`seal.version`, which `proposal` repeats). An
@@ -69,7 +70,8 @@ pub const PLAN_REFS_WRITER_ONLY: &str = "plan refs are written only by the plan 
 
 /// A field breaks its own rule: a text length, an enum combination, a git hash, a list bound.
 pub const INVALID_FIELDS: &str = "invalid fields";
-/// `stable` and `prev` do not name the chain this version follows.
+/// `stable` and `prev` do not name the chain this version follows, or the version drops an
+/// item that its predecessor answers.
 pub const INVALID_CHAIN: &str = "invalid chain";
 /// The bound proposal is not a proposal of this view in this batch, or another version binds it.
 pub const INVALID_PROPOSAL: &str = "invalid proposal";
@@ -278,9 +280,13 @@ pub(crate) fn invalid_context(
             else {
                 return Ok(Some(INVALID_CHAIN));
             };
+            // answers are cumulative: each of the predecessor's items keeps an answer (its act
+            // and reason may be replaced); `p.answers` is sorted by item (`invalid_record`)
+            let keeps = |item: &Hash| p.answers.binary_search_by(|a| a.item.cmp(item)).is_ok();
             if q.view != p.view
                 || q.seal.is_some()
                 || p.stable != Some(q.stable.unwrap_or(prev))
+                || !q.answers.iter().all(|a| keeps(&a.item))
                 || (!holder && look.latest(&p.view)? != Some(prev))
             {
                 return Ok(Some(INVALID_CHAIN));

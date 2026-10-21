@@ -22,7 +22,11 @@
 //!    (`crate::closure`): answers of reached landings and tags, signatures of reached landings
 //!    and of the root, the root's relay answer (O11: act `tag`, item `tag:<root name>`, and
 //!    targets exactly the root TAG), requests of reached carriers, and applies whose request
-//!    names a reached object.
+//!    names a reached object. Each new PLAN keeps its chain, bound proposal and seal, and each
+//!    new ANSWER its typed targets, as the holder's fsck checks them, against the union and the
+//!    holder (`stream_source::check_typed_context`): a second seal of one landing, in the upload
+//!    or against the holder's seal, is `duplicate landing seal`. A hash the holder holds already
+//!    is not checked again.
 //! 6. Each new apply passes its portable proof (`sync_proof::check`, over the union and the
 //!    holder). Each dropped record names a validated apply that approves its exact tuple, and
 //!    each key the upload approves or drops has one tuple over every approval of the holder and
@@ -46,7 +50,7 @@
 //!    the frames, payload bytes and spans of the batch included; the marker counts only when
 //!    there is a frame to write (a complete retry writes none).
 //!
-//! Steps 2, 3 (the root), 5 and 6 (the portable proofs, the dropped records and the one tuple of
+//! Steps 2, 3 (the root), 5 (with the typed context) and 6 (the portable proofs, the dropped records and the one tuple of
 //! each key) and the relay answers of step 8 are `crate::stream_source`'s checks, which a checked
 //! stream runs with nothing held; the take runs them over the union and the holder. The
 //! receiver's own steps stay here: the repo, the upload target, SIG's rule over the holder, the
@@ -458,6 +462,11 @@ impl Records for UploadSource<'_> {
                 .map_err(|e| store_error(e, Some(*k)))?)
     }
 
+    fn position(&self, k: &ObjectKey) -> Option<(u64, u64)> {
+        let at = self.union.get(k)?.present?;
+        Some((at.record, at.offset))
+    }
+
     fn links(&mut self, k: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError> {
         if let Some(e) = self.union.get(&k) {
             let mut links = e.refs.clone();
@@ -762,6 +771,18 @@ pub(crate) fn prepare<E>(
     }
     // 5. the closure
     stream_source::check_closure(&mut source, root_key, &root, &objects)?;
+    // 5. and the typed context of the new plans and plan answers, over the union and the holder
+    let mut new_keys: Vec<ObjectKey> = Vec::new();
+    for k in union
+        .keys()
+        .filter(|k| matches!(k.kind, kinds::PLAN | kinds::ANSWER))
+    {
+        if !rx.holds(k)? {
+            new_keys.push(*k);
+        }
+    }
+    stream_source::check_typed_context(&mut source, Some(reader), &new_keys)?;
+    drop(new_keys);
     // 6. the approvals: every new apply's proof, and the holder's active ones
     let empty = Imported::default();
     let active: &Imported = rx.auth.imported.as_ref().unwrap_or(&empty);

@@ -6,7 +6,8 @@
 //! The completeness and removal checks here are the take's own (`crate::take_batch` calls the
 //! same functions over the holder and the incoming files): every prerequisite is held, the root
 //! TAG decodes, every incoming record is in the root's closure (forward links and the closure's
-//! attachments), every new apply passes its portable proof (`sync_proof::check`), every dropped
+//! attachments), every incoming PLAN and ANSWER keeps its typed context as fsck checks a
+//! holder's ([`check_typed_context`]), every new apply passes its portable proof (`sync_proof::check`), every dropped
 //! record names a validated apply that approves its exact tuple, and each approved or dropped
 //! key has one tuple. [`check_complete`] runs them over any [`ObjectSource`] with nothing held.
 //! The take's step 7 (a present change that embeds an approved block version and that no
@@ -22,8 +23,10 @@
 //! frame and hash checked, when a read needs it. A record that an approved removal covers reads
 //! as its dropped identity, never as its bytes.
 use crate::bounded;
+use crate::error::StoreError;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef};
+use crate::plan::Place as PlanPlace;
 use crate::segment::HEADER;
 use crate::stream_error::{LIMIT_GRAPH_EDGES, LIMIT_OBJECT_RECORDS, Reason, StreamError};
 use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
@@ -76,6 +79,11 @@ pub(crate) trait Records {
     /// it is written), then each dropped representation's residue and apply. None when the
     /// source does not hold `key`.
     fn links(&mut self, key: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError>;
+    /// The record number and frame offset of `key`'s present record in the incoming files, when
+    /// the source indexes them; a refusal names them.
+    fn position(&self, _key: &ObjectKey) -> Option<(u64, u64)> {
+        None
+    }
 }
 
 /// The forward links of one record: its references, then its removal proof.
@@ -355,6 +363,178 @@ pub(crate) fn check_closure(
     }
 }
 
+/// The writers' and fsck's view of a plan, as the receive checks see it: an incoming record is
+/// in the plan's own batch (a take writes one batch), a record the source holds otherwise is
+/// the holder's, and the seals and bound proposals are the incoming plans checked so far and
+/// the holder's tables. A stream error of a lookup is kept in `failed`: the store error the
+/// plan check returns then only stops it.
+struct ContextLookup<'a> {
+    rec: RefCell<&'a mut dyn Records>,
+    holder: Option<&'a crate::StoreReader>,
+    incoming: &'a [ObjectKey],
+    bound: HashMap<Hash, Hash>,
+    sealed: HashMap<Hash, Hash>,
+    failed: RefCell<Option<StreamError>>,
+}
+
+impl ContextLookup<'_> {
+    /// `r`, with a stream error kept in `failed`.
+    fn keep<T>(&self, r: Result<T, StreamError>) -> Result<T, StoreError> {
+        r.map_err(|e| {
+            *self.failed.borrow_mut() = Some(e);
+            StoreError::Refused(String::new())
+        })
+    }
+
+    /// Whether the record of `key` is incoming or the source holds it.
+    fn holds(&self, key: &ObjectKey) -> Result<bool, StreamError> {
+        Ok(self.incoming.binary_search(key).is_ok() || self.rec.borrow_mut().has(key)?)
+    }
+
+    /// The refusal of the record `key` that breaks `rule` (fsck's own text).
+    fn broken(&self, key: ObjectKey, rule: &str) -> StreamError {
+        let (n, offset) = self.rec.borrow().position(&key).unwrap_or((0, 0));
+        StreamError::broken_rule(n, offset, rule).with_object(Some(key))
+    }
+
+    /// The error a failed plan check ends with: the kept stream error, else `e`'s.
+    fn failure(&self, e: StoreError, key: ObjectKey) -> StreamError {
+        self.failed
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| crate::closure::store_error(e, Some(key)))
+    }
+}
+
+impl crate::plan::PlanLookup for ContextLookup<'_> {
+    fn place(&self, kind: u8, h: &Hash) -> Result<PlanPlace, StoreError> {
+        let key = ObjectKey { kind, hash: *h };
+        if self.incoming.binary_search(&key).is_ok() {
+            return Ok(PlanPlace::Batch);
+        }
+        Ok(if self.keep(self.rec.borrow_mut().has(&key))? {
+            PlanPlace::Log
+        } else {
+            PlanPlace::Missing
+        })
+    }
+
+    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        let key = ObjectKey { kind, hash: *h };
+        let record = self.keep(self.rec.borrow_mut().object_source().record(key))?;
+        match record {
+            Some(StreamRecord::Present { payload, .. }) => Ok(payload),
+            // a removed record reads as removed, as fsck reads it: by the apply that removed it
+            Some(StreamRecord::Dropped { apply, .. }) => {
+                Err(StoreError::Redacted { request: apply })
+            }
+            None => Err(StoreError::NotFound(*h)),
+        }
+    }
+
+    fn latest(&self, _: &str) -> Result<Option<Hash>, StoreError> {
+        // a receiver has no view: its chains are checked as a holder's
+        Ok(None)
+    }
+
+    fn bound(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
+        if let Some(h) = self.bound.get(p) {
+            return Ok(Some(*h));
+        }
+        match self.holder {
+            Some(r) => Ok(r.index().plan_proposal(p)?.map(|(h, _)| h)),
+            None => Ok(None),
+        }
+    }
+
+    fn sealed(&self, l: &Hash) -> Result<Option<Hash>, StoreError> {
+        if let Some(h) = self.sealed.get(l) {
+            return Ok(Some(*h));
+        }
+        match self.holder {
+            Some(r) => Ok(r.index().plan_seal(l)?.map(|(h, _)| h)),
+            None => Ok(None),
+        }
+    }
+
+    fn holder(&self) -> bool {
+        true
+    }
+}
+
+/// Checks the typed context of the incoming plans and plan answers before anything is written,
+/// as fsck checks a holder's: each new PLAN keeps its chain, bound proposal and seal
+/// (`crate::plan::invalid_context`) against the incoming records, the records `rec` holds and
+/// the `holder`'s seal and proposal tables, and each new ANSWER keeps its typed target rule
+/// (`crate::answer::invalid_targets`: a KeepSuspect names BLOCK versions only). Two different
+/// seals of one landing, in the upload or against the holder, are `duplicate landing seal`; a
+/// record the holder holds already is not incoming, so a repeated hash is accepted. `incoming`
+/// is sorted. A break is E_BAD_RECORD with fsck's own text, `plan <h>: <reason>` or `answer <h>:
+/// <reason>`. A take runs it over the upload and the holder; a checked stream with nothing held.
+pub(crate) fn check_typed_context(
+    rec: &mut dyn Records,
+    holder: Option<&crate::StoreReader>,
+    incoming: &[ObjectKey],
+) -> Result<(), StreamError> {
+    let mut look = ContextLookup {
+        rec: RefCell::new(rec),
+        holder,
+        incoming,
+        bound: HashMap::new(),
+        sealed: HashMap::new(),
+        failed: RefCell::new(None),
+    };
+    let grow = || StreamError::allocation(None, 0);
+    for k in incoming.iter().copied() {
+        match k.kind {
+            kinds::PLAN => {
+                let record = look.rec.get_mut().object_source().record(k)?;
+                let Some(StreamRecord::Present { payload, .. }) = record else {
+                    continue;
+                };
+                let p = crate::plan::decode_plan(&payload)
+                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
+                let rule = match crate::plan::invalid_record(&p) {
+                    Some(rule) => Some(rule),
+                    None => crate::plan::invalid_context(&k.hash, &p, &look)
+                        .map_err(|e| look.failure(e, k))?,
+                };
+                if let Some(rule) = rule {
+                    return Err(look.broken(k, &crate::plan::damage(&k.hash, rule)));
+                }
+                match &p.seal {
+                    Some(seal) => {
+                        look.sealed.try_reserve(1).map_err(|_| grow())?;
+                        look.sealed.entry(seal.landing).or_insert(k.hash);
+                    }
+                    None => {
+                        if let Some(prop) = p.proposal {
+                            look.bound.try_reserve(1).map_err(|_| grow())?;
+                            look.bound.entry(prop).or_insert(k.hash);
+                        }
+                    }
+                }
+            }
+            kinds::ANSWER => {
+                let Some(a) = typed::<Answer>(look.rec.get_mut().object_source(), k)? else {
+                    continue;
+                };
+                let is_block = |t: &Hash| {
+                    look.holds(&ObjectKey {
+                        kind: kinds::BLOCK,
+                        hash: *t,
+                    })
+                };
+                if let Some(rule) = crate::answer::invalid_targets(&a, is_block)? {
+                    return Err(look.broken(k, &crate::answer::damage(&k.hash, rule)));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Checks each apply of `applies` by its portable proof over the source, and returns what each
 /// one authorizes, by apply hash.
 pub(crate) fn check_applies(
@@ -556,6 +736,8 @@ fn complete(
     let root_key = header.root();
     let root = root_tag(rec, root_key)?;
     check_closure(rec, root_key, &root, &keys)?;
+    // the typed context of the plans and plan answers
+    check_typed_context(rec, None, &keys)?;
     // the approvals: every apply's proof
     let incoming = check_applies(
         rec,
@@ -613,7 +795,8 @@ fn complete(
 /// checks the union of an upload's batch files: every prerequisite of every header is a record
 /// of `source` (else E_UNRESOLVED_REF `stream prerequisite <key> is missing`, for the first
 /// missing key in key order), the headers agree, the root TAG decodes, every key of
-/// `input_keys` (the incoming objects) is in the root's closure, every apply among them passes
+/// `input_keys` (the incoming objects) is in the root's closure, every PLAN and ANSWER among
+/// them keeps its typed context ([`check_typed_context`]), every apply among them passes
 /// its portable proof, every dropped record names a validated apply that approves its exact
 /// tuple, and each approved or dropped key has one tuple. A record of `source` that is not in
 /// `input_keys` is not incoming, and is never required to be reached. Returns the facts a take
@@ -749,6 +932,13 @@ impl<R: Read + Seek> Records for Indexed<R> {
 
     fn has(&mut self, key: &ObjectKey) -> Result<bool, StreamError> {
         Ok(self.index.contains_key(key))
+    }
+
+    fn position(&self, key: &ObjectKey) -> Option<(u64, u64)> {
+        match self.index.get(key) {
+            Some(Place::Present { record, offset, .. }) => Some((*record, *offset)),
+            _ => None,
+        }
     }
 
     fn links(&mut self, key: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError> {

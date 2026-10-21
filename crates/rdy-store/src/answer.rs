@@ -165,6 +165,25 @@ fn plan_act_invalid(a: &Answer) -> Option<&'static str> {
     }
 }
 
+/// The typed target rule of `a` (store format 17), if it breaks it: a KeepSuspect's targets are
+/// member BLOCK versions. `is_block` says whether a hash names a BLOCK version that `a` may name
+/// (written before it). The one rule that `put_answer`, fsck and the receive checks
+/// (`crate::stream_source`) apply; the generic reference edges of the targets stay kind-None.
+pub(crate) fn invalid_targets<E>(
+    a: &Answer,
+    mut is_block: impl FnMut(&Hash) -> Result<bool, E>,
+) -> Result<Option<&'static str>, E> {
+    if a.act != AnswerAct::KeepSuspect {
+        return Ok(None);
+    }
+    for t in &a.targets {
+        if !is_block(t)? {
+            return Ok(Some(PLAN_TARGETS));
+        }
+    }
+    Ok(None)
+}
+
 /// The text of the rule `rule` that answer `h` breaks: `answer <h>: <rule>`.
 pub(crate) fn damage(h: &Hash, rule: impl std::fmt::Display) -> String {
     format!("answer {h}: {rule}")
@@ -212,15 +231,15 @@ impl Store {
                     format!("target {t} is not an object in the log"),
                 )));
             }
-            // a KeepSuspect's targets are member BLOCK versions
-            if a.act == AnswerAct::KeepSuspect
-                && !extra
-                    .iter()
-                    .any(|(k, p)| *k == kinds::BLOCK && Hash::of(p) == *t)
-                && !self.has_kind(kinds::BLOCK, t)?
-            {
-                return Err(StoreError::Refused(damage(&id, PLAN_TARGETS)));
-            }
+        }
+        let is_block = |t: &Hash| -> Result<bool, StoreError> {
+            Ok(extra
+                .iter()
+                .any(|(k, p)| *k == kinds::BLOCK && Hash::of(p) == *t)
+                || self.has_kind(kinds::BLOCK, t)?)
+        };
+        if let Some(rule) = invalid_targets(a, is_block)? {
+            return Err(StoreError::Refused(damage(&id, rule)));
         }
         let mut items = extra;
         items.push((kinds::ANSWER, bytes));
@@ -311,11 +330,12 @@ impl StoreReader {
                         format!("target {t} is not an object in the log before it"),
                     )));
                 }
-                if a.act == AnswerAct::KeepSuspect
-                    && !self.index().typed(kinds::BLOCK, t)?.is_some_and(|l| l < at)
-                {
-                    return Err(StoreError::Decode(damage(&h, PLAN_TARGETS)));
-                }
+            }
+            let is_block = |t: &Hash| -> Result<bool, StoreError> {
+                Ok(self.index().typed(kinds::BLOCK, t)?.is_some_and(|l| l < at))
+            };
+            if let Some(rule) = invalid_targets(&a, is_block)? {
+                return Err(StoreError::Decode(damage(&h, rule)));
             }
             n += 1;
             Ok(())

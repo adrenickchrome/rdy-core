@@ -1741,7 +1741,7 @@ fn holds(root: &Path, bytes: &[u8]) -> bool {
 }
 
 /// Copies the tree `from` to `to`, files byte for byte.
-fn copy_tree(from: &Path, to: &Path) {
+pub fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for e in std::fs::read_dir(from).unwrap() {
         let e = e.unwrap();
