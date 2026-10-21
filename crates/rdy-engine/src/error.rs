@@ -695,6 +695,10 @@ pub const E_SITE: &str = "E_SITE";
 /// The live site is open to the network (`serve.site_lan`), or could not be limited to this
 /// machine as asked.
 pub const W_SITE_LAN: &str = "W_SITE_LAN";
+/// A live profile site warns: it links a block the profile does not show, or it is a
+/// profile-only site, whose reader can still read everything the project holds (D-DK03K). It is
+/// a name for the descriptive error table; a reply carries its warnings as text, with no code.
+pub const W_SITE_PROFILE: &str = "W_SITE_PROFILE";
 
 /// A file that is not a dump this rdy reads, a damaged dump, or a loaded project that fails fsck.
 pub const E_DUMP: &str = "E_DUMP";

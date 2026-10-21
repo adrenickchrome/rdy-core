@@ -23,7 +23,7 @@ use crate::shared::Shared;
 use crate::site::guard::{Guard, SiteTarget};
 use crate::site::server::{self, HttpLimits, SiteServer};
 use crate::site::{LanOverride, SiteInfo, addr};
-use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
+use rdy_engine::engine::{SiteWarning, profile_only_caveat, profile_only_lan_warning};
 use rdy_engine::publication::{IMPLICIT_ORG, ResolvedProfile, profile_at};
 use rdy_engine::{E_NOT_FOUND, E_SITE, RdyError, ReadState, Scope, serve_config};
 use std::collections::BTreeMap;
@@ -145,31 +145,11 @@ fn held_in(st: &ReadState, key: &str) -> Availability {
     }
 }
 
-/// The caveat of every profile-only site, for the profile titled `title`.
-pub fn caveat(title: &str) -> SiteWarning {
-    SiteWarning {
-        message: format!(
-            "this site shows only the profile \"{title}\"; anyone with the project still reads everything"
-        ),
-        fix: "give the full site's link from rdy site when the person needs everything".to_string(),
-    }
-}
-
 /// The LAN warning of `info` (a profile-only listener's original diagnostic) for the profile
-/// titled `title`: a bound LAN address names the profile, and a failed setup prefixes its
-/// message with the profile. `None` without a LAN warning.
-pub fn profile_lan_warning(info: &SiteInfo, title: &str) -> Option<SiteWarning> {
+/// titled `title`, worded as a reply words it. `None` without a LAN warning.
+fn lan_warning(info: &SiteInfo, title: &str) -> Option<SiteWarning> {
     let w = info.warning.as_ref()?;
-    Some(match &info.lan_url {
-        Some(url) => SiteWarning {
-            message: format!("anyone on your network can read the profile \"{title}\" at {url}"),
-            fix: SITE_LAN_FIX.to_string(),
-        },
-        None => SiteWarning {
-            message: format!("profile \"{title}\": {}", w.message),
-            fix: w.fix.clone(),
-        },
-    })
+    Some(profile_only_lan_warning(w, info.lan_url.as_deref(), title))
 }
 
 /// The lines a new profile-only listener logs: its address, its LAN warning in the base LAN
@@ -179,13 +159,13 @@ fn open_lines(key: &str, info: &SiteInfo, title: &str) -> Vec<String> {
         "site: profile {key}: {}",
         info.url.as_deref().unwrap_or_default()
     )];
-    if let Some(w) = profile_lan_warning(info, title) {
+    if let Some(w) = lan_warning(info, title) {
         lines.push(match info.lan_url {
             Some(_) => format!("site: warning: {}; fix: {}", w.message, w.fix),
             None => format!("site: {}; fix: {}", w.message, w.fix),
         });
     }
-    let c = caveat(title);
+    let c = profile_only_caveat(title);
     lines.push(format!("site: warning: {}; fix: {}", c.message, c.fix));
     lines
 }

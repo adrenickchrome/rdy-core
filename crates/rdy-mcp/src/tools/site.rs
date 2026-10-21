@@ -22,7 +22,7 @@ pub struct SiteParams {
 /// required, as for `rdy_inbox`.
 pub fn rdy_site(st: &mut McpState, p: SiteParams) -> Result<Value, RdyError> {
     session(st)?;
-    site_reply(&*st.engine, p.scope.as_deref())
+    site_reply(&*st.engine, p.scope.as_deref(), None, false)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

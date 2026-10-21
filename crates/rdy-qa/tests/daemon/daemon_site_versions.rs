@@ -186,7 +186,8 @@ fn sr8_a_view_commit_recounts_one_view() {
 fn sr8_the_versions_page_is_never_a_read_scope() {
     let h = two_docs();
     let sh = shared(&h);
-    let e = rdy_engine::engine::site_reply(&*sh.engine(), Some("versions")).unwrap_err();
+    let e =
+        rdy_engine::engine::site_reply(&*sh.engine(), Some("versions"), None, false).unwrap_err();
     assert_eq!(e.code, rdy_engine::E_NOT_FOUND, "{e:?}");
     assert_eq!(e.message, "no view \"versions\"", "{e:?}");
     assert!(resolve(&sh.state.load_full(), &ScopeRef::Versions).is_err());
