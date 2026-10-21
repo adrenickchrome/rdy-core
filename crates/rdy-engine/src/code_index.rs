@@ -140,11 +140,29 @@ pub struct Commit {
 /// The commits in `git log -z --name-status --format=<log_format(nonce)>` output. Records
 /// split on the separators followed by `nonce`. A hash that is not 40 or 64 lowercase hex
 /// characters skips its record, as do malformed records; non-UTF-8 paths are skipped; it never
-/// panics.
+/// panics. The only bound is the size of `out`; evidence reads use `parse_log_bounded`.
 pub fn parse_log(out: &[u8], nonce: &str) -> Vec<Commit> {
+    parse_log_bounded(out, nonce, usize::MAX, usize::MAX).unwrap_or_default()
+}
+
+/// `parse_log` for output from a repository the person does not control. Every path token
+/// counts (a rename holds two), whatever its encoding: more than `max_paths` in all is
+/// `E_LIMIT` `paths`, and one over `max_path` bytes is `E_LIMIT` `path bytes`. Both checks run
+/// on the raw token before a path is copied.
+pub(crate) fn parse_log_bounded(
+    out: &[u8],
+    nonce: &str,
+    max_paths: usize,
+    max_path: usize,
+) -> Result<Vec<Commit>, RdyError> {
     let record = [&[0x1e], nonce.as_bytes()].concat();
     let unit = [&[0x1f], nonce.as_bytes()].concat();
     let mut commits = Vec::new();
+    let mut bounds = PathBounds {
+        left: max_paths,
+        max_paths,
+        max_path,
+    };
     // the bytes before the first record marker are no record
     for chunk in split_on(out, &record).skip(1) {
         let Some(i) = find(chunk, &unit) else {
@@ -161,10 +179,31 @@ pub fn parse_log(out: &[u8], nonce: &str) -> Vec<Commit> {
         commits.push(Commit {
             hash: String::from_utf8_lossy(hash).into_owned(),
             implements: implements_of(&String::from_utf8_lossy(trailers)),
-            changes: changes_of(tail),
+            changes: changes_of(tail, &mut bounds)?,
         });
     }
-    commits
+    Ok(commits)
+}
+
+/// What is left of the path budget of one log.
+struct PathBounds {
+    left: usize,
+    max_paths: usize,
+    max_path: usize,
+}
+
+impl PathBounds {
+    /// Counts one path token and returns it, or the `E_LIMIT` it passes.
+    fn take<'a>(&mut self, token: &'a [u8]) -> Result<&'a [u8], RdyError> {
+        if self.left == 0 {
+            return Err(limit_error(self.max_paths, "paths"));
+        }
+        self.left -= 1;
+        if token.len() > self.max_path {
+            return Err(limit_error(self.max_path, "path bytes"));
+        }
+        Ok(token)
+    }
 }
 
 /// The first position of `needle` (not empty) in `hay`.
@@ -207,8 +246,9 @@ fn implements_of(trailers: &str) -> Vec<String> {
     out
 }
 
-/// The `--name-status -z` list: a status token, then one path (two for `R` and `C`).
-fn changes_of(tail: &[u8]) -> Vec<FileChange> {
+/// The `--name-status -z` list: a status token, then one path (two for `R` and `C`). Each path
+/// token is counted against `bounds` before it is decoded.
+fn changes_of(tail: &[u8], bounds: &mut PathBounds) -> Result<Vec<FileChange>, RdyError> {
     let mut tokens = tail
         .split(|b| *b == 0)
         .map(|t| {
@@ -224,6 +264,7 @@ fn changes_of(tail: &[u8]) -> Vec<FileChange> {
                 let (Some(from), Some(to)) = (tokens.next(), tokens.next()) else {
                     break;
                 };
+                let (from, to) = (bounds.take(from)?, bounds.take(to)?);
                 if let (Some(from), Some(to)) = (utf8(from), utf8(to)) {
                     changes.push(if kind == b'R' {
                         FileChange::Rename { from, to }
@@ -236,6 +277,7 @@ fn changes_of(tail: &[u8]) -> Vec<FileChange> {
                 let Some(path) = tokens.next() else {
                     break;
                 };
+                let path = bounds.take(path)?;
                 if let Some(path) = utf8(path) {
                     changes.push(if kind == b'D' {
                         FileChange::Delete(path)
@@ -246,7 +288,7 @@ fn changes_of(tail: &[u8]) -> Vec<FileChange> {
             }
         }
     }
-    changes
+    Ok(changes)
 }
 
 /// One linked repository's citations at one HEAD.
@@ -709,6 +751,17 @@ fn build_from(
     head: String,
     at_head: &BTreeSet<String>,
 ) -> Result<CodeIndex, RdyError> {
+    build_from_bounded(repo, head, at_head, MAX_TREE_PATHS, MAX_TREE_PATH)
+}
+
+/// `build_from` with the history path bounds named, so a test can use small ones.
+pub(crate) fn build_from_bounded(
+    repo: &CodeRepo,
+    head: String,
+    at_head: &BTreeSet<String>,
+    max_paths: usize,
+    max_path: usize,
+) -> Result<CodeIndex, RdyError> {
     check_not_shallow(repo)?;
     let nonce = crate::wc::state::new_nonce();
     let mut c = git_command(&repo.root);
@@ -733,7 +786,7 @@ fn build_from(
         ));
     }
     Ok(CodeIndex::from_commits(
-        &parse_log(&log.stdout, &nonce),
+        &parse_log_bounded(&log.stdout, &nonce, max_paths, max_path)?,
         Some(at_head),
         Some(head),
     ))

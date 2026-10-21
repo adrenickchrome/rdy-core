@@ -216,7 +216,7 @@ mod tests {
     use super::*;
     use crate::code_index::{
         Drained, Limits, MAX_GIT_ERROR, MAX_GIT_OUTPUT, MAX_TREE_PATH, MAX_TREE_PATHS, REAPED,
-        drain, parse_tree, run_with,
+        build_from_bounded, drain, parse_log_bounded, parse_tree, run_with,
     };
     use crate::{E_CONFIG, E_LIMIT};
     use rdy_model::{Block, FieldValue, Op};
@@ -686,5 +686,119 @@ mod tests {
         assert_eq!(err.message, "code evidence exceeds 8 path bytes");
         assert_eq!((MAX_GIT_OUTPUT, MAX_GIT_ERROR), (268_435_456, 65_536));
         assert_eq!((MAX_TREE_PATHS, MAX_TREE_PATH), (1_000_000, 4096));
+    }
+
+    /// Commits the empty blob at the paths of `add` and drops those of `remove`, with git
+    /// plumbing: the work tree is never touched, so a path no file system could hold still
+    /// enters the history. `parent` is the commit it follows, if any.
+    fn plumbing_commit(
+        dir: &Path,
+        parent: Option<&str>,
+        add: &[&str],
+        remove: &[&str],
+        message: &str,
+    ) -> String {
+        let blob = git(dir, &["hash-object", "-w", "-t", "blob", "/dev/null"]);
+        for path in add {
+            git(
+                dir,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},{path}"),
+                ],
+            );
+        }
+        for path in remove {
+            git(dir, &["update-index", "--force-remove", path]);
+        }
+        let tree = git(dir, &["write-tree"]);
+        let mut args = vec!["commit-tree", tree.as_str(), "-m", message];
+        if let Some(p) = parent {
+            args.extend(["-p", p]);
+        }
+        let commit = git(dir, &args);
+        git(dir, &["update-ref", "HEAD", &commit]);
+        commit
+    }
+
+    fn log_record(nonce: &str, hash: &str, changes: &[&[u8]]) -> Vec<u8> {
+        let mut v = vec![0x1e];
+        v.extend_from_slice(nonce.as_bytes());
+        v.extend_from_slice(hash.as_bytes());
+        v.push(0x1f);
+        v.extend_from_slice(nonce.as_bytes());
+        v.push(0x1f);
+        v.extend_from_slice(nonce.as_bytes());
+        v.extend_from_slice(b"\0\n");
+        for c in changes {
+            v.extend_from_slice(c);
+            v.push(0);
+        }
+        v
+    }
+
+    #[test]
+    fn cp2_history_path_bytes_are_bounded_though_the_tree_is_small() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        // 17 components of 250 bytes: over 4096 bytes in all, deleted again before HEAD
+        let deep = vec!["d".repeat(250); 17].join("/");
+        assert!(deep.len() > MAX_TREE_PATH);
+        let c1 = plumbing_commit(dir, None, &["keep.rs", &deep], &[], "add deep");
+        plumbing_commit(dir, Some(&c1), &[], &[&deep], "drop deep");
+        let repo = repo_of(dir);
+        let head = crate::code_index::head_of(&repo).unwrap();
+        let err = at(&repo, head.as_deref()).unwrap_err();
+        assert_eq!(err.code, E_LIMIT);
+        assert_eq!(err.message, "code evidence exceeds 4096 path bytes");
+        assert_eq!(err.fix, "use a smaller linked checkout");
+    }
+
+    #[test]
+    fn cp2_history_path_count_is_bounded_though_the_tree_is_small() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        let c1 = plumbing_commit(dir, None, &["keep.rs", "a.rs", "b.rs"], &[], "add");
+        plumbing_commit(dir, Some(&c1), &[], &["a.rs", "b.rs"], "drop");
+        let repo = repo_of(dir);
+        let head = crate::code_index::head_of(&repo).unwrap().unwrap();
+        let tree: BTreeSet<String> = ["keep.rs".to_string()].into();
+        // the history names 3 + 2 paths; the tree holds 1
+        let err = build_from_bounded(&repo, head.clone(), &tree, 4, 64).unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (E_LIMIT, "code evidence exceeds 4 paths")
+        );
+        assert_eq!(err.fix, "use a smaller linked checkout");
+        let idx = build_from_bounded(&repo, head, &tree, 5, 64).unwrap();
+        assert_eq!(idx.commits, 2);
+    }
+
+    #[test]
+    fn cp2_log_decoder_counts_every_path_token_before_decoding() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let h1 = "a".repeat(40);
+        let h2 = "b".repeat(40);
+        let mut out = log_record(n, &h1, &[b"A", b"one.rs", b"R100", b"old.rs", b"new.rs"]);
+        out.extend(log_record(n, &h2, &[b"M", b"\xff\xfe.rs"]));
+        // 4 path tokens in all, the non-UTF-8 one included
+        assert_eq!(parse_log_bounded(&out, n, 4, 16).unwrap().len(), 2);
+        let err = parse_log_bounded(&out, n, 3, 16).unwrap_err();
+        assert_eq!(err.message, "code evidence exceeds 3 paths");
+        // a rename needs room for both of its paths
+        let err = parse_log_bounded(&out, n, 2, 16).unwrap_err();
+        assert_eq!(err.message, "code evidence exceeds 2 paths");
+        // a long non-UTF-8 path is refused too, not skipped
+        let long = [&b"\xff"[..], "p".repeat(16).as_bytes()].concat();
+        let out = log_record(n, &h1, &[b"M", &long]);
+        let err = parse_log_bounded(&out, n, 8, 16).unwrap_err();
+        assert_eq!(err.message, "code evidence exceeds 16 path bytes");
+        assert_eq!(parse_log_bounded(&out, n, 8, 17).unwrap()[0].changes, []);
+        // the public decoder keeps its old, unbounded behaviour
+        assert_eq!(crate::code_index::parse_log(&out, n).len(), 1);
     }
 }
