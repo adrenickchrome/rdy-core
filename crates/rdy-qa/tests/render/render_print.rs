@@ -558,20 +558,24 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// from `build_site` at BASE, twice, before this commit's code existed; they are the oracle. A
 /// change to the site's pages moves them: take them again from the build before that change.
 /// site.css gained the HA2b Task 6 rules; CSS-only (ruling task-6).
+/// PRS Task 5 (plan 2026-10-20-rdy-site-profiles, Task 5) changed `js/menu.js`, bundled in
+/// `assets/app.js`: the menu `LABEL` becomes "Versions, proposals, views and profiles" and the
+/// script fetches the pill's href in place of the hard-coded PAGE (with its same-origin http/https
+/// check from fix rounds 2827fddd and 2f7023bd). Only `assets/app.js` changed; re-taken.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "917c4b2d0cc2a0585f05d3d9f8245a39f44c13b739a1373134970b9e28e47bf0",
+            "e0d7d62a6e961854f0307029f01aba846ef650b6a453ac8a9064ab2b638047cb",
         ),
         (
             "view:editing",
-            "b5fc6cded31b453377f179b7161a8efaee42dd4f25a88597da04d234b3b7263c",
+            "fad00635ef970f18bbe5ef33221e8d6f953e868be4b52a6ada5800b85d14a398",
         ),
         (
             "view:reserved",
-            "0f163cbba3ccf66ad184fe8348c0cd1005dcea267a275688f48cc3b723ac58a1",
+            "dd24f0a2118f30302c5b2a741fedc9e4df7819298502eedb60310a9eff0963b1",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

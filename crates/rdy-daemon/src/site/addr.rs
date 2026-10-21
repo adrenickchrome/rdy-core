@@ -27,7 +27,34 @@ pub fn candidates(setting: Option<u16>, root: &Path) -> Vec<u16> {
     if let Some(port) = setting {
         return vec![port];
     }
-    let start = derived_port(root) - PORT_LOW;
+    window(derived_port(root) - PORT_LOW)
+}
+
+/// The ports to try for the listener of profile `canonical_key` (a folded key, or
+/// `implicit:org`) of project `root`, in order (D-DK03K). The hash input is
+/// `rdy-site-profile-v1\0`, the byte length of the canonical root as a little-endian u64, the
+/// root's bytes, the byte length of the key as a little-endian u64, then the key's bytes. The
+/// first port is `49152 + le_u16(hash[0..2]) % 16384`, then 15 more, wrapping. `serve.site_port`
+/// pins the source listener only: it has no say here.
+pub fn profile_candidates(root: &Path, canonical_key: &str) -> Vec<u16> {
+    let canonical = RunDir::of_project(root).root();
+    let root_bytes = crate::sys::path_bytes(&canonical);
+    let mut input =
+        Vec::with_capacity(PROFILE_DOMAIN.len() + 16 + root_bytes.len() + canonical_key.len());
+    input.extend_from_slice(PROFILE_DOMAIN);
+    input.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
+    input.extend_from_slice(root_bytes);
+    input.extend_from_slice(&(canonical_key.len() as u64).to_le_bytes());
+    input.extend_from_slice(canonical_key.as_bytes());
+    let h = Hash::of(&input).0;
+    window(u16::from_le_bytes([h[0], h[1]]) % SPAN)
+}
+
+/// The domain of the profile hash: it keeps a profile's ports apart from the source's.
+const PROFILE_DOMAIN: &[u8] = b"rdy-site-profile-v1\0";
+
+/// [`TRIES`] ports from offset `start` of the range, wrapping inside it.
+fn window(start: u16) -> Vec<u16> {
     (0..TRIES).map(|i| PORT_LOW + (start + i) % SPAN).collect()
 }
 
@@ -121,6 +148,97 @@ mod tests {
             derived_port(&real),
             derived_port(&link),
             "one canonical root, one port"
+        );
+    }
+
+    /// The profile ports, built by hand from the recipe: no helper of the module is used.
+    fn recipe(root_bytes: &[u8], key: &str) -> Vec<u16> {
+        let mut input = b"rdy-site-profile-v1\0".to_vec();
+        input.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
+        input.extend_from_slice(root_bytes);
+        input.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        input.extend_from_slice(key.as_bytes());
+        let h = Hash::of(&input).0;
+        let start = u32::from(u16::from_le_bytes([h[0], h[1]])) % 16384;
+        (0..16u32)
+            .map(|i| (49152 + (start + i) % 16384) as u16)
+            .collect()
+    }
+
+    #[test]
+    fn spv3_profile_ports_match_the_domain_separated_recipe() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        // a second spelling of the same directory, with no OS-specific call
+        let link = real.join(".");
+        let canonical = RunDir::of_project(&real).root();
+        let bytes = crate::sys::path_bytes(&canonical).to_vec();
+        for key in ["docs", "a.b-c_d", "implicit:org", "x"] {
+            let want = recipe(&bytes, key);
+            assert_eq!(want.len(), 16);
+            assert_eq!(profile_candidates(&real, key), want, "{key}");
+            assert_eq!(
+                profile_candidates(&link, key),
+                want,
+                "{key}: a second spelling of the root"
+            );
+        }
+        // the key and the root both feed the hash, and the domain keeps it apart from the
+        // source's. Fixed inputs with known first ports: the hash is cut to 16384 offsets, so two
+        // arbitrary inputs may share a window, and a random root could fail a correct build
+        let source = |root: &[u8]| {
+            let h = Hash::of(root).0;
+            49152 + u16::from_le_bytes([h[0], h[1]]) % 16384
+        };
+        assert_eq!(recipe(b"/fixed/project", "docs")[0], 60127);
+        assert_eq!(recipe(b"/fixed/project", "doc")[0], 58185);
+        assert_eq!(recipe(b"/fixed/other", "docs")[0], 50814);
+        assert_eq!(source(b"/fixed/project"), 50417);
+        // equivalent folded keys: the caller folds, and one folded key gives one list
+        assert_eq!(
+            profile_candidates(&real, &rdy_model::key::fold("Docs")),
+            profile_candidates(&real, "docs")
+        );
+        // the length prefixes separate the two fields: moving a byte between them changes the hash
+        assert_eq!(recipe(b"ab", "c")[0], 50632);
+        assert_eq!(recipe(b"a", "bc")[0], 49401);
+    }
+
+    #[test]
+    fn spv3_profile_ports_wrap_and_ignore_source_pin() {
+        // the shared window wraps inside the range, from the last port
+        let w = window(SPAN - 1);
+        assert_eq!(w.len(), 16);
+        assert_eq!(w[0], 65535);
+        assert_eq!(w[1], PORT_LOW);
+        assert_eq!(w[15], PORT_LOW + 14);
+        assert_eq!(window(0)[15], PORT_LOW + 15);
+        let root = Path::new("/some/project");
+        for i in 0..500u32 {
+            let key = format!("k{i}");
+            let c = profile_candidates(root, &key);
+            assert_eq!(c.len(), 16, "{key}");
+            assert!(c.iter().all(|p| *p >= PORT_LOW), "{c:?}");
+            for pair in c.windows(2) {
+                assert!(
+                    pair[0].checked_add(1) == Some(pair[1])
+                        || (pair[0] == 65535 && pair[1] == PORT_LOW),
+                    "{c:?}"
+                );
+            }
+        }
+        // `serve.site_port` pins the source listener only
+        assert_eq!(candidates(Some(4567), root), vec![4567]);
+        assert_eq!(
+            profile_candidates(root, "docs"),
+            profile_candidates(root, "docs")
+        );
+        assert_eq!(profile_candidates(root, "docs").len(), 16);
+        // the source's own list is the window at the derived port
+        assert_eq!(
+            candidates(None, root),
+            window(derived_port(root) - PORT_LOW)
         );
     }
 }

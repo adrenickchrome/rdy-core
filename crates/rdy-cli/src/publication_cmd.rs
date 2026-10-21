@@ -16,8 +16,11 @@ pub(crate) enum PublicationCmd {
         /// The profile: its id or key.
         #[arg(long)]
         profile: String,
-        /// canon (default), tag:<name> or landing:<hash>.
-        #[arg(long)]
+        // the help is given in full: a doc comment would lose its closing period
+        #[arg(
+            long,
+            help = "canon (default), tag:<name>, landing:<hash>, a view name, view:<name>, or proposal:P-x@n."
+        )]
         scope: Option<String>,
         /// A baseline to compare with: canon, tag:<name> or landing:<hash>. Same profile id and audience.
         #[arg(long)]

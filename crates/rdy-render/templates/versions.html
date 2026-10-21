@@ -1,11 +1,11 @@
 {% extends "layout.html" %}
 {% block brand_href %}/{% endblock %}
 {% block head_scope %}{% endblock %}
-{% block pages %}<details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages"><ul class="nav-root"><li class="nav-group"><ul><li class="nav-item"><a href="/">Home</a></li><li class="nav-item is-active"><a href="/~versions/" aria-current="page">{{ title }}</a></li></ul></li></ul></nav></details>{% endblock %}
+{% block pages %}<details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages"><ul class="nav-root"><li class="nav-group"><ul><li class="nav-item"><a href="{{ home_href }}">Home</a></li><li class="nav-item is-active"><a href="{{ menu_href }}" aria-current="page">{{ title }}</a></li></ul></li></ul></nav></details>{% endblock %}
 {% block content %}
 <h1>{{ title }}</h1>
 <nav class="vmenu" aria-label="{{ title }}">
-{% for s in sections %}<section><h2>{{ s.title }}</h2>{% if s.rows %}<ul class="vmenu-list">{% for r in s.rows %}<li>{% if r.href %}<a href="{{ r.href }}">{{ r.label }}</a>{% else %}<span class="vmenu-name">{{ r.label }}</span>{% endif %}{% if r.meta %} <span class="vmenu-meta">{{ r.meta | join(" · ") }}</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="vmenu-none">None open.</p>{% endif %}</section>
+{% for s in sections %}<section><h2>{{ s.title }}</h2>{% if s.rows %}<ul class="vmenu-list">{% for r in s.rows %}<li>{% if r.href %}<a href="{{ r.href }}"{% if r.current %} aria-current="page"{% endif %}>{{ r.label }}</a>{% else %}<span class="vmenu-name">{{ r.label }}</span>{% endif %}{% if r.meta or r.current %} <span class="vmenu-meta">{{ r.meta | join(" · ") }}{% if r.current %}{% if r.meta %} {% endif %}(current){% endif %}</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="vmenu-none">None open.</p>{% endif %}{% if s.note %}<p class="vmenu-meta">{{ s.note }}</p>{% endif %}</section>
 {% endfor %}</nav>
 {% endblock %}
 {% block foot %}<p class="colophon">{{ site_name }}, {{ latest }}.</p>{% endblock %}

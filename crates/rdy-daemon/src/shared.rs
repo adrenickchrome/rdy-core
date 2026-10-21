@@ -8,10 +8,10 @@ use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
-use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteLink, WriteFn};
+use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteFacts, SiteLink, WriteFn};
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
-use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Session};
 use rdy_mcp::notify::NotifyHub;
 use serde_json::Value;
@@ -54,6 +54,9 @@ pub struct Shared {
     /// Where the site listens: set once by the daemon's start, after the bind and before
     /// `ready` (ls6). Unset for a `Shared` that no daemon serves.
     pub site_info: OnceLock<SiteInfo>,
+    /// The profile-only listeners this daemon owns (D-DK03K) and the HTTP limits every listener
+    /// shares; filled in by the daemon's start, closed and joined at its stop.
+    pub profile_sites: crate::site::profiles::ProfileSites,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -105,6 +108,7 @@ impl Shared {
                 notify,
                 site,
                 site_info: OnceLock::new(),
+                profile_sites: Default::default(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
@@ -205,7 +209,10 @@ impl Engine for DaemonEngine {
         self.0.pack_error_lock().clone()
     }
 
-    fn site(&self) -> Result<SiteLink, RdyError> {
+    /// The full site's link for a source or profile target, and the profile-only listener's
+    /// (bound on the first ask, reused after) for [`SiteTarget::ProfileOnly`]. The profile-only
+    /// link carries the listener's own LAN diagnostic; the reply words it for the build's title.
+    fn site(&self, target: &SiteTarget) -> Result<SiteLink, RdyError> {
         let off = |reason: &str| {
             RdyError::new(
                 E_SITE,
@@ -213,11 +220,15 @@ impl Engine for DaemonEngine {
                 "set serve.site_port to a free port from 1024 to 65535 in .rdy/local.yaml, then run rdy serve --stop",
             )
         };
-        let info = self
-            .0
-            .site_info
-            .get()
-            .ok_or_else(|| off("the daemon has not started it"))?;
+        let info = match target {
+            SiteTarget::ProfileOnly { key } => self.0.profile_sites.ensure(&self.0, key)?.1,
+            _ => self
+                .0
+                .site_info
+                .get()
+                .ok_or_else(|| off("the daemon has not started it"))?
+                .clone(),
+        };
         match &info.url {
             Ok(url) => Ok(SiteLink {
                 url: url.clone(),
@@ -228,8 +239,16 @@ impl Engine for DaemonEngine {
         }
     }
 
-    fn site_warnings(&self, scope: &ScopeRef) -> Result<Vec<String>, RdyError> {
-        Ok(self.0.site.refresh(&self.0, scope)?.warnings.clone())
+    /// The profile, summary page and warnings of the one build the site holds for `target`,
+    /// built first when it has none or its inputs changed.
+    fn site_facts(&self, target: &SiteTarget) -> Result<SiteFacts, RdyError> {
+        let target = crate::site::live::normalize(target);
+        let build = self.0.site.refresh(&self.0, &target)?;
+        Ok(SiteFacts {
+            profile: build.profile.clone(),
+            changes: build.changes,
+            warnings: build.live.warnings.clone(),
+        })
     }
 
     /// `rdy_export`: the `export` op's print. A relative `out` is under the project directory;
@@ -328,7 +347,7 @@ mod tests {
             .unwrap();
         let e = sh.engine();
         assert_eq!(sh.site.builds(), 0, "guard: nothing built yet");
-        let v = site_reply(&*e, Some("g1")).unwrap();
+        let v = site_reply(&*e, Some("g1"), None, false).unwrap();
         assert_eq!(
             v["warnings"],
             serde_json::json!([
@@ -337,7 +356,7 @@ mod tests {
             "{v}"
         );
         assert_eq!(sh.site.builds(), 1, "the scope was built for its warnings");
-        let canon = site_reply(&*e, None).unwrap();
+        let canon = site_reply(&*e, None, None, false).unwrap();
         assert!(canon.get("warnings").is_none(), "{canon}");
         sh.shutdown().unwrap();
     }
@@ -408,18 +427,18 @@ mod tests {
                 format!("proposal:{canonical}"),
             ),
         ];
-        let guard = Guard {
-            port: 51000,
-            lan: None,
-        };
+        let guard = Guard::full(51000, None);
         for (given, want) in cases {
-            let v = site_reply(&*e, Some(&given)).unwrap();
+            let v = site_reply(&*e, Some(&given), None, false).unwrap();
             assert_eq!(v["scope"], want.as_str(), "{given}: {v}");
             let url = v["url"].as_str().unwrap();
             let path = url.strip_prefix(ROOT).unwrap();
             let head = format!("GET {path}index.html HTTP/1.1\r\nHost: 127.0.0.1:51000\r\n\r\n");
             match guard.check(&parse_head(head.as_bytes()).unwrap()) {
-                Ok(Route::Page { scope, path }) => {
+                Ok(Route::Page {
+                    target: SiteTarget::Source(scope),
+                    path,
+                }) => {
                     assert_eq!(scope.text(), want, "{given}: {url}");
                     assert_eq!(path, "index.html", "{given}: {url}");
                 }
@@ -427,7 +446,7 @@ mod tests {
             }
         }
         for name in [".", ".."] {
-            let err = site_reply(&*e, Some(name)).unwrap_err();
+            let err = site_reply(&*e, Some(name), None, false).unwrap_err();
             assert_eq!(err.code, rdy_engine::E_BAD_INPUT, "{name}: {err:?}");
             assert_eq!(
                 err.message,
@@ -443,6 +462,424 @@ mod tests {
             );
         }
         sh.shutdown().unwrap();
+    }
+
+    // --- spv8: profile link replies --------------------------------------------------------------
+
+    use rdy_engine::engine::{SiteFacts, site_reply, with_writer_result};
+    use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, WriteRequest};
+    use rdy_model::Role;
+    use serde_json::json;
+
+    fn writer() -> Session {
+        Session::human("human:qa".into(), Role::Writer)
+    }
+
+    fn approver() -> Session {
+        Session::human("human:qa".into(), Role::Approver)
+    }
+
+    fn put(r: &mut Rdy, view: &str, ops: Value) -> std::collections::BTreeMap<String, String> {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: view.into(),
+                ops: rdy_engine::parse_ops(ops.as_array().unwrap().clone()).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("write to {view}: {e}"))
+        .created
+    }
+
+    fn land(r: &mut Rdy, view: &str) {
+        let p = r.propose(&writer(), view, view, None).unwrap();
+        r.land(&approver(), &p.id).unwrap();
+    }
+
+    /// A project whose canon holds the doc `intro` and the org profile `guide` ("Guide book",
+    /// selecting the doc), and whose view `work` edits the doc; the site is set up as the daemon's start leaves it.
+    struct World {
+        dir: tempfile::TempDir,
+        sh: Arc<Shared>,
+        ids: std::collections::BTreeMap<String, String>,
+    }
+
+    const FULL: &str = "http://127.0.0.1:51000/";
+
+    fn world() -> World {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let mut ids = put(
+            &mut r,
+            "w1",
+            json!([
+                {"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro page", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$ip", "parent": "$intro", "body": "INTRO-ONE"},
+                {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}
+            ]),
+        );
+        land(&mut r, "w1");
+        let made = put(
+            &mut r,
+            "admin",
+            json!([{"op": "create", "type": "publication_profile", "id": "$guide",
+                "parent": ids["$admin"],
+                "fields": {"key": "guide", "title": "Guide book", "description": "About it.",
+                    "audience": "org", "select": [ids["$intro"]]}}]),
+        );
+        land(&mut r, "admin");
+        ids.extend(made);
+        put(
+            &mut r,
+            "work",
+            json!([{"op": "update", "id": ids["$ip"], "body": "INTRO-VIEW"}]),
+        );
+        let sh = Shared::new(r);
+        sh.site_info
+            .set(SiteInfo {
+                url: Ok(FULL.into()),
+                lan_url: None,
+                warning: None,
+                addrs: vec![],
+            })
+            .unwrap();
+        World { dir, sh, ids }
+    }
+
+    /// Lets the registry of `sh` bind profile-only listeners, as a daemon's start does, with
+    /// `serve.site_lan` on and no private address to bind (the LAN setup fails).
+    fn open_listeners(sh: &Arc<Shared>, root: &std::path::Path) -> tokio::runtime::Runtime {
+        std::fs::write(root.join(".rdy/local.yaml"), "serve:\n  site_lan: true\n").unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let handler = crate::ServeHandler::new(Arc::clone(sh), None);
+        let daemon = crate::Daemon::new(
+            crate::DaemonConfig::new(crate::RunDir::of_project(root), "t".into()),
+            Arc::new(handler),
+        );
+        sh.profile_sites.init(
+            rt.handle().clone(),
+            daemon.handle(),
+            root.canonicalize().unwrap(),
+            Some(crate::site::LanOverride::NoneFound),
+        );
+        rt
+    }
+
+    type Before = Box<dyn FnOnce(&dyn Engine) + Send>;
+
+    /// An engine that runs `before` once, between the profile lookup and the build facts: right
+    /// after the link is given.
+    struct Barrier {
+        inner: Arc<dyn Engine>,
+        before: Mutex<Option<Before>>,
+    }
+
+    impl Engine for Barrier {
+        fn read(&self) -> Arc<ReadState> {
+            self.inner.read()
+        }
+        fn write(&self, f: WriteFn) -> Result<Value, RdyError> {
+            self.inner.write(f)
+        }
+        fn open_report(&self) -> OpenReport {
+            self.inner.open_report()
+        }
+        fn root(&self) -> PathBuf {
+            self.inner.root()
+        }
+        fn briefs(&self) -> Arc<BriefRegistry> {
+            self.inner.briefs()
+        }
+        fn leases(&self) -> Arc<LeaseRegistry> {
+            self.inner.leases()
+        }
+        fn site(&self, target: &SiteTarget) -> Result<SiteLink, RdyError> {
+            let link = self.inner.site(target)?;
+            if let Some(f) = self.before.lock().unwrap().take() {
+                f(&*self.inner);
+            }
+            Ok(link)
+        }
+        fn site_facts(&self, target: &SiteTarget) -> Result<SiteFacts, RdyError> {
+            self.inner.site_facts(target)
+        }
+    }
+
+    fn barrier(w: &World, before: impl FnOnce(&dyn Engine) + Send + 'static) -> Barrier {
+        Barrier {
+            inner: w.sh.engine(),
+            before: Mutex::new(Some(Box::new(before))),
+        }
+    }
+
+    /// spv8: the profile object, the render warnings and the LAN wording of a reply come from
+    /// the build the call captured, not from the lookup before it; a profile that is gone by the
+    /// build is the build's failure.
+    #[test]
+    fn spv8_reply_facts_match_the_captured_selected_build() {
+        let w = world();
+        let guide = w.ids["$guide"].clone();
+        let rt = open_listeners(&w.sh, w.dir.path());
+        // a route in a view: the profile is renamed after the lookup
+        let ok = barrier(&w, {
+            let guide = guide.clone();
+            move |e| {
+                with_writer_result(e, move |r| {
+                    put(
+                        r,
+                        "work",
+                        json!([{"op": "update", "id": guide, "fields": {"title": "Renamed book"}}]),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        let v = site_reply(&ok, Some("work"), Some("guide"), false).unwrap();
+        assert_eq!(v["profile"]["title"], "Renamed book", "{v}");
+        assert_eq!(v["url"], format!("{FULL}~view/work/~profile/guide/"), "{v}");
+        // the same view: the profile is gone by the build, the call refuses
+        let gone = barrier(&w, {
+            let guide = guide.clone();
+            move |e| {
+                with_writer_result(e, move |r| {
+                    put(
+                        r,
+                        "work",
+                        json!([{"op": "update", "id": guide, "fields": {"key": "other"}}]),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        let err = site_reply(&gone, Some("work"), Some("guide"), false).unwrap_err();
+        assert_eq!(err.code, E_NOT_FOUND, "{err:?}");
+        // profile-only: canon is renamed by a landing after the listener is bound
+        let only = barrier(&w, {
+            let guide = guide.clone();
+            move |e| {
+                with_writer_result(e, move |r| {
+                    put(
+                        r,
+                        "rename",
+                        json!([{"op": "update", "id": guide, "fields": {"title": "Landed book"}}]),
+                    );
+                    land(r, "rename");
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        let v = site_reply(&only, None, Some("guide"), true).unwrap();
+        assert_eq!(v["profile"]["title"], "Landed book", "{v}");
+        assert_eq!(v["profile_only"], true, "{v}");
+        assert_ne!(v["url"], FULL, "{v}");
+        assert_eq!(
+            v["warnings"][0],
+            "this site shows only the profile \"Landed book\"; anyone with the project still reads everything give the full site's link from rdy site when the person needs everything",
+            "{v}"
+        );
+        // the LAN setup could not name an address: it names the build's title
+        let message = v["warning"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("profile \"Landed book\": "),
+            "{message}"
+        );
+        // the selection changes between the lookup and the build: a render warning comes into
+        // the build (the profile now shows a top-level doc named glossary, which has no page)
+        const GLOSSARY: &str = "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it.";
+        let intro = w.ids["$intro"].clone();
+        let gl = with_writer_result(&*w.sh.engine(), |r| {
+            let made = put(
+                r,
+                "gl",
+                json!([{"op": "create", "type": "doc", "id": "$gl",
+                    "fields": {"name": "glossary", "title": "Glossary page", "doc_type": "page"}}]),
+            );
+            land(r, "gl");
+            Ok(made["$gl"].clone())
+        })
+        .unwrap();
+        let select_in = |title: &'static str, select: Vec<String>, view: &'static str| {
+            let guide = guide.clone();
+            barrier(&w, move |e| {
+                with_writer_result(e, move |r| {
+                    put(
+                        r,
+                        view,
+                        json!([{"op": "update", "id": guide,
+                            "fields": {"title": title, "select": select}}]),
+                    );
+                    land(r, view);
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        let appears = select_in("Selected book", vec![intro.clone(), gl.clone()], "sel1");
+        let v = site_reply(&appears, None, Some("guide"), true).unwrap();
+        assert_eq!(v["profile"]["title"], "Selected book", "{v}");
+        assert_eq!(
+            v["warnings"],
+            json!([
+                GLOSSARY,
+                "this site shows only the profile \"Selected book\"; anyone with the project still reads everything give the full site's link from rdy site when the person needs everything"
+            ]),
+            "the build's render warning, then the caveat: {v}"
+        );
+        let message = v["warning"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("profile \"Selected book\": "),
+            "{message}"
+        );
+        // the warning is gone with the selection that brought it: nothing stale is kept
+        let gone_again = select_in("Pruned book", vec![intro.clone()], "sel2");
+        let v = site_reply(&gone_again, None, Some("guide"), false).unwrap();
+        assert_eq!(v["profile"]["title"], "Pruned book", "{v}");
+        assert!(v.get("warnings").is_none(), "no stale render warning: {v}");
+        assert!(v.get("profile_only").is_none(), "{v}");
+        // and in only-mode the caveat alone remains
+        let again = select_in("Final book", vec![intro.clone()], "sel3");
+        let v = site_reply(&again, None, Some("guide"), true).unwrap();
+        assert_eq!(v["profile"]["title"], "Final book", "{v}");
+        assert_eq!(
+            v["warnings"],
+            json!([
+                "this site shows only the profile \"Final book\"; anyone with the project still reads everything give the full site's link from rdy site when the person needs everything"
+            ]),
+            "{v}"
+        );
+        // a route over a selection that gains the warning, with no caveat
+        let appears = select_in("Again book", vec![intro, gl], "sel4");
+        let v = site_reply(&appears, None, Some("guide"), false).unwrap();
+        assert_eq!(v["profile"]["title"], "Again book", "{v}");
+        assert_eq!(v["warnings"], json!([GLOSSARY]), "{v}");
+        // a profile canon no longer holds fails the whole call, the listener already open
+        let gone = barrier(&w, {
+            let guide = guide.clone();
+            move |e| {
+                with_writer_result(e, move |r| {
+                    put(
+                        r,
+                        "rekey",
+                        json!([{"op": "update", "id": guide, "fields": {"key": "moved"}}]),
+                    );
+                    land(r, "rekey");
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        let err = site_reply(&gone, None, Some("guide"), true).unwrap_err();
+        assert_eq!(err.code, E_NOT_FOUND, "{err:?}");
+        w.sh.shutdown().unwrap();
+        drop(rt);
+    }
+
+    /// spv8: a refused `only` or an unknown profile registers no listener.
+    #[test]
+    fn spv8_only_validation_precedes_binding() {
+        let w = world();
+        let rt = open_listeners(&w.sh, w.dir.path());
+        let e = w.sh.engine();
+        for (scope, profile) in [(None, None), (Some("work"), Some("guide"))] {
+            let err = site_reply(&*e, scope, profile, true).unwrap_err();
+            assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
+            assert_eq!(
+                err.message,
+                "a profile-only site needs a profile and shows canon only"
+            );
+            assert_eq!(err.fix, "pass profile with scope canon, or leave out only");
+        }
+        let err = site_reply(&*e, None, Some("missing"), true).unwrap_err();
+        assert_eq!(err.code, E_NOT_FOUND, "{err:?}");
+        assert!(w.sh.profile_sites.keys().is_empty(), "nothing registered");
+        // false is an ordinary route, and binds nothing either
+        let v = site_reply(&*e, None, Some("guide"), false).unwrap();
+        assert!(v.get("profile_only").is_none(), "{v}");
+        assert!(w.sh.profile_sites.keys().is_empty(), "nothing registered");
+        // a valid only-mode registers its folded key once, and reuses it
+        let a = site_reply(&*e, None, Some("GUIDE"), true).unwrap();
+        let b = site_reply(&*e, Some("canon"), Some(&w.ids["$guide"]), true).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(w.sh.profile_sites.keys(), vec!["guide".to_string()]);
+        w.sh.shutdown().unwrap();
+        drop(rt);
+    }
+
+    /// spv8: the `site_url` op reads `{scope?, profile?, only?}` with the strict parser's hints,
+    /// and gives the value the direct helper gives.
+    #[test]
+    fn spv8_ctl_site_url_is_strict_and_shares_the_reply() {
+        use crate::ops::{OpContext, dispatch};
+        let w = world();
+        let rt = open_listeners(&w.sh, w.dir.path());
+        let e = w.sh.engine();
+        let s = Session::human("human:qa".into(), Role::Writer);
+        let cx = OpContext {
+            engine: &*e,
+            session: &s,
+            human: "human:qa",
+            cwd: w.dir.path(),
+            agent: &rdy_engine::signing_crypto::UnavailableAgent,
+        };
+        let err = dispatch(&cx, "site_url", json!({"profiel": "guide"})).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
+        assert_eq!(
+            err.message, "site_url: unknown field \"profiel\"",
+            "{err:?}"
+        );
+        assert!(err.fix.contains("profile"), "{err:?}");
+        let err =
+            dispatch(&cx, "site_url", json!({"profile": "guide", "only": "yes"})).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
+        assert!(err.message.starts_with("site_url: "), "{err:?}");
+        assert_eq!(
+            err.fix, "args for site_url: {scope?, profile?, only?}",
+            "{err:?}"
+        );
+        assert!(
+            w.sh.profile_sites.keys().is_empty(),
+            "a refusal binds nothing"
+        );
+        for (args, scope, profile, only) in [
+            (json!({}), None, None, false),
+            (json!(null), None, None, false),
+            (json!({"scope": "canon"}), Some("canon"), None, false),
+            (
+                json!({"scope": "canon", "profile": "guide"}),
+                Some("canon"),
+                Some("guide"),
+                false,
+            ),
+            (
+                json!({"profile": "guide", "only": false}),
+                None,
+                Some("guide"),
+                false,
+            ),
+            (
+                json!({"profile": "guide", "only": true}),
+                None,
+                Some("guide"),
+                true,
+            ),
+        ] {
+            let via_op = dispatch(&cx, "site_url", args.clone()).unwrap();
+            let direct = site_reply(&*e, scope, profile, only).unwrap();
+            assert_eq!(via_op, direct, "{args}");
+        }
+        let err = dispatch(&cx, "site_url", json!({"only": true})).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
+        w.sh.shutdown().unwrap();
+        drop(rt);
     }
 
     /// ec11 fix round 1 (finding 3): `rdy_export` reads a scope as the `export` op does. The

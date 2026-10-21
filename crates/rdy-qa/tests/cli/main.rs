@@ -44,6 +44,7 @@ mod cli_semantic;
 mod cli_signing;
 mod cli_signing_config;
 mod cli_site;
+mod cli_site_profiles;
 mod cli_state;
 mod cli_status_views;
 mod cli_stream;

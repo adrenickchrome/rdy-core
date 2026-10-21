@@ -702,3 +702,107 @@ fn hpb13_bad_inputs_and_stale_snapshots_return_no_success() {
     }
     holder.close().unwrap();
 }
+
+/// spv4 (D-CWC91, D-0VCQ5): the live site warns of a blocked public profile, and every durable
+/// output still refuses it. Through the adapter, a holder's one-page render and its full render
+/// request refuse a blocked public profile with `E_PUBLICATION_REFERENCE`, with and without a
+/// selected figure, and so does the core build each stands for: no artifact is returned and no
+/// figure byte is read.
+#[test]
+fn spv4_adapter_output_keeps_the_public_reference_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("src");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut r = Rdy::init(&root, "rdy-standard").unwrap();
+    let png = b"\x89PNG\r\n\x1a\nspv4 gate figure".to_vec();
+    let blob = r.store_mut().put_blob(&png).unwrap();
+    let ids = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$plain", "fields": {"name": "plain", "title": "Plain page", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$fig", "fields": {"name": "fig", "title": "Figure page", "doc_type": "page"}},
+            {"op": "create", "type": "figure", "parent": "$fig", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "Gate figure"}},
+            {"op": "create", "type": "doc", "id": "$other", "fields": {"name": "other", "title": "Other page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$op", "parent": "$other", "body": format!("{OTHER_WORDS} there.")},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}
+        ]),
+    );
+    let op = ids["$op"].clone();
+    write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "prose", "parent": ids["$plain"], "body": format!("Plain sees {{{{{op}}}}}.")},
+            {"op": "create", "type": "prose", "parent": ids["$fig"], "body": format!("Figure sees {{{{{op}}}}}.")}
+        ]),
+    );
+    land(&mut r, "first");
+    let p = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "publication_profile", "id": "$pubzero", "parent": ids["$admin"],
+             "fields": {"key": "pubzero", "title": "Public zero", "audience": "public", "select": [ids["$plain"]]}},
+            {"op": "create", "type": "publication_profile", "id": "$pubfig", "parent": ids["$admin"],
+             "fields": {"key": "pubfig", "title": "Public figure", "audience": "public", "select": [ids["$fig"]]}}
+        ]),
+    );
+    land(&mut r, "profiles");
+    let v1 = tag(&mut r, "v1.0.0");
+    let l1 = r.store().read_tag(&v1).unwrap().landing;
+    let read = r.read();
+    let inputs = capture_inputs(&read, &Scope::At(l1)).unwrap();
+    let mut export = Vec::new();
+    stream_export::write(&read, v1, &BTreeSet::new(), &mut export).unwrap();
+    let repo = r.store().repo_id().unwrap().unwrap();
+    let mut holder = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
+    take(&mut holder, dir.path(), "v1", &export, "v1.0.0", l1);
+    let snap = holder.snapshot().unwrap();
+    let blocked = (
+        "Public profile has 1 references outside its selection.",
+        "Include the target docs or remove these references. Run the publication check again.",
+    );
+    for key in ["$pubzero", "$pubfig"] {
+        let profile = p[key].as_str();
+        // the live inspection of the same profile builds: only output refuses
+        let resolved =
+            rdy_engine::publication::resolve_inspection(&read, &Scope::At(l1), profile).unwrap();
+        assert_eq!(
+            resolved.references.status,
+            rdy_engine::publication::CheckStatus::Blocked
+        );
+        let reads = rdy_engine::publication::blob_reads_for_tests();
+        // the core build each adapter call stands for
+        let source = ReadPublicationSource::with_settings(
+            &read,
+            &inputs.pack,
+            &inputs.title,
+            inputs.description.as_deref(),
+        );
+        let m = read.materialized(&Scope::At(l1)).unwrap();
+        let core = build_publication(&source, &m, "v1.0.0", false, profile, &inputs).unwrap_err();
+        let core_page =
+            render_publication_page(&source, &m, "v1.0.0", false, profile, &inputs, "index.html")
+                .unwrap_err();
+        assert_eq!(
+            rdy_engine::publication::blob_reads_for_tests(),
+            reads,
+            "{key}: no figure byte is read"
+        );
+        // through the adapter: the one-page render and the full render request
+        let page = snap
+            .render_page("v1.0.0", profile, &inputs, "index.html")
+            .unwrap_err();
+        let full = request(&snap, "v1.0.0", profile, &inputs, RenderFormat::Site)
+            .and_then(|bytes| process(&bytes))
+            .unwrap_err();
+        for e in [&core, &core_page, &page, &full] {
+            assert_eq!(
+                (e.code, e.message.as_str(), e.fix.as_str()),
+                (rdy_engine::E_PUBLICATION_REFERENCE, blocked.0, blocked.1),
+                "{key}: {e}"
+            );
+        }
+        same_error(&page, &core_page);
+        same_error(&full, &core);
+    }
+    holder.close().unwrap();
+}

@@ -8,9 +8,12 @@ use crate::layout::RunDir;
 use crate::ops::{OpContext, dispatch};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
-use crate::site::{self, LanOverride, SiteServer};
+use crate::site::guard::SiteTarget;
+use crate::site::profiles::{self, TestEvent, say};
+use crate::site::{self, LanOverride, SiteInfo, SiteServer};
 use crate::sys;
 use crate::writer::panic_text;
+use rdy_engine::publication::{ResolvedProfile, profile_at};
 use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::{E_HELD_BY_READER, E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
 use rdy_engine::{classify, human_actor_for_env};
@@ -24,7 +27,7 @@ use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -90,6 +93,10 @@ pub struct ServeRun {
     readiness: Readiness,
     shared: Arc<Shared>,
     thread: JoinHandle<Result<ExitReason, ServeError>>,
+    /// A foreground profile-only start's hold on readiness: `ready` is answered only once the
+    /// warm-up is done and this sends (see [`serve_with_profile`]). Dropped unsent, the daemon
+    /// never answers `ready`.
+    gate: Option<mpsc::Sender<()>>,
 }
 
 impl ServeRun {
@@ -109,7 +116,15 @@ impl ServeRun {
 
     /// Waits for the daemon to exit. The store is closed before this returns.
     pub fn wait(self) -> Result<ExitReason, ServeError> {
-        let ServeRun { shared, thread, .. } = self;
+        let ServeRun {
+            shared,
+            thread,
+            gate,
+            ..
+        } = self;
+        // a start not released by now never is: the warm-up stops waiting, answers no `ready`,
+        // and the runtime's blocking pool can drain
+        drop(gate);
         match thread.join() {
             Ok(out) => out,
             Err(_) => {
@@ -130,22 +145,29 @@ impl ServeRun {
 /// Opens the store, binds the socket and starts serving on a thread of its own. Returns once
 /// the socket is bound; clients are answered `starting` until canon is built.
 pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
+    start_checked(opts, None)
+}
+
+/// [`start`], refusing before either HTTP site binds when canon does not hold `profile` (the
+/// foreground profile-only start).
+fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, ServeError> {
     // (1)
     if opts.detach {
         crate::spawn::detach().map_err(ServeError::Runtime)?;
     }
+    let root = RunDir::of_project(&opts.project).root();
     // (2)
     log("opening store");
     let rdy = match open_store(&opts.project) {
         Ok(r) => r,
         Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
             let err = ServeError::AlreadyRunning(store_dir(&opts.project));
-            log(&err.to_string());
+            say(&root, &err.to_string());
             return Err(err);
         }
         Err(e) => {
             let err = ServeError::Open(e);
-            log(&err.to_string());
+            say(&root, &err.to_string());
             return Err(err);
         }
     };
@@ -159,6 +181,15 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
         r.index_rebuilt,
         r.unclean_shutdown
     ));
+    // (3b) the initial profile of a foreground profile-only start, in canon, before any port
+    if let Some(name) = profile
+        && let Err(e) = profile_at(&shared.state.load_full(), &Scope::Canon, name)
+    {
+        close(&shared);
+        let err = ServeError::Open(e);
+        say(&root, &err.to_string());
+        return Err(err);
+    }
     // (4)
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -186,26 +217,43 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
     let readiness = daemon.readiness();
     // (4b) the site, once the daemon owns the project: the store lock is held and the socket is
     // bound and recorded (D-WZ4ZP, D-R7N9J). No loopback port leaves the daemon without a site.
-    let root = RunDir::of_project(&opts.project).root();
+    // The profile-only listeners start later, on request, on this runtime.
     let (site, info) = rt.block_on(SiteServer::bind(&root, opts.site_lan_override));
     for line in site::log_lines(&info) {
         log(&line);
     }
     let _ = shared.site_info.set(info);
-    // (5)
+    shared.profile_sites.init(
+        rt.handle().clone(),
+        handle.clone(),
+        root.clone(),
+        opts.site_lan_override,
+    );
+    // (5) a foreground profile-only start answers `ready` only once its caller released it
+    let (gate, released) = match profile {
+        Some(_) => {
+            let (tx, rx) = mpsc::channel();
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
     let thread = {
         let shared = Arc::clone(&shared);
         let readiness = readiness.clone();
         let handle = handle.clone();
         std::thread::Builder::new()
             .name("rdy-serve".into())
-            .spawn(move || serve_thread(rt, daemon, shared, readiness, site, handle))
+            .spawn(move || {
+                serve_thread(rt, daemon, shared, readiness, site, handle, root, released)
+            })
     };
     let thread = match thread {
         Ok(t) => t,
         Err(e) => {
-            // the runtime and the daemon went down with the closure: take the run files too
+            // the runtime and the daemon went down with the closure (and every listener with
+            // the runtime): take the run files too
             handle.stop();
+            drop(shared.profile_sites.close());
             close(&shared);
             return Err(ServeError::Runtime(e));
         }
@@ -216,6 +264,7 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
         readiness,
         shared,
         thread,
+        gate,
     })
 }
 
@@ -252,6 +301,73 @@ pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
         s.stop_on_signal(run.handle());
     }
     run.wait()
+}
+
+/// What a foreground profile-only start has once its listener is open: the folded key, the
+/// listener's info (its `warning` the original LAN diagnostic), and the profile and render
+/// warnings of the build it captured.
+#[derive(Clone, Debug)]
+pub struct ProfileSiteReady {
+    pub key: String,
+    pub info: SiteInfo,
+    pub profile: ResolvedProfile,
+    pub warnings: Vec<String>,
+}
+
+/// [`serve`] with the profile-only listener of `key` (D-DK03K): the same signals and start;
+/// canon must hold `key` before either HTTP site binds. Once the daemon owns the store and its
+/// socket, the listener of `key` opens and its pages build; `on_ready` then runs once, on this
+/// thread, and the call serves in the foreground until the daemon stops. A failed profile, build
+/// or `on_ready` stops and joins the daemon this call created, releasing its sockets, logs the
+/// error as a failed start does, and is returned as `ServeError::Open`.
+pub fn serve_with_profile(
+    opts: ServeOptions,
+    key: &str,
+    on_ready: impl FnOnce(ProfileSiteReady) -> Result<(), RdyError>,
+) -> Result<ExitReason, ServeError> {
+    let signals = StopSignals::install();
+    let root = RunDir::of_project(&opts.project).root();
+    let run = start_checked(opts, Some(key))?;
+    if let Some(s) = signals {
+        s.stop_on_signal(run.handle());
+    }
+    let ready = profile_ready(run.shared(), key).and_then(on_ready);
+    if let Err(e) = ready {
+        let err = ServeError::Open(e);
+        say(&root, &err.to_string());
+        run.handle().stop();
+        // the gate goes unsent: no client hears `ready` from this daemon
+        if let Err(w) = run.wait() {
+            log(&format!("the daemon did not stop cleanly: {w}"));
+        }
+        return Err(err);
+    }
+    // the start succeeded: `ready` goes out once the warm-up is done too
+    if let Some(gate) = &run.gate {
+        let _ = gate.send(());
+    }
+    run.wait()
+}
+
+/// Opens (or reuses) the listener of `key` and builds its pages once, for the facts of that
+/// build.
+fn profile_ready(sh: &Arc<Shared>, key: &str) -> Result<ProfileSiteReady, RdyError> {
+    let (key, info) = sh.profile_sites.ensure(sh, key)?;
+    let target = SiteTarget::ProfileOnly { key: key.clone() };
+    let build = sh.site.refresh(sh, &target)?;
+    let profile = build.profile.clone().ok_or_else(|| {
+        RdyError::new(
+            rdy_engine::E_SITE,
+            format!("the profile-only site of \"{key}\" built no profile"),
+            "run rdy serve --stop, then start it again",
+        )
+    })?;
+    Ok(ProfileSiteReady {
+        key,
+        info,
+        profile,
+        warnings: build.live.warnings.clone(),
+    })
 }
 
 /// SIGINT and SIGTERM, registered on a runtime of their own (the daemon's runtime moves to the
@@ -316,21 +432,33 @@ fn close(shared: &Shared) {
     }
 }
 
-/// Runs the warm-up, then answers ready. A panic in the warm-up is logged and the daemon serves
-/// with a cold cache: readiness is always reached, so no client waits out its start timeout.
-pub(crate) fn warm_then_ready(readiness: &Readiness, warm: impl FnOnce()) {
+/// Runs the warm-up, then answers ready once `released` (called after the warm-up) is true. A
+/// panic in the warm-up is logged and the daemon serves with a cold cache: a released start
+/// always reaches readiness, so no client waits out its start timeout. A foreground
+/// profile-only start waits in `released` for its caller's callback; false leaves the daemon
+/// `starting` (it is stopping) and logs no `ready`. Returns whether ready was answered.
+pub(crate) fn warm_then_ready(
+    readiness: &Readiness,
+    warm: impl FnOnce(),
+    released: impl FnOnce() -> bool,
+) -> bool {
     if let Err(p) = catch_unwind(AssertUnwindSafe(warm)) {
         log(&format!(
             "warm-up panicked ({}); serving with a cold cache",
             panic_text(&*p)
         ));
     }
+    if !released() {
+        return false;
+    }
     readiness.ready();
     log("ready");
+    true
 }
 
 /// The body of the `rdy-serve` thread: warms canon beside the accept loop and serves the site,
 /// then, once the daemon exits, ends the site and closes the store.
+#[allow(clippy::too_many_arguments)]
 fn serve_thread(
     rt: tokio::runtime::Runtime,
     daemon: Daemon,
@@ -338,6 +466,8 @@ fn serve_thread(
     readiness: Readiness,
     site: Option<SiteServer>,
     handle: DaemonHandle,
+    root: PathBuf,
+    released: Option<mpsc::Receiver<()>>,
 ) -> Result<ExitReason, ServeError> {
     // the site accepts until the daemon stops; the runtime's drop below ends what is left of
     // it before the store closes, so a successor finds the port free
@@ -347,23 +477,46 @@ fn serve_thread(
     readiness.progress("building canon");
     log("building canon");
     let warm = Arc::clone(&shared);
+    let warmed = root.clone();
     rt.spawn_blocking(move || {
-        warm_then_ready(&readiness, || {
-            let st = warm.engine().read();
-            for scope in WARM_SCOPES {
-                if let Err(e) = st
-                    .materialized(scope)
-                    .and_then(|_| st.graph(scope).map(drop))
-                {
-                    log(&format!("warm-up failed: {e}"));
+        let ready = warm_then_ready(
+            &readiness,
+            || {
+                let st = warm.engine().read();
+                for scope in WARM_SCOPES {
+                    if let Err(e) = st
+                        .materialized(scope)
+                        .and_then(|_| st.graph(scope).map(drop))
+                    {
+                        log(&format!("warm-up failed: {e}"));
+                    }
                 }
-            }
-        });
+            },
+            || {
+                profiles::report(&warmed, TestEvent::Stage("warmed"));
+                // a foreground profile-only start: its callback's success releases it, and
+                // a failure drops the gate unsent
+                released.is_none_or(|rx| rx.recv().is_ok())
+            },
+        );
+        if !ready {
+            return;
+        }
+        profiles::report(&warmed, TestEvent::Stage("ready"));
         // plan M2e2 (D-Z0EMP): what moved while no daemon ran (the pack, the rdy build) is
         // logged once, after ready, in a batch of cause `reopened`
         warm.writer.reconcile_soon();
     });
     let ran = rt.block_on(daemon.run());
+    // the profile-only listeners: no start from now on, and each listener's task, ended by the
+    // stop, is joined on this runtime before the store closes or is abandoned
+    let listeners = shared.profile_sites.close();
+    rt.block_on(async move {
+        for task in listeners {
+            let _ = task.await;
+        }
+    });
+    profiles::report(&root, TestEvent::Stage("profiles-joined"));
     // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still
     // serves them; then the store closes last, so the process exits right after releasing it
     drop(rt);
@@ -371,9 +524,11 @@ fn serve_thread(
         // final ruling: no store write; the store's path may hold another project now
         shared.writer.abandon();
         log("store left as it is (the project is gone)");
+        profiles::report(&root, TestEvent::Stage("store-abandoned"));
     } else {
         close(&shared);
         log("store closed");
+        profiles::report(&root, TestEvent::Stage("store-closed"));
     }
     ran.map_err(ServeError::Runtime)
 }
@@ -555,7 +710,11 @@ mod tests {
     #[test]
     fn msw9_a_warm_up_that_panics_still_answers_ready() {
         let r = Readiness::new();
-        warm_then_ready(&r, || panic!("warm-up test panic"));
+        assert!(warm_then_ready(
+            &r,
+            || panic!("warm-up test panic"),
+            || true
+        ));
         assert!(r.is_ready());
     }
 }

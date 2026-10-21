@@ -134,6 +134,21 @@ pub struct Sides<'a> {
     pub to: &'a Materialized,
     /// The `to` side's site: both sides' text reads against it (O4).
     pub text: &'a Site<'a>,
+    /// A named profile's `from` side site (D-CWC91): the text only `from` holds reads its
+    /// references through that side's own selected state, never through the full source. None
+    /// for the source, whose sides both read against `text`.
+    pub from_text: Option<&'a Site<'a>>,
+}
+
+impl<'a> Sides<'a> {
+    /// The site a block of side `m` reads its text against: `from_text` for the `from` side when
+    /// there is one, else `text` (O4).
+    fn site_of(&self, m: &Materialized) -> &'a Site<'a> {
+        match self.from_text {
+            Some(old) if std::ptr::eq(m, self.from) => old,
+            _ => self.text,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -239,7 +254,7 @@ pub fn summary(
 
     // rule 2: the rows, each with its section's anchor
     let rows: Vec<ChangeRow> = match of {
-        Of::Review(_) => home::changes(site, rv),
+        Of::Review(_) => home::changes_with(site, rv, sides.from_text),
         Of::Since { .. } => since_rows(site, rv, &order, sides),
     };
     let mut taken = reserved_ids();
@@ -310,7 +325,7 @@ pub fn summary(
     }
     for (key, entries) in extra {
         let title = side_of(&key, sides)
-            .map(|(b, m)| page_title(b, m, sides.text))
+            .map(|(b, m)| page_title(b, m, sides.site_of(m)))
             .unwrap_or_default();
         groups.push(Group {
             anchor: unique(title.clone(), &mut taken),
@@ -409,7 +424,7 @@ fn since_rows(
                 };
                 home::doc_row(sides.text, b, rv.doc(&b.id).unwrap_or(&edited))
             }
-            None => home::removed_row(doc, page_title(doc, sides.from, sides.text)),
+            None => home::removed_row(doc, page_title(doc, sides.from, sides.site_of(sides.from))),
         };
         row.href = site.page(&doc.id).map(|p| rel("index.html", &p));
         rows.push(row);
@@ -510,9 +525,14 @@ fn unit(b: &Block) -> Unit {
 /// the block's element when both sides have the same kind of text, else each side whole in its
 /// own element.
 fn block_diff(old: Option<&Block>, new: Option<&Block>, sides: &Sides) -> String {
-    let site = sides.text;
-    let old = old.map(|o| (text(o, sides.from, site), wrap_of(o), o));
-    let new = new.map(|n| (text(n, sides.to, site), wrap_of(n), n));
+    let old = old.map(|o| {
+        (
+            text(o, sides.from, sides.site_of(sides.from)),
+            wrap_of(o),
+            o,
+        )
+    });
+    let new = new.map(|n| (text(n, sides.to, sides.text), wrap_of(n), n));
     match (old, new) {
         (Some((ot, ow, _)), Some((nt, nw, n))) if ow.same_kind(&nw) => {
             diff_html(&worddiff::diff(&ot, &nt, unit(n)), &nw)
@@ -702,10 +722,11 @@ fn place(b: &Block, sides: &Sides) -> String {
     for _ in 0..=sides.from.len() + sides.to.len() {
         let Some((c, m)) = cur else { break };
         if c.block_type == "section" {
-            return field_words(c, "title", sides.text, false).unwrap_or_else(|| "Untitled".into());
+            return field_words(c, "title", sides.site_of(m), false)
+                .unwrap_or_else(|| "Untitled".into());
         }
         if c.block_type == tree::DOC {
-            return page_title(c, m, sides.text);
+            return page_title(c, m, sides.site_of(m));
         }
         cur = c.parent.as_ref().and_then(|p| side_of(p, sides));
     }

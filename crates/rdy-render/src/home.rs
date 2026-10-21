@@ -121,7 +121,10 @@ pub fn build(
     let current = versions.last().map(|v| &v.name);
     Home {
         description: description.map(String::from),
-        changes: facts.listed.map(|r| changes(site, r)).unwrap_or_default(),
+        changes: facts
+            .listed
+            .map(|r| changes_with(site, r, facts.old))
+            .unwrap_or_default(),
         cards,
         versions: versions
             .iter()
@@ -143,6 +146,12 @@ pub fn build(
 
 /// The changed docs of a draft in reading order, then its removed pages.
 pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
+    changes_with(site, review, None)
+}
+
+/// [`changes`], with a named profile's old selected site `old` (D-CWC91): a removed page's
+/// title reads its references through it, never through `site`.
+pub(crate) fn changes_with(site: &Site, review: &Review, old: Option<&Site>) -> Vec<ChangeRow> {
     let mut rows: Vec<ChangeRow> = site
         .tree_pages()
         .filter_map(|id| {
@@ -155,7 +164,7 @@ pub(crate) fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
         review
             .removed_pages()
             .iter()
-            .map(|b| removed_row(b, site.label(b))),
+            .map(|b| removed_row(b, old.unwrap_or(site).label(b))),
     );
     rows
 }

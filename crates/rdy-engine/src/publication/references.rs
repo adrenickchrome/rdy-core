@@ -104,6 +104,25 @@ impl ReferenceReport {
             fix: WARNING_FIX.to_string(),
         })
     }
+
+    /// The `W_PUBLICATION_REFERENCE` warning a live inspection shows (D-CWC91): none when the
+    /// check is clear, the org warning when it warns, and for a blocked public check the refusal's
+    /// own message and fix as a warning. The status stays as it is, and output still refuses a
+    /// blocked check ([`ReferenceReport::require_output`]).
+    pub fn live_warning(&self) -> Option<PublicationWarning> {
+        match self.status {
+            CheckStatus::Clear => None,
+            CheckStatus::Warning => self.warning(),
+            CheckStatus::Blocked => Some(PublicationWarning {
+                code: W_PUBLICATION_REFERENCE,
+                message: format!(
+                    "Public profile has {} references outside its selection.",
+                    self.blocked_count
+                ),
+                fix: BLOCKED_FIX.to_string(),
+            }),
+        }
+    }
 }
 
 /// One segment of a JSON Pointer (RFC 6901): `~` as `~0`, `/` as `~1`.

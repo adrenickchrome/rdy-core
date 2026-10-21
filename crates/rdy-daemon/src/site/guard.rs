@@ -7,25 +7,46 @@
 use crate::site::http::{Method, Request, Response, text};
 use std::net::Ipv4Addr;
 
-/// What the site answers to: its port, and the one LAN address it is bound to, if any.
+/// What the site answers to: its port, the one LAN address it is bound to, if any, and the mode
+/// its listener serves. The mode is fixed when the listener is made (D-DK03K: "The listener a
+/// request arrives on sets the mode, never a path, a Host header or a link").
 pub struct Guard {
     pub port: u16,
     pub lan: Option<Ipv4Addr>,
+    mode: ListenerMode,
 }
 
+/// What one listener serves: the full site (every scope, profile route and the menu), or the
+/// pages of one profile of canon at its root and nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListenerMode {
+    Full,
+    /// `key` is a folded profile key, or the exact `implicit:org`.
+    ProfileOnly {
+        key: String,
+    },
+}
+
+use rdy_engine::publication::IMPLICIT_ORG;
 pub use rdy_engine::site_scope::ScopeRef;
 use rdy_engine::site_scope::{proposal_ref, tag_name_ok, view_name_ok};
+pub use rdy_engine::site_target::SiteTarget;
+
+/// The route segment that names a publication profile under a scope (D-CWC91).
+const PROFILE: &[u8] = b"~profile";
 
 /// What a request that passes the guard asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
-    /// A page or asset of a scope, by its path inside the scope's site.
-    Page { scope: ScopeRef, path: String },
+    /// A page or asset of a target (a scope's source, a profile of a scope, or the versions
+    /// menu seen from a scope), by its path inside the target's site.
+    Page { target: SiteTarget, path: String },
     /// The live script.
     LiveJs,
-    /// The event stream of an open page: its scope, its path, and the revision and label it has.
+    /// The event stream of an open page: its target, its path, and the revision and label it
+    /// has.
     Events {
-        scope: ScopeRef,
+        target: SiteTarget,
         page: String,
         rev: String,
         label: String,
@@ -47,6 +68,29 @@ pub enum Refusal {
 }
 
 impl Guard {
+    /// The guard of a full listener.
+    pub fn full(port: u16, lan: Option<Ipv4Addr>) -> Guard {
+        Guard {
+            port,
+            lan,
+            mode: ListenerMode::Full,
+        }
+    }
+
+    /// The guard of the profile-only listener of `key` (a folded key, or `implicit:org`).
+    pub fn profile_only(port: u16, lan: Option<Ipv4Addr>, key: String) -> Guard {
+        Guard {
+            port,
+            lan,
+            mode: ListenerMode::ProfileOnly { key },
+        }
+    }
+
+    /// The mode this listener serves, fixed when it was made.
+    pub fn mode(&self) -> &ListenerMode {
+        &self.mode
+    }
+
     /// The `Host` values the site answers to.
     pub fn hosts(&self) -> Vec<String> {
         let port = self.port;
@@ -100,8 +144,11 @@ impl Guard {
             .map(|seg| percent_decode(seg, false))
             .collect::<Option<Vec<_>>>()
             .ok_or(Refusal::NotFound)?;
-        // 6. The routes.
-        route(&r.method, &segments, query)
+        // 6. The routes of the listener's mode.
+        match &self.mode {
+            ListenerMode::Full => route(&r.method, &segments, query),
+            ListenerMode::ProfileOnly { key } => route_only(key, &r.method, &segments, query),
+        }
     }
 
     fn is_own_host(&self, value: &str) -> bool {
@@ -115,17 +162,25 @@ impl Guard {
 
 /// Routes a path from its percent-decoded segments (the path after its leading `/`, split at
 /// `/` before decoding).
+///
+/// A page route is `[<scope prefix>][~profile/<key>/]<page path>`: zero or one scope prefix
+/// (`~view/<name>/`, `~proposal/<ref>/`, `~tag/<name>/`), then zero or one profile prefix
+/// (D-CWC91), then a page path by rule 5. A second profile prefix, one after page content, an
+/// invalid key or an unknown `~` route is not found. Only the versions page reads its query.
 fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<Route, Refusal> {
     if segments[0].starts_with(b"~") {
         // the versions page is one page: `/~versions/` or `/~versions/index.html`, nothing else
         if segments[0] == b"~versions" {
             return match &segments[1..] {
                 [last] if last.is_empty() || last == b"index.html" => Ok(Route::Page {
-                    scope: ScopeRef::Versions,
+                    target: versions(query.unwrap_or(""))?,
                     path: "index.html".to_string(),
                 }),
                 _ => Err(Refusal::NotFound),
             };
+        }
+        if segments[0] == PROFILE {
+            return profile_page(ScopeRef::Canon, &segments[1..]);
         }
         let [kind, name, rest @ ..] = segments else {
             return Err(Refusal::NotFound);
@@ -141,8 +196,14 @@ fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<R
             b"~tag" if tag_name_ok(name) => ScopeRef::Tag(name.to_string()),
             _ => return Err(Refusal::NotFound),
         };
-        let path = page_path(rest).ok_or(Refusal::NotFound)?;
-        return Ok(Route::Page { scope, path });
+        if rest[0] == PROFILE {
+            return profile_page(scope, &rest[1..]);
+        }
+        let path = content_path(rest)?;
+        return Ok(Route::Page {
+            target: SiteTarget::Source(scope),
+            path,
+        });
     }
     let path = page_path(segments).ok_or(Refusal::NotFound)?;
     if path == "_rdy/live.js" {
@@ -157,29 +218,180 @@ fn route(method: &Method, segments: &[Vec<u8>], query: Option<&str>) -> Result<R
     if path == "_rdy" || path.starts_with("_rdy/") {
         return Err(Refusal::NotFound);
     }
+    let path = content_path(segments)?;
     Ok(Route::Page {
-        scope: ScopeRef::Canon,
+        target: SiteTarget::Source(ScopeRef::Canon),
         path,
     })
 }
 
-/// The event route from its query: `scope`, `page`, `rev` and `label` (first of each; other keys
-/// are ignored).
-fn events(query: &str) -> Result<Route, Refusal> {
-    let (mut scope, mut page, mut rev, mut label) = (None, None, None, None);
+/// Routes a path on the profile-only listener of `key`: no `~` route at all (every scope,
+/// profile and menu prefix is the plain not found, D-DK03K), the live script, the event route of
+/// its own pages, and the profile's pages and assets at the root. A page's query is ignored.
+fn route_only(
+    key: &str,
+    method: &Method,
+    segments: &[Vec<u8>],
+    query: Option<&str>,
+) -> Result<Route, Refusal> {
+    if segments[0].starts_with(b"~") {
+        return Err(Refusal::NotFound);
+    }
+    let path = page_path(segments).ok_or(Refusal::NotFound)?;
+    if path == "_rdy/live.js" {
+        return Ok(Route::LiveJs);
+    }
+    if path == "_rdy/events" {
+        if *method == Method::Head {
+            return Err(Refusal::Method);
+        }
+        return events_only(key, query.unwrap_or(""));
+    }
+    if path == "_rdy" || path.starts_with("_rdy/") {
+        return Err(Refusal::NotFound);
+    }
+    let path = content_path(segments)?;
+    Ok(Route::Page {
+        target: SiteTarget::ProfileOnly {
+            key: key.to_string(),
+        },
+        path,
+    })
+}
+
+/// A page of profile `<key>` under `scope`, from the segments after `~profile`: the key, then
+/// a page path. No page without the `/` after the key, as for a scope.
+fn profile_page(scope: ScopeRef, segments: &[Vec<u8>]) -> Result<Route, Refusal> {
+    let [key, rest @ ..] = segments else {
+        return Err(Refusal::NotFound);
+    };
+    if rest.is_empty() {
+        return Err(Refusal::NotFound);
+    }
+    let key = profile_key(key).ok_or(Refusal::NotFound)?;
+    let target = SiteTarget::Profile { scope, key };
+    target.validate().map_err(|_| Refusal::NotFound)?;
+    let path = content_path(rest)?;
+    Ok(Route::Page { target, path })
+}
+
+/// Rule 5 on the page path after every prefix: no segment starts another `~` route (a second
+/// profile prefix, a profile prefix after page content, an unknown route), then [`page_path`].
+fn content_path(segments: &[Vec<u8>]) -> Result<String, Refusal> {
+    if segments.first().is_some_and(|s| s.starts_with(b"~"))
+        || segments.iter().any(|s| s == PROFILE)
+    {
+        return Err(Refusal::NotFound);
+    }
+    page_path(segments).ok_or(Refusal::NotFound)
+}
+
+/// A profile key as a route or a query names it: the exact implicit token, or a valid key,
+/// folded (one key, one target). `None` for anything else: no id, path step or separator.
+fn profile_key(raw: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(raw).ok()?;
+    if text == IMPLICIT_ORG {
+        return Some(text.to_string());
+    }
+    if rdy_model::key::problem(text).is_some() {
+        return None;
+    }
+    Some(rdy_model::key::fold(text))
+}
+
+/// The first value of each of `keys` in `query`, each decoded once; a later duplicate and every
+/// other key are ignored, their values never decoded. A first value that does not decode is
+/// malformed.
+fn first_values<const N: usize>(
+    query: &str,
+    keys: [&str; N],
+) -> Result<[Option<String>; N], Refusal> {
+    let mut out: [Option<String>; N] = std::array::from_fn(|_| None);
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let slot = match key {
-            "scope" => &mut scope,
-            "page" => &mut page,
-            "rev" => &mut rev,
-            "label" => &mut label,
-            _ => continue,
+        let Some(i) = keys.iter().position(|k| *k == key) else {
+            continue;
         };
-        if slot.is_none() {
-            *slot = Some(query_decode(value).ok_or(Refusal::Malformed)?);
+        if out[i].is_none() {
+            out[i] = Some(query_decode(value).ok_or(Refusal::Malformed)?);
         }
     }
+    Ok(out)
+}
+
+/// The versions page's context from its query: `scope` (canon when absent) and `profile` (the
+/// full source when absent), as `Menu { scope, profile }`. An invalid value is malformed.
+fn versions(query: &str) -> Result<SiteTarget, Refusal> {
+    let [scope, profile] = first_values(query, ["scope", "profile"])?;
+    let scope = match scope {
+        None => ScopeRef::Canon,
+        Some(s) => parse_scope(&s).ok_or(Refusal::Malformed)?,
+    };
+    let profile = match profile {
+        None => None,
+        Some(p) => Some(profile_key(p.as_bytes()).ok_or(Refusal::Malformed)?),
+    };
+    let target = SiteTarget::Menu { scope, profile };
+    target.validate().map_err(|_| Refusal::Malformed)?;
+    Ok(target)
+}
+
+/// The event route from its query: `scope`, `page`, `rev` and `label`, and the optional
+/// `profile` and `menu` (first of each; other keys are ignored). `menu=1` is the menu seen from
+/// the scope (and profile); else a profile is its route under the scope, and no profile the
+/// scope's source. The base `scope=versions` alone is the menu of canon.
+fn events(query: &str) -> Result<Route, Refusal> {
+    let q = event_values(query)?;
+    let target = match (q.scope.clone(), q.profile.clone(), q.menu) {
+        (ScopeRef::Versions, None, false) => SiteTarget::Menu {
+            scope: ScopeRef::Canon,
+            profile: None,
+        },
+        // a nested versions scope is no target
+        (ScopeRef::Versions, _, _) => return Err(Refusal::Malformed),
+        (scope, profile, true) => SiteTarget::Menu { scope, profile },
+        (scope, Some(key), false) => SiteTarget::Profile { scope, key },
+        (scope, None, false) => SiteTarget::Source(scope),
+    };
+    target.validate().map_err(|_| Refusal::Malformed)?;
+    Ok(event_route(q, target))
+}
+
+/// The event route on the profile-only listener of `key`, by the same value rules as
+/// [`events`]: a valid event of its pages reads canon, with no menu, and with no profile or its
+/// own (folded) key. A well-formed context that selects any other target is not found; this
+/// check comes before the full listener's combination rules.
+fn events_only(key: &str, query: &str) -> Result<Route, Refusal> {
+    let q = event_values(query)?;
+    let own =
+        q.scope == ScopeRef::Canon && !q.menu && q.profile.as_deref().is_none_or(|p| p == key);
+    if !own {
+        return Err(Refusal::NotFound);
+    }
+    let target = SiteTarget::ProfileOnly {
+        key: key.to_string(),
+    };
+    Ok(event_route(q, target))
+}
+
+/// The values of an event query, each read by the first-of-each rule and checked on its own:
+/// the four required ones present; the scope, page path, revision, label, profile key and menu
+/// flag valid. Every recognized value is checked here, before any target rule (the bound
+/// listener's or the full listener's), so a malformed value is 400 whatever target the others
+/// name.
+struct EventValues {
+    scope: ScopeRef,
+    profile: Option<String>,
+    menu: bool,
+    /// The page path, by rule 5.
+    page: String,
+    rev: String,
+    label: String,
+}
+
+fn event_values(query: &str) -> Result<EventValues, Refusal> {
+    let [scope, page, rev, label, profile, menu] =
+        first_values(query, ["scope", "page", "rev", "label", "profile", "menu"])?;
     let (Some(scope), Some(page), Some(rev), Some(label)) = (scope, page, rev, label) else {
         return Err(Refusal::Malformed);
     };
@@ -190,12 +402,33 @@ fn events(query: &str) -> Result<Route, Refusal> {
     // The value is decoded once, so each `/` in it separates two segments.
     let segments: Vec<Vec<u8>> = page.split('/').map(|s| s.as_bytes().to_vec()).collect();
     let page = page_path(&segments).ok_or(Refusal::Malformed)?;
-    Ok(Route::Events {
+    let profile = match profile {
+        None => None,
+        Some(p) => Some(profile_key(p.as_bytes()).ok_or(Refusal::Malformed)?),
+    };
+    let menu = match menu.as_deref() {
+        None => false,
+        Some("1") => true,
+        Some(_) => return Err(Refusal::Malformed),
+    };
+    Ok(EventValues {
         scope,
+        profile,
+        menu,
         page,
         rev,
         label,
     })
+}
+
+/// The event route of `target`, from its checked values.
+fn event_route(q: EventValues, target: SiteTarget) -> Route {
+    Route::Events {
+        target,
+        page: q.page,
+        rev: q.rev,
+        label: q.label,
+    }
 }
 
 /// `canon`, `versions`, `tag:<name>`, `view:<name>` or `proposal:<ref>`.
@@ -319,17 +552,11 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn g() -> Guard {
-        Guard {
-            port: 51000,
-            lan: None,
-        }
+        Guard::full(51000, None)
     }
 
     fn lan() -> Guard {
-        Guard {
-            port: 51000,
-            lan: Some(Ipv4Addr::new(192, 168, 1, 20)),
-        }
+        Guard::full(51000, Some(Ipv4Addr::new(192, 168, 1, 20)))
     }
 
     /// A request head from lines joined by `\n`.
@@ -345,7 +572,7 @@ mod tests {
 
     fn canon(path: &str) -> Route {
         Route::Page {
-            scope: ScopeRef::Canon,
+            target: SiteTarget::Source(ScopeRef::Canon),
             path: path.into(),
         }
     }
@@ -490,21 +717,21 @@ mod tests {
         assert_eq!(
             g().check(&get("/~view/work-agent-a/system/site.html", h)),
             Ok(Route::Page {
-                scope: ScopeRef::View("work-agent-a".into()),
+                target: SiteTarget::Source(ScopeRef::View("work-agent-a".into())),
                 path: "system/site.html".into()
             })
         );
         assert_eq!(
             g().check(&get("/~proposal/P-7a2c9e@3/", h)),
             Ok(Route::Page {
-                scope: ScopeRef::Proposal("P-7a2c9e@3".into()),
+                target: SiteTarget::Source(ScopeRef::Proposal("P-7a2c9e@3".into())),
                 path: "index.html".into()
             })
         );
         assert_eq!(
             g().check(&get("/~proposal/P-7a2c9e/index.html", h)),
             Ok(Route::Page {
-                scope: ScopeRef::Proposal("P-7a2c9e".into()),
+                target: SiteTarget::Source(ScopeRef::Proposal("P-7a2c9e".into())),
                 path: "index.html".into()
             })
         );
@@ -523,7 +750,7 @@ mod tests {
         assert_eq!(
             g().check(&get(ev, h)),
             Ok(Route::Events {
-                scope: ScopeRef::View("draft".into()),
+                target: SiteTarget::Source(ScopeRef::View("draft".into())),
                 page: "system/site.html".into(),
                 rev: "00112233aabbccdd".into(),
                 label: "ffeeddccbbaa9988".into()
@@ -570,7 +797,7 @@ mod tests {
 
     fn view(name: &str, path: &str) -> Route {
         Route::Page {
-            scope: ScopeRef::View(name.into()),
+            target: SiteTarget::Source(ScopeRef::View(name.into())),
             path: path.into(),
         }
     }
@@ -594,7 +821,7 @@ mod tests {
             assert_eq!(
                 events(&q),
                 Ok(Route::Events {
-                    scope,
+                    target: SiteTarget::Source(scope),
                     page: "index.html".into(),
                     rev: REV.into(),
                     label: REV.into()
@@ -617,7 +844,7 @@ mod tests {
         );
         let raw = format!("scope=view:team/a&page=index.html&rev={REV}&label={REV}");
         assert!(
-            matches!(events(&raw), Ok(Route::Events { scope: ScopeRef::View(n), .. }) if n == "team/a")
+            matches!(events(&raw), Ok(Route::Events { target: SiteTarget::Source(ScopeRef::View(n)), .. }) if n == "team/a")
         );
     }
 
@@ -650,7 +877,7 @@ mod tests {
     #[test]
     fn ls3_a_proposal_ref_has_one_spelling() {
         let want = Ok(Route::Page {
-            scope: ScopeRef::Proposal("P-7a2c9e@1".into()),
+            target: SiteTarget::Source(ScopeRef::Proposal("P-7a2c9e@1".into())),
             path: "index.html".into(),
         });
         for r in ["P-7A2C9E@1", "P-7a2c9e@01", "P-7a2c9e@1", "P-7a2C9E@0001"] {
@@ -659,26 +886,26 @@ mod tests {
         assert_eq!(
             g().check(&get("/~proposal/P-ABCD@01/index.html", H)),
             Ok(Route::Page {
-                scope: ScopeRef::Proposal("P-abcd@1".into()),
+                target: SiteTarget::Source(ScopeRef::Proposal("P-abcd@1".into())),
                 path: "index.html".into()
             })
         );
         assert_eq!(
             g().check(&get("/~proposal/P-ABCD/index.html", H)),
             Ok(Route::Page {
-                scope: ScopeRef::Proposal("P-abcd".into()),
+                target: SiteTarget::Source(ScopeRef::Proposal("P-abcd".into())),
                 path: "index.html".into()
             })
         );
         let q = format!("scope=proposal:P-ABCD@01&page=index.html&rev={REV}&label={REV}");
         assert!(
-            matches!(events(&q), Ok(Route::Events { scope: ScopeRef::Proposal(r), .. }) if r == "P-abcd@1")
+            matches!(events(&q), Ok(Route::Events { target: SiteTarget::Source(ScopeRef::Proposal(r)), .. }) if r == "P-abcd@1")
         );
     }
 
     fn tag(name: &str, path: &str) -> Route {
         Route::Page {
-            scope: ScopeRef::Tag(name.into()),
+            target: SiteTarget::Source(ScopeRef::Tag(name.into())),
             path: path.into(),
         }
     }
@@ -721,7 +948,7 @@ mod tests {
         assert_eq!(
             g().check(&get(&format!("/~tag/{long}/"), H)),
             Ok(Route::Page {
-                scope: ScopeRef::Tag(long),
+                target: SiteTarget::Source(ScopeRef::Tag(long)),
                 path: "index.html".into()
             })
         );
@@ -731,7 +958,7 @@ mod tests {
         assert_eq!(
             g().check(&get(&format!("/~tag/{max}/"), H)),
             Ok(Route::Page {
-                scope: ScopeRef::Tag(max.clone()),
+                target: SiteTarget::Source(ScopeRef::Tag(max.clone())),
                 path: "index.html".into()
             })
         );
@@ -753,7 +980,7 @@ mod tests {
             assert_eq!(
                 g().check(&get(&format!("/{prefix}"), H)),
                 Ok(Route::Page {
-                    scope: scope.clone(),
+                    target: SiteTarget::Source(scope.clone()),
                     path: "index.html".into()
                 }),
                 "{name}"
@@ -763,7 +990,7 @@ mod tests {
         assert_eq!(
             g().check(&get("/~tag/v1%2E0%2E0-rc%2E1/index.html", H)),
             Ok(Route::Page {
-                scope: ScopeRef::Tag("v1.0.0-rc.1".into()),
+                target: SiteTarget::Source(ScopeRef::Tag("v1.0.0-rc.1".into())),
                 path: "index.html".into()
             })
         );
@@ -776,7 +1003,10 @@ mod tests {
     #[test]
     fn sr2_the_versions_route_is_one_page() {
         let versions = Ok(Route::Page {
-            scope: ScopeRef::Versions,
+            target: SiteTarget::Menu {
+                scope: ScopeRef::Canon,
+                profile: None,
+            },
             path: "index.html".into(),
         });
         assert_eq!(g().check(&get("/~versions/", H)), versions);
@@ -799,7 +1029,7 @@ mod tests {
         assert_eq!(
             events(&q),
             Ok(Route::Events {
-                scope: ScopeRef::Tag("v1.0.0".into()),
+                target: SiteTarget::Source(ScopeRef::Tag("v1.0.0".into())),
                 page: "index.html".into(),
                 rev: REV.into(),
                 label: REV.into()
@@ -809,7 +1039,10 @@ mod tests {
         assert_eq!(
             events(&q),
             Ok(Route::Events {
-                scope: ScopeRef::Versions,
+                target: SiteTarget::Menu {
+                    scope: ScopeRef::Canon,
+                    profile: None,
+                },
                 page: "index.html".into(),
                 rev: REV.into(),
                 label: REV.into()

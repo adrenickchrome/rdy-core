@@ -3,7 +3,7 @@
 //! is never a read scope.
 use rdy_daemon::Shared;
 use rdy_daemon::site::SiteInfo;
-use rdy_daemon::site::guard::ScopeRef;
+use rdy_daemon::site::guard::{ScopeRef, SiteTarget};
 use rdy_daemon::site::live::*;
 use rdy_engine::engine::write_typed;
 use rdy_engine::{Rdy, Scope};
@@ -11,14 +11,13 @@ use rdy_model::BlockId;
 use rdy_qa::daemon::Hosted;
 use rdy_qa::golden::{land, tiny};
 use rdy_qa::http;
-use rdy_render::live::LiveBuild;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc::error::TryRecvError;
 
-const C: ScopeRef = ScopeRef::Canon;
-const V: ScopeRef = ScopeRef::Versions;
+const C: SiteTarget = SiteTarget::Source(ScopeRef::Canon);
+const V: SiteTarget = SiteTarget::Source(ScopeRef::Versions);
 
 fn shared(h: &Hosted) -> Arc<Shared> {
     Arc::clone(h.run.as_ref().unwrap().shared())
@@ -76,9 +75,9 @@ fn edit(sh: &Arc<Shared>, view: &'static str, title: &'static str, body: &'stati
     .unwrap();
 }
 
-fn sub(sh: &Arc<Shared>, scope: &ScopeRef, page: &str, b: &LiveBuild) -> Subscription {
+fn sub(sh: &Arc<Shared>, scope: &SiteTarget, page: &str, b: &SiteBuild) -> Subscription {
     sh.site
-        .subscribe(sh, scope, page, &b.revs[page], &b.label_rev)
+        .subscribe(sh, scope, page, &b.live.revs[page], &b.live.label_rev)
         .unwrap()
 }
 
@@ -117,7 +116,7 @@ fn sr8_a_view_commit_rebuilds_the_versions_page_and_not_canon() {
     let bc = sh.site.refresh(&sh, &C).unwrap();
     let bv = sh.site.refresh(&sh, &V).unwrap();
     assert!(
-        String::from_utf8_lossy(&bv.files["index.html"]).contains("1 doc changed"),
+        String::from_utf8_lossy(&bv.live.files["index.html"]).contains("1 doc changed"),
         "the view changes one doc"
     );
     let mut home = sub(&sh, &C, "index.html", &bc);
@@ -132,7 +131,7 @@ fn sr8_a_view_commit_rebuilds_the_versions_page_and_not_canon() {
     sh.site.refresh(&sh, &C).unwrap();
     let after = sh.site.refresh(&sh, &V).unwrap();
     assert!(
-        String::from_utf8_lossy(&after.files["index.html"]).contains("2 docs changed"),
+        String::from_utf8_lossy(&after.live.files["index.html"]).contains("2 docs changed"),
         "the menu counts the new doc"
     );
     assert_eq!(versions.rx.try_recv(), Ok(LiveEvent::Reload));
@@ -187,10 +186,11 @@ fn sr8_a_view_commit_recounts_one_view() {
 fn sr8_the_versions_page_is_never_a_read_scope() {
     let h = two_docs();
     let sh = shared(&h);
-    let e = rdy_engine::engine::site_reply(&*sh.engine(), Some("versions")).unwrap_err();
+    let e =
+        rdy_engine::engine::site_reply(&*sh.engine(), Some("versions"), None, false).unwrap_err();
     assert_eq!(e.code, rdy_engine::E_NOT_FOUND, "{e:?}");
     assert_eq!(e.message, "no view \"versions\"", "{e:?}");
-    assert!(resolve(&sh.state.load_full(), &V).is_err());
+    assert!(resolve(&sh.state.load_full(), &ScopeRef::Versions).is_err());
 }
 
 /// The meta of the row that links to `href` on the versions page `page`.
@@ -252,7 +252,7 @@ fn sr8_a_pinned_view_from_before_the_first_landing_counts_against_each_canon() {
         assert_eq!(st.effective_base("editing"), None, "the view stays pinned");
         let fresh = rdy_render::menu::docs_changed(&st, &editing).unwrap();
         let page = sh.site.refresh(&sh, &V).unwrap();
-        let page = String::from_utf8_lossy(&page.files["index.html"]).into_owned();
+        let page = String::from_utf8_lossy(&page.live.files["index.html"]).into_owned();
         let meta = row_meta(&page, "/~view/editing/");
         assert!(
             meta.ends_with(&words(fresh)),

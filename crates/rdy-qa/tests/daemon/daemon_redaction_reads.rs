@@ -6,8 +6,8 @@
 //! in progress never delays the removal (no lease, no drain). Barriers pause builds at the
 //! publication check: nothing here sleeps.
 use rdy_daemon::Shared;
-use rdy_daemon::site::guard::{Refusal, ScopeRef, refusal};
-use rdy_daemon::site::live::{LiveEvent, LiveSite};
+use rdy_daemon::site::guard::{Refusal, ScopeRef, SiteTarget, refusal};
+use rdy_daemon::site::live::{LiveEvent, LiveSite, SiteBuild, normalize};
 use rdy_daemon::site::sse::{self, EpochNow};
 use rdy_engine::engine::write_typed;
 use rdy_engine::redaction::RedactInput;
@@ -180,13 +180,14 @@ fn get_or_head(url: &str) -> http::Response {
 
 /// A barrier at the publication check of every build of `scope`: the build reports it is there
 /// on the returned receiver, then waits until the returned sender releases it. Builds of other
-/// scopes pass.
-fn hold(site: &LiveSite, scope: ScopeRef) -> (Receiver<()>, Sender<()>) {
+/// targets pass.
+fn hold(site: &LiveSite, scope: SiteTarget) -> (Receiver<()>, Sender<()>) {
+    let scope = normalize(&scope);
     let (at_tx, at_rx) = channel::<()>();
     let (go_tx, go_rx) = channel::<()>();
     let at_tx = Mutex::new(at_tx);
     let go_rx = Mutex::new(go_rx);
-    site.set_before_publish(Some(Box::new(move |s: &ScopeRef| {
+    site.set_before_publish(Some(Box::new(move |s: &SiteTarget| {
         if *s == scope {
             let _ = at_tx.lock().unwrap().send(());
             let _ = go_rx.lock().unwrap().recv();
@@ -195,9 +196,15 @@ fn hold(site: &LiveSite, scope: ScopeRef) -> (Receiver<()>, Sender<()>) {
     (at_rx, go_tx)
 }
 
+/// The source target of `scope`.
+fn source(scope: ScopeRef) -> SiteTarget {
+    SiteTarget::Source(scope)
+}
+
 /// Whether any file of the build holds `needle`.
-fn build_holds(b: &rdy_render::live::LiveBuild, needle: &str) -> bool {
-    b.files
+fn build_holds(b: &SiteBuild, needle: &str) -> bool {
+    b.live
+        .files
         .values()
         .any(|f| f.windows(needle.len()).any(|w| w == needle.as_bytes()))
 }
@@ -211,13 +218,13 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
     // a page build of canon reads the state before the removal and pauses at the check
     let p = request(&sh, &ids.secret, "redact-1");
     let before = epoch(&sh);
-    let (at, go) = hold(&sh.site, ScopeRef::Canon);
+    let (at, go) = hold(&sh.site, source(ScopeRef::Canon));
     let held = {
         let sh = Arc::clone(&sh);
         std::thread::spawn(move || {
             sh.site
-                .refresh(&sh, &ScopeRef::Canon)
-                .map(|b| (b.epoch, build_holds(&b, SECRET)))
+                .refresh(&sh, &source(ScopeRef::Canon))
+                .map(|b| (b.live.epoch, build_holds(&b, SECRET)))
         })
     };
     at.recv().unwrap();
@@ -233,9 +240,9 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
     }
     sh.site.set_before_publish(None);
     // later requests serve the new state only
-    let b = sh.site.refresh(&sh, &ScopeRef::Canon).unwrap();
+    let b = sh.site.refresh(&sh, &source(ScopeRef::Canon)).unwrap();
     assert_eq!(
-        b.epoch,
+        b.live.epoch,
         epoch(&sh),
         "the served build is of the current epoch"
     );
@@ -248,13 +255,17 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
     assert!(!text(&page).contains(SECRET) && text(&page).contains(STUB));
 
     // a menu build reads the state before the second removal and pauses at the check
-    sh.site.refresh(&sh, &ScopeRef::Versions).unwrap();
+    sh.site.refresh(&sh, &source(ScopeRef::Versions)).unwrap();
     let p = request(&sh, &ids.other, "redact-2");
     let before = epoch(&sh);
-    let (at, go) = hold(&sh.site, ScopeRef::Versions);
+    let (at, go) = hold(&sh.site, source(ScopeRef::Versions));
     let held = {
         let sh = Arc::clone(&sh);
-        std::thread::spawn(move || sh.site.refresh(&sh, &ScopeRef::Versions).map(|b| b.epoch))
+        std::thread::spawn(move || {
+            sh.site
+                .refresh(&sh, &source(ScopeRef::Versions))
+                .map(|b| b.live.epoch)
+        })
     };
     at.recv().unwrap();
     on_writer(&sh, move |r| approve(r, &p));
@@ -268,9 +279,9 @@ fn rdx14_delayed_live_builds_cannot_publish_an_old_epoch() {
         ),
     }
     sh.site.set_before_publish(None);
-    let menu = sh.site.refresh(&sh, &ScopeRef::Versions).unwrap();
+    let menu = sh.site.refresh(&sh, &source(ScopeRef::Versions)).unwrap();
     assert_eq!(
-        menu.epoch,
+        menu.live.epoch,
         epoch(&sh),
         "the served menu is of the current epoch"
     );
@@ -396,7 +407,7 @@ fn rdx14_a_prior_response_does_not_delay_erasure() {
     // and a request whose build read the state before the removal, paused at the check
     let p = request(&sh, &ids.secret, "redact");
     let before = epoch(&sh);
-    let (at, go) = hold(&sh.site, ScopeRef::Tag("v1.0.0".into()));
+    let (at, go) = hold(&sh.site, source(ScopeRef::Tag("v1.0.0".into())));
     let first = {
         let tag = tag.clone();
         std::thread::spawn(move || http::get(&tag))
@@ -506,12 +517,18 @@ fn rdx14_a_queued_event_waits_for_the_fresh_state() {
     let p = request(&sh, &ids.secret, "redact");
     // two open pages of alpha at its current revision with an older label: each stream's
     // queue holds a label event
-    let old = sh.site.refresh(&sh, &ScopeRef::Canon).unwrap();
+    let old = sh.site.refresh(&sh, &source(ScopeRef::Canon)).unwrap();
     assert!(build_holds(&old, SECRET));
-    let rev = old.revs["alpha.html"].clone();
+    let rev = old.live.revs["alpha.html"].clone();
     let open = || {
         sh.site
-            .subscribe(&sh, &ScopeRef::Canon, "alpha.html", &rev, "an-older-label")
+            .subscribe(
+                &sh,
+                &source(ScopeRef::Canon),
+                "alpha.html",
+                &rev,
+                "an-older-label",
+            )
             .expect("the stream opens")
     };
     let (a, b) = (open(), open());
@@ -584,7 +601,7 @@ fn rdx14_a_queued_event_waits_for_the_fresh_state() {
 fn rdx14_a_subscribe_across_removal_gets_the_refresh() {
     let (h, ids) = host();
     let sh = shared(&h);
-    let tag = ScopeRef::Tag("v1.0.0".into());
+    let tag = source(ScopeRef::Tag("v1.0.0".into()));
     // a site with no worker: its publish count never moves, as the worker's does not without
     // another publish, so nothing refreshes the scope after the step below
     let site = LiveSite::new();
@@ -620,7 +637,7 @@ fn rdx14_a_subscribe_across_removal_gets_the_refresh() {
     );
     let b = site.refresh(&sh, &tag).unwrap();
     assert_eq!(
-        b.epoch,
+        b.live.epoch,
         epoch(&sh),
         "the scope's build is of the current epoch"
     );
@@ -629,12 +646,13 @@ fn rdx14_a_subscribe_across_removal_gets_the_refresh() {
 
 /// Holds each subscribe of `scope` after its refresh, before its stream is registered: returns
 /// the channel that says it is there and the one that lets it go on.
-fn hold_after_refresh(site: &LiveSite, scope: ScopeRef) -> (Receiver<()>, Sender<()>) {
+fn hold_after_refresh(site: &LiveSite, scope: SiteTarget) -> (Receiver<()>, Sender<()>) {
+    let scope = normalize(&scope);
     let (at_tx, at_rx) = channel::<()>();
     let (go_tx, go_rx) = channel::<()>();
     let at_tx = Mutex::new(at_tx);
     let go_rx = Mutex::new(go_rx);
-    site.set_after_subscribe_refresh(Some(Box::new(move |s: &ScopeRef| {
+    site.set_after_subscribe_refresh(Some(Box::new(move |s: &SiteTarget| {
         if *s == scope {
             let _ = at_tx.lock().unwrap().send(());
             let _ = go_rx.lock().unwrap().recv();
@@ -653,25 +671,26 @@ fn hold_after_refresh(site: &LiveSite, scope: ScopeRef) -> (Receiver<()>, Sender
 fn rdx14_a_successful_subscribe_refresh_across_removal_gets_the_refresh() {
     let (h, ids) = host();
     let sh = shared(&h);
-    let tag = ScopeRef::Tag("v1.0.0".into());
+    let tag = source(ScopeRef::Tag("v1.0.0".into()));
     // a site with no worker: nothing refreshes the scope but the calls below
     let site = LiveSite::new();
     let p = request(&sh, &ids.secret, "redact");
     let before = epoch(&sh);
     // the build of the state before the removal, and the page of it that shows the secret
     let old = site.refresh(&sh, &tag).unwrap();
-    assert_eq!(old.epoch, before);
+    assert_eq!(old.live.epoch, before);
     let page = old
+        .live
         .revs
         .keys()
         .find(|k| {
-            old.files[*k]
+            old.live.files[*k]
                 .windows(SECRET.len())
                 .any(|w| w == SECRET.as_bytes())
         })
         .expect("a page shows the secret")
         .clone();
-    let (rev, label_rev) = (old.revs[&page].clone(), old.label_rev.clone());
+    let (rev, label_rev) = (old.live.revs[&page].clone(), old.live.label_rev.clone());
     let (at, go) = hold_after_refresh(&site, tag.clone());
     let opening = {
         let (sh, site, tag, page) = (Arc::clone(&sh), Arc::clone(&site), tag.clone(), page);
@@ -695,6 +714,6 @@ fn rdx14_a_successful_subscribe_refresh_across_removal_gets_the_refresh() {
         "the page opened at the old build reloads"
     );
     let b = site.refresh(&sh, &tag).unwrap();
-    assert_eq!(b.epoch, epoch(&sh));
+    assert_eq!(b.live.epoch, epoch(&sh));
     assert!(!build_holds(&b, SECRET));
 }

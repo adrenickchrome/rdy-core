@@ -53,6 +53,9 @@ pub(crate) struct Prepared {
     /// How a named profile's output presents itself (`publication::prepare`); none for a source
     /// output, which keeps its existing rules.
     pub profile: Option<ProfilePresentation>,
+    /// Where a live page's pill opens the menu (`SiteTarget::menu_url`); none for the source's
+    /// default `/~versions/`. A static page never reads it.
+    pub menu_url: Option<String>,
 }
 
 /// What a named profile's output reads beyond its selected state (RULING F3, D-0VCQ5): whether
@@ -66,6 +69,28 @@ pub(crate) struct ProfilePresentation {
     pub tag_name: Option<String>,
     /// The chosen tag's history holds content a redaction removed (`VersionInfo::redacted`).
     pub tag_redacted: bool,
+    /// Which output the profile is shown in.
+    pub presentation: Presentation,
+}
+
+/// Where a named profile is shown (D-CWC91, D-DK03K).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Presentation {
+    /// A durable output (a static site, a print, a publication): the chosen tag's name alone.
+    Output,
+    /// A live route under a scope: the existing version header with the profile's title, its
+    /// selected counts, the menu and the review controls.
+    LiveRoute {
+        /// The header's words (`version::profile_header`).
+        header: version::Header,
+        /// The whole colophon sentence (`version::profile_colophon`).
+        colophon: String,
+    },
+    /// The profile-only site of canon: no pill, chip, menu, review or history.
+    LiveOnly {
+        /// The colophon sentence: the profile's title and a period.
+        colophon: String,
+    },
 }
 
 /// What an output reads of the scope's history: its review, the view or proposal version it
@@ -86,6 +111,10 @@ pub(crate) struct History {
     pub since: Option<changes::Summary>,
     /// The build's warnings for the scope, in order.
     pub warnings: Vec<String>,
+    /// A named profile's review base, its selected state (D-CWC91): the words only it holds (a
+    /// removed line, a removed page's row) read their references through it. None for the
+    /// source, whose removed text reads against the scope's site.
+    pub old: Option<Arc<Materialized>>,
 }
 
 impl History {
@@ -99,6 +128,7 @@ impl History {
             changes: None,
             since: None,
             warnings: vec![],
+            old: None,
         }
     }
 }
@@ -148,6 +178,7 @@ pub(crate) fn source(
         rdy_dir: rdy.root().join(".rdy"),
         history,
         profile: None,
+        menu_url: None,
     })
 }
 
@@ -230,6 +261,7 @@ fn history(
             from: &from,
             to: m,
             text: &site,
+            from_text: None,
         };
         let (s, inline) = changes::summary(
             &site,
@@ -266,6 +298,7 @@ fn history(
             from: &from,
             to: to_m.as_deref().unwrap_or(m),
             text: to_site.as_ref().unwrap_or(&site),
+            from_text: None,
         };
         let (s, _) = changes::summary(
             &site,
@@ -288,6 +321,7 @@ fn history(
         changes: changes_summary,
         since: since_summary,
         warnings,
+        old: None,
     })
 }
 
@@ -419,7 +453,7 @@ fn since_of(
 
 /// What a review render shows (D-BMX8P): a view's name and owner, or a proposal version's title
 /// and author, with the `blocks` it changes (`Review::changed_blocks`). None for any other scope.
-fn reviewed_of(
+pub(crate) fn reviewed_of(
     rdy: &ReadState,
     scope: &Scope,
     blocks: u32,
