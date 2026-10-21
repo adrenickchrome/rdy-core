@@ -163,7 +163,8 @@ fn cp1_pack_cannot_own_engine_fields() {
             e.to_string(),
             format!("invalid pack: type decision: field {field} is reserved for the engine"),
         );
-        // a tracking declaration alone names no field of the type, and is refused as reserved
+        // a tracking declaration alone names no field of the type, and gets the same
+        // reserved-field diagnostic
         let mut set = PackSet::with_builtin();
         let name = set
             .add_yaml(&format!(
@@ -173,9 +174,7 @@ fn cp1_pack_cannot_own_engine_fields() {
         let e = set.resolve(&name).unwrap_err();
         assert_eq!(
             e.to_string(),
-            format!(
-                "invalid pack: type decision: tracking field {field} is derived or reserved by the engine"
-            ),
+            format!("invalid pack: type decision: field {field} is reserved for the engine"),
         );
     }
     // both are store-only: a working copy never shows them

@@ -540,15 +540,20 @@ fn check_coverage(pack: &Pack) -> Result<(), SchemaError> {
 }
 
 /// trk1: each tracking field of `t` is a field of the type, and neither part of a decision's
-/// ruling nor derived or reserved by the engine.
+/// ruling nor derived or reserved by the engine. An engine metadata field (`reaffirmed`,
+/// `reflects_at`) gets the same diagnostic as a pack field of that name.
 fn check_tracking(name: &str, t: &BlockTypeDef) -> Result<(), SchemaError> {
     for f in &t.tracking {
+        if rdy_model::engine_fields::is_engine_field(f) {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field {f} is reserved for the engine"
+            )));
+        }
         let why = if name == d::DECISION && d::RULING_FIELDS.contains(&f.as_str()) {
             "is part of the ruling"
         } else if rdy_model::block::DERIVED_FIELDS.contains(&f.as_str())
             || f == "key"
             || f == crate::validate::REFLECTS_FIELD
-            || rdy_model::engine_fields::is_engine_field(f)
         {
             "is derived or reserved by the engine"
         } else if !t.fields.contains_key(f) {
