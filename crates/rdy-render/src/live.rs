@@ -102,7 +102,8 @@ pub fn build_live(
 
 /// A live build of a publication profile (D-CWC91, D-DK03K): the site of the profile's selected
 /// state as the live server serves it, the profile the target resolved to, and the generated
-/// change summary's page (`changes.html`) when the build wrote one.
+/// change summary's page when the build wrote one: `changes.html` for a review route,
+/// `changes-since.html` for canon.
 pub struct ProfileBuild {
     pub live: LiveBuild,
     pub profile: rdy_engine::publication::ResolvedProfile,
