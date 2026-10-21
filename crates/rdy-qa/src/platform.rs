@@ -221,6 +221,16 @@ pub fn holds_file(dir: &File, name: &std::ffi::OsStr, file: &File) -> io::Result
     }
 }
 
+/// Whether `path`, its links followed, opens the open directory `dir` now (the same device and
+/// inode). A path that cannot be opened as a directory does not.
+pub fn opens_dir(path: &Path, dir: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (open_dir(path).and_then(|d| d.metadata()), dir.metadata()) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
 /// Removes the entry `name` (not a directory) from the open directory `dir`; a link is removed,
 /// never followed.
 pub fn remove_file_at(dir: &File, name: &std::ffi::OsStr) -> io::Result<()> {

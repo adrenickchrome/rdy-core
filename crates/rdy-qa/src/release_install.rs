@@ -1076,13 +1076,21 @@ struct Installed {
 
 /// Whether the paths the guide's commands name still name what the check checked and made:
 /// DOWNLOAD the checked directory, with the manifest, the signature, every present archive and
-/// the signer file the same entries; UNPACK and PREFIX, once made, this run's directories; and
-/// `PREFIX/bin` and `PREFIX/bin/rdy`, once found, the install's.
+/// the signer file the same entries; the parents of UNPACK and PREFIX the checked parents;
+/// UNPACK and PREFIX, once made, this run's directories; and `PREFIX/bin` and
+/// `PREFIX/bin/rdy`, once found, the install's.
 fn intact(input: &InstallInput, dl: &Download, owned: &Owned, installed: &Installed) -> bool {
     let holds = |name: &str, file: &File| {
         platform::holds_file(&dl.dir, name.as_ref(), file).unwrap_or(false)
     };
+    let in_parent = |output: &Path, parent: &File| {
+        output
+            .parent()
+            .is_some_and(|p| platform::opens_dir(p, parent))
+    };
     names_dir(&input.download, &dl.dir)
+        && in_parent(&input.unpack, &dl.unpack_parent)
+        && in_parent(&input.prefix, &dl.prefix_parent)
         && holds(MANIFEST_FILE, &dl.manifest.file)
         && holds(SIGNATURE_FILE, &dl.signature.file)
         && dl.archives.iter().all(|(name, file)| holds(name, file))
@@ -1201,12 +1209,15 @@ impl MadeDir {
     }
 
     /// The directory `name` in `parent`, which a guide command has just made: a directory (not
-    /// a link) that this user owns. `None` for anything else.
+    /// a link) that this user owns, and empty, as a directory that mkdir has just made is. `None`
+    /// for anything else: a directory with something in it is another process's.
     fn claim(parent: &File, name: &OsStr) -> Option<MadeDir> {
         let dir = rdy_store::pio::open_dir_at(parent, name).ok()?;
         let meta = dir.metadata().ok()?;
-        (meta.is_dir() && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid())
-            .then_some(())?;
+        (meta.is_dir()
+            && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid()
+            && is_empty_dir(&dir))
+        .then_some(())?;
         Some(MadeDir {
             parent: parent.try_clone().ok()?,
             name: name.to_os_string(),
@@ -1235,6 +1246,16 @@ impl MadeDir {
         // rmdir removes only an empty directory: a directory swapped in since is not removed
         emptied && self.in_place() && platform::remove_dir_at(&self.parent, &self.name).is_ok()
     }
+}
+
+/// Whether the open directory `dir` holds no entry, as `find . -mindepth 1 -maxdepth 1`,
+/// started in it through its handle, lists none. A failed or bounded-out listing is not empty.
+fn is_empty_dir(dir: &File) -> bool {
+    let mut find = Command::new("find");
+    find.args([".", "-mindepth", "1", "-maxdepth", "1"]);
+    platform::start_in_dir(&mut find, dir).is_ok()
+        && platform::run_bounded(find, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE)
+            .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
 }
 
 /// The installed check's scratch directory.
@@ -1623,8 +1644,16 @@ fn install_stages(
         &[],
         Install,
     )?;
-    owned.unpack = Some(MadeDir::claim(&dl.unpack_parent, &unpack_name).ok_or(Install)?);
-    owned.prefix = Some(MadeDir::claim(&dl.prefix_parent, &prefix_name).ok_or(Install)?);
+    // the mkdir's own check found both parents still the checked ones (`run_guide`); each
+    // directory is claimed only when both are found as that mkdir leaves them, else neither is
+    let claimed = (
+        MadeDir::claim(&dl.unpack_parent, &unpack_name),
+        MadeDir::claim(&dl.prefix_parent, &prefix_name),
+    );
+    let (Some(unpack), Some(prefix)) = claimed else {
+        return Err(Install);
+    };
+    (owned.unpack, owned.prefix) = (Some(unpack), Some(prefix));
     if !intact(input, dl, owned, &installed) {
         return Err(Install);
     }
@@ -4577,6 +4606,124 @@ esac
                     assert!(
                         absent(ours) || (ours.is_dir() && names(ours).is_empty()),
                         "{what}: {} is absent or empty",
+                        ours.display()
+                    );
+                }
+            }
+            assert!(!kit.marker.exists(), "{what}: nothing ran");
+            assert!(absent(&kit.download.join(SIGNERS_FILE)));
+        }
+        // ... or the link to UNPACK's (or PREFIX's) parent is moved to another directory as
+        // that mkdir starts, and another process makes the output in the parent the input
+        // checks found. The mkdir succeeds in the new parent. The output's parent path no longer
+        // names the checked parent, so this run claims neither directory: the other process's
+        // directory (with a file in it or empty) stays, and so do the (empty) directories the
+        // mkdir made.
+        for (what, their_file) in [
+            ("UNPACK", true),
+            ("UNPACK", false),
+            ("PREFIX", true),
+            ("PREFIX", false),
+        ] {
+            let kit = Kit::new(target);
+            let mut input = kit.input();
+            let (checked, moved, alias) = (
+                kit.dir.path().join("checked parent"),
+                kit.dir.path().join("moved parent"),
+                kit.dir.path().join("parent alias"),
+            );
+            for d in [&checked, &moved] {
+                fs::create_dir(d).expect("mkdir");
+            }
+            platform::symlink(&checked, &alias).expect("symlink");
+            let output = if what == "UNPACK" {
+                &mut input.unpack
+            } else {
+                &mut input.prefix
+            };
+            let name = output.file_name().expect("a name").to_os_string();
+            *output = alias.join(&name);
+            let theirs = checked.join(&name);
+            let process = |c: &GuideCommand| {
+                if c.program == "mkdir" && c.args.first().is_some_and(|a| a != "-p") {
+                    fs::remove_file(&alias).expect("rm the link");
+                    platform::symlink(&moved, &alias).expect("move the link");
+                    fs::create_dir(&theirs).expect("the other process's mkdir");
+                    if their_file {
+                        fs::write(theirs.join("theirs"), b"sentinel\n").expect("their file");
+                    }
+                }
+                stand_in(c, "")
+            };
+            assert_eq!(
+                check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+                Err(Install),
+                "{what} ({their_file}): its parent's link moved as mkdir starts"
+            );
+            assert!(
+                theirs.is_dir(),
+                "{what} ({their_file}): the other process's directory in the checked parent stays"
+            );
+            if their_file {
+                assert_eq!(
+                    fs::read(theirs.join("theirs")).ok(),
+                    Some(b"sentinel\n".to_vec()),
+                    "{what}: their file stays"
+                );
+                assert_eq!(names(&theirs), ["theirs"], "{what}: and only their file");
+            } else {
+                assert!(names(&theirs).is_empty(), "{what}: theirs stays empty");
+            }
+            for ours in [&input.unpack, &input.prefix] {
+                assert!(
+                    absent(ours) || (ours.is_dir() && names(ours).is_empty()),
+                    "{what}: {} is absent or empty",
+                    ours.display()
+                );
+            }
+            assert!(!kit.marker.exists(), "{what}: nothing ran");
+            assert!(absent(&kit.download.join(SIGNERS_FILE)));
+        }
+        // ... or another process removes the directory the mkdir made right after it, and
+        // makes its own at that name, with a file in it. The parents are unchanged, but a
+        // directory the guide's mkdir just made is empty: this one is not this run's, and
+        // neither directory is claimed.
+        for what in ["UNPACK", "PREFIX"] {
+            let kit = Kit::new(target);
+            let input = kit.input();
+            let theirs = if what == "UNPACK" {
+                input.unpack.clone()
+            } else {
+                input.prefix.clone()
+            };
+            let process = |c: &GuideCommand| {
+                if c.program == "mkdir" && c.args.first().is_some_and(|a| a != "-p") {
+                    let q = |p: &Path| format!("'{}'", p.display());
+                    return shell_script(&format!(
+                        "mkdir {u} {p} && rmdir {t} && mkdir {t} && echo sentinel > {f}",
+                        u = q(&input.unpack),
+                        p = q(&input.prefix),
+                        t = q(&theirs),
+                        f = q(&theirs.join("theirs")),
+                    ));
+                }
+                stand_in(c, "")
+            };
+            assert_eq!(
+                check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+                Err(Install),
+                "{what} replaced after mkdir"
+            );
+            assert_eq!(
+                fs::read(theirs.join("theirs")).ok(),
+                Some(b"sentinel\n".to_vec()),
+                "{what}: the other process's directory stays"
+            );
+            for ours in [&input.unpack, &input.prefix] {
+                if *ours != theirs {
+                    assert!(
+                        ours.is_dir() && names(ours).is_empty(),
+                        "{what}: {} the mkdir made stays, empty",
                         ours.display()
                     );
                 }
