@@ -692,6 +692,75 @@ mod tests {
             message.starts_with("profile \"Landed book\": "),
             "{message}"
         );
+        // the selection changes between the lookup and the build: a render warning comes into
+        // the build (the profile now shows a top-level doc named glossary, which has no page)
+        const GLOSSARY: &str = "the top-level doc named glossary has no page: the site keeps the name glossary.html for its generated glossary. Rename the doc to publish it.";
+        let intro = w.ids["$intro"].clone();
+        let gl = with_writer_result(&*w.sh.engine(), |r| {
+            let made = put(
+                r,
+                "gl",
+                json!([{"op": "create", "type": "doc", "id": "$gl",
+                    "fields": {"name": "glossary", "title": "Glossary page", "doc_type": "page"}}]),
+            );
+            land(r, "gl");
+            Ok(made["$gl"].clone())
+        })
+        .unwrap();
+        let select_in = |title: &'static str, select: Vec<String>, view: &'static str| {
+            let guide = guide.clone();
+            barrier(&w, move |e| {
+                with_writer_result(e, move |r| {
+                    put(
+                        r,
+                        view,
+                        json!([{"op": "update", "id": guide,
+                            "fields": {"title": title, "select": select}}]),
+                    );
+                    land(r, view);
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        let appears = select_in("Selected book", vec![intro.clone(), gl.clone()], "sel1");
+        let v = site_reply(&appears, None, Some("guide"), true).unwrap();
+        assert_eq!(v["profile"]["title"], "Selected book", "{v}");
+        assert_eq!(
+            v["warnings"],
+            json!([
+                GLOSSARY,
+                "this site shows only the profile \"Selected book\"; anyone with the project still reads everything give the full site's link from rdy site when the person needs everything"
+            ]),
+            "the build's render warning, then the caveat: {v}"
+        );
+        let message = v["warning"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("profile \"Selected book\": "),
+            "{message}"
+        );
+        // the warning is gone with the selection that brought it: nothing stale is kept
+        let gone_again = select_in("Pruned book", vec![intro.clone()], "sel2");
+        let v = site_reply(&gone_again, None, Some("guide"), false).unwrap();
+        assert_eq!(v["profile"]["title"], "Pruned book", "{v}");
+        assert!(v.get("warnings").is_none(), "no stale render warning: {v}");
+        assert!(v.get("profile_only").is_none(), "{v}");
+        // and in only-mode the caveat alone remains
+        let again = select_in("Final book", vec![intro.clone()], "sel3");
+        let v = site_reply(&again, None, Some("guide"), true).unwrap();
+        assert_eq!(v["profile"]["title"], "Final book", "{v}");
+        assert_eq!(
+            v["warnings"],
+            json!([
+                "this site shows only the profile \"Final book\"; anyone with the project still reads everything give the full site's link from rdy site when the person needs everything"
+            ]),
+            "{v}"
+        );
+        // a route over a selection that gains the warning, with no caveat
+        let appears = select_in("Again book", vec![intro, gl], "sel4");
+        let v = site_reply(&appears, None, Some("guide"), false).unwrap();
+        assert_eq!(v["profile"]["title"], "Again book", "{v}");
+        assert_eq!(v["warnings"], json!([GLOSSARY]), "{v}");
         // a profile canon no longer holds fails the whole call, the listener already open
         let gone = barrier(&w, {
             let guide = guide.clone();
