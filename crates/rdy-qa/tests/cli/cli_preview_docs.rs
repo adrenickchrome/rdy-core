@@ -274,23 +274,43 @@ fn sample_key() -> (String, String) {
     (line, pk.fingerprint(ssh_key::HashAlg::Sha256).to_string())
 }
 
-/// The real README with its pending block replaced by `state`.
+/// A synthetic README in the pending state. It does not depend on the real README, so the pin
+/// tests keep working when the real README moves to the ready state.
+fn pending_fixture() -> String {
+    format!("# Synthetic README\n\nSome text before.\n\n{PENDING}\nSome text after.\n")
+}
+
+/// The synthetic README with its pending block replaced by `state`.
 fn readme_with(state: &str) -> String {
-    let readme = read("README.md");
-    assert!(
-        readme.contains(PENDING),
-        "the base README is in the pending state"
-    );
-    readme.replacen(PENDING, state, 1)
+    pending_fixture().replacen(PENDING, state, 1)
+}
+
+/// The real README must pass in the pending state and in the ready state the orchestrator
+/// writes later. The other state is built from the real text, so a change in either state
+/// cannot fail the pin tests for the wrong reason.
+#[test]
+fn pre2_trust_state_pin_accepts_the_real_readme_in_either_state() {
+    let real = read("README.md");
+    assert_eq!(trust_state_error(&real), Ok(()), "the real README");
+    if real.contains(PENDING) {
+        let (key, fp) = sample_key();
+        let fenced = format!("```text\nrdy-release namespaces=\"rdy-release-v1\" {key}\n```");
+        let ready = real.replacen(PENDING, &ready_block(&fenced, &fp), 1);
+        assert_eq!(
+            trust_state_error(&ready),
+            Ok(()),
+            "the real README in the ready state"
+        );
+    }
 }
 
 #[test]
 fn pre2_trust_state_pin_rejects_every_bad_shape() {
-    let pending_readme = read("README.md");
+    let pending_readme = pending_fixture();
     assert_eq!(
         trust_state_error(&pending_readme),
         Ok(()),
-        "the real README"
+        "the synthetic pending state passes"
     );
 
     let (key, fp) = sample_key();
