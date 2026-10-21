@@ -23,6 +23,7 @@ mod cli_intents;
 mod cli_keys;
 mod cli_log;
 mod cli_output;
+mod cli_preview_docs;
 mod cli_proposal;
 mod cli_publication_check;
 mod cli_publication_create;
