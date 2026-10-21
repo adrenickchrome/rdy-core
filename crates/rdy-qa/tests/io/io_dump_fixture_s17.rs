@@ -84,12 +84,30 @@ pub(crate) const MEMBERS: [(&str, &str); 12] = [
         CHAIN_EXPECT,
         "9dcb2982bcae43cf79476b6ecaff2e13f528bb1a86d5f2caf0ec4e98c0f775b8",
     ),
-    (HOLDER, "TBD"),
-    (HOLDER_EXPECT, "TBD"),
-    (HOLDER_CHAIN_FULL, "TBD"),
-    (HOLDER_CHAIN_1, "TBD"),
-    (HOLDER_CHAIN_2, "TBD"),
-    (HOLDER_CHAIN_EXPECT, "TBD"),
+    (
+        HOLDER,
+        "004dbd2f0eb39bcf227aa4a1dfc1fe58980094bd3bbb80b52bbcb70cc8124d91",
+    ),
+    (
+        HOLDER_EXPECT,
+        "8c21ae51e8a2bd0689189935d56bac40506fb77890606cf70cdf0d967f39ff69",
+    ),
+    (
+        HOLDER_CHAIN_FULL,
+        "ec0e4a4f6f3f5c6efde8229b8b65205adfa4a18de8098f4945864021f4ebf5eb",
+    ),
+    (
+        HOLDER_CHAIN_1,
+        "1ff73bc53aeb46cb50f0de29997165298bcd14e14b4876bf3909db17eecd9be2",
+    ),
+    (
+        HOLDER_CHAIN_2,
+        "bbff1ff5ce76e60d8ec2c6aacab90b9c471edf0ec4b359017dfa884c7e2bc35a",
+    ),
+    (
+        HOLDER_CHAIN_EXPECT,
+        "b38ac9d6944e139dd4e0966c5a58648d76a937c8858910f11b92446200b55e2f",
+    ),
 ];
 
 /// The blake3 of member `name`, as [`MEMBERS`] pins it.
