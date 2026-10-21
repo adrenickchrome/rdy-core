@@ -7,7 +7,7 @@
 //! record 0 at offset 0. `object` is the key of the failing record, when it is known.
 use crate::bounded::RecordError;
 use crate::holder::StoreMode;
-use crate::object_refs::ObjectKey;
+use crate::object_refs::{ObjectKey, ObjectRef};
 use rdy_model::Hash;
 use std::fmt;
 
@@ -38,6 +38,11 @@ pub const LIMIT_PENDING_DROPS: &str = "1000000 pending drops";
 pub const LIMIT_PENDING_DROPPED_BYTES: &str = "1073741824 pending dropped bytes";
 
 /// Why a stream record is bad (E_BAD_RECORD). A closed list.
+///
+/// A batch's dependency faults name their object: an unlisted dependency names the edge or
+/// proof that resolves to no record of the batch and no prerequisite, and an unneeded
+/// prerequisite names the smallest listed key that no record needs. A root TAG that is neither in
+/// the batch nor listed is its own fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
     UnknownKind,
@@ -54,10 +59,14 @@ pub enum Reason {
     InputChangedDuringTake,
     InvalidRemovalProof,
     OutsideTagClosure,
+    UnlistedDependency(ObjectRef),
+    RootTagNotListed,
+    UnneededPrerequisite(ObjectKey),
 }
 
 impl Reason {
-    /// The reason as the message writes it.
+    /// The reason's label. Display writes the label, then the object for a reason that names
+    /// one.
     pub fn as_str(self) -> &'static str {
         match self {
             Reason::UnknownKind => "unknown kind",
@@ -74,13 +83,30 @@ impl Reason {
             Reason::InputChangedDuringTake => "input changed during take",
             Reason::InvalidRemovalProof => "invalid removal proof",
             Reason::OutsideTagClosure => "object is outside the tag closure",
+            Reason::UnlistedDependency(_) => "unlisted dependency",
+            Reason::RootTagNotListed => "root tag is not in the batch or its prerequisites",
+            Reason::UnneededPrerequisite(_) => "unneeded prerequisite",
         }
     }
 }
 
+/// The reason as the message writes it: the label, then the object a dependency fault names.
+/// A typed object prints `<kind>:<hash>` (the kind in decimal, the full lowercase hash); an
+/// untyped edge prints its hash alone, as no kind is known.
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        let label = self.as_str();
+        match self {
+            Reason::UnlistedDependency(ObjectRef {
+                kind: Some(kind),
+                hash,
+            }) => write!(f, "{label} {kind}:{hash}"),
+            Reason::UnlistedDependency(ObjectRef { kind: None, hash }) => {
+                write!(f, "{label} {hash}")
+            }
+            Reason::UnneededPrerequisite(key) => write!(f, "{label} {key}"),
+            _ => f.write_str(label),
+        }
     }
 }
 

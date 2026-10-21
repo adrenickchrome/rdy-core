@@ -29,7 +29,8 @@ pub(crate) struct CheckArgs {
 }
 
 /// Runs the command and prints its result as `main` prints any command's: JSON on stdout with
-/// `--json`, else the one summary line. Nothing prints until the whole batch has passed.
+/// `--json`, else the one summary line (with the count of the batch's prerequisites, when it has
+/// any). Nothing prints until the whole batch has passed.
 pub(crate) fn run(cmd: StreamCmd, as_json: bool) -> ExitCode {
     let StreamCmd::Check(a) = cmd;
     match check(a) {
@@ -63,11 +64,22 @@ fn check(a: CheckArgs) -> Result<(Value, String), ErrorReply> {
         check_batch(BufReader::new(file), repo)
     }?;
     let text = format!(
-        "checked {} records and {} bytes",
-        report.records, report.bytes
+        "checked {} records and {} bytes{}",
+        report.records,
+        report.bytes,
+        needs(report.header.prerequisites.len())
     );
     let v = serde_json::to_value(&report).expect("a report serializes");
     Ok((v, text))
+}
+
+/// The summary's note of a batch's `n` prerequisites: none when it needs none.
+fn needs(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "; it needs 1 prerequisite from other batches or the holder".to_string(),
+        n => format!("; it needs {n} prerequisites from other batches or the holder"),
+    }
 }
 
 /// `--repo-id`: 32 hex digits, parsed as every repo id is.

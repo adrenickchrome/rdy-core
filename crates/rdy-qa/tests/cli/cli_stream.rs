@@ -3,16 +3,16 @@
 //! a store, so it runs before project discovery, config reads and any daemon connection.
 use rdy_engine::Rdy;
 use rdy_engine::stream_check::check_batch;
-use rdy_model::RepoId;
+use rdy_model::{BlockId, Hash, RepoId, StateSnapshot};
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::{output_within_stdin, rdy_bin};
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
 use rdy_store::closure::{self, END_OF_LOG, StoreSource};
 use rdy_store::kinds;
 use rdy_store::object_refs::{ObjectKey, refs_of};
-use rdy_store::sync_stream::StreamHeader;
+use rdy_store::sync_stream::{StreamHeader, StreamRecord, StreamWriter};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -358,4 +358,81 @@ fn ha15_a_child_that_stops_reading_is_killed_at_its_budget_not_waited_on() {
         r.is_err(),
         "a child past its budget is an error, not a wait: {r:?}"
     );
+}
+
+/// A batch of one snapshot record whose block and root TAG are both absent: it lists the two as
+/// its prerequisites, as the store tests encode records.
+fn two_prerequisite_batch() -> Vec<u8> {
+    let snapshot = StateSnapshot {
+        blocks: BTreeMap::from([(BlockId::parse("b-00001").unwrap(), Hash([0x31; 32]))]),
+    };
+    let payload = postcard::to_allocvec(&snapshot).unwrap();
+    let record = StreamRecord::Present {
+        key: ObjectKey {
+            kind: kinds::SNAPSHOT,
+            hash: Hash::of(&payload),
+        },
+        payload,
+    };
+    let root = Hash([0x41; 32]);
+    let prerequisites = vec![
+        ObjectKey {
+            kind: kinds::BLOCK,
+            hash: Hash([0x31; 32]),
+        },
+        ObjectKey {
+            kind: kinds::TAG,
+            hash: root,
+        },
+    ];
+    let header = StreamHeader::tag_history(RepoId([7; 16]), root, prerequisites);
+    let mut w = StreamWriter::new(Vec::new(), &header).unwrap();
+    w.record(&record).unwrap();
+    w.finish().unwrap().0
+}
+
+#[test]
+fn plb2_check_text_counts_prerequisites() {
+    let b = batches();
+    let two = two_prerequisite_batch();
+    let s = Scratch::new();
+    for (name, bytes, prerequisites, suffix) in [
+        ("zero", &b.full, 0, ""),
+        (
+            "one",
+            &b.early,
+            1,
+            "; it needs 1 prerequisite from other batches or the holder",
+        ),
+        (
+            "two",
+            &two,
+            2,
+            "; it needs 2 prerequisites from other batches or the holder",
+        ),
+    ] {
+        // the numbers come from the engine's own check of the fixture
+        let report = check_batch(bytes.as_slice(), None).unwrap();
+        assert_eq!(report.header.prerequisites.len(), prerequisites, "{name}");
+        assert_eq!(report.bytes, bytes.len() as u64 - 85, "{name}");
+        let want = format!(
+            "checked {} records and {} bytes{suffix}\n",
+            report.records, report.bytes
+        );
+        let file = s.put(&format!("{name}.rdybatch"), bytes);
+        for (args, stdin) in [
+            (vec!["stream", "check", file.as_str()], None),
+            (vec!["stream", "check", "-"], Some(bytes.as_slice())),
+        ] {
+            let o = s.rdy(&args, stdin);
+            assert!(o.status.success(), "{name}: {}", err_text(&o));
+            assert_eq!(out_text(&o), want, "{name} {args:?}");
+            assert!(err_text(&o).is_empty(), "no warning: {}", err_text(&o));
+        }
+        // JSON stays the engine's report: no new field
+        let o = s.rdy(&["--json", "stream", "check", "-"], Some(bytes));
+        assert!(o.status.success(), "{name}: {}", err_text(&o));
+        let v: Value = serde_json::from_str(out_text(&o).trim()).unwrap();
+        assert_eq!(v, serde_json::to_value(&report).unwrap(), "{name}");
+    }
 }

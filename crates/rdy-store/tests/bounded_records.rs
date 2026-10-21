@@ -533,10 +533,74 @@ fn ha1_stream_errors_use_the_exact_texts() {
             Reason::OutsideTagClosure,
             "object is outside the tag closure",
         ),
+        (
+            Reason::UnlistedDependency(rdy_store::object_refs::ObjectRef {
+                kind: Some(4),
+                hash: Hash([0xab; 32]),
+            }),
+            "unlisted dependency",
+        ),
+        (
+            Reason::RootTagNotListed,
+            "root tag is not in the batch or its prerequisites",
+        ),
+        (Reason::UnneededPrerequisite(key), "unneeded prerequisite"),
     ];
     for (r, s) in reasons {
         assert_eq!(r.as_str(), s);
     }
+}
+
+#[test]
+fn plb2_parameterized_reason_display_is_exact() {
+    use rdy_store::object_refs::{ObjectKey, ObjectRef};
+    use rdy_store::stream_error::{Reason, StreamError};
+    let hex = "ab".repeat(32);
+    let hash = Hash([0xab; 32]);
+    let typed = Reason::UnlistedDependency(ObjectRef {
+        kind: Some(4),
+        hash,
+    });
+    // an untyped edge that resolved to nothing: its hash alone, no kind is inferred
+    let untyped = Reason::UnlistedDependency(ObjectRef { kind: None, hash });
+    let unneeded = Reason::UnneededPrerequisite(ObjectKey { kind: 22, hash });
+
+    // the labels are static; Display adds the object
+    assert_eq!(typed.as_str(), "unlisted dependency");
+    assert_eq!(untyped.as_str(), "unlisted dependency");
+    assert_eq!(unneeded.as_str(), "unneeded prerequisite");
+    assert_eq!(
+        Reason::RootTagNotListed.as_str(),
+        "root tag is not in the batch or its prerequisites"
+    );
+    assert_eq!(typed.to_string(), format!("unlisted dependency 4:{hex}"));
+    assert_eq!(untyped.to_string(), format!("unlisted dependency {hex}"));
+    assert_eq!(
+        unneeded.to_string(),
+        format!("unneeded prerequisite 22:{hex}")
+    );
+    assert_eq!(
+        Reason::RootTagNotListed.to_string(),
+        "root tag is not in the batch or its prerequisites"
+    );
+    // a reason without an object prints its label alone
+    assert_eq!(Reason::DependencyCycle.to_string(), "dependency cycle");
+
+    // the message and fix of the error stay the shared ones
+    let e = StreamError::bad_record(2, 160, untyped);
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_BAD_RECORD",
+            format!("stream record 2 at byte 160: unlisted dependency {hex}").as_str(),
+            "request this stream again; run rdy fsck at its source"
+        )
+    );
+    let e = StreamError::bad_record(0, 12, unneeded);
+    assert_eq!(
+        e.message,
+        format!("stream record 0 at byte 12: unneeded prerequisite 22:{hex}")
+    );
 }
 
 /// A field value of `levels` levels whose deepest value is the costliest leaf for the decoder:
