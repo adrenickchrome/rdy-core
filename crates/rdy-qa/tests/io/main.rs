@@ -21,6 +21,7 @@ mod io_link_keys;
 mod io_load;
 mod io_load_limit;
 mod io_onboarding;
+mod io_plan_metadata;
 mod io_publication;
 mod io_reader;
 mod io_redaction_load;

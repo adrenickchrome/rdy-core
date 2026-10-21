@@ -7,9 +7,11 @@ use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, Writ
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{
     ActorRun, Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification,
-    Link, Op, Provenance, Role, tree,
+    Link, Op, Provenance, Role, engine_fields, tree,
 };
-use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
+use rdy_schema::{
+    Issue, Pack, Severity, has_errors, skeleton_gaps, validate_block, validate_prefix,
+};
 use rdy_store::segment::Location;
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -548,6 +550,38 @@ fn import_skeleton_gaps(pack: &rdy_schema::Pack, blocks: &[Block]) -> Vec<rdy_sc
         .collect()
 }
 
+/// p-8YP1G: a file or an edit buffer never sets the engine metadata fields; rdy sets them, and
+/// `fields` holds what the input set. One `E_FIELD_UNKNOWN` issue for each such field of each
+/// block, checked on the decoded input before any field is dropped.
+fn engine_field_issues<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Vec<Issue> {
+    let mut out = vec![];
+    for b in blocks {
+        for f in engine_fields::ENGINE_FIELDS {
+            if b.fields.contains_key(f) {
+                out.push(Issue {
+                    severity: Severity::Error,
+                    code: "E_FIELD_UNKNOWN",
+                    block: Some(b.id.clone()),
+                    message: format!("{} sets \"{f}\", and rdy sets it", b.id),
+                    fix: format!("remove {f}; use reaffirm or repin with code: true"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The refusal for a non-empty [`engine_field_issues`] list.
+fn engine_field_refusal(what: &str, issues: Vec<Issue>) -> RdyError {
+    let mut e = RdyError::new(
+        E_VALIDATION,
+        format!("the {what} sets fields that only rdy sets"),
+        "remove the listed fields",
+    );
+    e.issues = issues;
+    e
+}
+
 fn io_err(e: std::io::Error) -> RdyError {
     RdyError::new(E_IO, e.to_string(), "check the path and permissions")
 }
@@ -558,9 +592,12 @@ pub(crate) fn to_yaml_struct(b: &Block) -> BlockYaml {
         block_type: b.block_type.clone(),
         parent: b.parent.clone(),
         order: b.order.clone(),
+        // p-8YP1G: the engine metadata fields live only in the store, so no export, buffer or
+        // read shows them; `key_auto` is shown, as it always was
         fields: b
             .fields
             .iter()
+            .filter(|(k, _)| !engine_fields::is_engine_field(k))
             .map(|(k, v)| (k.clone(), v.to_yaml()))
             .collect(),
         body: b.body.clone(),
@@ -987,6 +1024,11 @@ impl Rdy {
             }
             loaded.into_iter().map(|l| (l.block, l.keyed)).unzip()
         };
+        // p-8YP1G: before anything is stored or changed, on the input as decoded
+        let supplied = engine_field_issues(&blocks);
+        if !supplied.is_empty() {
+            return Err(engine_field_refusal("import", supplied));
+        }
         let scope = Scope::View(view.to_string());
         // an import is a commit: it claims an unowned view and checks against the view's
         // recorded conflicts, as `write_linked` does
@@ -1350,6 +1392,10 @@ impl Rdy {
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         let (mut edited, keyed) = parse_yaml(yaml)?;
+        let supplied = engine_field_issues([&edited]);
+        if !supplied.is_empty() {
+            return Err(engine_field_refusal("edit", supplied));
+        }
         if !keyed.is_empty() {
             let m = self.read().materialized(&Scope::View(view.to_string()))?;
             let keys = Keys::of(m.iter());
@@ -1395,7 +1441,7 @@ impl Rdy {
         &mut self,
         s: &Session,
         view: &str,
-        edited: Block,
+        mut edited: Block,
         base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
@@ -1459,6 +1505,21 @@ impl Rdy {
                 Err(_) => cur,
             }
         };
+        // p-8YP1G: the buffer an editor reads leaves out the engine metadata, and leaving it out
+        // is no request to unset it: the edit keeps what the version it was taken against held
+        for f in engine_fields::ENGINE_FIELDS {
+            if let (None, Some(v)) = (edited.fields.get(f), cur.fields.get(f)) {
+                edited.fields.insert(f.to_string(), v.clone());
+            }
+        }
+        let forged = engine_field_issues(std::iter::once(&edited).filter(|e| {
+            engine_fields::ENGINE_FIELDS
+                .iter()
+                .any(|f| e.fields.get(*f) != cur.fields.get(*f))
+        }));
+        if !forged.is_empty() {
+            return Err(engine_field_refusal("edit", forged));
+        }
         if current && cur == edited {
             return Err(RdyError::new(
                 E_BAD_INPUT,
