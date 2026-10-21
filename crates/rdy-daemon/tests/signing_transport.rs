@@ -16,11 +16,16 @@ use rdy_engine::signing_crypto::{AgentIdentity, CallCancel, SigningAgent};
 use rdy_engine::{E_NO_AGENT, NoAgentCause, Rdy, RdyError, Session, WriteRequest, no_agent};
 use rdy_model::Role;
 use serde_json::{Value, json};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Condvar, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
-use tokio::sync::mpsc;
+use std::task::{Context, Poll, ready};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream,
+    ReadBuf,
+};
+use tokio::sync::{mpsc, oneshot};
 
 // ---- keys, payloads and the wire ----
 
@@ -514,12 +519,27 @@ fn fake_service(
 }
 
 fn mcp(agent: Arc<dyn CallerSigner>, big: usize) -> Mcp {
+    mcp_with_socket(agent, big, |s| s)
+}
+
+/// As [`mcp`], with the proxy's socket end wrapped by `wrap`.
+fn mcp_with_socket<S>(
+    agent: Arc<dyn CallerSigner>,
+    big: usize,
+    wrap: impl FnOnce(DuplexStream) -> S,
+) -> Mcp
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
     let (client_end, host_end) = tokio::io::duplex(1 << 16);
     let (seen, results) = fake_service(host_mcp(host_end), big);
     let (input, proxy_in) = tokio::io::duplex(1 << 16);
     let (proxy_out, output) = tokio::io::duplex(1 << 16);
     let proxy = tokio::spawn(rdy_daemon::proxy::run_proxy(
-        proxy_in, proxy_out, client_end, agent,
+        proxy_in,
+        proxy_out,
+        wrap(client_end),
+        agent,
     ));
     Mcp {
         input,
@@ -1740,4 +1760,188 @@ async fn sig5_a_callback_belongs_to_the_request_it_names() {
     p.host.read_to_end(&mut rest).await.unwrap();
     drop(p.host);
     assert_eq!(proxy.await.unwrap(), 0);
+}
+
+// ---- plb3: the proxy's own half-close is not the daemon's loss ----
+
+/// A socket end that holds its half-close: `poll_shutdown` first shuts the inner end down, then
+/// signals `shut` and stays pending until `release` resolves. A read that finds the socket's EOF
+/// into a buffer with room signals `eof`. Each signal is sent once; I/O errors pass through.
+struct ShutdownGate<S> {
+    inner: S,
+    shut: Option<oneshot::Sender<()>>,
+    eof: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Receiver<()>>,
+    closed: bool,
+}
+
+impl<S> ShutdownGate<S> {
+    fn new(
+        inner: S,
+        shut: oneshot::Sender<()>,
+        eof: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) -> ShutdownGate<S> {
+        ShutdownGate {
+            inner,
+            shut: Some(shut),
+            eof: Some(eof),
+            release: Some(release),
+            closed: false,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ShutdownGate<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let room = buf.remaining();
+        let before = buf.filled().len();
+        ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+        // a zero-capacity read reads nothing without being the end
+        if room > 0
+            && buf.filled().len() == before
+            && let Some(eof) = this.eof.take()
+        {
+            let _ = eof.send(());
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ShutdownGate<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.closed {
+            ready!(Pin::new(&mut this.inner).poll_shutdown(cx))?;
+            this.closed = true;
+            if let Some(shut) = this.shut.take() {
+                let _ = shut.send(());
+            }
+        }
+        if let Some(release) = &mut this.release {
+            // a dropped sender releases too: a failed test leaves no task behind
+            let _ = ready!(Pin::new(release).poll(cx));
+            this.release = None;
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// The JSON-RPC error the proxy writes for a request the daemon left unanswered.
+fn gone_error() -> Value {
+    json!({
+        "code": -32000,
+        "message": "E_DAEMON_GONE: the daemon closed the connection before answering; a write may or may not have committed",
+        "data": {
+            "code": "E_DAEMON_GONE",
+            "fix": "check rdy status; a write may or may not have committed; it is not retried"
+        }
+    })
+}
+
+/// Asserts `out` is exactly one line: the `E_DAEMON_GONE` error response to request 1.
+fn assert_one_gone_reply(out: &str) {
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "{out}");
+    let v: Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(
+        v,
+        json!({"jsonrpc": "2.0", "id": 1, "error": gone_error()}),
+        "{out}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plb3_socket_eof_before_stdin_task_completion_is_clean() {
+    let (fake, ready) = Fake::gated(vec![key(1)]);
+    let _unblock = Unblock(fake.clone());
+    let mut ready = bridged(ready);
+    let (shut_tx, shut) = oneshot::channel();
+    let (eof_tx, eof) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    let mut m = mcp_with_socket(fake.clone(), 0, move |s| {
+        ShutdownGate::new(s, shut_tx, eof_tx, release_rx)
+    });
+    m.input.write_all(tool_call(1).as_bytes()).await.unwrap();
+    ready.recv().await.unwrap();
+    // the host closes stdin while its signed request is in flight
+    m.input.shutdown().await.unwrap();
+    drop(m.input);
+    fake.release();
+    // the proxy's own half-close reaches the daemon, which closes the socket, before the task
+    // that shut the socket down completes
+    shut.await.unwrap();
+    eof.await.unwrap();
+    assert!(
+        !m.proxy.is_finished(),
+        "the proxy ended before its stdin task completed"
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        m.results.recv().await.unwrap().unwrap(),
+        fake_signature(&key(1))
+    );
+    let mut rest = String::new();
+    m.output.read_to_string(&mut rest).await.unwrap();
+    assert_eq!(m.proxy.await.unwrap(), 0, "{rest}");
+    assert!(!rest.contains("E_DAEMON_GONE"), "{rest}");
+    assert!(
+        !rest.as_bytes().contains(&CALLBACK_MARK),
+        "a callback byte reached stdout"
+    );
+    let lines: Vec<&str> = rest.lines().collect();
+    assert_eq!(lines.len(), 3, "{rest}");
+    let v: Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["result"]["signature"], hex(&fake_signature(&key(1))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plb3_remote_eof_without_local_shutdown_still_fails() {
+    let fake = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 1);
+    // the daemon goes while stdin stays open
+    drop(p.host);
+    assert_eq!(proxy.await.unwrap(), 1);
+    let mut out = String::new();
+    p.output.read_to_string(&mut out).await.unwrap();
+    assert_one_gone_reply(&out);
+    drop(p.input);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plb3_daemon_loss_after_stdin_eof_still_fails() {
+    let fake = Fake::open(vec![key(1)]);
+    let (mut p, proxy) = raw(fake.clone());
+    let proxy = tokio::spawn(proxy);
+    p.input.write_all(tool_call(1).as_bytes()).await.unwrap();
+    assert_eq!(host_json(&mut p).await["id"], 1);
+    // stdin ends, then the daemon goes before it answers the call
+    p.input.shutdown().await.unwrap();
+    drop(p.input);
+    drop(p.host);
+    assert_eq!(proxy.await.unwrap(), 1);
+    let mut out = String::new();
+    p.output.read_to_string(&mut out).await.unwrap();
+    assert_one_gone_reply(&out);
 }
