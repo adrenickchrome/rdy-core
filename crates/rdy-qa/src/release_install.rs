@@ -768,11 +768,14 @@ mod tests {
         );
     }
 
+    /// Spoils one license file in place.
+    type Spoil = fn(&Path);
+
     #[test]
     fn pre1_package_refuses_inputs_and_never_overwrites_license_files() {
         let probe = printing("rdy 0.14.0\\n");
         for name in [MIT_FILE, APACHE_FILE] {
-            let cases: [(&str, fn(&Path), Failure); 5] = [
+            let cases: [(&str, Spoil, Failure); 5] = [
                 (
                     "missing",
                     |p| fs::remove_file(p).expect("rm"),
