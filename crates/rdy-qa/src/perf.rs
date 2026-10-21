@@ -376,7 +376,7 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "site_profile_get_page" => "no spec target: GET a warm profile-only page (reported)",
         "site_profile_event_after_land" => {
-            "no spec target: from the end of the writer's landing to the profile page's reload event (reported)"
+            "no spec target: from the return of a landing through the writer to the profile page's reload event (reported)"
         }
         "site_get_page" => "< 5 ms p95 (proposed, ledger F4; reported)",
         "cold_open" => "< 2 s at 100k (spec 11)",
@@ -4060,7 +4060,8 @@ struct ProfileFacts {
     selected_docs: usize,
     /// The bytes of the files of that profile's cold canon build.
     rendered_bytes: u64,
-    /// The blocks the selected old and new sides of the proposal differ in.
+    /// The blocks the proposal's profile review counts as changed (its chip), as the renderer
+    /// worked them out from the selected old and new sides.
     review_blocks: usize,
 }
 
@@ -4089,31 +4090,20 @@ fn cached_counts<'a>(
     }
 }
 
-/// `view`'s landed body edit of the fixture claim, as the daemon's writer runs it, and the instant
-/// the writer's work ended: after the write and the landing, before the state is published and
-/// the site worker is woken.
-fn land_claim_on_writer(
-    sh: &std::sync::Arc<Shared>,
-    claim: &str,
-    view: &str,
-    body: String,
-) -> Instant {
-    let (claim, view) = (claim.to_string(), view.to_string());
-    let done = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let seen = std::sync::Arc::clone(&done);
-    write_typed(&*sh.engine(), move |r| {
-        write(
-            r,
-            &view,
-            json!([{"op": "update", "id": claim, "body": body}]),
-        )?;
-        land(r, &view)?;
-        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-        Ok(())
-    })
-    .unwrap_or_else(|e| panic!("the claim landing failed: {e}"));
-    let at = done.lock().unwrap_or_else(|e| e.into_inner()).take();
-    at.expect("the writer ran the landing")
+/// The review blocks a profile build counts, read from its rendered version label (the review
+/// part of the colophon: `proposal: {title}, 4 changes, not landed`, `1 change`, or `no changes
+/// yet`). The renderer worked the count out of the selected old and new sides
+/// (`Review::changed_blocks`): it is the figure of the review chip.
+fn rendered_review_blocks(label: &str) -> usize {
+    let part = label.rsplit(" \u{b7} ").next().unwrap_or(label);
+    let Some(counted) = part.strip_suffix(", not landed") else {
+        return 0;
+    };
+    let n = counted.rsplit(", ").next().unwrap_or(counted);
+    n.split(' ')
+        .next()
+        .and_then(|w| w.parse().ok())
+        .unwrap_or_else(|| panic!("no change count in the label {label:?}"))
 }
 
 /// The profile ops (D-CWC91, D-DK03K), all reported with no ceiling. `proj` is closed. A copy of
@@ -4133,7 +4123,7 @@ fn land_claim_on_writer(
 ///   rows and the source counts of proposals and views filled in by one build beforehand.
 /// - `site_profile_get_page`: `GET` of the edited doc's page on the profile-only listener.
 /// - `site_profile_event_after_land`: a landed body edit of that doc through the writer, from the
-///   end of the writer's work to the `Reload` of the page's stream.
+///   return of that landing (the writer has replied) to the `Reload` of the page's stream.
 fn site_profiles(
     proj: &std::path::Path,
     parent: &std::path::Path,
@@ -4194,6 +4184,8 @@ fn site_profiles(
         "prfr",
         json!([
             {"op": "update", "id": fx.claim.to_string(), "body": "Reviewed in the profile."},
+            {"op": "create", "type": "decision", "parent": fx.section.to_string(),
+             "fields": {"statement": "The profile review is audited", "status": "proposed"}},
             {"op": "update", "id": made.created["$in"], "fields": {"select": changed}}
         ]),
     )
@@ -4237,8 +4229,23 @@ fn site_profiles(
         "the other profile has the edited page"
     );
     let rendered_bytes: u64 = first.live.files.values().map(|b| b.len() as u64).sum();
+    // the review count is the renderer's own, from the label of the cold review build; the raw
+    // entries of the block diff also hold the proposal's decision, which no reader sees, so the
+    // two differ in this fixture
     let reviewed = resolve_inspection(&st, &pscope, PROFILE_IN).expect("the proposal's profile");
-    let review_blocks = diff_states(&selected.m, &reviewed.m).entries.len();
+    let raw_entries = diff_states(&selected.m, &reviewed.m).entries.len();
+    let review = build_profile_live(&st, &proposal_target, &mut memo).expect("build the review");
+    let review_blocks = rendered_review_blocks(&review.live.label);
+    assert!(
+        review.live.header.contains(&format!("+{review_blocks}")),
+        "the header chip and the label disagree: {}",
+        review.live.header
+    );
+    assert!(
+        review_blocks > 0 && review_blocks < raw_entries,
+        "the review counts {review_blocks} of {raw_entries} changed blocks"
+    );
+    drop(review);
     let facts = ProfileFacts {
         selected_docs: selected.docs.len(),
         rendered_bytes,
@@ -4310,9 +4317,18 @@ fn site_profiles(
         .unwrap_or_else(|_| panic!("the site is busy"));
     out.push(measure_timed(&name(4), runs.write, |i| {
         drain_events(&mut sub);
-        let done = land_claim_on_writer(&sh, &claim, &format!("spe-{i}"), format!("Landed {i}."));
+        // the writer has sealed, built, published and replied when the landing returns: the
+        // sample starts there and ends at the stream's event
+        edit_claim_on_writer(
+            &sh,
+            &claim,
+            &format!("spe-{i}"),
+            format!("Landed {i}."),
+            true,
+        );
+        let s = Instant::now();
         await_reload(&rt, &mut sub);
-        let took = done.elapsed();
+        let took = s.elapsed();
         // let the worker finish what the run's publishes started, outside the timer
         sh.site.refresh(&sh, &only).expect("the profile builds");
         took
@@ -6955,7 +6971,10 @@ mod tests {
             // the edited doc and half of the others are selected
             assert!(facts.selected_docs >= 2, "{facts:?}");
             assert!(facts.rendered_bytes > 0, "{facts:?}");
-            assert!(facts.review_blocks > 0, "{facts:?}");
+            // the rendered review counts the claim's edit, the doc that leaves and the doc
+            // that enters (a page and its content each), and not the decision the proposal
+            // adds under the edited section (the block diff has one more entry)
+            assert_eq!(facts.review_blocks, 29, "{facts:?}");
             // the same fixture again selects and reviews the same (page bytes carry dates)
             let (_, again) = site_profiles(&proj, dir.path(), &fx, sfx, 2, &runs);
             assert_eq!(again.selected_docs, facts.selected_docs);
@@ -7031,6 +7050,21 @@ mod tests {
             );
         }
         assert!(helper.contains("format!(\"{}{sfx}\", SITE_PROFILE_OPS[i])"));
+    }
+
+    /// Task 11 fix round 1: the event sample starts after the synchronous landing returned (the
+    /// writer has sealed, built, published and replied), never inside the writer's closure.
+    #[test]
+    fn spv11_event_sample_starts_after_the_writer_returns() {
+        let src = include_str!("perf.rs");
+        let from = src.find("fn site_profiles(").expect("the helper");
+        let helper = &src[from..from + src[from..].find("\n}\n").expect("its end")];
+        let at = helper.find("&name(4)").expect("the event op");
+        let sample = &helper[at..];
+        let landed = sample.find("edit_claim_on_writer(").expect("the landing");
+        let started = sample.find("Instant::now()").expect("the timer");
+        let received = sample.find("await_reload(").expect("the event");
+        assert!(landed < started && started < received, "{sample}");
     }
 
     /// The intake ops run end to end on a small tree with two proposals, and each has a reported

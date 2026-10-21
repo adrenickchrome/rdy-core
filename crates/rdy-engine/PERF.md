@@ -1388,7 +1388,7 @@ the event after a landing. Everything is made outside every timer, on a copy of 
 tier project: two public profiles in one landing (`perf-prs-in` selects the doc that the site
 ops edit and the first half of the other docs in sorted id order, rounded up and capped at
 1,024; `perf-prs-out` selects the same number of the other docs), then a view that changes the
-doc's body and swaps one doc of `perf-prs-in` for another, proposed and left open. The copy's
+doc's body, adds a decision under its section and swaps one doc of `perf-prs-in` for another, proposed and left open. The copy's
 handle, the warmed states, the daemon, the profile-only listener, its first build and the page
 stream are also made outside the timers. The copy is removed at the end.
 
@@ -1398,7 +1398,7 @@ stream are also made outside the timers. The copy is removed at the end.
 | `site_profile_review` | the same in the open proposal, with a fresh memo each run: the profile in the proposal and in its base, both selected sides compared, the changed and the removed pages. The proposal's state is warm | 5 (3 at 50k) | no spec target: build a proposal's profile with a changed selection and body, old and new selected sides compared (reported) |
 | `site_profile_menu` | `build_versions_for` the menu seen from the proposal and the profile: the bounded Profiles list with the selected doc count of each row, and the count of docs each proposal and view changes. The counts of proposals and views are the full-source counts; one build fills their cache outside the timer, as the site's cache holds them | 5 (3 at 50k) | no spec target: build the versions page seen from a proposal and a profile, profile rows and cached source counts included (reported) |
 | `site_profile_get_page` | `rdy_qa::http::get` of the edited doc's page on the profile-only listener, over its loopback port. The listener, its first build and one request are outside the timer. The op asserts status 200 | 50 | no spec target: GET a warm profile-only page (reported) |
-| `site_profile_event_after_land` | a body edit of that doc, written into a fresh view and landed through the writer, with one stream open on the page of the profile-only target. The time starts where the writer's work ends (after the write and the landing, before the state is published) and stops at the stream's `Reload`, which the site worker sends. Each run waits for the worker to settle, outside the timer | `runs.write` | no spec target: from the end of the writer's landing to the profile page's reload event (reported) |
+| `site_profile_event_after_land` | a body edit of that doc, written into a fresh view and landed through the writer, with one stream open on the page of the profile-only target. The time starts when the landing returns, which is after the writer has sealed, built, published and replied (the writer-completion boundary; `site_event_after_land` times from before the write, so the two are not comparable), and stops at the stream's `Reload`, which the site worker sends. The write and the writer's own work are outside the sample. Each run waits for the worker to settle, outside the timer | `runs.write` | no spec target: from the return of a landing through the writer to the profile page's reload event (reported) |
 
 The daemon keeps a `ProfileHistoryMemo` for each profile target it serves, so the GET and event
 ops build with the memo of the listener's own target, while the two cold builds start from an
@@ -1407,8 +1407,11 @@ empty one. The event is received from the existing stream, never after a sleep.
 Three fixture facts are printed on standard error with the timings, one line for each tier
 (`site_profile` and `site_profile_50k`): the docs `perf-prs-in` selects in canon, the bytes of
 the files of its cold canon build, and the blocks the selected old and new sides of the proposal
-differ in (the entries of `diff_states` over the two selected states). The checks of the tiny
-harness fixtures read these facts and the names; they assert no duration.
+differ in as the review counts them: the renderer's own `changed_blocks` of the selected old and
+new sides, read from the cold review build's label (its header chip must show the same number).
+The proposal also adds a decision under the edited section, which the review never counts, so
+the block diff's raw entries are one more than the figure and the helper asserts the figure is
+below them. The checks of the tiny harness fixtures read these facts and the names; they assert no duration.
 
 What each cost grows with:
 
